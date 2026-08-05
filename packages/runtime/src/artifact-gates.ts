@@ -546,7 +546,11 @@ function verifyInvariantProbePath(
 ): void {
   const probePath = path.resolve(workspacePath, relativePath);
   const diagnosticPath = `${ledgerPath}#$.scan_probes[${probeIndex}].source_path`;
-  if (probePath === workspacePath || !probePath.startsWith(`${workspacePath}${path.sep}`)) {
+  const isWorkspaceRootProbe = probePath === workspacePath && !path.isAbsolute(relativePath);
+  if (
+    (!isWorkspaceRootProbe && !probePath.startsWith(`${workspacePath}${path.sep}`)) ||
+    path.isAbsolute(relativePath)
+  ) {
     diagnostics.push({
       code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
       message: `Invariant scan probe path escapes the discovery workspace: ${relativePath}`,
@@ -556,7 +560,7 @@ function verifyInvariantProbePath(
     });
     return;
   }
-  if (!invariantPathParentsInsideWorkspace(workspacePath, probePath)) {
+  if (!isWorkspaceRootProbe && !invariantPathParentsInsideWorkspace(workspacePath, probePath)) {
     diagnostics.push({
       code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
       message: `Invariant scan probe path crosses a symlinked parent: ${relativePath}`,
@@ -566,6 +570,7 @@ function verifyInvariantProbePath(
     });
     return;
   }
+  if (isWorkspaceRootProbe) return;
   try {
     const stat = fs.lstatSync(probePath);
     if (!stat.isFile() || stat.isSymbolicLink()) {

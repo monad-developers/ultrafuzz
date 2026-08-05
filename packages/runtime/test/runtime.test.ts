@@ -2939,6 +2939,7 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   assert.match(workflowSource, /validateArtifactContract/);
   assert.match(workflowSource, /candidate !== root && candidate\.startsWith/);
   assert.match(workflowSource, /isStrictlyInsideDirectory\(artifactDir, artifactPath\)/);
+  assert.match(workflowSource, /probeCandidate === workspaceRoot/);
 });
 
 test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes", async () => {

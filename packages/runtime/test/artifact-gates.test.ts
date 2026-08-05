@@ -316,6 +316,39 @@ test("project discovery gate requires ledger evidence to survive in the markdown
   );
 });
 
+test("project discovery gate accepts a repository-root scan probe", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-root-probe" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const discoveryWorkspace = path.join(layout.workspacesDir, "project-discovery");
+  fs.mkdirSync(discoveryWorkspace, { recursive: true });
+  writeArtifact(layout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: [
+        {
+          id: "probe-repository-root",
+          source_path: ".",
+          query: "repository-wide invariant inventory",
+          result: "Repository-wide scan completed"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
 test("project discovery gate verifies immutable source proof after the discovery workspace is reclaimed", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-source-proof" });
   const node = {

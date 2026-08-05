@@ -1398,16 +1398,23 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
   const workspaceRoot = realpathSync(task.workspacePath);
   for (const probe of validation.value.scan_probes) {
     const probeCandidate = path.resolve(workspaceRoot, probe.source_path);
-    if (!isStrictlyInsideDirectory(workspaceRoot, probeCandidate)) {
+    const isWorkspaceRootProbe = probeCandidate === workspaceRoot && !path.isAbsolute(probe.source_path);
+    if (
+      (!isWorkspaceRootProbe && !isStrictlyInsideDirectory(workspaceRoot, probeCandidate)) ||
+      path.isAbsolute(probe.source_path)
+    ) {
       throw new Error(
         `artifact-contract failure: invariant scan probe path escapes the task workspace: ${probe.source_path}`
       );
     }
-    if (!invariantPathParentsInsideWorkspace(workspaceRoot, probeCandidate)) {
+    if (!isWorkspaceRootProbe && !invariantPathParentsInsideWorkspace(workspaceRoot, probeCandidate)) {
       throw new Error(
         `artifact-contract failure: invariant scan probe path crosses a symlinked parent: ${probe.source_path}`
       );
     }
+    // A repository-wide probe names the workspace directory itself. It is
+    // valid evidence, but cannot be snapshotted as a regular UTF-8 file.
+    if (isWorkspaceRootProbe) continue;
     // Scan probes may intentionally target optional files. When a probe path
     // is absent, its result text is the durable evidence of that absence.
     try {
