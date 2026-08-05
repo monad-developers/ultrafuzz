@@ -1797,13 +1797,34 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
   const ledgerBytes = readFileSync(ledgerPath);
   const files = new Map<string, { path: string; sha256: string; content: string }>();
   const sourceSnapshots = new Map<string, { bytes: Buffer; content: string }>();
-  const workspaceRoot = realpathSync(task.workspacePath);
+  const workspacePath = path.resolve(task.workspacePath);
+  const workspaceStat = lstatSync(workspacePath);
+  if (!workspaceStat.isDirectory() || workspaceStat.isSymbolicLink() || realpathSync(workspacePath) !== workspacePath) {
+    throw new Error("artifact-contract failure: invariant discovery workspace is not a canonical directory");
+  }
+  const workspaceRoot = workspacePath;
   for (const probe of validation.value.scan_probes) {
     const probeCandidate = path.resolve(workspaceRoot, probe.source_path);
-    if (!isStrictlyInsideDirectory(workspaceRoot, probeCandidate)) {
+    const isSafeRelativeProbe = isSafeInvariantProbePath(probe.source_path);
+    const isWorkspaceRootProbe = isSafeRelativeProbe && probeCandidate === workspaceRoot;
+    if (!isSafeRelativeProbe || (!isWorkspaceRootProbe && !isStrictlyInsideDirectory(workspaceRoot, probeCandidate))) {
       throw new Error(
         `artifact-contract failure: invariant scan probe path escapes the task workspace: ${probe.source_path}`
       );
+    }
+    if (isWorkspaceRootProbe) {
+      if (
+        !workspaceStat.isDirectory() ||
+        workspaceStat.isSymbolicLink() ||
+        realpathSync(workspacePath) !== workspacePath
+      ) {
+        throw new Error(
+          `artifact-contract failure: invariant repository-root scan probe requires a canonical workspace directory: ${probe.source_path}`
+        );
+      }
+      // A repository-wide probe names the workspace directory itself. It is
+      // valid evidence, but cannot be snapshotted as a regular UTF-8 file.
+      continue;
     }
     if (!invariantPathParentsInsideWorkspace(workspaceRoot, probeCandidate)) {
       throw new Error(
@@ -1935,12 +1956,27 @@ function invariantPathParentsInsideWorkspace(workspaceRoot: string, candidatePat
       return realpathSync(current) === current;
     } catch (error) {
       if (!isMissingPathError(error)) return false;
+      try {
+        if (lstatSync(current).isSymbolicLink()) return false;
+      } catch (lstatError) {
+        if (!isMissingPathError(lstatError)) return false;
+      }
       const parent = path.dirname(current);
       if (parent === current) return false;
       current = parent;
     }
   }
   return true;
+}
+
+function isSafeInvariantProbePath(relativePath: string): boolean {
+  return (
+    !path.isAbsolute(relativePath) &&
+    !relativePath.includes("\u0000") &&
+    !relativePath.includes("\\") &&
+    !/^[A-Za-z]:/u.test(relativePath) &&
+    !relativePath.split("/").includes("..")
+  );
 }
 
 function rememberVerifiedPublication(publications: Map<string, Buffer>, relativePath: string, contents: Buffer): void {

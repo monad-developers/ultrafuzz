@@ -546,7 +546,9 @@ function verifyInvariantProbePath(
 ): void {
   const probePath = path.resolve(workspacePath, relativePath);
   const diagnosticPath = `${ledgerPath}#$.scan_probes[${probeIndex}].source_path`;
-  if (probePath === workspacePath || !probePath.startsWith(`${workspacePath}${path.sep}`)) {
+  const isSafeRelativeProbe = isSafeInvariantProbePath(relativePath);
+  const isWorkspaceRootProbe = isSafeRelativeProbe && probePath === workspacePath;
+  if (!isSafeRelativeProbe || (!isWorkspaceRootProbe && !probePath.startsWith(`${workspacePath}${path.sep}`))) {
     diagnostics.push({
       code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
       message: `Invariant scan probe path escapes the discovery workspace: ${relativePath}`,
@@ -554,6 +556,29 @@ function verifyInvariantProbePath(
       source: "invariant-ledger",
       path: diagnosticPath
     });
+    return;
+  }
+  try {
+    const workspaceStat = fs.lstatSync(workspacePath);
+    if (
+      !workspaceStat.isDirectory() ||
+      workspaceStat.isSymbolicLink() ||
+      fs.realpathSync(workspacePath) !== workspacePath
+    ) {
+      throw new Error("workspace root is not a canonical directory");
+    }
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
+      message: `Invariant scan probe requires a canonical discovery workspace: ${relativePath}`,
+      severity: "error",
+      source: "invariant-ledger",
+      path: `${ledgerPath}#$.scan_probes[${probeIndex}].source_path`
+    });
+    return;
+  }
+  if (isWorkspaceRootProbe) {
     return;
   }
   if (!invariantPathParentsInsideWorkspace(workspacePath, probePath)) {
@@ -596,6 +621,16 @@ function verifyInvariantProbePath(
   }
 }
 
+function isSafeInvariantProbePath(relativePath: string): boolean {
+  return (
+    !path.isAbsolute(relativePath) &&
+    !relativePath.includes("\u0000") &&
+    !relativePath.includes("\\") &&
+    !/^[A-Za-z]:/u.test(relativePath) &&
+    !relativePath.split("/").includes("..")
+  );
+}
+
 function invariantPathParentsInsideWorkspace(workspacePath: string, candidatePath: string): boolean {
   let current = path.dirname(candidatePath);
   while (current !== workspacePath) {
@@ -604,6 +639,13 @@ function invariantPathParentsInsideWorkspace(workspacePath: string, candidatePat
       return fs.realpathSync(current) === current;
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) return false;
+      try {
+        if (fs.lstatSync(current).isSymbolicLink()) return false;
+      } catch (lstatError) {
+        if (!(lstatError instanceof Error && "code" in lstatError && lstatError.code === "ENOENT")) {
+          return false;
+        }
+      }
       const parent = path.dirname(current);
       if (parent === current) return false;
       current = parent;
