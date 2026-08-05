@@ -159,6 +159,7 @@
                     "ultrafuzz/findings@1",
                     "ultrafuzz/generated-tests@1",
                     "ultrafuzz/implemented-properties@1",
+                    "ultrafuzz/invariant-ledger@1",
                     "ultrafuzz/json-array@1",
                     "ultrafuzz/json-object@1",
                     "ultrafuzz/nonempty-markdown@1",

@@ -34,6 +34,8 @@ const {
   materializePromptSchemas,
   publishFileDurableExclusive,
   validateArtifactContract,
+  validateInvariantLedgerSchema,
+  validateInvariantSourceProofSchema,
   writeFileDurable
 } = await import(artifactsModule);
 const {
@@ -758,31 +760,41 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
   if (!isStrictlyInsideDirectory(runRoot, resolvedProofRoot)) {
     throw new Error(`source-isolation failure: unsafe proof root ${task.attemptId}`);
   }
-  writeFileSync(
-    path.join(resolvedProofRoot, `${task.attemptId}.json`),
-    `${JSON.stringify(
-      {
-        schema_version: "ultrafuzz.agent-source-proof.v1",
-        attempt_id: task.attemptId,
-        commit,
-        tree,
-        base_ref: pinnedSourceRef,
-        refs,
-        remotes,
-        revision_count: revisions.length,
-        commit_object_count: commitObjectCount
-      },
-      null,
-      2
-    )}\n`,
-    { encoding: "utf8", mode: 0o600 }
-  );
+  const proofPath = path.join(resolvedProofRoot, `${task.attemptId}.json`);
+  const proofContents = `${JSON.stringify(
+    {
+      schema_version: "ultrafuzz.agent-source-proof.v1",
+      attempt_id: task.attemptId,
+      commit,
+      tree,
+      base_ref: pinnedSourceRef,
+      refs,
+      remotes,
+      revision_count: revisions.length,
+      commit_object_count: commitObjectCount
+    },
+    null,
+    2
+  )}\n`;
+  if (existsSync(proofPath)) {
+    if (!readFileSync(proofPath).equals(Buffer.from(proofContents, "utf8"))) {
+      throw new Error(`source-isolation failure: pinned source proof ${task.attemptId} changed`);
+    }
+    return;
+  }
+  writeFileDurable(proofPath, proofContents);
 }
 
 function canonicalEmptyArtifact(
   task: (typeof taskSpecs)[number],
   output: (typeof task.outputs)[number]
 ): string | undefined {
+  // These artifacts carry source-completeness and provenance joins. An empty
+  // sidecar would make an omitted agent output look successful, so they must
+  // always be produced by the agent and rejected by the strict verifier.
+  if (output.contract === "ultrafuzz/invariant-ledger@1" || output.contract === "ultrafuzz/properties@1") {
+    return undefined;
+  }
   // A primary findings array canonically represents "no findings". Other
   // primary outputs must still come from the agent. Non-primary outputs use
   // their contract-defined empty representation and remain overwritable.
@@ -1592,6 +1604,7 @@ function collectVerifiedArtifacts(task: (typeof taskSpecs)[number]): {
   sourceClaim(task);
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
+  verifyInvariantLedgerSourceEvidence(task, artifactRoots);
   const publications = new Map<string, Buffer>();
   const artifacts = task.outputs.map((output) => {
     const canonicalPath = path.resolve(artifactDir, output.path);
@@ -1692,6 +1705,242 @@ function verifyArtifacts(task: (typeof taskSpecs)[number], rawExecution: unknown
     verifier,
     ...verified
   });
+}
+
+function readInvariantSourceSnapshot(
+  workspaceRoot: string,
+  relativePath: string,
+  label: "scan probe" | "invariant source"
+): { bytes: Buffer; content: string } {
+  const sourceCandidate = path.resolve(workspaceRoot, relativePath);
+  if (!isStrictlyInsideDirectory(workspaceRoot, sourceCandidate)) {
+    throw new Error(`artifact-contract failure: invariant ${label} path escapes the task workspace: ${relativePath}`);
+  }
+  let sourcePath: string;
+  try {
+    sourcePath = resolveRegularArtifactFile(workspaceRoot, sourceCandidate, `${label} is not a regular file`);
+  } catch (error) {
+    throw new Error(
+      `artifact-contract failure: invariant ${label} ${relativePath} is unavailable: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  const bytes = readFileSync(sourcePath);
+  let content: string;
+  try {
+    content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new Error(`artifact-contract failure: invariant ${label} ${relativePath} is binary`);
+  }
+  if (content.includes("\u0000")) {
+    throw new Error(`artifact-contract failure: invariant ${label} ${relativePath} is binary`);
+  }
+  if (usesPinnedSource) {
+    try {
+      execFileSync("git", ["ls-files", "--error-unmatch", "--", relativePath], {
+        cwd: workspaceRoot,
+        stdio: ["ignore", "ignore", "pipe"]
+      });
+      execFileSync("git", ["diff", "--quiet", "HEAD", "--", relativePath], {
+        cwd: workspaceRoot,
+        stdio: ["ignore", "ignore", "pipe"]
+      });
+      const pinnedBytes = execFileSync("git", ["show", `${pinnedSourceRef}:${relativePath}`], {
+        cwd: workspaceRoot,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      if (!Buffer.from(pinnedBytes).equals(bytes)) {
+        throw new Error(`source differs from pinned commit for ${relativePath}`);
+      }
+    } catch {
+      throw new Error(`artifact-contract failure: invariant ${label} ${relativePath} is not pinned and unchanged`);
+    }
+  }
+  return { bytes, content };
+}
+
+function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], artifactRoots: readonly string[]): void {
+  if (task.metadata.node.logicalNodeId !== "project-discovery") {
+    return;
+  }
+  const ledgerOutput = task.outputs.find((output) => output.path === "setup/invariant-evidence-ledger.json");
+  if (ledgerOutput === undefined) {
+    return;
+  }
+  let ledgerPath: string | undefined;
+  for (const root of artifactRoots) {
+    try {
+      ledgerPath = resolveRegularArtifactFile(
+        root,
+        path.resolve(root, ledgerOutput.path),
+        "artifact-contract failure: invariant ledger is not a regular file"
+      );
+      break;
+    } catch {
+      // The normal output verifier below reports the missing artifact.
+    }
+  }
+  if (ledgerPath === undefined) {
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(ledgerPath, "utf8")) as unknown;
+  } catch (error) {
+    throw new Error(
+      `artifact-contract failure: invariant ledger JSON is unreadable: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  const validation = validateInvariantLedgerSchema(parsed, ledgerPath);
+  if (!validation.ok || validation.value === undefined) {
+    return;
+  }
+  const ledgerBytes = readFileSync(ledgerPath);
+  const files = new Map<string, { path: string; sha256: string; content: string }>();
+  const sourceSnapshots = new Map<string, { bytes: Buffer; content: string }>();
+  const workspaceRoot = realpathSync(task.workspacePath);
+  for (const probe of validation.value.scan_probes) {
+    const probeCandidate = path.resolve(workspaceRoot, probe.source_path);
+    if (!isStrictlyInsideDirectory(workspaceRoot, probeCandidate)) {
+      throw new Error(
+        `artifact-contract failure: invariant scan probe path escapes the task workspace: ${probe.source_path}`
+      );
+    }
+    if (!invariantPathParentsInsideWorkspace(workspaceRoot, probeCandidate)) {
+      throw new Error(
+        `artifact-contract failure: invariant scan probe path crosses a symlinked parent: ${probe.source_path}`
+      );
+    }
+    // Scan probes may intentionally target optional files. When a probe path
+    // is absent, its result text is the durable evidence of that absence.
+    try {
+      lstatSync(probeCandidate);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
+      throw error;
+    }
+    const snapshot = readInvariantSourceSnapshot(workspaceRoot, probe.source_path, "scan probe");
+    sourceSnapshots.set(probe.source_path, snapshot);
+    files.set(probe.source_path, {
+      path: probe.source_path,
+      sha256: createHash("sha256").update(snapshot.bytes).digest("hex"),
+      content: snapshot.content
+    });
+  }
+  for (const entry of validation.value.entries) {
+    const snapshot =
+      sourceSnapshots.get(entry.source_path) ??
+      readInvariantSourceSnapshot(workspaceRoot, entry.source_path, "invariant source");
+    sourceSnapshots.set(entry.source_path, snapshot);
+    const sourceBytes = snapshot.bytes;
+    const source = snapshot.content;
+    const locationMatch = /^(?:line|lines)\s+(\d+)(?:\s*[-–]\s*(\d+))?/iu.exec(entry.source_location);
+    const locatedSource =
+      locationMatch === null
+        ? source
+        : normalizeInvariantSourceLines(
+            source.split(/\r?\n/u).slice(Number(locationMatch[1]) - 1, Number(locationMatch[2] ?? locationMatch[1]))
+          );
+    const sourceMatches =
+      locationMatch === null
+        ? symbolFromInvariantLocation(entry.source_location) !== undefined &&
+          invariantSymbolDeclaration(source, symbolFromInvariantLocation(entry.source_location)!) !== undefined &&
+          normalizeInvariantSourceText(
+            invariantSymbolDeclaration(source, symbolFromInvariantLocation(entry.source_location)!)!
+          ).includes(normalizeInvariantSourceLines([entry.verbatim]))
+        : locatedSource === normalizeInvariantSourceLines([entry.verbatim]);
+    if (!sourceMatches) {
+      throw new Error(
+        `artifact-contract failure: invariant ledger entry ${entry.id} does not preserve source text at ${entry.source_location}`
+      );
+    }
+    if (!files.has(entry.source_path)) {
+      files.set(entry.source_path, {
+        path: entry.source_path,
+        sha256: createHash("sha256").update(sourceBytes).digest("hex"),
+        content: source
+      });
+    }
+  }
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspaceRoot, encoding: "utf8" })
+    .trim()
+    .toLowerCase();
+  const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+    cwd: workspaceRoot,
+    encoding: "utf8"
+  })
+    .trim()
+    .toLowerCase();
+  const proof = {
+    schema_version: "ultrafuzz.invariant-source-proof.v1",
+    attempt_id: task.attemptId,
+    commit,
+    tree,
+    ledger_sha256: createHash("sha256").update(ledgerBytes).digest("hex"),
+    files: [...files.values()]
+  };
+  const proofValidation = validateInvariantSourceProofSchema(proof, "invariant-source-proof");
+  if (!proofValidation.ok) {
+    throw new Error(
+      `artifact-contract failure: invariant source proof is invalid: ${proofValidation.issues
+        .map((issue) => issue.message)
+        .join("; ")}`
+    );
+  }
+  const runRoot = realpathSync(path.resolve(process.cwd(), task.metadata.artifacts.dir, "..", ".."));
+  const proofRoot = path.join(runRoot, "source-proofs");
+  const proofPath = path.join(proofRoot, `${task.attemptId}.invariant.json`);
+  if (!isStrictlyInsideDirectory(runRoot, proofRoot) || !isStrictlyInsideDirectory(proofRoot, proofPath)) {
+    throw new Error(`artifact-contract failure: unsafe invariant source proof path ${task.attemptId}`);
+  }
+  mkdirSync(proofRoot, { recursive: true });
+  const resolvedProofRoot = realpathSync(proofRoot);
+  if (resolvedProofRoot !== proofRoot || !isStrictlyInsideDirectory(runRoot, resolvedProofRoot)) {
+    throw new Error(`artifact-contract failure: unsafe invariant source proof root ${task.attemptId}`);
+  }
+  writeFileDurable(proofPath, `${JSON.stringify(proof, null, 2)}\n`);
+}
+
+function normalizeInvariantSourceText(value: string): string {
+  return value.replace(/\s+/gu, " ").trim();
+}
+
+function normalizeInvariantSourceLines(lines: readonly string[]): string {
+  return normalizeInvariantSourceText(lines.map((line) => line.replace(/^\s*(?:[-*+]\s+|>\s+)/u, "").trim()).join(" "));
+}
+
+function symbolFromInvariantLocation(location: string): string | undefined {
+  return /([A-Za-z_$][A-Za-z0-9_$]*)\s*$/u.exec(location)?.[1];
+}
+
+function escapeRegExpForPattern(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function invariantSymbolDeclaration(source: string, symbol: string): string | undefined {
+  const declaration = new RegExp(
+    `\\b(?:function|contract|library|interface|modifier|event|error|struct|enum)\\s+(?:[A-Za-z_$][A-Za-z0-9_$]*\\.)?${escapeRegExpForPattern(symbol)}\\b`,
+    "u"
+  ).exec(source);
+  if (declaration === null || declaration.index === undefined) return undefined;
+  const tail = source.slice(declaration.index + declaration[0].length);
+  const next = /\n\s*(?:function|contract|library|interface|modifier|event|error|struct|enum)\s+/u.exec(tail);
+  return source.slice(declaration.index, declaration.index + declaration[0].length + (next?.index ?? tail.length));
+}
+
+function invariantPathParentsInsideWorkspace(workspaceRoot: string, candidatePath: string): boolean {
+  let current = path.dirname(candidatePath);
+  while (current !== workspaceRoot) {
+    if (!isStrictlyInsideDirectory(workspaceRoot, current)) return false;
+    try {
+      return realpathSync(current) === current;
+    } catch (error) {
+      if (!isMissingPathError(error)) return false;
+      const parent = path.dirname(current);
+      if (parent === current) return false;
+      current = parent;
+    }
+  }
+  return true;
 }
 
 function rememberVerifiedPublication(publications: Map<string, Buffer>, relativePath: string, contents: Buffer): void {

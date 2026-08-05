@@ -78,6 +78,40 @@ discovery; they are not Ultrafuzz beta execution dependencies.
 
 Read the target's documentation, NatSpec, interfaces, source comments, tests,
 and existing harnesses for target-derived invariants and liveness requirements.
+
+### Verbatim source-evidence ledger
+
+Before writing the normalized inventory, create a machine-readable `Verbatim
+source-evidence ledger` at
+`{{artifact_path}}/setup/invariant-evidence-ledger.json`. Use the task-local
+`{{schema_path}}/invariant-evidence-ledger.schema.json` and assign each entry a
+stable `id`, source path, line or symbol location, kind, verbatim source text,
+and one or more `inventory_ids` using the `inventory-` prefix. Scan every
+relevant documentation, specification, NatSpec, source-comment, test, and
+harness section and every explicitly enumerated bullet or formula, regardless of
+the section heading. Classify statements that express invariants, accounting,
+solvency, conservation, monotonicity, safety, risk, interest accrual,
+liquidation, liveness, or another state relation. Copy each such statement
+verbatim before interpreting it, including statements under generic headings such
+as `Hub`, `Risk`, or `Operations`. Include source path and line or symbol location
+beside each copied entry. Do not summarize, merge, or omit a source
+bullet before it has a corresponding ledger entry; the normalized inventory must
+map each ledger entry to one or more `inventory_ids` and retain the original
+operands, comparison direction, units, denominator, and rounding terms. If a
+separate source probe finds no matching section, record that probe and its result
+rather than silently skipping it.
+
+The JSON ledger must also contain `inventory_rows`, where each row has a stable
+`inventory-` ID, a normalized description, and one or more `ledger_ids`; every
+`inventory_id` in an entry must name one of these rows. Record each negative
+source probe in `scan_probes` with a stable `probe-` ID, source path, query, and
+result. Use `safety`, `risk`, or `interest` as the `kind` when those are the
+most precise classifications. Keep every `source_path` target-relative and
+use a line range or symbol that can be checked against the checked-out source.
+If no invariant statement is found, emit `entries: []`, `inventory_rows: []`,
+and at least one non-empty `scan_probes` record explaining the searches and
+their results.
+
 Extract every explicit equation, inequality, bound, and state relation into the
 discovery artifact with its exact operands, units, and rounding semantics.
 Preserve distinct denominator and rounding variants as separate entries, even
@@ -97,3 +131,14 @@ Create a table with information: file, coverage, semantic
 ## 3. Artifacts
 
 Write the discovery artifact with the framework decisions and project-specific context needed by later workflow nodes in {{artifact_path}}/setup/project-discovery.md
+
+The Markdown discovery handoff must reproduce every ledger entry's stable ID,
+source path, source location, verbatim text, and inventory IDs so reviewers can
+audit the structured artifact without opening JSON. A source statement may map to
+multiple normalized inventory rows, and equivalent source statements may map to
+one row; record those cardinalities explicitly rather than forcing a one-to-one
+mapping. Render each entry in a delimited block beginning with
+`### Ledger entry: <id>` and each normalized row in a block beginning with
+`### Inventory row: <inventory-id>`, including the complete fields in each block.
+Close those blocks with `### End ledger entry: <id>` and
+`### End inventory row: <inventory-id>` respectively.

@@ -1037,11 +1037,13 @@ describe("Modal node sandbox provider", () => {
     try {
       const artifactDir = path.join(root, "canonical", "attempt-one");
       const workspaceDir = path.join(root, "workspace");
+      const sourceProofRoot = path.join(root, "source-proofs");
       const mirror = path.join(workspaceDir, "artifacts", "attempt-one");
       const stagingDir = path.join(root, "staging");
       fs.mkdirSync(path.join(artifactDir, "generated-tests"), { recursive: true });
       fs.mkdirSync(path.join(mirror, "generated-tests"), { recursive: true });
       fs.mkdirSync(path.join(workspaceDir, "node_modules", ".bin"), { recursive: true });
+      fs.mkdirSync(sourceProofRoot, { recursive: true });
       fs.mkdirSync(stagingDir);
 
       fs.writeFileSync(path.join(artifactDir, "report.md"), "# canonical report\n");
@@ -1054,10 +1056,19 @@ describe("Modal node sandbox provider", () => {
       fs.writeFileSync(path.join(mirror, "report.md"), "# stale mirror report\n");
       fs.writeFileSync(path.join(mirror, "generated-tests", "Generated.t.sol"), "contract GeneratedTest {}\n");
       fs.symlinkSync("/usr/bin/env", path.join(workspaceDir, "node_modules", ".bin", "tool"));
+      fs.writeFileSync(path.join(sourceProofRoot, "attempt-one.invariant.json"), "durable source proof\n");
+      fs.writeFileSync(path.join(sourceProofRoot, "attempt-one.json"), "pinned source proof\n");
+      fs.writeFileSync(path.join(sourceProofRoot, "unrelated.json"), "unrelated proof\n");
 
-      stageCanonicalNodeResultBundle({ artifactDir, workspaceDir, attemptId: "attempt-one", stagingDir });
+      stageCanonicalNodeResultBundle({
+        artifactDir,
+        workspaceDir,
+        sourceProofRoot,
+        attemptId: "attempt-one",
+        stagingDir
+      });
 
-      expect(fs.readdirSync(stagingDir)).toEqual(["artifacts"]);
+      expect(fs.readdirSync(stagingDir).sort()).toEqual(["artifacts", "source-proofs"]);
       const published = path.join(stagingDir, "artifacts");
       expect(fs.readFileSync(path.join(published, "report.md"), "utf8")).toBe("# canonical report\n");
       expect(fs.readFileSync(path.join(published, "report.json"), "utf8")).toContain('"schema_version":"1.0"');
@@ -1070,6 +1081,13 @@ describe("Modal node sandbox provider", () => {
       );
       expect(fs.existsSync(path.join(stagingDir, "workspace"))).toBe(false);
       expect(fs.existsSync(path.join(published, "node_modules"))).toBe(false);
+      expect(fs.readdirSync(path.join(stagingDir, "source-proofs")).sort()).toEqual([
+        "attempt-one.invariant.json",
+        "attempt-one.json"
+      ]);
+      expect(fs.readFileSync(path.join(stagingDir, "source-proofs", "attempt-one.invariant.json"), "utf8")).toBe(
+        "durable source proof\n"
+      );
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -1402,6 +1420,15 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
       expect(fs.readFileSync(path.join(fixture.root, fixture.input.artifact_dir, "finding.json"), "utf8")).toBe(
         '{"ok":true}\n'
       );
+      expect(
+        fs.readFileSync(
+          path.join(fixture.root, fixture.input.run_root, "source-proofs", "attempt-one.invariant.json"),
+          "utf8"
+        )
+      ).toBe("durable source proof\n");
+      expect(
+        fs.readFileSync(path.join(fixture.root, fixture.input.run_root, "source-proofs", "attempt-one.json"), "utf8")
+      ).toBe("pinned source proof\n");
       expect(fs.existsSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"))).toBe(false);
       expect(
         fs.readFileSync(path.join(fixture.root, fixture.input.artifact_dir, WORKSPACE_SOURCE_ATTESTATION_FILE), "utf8")
@@ -3509,6 +3536,7 @@ function createResultArchive(
   const bundle = path.join(root, "bundle");
   const archive = path.join(root, "result.tgz");
   fs.mkdirSync(path.join(bundle, "artifacts"), { recursive: true });
+  fs.mkdirSync(path.join(bundle, "source-proofs"), { recursive: true });
   fs.writeFileSync(path.join(bundle, "artifacts", "finding.json"), '{"ok":true}\n');
   fs.writeFileSync(path.join(bundle, "artifacts", "report.md"), "# remote report\n");
   fs.writeFileSync(path.join(bundle, "artifacts", "report.json"), '{"schema_version":"1.0"}\n');
@@ -3520,6 +3548,8 @@ function createResultArchive(
     path.join(bundle, "artifacts", WORKSPACE_SOURCE_ATTESTATION_FILE),
     '{"schema_version":"ultrafuzz.workspace-source-attestation.v1"}\n'
   );
+  fs.writeFileSync(path.join(bundle, "source-proofs", "attempt-one.invariant.json"), "durable source proof\n");
+  fs.writeFileSync(path.join(bundle, "source-proofs", "attempt-one.json"), "pinned source proof\n");
   if (options.includeWorkspace === true) {
     fs.mkdirSync(path.join(bundle, "workspace"), { recursive: true });
     fs.writeFileSync(path.join(bundle, "workspace", "work.txt"), "remote workspace\n");

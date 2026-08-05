@@ -57,6 +57,11 @@ test("generated Smithers workflow prepares canonical empty sidecars and primary 
   const preparation = source.slice(preparationStart, verifierStart);
   assert.match(preparation, /function canonicalEmptyArtifact/u);
   assert.match(preparation, /output\.primary && output\.contract !== "ultrafuzz\/findings@1"/u);
+  assert.match(
+    preparation,
+    /output\.contract === "ultrafuzz\/invariant-ledger@1" \|\| output\.contract === "ultrafuzz\/properties@1"/u
+  );
+  assert.match(preparation, /source-completeness and provenance joins/u);
   assert.match(preparation, /artifactContractDefinition\(output\.contract\)\.validEmptyExample/u);
   assert.match(source, /id=\{task\.preparationId\}/u);
   assert.match(source, /dependsOn=\{\[task\.preparationId\]\}/u);

@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -11,12 +12,16 @@ import {
   validateArtifactContract,
   validateFindingsSchema,
   validateGeneratedTestManifestSchema,
+  validateInvariantLedgerSchema,
+  validateInvariantSourceProofSchema,
   validateImplementedPropertiesSchema,
   validatePropertiesSchema,
   validatePropertyCampaignSchema,
   validatePropertyReferences,
   verifyArtifactManifestPrerequisites,
   type ImplementedPropertiesArtifact,
+  type InvariantLedgerEntry,
+  type InvariantSourceProof,
   type PropertiesArtifact,
   type PropertyReferenceInput,
   type RunLayout,
@@ -165,6 +170,11 @@ export function verifyRequiredArtifactsForAttempt(
   }
   diagnostics.push(...verifySeverityMatrixArtifacts(artifactDir, node));
   try {
+    diagnostics.push(...verifyInvariantEvidenceArtifacts(layout, artifactDir, node));
+  } catch (error) {
+    diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_EVIDENCE_READ_FAILED"));
+  }
+  try {
     diagnostics.push(...verifyPropertyProvenanceArtifacts(layout, artifactDir, node));
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "property-provenance", "PROPERTY_PROVENANCE_READ_FAILED"));
@@ -175,6 +185,664 @@ export function verifyRequiredArtifactsForAttempt(
     diagnostics,
     missing
   };
+}
+
+/**
+ * Enforce the cross-artifact joins that cannot be expressed by an individual
+ * JSON schema: discovery's source evidence must survive into the Markdown
+ * handoff, and every discovered source statement must reach at least one
+ * canonical property before invariant implementation begins.
+ */
+function verifyInvariantEvidenceArtifacts(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode
+): RuntimeDiagnostic[] {
+  const logicalId = node.logical_id ?? node.id;
+  const diagnostics: RuntimeDiagnostic[] = [];
+  if (
+    logicalId === "project-discovery" &&
+    node.outputs.some((output) => output.path === "setup/invariant-evidence-ledger.json")
+  ) {
+    const ledgerPath = path.join(artifactDir, "setup", "invariant-evidence-ledger.json");
+    const markdownPath = path.join(artifactDir, "setup", "project-discovery.md");
+    if (!fs.existsSync(ledgerPath) || !fs.existsSync(markdownPath)) {
+      return diagnostics;
+    }
+    const parsed = validateInvariantLedgerSchema(readJsonFile(ledgerPath), ledgerPath);
+    if (!parsed.ok || parsed.value === undefined) {
+      return diagnostics;
+    }
+    if (parsed.value.entries.length === 0 && (parsed.value.scan_probes?.length ?? 0) > 0) {
+      if (parsed.value.inventory_rows === undefined) {
+        diagnostics.push({
+          code: "INVARIANT_LEDGER_INVENTORY_MISSING",
+          message: "An explicit no-evidence ledger must include an empty inventory_rows array",
+          severity: "error",
+          source: "invariant-ledger",
+          path: `${ledgerPath}#$.inventory_rows`
+        });
+      } else if (parsed.value.inventory_rows.length > 0) {
+        diagnostics.push({
+          code: "INVARIANT_LEDGER_INVENTORY_UNEXPECTED",
+          message: "An explicit no-evidence ledger must not contain inventory rows",
+          severity: "error",
+          source: "invariant-ledger",
+          path: `${ledgerPath}#$.inventory_rows`
+        });
+      }
+      const discoveryWorkspace = path.join(layout.workspacesDir, path.basename(artifactDir));
+      const sourceProofPath = invariantSourceProofPath(layout.root, path.basename(artifactDir));
+      if (fs.existsSync(sourceProofPath)) {
+        readInvariantSourceProof(sourceProofPath, ledgerPath, diagnostics);
+      } else if (!fs.existsSync(discoveryWorkspace)) {
+        diagnostics.push({
+          code: "INVARIANT_LEDGER_SOURCE_PROOF_MISSING",
+          message: "Invariant ledger source proof and discovery workspace are unavailable",
+          severity: "error",
+          source: "invariant-ledger",
+          path: ledgerPath
+        });
+      }
+      // Probe paths may intentionally name optional files; the probe result
+      // records absence, so containment is the invariant we can enforce.
+      for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
+        verifyInvariantProbePath(discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
+      }
+      return diagnostics;
+    }
+    if (parsed.value.entries.length === 0) {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_EMPTY",
+        message: "Project discovery invariant evidence ledger must contain at least one source entry",
+        severity: "error",
+        source: "invariant-ledger",
+        path: `${ledgerPath}#$.entries`
+      });
+      return diagnostics;
+    }
+    if (parsed.value.inventory_rows === undefined) {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_INVENTORY_MISSING",
+        message: "Project discovery invariant evidence ledger is missing structured inventory rows",
+        severity: "error",
+        source: "invariant-ledger",
+        path: `${ledgerPath}#$.inventory_rows`
+      });
+      return diagnostics;
+    }
+    if (parsed.value.scan_probes === undefined) {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_PROBES_MISSING",
+        message: "Project discovery invariant evidence ledger is missing scan probe results",
+        severity: "error",
+        source: "invariant-ledger",
+        path: `${ledgerPath}#$.scan_probes`
+      });
+    }
+    const discoveryWorkspace = path.join(layout.workspacesDir, path.basename(artifactDir));
+    const sourceProofPath = invariantSourceProofPath(layout.root, path.basename(artifactDir));
+    const sourceProofPresent = fs.existsSync(sourceProofPath);
+    const sourceProof = sourceProofPresent
+      ? readInvariantSourceProof(sourceProofPath, ledgerPath, diagnostics)
+      : undefined;
+    if (!sourceProofPresent && !fs.existsSync(discoveryWorkspace)) {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_SOURCE_PROOF_MISSING",
+        message: "Invariant ledger source proof and discovery workspace are unavailable",
+        severity: "error",
+        source: "invariant-ledger",
+        path: ledgerPath
+      });
+    }
+    // Probe paths may intentionally name optional files; the probe result
+    // records absence, so containment is the invariant we can enforce.
+    for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
+      verifyInvariantProbePath(discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
+    }
+    const markdown = fs.readFileSync(markdownPath, "utf8");
+    for (const [entryIndex, entry] of parsed.value.entries.entries()) {
+      if (sourceProof !== undefined) {
+        verifyInvariantSourceProofEvidence(sourceProof, entry, entryIndex, ledgerPath, diagnostics);
+      } else if (!sourceProofPresent && fs.existsSync(discoveryWorkspace)) {
+        verifyInvariantSourceEvidence(discoveryWorkspace, entry, entryIndex, ledgerPath, diagnostics);
+      }
+      const block = markdownDelimitedBlock(markdown, `### Ledger entry: ${entry.id}`);
+      if (block === undefined) {
+        diagnostics.push({
+          code: "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING",
+          message: `Discovery Markdown is missing the delimited block for ledger entry ${JSON.stringify(entry.id)}`,
+          severity: "error",
+          source: "invariant-ledger",
+          path: `${markdownPath}#$.entries[${entryIndex}]`
+        });
+        continue;
+      }
+      const evidence = [entry.id, entry.source_path, entry.source_location, entry.verbatim, ...entry.inventory_ids];
+      for (const token of evidence) {
+        if (markdownContainsToken(block, token)) {
+          continue;
+        }
+        diagnostics.push({
+          code: "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING",
+          message: `Discovery Markdown must preserve ledger entry ${JSON.stringify(entry.id)} token ${JSON.stringify(token)}`,
+          severity: "error",
+          source: "invariant-ledger",
+          path: `${markdownPath}#$.entries[${entryIndex}]`
+        });
+      }
+      for (const inventoryId of entry.inventory_ids) {
+        const row = parsed.value.inventory_rows.find((candidate) => candidate.id === inventoryId);
+        const rowBlock = markdownDelimitedBlock(markdown, `### Inventory row: ${inventoryId}`);
+        if (row === undefined || rowBlock === undefined || !markdownContainsToken(rowBlock, row.description)) {
+          diagnostics.push({
+            code: "INVARIANT_LEDGER_MARKDOWN_INVENTORY_MISSING",
+            message: `Discovery Markdown is missing normalized inventory row ${JSON.stringify(inventoryId)}`,
+            severity: "error",
+            source: "invariant-ledger",
+            path: `${markdownPath}#$.entries[${entryIndex}].inventory_ids`
+          });
+          continue;
+        }
+        for (const ledgerId of row.ledger_ids) {
+          if (!markdownContainsToken(rowBlock, ledgerId)) {
+            diagnostics.push({
+              code: "INVARIANT_LEDGER_MARKDOWN_INVENTORY_MISSING",
+              message: `Inventory row ${JSON.stringify(inventoryId)} is missing ledger ID ${JSON.stringify(ledgerId)}`,
+              severity: "error",
+              source: "invariant-ledger",
+              path: `${markdownPath}#$.entries[${entryIndex}].inventory_ids`
+            });
+          }
+        }
+      }
+    }
+    return diagnostics;
+  }
+
+  if (
+    logicalId !== "property-specification-fanin" ||
+    !node.outputs.some((output) => output.path === "properties.json")
+  ) {
+    return diagnostics;
+  }
+
+  const ledgerPath = findLogicalNodeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json");
+  const catalogPath = path.join(artifactDir, "properties.json");
+  if (ledgerPath === undefined) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_MISSING",
+      message: "Project discovery invariant evidence ledger is unavailable for property fan-in",
+      severity: "error",
+      source: "invariant-ledger",
+      path: catalogPath
+    });
+    return diagnostics;
+  }
+  if (!fs.existsSync(catalogPath)) {
+    return diagnostics;
+  }
+  const ledger = validateInvariantLedgerSchema(readJsonFile(ledgerPath), ledgerPath);
+  const catalog = validatePropertiesSchema(readJsonFile(catalogPath), catalogPath);
+  if (!ledger.ok || ledger.value === undefined || !catalog.ok || catalog.value === undefined) {
+    return diagnostics;
+  }
+  if (ledger.value.entries.length === 0 && (ledger.value.scan_probes?.length ?? 0) > 0) {
+    if (ledger.value.inventory_rows === undefined || ledger.value.inventory_rows.length > 0) {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_INVENTORY_UNEXPECTED",
+        message: "An explicit no-evidence ledger must include an empty inventory_rows array",
+        severity: "error",
+        source: "invariant-ledger",
+        path: `${ledgerPath}#$.inventory_rows`
+      });
+    }
+    for (const [propertyIndex, property] of catalog.value.properties.entries()) {
+      for (const [ledgerIndex, ledgerId] of (property.ledger_ids ?? []).entries()) {
+        diagnostics.push({
+          code: "INVARIANT_LEDGER_REFERENCE_UNKNOWN",
+          message: `Canonical property ${JSON.stringify(property.id)} references ledger ID ${JSON.stringify(ledgerId)} but discovery recorded no invariant entries`,
+          severity: "error",
+          source: "invariant-ledger",
+          path: `${catalogPath}#$.properties[${propertyIndex}].ledger_ids[${ledgerIndex}]`
+        });
+      }
+    }
+    return diagnostics;
+  }
+  if (ledger.value.entries.length === 0 || ledger.value.inventory_rows === undefined) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_INCOMPLETE",
+      message: "Property fan-in requires a non-empty invariant ledger with structured inventory rows",
+      severity: "error",
+      source: "invariant-ledger",
+      path: ledgerPath
+    });
+    return diagnostics;
+  }
+  if (ledger.value.scan_probes === undefined) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_PROBES_MISSING",
+      message: "Property fan-in requires scan probe results from project discovery",
+      severity: "error",
+      source: "invariant-ledger",
+      path: `${ledgerPath}#$.scan_probes`
+    });
+  }
+
+  const ledgerIds = new Set(ledger.value.entries.map((entry) => entry.id));
+  const referenced = new Set<string>();
+  for (const [propertyIndex, property] of catalog.value.properties.entries()) {
+    for (const [ledgerIndex, ledgerId] of (property.ledger_ids ?? []).entries()) {
+      if (!ledgerIds.has(ledgerId)) {
+        diagnostics.push({
+          code: "INVARIANT_LEDGER_REFERENCE_UNKNOWN",
+          message: `Canonical property ${JSON.stringify(property.id)} references unknown invariant ledger ID ${JSON.stringify(ledgerId)}`,
+          severity: "error",
+          source: "invariant-ledger",
+          path: `${catalogPath}#$.properties[${propertyIndex}].ledger_ids[${ledgerIndex}]`
+        });
+      } else {
+        referenced.add(ledgerId);
+      }
+    }
+  }
+  for (const [entryIndex, entry] of ledger.value.entries.entries()) {
+    if (referenced.has(entry.id)) {
+      continue;
+    }
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_REFERENCE_MISSING",
+      message: `Invariant ledger entry ${JSON.stringify(entry.id)} is not mapped to a canonical property`,
+      severity: "error",
+      source: "invariant-ledger",
+      path: `${ledgerPath}#$.entries[${entryIndex}].id`
+    });
+  }
+  if (node.outputs.some((output) => output.path === "properties.md")) {
+    const markdownPath = path.join(artifactDir, "properties.md");
+    if (fs.existsSync(markdownPath)) {
+      const markdown = fs.readFileSync(markdownPath, "utf8");
+      for (const [propertyIndex, property] of catalog.value.properties.entries()) {
+        for (const ledgerId of property.ledger_ids ?? []) {
+          const block = markdownDelimitedBlock(markdown, `### Canonical property: ${property.id}`);
+          if (block !== undefined && markdownContainsToken(block, ledgerId)) {
+            continue;
+          }
+          diagnostics.push({
+            code: "INVARIANT_LEDGER_MARKDOWN_MAPPING_MISSING",
+            message: `Properties Markdown must preserve canonical property ${JSON.stringify(property.id)} and ledger ID ${JSON.stringify(ledgerId)}`,
+            severity: "error",
+            source: "invariant-ledger",
+            path: `${markdownPath}#$.properties[${propertyIndex}].ledger_ids`
+          });
+        }
+      }
+    }
+  }
+  return diagnostics;
+}
+
+function verifyInvariantSourceEvidence(
+  workspacePath: string,
+  entry: InvariantLedgerEntry,
+  entryIndex: number,
+  ledgerPath: string,
+  diagnostics: RuntimeDiagnostic[]
+): void {
+  let sourcePath: string;
+  try {
+    sourcePath = path.resolve(workspacePath, entry.source_path);
+    if (sourcePath === workspacePath || !sourcePath.startsWith(`${workspacePath}${path.sep}`)) {
+      throw new Error(`invariant evidence source path escapes workspace: ${entry.source_path}`);
+    }
+  } catch (error) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_SOURCE_PATH_INVALID",
+      message: diagnosticFromError(error, "invariant-ledger", "INVARIANT_LEDGER_SOURCE_PATH_INVALID").message,
+      severity: "error",
+      source: "invariant-ledger",
+      path: `${ledgerPath}#$.entries[${entryIndex}].source_path`
+    });
+    return;
+  }
+  if (!fs.existsSync(sourcePath)) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_SOURCE_MISSING",
+      message: `Invariant ledger source path ${JSON.stringify(entry.source_path)} does not exist in the discovery workspace`,
+      severity: "error",
+      source: "invariant-ledger",
+      path: `${ledgerPath}#$.entries[${entryIndex}].source_path`
+    });
+    return;
+  }
+  try {
+    assertRegularFileInside(workspacePath, sourcePath, "invariant evidence source");
+    let source: string;
+    try {
+      source = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(sourcePath));
+    } catch {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_SOURCE_BINARY",
+        message: `Invariant ledger source ${JSON.stringify(entry.source_path)} is not UTF-8 text`,
+        severity: "error",
+        source: "invariant-ledger",
+        path: `${ledgerPath}#$.entries[${entryIndex}].source_path`
+      });
+      return;
+    }
+    verifyInvariantSourceText(source, entry, entryIndex, ledgerPath, diagnostics);
+  } catch (error) {
+    diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_LEDGER_SOURCE_READ_FAILED"));
+  }
+}
+
+function verifyInvariantProbePath(
+  workspacePath: string,
+  relativePath: string,
+  probeIndex: number,
+  ledgerPath: string,
+  diagnostics: RuntimeDiagnostic[]
+): void {
+  const probePath = path.resolve(workspacePath, relativePath);
+  const diagnosticPath = `${ledgerPath}#$.scan_probes[${probeIndex}].source_path`;
+  if (probePath === workspacePath || !probePath.startsWith(`${workspacePath}${path.sep}`)) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
+      message: `Invariant scan probe path escapes the discovery workspace: ${relativePath}`,
+      severity: "error",
+      source: "invariant-ledger",
+      path: diagnosticPath
+    });
+    return;
+  }
+  if (!invariantPathParentsInsideWorkspace(workspacePath, probePath)) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
+      message: `Invariant scan probe path crosses a symlinked parent: ${relativePath}`,
+      severity: "error",
+      source: "invariant-ledger",
+      path: diagnosticPath
+    });
+    return;
+  }
+  try {
+    const stat = fs.lstatSync(probePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
+        message: `Invariant scan probe path must be a regular file when present: ${relativePath}`,
+        severity: "error",
+        source: "invariant-ledger",
+        path: diagnosticPath
+      });
+    } else {
+      try {
+        const content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(probePath));
+        if (content.includes("\u0000")) throw new Error("NUL");
+      } catch {
+        diagnostics.push({
+          code: "INVARIANT_LEDGER_PROBE_SOURCE_BINARY",
+          message: `Invariant scan probe source is not UTF-8 text: ${relativePath}`,
+          severity: "error",
+          source: "invariant-ledger",
+          path: diagnosticPath
+        });
+      }
+    }
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+    diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_LEDGER_PROBE_PATH_INVALID"));
+  }
+}
+
+function invariantPathParentsInsideWorkspace(workspacePath: string, candidatePath: string): boolean {
+  let current = path.dirname(candidatePath);
+  while (current !== workspacePath) {
+    if (!current.startsWith(`${workspacePath}${path.sep}`)) return false;
+    try {
+      return fs.realpathSync(current) === current;
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) return false;
+      const parent = path.dirname(current);
+      if (parent === current) return false;
+      current = parent;
+    }
+  }
+  return true;
+}
+
+function invariantSourceProofPath(runRoot: string, attemptId: string): string {
+  return safeResolveInside(runRoot, `source-proofs/${attemptId}.invariant.json`, "invariant source proof");
+}
+
+function readInvariantSourceProof(
+  proofPath: string,
+  ledgerPath: string,
+  diagnostics: RuntimeDiagnostic[]
+): InvariantSourceProof | undefined {
+  try {
+    assertRegularFileInside(path.dirname(path.dirname(proofPath)), proofPath, "invariant source proof");
+    const parsed = validateInvariantSourceProofSchema(JSON.parse(fs.readFileSync(proofPath, "utf8")), proofPath);
+    if (!parsed.ok || parsed.value === undefined) {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_SOURCE_PROOF_INVALID",
+        message: parsed.issues.map((issue) => issue.message).join("; "),
+        severity: "error",
+        source: "invariant-ledger",
+        path: `${proofPath}#${parsed.issues[0]?.path ?? "$"}`
+      });
+      return undefined;
+    }
+    const expectedAttemptId = path.basename(proofPath).replace(/\.invariant\.json$/u, "");
+    if (parsed.value.attempt_id !== expectedAttemptId) {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_SOURCE_PROOF_ATTEMPT_MISMATCH",
+        message: "Invariant source proof attempt does not match its durable path",
+        severity: "error",
+        source: "invariant-ledger",
+        path: `${proofPath}#$.attempt_id`
+      });
+      return undefined;
+    }
+    const ledgerBytes = fs.readFileSync(ledgerPath);
+    const ledgerDigest = crypto.createHash("sha256").update(ledgerBytes).digest("hex");
+    if (ledgerDigest !== parsed.value.ledger_sha256) {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_SOURCE_PROOF_LEDGER_MISMATCH",
+        message: "Invariant source proof is not bound to the published ledger bytes",
+        severity: "error",
+        source: "invariant-ledger",
+        path: `${proofPath}#$.ledger_sha256`
+      });
+      return undefined;
+    }
+    const baseProofPath = proofPath.replace(/\.invariant\.json$/u, ".json");
+    let baseProofPresent = false;
+    try {
+      fs.lstatSync(baseProofPath);
+      baseProofPresent = true;
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    }
+    if (baseProofPresent) {
+      assertRegularFileInside(path.dirname(path.dirname(proofPath)), baseProofPath, "pinned source proof");
+      const base = JSON.parse(fs.readFileSync(baseProofPath, "utf8")) as {
+        attempt_id?: unknown;
+        commit?: unknown;
+        tree?: unknown;
+      };
+      if (
+        base.attempt_id !== expectedAttemptId ||
+        base.commit !== parsed.value.commit ||
+        base.tree !== parsed.value.tree
+      ) {
+        diagnostics.push({
+          code: "INVARIANT_LEDGER_SOURCE_PROOF_SOURCE_MISMATCH",
+          message: "Invariant source proof does not match the pinned source proof",
+          severity: "error",
+          source: "invariant-ledger",
+          path: `${proofPath}#$.commit`
+        });
+        return undefined;
+      }
+    }
+    return parsed.value;
+  } catch (error) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_SOURCE_PROOF_INVALID",
+      message: diagnosticFromError(error, "invariant-ledger", "INVARIANT_LEDGER_SOURCE_PROOF_INVALID").message,
+      severity: "error",
+      source: "invariant-ledger",
+      path: proofPath
+    });
+    return undefined;
+  }
+}
+
+function verifyInvariantSourceProofEvidence(
+  proof: InvariantSourceProof,
+  entry: InvariantLedgerEntry,
+  entryIndex: number,
+  ledgerPath: string,
+  diagnostics: RuntimeDiagnostic[]
+): void {
+  const file = proof.files.find((candidate) => candidate.path === entry.source_path);
+  if (file === undefined) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_SOURCE_PROOF_FILE_MISSING",
+      message: `Invariant source proof does not contain ${JSON.stringify(entry.source_path)}`,
+      severity: "error",
+      source: "invariant-ledger",
+      path: `${ledgerPath}#$.entries[${entryIndex}].source_path`
+    });
+    return;
+  }
+  const digest = crypto.createHash("sha256").update(file.content, "utf8").digest("hex");
+  if (digest !== file.sha256) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_SOURCE_PROOF_FILE_INVALID",
+      message: `Invariant source proof content hash does not match ${JSON.stringify(entry.source_path)}`,
+      severity: "error",
+      source: "invariant-ledger",
+      path: `${ledgerPath}#$.entries[${entryIndex}].source_path`
+    });
+    return;
+  }
+  verifyInvariantSourceText(file.content, entry, entryIndex, ledgerPath, diagnostics);
+}
+
+function verifyInvariantSourceText(
+  source: string,
+  entry: InvariantLedgerEntry,
+  entryIndex: number,
+  ledgerPath: string,
+  diagnostics: RuntimeDiagnostic[]
+): void {
+  if (source.includes("\u0000")) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_SOURCE_BINARY",
+      message: `Invariant ledger source ${JSON.stringify(entry.source_path)} is not UTF-8 text`,
+      severity: "error",
+      source: "invariant-ledger",
+      path: `${ledgerPath}#$.entries[${entryIndex}].source_path`
+    });
+    return;
+  }
+  const lineMatch = /^(?:line|lines)\s+(\d+)(?:\s*[-–]\s*(\d+))?/iu.exec(entry.source_location);
+  const symbol = lineMatch === null ? /([A-Za-z_$][A-Za-z0-9_$]*)\s*$/u.exec(entry.source_location)?.[1] : undefined;
+  if (lineMatch === null && symbol === undefined) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_SOURCE_LOCATION_INVALID",
+      message: `Invariant ledger source location ${JSON.stringify(entry.source_location)} is not a line range or symbol`,
+      severity: "error",
+      source: "invariant-ledger",
+      path: `${ledgerPath}#$.entries[${entryIndex}].source_location`
+    });
+    return;
+  }
+  if (lineMatch === null) {
+    const declaration = invariantSymbolDeclaration(source, symbol!);
+    if (declaration === undefined) {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_SOURCE_TEXT_MISMATCH",
+        message: `Invariant ledger symbol ${JSON.stringify(symbol)} does not occur in ${JSON.stringify(entry.source_path)}`,
+        severity: "error",
+        source: "invariant-ledger",
+        path: `${ledgerPath}#$.entries[${entryIndex}].source_location`
+      });
+      return;
+    }
+    if (!normalizeInvariantSourceText(declaration).includes(normalizeInvariantSourceLines([entry.verbatim]))) {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_SOURCE_TEXT_MISMATCH",
+        message: `Invariant ledger verbatim text does not occur in ${JSON.stringify(entry.source_path)}`,
+        severity: "error",
+        source: "invariant-ledger",
+        path: `${ledgerPath}#$.entries[${entryIndex}].verbatim`
+      });
+    }
+    return;
+  }
+  const startLine = Number(lineMatch[1]);
+  const endLine = Number(lineMatch[2] ?? lineMatch[1]);
+  const lines = source.split(/\r?\n/u).slice(Math.max(0, startLine - 1), endLine);
+  if (lines.length === 0 || normalizeInvariantSourceLines(lines) !== normalizeInvariantSourceLines([entry.verbatim])) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_SOURCE_TEXT_MISMATCH",
+      message: `Invariant ledger verbatim text does not occur at ${entry.source_location} in ${JSON.stringify(entry.source_path)}`,
+      severity: "error",
+      source: "invariant-ledger",
+      path: `${ledgerPath}#$.entries[${entryIndex}].verbatim`
+    });
+  }
+}
+
+function normalizeInvariantSourceText(value: string): string {
+  return value.replace(/\s+/gu, " ").trim();
+}
+
+function normalizeInvariantSourceLines(lines: readonly string[]): string {
+  return normalizeInvariantSourceText(lines.map((line) => line.replace(/^\s*(?:[-*+]\s+|>\s+)/u, "").trim()).join(" "));
+}
+
+function invariantSymbolDeclaration(source: string, symbol: string): string | undefined {
+  const declaration = new RegExp(
+    `\\b(?:function|contract|library|interface|modifier|event|error|struct|enum)\\s+(?:[A-Za-z_$][A-Za-z0-9_$]*\\.)?${escapeRegExp(symbol)}\\b`,
+    "u"
+  ).exec(source);
+  if (declaration === null || declaration.index === undefined) return undefined;
+  const tail = source.slice(declaration.index + declaration[0].length);
+  const next = /\n\s*(?:function|contract|library|interface|modifier|event|error|struct|enum)\s+/u.exec(tail);
+  return source.slice(declaration.index, declaration.index + declaration[0].length + (next?.index ?? tail.length));
+}
+
+function markdownDelimitedBlock(markdown: string, marker: string): string | undefined {
+  const markerPattern = new RegExp(`^${escapeRegExp(marker)}[ \\t]*$`, "mu");
+  const match = markerPattern.exec(markdown);
+  if (match === null || match.index === undefined) {
+    return undefined;
+  }
+  const start = match.index;
+  const endMarker = marker
+    .replace("### Ledger entry:", "### End ledger entry:")
+    .replace("### Inventory row:", "### End inventory row:")
+    .replace("### Canonical property:", "### End canonical property:");
+  const endPattern = new RegExp(`^${escapeRegExp(endMarker)}[ \\t]*$`, "mu");
+  endPattern.lastIndex = start + match[0].length;
+  const endMatch = endPattern.exec(markdown);
+  if (endMatch === null || endMatch.index === undefined) {
+    return undefined;
+  }
+  return markdown.slice(start, endMatch.index + endMatch[0].length);
+}
+
+function markdownContainsToken(markdown: string, token: string): boolean {
+  return new RegExp(`(?<![A-Za-z0-9._-])${escapeRegExp(token)}(?![A-Za-z0-9._-])`, "u").test(markdown);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 function verifyRequiredArtifactShape(

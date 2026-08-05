@@ -939,6 +939,7 @@ async function publishCanonicalResult(
     stageCanonicalNodeResultBundle({
       artifactDir: anchoredProjectPath(projectRoot, input.artifact_dir),
       workspaceDir: anchoredProjectPath(projectRoot, input.workspace_dir),
+      sourceProofRoot: anchoredProjectPath(projectRoot, path.join(input.run_root, "source-proofs")),
       attemptId: input.attempt_id,
       stagingDir: staging
     });
@@ -2006,6 +2007,7 @@ function mergeWorkspaceArtifacts(workspaceDir: string, artifactDir: string, atte
 export function stageCanonicalNodeResultBundle(input: {
   artifactDir: string;
   workspaceDir: string;
+  sourceProofRoot: string;
   attemptId: string;
   stagingDir: string;
 }): void {
@@ -2018,6 +2020,18 @@ export function stageCanonicalNodeResultBundle(input: {
   // tool state and must never become part of a cloud result archive.
   mergeWorkspaceArtifacts(input.workspaceDir, input.artifactDir, input.attemptId);
   copySafeTree(input.artifactDir, path.join(input.stagingDir, "artifacts"));
+  assertSafeDirectoryTarget(input.sourceProofRoot);
+  for (const suffix of [".json", ".invariant.json"] as const) {
+    const sourceProof = path.join(input.sourceProofRoot, `${input.attemptId}${suffix}`);
+    if (!fs.existsSync(sourceProof)) continue;
+    const proofStat = fs.lstatSync(sourceProof);
+    if (!proofStat.isFile() || proofStat.isSymbolicLink() || proofStat.nlink !== 1) {
+      throw new Error("cloud publication source proof is unsafe");
+    }
+    const proofDestination = path.join(input.stagingDir, "source-proofs", `${input.attemptId}${suffix}`);
+    fs.mkdirSync(path.dirname(proofDestination), { recursive: true, mode: 0o700 });
+    fs.copyFileSync(sourceProof, proofDestination, fs.constants.COPYFILE_EXCL);
+  }
 }
 
 export function copySafeTree(source: string, destination: string, onlyMissing = false): void {

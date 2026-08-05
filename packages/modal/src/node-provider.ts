@@ -1644,6 +1644,7 @@ async function stageModalNodeResult(
 ): Promise<StagedModalNodePublication> {
   const root = fs.realpathSync(path.resolve(projectRoot));
   const artifactDir = checkedPath(root, input.artifact_dir, "artifact directory", false);
+  const proofRoot = checkedPath(root, path.join(input.run_root, "source-proofs"), "source proof directory", false);
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-result-"));
   fs.chmodSync(temporaryRoot, 0o700);
   try {
@@ -1657,8 +1658,8 @@ async function stageModalNodeResult(
     fs.mkdirSync(extracted, { recursive: true });
     await extractSafeTarArchive(archive, extracted, { gzip: true, label: "cloud node result" });
     assertSafeTree(extracted);
-    const canonicalArtifacts = canonicalResultArtifactDirectory(extracted);
-    assertNoForwardedCredentialBytes(canonicalArtifacts, sensitiveValues);
+    const canonical = canonicalResultBundle(extracted, input.attempt_id);
+    assertNoForwardedCredentialBytes(extracted, sensitiveValues);
     let committed = false;
     return {
       commit: () => {
@@ -1666,7 +1667,15 @@ async function stageModalNodeResult(
         if (checkedPath(root, input.artifact_dir, "artifact directory", false) !== artifactDir) {
           throw new Error("cloud node publication destination changed before commit");
         }
-        replacePublishedDirectory(canonicalArtifacts, artifactDir);
+        if (
+          checkedPath(root, path.join(input.run_root, "source-proofs"), "source proof directory", false) !== proofRoot
+        ) {
+          throw new Error("cloud node source proof destination changed before commit");
+        }
+        for (const sourceProof of canonical.sourceProofs) {
+          replacePublishedFile(sourceProof, path.join(proofRoot, path.basename(sourceProof)));
+        }
+        replacePublishedDirectory(canonical.artifacts, artifactDir);
         committed = true;
       },
       cleanup: () => fs.rmSync(temporaryRoot, { recursive: true, force: true })
@@ -1677,12 +1686,34 @@ async function stageModalNodeResult(
   }
 }
 
-function canonicalResultArtifactDirectory(extractedRoot: string): string {
+function canonicalResultBundle(
+  extractedRoot: string,
+  attemptId: string
+): { artifacts: string; sourceProofs: string[] } {
   const entries = fs.readdirSync(extractedRoot, { withFileTypes: true });
-  if (entries.length !== 1 || entries[0]?.name !== "artifacts" || !entries[0].isDirectory()) {
-    throw new Error("cloud node result must contain only canonical artifacts");
+  const artifacts = entries.find((entry) => entry.name === "artifacts");
+  const sourceProofDirectory = entries.find((entry) => entry.name === "source-proofs");
+  if (
+    artifacts === undefined ||
+    !artifacts.isDirectory() ||
+    entries.some((entry) => entry.name !== "artifacts" && entry.name !== "source-proofs") ||
+    (sourceProofDirectory !== undefined && !sourceProofDirectory.isDirectory())
+  ) {
+    throw new Error("cloud node result must contain only canonical artifacts and source proofs");
   }
-  return path.join(extractedRoot, "artifacts");
+  const sourceProofs: string[] = [];
+  if (sourceProofDirectory !== undefined) {
+    const proofRoot = path.join(extractedRoot, sourceProofDirectory.name);
+    const allowedNames = new Set([`${attemptId}.json`, `${attemptId}.invariant.json`]);
+    for (const entry of fs.readdirSync(proofRoot, { withFileTypes: true })) {
+      if (!entry.isFile() || !allowedNames.has(entry.name)) {
+        throw new Error("cloud node result contains an unexpected source proof");
+      }
+      sourceProofs.push(path.join(proofRoot, entry.name));
+    }
+    sourceProofs.sort();
+  }
+  return { artifacts: path.join(extractedRoot, artifacts.name), sourceProofs };
 }
 
 export function assertNoForwardedCredentialBytes(root: string, credentialValues: readonly string[]): void {
@@ -2040,6 +2071,31 @@ function replacePublishedDirectory(source: string, destination: string): void {
     throw error;
   }
   if (hadPrevious) fs.rmSync(previous, { recursive: true, force: true });
+}
+
+function replacePublishedFile(source: string, destination: string): void {
+  const sourceStat = fs.lstatSync(source);
+  if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.nlink !== 1) {
+    throw new Error("cloud node result source file is unsafe");
+  }
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  const destinationStat = fs.existsSync(destination) ? fs.lstatSync(destination) : undefined;
+  if (destinationStat?.isSymbolicLink() || (destinationStat !== undefined && !destinationStat.isFile())) {
+    throw new Error("cloud node result destination file is unsafe");
+  }
+  if (destinationStat !== undefined) {
+    if (!fs.readFileSync(destination).equals(fs.readFileSync(source))) {
+      throw new Error("cloud node result would replace immutable source proof");
+    }
+    return;
+  }
+  const pending = `${destination}.publishing-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
+  fs.copyFileSync(source, pending);
+  try {
+    fs.renameSync(pending, destination);
+  } finally {
+    if (fs.existsSync(pending)) fs.rmSync(pending, { force: true });
+  }
 }
 
 function requiredCredential(env: Record<string, string | undefined>, name: string | undefined): string {

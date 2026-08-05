@@ -10,6 +10,7 @@ import {
   validateExpandedGraphSchema,
   type ExpandedGraph
 } from "../src/index.js";
+import { ARTIFACT_CONTRACT_IDS } from "@ultrafuzz/artifacts";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -94,5 +95,15 @@ describe("expanded graph schema", () => {
 
     expect(snapshot.$id).toBe(expandedGraphJsonSchema.$id);
     expect(snapshot.required).toEqual(expandedGraphJsonSchema.required);
+    const outputContractEnum = (
+      snapshot as {
+        properties?: {
+          nodes?: {
+            items?: { properties?: { outputs?: { items?: { properties?: { contract?: { enum?: unknown } } } } } };
+          };
+        };
+      }
+    ).properties?.nodes?.items?.properties?.outputs?.items?.properties?.contract?.enum;
+    expect(outputContractEnum).toEqual(ARTIFACT_CONTRACT_IDS);
   });
 });
