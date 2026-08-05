@@ -37,6 +37,18 @@ property with every distinct contributing source in `sources`. Never keep only
 the first source. Canonical IDs only need to remain stable within this run, but
 all downstream artifacts must use them unchanged.
 
+## Target-derived consolidation
+
+Use the project-discovery, actor/flow, base-setup, and lens artifacts together
+to preserve target-derived requirements. Retain every explicit mathematical
+invariant, accounting equation, bound, and state relation represented by the
+source catalogs. Keep distinct formula, denominator, and rounding variants as
+separate canonical property rows, and carry the exact aggregate accounting
+relationships between supplied assets, borrowed assets, and shares into their
+descriptions. Preserve the target getter, function, or source location that
+supplies each oracle in the contributing source description so downstream
+implementation can observe the same relation.
+
 Use neutral authorized-QA language in the consolidated table. Phrase each row as
 an expected property, invariant, boundary condition, state transition, or
 regression target. If an upstream lens uses misuse-oriented or sensational
