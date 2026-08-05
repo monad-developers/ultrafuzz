@@ -731,6 +731,29 @@ function verifyLensReferenceExpectationPreservation(
     }
   }
 
+  for (const [propertyIndex, property] of catalog.properties.entries()) {
+    const expectedReferenceIds = property.reference_expectations ?? [];
+    if (expectedReferenceIds.length === 0) continue;
+    const sourcePairs = new Set(
+      property.sources.map((source) => `${source.source_node_id}\u0000${source.source_property_id}`)
+    );
+    const lensReferenceIds = new Set(
+      [...lensRows.values()]
+        .filter((row) => sourcePairs.has(`${row.sourceNodeId}\u0000${row.propertyId}`))
+        .flatMap((row) => row.expectationIds)
+    );
+    const missingReferenceIds = expectedReferenceIds.filter((expectationId) => !lensReferenceIds.has(expectationId));
+    if (missingReferenceIds.length > 0) {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_DROPPED",
+        message: `Canonical property ${JSON.stringify(property.id)} carries reference expectations not present in its source lens artifacts: ${JSON.stringify(missingReferenceIds)}`,
+        severity: "error",
+        source: "property-fanin",
+        path: `${path.join(getNodeArtifactDir(layout, node.id), "properties.json")}#$.properties[${propertyIndex}].reference_expectations`
+      });
+    }
+  }
+
   const rowsBySource = new Map<string, LensReferenceRow[]>();
   for (const row of lensRows.values()) {
     const key = `${row.sourceNodeId}\\u0000${row.propertyId}`;
@@ -1594,6 +1617,23 @@ function verifyImplementationSelectionCoverage(
       source: "property-provenance",
       path: `${implementationPath}#$.properties`
     });
+  }
+
+  for (const [recordIndex, record] of implementation.properties.entries()) {
+    const canonical = catalog.properties.find((property) => property.id === record.property_id);
+    const expectedReferenceExpectations = canonical?.reference_expectations ?? [];
+    if (
+      expectedReferenceExpectations.length > 0 &&
+      !sameStringSet(record.reference_expectations ?? [], expectedReferenceExpectations)
+    ) {
+      diagnostics.push({
+        code: "PROPERTY_IMPLEMENTATION_REFERENCE_EXPECTATIONS_MISMATCH",
+        message: `Implementation record ${JSON.stringify(record.property_id)} must preserve the complete canonical reference expectation ID set`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${implementationPath}#$.properties[${recordIndex}].reference_expectations`
+      });
+    }
   }
 
   for (const [recordIndex, record] of implementation.properties.entries()) {

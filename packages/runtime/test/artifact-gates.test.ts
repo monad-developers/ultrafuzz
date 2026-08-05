@@ -1564,6 +1564,70 @@ test("property implementation gate includes lower-priority benchmark expectation
       ?.message ?? "",
     /property-supply/u
   );
+
+  writeArtifact(
+    layout,
+    nodeId,
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      selection: {
+        priority_threshold: "high",
+        priorities: ["high"],
+        property_ids: ["property-high", "property-supply"]
+      },
+      properties: [
+        {
+          property_id: "property-high",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: []
+        },
+        {
+          property_id: "property-supply",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: []
+        }
+      ]
+    })
+  );
+  const missingReferenceMetadata = verifyRequiredArtifactsForAttempt(layout, node, nodeId);
+  assert.ok(
+    missingReferenceMetadata.diagnostics.some(
+      (diagnostic) => diagnostic.code === "PROPERTY_IMPLEMENTATION_REFERENCE_EXPECTATIONS_MISMATCH"
+    )
+  );
+
+  writeArtifact(
+    layout,
+    nodeId,
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      selection: {
+        priority_threshold: "high",
+        priorities: ["high"],
+        property_ids: ["property-high", "property-supply"]
+      },
+      properties: [
+        {
+          property_id: "property-high",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: []
+        },
+        {
+          property_id: "property-supply",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: [],
+          reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"]
+        }
+      ]
+    })
+  );
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, nodeId).ok, true);
 });
 
 test("property implementation gate rejects an unknown finding property reference", () => {

@@ -95,6 +95,8 @@ export interface ImplementedPropertyRecord extends Record<string, unknown> {
   status: PropertyImplementationStatus;
   implementation_paths: string[];
   test_paths: string[];
+  /** Benchmark/reference expectation IDs carried by this implementation record. */
+  reference_expectations?: string[];
   /** A typed, actionable explanation for a selected property that is not implemented. */
   blocker?: PropertyImplementationBlocker;
 }
@@ -233,6 +235,7 @@ const implementedPropertySchema = z.looseObject({
   status: z.enum(["implemented", "pending", "deferred", "blocked"]),
   implementation_paths: nonEmptyStringArray,
   test_paths: nonEmptyStringArray,
+  reference_expectations: referenceExpectationIdsSchema.optional(),
   blocker: z
     .strictObject({
       code: nonEmptyString,

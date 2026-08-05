@@ -145,7 +145,8 @@ repository test root when it uses `test/` instead.
       "property_id": "property-1",
       "status": "implemented",
       "implementation_paths": ["tests/recon/Properties.sol"],
-      "test_paths": ["tests/foundry/stateful-invariant-implement-properties/Property1.t.sol"]
+      "test_paths": ["tests/foundry/stateful-invariant-implement-properties/Property1.t.sol"],
+      "reference_expectations": ["scfuzzbench:aave-v4:iSpoke_supply"]
     }
   ]
 }
@@ -169,6 +170,9 @@ an actionable `blocker` object with this shape:
 
 `status` must be `implemented`, `pending`, `deferred`, or `blocked`. Include
 both path arrays on every record, using empty arrays when no path exists. A
+selected property with `reference_expectations` carries the complete
+expectation-ID array on its implementation record in the same order-independent
+set. A
 `property_id` must exactly match a canonical ID in `properties.json`; dangling
 references fail artifact validation. Preserve generated and changed test paths
 in `test_paths` and invariant/helper implementation paths in
