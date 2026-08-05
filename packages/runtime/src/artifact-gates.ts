@@ -1321,7 +1321,12 @@ function markdownFieldValues(markdown: string, field: string): string[] {
     const parts = [match[1].replace(/\s*\|\s*$/u, "")];
     for (let continuation = index + 1; continuation < lines.length; continuation += 1) {
       const line = lines[continuation] ?? "";
-      if (/^\s*###\s/u.test(line) || nextFieldPattern.test(line)) break;
+      if (
+        /^\s*(?:\|\s*)?(?:[-*+]\s*)?ledger[_ -]?evidence(?: retained?)?\s*(?::|\|)/iu.test(line) ||
+        /^\s*###\s/u.test(line) ||
+        nextFieldPattern.test(line)
+      )
+        break;
       if (line.trim() !== "") parts.push(line.trim());
       index = continuation;
     }
