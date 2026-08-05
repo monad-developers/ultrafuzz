@@ -53,7 +53,7 @@ function loadRestoreInvariantSuiteWorkspaceSnapshot(
     (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
     snapshots,
     () => undefined,
-    (workspaceRoot: string) => ["test/baseline.t.sol", "test/new.t.sol"],
+    (_workspaceRoot: string) => ["test/baseline.t.sol", "test/new.t.sol"],
     (value: string) => value,
     (root: string, candidate: string) => {
       fs.mkdirSync(candidate, { recursive: true });
