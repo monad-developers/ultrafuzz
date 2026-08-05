@@ -56,6 +56,50 @@ describe("prompt semantic anchors", () => {
     }
   });
 
+  it("extracts target-derived equations without collapsing distinct variants", () => {
+    const lensPrompts = loadBuiltInPromptAssets().filter(
+      (asset) =>
+        asset.relativePath.startsWith("properties/") &&
+        asset.relativePath !== "properties/property-specification-fanin.md"
+    );
+
+    expect(lensPrompts).toHaveLength(8);
+    for (const asset of lensPrompts) {
+      expect(asset.markdown, asset.relativePath).toContain("Target-derived invariant extraction");
+      expect(asset.markdown, asset.relativePath).toContain("preserve every explicit mathematical invariant");
+      expect(asset.markdown, asset.relativePath).toMatch(
+        /retaining exact operands,\s+constants, named formulas, units, denominator expressions, and rounding\s+direction/u
+      );
+      expect(asset.markdown, asset.relativePath).toMatch(
+        /Keep distinct formula, denominator, and rounding variants as separate\s+property rows/u
+      );
+      expect(asset.markdown, asset.relativePath).toMatch(
+        /aggregate accounting\s+relationships between supplied assets, borrowed\s+assets, and shares/u
+      );
+      expect(asset.markdown, asset.relativePath).toContain(
+        "explicitly documented or source-observed aggregate accounting"
+      );
+      expect(asset.markdown, asset.relativePath).toMatch(
+        /record the target getter, function, or source location that supplies its\s+oracle/u
+      );
+    }
+
+    const fanin = prompt("properties/property-specification-fanin.md");
+    expect(fanin).toContain("{{artifact_handoff:project-discovery}}");
+    expect(fanin).toContain("{{artifact_handoff:actors-flows}}");
+    expect(fanin).toContain("{{artifact_handoff:base-test-setup}}");
+    expect(fanin).toContain("Target-derived consolidation");
+    expect(fanin).toMatch(/Retain every explicit mathematical\s+invariant/u);
+    expect(fanin).toMatch(
+      /Preserve exact operands, constants, units, denominator\s+expressions, and rounding direction/u
+    );
+    expect(fanin).toMatch(/Keep\s+distinct formula, denominator, and rounding variants/u);
+    expect(fanin).toMatch(
+      /explicitly documented or source-observed aggregate\s+accounting\s+relationships between supplied assets, borrowed\s+assets, and shares/u
+    );
+    expect(fanin).toMatch(/getter, function, test, or source\s+location that supplies each oracle/u);
+  });
+
   it("keeps protocol failures observable during invariant handler execution", () => {
     const handlers = prompt("strategies/invariants/handlers.md");
     const setup = prompt("strategies/invariants/setup.md");
@@ -101,6 +145,22 @@ describe("prompt semantic anchors", () => {
     expect(promptCorpus).not.toContain("medusa --version");
     expect(promptCorpus).not.toContain("halmos --version");
     expect(promptCorpus).not.toContain("medusa version");
+  });
+
+  it("records exact target equations and their observable oracles during discovery", () => {
+    const discovery = prompt("setup/project-discovery.md");
+
+    expect(discovery).toContain("Invariant and equation inventory");
+    expect(discovery).toContain("Extract every explicit equation, inequality, bound, and state relation");
+    expect(discovery).toContain("exact operands, units, and rounding semantics");
+    expect(discovery).toContain("Preserve distinct denominator and rounding variants");
+    expect(discovery).toMatch(
+      /For each entry, name the getter,\s+function,\s+test,\s+or source location that supplies each\s+oracle/u
+    );
+    expect(discovery).toMatch(/liveness requirements for public and external\s+operations/u);
+    expect(discovery).toMatch(
+      /aggregate accounting relationships between supplied assets, borrowed assets,\s+and shares when those relationships are explicitly documented or observed/u
+    );
   });
 
   it("keeps the final invariant campaign backend-neutral on the single recon-fuzzer backend", () => {
