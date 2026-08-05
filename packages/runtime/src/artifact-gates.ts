@@ -860,10 +860,6 @@ function verifyInvariantSourceText(
   }
 }
 
-function normalizeInvariantSourceText(value: string): string {
-  return value.replace(/\s+/gu, " ").trim();
-}
-
 function normalizeInvariantSourceLines(lines: readonly string[]): string {
   return lines
     .flatMap((line) => line.replace(/\r\n?/gu, "\n").split("\n"))
