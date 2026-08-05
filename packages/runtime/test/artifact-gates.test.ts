@@ -829,7 +829,7 @@ test("fanin gate requires every invariant ledger entry to map to a canonical pro
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- ledger_ids: evidence-borrowed-assets\n### End canonical property: property-1\n"
+    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below total supplied assets.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon / recon-1\n- ledger_ids: evidence-borrowed-assets\n### End canonical property: property-1\n"
   );
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, false);
   const missingMapping = verifyRequiredArtifactsForAttempt(layout, node, node.id);
@@ -845,7 +845,7 @@ test("fanin gate requires every invariant ledger entry to map to a canonical pro
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- ledger_ids: evidence-borrowed-assets, evidence-borrowed-shares\n### End canonical property: property-1\n"
+    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below total supplied assets.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon / recon-1\n- ledger_ids: evidence-borrowed-assets, evidence-borrowed-shares\n### End canonical property: property-1\n"
   );
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
 
@@ -853,7 +853,7 @@ test("fanin gate requires every invariant ledger entry to map to a canonical pro
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- ledger_ids: missing mapping\n### End canonical property: property-1\n"
+    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below total supplied assets.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon / recon-1\n- ledger_ids: missing mapping\n### End canonical property: property-1\n"
   );
   const missingMarkdownMapping = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(missingMarkdownMapping.ok, false);
@@ -872,6 +872,76 @@ test("fanin gate requires every invariant ledger entry to map to a canonical pro
   const unknownMapping = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(unknownMapping.ok, false);
   assert.ok(unknownMapping.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_REFERENCE_UNKNOWN"));
+});
+
+test("property fan-in gate rejects Markdown that omits source-only canonical rows", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-markdown-parity" });
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [
+        {
+          id: "evidence-borrowed-assets",
+          source_path: "docs/overview.md",
+          source_location: "line 55",
+          kind: "invariant",
+          verbatim: "Total borrowed assets remain below supplied assets.",
+          inventory_ids: ["inventory-hub-solvency"]
+        }
+      ],
+      inventory_rows: [
+        {
+          id: "inventory-hub-solvency",
+          description: "Hub borrowed assets remain at or below supplied assets.",
+          ledger_ids: ["evidence-borrowed-assets"]
+        }
+      ],
+      scan_probes: []
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-1",
+          description: "Total borrowed assets | supplied assets remain bounded.",
+          category: "hub-accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-1" }],
+          ledger_ids: ["evidence-borrowed-assets"]
+        },
+        {
+          id: "property-2",
+          description: "Supply share price and drawn index do not decrease.",
+          category: "monotonicity",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-aviggiano", source_property_id: "aviggiano-2" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    "### Canonical property: property-1\n- description: Total borrowed assets \\| supplied assets remain bounded.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon / recon-1\n- ledger_ids: evidence-borrowed-assets\n### End canonical property: property-1\n"
+  );
+  const node = {
+    ...plannedNode(["properties.json", "properties.md"]),
+    id: "property-specification-fanin",
+    logical_id: "property-specification-fanin"
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING"));
 });
 
 test("property implementation gate rejects an unknown canonical property reference", () => {

@@ -609,6 +609,10 @@ nodes:
       - path: setup-inventory.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: workspace.patch
+        contract: ultrafuzz/text@1
+      - path: workspace-patch.json
+        contract: ultrafuzz/workspace-patch@1
     loops: 1
   - id: stateful-invariant-handlers
     kind: agentic
@@ -620,6 +624,10 @@ nodes:
       - path: handler-coverage-inventory.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: workspace.patch
+        contract: ultrafuzz/text@1
+      - path: workspace-patch.json
+        contract: ultrafuzz/workspace-patch@1
     loops: 1
   - id: stateful-invariant-coverage
     kind: agentic
@@ -641,6 +649,10 @@ nodes:
         contract: ultrafuzz/generated-tests@1
       - path: harness-repairs.json
         contract: ultrafuzz/json-array@1
+      - path: workspace.patch
+        contract: ultrafuzz/text@1
+      - path: workspace-patch.json
+        contract: ultrafuzz/workspace-patch@1
     loops: 1
   - id: stateful-invariant-implement-properties
     kind: agentic
@@ -658,6 +670,10 @@ nodes:
         contract: ultrafuzz/generated-tests@1
       - path: findings.json
         contract: ultrafuzz/findings@1
+      - path: workspace.patch
+        contract: ultrafuzz/text@1
+      - path: workspace-patch.json
+        contract: ultrafuzz/workspace-patch@1
     loops: 1
   - id: stateful-invariant-campaign
     kind: agentic
@@ -679,6 +695,10 @@ nodes:
         contract: ultrafuzz/generated-tests@1
       - path: findings.json
         contract: ultrafuzz/findings@1
+      - path: workspace.patch
+        contract: ultrafuzz/text@1
+      - path: workspace-patch.json
+        contract: ultrafuzz/workspace-patch@1
     loops: 1
   - id: differential-oracle-planner
     kind: agentic

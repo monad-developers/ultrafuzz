@@ -276,6 +276,44 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toContain("{{artifact_dir}}/recon-fuzzer-results.json");
   });
 
+  it("publishes runtime-owned workspace patches for every invariant handoff", () => {
+    const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
+    const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
+      nodes: {
+        id: string;
+        outputs?: Array<{ path: string; contract?: string }>;
+      }[];
+    };
+    const invariantNodeIds = [
+      "stateful-invariant-setup",
+      "stateful-invariant-handlers",
+      "stateful-invariant-coverage",
+      "stateful-invariant-implement-properties",
+      "stateful-invariant-campaign"
+    ];
+
+    for (const id of invariantNodeIds) {
+      const outputs = topology.nodes.find((node) => node.id === id)?.outputs ?? [];
+      expect(outputs, id).toEqual(
+        expect.arrayContaining([
+          { path: "workspace.patch", contract: "ultrafuzz/text@1" },
+          { path: "workspace-patch.json", contract: "ultrafuzz/workspace-patch@1" }
+        ])
+      );
+    }
+  });
+
+  it("keeps invariant setup and coverage JSON-first with Markdown parity", () => {
+    const setup = prompt("strategies/invariants/setup.md");
+    const coverage = prompt("strategies/invariants/coverage.md");
+    for (const invariantPrompt of [setup, coverage]) {
+      expect(invariantPrompt).toContain("{{artifact_path:property-specification-fanin}}/properties.json");
+      expect(invariantPrompt).toContain("{{artifact_path:property-specification-fanin}}/properties.md");
+      expect(invariantPrompt).toContain("machine-readable source of truth");
+      expect(invariantPrompt).toContain("source-only properties");
+    }
+  });
+
   it("keeps generated-test manifests on the canonical generated_tests contract", () => {
     const aggregate = prompt("review/aggregate-test-files.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");

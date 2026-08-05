@@ -477,14 +477,29 @@ function verifyInvariantEvidenceArtifacts(
     if (fs.existsSync(markdownPath)) {
       const markdown = fs.readFileSync(markdownPath, "utf8");
       for (const [propertyIndex, property] of catalog.value.properties.entries()) {
+        const propertyTokens = [
+          property.id,
+          property.description,
+          property.category,
+          property.priority,
+          ...property.sources.flatMap((source) => [source.source_node_id, source.source_property_id])
+        ];
+        const block = markdownDelimitedBlock(markdown, `### Canonical property: ${property.id}`, [property.id]);
+        const missingPropertyToken = propertyTokens.find(
+          (token) => block === undefined || !markdownContainsCanonicalValue(block, token)
+        );
+        if (missingPropertyToken !== undefined) {
+          diagnostics.push({
+            code: "PROPERTY_MARKDOWN_PARITY_MISSING",
+            message: `Properties Markdown must preserve canonical property ${JSON.stringify(property.id)} with its description, category, priority, and sources (missing ${JSON.stringify(missingPropertyToken)})`,
+            severity: "error",
+            source: "property-fanin",
+            path: `${markdownPath}#$.properties[${propertyIndex}]`
+          });
+          continue;
+        }
         for (const ledgerId of property.ledger_ids ?? []) {
-          const block = markdownDelimitedBlock(markdown, `### Canonical property: ${property.id}`, [
-            property.id,
-            ledgerId
-          ]);
-          if (block !== undefined && markdownContainsToken(block, ledgerId)) {
-            continue;
-          }
+          if (markdownContainsToken(block!, ledgerId)) continue;
           diagnostics.push({
             code: "INVARIANT_LEDGER_MARKDOWN_MAPPING_MISSING",
             message: `Properties Markdown must preserve canonical property ${JSON.stringify(property.id)} and ledger ID ${JSON.stringify(ledgerId)}`,
@@ -917,6 +932,14 @@ function markdownContainsToken(markdown: string, token: string): boolean {
   if (pattern.test(markdown)) return true;
   const normalizeIndented = (value: string): string => value.replace(/\r\n?/gu, "\n").replace(/^ {2}/gmu, "");
   return pattern.test(normalizeIndented(markdown));
+}
+
+function markdownContainsCanonicalValue(markdown: string, value: string): boolean {
+  const normalized = value.replace(/\r\n?/gu, "\n");
+  const rendered = markdown.replaceAll("\\|", "|").replaceAll("<br>", "\n");
+  const variants = new Set([normalized, normalized.replaceAll("|", "\\|"), normalized.replaceAll("\n", "<br>")]);
+  if (markdownContainsToken(rendered, normalized)) return true;
+  return [...variants].some((variant) => markdownContainsToken(markdown, variant));
 }
 
 function escapeRegExp(value: string): string {

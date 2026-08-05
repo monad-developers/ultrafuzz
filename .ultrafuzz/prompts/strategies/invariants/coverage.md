@@ -22,8 +22,16 @@ Setup inventory:
 Handler coverage inventory:
 {{artifact_path:stateful-invariant-handlers}}/handler-coverage-inventory.md
 
-Property catalog:
+Property catalog JSON (machine-readable source of truth):
+{{artifact_path:property-specification-fanin}}/properties.json
+
+Property catalog Markdown (human-readable companion and parity check):
 {{artifact_path:property-specification-fanin}}/properties.md
+
+Parse and validate `properties.json` first. Use `properties.md` only to verify
+that every canonical ID, description, category, priority, source pair, and
+ledger mapping is presented consistently; retain source-only properties that
+do not have ledger IDs.
 
 Before compiling, fuzzing, or running coverage commands, verify local test
 dependencies described by the setup inventory, handler inventory, base setup, or
