@@ -11,7 +11,10 @@ export const PROPERTIES_SCHEMA_VERSION = "ultrafuzz.properties.v1" as const;
 export const PROPERTY_LENS_SCHEMA_VERSION = "ultrafuzz.property-lens.v1" as const;
 export const IMPLEMENTED_PROPERTIES_SCHEMA_VERSION = "ultrafuzz.implemented-properties.v1" as const;
 export const PROPERTY_CAMPAIGN_SCHEMA_VERSION = "ultrafuzz.property-campaign.v1" as const;
+export const REFERENCE_EXPECTATIONS_SCHEMA_VERSION = "ultrafuzz.reference-expectations.v1" as const;
 export const PROPERTIES_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/properties" as const;
+export const REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID =
+  "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/reference-expectations" as const;
 
 const nonEmptyString = z.string().min(1);
 const stableLedgerId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
@@ -140,9 +143,25 @@ export interface PropertyReferenceInput {
   path: string;
 }
 
+export interface ReferenceExpectationEntry extends Record<string, unknown> {
+  id: string;
+}
+
+export interface ReferenceExpectationsArtifact {
+  schema_version: typeof REFERENCE_EXPECTATIONS_SCHEMA_VERSION;
+  expectations: ReferenceExpectationEntry[];
+}
+
 const propertySourceSchema = z.strictObject({
   source_node_id: nonEmptyString,
   source_property_id: nonEmptyString
+});
+
+const referenceExpectationEntrySchema = z.looseObject({ id: nonEmptyString });
+
+export const referenceExpectationsSchema = z.strictObject({
+  schema_version: z.literal(REFERENCE_EXPECTATIONS_SCHEMA_VERSION),
+  expectations: z.array(referenceExpectationEntrySchema).min(1)
 });
 
 const lensPropertySchema = z.strictObject({
@@ -388,6 +407,32 @@ export const propertiesJsonSchema = {
   }
 } as const;
 
+export const referenceExpectationsJsonSchema = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID,
+  title: "Ultrafuzz supplied reference expectation catalog",
+  type: "object",
+  required: ["schema_version", "expectations"],
+  additionalProperties: false,
+  properties: {
+    schema_version: { const: REFERENCE_EXPECTATIONS_SCHEMA_VERSION },
+    expectations: {
+      type: "array",
+      minItems: 1,
+      items: {
+        type: "object",
+        required: ["id"],
+        additionalProperties: true,
+        properties: {
+          id: { type: "string", minLength: 1 },
+          benchmark_name: { type: "string", minLength: 1 },
+          description: { type: "string", minLength: 1 }
+        }
+      }
+    }
+  }
+} as const;
+
 export const lensPropertiesJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: `${PROPERTIES_JSON_SCHEMA_ID}/lens`,
@@ -428,6 +473,16 @@ export function validateLensPropertiesSchema(
   return validateWithZod(lensPropertiesSchema as z.ZodType<LensPropertiesArtifact>, value, {
     path,
     code: "PROPERTY_LENS_SCHEMA_INVALID"
+  });
+}
+
+export function validateReferenceExpectationsSchema(
+  value: unknown,
+  path = "$"
+): SchemaValidationResult<ReferenceExpectationsArtifact> {
+  return validateWithZod(referenceExpectationsSchema as z.ZodType<ReferenceExpectationsArtifact>, value, {
+    path,
+    code: "REFERENCE_EXPECTATIONS_SCHEMA_INVALID"
   });
 }
 

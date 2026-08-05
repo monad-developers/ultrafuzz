@@ -19,6 +19,9 @@ export default class Run extends Command {
     ...globalFlags,
     "run-id": Flags.string({ summary: "Ultrafuzz run ID" }),
     input: Flags.string({ summary: "Workflow input JSON path or inline JSON" }),
+    "reference-expectations": Flags.string({
+      summary: "Trusted benchmark expectation catalog JSON path"
+    }),
     prompt: Flags.string({ summary: "Operator prompt text" }),
     agent: Flags.string({ summary: "Override the default agent reference" }),
     model: Flags.string({ summary: "Override the default model metadata" }),
@@ -43,6 +46,7 @@ export default class Run extends Command {
     const result = await startRun({
       projectRoot: root,
       runId: flags["run-id"],
+      referenceExpectationsPath: flags["reference-expectations"],
       prompt: flags.prompt,
       agent: flags.agent,
       model: flags.model,

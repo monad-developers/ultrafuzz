@@ -31,6 +31,7 @@ import {
   lensPropertiesJsonSchema,
   nodeAttemptLedgerJsonSchema,
   propertiesJsonSchema,
+  referenceExpectationsJsonSchema,
   runStateJsonSchema,
   validateAnalysisBundleManifestSchema,
   usageLedgerJsonSchema,
@@ -61,10 +62,12 @@ test("materializes the checked-in JSON schema bundle into a task-local directory
     const copied = materializePromptSchemas(destination);
     assert.ok(copied.some((file) => file.endsWith("property-lens.schema.json")));
     assert.ok(copied.some((file) => file.endsWith("properties.schema.json")));
+    assert.ok(copied.some((file) => file.endsWith("reference-expectations.schema.json")));
     assert.ok(copied.some((file) => file.endsWith("invariant-evidence-ledger.schema.json")));
     assert.ok(copied.some((file) => file.endsWith("invariant-source-proof.schema.json")));
     assert.ok(readdirSync(destination).every((file) => file.endsWith(".schema.json")));
     assert.equal(statSync(path.join(destination, "property-lens.schema.json")).isFile(), true);
+    assert.equal(statSync(path.join(destination, "reference-expectations.schema.json")).isFile(), true);
     assert.equal(statSync(path.join(destination, "property-lens.schema.json")).mode & 0o777, 0o400);
     assert.equal(statSync(destination).mode & 0o777, 0o700);
   } finally {
@@ -1089,6 +1092,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   const nodeAttemptLedgerSnapshot = readSchemaSnapshot("node-attempt-ledger.schema.json");
   const propertiesSnapshot = readSchemaSnapshot("properties.schema.json");
   const lensPropertiesSnapshot = readSchemaSnapshot("property-lens.schema.json");
+  const referenceExpectationsSnapshot = readSchemaSnapshot("reference-expectations.schema.json");
   const runStateSnapshot = readSchemaSnapshot("run-state.schema.json");
   const usageLedgerSnapshot = readSchemaSnapshot("usage-ledger.schema.json");
   const workspacePatchSnapshot = readSchemaSnapshot("workspace-patch.schema.json");
@@ -1115,6 +1119,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(runStateContractEnum, ARTIFACT_CONTRACT_IDS);
   assert.deepEqual(propertiesSnapshot, propertiesJsonSchema);
   assert.deepEqual(lensPropertiesSnapshot, lensPropertiesJsonSchema);
+  assert.deepEqual(referenceExpectationsSnapshot, referenceExpectationsJsonSchema);
   assert.deepEqual(usageLedgerSnapshot, usageLedgerJsonSchema);
   assert.deepEqual(workspacePatchSnapshot, workspacePatchJsonSchema);
 });

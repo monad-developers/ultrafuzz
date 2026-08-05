@@ -8,6 +8,7 @@ import { validateInvariantLedgerSchema } from "./invariant-ledger.js";
 import { validateWorkspacePatchSchema } from "./workspace-patch.js";
 import {
   validateLensPropertiesSchema,
+  validateReferenceExpectationsSchema,
   validateImplementedPropertiesSchema,
   validatePropertiesSchema,
   validatePropertyCampaignSchema
@@ -23,6 +24,7 @@ export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/json-object@1",
   "ultrafuzz/nonempty-markdown@1",
   "ultrafuzz/property-lens@1",
+  "ultrafuzz/reference-expectations@1",
   "ultrafuzz/properties@1",
   "ultrafuzz/property-campaign@1",
   "ultrafuzz/report@1",
@@ -204,6 +206,14 @@ const definitions = defineContracts([
     description: "A typed property-lens catalog whose source properties use only high, medium, or low priority."
   },
   {
+    id: "ultrafuzz/reference-expectations@1",
+    format: "json",
+    description:
+      "A supplied reference expectation catalog. IDs are trusted provenance only when this declared input artifact is present.",
+    validEmptyExample:
+      '{"schema_version":"ultrafuzz.reference-expectations.v1","expectations":[{"id":"expectation-example"}]}'
+  },
+  {
     id: "ultrafuzz/property-campaign@1",
     format: "json",
     description:
@@ -316,6 +326,14 @@ export function validateArtifactContract(
   }
   if (contract === "ultrafuzz/property-lens@1") {
     const result = validateLensPropertiesSchema(parsed, artifactPath);
+    return {
+      ok: result.ok,
+      issues: result.issues,
+      ...(result.value === undefined ? {} : { value: result.value })
+    };
+  }
+  if (contract === "ultrafuzz/reference-expectations@1") {
+    const result = validateReferenceExpectationsSchema(parsed, artifactPath);
     return {
       ok: result.ok,
       issues: result.issues,

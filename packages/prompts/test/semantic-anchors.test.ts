@@ -29,6 +29,24 @@ describe("prompt semantic anchors", () => {
     }
   });
 
+  it("grounds reference expectation metadata in supplied JSON catalogs", () => {
+    const propertyPrompts = loadBuiltInPromptAssets().filter(
+      (asset) =>
+        asset.relativePath.startsWith("properties/") &&
+        asset.relativePath !== "properties/property-specification-fanin.md"
+    );
+    expect(propertyPrompts).toHaveLength(8);
+    for (const asset of propertyPrompts) {
+      expect(asset.markdown, asset.relativePath).toContain("exact identifiers present in the");
+      expect(asset.markdown, asset.relativePath).toContain("{{schema_path}}/reference-expectations.schema.json");
+      expect(asset.markdown, asset.relativePath).not.toContain("scfuzzbench:aave-v4:iSpoke_supply");
+    }
+    const fanin = prompt("properties/property-specification-fanin.md");
+    expect(fanin).toContain("{{schema_path}}/reference-expectations.schema.json");
+    expect(fanin).not.toContain("scfuzzbench:aave-v4:iSpoke_supply");
+    expect(prompt("strategies/invariants/implement-properties.md")).not.toContain("scfuzzbench:aave-v4:iSpoke_supply");
+  });
+
   it("preserves source-guided denial-of-service and liveness requirements", () => {
     const lensPrompts = loadBuiltInPromptAssets().filter(
       (asset) =>

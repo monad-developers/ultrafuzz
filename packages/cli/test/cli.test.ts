@@ -266,6 +266,25 @@ test("init and validate emit schema-versioned launch JSON", async () => {
   assert.equal("repository_mutation" in posture, false);
 });
 
+test("run exposes the trusted reference expectation catalog option", async () => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  writeSmallTopology(project);
+  const run = await cli(
+    project,
+    ["run", "--run-id", "catalog-cli-run", "--reference-expectations", "missing.json", "--json"],
+    fakeSmithersEnv(project)
+  );
+  assert.equal(run.code, 1, run.stderr);
+  const body = parseJson(run);
+  assert.equal(
+    (body.diagnostics as Array<{ code?: string }>).some(
+      (diagnostic) => diagnostic.code === "REFERENCE_EXPECTATIONS_INVALID" || diagnostic.code === "ENOENT"
+    ),
+    true
+  );
+});
+
 test("run, ps, status, inspect, report, materialize, clean, and lifecycle commands expose product workflow evidence", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
