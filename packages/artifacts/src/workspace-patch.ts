@@ -34,15 +34,18 @@ export function normalizeWorkspacePatchPath(value: string, label = "workspace pa
 
 const workspacePatchPath = z
   .string()
-  .refine((value) => {
-    try {
-      return normalizeWorkspacePatchPath(value) === value;
-    } catch {
-      return false;
+  .refine(
+    (value) => {
+      try {
+        return normalizeWorkspacePatchPath(value) === value;
+      } catch {
+        return false;
+      }
+    },
+    {
+      message: "Workspace patch paths must be canonical safe relative paths"
     }
-  }, {
-    message: "Workspace patch paths must be canonical safe relative paths"
-  })
+  )
   .refine((value) => isSafeWorkspacePatchPath(value), {
     message: "Workspace patch paths cannot modify internal or secret roots"
   });
