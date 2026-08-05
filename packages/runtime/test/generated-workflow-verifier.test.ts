@@ -107,7 +107,8 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
     /resetTaskArtifactContents\(path\.join\(artifactsParent, task\.attemptId\), task\.attemptId, "mirror"\)/u
   );
   assert.match(reset, /output\.contract === "ultrafuzz\/generated-tests@1"/u);
-  assert.match(reset, /path\.resolve\(workspaceRoot, "test", "foundry"\)/u);
+  assert.match(reset, /for \(const testRoot of invariantTestRoots\(workspaceRoot\)\)/u);
+  assert.match(reset, /path\.resolve\(workspaceRoot, testRoot, "foundry"\)/u);
   assert.match(
     reset,
     /path\.join\(foundryParent, task\.metadata\.node\.logicalNodeId\),\s*task\.metadata\.node\.logicalNodeId,\s*"generated-test"/u
@@ -324,10 +325,9 @@ test("generated Smithers agent mirrors declared workspace tests before strict ve
 
   const materializer = source.slice(materializerStart, resolverStart);
   assert.match(materializer, /const generatedPrefix = "generated-tests\/"/u);
-  assert.match(materializer, /const directSourceCandidate = path\.resolve\(workspaceRoot, "test", "foundry"/u);
-  assert.match(materializer, /path\.resolve\(workspaceRoot, "test", "foundry", nodeId, workspaceRelativePath\)/u);
-  assert.match(materializer, /existsSync\(directSourceCandidate\)/u);
-  assert.match(materializer, /existsSync\(nodeScopedSourceCandidate\)/u);
+  assert.match(materializer, /const sourceCandidates = INVARIANT_TEST_ROOT_NAMES\.flatMap/u);
+  assert.match(materializer, /path\.resolve\(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath\)/u);
+  assert.match(materializer, /sourceCandidates\.find\(\(candidate\) => existsSync\(candidate\)/u);
   assert.match(materializer, /resolveNonEmptyRegularArtifactFile\(workspaceRoot, sourceCandidate/u);
   assert.match(materializer, /sourceBefore\.nlink !== 1/u);
   assert.match(materializer, /writeFileSync\(anchoredArtifactPath, contents, \{ flag: "wx", mode: 0o600 \}\)/u);
@@ -349,6 +349,7 @@ test("generated Smithers workflow preserves the complete invariant suite across 
   assert.match(source, /validateImplementedPropertiesSchema/u);
   assert.match(source, /invariant-suite/u);
   assert.match(source, /changedTestTreePaths/u);
+  assert.match(source, /changedInvariantSourcePaths/u);
   assert.match(source, /CryticTester/u);
   assert.match(source, /TargetFunctions/u);
   assert.match(source, /Properties/u);
@@ -370,6 +371,8 @@ test("generated Smithers workflow preserves the complete invariant suite across 
   assert.match(source, /MAX_INVARIANT_SUITE_TOTAL_BYTES/u);
   assert.match(source, /INVARIANT_SUITE_BASELINE_FILE/u);
   assert.match(source, /captureInvariantSuiteBaseline/u);
+  assert.match(source, /invariantSuiteProtectedBaselinePath/u);
+  assert.match(source, /protected invariant suite baseline was modified/u);
   assert.match(source, /ultrafuzz\.invariant-suite-baseline\.v1/u);
   assert.match(source, /gitTestTreePaths/u);
   assert.match(source, /INVARIANT_SUITE_SENSITIVE_SEGMENTS/u);
@@ -379,12 +382,15 @@ test("generated Smithers workflow preserves the complete invariant suite across 
   assert.match(source, /pinnedSourceRef, "HEAD\^"/u);
   assert.match(source, /\$\{baseRef\}\.\.\.HEAD/u);
   assert.match(source, /implemented properties JSON is malformed/u);
-  assert.match(source, /directSources/u);
-  assert.match(source, /direct dependency suites conflict/u);
+  assert.match(source, /selectedSources/u);
+  assert.match(source, /ancestor invariant suite sources conflict/u);
   assert.match(source, /src\/contracts/u);
   assert.match(source, /invariant suite source is hard-linked/u);
   assert.match(source, /unable to enumerate changed invariant suite sources/u);
   assert.match(source, /writeFileDurable\(anchoredDestination/u);
+  assert.match(source, /copyDependencyInvariantSuiteToArtifact/u);
+  assert.match(source, /INVARIANT_SUITE_ALLOWED_ROOTS/u);
+  assert.match(source, /ancestor invariant suite sources conflict/u);
 
   const suiteMaterializerStart = source.indexOf("function materializeInvariantSuiteFromDependencies");
   const suitePublicationStart = source.indexOf("function rememberInvariantSuitePublications");
@@ -392,6 +398,21 @@ test("generated Smithers workflow preserves the complete invariant suite across 
   assert.ok(suitePublicationStart > suiteMaterializerStart, source);
   assert.ok(resolverStart > suitePublicationStart, source);
   assert.ok(workflowStart > resolverStart, source);
+});
+
+test("generated Smithers invariant provenance accepts only supported source roots", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const pathStart = source.indexOf("function assertSafeInvariantSuitePath");
+  const pathEnd = source.indexOf("function assertSafeInvariantSuiteTestPath", pathStart);
+
+  assert.ok(pathStart >= 0, source);
+  assert.ok(pathEnd > pathStart, source);
+  const validator = source.slice(pathStart, pathEnd);
+  assert.match(validator, /INVARIANT_SUITE_ALLOWED_ROOTS\.some/u);
+  assert.match(source, /const INVARIANT_SUITE_ALLOWED_ROOTS = \["src", "contracts", "test", "tests"\]/u);
+  assert.match(validator, /unsupported invariant suite source root/u);
+  assert.doesNotMatch(validator, /artifacts/u);
+  assert.doesNotMatch(validator, /\.envrc/u);
 });
 
 test("generated Smithers verifier rejects in-root leaf and parent symlinks", () => {
