@@ -837,6 +837,61 @@ test("generated Smithers preparation requires a successful dependency artifact v
   );
 });
 
+test("generated Smithers dependency verification fails closed before descendant preparation", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function assertVerifiedDependency");
+  const helperEnd = source.indexOf("\n\nfunction preservePinnedSourceProof", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = source
+    .slice(helperStart, helperEnd)
+    .replace("task: (typeof taskSpecs)[number]", "task")
+    .replace("dependency: string", "dependency")
+    .replace("): void {", ") {")
+    .replace(
+      /\s+as \{\s*schema_version\?: unknown;\s*attempt_id\?: unknown;\s*artifacts\?: unknown;\s*\};/u,
+      ";"
+    );
+  const assertVerifiedDependency = new Function(
+    "path",
+    "resolveRegularArtifactFile",
+    "readFileSync",
+    `const ARTIFACT_VERIFICATION_MARKER = ".ultrafuzz-artifact-verification.json";
+const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";
+${helper}; return assertVerifiedDependency;`
+  )(
+    path,
+    (root: string, candidate: string) => {
+      if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) {
+        throw new Error("unsafe path");
+      }
+      return candidate;
+    },
+    fs.readFileSync
+  ) as (task: { attemptId: string }, dependency: string) => void;
+
+  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verification-gate-"));
+  const dependency = path.join(runRoot, "property-specification-fanin");
+  fs.mkdirSync(dependency);
+  const task = { attemptId: "stateful-invariant-setup" };
+  assert.throws(
+    () => assertVerifiedDependency(task, dependency),
+    /artifact dependency has not passed verification property-specification-fanin/u
+  );
+
+  fs.writeFileSync(
+    path.join(dependency, ".ultrafuzz-artifact-verification.json"),
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.artifact-verification.v1",
+      attempt_id: "property-specification-fanin",
+      artifacts: []
+    })}\n`,
+    "utf8"
+  );
+  assert.doesNotThrow(() => assertVerifiedDependency(task, dependency));
+  fs.rmSync(runRoot, { recursive: true, force: true });
+});
+
 test("generated Smithers preserves setup-patch baselines across post-agent preparation", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function materializeWorkspacePatchDependencies");
