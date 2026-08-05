@@ -347,6 +347,7 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof
   const workspaceRoot = realpathSync(task.workspacePath);
   materializePromptSchemas(path.join(workspaceRoot, ".ultrafuzz", "schemas"));
   assertTaskInputs(task, workspaceRoot);
+  restoreInvariantSuiteWorkspaceSnapshot(task);
   materializeInvariantSuiteFromDependencies(task, workspaceRoot);
   captureInvariantSuiteWorkspaceSnapshot(task, workspaceRoot);
   const candidate = path.resolve(workspaceRoot, "artifacts", task.attemptId);
@@ -1494,6 +1495,15 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
     paths.add(relativePath);
   }
   let totalBytes = 0;
+  const publicationSnapshot = new Map<string, Buffer>();
+  const tombstones = invariantSuiteTombstones.get(realpathSync(task.workspacePath)) ?? new Set<string>();
+  const selectedDependencies = invariantSuiteDependencySnapshots.get(task.attemptId);
+  if (selectedDependencies === undefined) {
+    throw new Error(`artifact-contract failure: invariant suite dependency snapshot is unavailable ${task.attemptId}`);
+  }
+  for (const [relativePath, entry] of selectedDependencies) {
+    if (!tombstones.has(relativePath)) publicationSnapshot.set(relativePath, Buffer.from(entry.bytes));
+  }
   for (const relativePath of paths) {
     const sourcePath = path.resolve(task.workspacePath, relativePath);
     const source = resolveNonEmptyRegularArtifactFile(
@@ -1504,9 +1514,15 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
     );
     const sourceStat = statSync(source);
     assertInvariantSuiteSourceSize(relativePath, sourceStat.size);
-    totalBytes += sourceStat.size;
+    const sourceBytes = readFileSync(source);
+    if (sourceBytes.length !== sourceStat.size) {
+      throw new Error(`artifact-contract failure: invariant suite source changed ${relativePath}`);
+    }
+    totalBytes += sourceBytes.length;
+    publicationSnapshot.set(relativePath, sourceBytes);
   }
   assertInvariantSuiteSourceBudget(paths.size, totalBytes);
+  invariantSuitePublicationSnapshots.set(task.attemptId, publicationSnapshot);
   for (const artifactRoot of artifactRoots) {
     resetInvariantSuiteArtifactRoot(artifactRoot);
     copyDependencyInvariantSuiteToArtifact(task, artifactRoot);
@@ -1690,6 +1706,12 @@ const MAX_INVARIANT_SUITE_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_INVARIANT_SUITE_TOTAL_BYTES = 64 * 1024 * 1024;
 const INVARIANT_SUITE_BASELINE_FILE = "invariant-suite-baseline.json";
 const INVARIANT_SUITE_MANIFEST_FILE = "invariant-suite-manifest.json";
+const INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR = "invariant-suite-workspace-snapshots";
+const INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE = "snapshot.json";
+const INVARIANT_SUITE_WORKSPACE_FILES_DIR = "files";
+const MAX_INVARIANT_SUITE_WORKSPACE_FILES = 4_096;
+const MAX_INVARIANT_SUITE_WORKSPACE_SOURCE_BYTES = 16 * 1024 * 1024;
+const MAX_INVARIANT_SUITE_WORKSPACE_TOTAL_BYTES = 128 * 1024 * 1024;
 const INVARIANT_TEST_ROOT_NAMES = ["test", "tests"] as const;
 const invariantSuiteNodeIds = new Set([
   "stateful-invariant-setup",
@@ -1707,6 +1729,7 @@ const invariantSuiteDependencySnapshots = new Map<
   string,
   Map<string, { dependency: string; bytes: Buffer; direct: boolean }>
 >();
+const invariantSuitePublicationSnapshots = new Map<string, Map<string, Buffer>>();
 const invariantSuiteWorkspaceSnapshots = new Map<string, Map<string, Buffer>>();
 
 function invariantTestRoots(workspaceRoot: string): readonly string[] {
@@ -2166,11 +2189,27 @@ function safeInvariantSuiteDirectory(root: string, candidate: string): string {
   return resolved;
 }
 
-function rememberInvariantSuitePublications(publications: Map<string, Buffer>, artifactRoots: readonly string[]): void {
+function rememberInvariantSuitePublications(
+  task: (typeof taskSpecs)[number],
+  publications: Map<string, Buffer>,
+  artifactRoots: readonly string[]
+): void {
+  const expected = invariantSuitePublicationSnapshots.get(task.attemptId);
+  if (expected === undefined) {
+    throw new Error(`artifact-contract failure: invariant suite publication snapshot is unavailable ${task.attemptId}`);
+  }
+  const expectedPaths = new Set(expected.keys());
+  let observedRoot = false;
   for (const artifactRoot of artifactRoots) {
     const suiteRoot = path.join(artifactRoot, "invariant-suite");
     if (!existsSync(suiteRoot)) continue;
-    for (const relativePath of listInvariantSuiteSources(suiteRoot)) {
+    observedRoot = true;
+    const actualPaths = listInvariantSuiteSources(suiteRoot);
+    for (const relativePath of actualPaths) {
+      const expectedBytes = expected.get(relativePath);
+      if (expectedBytes === undefined) {
+        throw new Error(`artifact-contract failure: unexpected invariant suite artifact ${relativePath}`);
+      }
       const sourcePath = path.resolve(suiteRoot, relativePath);
       const source = resolveNonEmptyRegularArtifactFile(
         suiteRoot,
@@ -2178,8 +2217,21 @@ function rememberInvariantSuitePublications(publications: Map<string, Buffer>, a
         `artifact-contract failure: invariant suite artifact is missing ${relativePath}`,
         `artifact-contract failure: invariant suite artifact is empty ${relativePath}`
       );
-      rememberVerifiedPublication(publications, path.posix.join("invariant-suite", relativePath), readFileSync(source));
+      const bytes = readFileSync(source);
+      if (!bytes.equals(expectedBytes)) {
+        throw new Error(`artifact-contract failure: invariant suite artifact changed ${relativePath}`);
+      }
+      rememberVerifiedPublication(publications, path.posix.join("invariant-suite", relativePath), expectedBytes);
     }
+    if (
+      actualPaths.length !== expectedPaths.size ||
+      actualPaths.some((relativePath) => !expectedPaths.has(relativePath))
+    ) {
+      throw new Error("artifact-contract failure: invariant suite artifact set changed");
+    }
+  }
+  if (expected.size > 0 && !observedRoot) {
+    throw new Error(`artifact-contract failure: invariant suite artifact root is missing ${task.attemptId}`);
   }
 }
 
@@ -2263,7 +2315,7 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
     };
   });
   if (invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) {
-    rememberInvariantSuitePublications(publications, artifactRoots);
+    rememberInvariantSuitePublications(task, publications, artifactRoots);
   }
   const primary = artifacts.find((artifact) => artifact.primary);
   if (primary === undefined) {
