@@ -682,14 +682,19 @@ function writeWorkspacePatchArtifact(root: string, relativePath: string, content
   }
   mkdirSync(path.dirname(target), { recursive: true });
   if (existsSync(target)) {
-    resolveRegularArtifactFile(
+    const existing = resolveRegularArtifactFile(
       root,
       target,
       "artifact-contract failure: workspace patch artifact is unsafe"
     );
+    const existingContents = readFileSync(existing, "utf8");
+    if (existingContents !== "" && existingContents !== "\n") {
+      if (existingContents === contents) return;
+      throw new Error(`artifact-contract failure: workspace patch artifact was modified ${relativePath}`);
+    }
   }
-  // These paths are runtime-owned. Replace any regular agent-authored
-  // placeholder or partial patch with the complete post-agent capture.
+  // These paths are runtime-owned. Replace only an empty runtime placeholder;
+  // reject any non-empty agent-authored or tampered patch above.
   writeFileDurable(target, contents);
 }
 
