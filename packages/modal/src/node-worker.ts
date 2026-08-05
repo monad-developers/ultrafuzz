@@ -13,6 +13,8 @@ const DURABLE_INPUT_DIRECTORY = "input";
 const DURABLE_CHECKPOINT_DIRECTORY = "checkpoints";
 const DURABLE_CHECKPOINT_INDEX = "index.json";
 const DURABLE_RESTORE_MARKER = "restore.json";
+const MAX_PUBLICATION_MANIFEST_BYTES = 4 * 1024 * 1024;
+const MAX_PUBLICATION_MANIFEST_ENTRIES = 4_096;
 
 type DurableCheckpointStage = "prepared" | "running" | "failed" | "completed";
 
@@ -97,8 +99,7 @@ async function main(): Promise<void> {
     mergeWorkspaceArtifacts(workspaceDir, artifactDir, input.attempt_id);
     const completedCheckpoint = durableWorkspace.recordCheckpoint("completed");
     syncDurableData(projectRoot);
-    publishing = path.join(dataRoot, ".result-publishing");
-    fs.rmSync(publishing, { recursive: true, force: true });
+    publishing = path.join(dataRoot, `.result-publishing-${process.pid}-${crypto.randomBytes(8).toString("hex")}`);
     fs.mkdirSync(publishing, { recursive: true, mode: 0o700 });
     const staging = path.join(publishing, "bundle");
     fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
@@ -139,8 +140,29 @@ async function main(): Promise<void> {
       })}\n`,
       { mode: 0o600 }
     );
-    replacePublishedFile(artifactArchive, path.join(dataRoot, "artifacts.tgz"));
-    replacePublishedFile(path.join(publishing, "result.json"), path.join(dataRoot, "result.json"));
+    const publicationLock = path.join(dataRoot, ".result-publishing.lock");
+    let lockFd: number | undefined;
+    try {
+      try {
+        lockFd = fs.openSync(publicationLock, "wx", 0o600);
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+        const lockStat = fs.lstatSync(publicationLock);
+        if (Date.now() - lockStat.mtimeMs < 60 * 60 * 1000) throw error;
+        fs.unlinkSync(publicationLock);
+        lockFd = fs.openSync(publicationLock, "wx", 0o600);
+      }
+      fs.writeFileSync(lockFd, `${process.pid}\n`);
+      replacePublishedFile(artifactArchive, path.join(dataRoot, "artifacts.tgz"));
+      replacePublishedFile(path.join(publishing, "result.json"), path.join(dataRoot, "result.json"));
+    } finally {
+      if (lockFd !== undefined) fs.closeSync(lockFd);
+      try {
+        fs.unlinkSync(publicationLock);
+      } catch {
+        // Preserve the publication result if lock cleanup races with a failed worker.
+      }
+    }
     fs.rmSync(publishing, { recursive: true, force: true });
     publishing = undefined;
     syncDurableData(dataRoot);
@@ -747,6 +769,13 @@ function recursiveRegularFiles(root: string): string[] {
 function parsePublicationManifest(manifestPath: string): {
   files: Array<{ path: string; size_bytes: number; sha256: string }>;
 } {
+  const manifestStat = fs.lstatSync(manifestPath);
+  if (!manifestStat.isFile() || manifestStat.isSymbolicLink() || manifestStat.nlink !== 1) {
+    throw new Error(`artifact manifest is unsafe: ${manifestPath}`);
+  }
+  if (manifestStat.size > MAX_PUBLICATION_MANIFEST_BYTES) {
+    throw new Error(`artifact manifest exceeds the size limit: ${manifestPath}`);
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
@@ -764,6 +793,9 @@ function parsePublicationManifest(manifestPath: string): {
   const files = (parsed as { files: unknown[] }).files;
   if (files.length === 0) {
     throw new Error(`artifact manifest must declare at least one file: ${manifestPath}`);
+  }
+  if (files.length > MAX_PUBLICATION_MANIFEST_ENTRIES) {
+    throw new Error(`artifact manifest has too many file entries: ${manifestPath}`);
   }
   const paths = new Set<string>();
   for (const entry of files) {
