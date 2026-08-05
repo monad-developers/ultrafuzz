@@ -13,7 +13,7 @@ import {
   getNodeArtifactDir,
   layoutForRunRoot,
   safeResolveInside,
-  sha256File,
+  sha256Bytes,
   validateReferenceExpectationsSchema,
   updateNodeState,
   writeArtifactManifest,
@@ -535,7 +535,7 @@ export function transformTopologyForRun(
 }
 
 interface ReferenceExpectationProvision {
-  sourcePath: string;
+  sourceContents: Buffer;
   sourceRelativePath: string;
   sourceDigest: string;
 }
@@ -556,7 +556,8 @@ function provisionReferenceExpectationOutput(
   if (!stat.isFile() || stat.isSymbolicLink()) {
     throw new Error(`reference expectation catalog must be a regular file: ${sourcePath}`);
   }
-  const parsed = validateReferenceExpectationsSchema(JSON.parse(fs.readFileSync(sourcePath, "utf8")), sourcePath);
+  const sourceContents = fs.readFileSync(sourcePath);
+  const parsed = validateReferenceExpectationsSchema(JSON.parse(sourceContents.toString("utf8")), sourcePath);
   if (!parsed.ok || parsed.value === undefined) {
     throw new Error(parsed.issues.map((issue) => issue.message).join("; "));
   }
@@ -566,27 +567,50 @@ function provisionReferenceExpectationOutput(
     throw new Error("reference expectation catalog requires at least one pinned reference node");
   }
   for (const node of referenceNodes) {
-    if (node.outputs.some((output) => output.path === "references/expectations.json")) continue;
-    node.outputs.push({
-      path: "references/expectations.json",
-      contract: "ultrafuzz/reference-expectations@1",
-      contract_digest: contract.digest,
-      primary: false
-    });
-    const expandedNode = expandedGraph.nodes.find((candidate) => candidate.id === node.id);
-    if (expandedNode !== undefined) {
-      expandedNode.outputs.push({
+    const existingOutput = node.outputs.find((output) => output.path === "references/expectations.json");
+    if (
+      existingOutput !== undefined &&
+      (existingOutput.contract !== "ultrafuzz/reference-expectations@1" ||
+        existingOutput.contract_digest !== contract.digest)
+    ) {
+      throw new Error(
+        `reference node ${node.id} declares references/expectations.json with an incompatible artifact contract`
+      );
+    }
+    if (existingOutput === undefined) {
+      node.outputs.push({
         path: "references/expectations.json",
         contract: "ultrafuzz/reference-expectations@1",
-        contractDigest: contract.digest,
+        contract_digest: contract.digest,
         primary: false
       });
     }
+    const expandedNode = expandedGraph.nodes.find((candidate) => candidate.id === node.id);
+    if (expandedNode !== undefined) {
+      const expandedOutput = expandedNode.outputs.find((output) => output.path === "references/expectations.json");
+      if (
+        expandedOutput !== undefined &&
+        (expandedOutput.contract !== "ultrafuzz/reference-expectations@1" ||
+          expandedOutput.contractDigest !== contract.digest)
+      ) {
+        throw new Error(
+          `reference node ${node.id} declares references/expectations.json with an incompatible artifact contract`
+        );
+      }
+      if (expandedOutput === undefined) {
+        expandedNode.outputs.push({
+          path: "references/expectations.json",
+          contract: "ultrafuzz/reference-expectations@1",
+          contractDigest: contract.digest,
+          primary: false
+        });
+      }
+    }
   }
   return {
-    sourcePath,
+    sourceContents,
     sourceRelativePath: path.relative(projectRoot, sourcePath),
-    sourceDigest: sha256File(sourcePath)
+    sourceDigest: sha256Bytes(sourceContents)
   };
 }
 
@@ -596,12 +620,11 @@ function provisionReferenceExpectationArtifacts(input: {
   provision: ReferenceExpectationProvision | undefined;
 }): void {
   if (input.provision === undefined) return;
-  const contents = fs.readFileSync(input.provision.sourcePath);
   for (const node of input.graph.nodes) {
     if (node.kind !== "reference") continue;
     const artifactDir = getNodeArtifactDir(input.layout, node.id, { create: true });
     const destination = safeResolveInside(artifactDir, "references/expectations.json", "reference expectation catalog");
-    writeFileDurable(destination, contents);
+    writeFileDurable(destination, input.provision.sourceContents);
   }
 }
 

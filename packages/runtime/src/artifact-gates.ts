@@ -5,10 +5,12 @@ import path from "node:path";
 import {
   assertRegularFileInside,
   getNodeArtifactDir,
+  readArtifactManifest,
   readJsonFile,
   readRunState,
   redactValue,
   safeResolveInside,
+  sha256Bytes,
   updateNodeState,
   validateArtifactContract,
   validateFindingsSchema,
@@ -1536,8 +1538,9 @@ function verifyLensReferenceExpectationAuthority(
   const lens = validateLensPropertiesSchema(readJsonFile(lensPath), lensPath);
   if (!lens.ok || lens.value === undefined) return [];
 
-  const suppliedExpectationIds = readLensSuppliedExpectationIds(layout, node);
-  const diagnostics: RuntimeDiagnostic[] = [];
+  const supplied = readLensSuppliedExpectationIds(layout, node);
+  const suppliedExpectationIds = supplied.ids;
+  const diagnostics: RuntimeDiagnostic[] = [...supplied.diagnostics];
   for (const [propertyIndex, property] of lens.value.properties.entries()) {
     for (const [expectationIndex, expectationId] of (property.reference_expectations ?? []).entries()) {
       if (suppliedExpectationIds.has(expectationId)) continue;
@@ -1553,8 +1556,12 @@ function verifyLensReferenceExpectationAuthority(
   return diagnostics;
 }
 
-function readLensSuppliedExpectationIds(layout: RunLayout, node: PlannedGraphNode): Set<string> {
+function readLensSuppliedExpectationIds(
+  layout: RunLayout,
+  node: PlannedGraphNode
+): { ids: Set<string>; diagnostics: RuntimeDiagnostic[] } {
   const expectationIds = new Set<string>();
+  const diagnostics: RuntimeDiagnostic[] = [];
   const state = readRunState(layout);
   for (const dependencyId of node.depends_on) {
     // Only declared, pinned-reference inputs can authorize provenance. In
@@ -1562,16 +1569,46 @@ function readLensSuppliedExpectationIds(layout: RunLayout, node: PlannedGraphNod
     // in the run cannot authorize an ID for this lens.
     if (state.nodes[dependencyId]?.provenance?.origin !== "pinned-reference") continue;
     const dependencyDir = getNodeArtifactDir(layout, dependencyId);
-    if (declaresReferenceExpectationCatalog(state.nodes[dependencyId]?.outputs, "references/expectations.json")) {
-      appendExpectationCatalog(path.join(dependencyDir, "references", "expectations.json"), expectationIds);
-    }
+    const expectationPaths = [
+      ...(declaresReferenceExpectationCatalog(state.nodes[dependencyId]?.outputs, "references/expectations.json")
+        ? ["references/expectations.json"]
+        : []),
+      ...(declaresReferenceExpectationCatalog(
+        state.nodes[dependencyId]?.outputs,
+        "references/reference-expectations.json"
+      )
+        ? ["references/reference-expectations.json"]
+        : [])
+    ];
+    if (expectationPaths.length === 0) continue;
+    const metadata = state.nodes[dependencyId]?.provenance?.reference_expectations;
     if (
-      declaresReferenceExpectationCatalog(state.nodes[dependencyId]?.outputs, "references/reference-expectations.json")
+      !isRecord(metadata) ||
+      metadata.source !== "operator-supplied" ||
+      typeof metadata.sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(metadata.sha256)
     ) {
-      appendExpectationCatalog(path.join(dependencyDir, "references", "reference-expectations.json"), expectationIds);
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_PROVENANCE_INVALID",
+        message: `Pinned reference dependency ${JSON.stringify(dependencyId)} does not carry operator-supplied expectation provenance`,
+        severity: "error",
+        source: "property-provenance",
+        path: `state.nodes.${dependencyId}.provenance.reference_expectations`
+      });
+      continue;
+    }
+    for (const expectationPath of expectationPaths) {
+      appendExpectationCatalog(
+        layout,
+        dependencyId,
+        path.join(dependencyDir, expectationPath),
+        expectationIds,
+        metadata.sha256,
+        diagnostics
+      );
     }
   }
-  return expectationIds;
+  return { ids: expectationIds, diagnostics };
 }
 
 function declaresReferenceExpectationCatalog(
@@ -1585,17 +1622,75 @@ function declaresReferenceExpectationCatalog(
   );
 }
 
-function appendExpectationCatalog(catalogPath: string, expectationIds: Set<string>): void {
+function appendExpectationCatalog(
+  layout: RunLayout,
+  dependencyId: string,
+  catalogPath: string,
+  expectationIds: Set<string>,
+  expectedDigest: string,
+  diagnostics: RuntimeDiagnostic[]
+): void {
   try {
     const stat = fs.lstatSync(catalogPath);
-    if (!stat.isFile() || stat.isSymbolicLink()) return;
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_TAMPERED",
+        message: `Reference expectation catalog for ${JSON.stringify(dependencyId)} is not a regular file`,
+        severity: "error",
+        source: "property-provenance",
+        path: catalogPath
+      });
+      return;
+    }
+    const catalogContents = fs.readFileSync(catalogPath);
+    const actualDigest = sha256Bytes(catalogContents);
+    if (actualDigest !== expectedDigest) {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_TAMPERED",
+        message: `Reference expectation catalog for ${JSON.stringify(dependencyId)} does not match its recorded provenance digest`,
+        severity: "error",
+        source: "property-provenance",
+        path: catalogPath
+      });
+      return;
+    }
+    const manifest = readArtifactManifest(layout, dependencyId);
+    const manifestEntry = manifest.files.find(
+      (file) => file.path === path.relative(getNodeArtifactDir(layout, dependencyId), catalogPath)
+    );
+    if (manifestEntry?.sha256 !== expectedDigest) {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_MANIFEST_MISMATCH",
+        message: `Reference expectation catalog for ${JSON.stringify(dependencyId)} is not bound to its artifact manifest digest`,
+        severity: "error",
+        source: "property-provenance",
+        path: path.join(getNodeArtifactDir(layout, dependencyId), "artifact-manifest.json")
+      });
+      return;
+    }
     const parsed = validateReferenceExpectationsSchema(
-      JSON.parse(fs.readFileSync(catalogPath, "utf8")) as unknown,
+      JSON.parse(catalogContents.toString("utf8")) as unknown,
       catalogPath
     );
-    if (!parsed.ok || parsed.value === undefined) return;
+    if (!parsed.ok || parsed.value === undefined) {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_TAMPERED",
+        message: `Reference expectation catalog for ${JSON.stringify(dependencyId)} failed schema validation`,
+        severity: "error",
+        source: "property-provenance",
+        path: catalogPath
+      });
+      return;
+    }
     for (const expectation of parsed.value.expectations) expectationIds.add(expectation.id);
   } catch {
+    diagnostics.push({
+      code: "PROPERTY_REFERENCE_EXPECTATION_MANIFEST_MISMATCH",
+      message: `Reference expectation catalog for ${JSON.stringify(dependencyId)} has no verifiable artifact manifest`,
+      severity: "error",
+      source: "property-provenance",
+      path: catalogPath
+    });
     return;
   }
 }

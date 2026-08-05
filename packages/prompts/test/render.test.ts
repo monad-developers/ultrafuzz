@@ -41,6 +41,12 @@ function baseRenderInput(tmp: string) {
               contract: "ultrafuzz/nonempty-markdown@1",
               primary: true,
               description: "A non-empty Markdown document."
+            },
+            {
+              path: "references/expectations.json",
+              contract: "ultrafuzz/reference-expectations@1",
+              primary: false,
+              description: "A typed benchmark expectation catalog."
             }
           ],
           artifactDir: path.join(runArtifacts, "base-test-setup")
@@ -112,6 +118,7 @@ describe("prompt rendering", () => {
     const result = renderPrompt(baseRenderInput(tmp));
 
     expect(result.renderedMarkdown).toContain(path.join("base-test-setup", "setup", "base-test-setup.md"));
+    expect(result.renderedMarkdown).toContain(path.join("base-test-setup", "references", "expectations.json"));
     expect(result.renderedMarkdown).toContain(path.join("boundary-tests-0", "findings.json"));
     expect(result.renderedMarkdown).toContain("## Ultrafuzz Output Contract");
     expect(result.renderedMarkdown).toContain(path.join("boundary-tests-0", "generated-tests.json"));

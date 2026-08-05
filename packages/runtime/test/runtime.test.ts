@@ -2908,6 +2908,11 @@ test("plan provisions a validated trusted expectation catalog through pinned ref
       schema_version: "ultrafuzz.reference-expectations.v1",
       expectations: [{ id: "benchmark:example:supply", description: "Supply remains live." }]
     });
+    const rendered = fs.readFileSync(
+      path.join(plan.value!.run_root, "artifacts", "project-discovery", "prompt.rendered.md"),
+      "utf8"
+    );
+    assert.match(rendered, /reference-properties-example\/references\/expectations\.json/u);
     const state = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "state.json"), "utf8")) as {
       nodes?: Record<string, { provenance?: Record<string, unknown>; outputs?: Array<{ path?: string }> }>;
     };
