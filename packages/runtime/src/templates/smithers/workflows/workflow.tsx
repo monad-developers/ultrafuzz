@@ -400,6 +400,7 @@ function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspa
       throw new Error("artifact-contract failure: protected invariant suite baseline was modified");
     }
     writeFileDurable(baselinePath, contents);
+    invariantSuiteProtectedBaselineSnapshots.set(protectedBaselinePath, { contents, sha256: digest });
     invariantSuiteBaselineSnapshots.set(artifactRoot, { contents, sha256: digest });
     return;
   }
@@ -416,6 +417,7 @@ function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspa
       throw new Error("artifact-contract failure: invariant suite baseline was modified by the agent");
     }
     invariantSuiteBaselineSnapshots.set(artifactRoot, { contents, sha256: digest });
+    invariantSuiteProtectedBaselineSnapshots.set(protectedBaselinePath, { contents, sha256: digest });
     writeFileDurable(protectedBaselinePath, contents);
     return;
   }
@@ -465,6 +467,10 @@ function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspa
   )}\n`;
   writeFileDurable(baselinePath, contents);
   writeFileDurable(protectedBaselinePath, contents);
+  invariantSuiteProtectedBaselineSnapshots.set(protectedBaselinePath, {
+    contents,
+    sha256: createHash("sha256").update(contents).digest("hex")
+  });
   invariantSuiteBaselineSnapshots.set(artifactRoot, {
     contents,
     sha256: createHash("sha256").update(contents).digest("hex")
@@ -1567,6 +1573,7 @@ const invariantSuiteNodeIds = new Set([
 const INVARIANT_SUITE_SENSITIVE_SEGMENTS = new Set([".git", ".ultrafuzz", ".smithers", "node_modules", ".env"]);
 const INVARIANT_SUITE_ALLOWED_ROOTS = ["src", "contracts", "test", "tests"] as const;
 const invariantSuiteBaselineSnapshots = new Map<string, { contents: string; sha256: string }>();
+const invariantSuiteProtectedBaselineSnapshots = new Map<string, { contents: string; sha256: string }>();
 const invariantSuiteTombstones = new Map<string, Set<string>>();
 
 function invariantTestRoots(workspaceRoot: string): readonly string[] {
@@ -1772,19 +1779,18 @@ function changedInvariantSourcePaths(workspaceRoot: string): string[] {
       for (const value of execFileSync("git", args, { cwd: workspaceRoot, encoding: "utf8" }).split(/\r?\n/u)) {
         if (!value.startsWith("src/") && !value.startsWith("contracts/")) continue;
         const relativePath = assertSafeInvariantSuitePath(value);
+        const candidate = path.resolve(workspaceRoot, relativePath);
+        if (!existsSync(candidate)) {
+          recordInvariantSuiteTombstone(workspaceRoot, relativePath);
+          continue;
+        }
         const source = resolveRegularArtifactFile(
           workspaceRoot,
-          path.resolve(workspaceRoot, relativePath),
+          candidate,
           `artifact-contract failure: invariant source is not regular ${relativePath}`
         );
         if (statSync(source).size > 0) changed.add(relativePath);
         else recordInvariantSuiteTombstone(workspaceRoot, relativePath);
-      } catch (error) {
-        if (error instanceof Error && error.message.startsWith("artifact-contract failure:")) {
-          recordInvariantSuiteTombstone(workspaceRoot, relativePath);
-          continue;
-        }
-        throw error;
       }
     }
     return [...changed].sort();
@@ -1876,6 +1882,7 @@ function copyInvariantSuiteSource(
 }
 
 function copyDependencyInvariantSuiteToArtifact(task: (typeof taskSpecs)[number], artifactRoot: string): void {
+  const tombstones = invariantSuiteTombstones.get(realpathSync(task.workspacePath)) ?? new Set<string>();
   const directDependencies = new Set(task.metadata.dependencies.attemptIds);
   const dependencies = [...task.dependencyArtifactDirs].sort((left, right) => {
     const leftDirect = directDependencies.has(left) || directDependencies.has(path.basename(left));
@@ -1890,6 +1897,7 @@ function copyDependencyInvariantSuiteToArtifact(task: (typeof taskSpecs)[number]
     if (!existsSync(suiteRoot)) continue;
     const direct = directDependencies.has(dependency) || directDependencies.has(path.basename(dependency));
     for (const relativePath of listInvariantSuiteSources(suiteRoot)) {
+      if (tombstones.has(relativePath)) continue;
       const bytes = readInvariantSuiteSourceBytes(suiteRoot, relativePath, "artifact handoff invariant suite");
       const previous = selected.get(relativePath);
       if (previous !== undefined && !previous.bytes.equals(bytes)) {
