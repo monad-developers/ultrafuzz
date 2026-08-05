@@ -7,6 +7,7 @@ import {
   getNodeArtifactDir,
   readJsonFile,
   readRunState,
+  redactValue,
   safeResolveInside,
   updateNodeState,
   validateArtifactContract,
@@ -1868,11 +1869,7 @@ function verifyFinalReportImplementationCoverage(
       })
     };
     const mismatches: string[] = [];
-    for (const field of [
-      "reference_expected_property_ids",
-      "reference_expectation_ids",
-      "blocker_summaries"
-    ]) {
+    for (const field of ["reference_expected_property_ids", "reference_expectation_ids", "blocker_summaries"]) {
       if (!Array.isArray(coverage[field])) {
         mismatches.push(field);
       }
@@ -1973,14 +1970,18 @@ function verifyFinalReportImplementationCoverage(
         }
         const expectedBlockerSummaries = stringArray(coverage.blocker_summaries);
         const blockerHeadingIndex = lines.indexOf("Blocker summaries:");
-        let renderedBlockerCount = 0;
+        const renderedBlockers: string[] = [];
         if (blockerHeadingIndex >= 0) {
           for (const line of lines.slice(blockerHeadingIndex + 1)) {
             if (!line.startsWith("- ")) break;
-            renderedBlockerCount += 1;
+            renderedBlockers.push(line);
           }
         }
-        if (renderedBlockerCount !== expectedBlockerSummaries.length) {
+        const expectedRenderedBlockers = expectedBlockerSummaries.map((summary) => `- ${reportPublicProse(summary)}`);
+        if (
+          renderedBlockers.length !== expectedRenderedBlockers.length ||
+          expectedRenderedBlockers.some((summary, index) => renderedBlockers[index] !== summary)
+        ) {
           markdownMismatches.push("blocker_summaries");
         }
         if (markdownMismatches.length > 0) {
@@ -2118,6 +2119,32 @@ function propertySourceKey(source: { source_node_id?: unknown; source_property_i
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function reportPublicProse(value: string): string {
+  const redacted = redactValue(value);
+  const safe = typeof redacted === "string" ? redacted : "<redacted>";
+  const pathRedacted = [
+    /(^|[\s("'`])\/(?:home|Users|tmp|var|private|root|opt|mnt|workspace|workspaces)(?:\/[^\s"'`()[\]{}<>]*)?/gmu,
+    /(^|[\s("'`])(?:\.ultrafuzz|artifacts|workspaces|generated-tests)\/[^\s"'`()[\]{}<>]*/gmu,
+    /(^|[\s("'`])[A-Za-z]:\\(?:Users|Temp|Windows|workspace|workspaces)\\[^\s"'`()[\]{}<>]*/gmu
+  ].reduce(
+    (current, pattern) => current.replace(pattern, (_match, prefix: string) => `${prefix}[redacted-path]`),
+    safe
+  );
+  return pathRedacted
+    .replace(/\s+/gu, " ")
+    .trim()
+    .replaceAll("\\", "\\\\")
+    .replaceAll("`", "\\`")
+    .replaceAll("*", "\\*")
+    .replaceAll("_", "\\_")
+    .replaceAll("[", "\\[")
+    .replaceAll("]", "\\]")
+    .replaceAll("!", "\\!")
+    .replaceAll("#", "\\#")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 function sameStringSequence(left: readonly string[], right: readonly string[]): boolean {
