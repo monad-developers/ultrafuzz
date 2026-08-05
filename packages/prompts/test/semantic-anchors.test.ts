@@ -29,6 +29,34 @@ describe("prompt semantic anchors", () => {
     }
   });
 
+  it("preserves source-guided denial-of-service and liveness requirements", () => {
+    const lensPrompts = loadBuiltInPromptAssets().filter((asset) =>
+      [
+        "properties/0kn0t-lens.md",
+        "properties/aviggiano-lens.md",
+        "properties/certora-thinking-lens.md",
+        "properties/josselin-feist-lens.md",
+        "properties/property-specification-a16z.md",
+        "properties/property-specification-crytic.md",
+        "properties/property-specification-runtime-verification.md",
+        "properties/recon-lens.md"
+      ].includes(asset.relativePath)
+    );
+
+    expect(lensPrompts).toHaveLength(8);
+    for (const asset of lensPrompts) {
+      expect(asset.markdown, asset.relativePath).toContain(
+        "Source-preserving liveness requirements"
+      );
+      expect(asset.markdown, asset.relativePath).toContain(
+        "supply, withdraw, repay, and liquidation"
+      );
+      expect(asset.markdown, asset.relativePath).toContain(
+        "input-validation exceptions"
+      );
+    }
+  });
+
   it("does not require unused fuzzer CLIs during project discovery", () => {
     const markdown = prompt("setup/project-discovery.md");
     const promptCorpus = loadBuiltInPromptAssets()

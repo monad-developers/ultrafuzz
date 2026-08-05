@@ -31,6 +31,15 @@ You must produce a typed JSON catalog and a matching Markdown companion. Use
 the catalog, and set every property priority to `high`, `medium`, or `low`.
 The JSON catalog is the machine-readable source of truth.
 
+## Source-preserving liveness requirements
+
+When the assigned reference discusses Denial-of-Service or liveness, preserve
+that guidance as explicit property rows. For applicable public or external
+operations—especially supply, withdraw, repay, and liquidation—describe the
+expected completion behavior for valid state and inputs, identify the
+input-validation exceptions, and assign each row a `high`, `medium`, or `low`
+priority.
+
 Keep the Markdown table readable and identical in ids, descriptions,
 categories, and priorities. Do not put findings in either property artifact.
 
