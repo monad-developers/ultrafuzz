@@ -64,6 +64,10 @@ nodes:
       - path: setup/setup-foundry.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: workspace.patch
+        contract: ultrafuzz/text@1
+      - path: workspace-patch.json
+        contract: ultrafuzz/workspace-patch@1
   - id: base-test-setup
     kind: agentic
     prompt: setup/discover-base-test.md
@@ -74,6 +78,10 @@ nodes:
       - path: setup/base-test-setup.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: workspace.patch
+        contract: ultrafuzz/text@1
+      - path: workspace-patch.json
+        contract: ultrafuzz/workspace-patch@1
   - id: reference-properties-0kn0t
     kind: reference
     reference: properties.0kn0t

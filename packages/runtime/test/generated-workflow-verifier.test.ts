@@ -177,7 +177,8 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
   assert.match(reset, /candidate === preservedInput/u);
   assert.match(reset, /for \(const entry of readdirSync\(anchoredRoot\)\)/u);
   assert.match(reset, /rmSync\(candidate, \{ recursive: true, force: true \}\)/u);
-  assert.match(reset, /prepareArtifactMirror\(task\)/u);
+  assert.match(reset, /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\)/u);
+  assert.match(reset, /WORKSPACE_PATCH_BASELINE_FILE/u);
 });
 
 test("generated Smithers agent preserves its final response as missing non-report Markdown", () => {
@@ -190,7 +191,7 @@ test("generated Smithers agent preserves its final response as missing non-repor
 
   const agent = source.slice(agentStart, preparationStart);
   assert.match(agent, /const result = await agent\.generate\(args\)/u);
-  assert.match(agent, /prepareArtifactMirror\(task\)/u);
+  assert.match(agent, /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\)/u);
   assert.match(agent, /materializeMissingMarkdownArtifacts\(task, result\)/u);
   assert.match(agent, /materializeMissingFinalReportArtifacts\(task\)/u);
   assert.match(agent, /normalizeLegacyReportProvenance\(task\)/u);
@@ -545,6 +546,7 @@ test("generated Smithers retry snapshots are durable and restore through canonic
   const materializeStart = source.indexOf("function materializeInvariantSuiteFromDependencies");
   const restoreStart = source.indexOf("function restoreInvariantSuiteWorkspaceSnapshot");
   const restoreEnd = source.indexOf("function assertTaskInputs", restoreStart);
+  const workflowStart = source.indexOf("export default smithers");
 
   assert.ok(prepareStart >= 0 && materializeStart > prepareStart && restoreStart > prepareStart, source);
   assert.ok(restoreEnd > restoreStart, source);
@@ -566,6 +568,15 @@ test("generated Smithers retry snapshots are durable and restore through canonic
   assert.match(source, /before\.dev !== after\.dev/u);
   assert.match(source, /before\.ino !== after\.ino/u);
   assert.match(source, /writeFileDurable\(\s*path\.join\(snapshotRoot,\s*INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE/u);
+  const preparationRestoreStart = source.indexOf("function restoreWorkspacePatchPreparation");
+  assert.ok(preparationRestoreStart > 0, source);
+  const preparationRestore = source.slice(preparationRestoreStart, workflowStart);
+  assert.ok(
+    preparationRestore.indexOf('["read-tree", "--reset", "-u"') <
+      preparationRestore.indexOf("removeStaleWorkspaceFiles(workspaceRoot, preparationTree)"),
+    preparationRestore
+  );
+  assert.match(preparationRestore, /\["ls-files", "--others", "--ignored", "--exclude-standard", "-z"\]/u);
   assert.match(source, /const workspaceCandidate = path\.resolve\(task\.workspacePath\)/u);
   assert.match(source, /const workspaceStat = lstatSync\(workspaceCandidate\)/u);
   assert.match(source, /realpathSync\(workspaceCandidate\) !== workspaceCandidate/u);
@@ -597,6 +608,30 @@ test("generated Smithers verifier publishes the complete validated set before ta
   assert.ok(
     verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") <
       verifier.indexOf("return { artifacts, primary_artifact: primary.path }")
+  );
+});
+
+test("generated Smithers preserves setup-patch baselines across post-agent preparation", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function materializeWorkspacePatchDependencies");
+  const materializeStart = source.indexOf("function materializeWorkspacePatch(task");
+  const workflowStart = source.indexOf("export default smithers");
+
+  assert.ok(helperStart >= 0, source);
+  assert.ok(materializeStart > helperStart, source);
+  assert.ok(workflowStart > materializeStart, source);
+
+  const helper = source.slice(helperStart, materializeStart);
+  assert.match(helper, /replayWorkspacePatches: boolean/u);
+  assert.match(helper, /if \(!replayWorkspacePatches\)/u);
+  assert.match(helper, /!workspacePatchBaselineTrees\.has\(task\.attemptId\)/u);
+  assert.match(helper, /readWorkspacePatchBaseline\(task\)/u);
+  assert.match(helper, /writeWorkspacePatchBaseline\(task, baselineTree\)/u);
+  assert.match(helper, /persistedPreparation === undefined && !replayWorkspacePatches/u);
+  assert.match(helper, /taskPublishesWorkspacePatch\(task\) && !workspacePatchBaselineTrees\.has/u);
+  assert.match(
+    source,
+    /const result = await agent\.generate\(args\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\);/u
   );
 });
 

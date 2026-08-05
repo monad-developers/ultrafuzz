@@ -38,7 +38,8 @@ const {
   validateInvariantSourceProofSchema,
   writeFileDurable
 } = await import(artifactsModule);
-const { normalizeFinalReportSeverityRecord } = await import(runtimeModule);
+const { applyWorkspacePatch, captureWorkspacePatch, captureWorkspaceTree, normalizeFinalReportSeverityRecord } =
+  await import(runtimeModule);
 
 const inputTaskSchema = z.object({
   id: z.string(),
@@ -207,7 +208,12 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       // Agent work may replace or clean its worktree, including the prepared
       // artifact mirror. Re-establish the same path-checked directories before
       // preserving outputs; this remains deterministic and model-free.
-      prepareArtifactMirror(task);
+      // Rebuild the artifact mirror after the agent without replaying setup
+      // patches against the agent's now-dirty workspace. The first preparation
+      // captured the producer baseline and applied all dependency patches;
+      // replaying them here would either overwrite that baseline or fail with
+      // a base-tree mismatch.
+      prepareArtifactMirror(task, { replayWorkspacePatches: false });
       materializeMissingMarkdownArtifacts(task, result);
       materializeMissingDedupeArtifact(task);
       materializeMissingFinalReportArtifacts(task);
@@ -216,6 +222,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       normalizeLegacyGeneratedTestManifests(task);
       materializeGeneratedTestCompanions(task);
       materializeInvariantSuiteCompanions(task);
+      materializeWorkspacePatch(task);
       // Keep artifact validation inside the agent task completion boundary.
       // This does not create a second model opportunity; it validates and, for
       // Markdown only, preserves the same agent's final response as its output.
@@ -276,7 +283,8 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
       );
     }
   }
-  prepareArtifactMirror(task);
+  restoreWorkspacePatchPreparation(task, workspaceRoot);
+  prepareArtifactMirror(task, { replayWorkspacePatches: false });
 }
 
 function resetTaskArtifactContents(
@@ -315,7 +323,14 @@ function resetTaskArtifactContents(
   }
   for (const entry of readdirSync(anchoredRoot)) {
     const candidate = path.join(anchoredRoot, entry);
-    if (candidate === preservedInput || (label === "canonical" && entry === INVARIANT_SUITE_BASELINE_FILE)) continue;
+    if (
+      candidate === preservedInput ||
+      (label === "canonical" &&
+        (entry === INVARIANT_SUITE_BASELINE_FILE ||
+          entry === WORKSPACE_PATCH_BASELINE_FILE ||
+          entry === WORKSPACE_PATCH_PREPARATION_FILE))
+    )
+      continue;
     rmSync(candidate, { recursive: true, force: true });
   }
 }
@@ -342,11 +357,15 @@ function taskArtifactRoots(task: (typeof taskSpecs)[number], canonicalArtifactDi
   return roots;
 }
 
-function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof preparationOutput> {
+function prepareArtifactMirror(
+  task: (typeof taskSpecs)[number],
+  options: { replayWorkspacePatches?: boolean } = {}
+): z.infer<typeof preparationOutput> {
   preservePinnedSourceProof(task);
   const workspaceRoot = realpathSync(task.workspacePath);
   materializePromptSchemas(path.join(workspaceRoot, ".ultrafuzz", "schemas"));
   assertTaskInputs(task, workspaceRoot);
+  materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true);
   restoreInvariantSuiteWorkspaceSnapshot(task);
   materializeInvariantSuiteFromDependencies(task, workspaceRoot);
   captureInvariantSuiteWorkspaceSnapshot(task, workspaceRoot);
@@ -379,6 +398,301 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof
     }
   }
   return { prepared: true };
+}
+
+function taskPublishesWorkspacePatch(task: (typeof taskSpecs)[number]): boolean {
+  return (
+    task.outputs.some((output) => output.path === "workspace.patch" && output.contract === "ultrafuzz/text@1") &&
+    task.outputs.some(
+      (output) => output.path === "workspace-patch.json" && output.contract === "ultrafuzz/workspace-patch@1"
+    )
+  );
+}
+
+function materializeWorkspacePatchDependencies(
+  task: (typeof taskSpecs)[number],
+  workspaceRoot: string,
+  replayWorkspacePatches: boolean
+): void {
+  const expectedPreparation = workspacePatchPreparationTrees.get(task.attemptId);
+  if (expectedPreparation !== undefined && readWorkspacePatchPreparation(task) !== expectedPreparation) {
+    throw new Error(`artifact-contract failure: workspace preparation was modified ${task.attemptId}`);
+  }
+  const dependencies = [...task.dependencyArtifactDirs]
+    .filter(
+      (dependency) =>
+        existsSync(path.join(dependency, "workspace.patch")) &&
+        existsSync(path.join(dependency, "workspace-patch.json"))
+    )
+    .sort((left, right) => {
+      const leftIndex = taskSpecs.findIndex((candidate) => candidate.attemptId === path.basename(left));
+      const rightIndex = taskSpecs.findIndex((candidate) => candidate.attemptId === path.basename(right));
+      return leftIndex - rightIndex || left.localeCompare(right);
+    });
+  for (const dependency of dependencies) {
+    const patchPath = resolveRegularArtifactFile(
+      dependency,
+      path.join(dependency, "workspace.patch"),
+      "artifact-contract failure: workspace patch is not a regular file"
+    );
+    const manifestPath = resolveRegularArtifactFile(
+      dependency,
+      path.join(dependency, "workspace-patch.json"),
+      "artifact-contract failure: workspace patch manifest is not a regular file"
+    );
+    let manifest: unknown;
+    try {
+      manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as unknown;
+    } catch (error) {
+      throw new Error(`artifact-contract failure: workspace patch manifest is malformed ${manifestPath}`, {
+        cause: error
+      });
+    }
+    const capture = {
+      patch: readFileSync(patchPath, "utf8"),
+      manifest: manifest as Parameters<typeof applyWorkspacePatch>[1]["manifest"]
+    };
+    if (!replayWorkspacePatches) {
+      // Post-agent preparation may see a dirty worktree. Replay only when the
+      // exact dependency result tree is absent and the clean base tree is
+      // still present; otherwise the dependency patch is already represented
+      // by the dirty workspace and must not be applied over agent changes.
+      const currentTree = captureWorkspaceTree(workspaceRoot);
+      if (currentTree !== capture.manifest.base_tree) continue;
+    }
+    applyWorkspacePatch(workspaceRoot, capture);
+  }
+  if (!workspacePatchPreparationTrees.has(task.attemptId)) {
+    const persistedPreparation = readWorkspacePatchPreparation(task);
+    if (persistedPreparation === undefined && !replayWorkspacePatches) {
+      throw new Error(`artifact-contract failure: workspace preparation is unavailable ${task.attemptId}`);
+    }
+    const preparationTree = persistedPreparation ?? captureWorkspaceTree(workspaceRoot);
+    workspacePatchPreparationTrees.set(task.attemptId, preparationTree);
+    if (persistedPreparation === undefined) writeWorkspacePatchPreparation(task, preparationTree);
+  }
+  const expectedBaseline = workspacePatchBaselineTrees.get(task.attemptId);
+  if (expectedBaseline !== undefined && readWorkspacePatchBaseline(task) !== expectedBaseline) {
+    throw new Error(`artifact-contract failure: workspace patch baseline was modified ${task.attemptId}`);
+  }
+  if (taskPublishesWorkspacePatch(task) && !workspacePatchBaselineTrees.has(task.attemptId)) {
+    const persistedBaseline = readWorkspacePatchBaseline(task);
+    if (persistedBaseline === undefined && !replayWorkspacePatches) {
+      throw new Error(`artifact-contract failure: workspace patch baseline is unavailable ${task.attemptId}`);
+    }
+    const baselineTree = persistedBaseline ?? captureWorkspaceTree(workspaceRoot);
+    workspacePatchBaselineTrees.set(task.attemptId, baselineTree);
+    if (persistedBaseline === undefined) writeWorkspacePatchBaseline(task, baselineTree);
+  }
+}
+
+function workspacePatchBaselinePath(task: (typeof taskSpecs)[number]): string {
+  const artifactRoot = realpathSync(task.metadata.artifacts.dir);
+  const candidate = path.resolve(artifactRoot, WORKSPACE_PATCH_BASELINE_FILE);
+  if (!isStrictlyInsideDirectory(artifactRoot, candidate)) {
+    throw new Error(`artifact-contract failure: unsafe workspace patch baseline ${task.attemptId}`);
+  }
+  return candidate;
+}
+
+function writeWorkspacePatchBaseline(task: (typeof taskSpecs)[number], baselineTree: string): void {
+  if (!/^[0-9a-f]{40,64}$/u.test(baselineTree)) {
+    throw new Error(`artifact-contract failure: invalid workspace patch baseline ${task.attemptId}`);
+  }
+  const target = workspacePatchBaselinePath(task);
+  const contents = `${JSON.stringify({
+    schema_version: "ultrafuzz.workspace-patch-baseline.v1",
+    attempt_id: task.attemptId,
+    baseline_tree: baselineTree
+  })}\n`;
+  if (existsSync(target)) {
+    if (readFileSync(target, "utf8") !== contents) {
+      throw new Error(`artifact-contract failure: workspace patch baseline was modified ${task.attemptId}`);
+    }
+    return;
+  }
+  writeFileDurable(target, contents);
+}
+
+function readWorkspacePatchBaseline(task: (typeof taskSpecs)[number]): string | undefined {
+  const target = workspacePatchBaselinePath(task);
+  if (!existsSync(target)) return undefined;
+  const resolved = resolveRegularArtifactFile(
+    realpathSync(task.metadata.artifacts.dir),
+    target,
+    "artifact-contract failure: workspace patch baseline is not a regular file"
+  );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(resolved, "utf8")) as unknown;
+  } catch (error) {
+    throw new Error(`artifact-contract failure: workspace patch baseline is malformed ${task.attemptId}`, {
+      cause: error
+    });
+  }
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    (parsed as Record<string, unknown>).schema_version !== "ultrafuzz.workspace-patch-baseline.v1" ||
+    (parsed as Record<string, unknown>).attempt_id !== task.attemptId ||
+    typeof (parsed as Record<string, unknown>).baseline_tree !== "string" ||
+    !/^[0-9a-f]{40,64}$/u.test((parsed as Record<string, unknown>).baseline_tree as string)
+  ) {
+    throw new Error(`artifact-contract failure: workspace patch baseline is invalid ${task.attemptId}`);
+  }
+  return (parsed as Record<string, unknown>).baseline_tree as string;
+}
+
+function workspacePatchPreparationPath(task: (typeof taskSpecs)[number]): string {
+  const artifactRoot = realpathSync(task.metadata.artifacts.dir);
+  const candidate = path.resolve(artifactRoot, WORKSPACE_PATCH_PREPARATION_FILE);
+  if (!isStrictlyInsideDirectory(artifactRoot, candidate)) {
+    throw new Error(`artifact-contract failure: unsafe workspace preparation ${task.attemptId}`);
+  }
+  return candidate;
+}
+
+function writeWorkspacePatchPreparation(task: (typeof taskSpecs)[number], preparationTree: string): void {
+  if (!/^[0-9a-f]{40,64}$/u.test(preparationTree)) {
+    throw new Error(`artifact-contract failure: invalid workspace preparation ${task.attemptId}`);
+  }
+  const target = workspacePatchPreparationPath(task);
+  const contents = `${JSON.stringify({
+    schema_version: "ultrafuzz.workspace-patch-preparation.v1",
+    attempt_id: task.attemptId,
+    preparation_tree: preparationTree
+  })}\n`;
+  if (existsSync(target)) {
+    if (readFileSync(target, "utf8") !== contents) {
+      throw new Error(`artifact-contract failure: workspace preparation was modified ${task.attemptId}`);
+    }
+    return;
+  }
+  writeFileDurable(target, contents);
+}
+
+function readWorkspacePatchPreparation(task: (typeof taskSpecs)[number]): string | undefined {
+  const target = workspacePatchPreparationPath(task);
+  if (!existsSync(target)) return undefined;
+  const resolved = resolveRegularArtifactFile(
+    realpathSync(task.metadata.artifacts.dir),
+    target,
+    "artifact-contract failure: workspace preparation is not a regular file"
+  );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(resolved, "utf8")) as unknown;
+  } catch (error) {
+    throw new Error(`artifact-contract failure: workspace preparation is malformed ${task.attemptId}`, {
+      cause: error
+    });
+  }
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    (parsed as Record<string, unknown>).schema_version !== "ultrafuzz.workspace-patch-preparation.v1" ||
+    (parsed as Record<string, unknown>).attempt_id !== task.attemptId ||
+    typeof (parsed as Record<string, unknown>).preparation_tree !== "string" ||
+    !/^[0-9a-f]{40,64}$/u.test((parsed as Record<string, unknown>).preparation_tree as string)
+  ) {
+    throw new Error(`artifact-contract failure: workspace preparation is invalid ${task.attemptId}`);
+  }
+  return (parsed as Record<string, unknown>).preparation_tree as string;
+}
+
+function restoreWorkspacePatchPreparation(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
+  const preparationTree = workspacePatchPreparationTrees.get(task.attemptId) ?? readWorkspacePatchPreparation(task);
+  if (preparationTree === undefined) {
+    throw new Error(`artifact-contract failure: workspace preparation is unavailable ${task.attemptId}`);
+  }
+  workspacePatchPreparationTrees.set(task.attemptId, preparationTree);
+  execFileSync("git", ["read-tree", "--reset", "-u", preparationTree], {
+    cwd: workspaceRoot,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  removeStaleWorkspaceFiles(workspaceRoot, preparationTree);
+}
+
+function removeStaleWorkspaceFiles(workspaceRoot: string, preparationTree: string): void {
+  const expected = new Set(
+    execFileSync("git", ["ls-tree", "-r", "--name-only", "-z", preparationTree], {
+      cwd: workspaceRoot,
+      encoding: "utf8"
+    })
+      .split("\0")
+      .filter(Boolean)
+  );
+  const candidates = new Set<string>();
+  for (const args of [
+    ["ls-files", "--others", "--exclude-standard", "-z"],
+    ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]
+  ]) {
+    for (const entry of execFileSync("git", args, { cwd: workspaceRoot, encoding: "utf8" }).split("\0")) {
+      if (entry) candidates.add(entry);
+    }
+  }
+  for (const relativePath of candidates) {
+    if (expected.has(relativePath) || isWorkspaceRuntimePath(relativePath)) continue;
+    const candidate = path.resolve(workspaceRoot, ...relativePath.split("/"));
+    if (!isStrictlyInsideDirectory(workspaceRoot, candidate) || hasSymlinkComponent(workspaceRoot, candidate)) {
+      throw new Error(`artifact-contract failure: unsafe stale workspace path ${relativePath}`);
+    }
+    rmSync(candidate, { recursive: true, force: true });
+  }
+}
+
+function isWorkspaceRuntimePath(relativePath: string): boolean {
+  const root = relativePath.split("/")[0];
+  return [".ultrafuzz", ".smithers", "node_modules", "artifacts"].includes(root);
+}
+
+function hasSymlinkComponent(root: string, candidate: string): boolean {
+  let current = path.resolve(root);
+  const relative = path.relative(current, candidate);
+  for (const segment of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    try {
+      if (lstatSync(current).isSymbolicLink()) return true;
+    } catch (error) {
+      if (isMissingPathError(error)) return false;
+      throw error;
+    }
+  }
+  return false;
+}
+
+function materializeWorkspacePatch(task: (typeof taskSpecs)[number]): void {
+  if (!taskPublishesWorkspacePatch(task)) return;
+  const baselineTree = workspacePatchBaselineTrees.get(task.attemptId);
+  if (baselineTree === undefined) {
+    throw new Error(`artifact-contract failure: workspace patch baseline is unavailable ${task.attemptId}`);
+  }
+  const captured = captureWorkspacePatch(realpathSync(task.workspacePath), baselineTree);
+  const manifest = `${JSON.stringify(captured.manifest, null, 2)}\n`;
+  for (const artifactRoot of taskArtifactRoots(task, realpathSync(task.metadata.artifacts.dir))) {
+    writeWorkspacePatchArtifact(artifactRoot, "workspace.patch", captured.patch);
+    writeWorkspacePatchArtifact(artifactRoot, "workspace-patch.json", manifest);
+  }
+}
+
+function writeWorkspacePatchArtifact(root: string, relativePath: string, contents: string): void {
+  const target = path.resolve(root, relativePath);
+  if (!isStrictlyInsideDirectory(root, target)) {
+    throw new Error(`artifact-contract failure: unsafe workspace patch artifact path ${relativePath}`);
+  }
+  mkdirSync(path.dirname(target), { recursive: true });
+  if (existsSync(target)) {
+    const existing = resolveRegularArtifactFile(
+      root,
+      target,
+      "artifact-contract failure: workspace patch artifact is unsafe"
+    );
+    if (readFileSync(existing, "utf8") !== contents) {
+      throw new Error(`artifact-contract failure: workspace patch artifact was modified ${relativePath}`);
+    }
+    return;
+  }
+  writeFileDurable(target, contents);
 }
 
 function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
@@ -1940,6 +2254,8 @@ const MAX_INVARIANT_SUITE_FILES = 512;
 const MAX_INVARIANT_SUITE_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_INVARIANT_SUITE_TOTAL_BYTES = 64 * 1024 * 1024;
 const INVARIANT_SUITE_BASELINE_FILE = "invariant-suite-baseline.json";
+const WORKSPACE_PATCH_BASELINE_FILE = "workspace-patch-baseline.json";
+const WORKSPACE_PATCH_PREPARATION_FILE = "workspace-patch-preparation.json";
 const INVARIANT_SUITE_MANIFEST_FILE = "invariant-suite-manifest.json";
 const INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR = "invariant-suite-workspace-snapshots";
 const INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE = "snapshot.json";
@@ -1966,6 +2282,8 @@ const invariantSuiteDependencySnapshots = new Map<
 >();
 const invariantSuitePublicationSnapshots = new Map<string, Map<string, Buffer>>();
 const invariantSuiteWorkspaceSnapshots = new Map<string, Map<string, Buffer>>();
+const workspacePatchBaselineTrees = new Map<string, string>();
+const workspacePatchPreparationTrees = new Map<string, string>();
 
 function invariantTestRoots(workspaceRoot: string): readonly string[] {
   const discovered = INVARIANT_TEST_ROOT_NAMES.filter((root) => {
