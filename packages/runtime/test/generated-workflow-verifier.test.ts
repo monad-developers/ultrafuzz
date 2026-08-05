@@ -848,10 +848,7 @@ test("generated Smithers dependency verification fails closed before descendant 
     .replace("task: (typeof taskSpecs)[number]", "task")
     .replace("dependency: string", "dependency")
     .replace("): void {", ") {")
-    .replace(
-      /\s+as \{\s*schema_version\?: unknown;\s*attempt_id\?: unknown;\s*artifacts\?: unknown;\s*\};/u,
-      ";"
-    );
+    .replace(/\s+as \{\s*schema_version\?: unknown;\s*attempt_id\?: unknown;\s*artifacts\?: unknown;\s*\};/u, ";");
   const assertVerifiedDependency = new Function(
     "path",
     "resolveRegularArtifactFile",
