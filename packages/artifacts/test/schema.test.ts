@@ -679,6 +679,20 @@ test("property implementation schema accepts selection metadata and typed blocke
   );
 });
 
+test("current implementation contract requires selection while historical contract remains readable", () => {
+  const historical = JSON.stringify({
+    schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+    properties: []
+  });
+  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@1", historical).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@2", historical).ok, false);
+  assert.ok(
+    validateArtifactContract("ultrafuzz/implemented-properties@2", historical).issues.some(
+      (issue) => issue.code === "IMPLEMENTED_PROPERTIES_SELECTION_REQUIRED"
+    )
+  );
+});
+
 test("unknown canonical property references produce a clear diagnostic", () => {
   const catalog = {
     schema_version: PROPERTIES_SCHEMA_VERSION,

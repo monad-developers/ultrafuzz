@@ -141,6 +141,8 @@ describe("prompt semantic anchors", () => {
     );
     expect(implementation).toContain("Audit inherited handlers before implementing properties");
     expect(implementation).toContain("Every assertion observes state after a directly invoked protocol action");
+    expect(implementation).toContain("reference_expectations");
+    expect(implementation).toContain("even when its priority is below the configured threshold");
     expect(campaign).toContain("Audit inherited handlers before the final Recon smoke");
     expect(campaign).toMatch(
       /Record every reached protocol revert, panic, or out-of-gas failure as a\s+raw backend failure/u

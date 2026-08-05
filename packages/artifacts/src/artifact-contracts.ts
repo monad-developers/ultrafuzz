@@ -323,7 +323,9 @@ export function validateArtifactContract(
     };
   }
   if (contract === "ultrafuzz/implemented-properties@1" || contract === "ultrafuzz/implemented-properties@2") {
-    const result = validateImplementedPropertiesSchema(parsed, artifactPath);
+    const result = validateImplementedPropertiesSchema(parsed, artifactPath, {
+      requireSelection: contract === "ultrafuzz/implemented-properties@2"
+    });
     return {
       ok: result.ok,
       issues: result.issues,

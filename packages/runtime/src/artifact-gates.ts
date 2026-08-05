@@ -15,6 +15,7 @@ import {
   validateInvariantLedgerSchema,
   validateInvariantSourceProofSchema,
   validateImplementedPropertiesSchema,
+  validateLensPropertiesSchema,
   validatePropertiesSchema,
   validatePropertyCampaignSchema,
   validatePropertyReferences,
@@ -400,6 +401,7 @@ function verifyInvariantEvidenceArtifacts(
   if (!ledger.ok || ledger.value === undefined || !catalog.ok || catalog.value === undefined) {
     return diagnostics;
   }
+  diagnostics.push(...verifyLensReferenceExpectationPreservation(layout, node, catalog.value));
   if (ledger.value.entries.length === 0 && (ledger.value.scan_probes?.length ?? 0) > 0) {
     if (ledger.value.inventory_rows === undefined || ledger.value.inventory_rows.length > 0) {
       diagnostics.push({
@@ -632,6 +634,89 @@ function verifyInvariantEvidenceArtifacts(
           });
         }
       }
+    }
+  }
+  return diagnostics;
+}
+
+function verifyLensReferenceExpectationPreservation(
+  layout: RunLayout,
+  node: PlannedGraphNode,
+  catalog: PropertiesArtifact
+): RuntimeDiagnostic[] {
+  const diagnostics: RuntimeDiagnostic[] = [];
+  const lensRows = new Map<
+    string,
+    { sourceNodeId: string; propertyId: string; expectationIds: string[]; path: string; index: number }
+  >();
+  const state = readRunState(layout);
+  for (const dependencyId of node.depends_on) {
+    const dependency = state.nodes[dependencyId]?.logical_node_id ?? dependencyId;
+    if (!dependency.startsWith("property-specification-") || dependency === "property-specification-fanin") continue;
+    const lensName = dependency.slice("property-specification-".length);
+    const lensPath = findLogicalNodeArtifact(layout, dependency, `properties/${lensName}.json`);
+    if (lensPath === undefined) {
+      diagnostics.push({
+        code: "PROPERTY_LENS_MISSING",
+        message: `Property fan-in cannot verify reference expectations because lens artifact for ${JSON.stringify(dependency)} is unavailable`,
+        severity: "error",
+        source: "property-fanin",
+        path: `artifacts/${dependency}/properties/${lensName}.json`
+      });
+      continue;
+    }
+    const lens = validateLensPropertiesSchema(readJsonFile(lensPath), lensPath);
+    if (!lens.ok || lens.value === undefined) {
+      diagnostics.push(
+        ...lens.issues.map((issue) => ({
+          code: issue.code,
+          message: issue.message,
+          severity: "error" as const,
+          source: "property-fanin",
+          path: issue.path
+        }))
+      );
+      continue;
+    }
+    for (const [index, property] of lens.value.properties.entries()) {
+      if ((property.reference_expectations?.length ?? 0) === 0) continue;
+      lensRows.set(`${dependency}\u0000${property.id}`, {
+        sourceNodeId: dependency,
+        propertyId: property.id,
+        expectationIds: property.reference_expectations ?? [],
+        path: lensPath,
+        index
+      });
+    }
+  }
+
+  for (const row of lensRows.values()) {
+    const canonicalMatches = catalog.properties.filter((property) =>
+      property.sources.some(
+        (source) => source.source_node_id === row.sourceNodeId && source.source_property_id === row.propertyId
+      )
+    );
+    if (canonicalMatches.length === 0) {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_DROPPED",
+        message: `Canonical property fan-in dropped reference expectations ${JSON.stringify(row.expectationIds)} from ${JSON.stringify(row.sourceNodeId)}:${JSON.stringify(row.propertyId)}`,
+        severity: "error",
+        source: "property-fanin",
+        path: `${row.path}#$.properties[${row.index}].reference_expectations`
+      });
+      continue;
+    }
+    for (const expectationId of row.expectationIds) {
+      if (canonicalMatches.some((property) => (property.reference_expectations ?? []).includes(expectationId))) {
+        continue;
+      }
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_DROPPED",
+        message: `Canonical property fan-in dropped reference expectation ${JSON.stringify(expectationId)} for ${JSON.stringify(row.sourceNodeId)}:${JSON.stringify(row.propertyId)}`,
+        severity: "error",
+        source: "property-fanin",
+        path: `${row.path}#$.properties[${row.index}].reference_expectations`
+      });
     }
   }
   return diagnostics;
@@ -1274,7 +1359,7 @@ function verifyPropertyProvenanceArtifacts(
 ): RuntimeDiagnostic[] {
   const logicalId = node.logical_id ?? node.id;
   if (logicalId === "final-report") {
-    return verifyFinalReportPropertyReferences(layout, artifactDir);
+    return verifyFinalReportPropertyReferences(layout, artifactDir, node);
   }
   if (logicalId !== "stateful-invariant-implement-properties" && !isCampaignLogicalId(logicalId)) {
     return [];
@@ -1526,22 +1611,30 @@ function verifyCampaignPropertyReferences(
   return diagnostics;
 }
 
-function verifyFinalReportPropertyReferences(layout: RunLayout, artifactDir: string): RuntimeDiagnostic[] {
+function verifyFinalReportPropertyReferences(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode
+): RuntimeDiagnostic[] {
   const reportPath = path.join(artifactDir, "report.json");
   if (!fs.existsSync(reportPath)) {
     return [];
   }
   const report = readJsonFile(reportPath);
-  if (!isRecord(report) || !Array.isArray(report.property_provenance)) {
+  if (!isRecord(report)) {
     return [];
   }
+  const diagnostics = verifyFinalReportImplementationCoverage(layout, node, report, reportPath);
+  if (!Array.isArray(report.property_provenance)) {
+    return diagnostics;
+  }
   if (report.property_provenance.length === 0) {
-    return [];
+    return diagnostics;
   }
 
   const catalog = readCanonicalPropertyCatalog(layout);
   if (catalog.diagnostics.length > 0 || catalog.value === undefined) {
-    return catalog.diagnostics;
+    return [...diagnostics, ...catalog.diagnostics];
   }
   const references = report.property_provenance.flatMap((entry, entryIndex) => {
     if (!isRecord(entry) || !Array.isArray(entry.property_ids)) {
@@ -1558,7 +1651,7 @@ function verifyFinalReportPropertyReferences(layout: RunLayout, artifactDir: str
         : []
     );
   });
-  const diagnostics = propertyReferenceDiagnostics(catalog.value, references);
+  diagnostics.push(...propertyReferenceDiagnostics(catalog.value, references));
   const implementation = readImplementedProperties(layout);
   if (implementation.diagnostics.length > 0 || implementation.value === undefined) {
     return [...diagnostics, ...implementation.diagnostics];
@@ -1572,6 +1665,121 @@ function verifyFinalReportPropertyReferences(layout: RunLayout, artifactDir: str
       reportPath
     )
   );
+  return diagnostics;
+}
+
+/**
+ * A current invariant run carries selection metadata in the @2 implementation
+ * handoff. Its terminal report must preserve the same coverage accounting and
+ * render the corresponding Markdown section. Reports from before this
+ * handoff, which have no implementation selection, retain historical
+ * compatibility.
+ */
+function verifyFinalReportImplementationCoverage(
+  layout: RunLayout,
+  node: PlannedGraphNode,
+  report: Record<string, unknown>,
+  reportPath: string
+): RuntimeDiagnostic[] {
+  const implementationPath = findLogicalNodeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json"
+  );
+  if (implementationPath === undefined) {
+    return [];
+  }
+  const implementation = validateImplementedPropertiesSchema(readJsonFile(implementationPath), implementationPath);
+  if (!implementation.ok || implementation.value === undefined || implementation.value.selection === undefined) {
+    return [];
+  }
+
+  const catalog = readCanonicalPropertyCatalog(layout);
+  if (catalog.diagnostics.length > 0 || catalog.value === undefined) {
+    return catalog.diagnostics;
+  }
+
+  const diagnostics = verifyImplementationSelectionCoverage(
+    catalog.value,
+    implementation.value,
+    implementationPath,
+    layout,
+    true
+  );
+  const coverage = report.property_implementation_coverage;
+  if (!isRecord(coverage)) {
+    diagnostics.push({
+      code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MISSING",
+      message: "Current invariant reports must include property_implementation_coverage",
+      severity: "error",
+      source: "property-provenance",
+      path: `${reportPath}#$.property_implementation_coverage`
+    });
+  } else {
+    const selection = implementation.value.selection;
+    const expectedIds = catalog.value.properties
+      .filter(
+        (property) =>
+          selection.priorities.includes(property.priority) ||
+          (property.reference_expectations !== undefined && property.reference_expectations.length > 0)
+      )
+      .map((property) => property.id);
+    const recordsById = new Map(implementation.value.properties.map((record) => [record.property_id, record]));
+    const expectedReferencePropertyIds = catalog.value.properties
+      .filter((property) => (property.reference_expectations?.length ?? 0) > 0)
+      .map((property) => property.id);
+    const expectedReferenceExpectationIds = [
+      ...new Set(catalog.value.properties.flatMap((property) => property.reference_expectations ?? []))
+    ];
+    const expectedByStatus = (status: string): string[] =>
+      expectedIds.filter((propertyId) => recordsById.get(propertyId)?.status === status);
+    const expectedFields: Record<string, readonly string[]> = {
+      selected_property_ids: expectedIds,
+      implemented_property_ids: expectedByStatus("implemented"),
+      blocked_property_ids: expectedByStatus("blocked"),
+      pending_property_ids: expectedByStatus("pending"),
+      deferred_property_ids: expectedByStatus("deferred"),
+      reference_expected_property_ids: expectedReferencePropertyIds,
+      reference_expectation_ids: expectedReferenceExpectationIds
+    };
+    const mismatches: string[] = [];
+    if (coverage.priority_threshold !== selection.priority_threshold) {
+      mismatches.push("priority_threshold");
+    }
+    if (!sameStringSequence(stringArray(coverage.priorities), selection.priorities)) {
+      mismatches.push("priorities");
+    }
+    for (const [field, expected] of Object.entries(expectedFields)) {
+      if (!sameStringSequence(stringArray(coverage[field]), expected)) {
+        mismatches.push(field);
+      }
+    }
+    if (mismatches.length > 0) {
+      diagnostics.push({
+        code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MISMATCH",
+        message: `Current invariant report coverage does not match the implementation handoff (${mismatches.join(", ")})`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${reportPath}#$.property_implementation_coverage`
+      });
+    }
+  }
+
+  if (node.outputs.some((output) => output.path === "report.md")) {
+    const markdownPath = path.join(path.dirname(reportPath), "report.md");
+    if (fs.existsSync(markdownPath)) {
+      const markdown = fs.readFileSync(markdownPath, "utf8");
+      if (!markdown.includes("\n## Property implementation coverage\n")) {
+        diagnostics.push({
+          code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISSING",
+          message: "Current invariant report Markdown must render the property implementation coverage section",
+          severity: "error",
+          source: "property-provenance",
+          path: markdownPath
+        });
+      }
+    }
+  }
   return diagnostics;
 }
 
@@ -1695,6 +1903,10 @@ function propertySourceKey(source: { source_node_id?: unknown; source_property_i
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function sameStringSequence(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function addReportJoinMismatch(

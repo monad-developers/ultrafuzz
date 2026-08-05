@@ -225,6 +225,7 @@ The property specification fan-in writes both `properties.md` and a validated
       "description": "Accounted value remains conserved",
       "category": "accounting",
       "priority": "high",
+      "reference_expectations": ["scfuzzbench:aave-v4:hub-total-borrowed"],
       "sources": [
         {
           "source_node_id": "property-specification-certora",
@@ -243,11 +244,15 @@ The property specification fan-in writes both `properties.md` and a validated
 `source_node_id` is the source lens's logical topology node ID, while
 `source_property_id` is the prefixed ID from that lens's table. Deduplication
 keeps one canonical property and all distinct contributing source pairs.
-Canonical IDs are stable through one run; cross-run matching is not part of
-the v1 contract.
+`reference_expectations` preserves stable IDs for named benchmark or other
+external expectations represented by the property. Fan-in must carry every
+such ID from the source lens JSON into the canonical JSON and Markdown.
+Canonical IDs are stable through one run; cross-run matching is not part of the
+v1 contract.
 
 `implemented-properties.json` uses schema version
-`ultrafuzz.implemented-properties.v1`. Every record has a canonical
+`ultrafuzz.implemented-properties.v1`; current invariant nodes publish it
+through the `ultrafuzz/implemented-properties@2` contract. Every record has a canonical
 `property_id`, a status (`implemented`, `pending`, `deferred`, or `blocked`),
 and `implementation_paths` and `test_paths` arrays. The invariant campaign's
 `recon-fuzzer-results.json` uses `ultrafuzz.property-campaign.v1`; failure
@@ -267,8 +272,12 @@ deferring benchmark-relevant coverage. Historical artifacts may omit
 
 The final report mirrors this handoff in
 `property_implementation_coverage`, preserving the threshold, inclusive
-priorities, and ordered implemented/blocked/pending/deferred ID arrays for
-analysis. Reports produced before this field existed use `"unavailable"`.
+priorities, selected IDs, ordered implemented/blocked/pending/deferred ID
+arrays, and the reference expectation property/ID arrays for analysis. A
+current report must include this object in `report.json` and render
+`## Property implementation coverage` in `report.md`; runtime checks compare
+both representations with the implementation handoff. Reports produced before
+this field existed (and without current selection metadata) use `"unavailable"`.
 
 Runtime artifact gates reject unknown canonical IDs and campaign references to
 properties that were not recorded with `implemented` status. They validate each

@@ -437,12 +437,26 @@ export function validatePropertiesSchema(value: unknown, path = "$"): SchemaVali
 
 export function validateImplementedPropertiesSchema(
   value: unknown,
-  path = "$"
+  path = "$",
+  options: { requireSelection?: boolean } = {}
 ): SchemaValidationResult<ImplementedPropertiesArtifact> {
-  return validateWithZod(implementedPropertiesSchema as z.ZodType<ImplementedPropertiesArtifact>, value, {
+  const result = validateWithZod(implementedPropertiesSchema as z.ZodType<ImplementedPropertiesArtifact>, value, {
     path,
     code: "IMPLEMENTED_PROPERTIES_SCHEMA_INVALID"
   });
+  if (options.requireSelection && result.ok && result.value?.selection === undefined) {
+    return {
+      ok: false,
+      issues: [
+        {
+          code: "IMPLEMENTED_PROPERTIES_SELECTION_REQUIRED",
+          message: "Current invariant implementation artifacts must declare selection metadata",
+          path: `${path}#$.selection`
+        }
+      ]
+    };
+  }
+  return result;
 }
 
 export function validatePropertyCampaignSchema(

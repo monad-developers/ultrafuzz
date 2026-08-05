@@ -35,12 +35,20 @@ catalog priority values are:
 
 `{{invariant_property_priorities}}`
 
+Also inspect each property's optional `reference_expectations` array. A
+property with one or more reference expectation identifiers is mandatory for
+this current run even when its priority is below the configured threshold;
+include every such canonical ID in the selection so named benchmark behavior
+cannot be lost during priority filtering.
+
 ## Work
 
 1. Parse `properties.json` into a stable property list. Use `properties.md`
    only as its human-readable companion.
-   - Only select properties whose `priority` is one of the included priority
-     values above.
+   - Select properties whose `priority` is one of the included priority values
+     above or whose `reference_expectations` array is non-empty.
+   - Preserve each selected property's complete `reference_expectations` array
+     in the implementation summary and use it to explain any blocker.
    - Preserve each selected property's canonical `id` as `property_id`, plus
      its title, priority, oracle, setup
      requirements, preconditions, source lenses, and false-positive risks in
@@ -60,7 +68,7 @@ catalog priority values are:
      empty generated-test manifest, and use an empty findings array. Update
      those artifacts as work progresses so timeout or interruption still leaves
      reviewable state.
-   - If no properties match the threshold, write empty implementation artifacts
+   - If no properties match the threshold or carry a reference expectation, write empty implementation artifacts
      explaining that no selected properties were eligible.
 
 3. Implement properties in the invariant suite.
@@ -145,7 +153,8 @@ repository test root when it uses `test/` instead.
 
 The `selection` object is required for current runs. Set `priorities` to the
 exact configured priority set above and list every canonical ID in
-`properties.json` whose priority is in that set, in catalog order. Emit one
+`properties.json` whose priority is in that set, plus every canonical ID with
+one or more `reference_expectations`, in catalog order. Emit one
 implementation record for every selected ID. A selected property that cannot
 be implemented must use `status` `blocked`, `pending`, or `deferred` and carry
 an actionable `blocker` object with this shape:

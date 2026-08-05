@@ -1080,10 +1080,28 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
       ]
     })
   );
+  writeArtifact(
+    layout,
+    "property-specification-recon",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "medium",
+          reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"]
+        }
+      ]
+    })
+  );
   const node = {
     ...plannedNode(["properties.json", "properties.md"]),
     id: "property-specification-fanin",
-    logical_id: "property-specification-fanin"
+    logical_id: "property-specification-fanin",
+    depends_on: ["property-specification-recon"]
   };
   writeArtifact(
     layout,
@@ -1103,6 +1121,86 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
   );
   const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+});
+
+test("property fan-in gate rejects a lens reference expectation dropped from canonical JSON", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-drop" });
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [
+        {
+          id: "evidence-supply",
+          source_path: "docs/overview.md",
+          source_location: "line 1",
+          kind: "liveness",
+          verbatim: "Supply completes for valid state.",
+          inventory_ids: ["inventory-supply"]
+        }
+      ],
+      inventory_rows: [
+        { id: "inventory-supply", description: "Supply remains live.", ledger_ids: ["evidence-supply"] }
+      ],
+      scan_probes: []
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-recon",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "medium",
+          reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "medium",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "iSpoke_supply" }],
+          ledger_ids: ["evidence-supply"]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    "### Canonical property: property-supply\n- description: Supply completes for valid state.\n- category: dos-liveness\n- priority: medium\n- sources: property-specification-recon:iSpoke_supply\n- ledger_ids: evidence-supply\n### End canonical property: property-supply\n"
+  );
+  const node = {
+    ...plannedNode(["properties.json", "properties.md"]),
+    id: "property-specification-fanin",
+    logical_id: "property-specification-fanin",
+    depends_on: ["property-specification-recon"]
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_DROPPED"),
+    JSON.stringify(result.diagnostics)
+  );
 });
 
 test("property implementation gate rejects an unknown canonical property reference", () => {
@@ -2100,6 +2198,125 @@ test("final report gate rejects dangling property references while allowing hist
     })
   );
   assert.equal(verifyRequiredArtifactsForAttempt(currentLayout, node, node.id).ok, true);
+});
+
+test("current final reports preserve implementation coverage in JSON and Markdown", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-current-coverage",
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
+  });
+  const node = {
+    ...plannedNode(["report.md", "report.json"]),
+    id: "final-report",
+    logical_id: "final-report"
+  };
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-high",
+          description: "The accounting relation holds.",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "hub-total" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-high"] },
+      properties: [
+        {
+          property_id: "property-high",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: ["test/foundry/PropertyHigh.t.sol"]
+        }
+      ]
+    })
+  );
+  const reportPath = "report.json";
+  const baseReport = {
+    schema_version: "1.0",
+    run_metadata: {},
+    issues: [],
+    non_production_outcomes: []
+  };
+  writeArtifact(layout, node.id, reportPath, JSON.stringify(baseReport));
+  writeArtifact(layout, node.id, "report.md", "# Ultrafuzz report\n\nNo coverage section yet.\n");
+
+  const missing = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(missing.ok, false);
+  assert.ok(
+    missing.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MISSING")
+  );
+  assert.ok(
+    missing.diagnostics.some(
+      (diagnostic) => diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISSING"
+    )
+  );
+
+  writeArtifact(
+    layout,
+    node.id,
+    reportPath,
+    JSON.stringify({
+      ...baseReport,
+      property_implementation_coverage: {
+        priority_threshold: "high",
+        priorities: ["high"],
+        selected_property_ids: ["property-high"],
+        implemented_property_ids: ["property-high"],
+        blocked_property_ids: [],
+        pending_property_ids: [],
+        deferred_property_ids: [],
+        reference_expected_property_ids: [],
+        reference_expectation_ids: []
+      }
+    })
+  );
+  writeArtifact(
+    layout,
+    node.id,
+    "report.md",
+    "# Ultrafuzz report\n\n## Property implementation coverage\n\n- Implemented: 1\n"
+  );
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
+
+  writeArtifact(
+    layout,
+    node.id,
+    reportPath,
+    JSON.stringify({
+      ...baseReport,
+      property_implementation_coverage: {
+        priority_threshold: "high",
+        priorities: ["high"],
+        selected_property_ids: [],
+        implemented_property_ids: [],
+        blocked_property_ids: [],
+        pending_property_ids: [],
+        deferred_property_ids: [],
+        reference_expected_property_ids: [],
+        reference_expectation_ids: []
+      }
+    })
+  );
+  const mismatch = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(mismatch.ok, false);
+  assert.ok(
+    mismatch.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MISMATCH")
+  );
 });
 
 test("dependency gates reject reused descendants after an ancestor manifest changes", () => {
