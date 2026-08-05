@@ -107,6 +107,15 @@ describe("Modal Eval Benchmarks private-reference credential wiring", () => {
     // And the mint must fail soft, so the preflight is what reports the diagnosis rather than the
     // action's bare `Not Found`.
     expect(steps("launch")[mint]!["continue-on-error"]).toBe(true);
+
+    const proof = steps("launch")[preflight]!;
+    const launchStep = steps("launch")[launch]!;
+    expect(proof.run).toContain("usable_until_epoch=$((proven_at_epoch + 1800))");
+    expect(launchStep.env?.REFERENCE_ACCESS_PROVEN_UNTIL_EPOCH).toBe(
+      "${{ steps.reference-preflight.outputs.usable_until_epoch }}"
+    );
+    expect(launchStep.run).toContain('! [[ "$REFERENCE_ACCESS_PROVEN_UNTIL_EPOCH" =~ ^[0-9]+$ ]]');
+    expect(launchStep.run).toContain("reference-access-unproven");
   });
 
   it("pairs the collect mint with a fail-soft recorded preflight before the wait step", () => {
@@ -126,6 +135,7 @@ describe("Modal Eval Benchmarks private-reference credential wiring", () => {
     // into the uploaded diagnostics.
     expect(step.run).toContain("reference-access-preflight.json");
     expect(step.run).toContain("reference-access-preflight.log");
+    expect(step.run).toContain("usable_until_epoch=$((proven_at_epoch + 1800))");
   });
 
   it("still waits and collects when reference access is unproven", () => {
@@ -138,6 +148,12 @@ describe("Modal Eval Benchmarks private-reference credential wiring", () => {
     for (const name of ["Collect and validate public finding bundles", "Upload launch state and failure diagnostics"]) {
       expect(String(stepAt("collect", namedStep(name), name).if), name).toContain("always()");
     }
+
+    // The token is also the value the public-evidence scanner must reject. Omitting it here makes
+    // the runner's forbidden-secret check inert even though the worker received the credential.
+    const collection = stepAt("collect", namedStep("Collect and validate public finding bundles"), "public collection");
+    expect(collection.env?.ULTRAFUZZ_REFERENCE_GITHUB_TOKEN).toBe("${{ steps.reference-token.outputs.token }}");
+    expect(collection.env?.ULTRAFUZZ_REFERENCE_GITHUB_REPOS).toBe("${{ env.ULTRAFUZZ_REFERENCE_GITHUB_REPOS }}");
   });
 
   it("gates every recovery relaunch on proven access and records the exact category", () => {
@@ -145,14 +161,21 @@ describe("Modal Eval Benchmarks private-reference credential wiring", () => {
     const script = String(wait.run);
 
     expect(wait.env?.REFERENCE_ACCESS_PROVEN).toBe("${{ steps.reference-preflight.outcome == 'success' }}");
+    expect(wait.env?.REFERENCE_ACCESS_PROVEN_UNTIL_EPOCH).toBe(
+      "${{ steps.reference-preflight.outputs.usable_until_epoch }}"
+    );
 
     // Every relaunch in this script must sit behind the gate. Counting them is the adversarial part:
     // a newly added launch path that forgot the guard fails here instead of silently relaunching with
     // an empty token.
     const relaunches = script.match(/cli\.js launch/gu) ?? [];
     const guards = script.match(/\$REFERENCE_ACCESS_PROVEN" != true/gu) ?? [];
+    const freshnessGuards =
+      script.match(/! \[\[ "\$REFERENCE_ACCESS_PROVEN_UNTIL_EPOCH" =~ \^\[0-9\]\+\$ \]\]/gu) ?? [];
     expect(relaunches.length).toBeGreaterThan(0);
     expect(guards.length).toBe(relaunches.length);
+    expect(freshnessGuards.length).toBe(relaunches.length);
+    expect(script.match(/date \+%s/gu)?.length).toBe(relaunches.length);
 
     expect(script).toContain("reference-access-unproven");
     // The refusal must be terminal for the pair, so the incomplete-matrix gate fails the job rather

@@ -60,12 +60,14 @@ test("the token travels only as a git config header keyed to the exact remote", 
   const credential = referenceGitCredential(credentialEnv())!;
   const env = referenceGitCredentialEnv(credential, PRIVATE_REPO, PRIVATE_REMOTE);
 
-  assert.equal(env.GIT_CONFIG_COUNT, "1");
+  assert.equal(env.GIT_CONFIG_COUNT, "2");
   assert.equal(env.GIT_CONFIG_KEY_0, `http.${PRIVATE_REMOTE}.extraheader`);
   assert.equal(
     env.GIT_CONFIG_VALUE_0,
     `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${TOKEN}`).toString("base64")}`
   );
+  assert.equal(env.GIT_CONFIG_KEY_1, "credential.helper");
+  assert.equal(env.GIT_CONFIG_VALUE_1, "");
   // An unusable token must fail rather than hang on a prompt or silently fall back to an ambient
   // helper credential that could carry more privilege than this token was minted with.
   assert.equal(env.GIT_TERMINAL_PROMPT, "0");

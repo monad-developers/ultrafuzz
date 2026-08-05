@@ -76,9 +76,11 @@ leaked to an unrelated remote just because the catalog names it.
 The token reaches git through `GIT_CONFIG_*` variables carrying an
 `http.<remote>.extraheader` setting keyed to the exact remote URL. It is never
 written into the remote URL, a command argument, a config file, or a credential
-helper, so it cannot surface in `git remote -v`, a process listing, a cache
-manifest, or a `GIT_FAILED` diagnostic — those redact both the token and its
-derived basic-auth encoding.
+helper; the command-scoped config also resets the helper list so a rejected token
+cannot silently fall back to a broader ambient credential. The token therefore
+cannot surface in `git remote -v`, a process listing, a cache manifest, or a
+`GIT_FAILED` diagnostic — those redact both the token and its derived basic-auth
+encoding.
 
 Without a usable credential, `ultrafuzz references sync` fails closed with the
 `GIT_FAILED` reference diagnostic wrapping the git stderr:
@@ -124,11 +126,20 @@ the credential a worker still needs. The token is also registered as a forbidden
 value for public bundles, diagnostics, and lifecycle logs, exactly like a model
 API key.
 
+A successful preflight is launch authority for only 30 minutes. Every initial and
+recovery `launch` checks that deadline immediately before dispatch, preserving at
+least another 30 minutes of the one-hour token lifetime for the launch and the
+detached worker's reference fetch. If a long image build or wait outlives the proof,
+that launch is refused as `reference-access-unproven`; an old successful preflight
+is never treated as evidence that an expired token remains usable.
+
 The two jobs fail differently on purpose:
 
 - In `launch`, the preflight fails **hard**. There is no work in flight to protect,
   so an unproven credential must stop the job before the image build and before any
-  sandbox starts.
+  sandbox starts. A proof that becomes stale during the image build or launch loop
+  also refuses the affected launch; the collect job can recover it with its own
+  freshly minted token.
 - In `collect`, the mint and the preflight both fail **soft**, and the preflight's
   verdict is recorded to `diagnostics/reference-access-preflight.{json,log}`.
   Waiting and collection are never gated on it: unproven access to a _future_

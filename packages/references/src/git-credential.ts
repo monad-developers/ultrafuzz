@@ -85,9 +85,14 @@ export function referenceGitCredentialEnv(
   if (!referenceGitCredentialCoversRepo(credential, repo)) return {};
   const basic = Buffer.from(`x-access-token:${credential!.token}`, "utf8").toString("base64");
   return {
-    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_COUNT: "2",
     GIT_CONFIG_KEY_0: `http.${remote}.extraheader`,
     GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${basic}`,
+    // Reset the multi-valued helper list after repository, global, and system config have been
+    // loaded. Otherwise an ambient helper could answer after this narrowly scoped header is
+    // rejected, silently widening the credential actually used for a private fetch.
+    GIT_CONFIG_KEY_1: "credential.helper",
+    GIT_CONFIG_VALUE_1: "",
     // A private fetch must fail rather than block forever on an interactive credential prompt when
     // the token is rejected, and it must never fall back to an ambient helper credential.
     GIT_TERMINAL_PROMPT: "0",

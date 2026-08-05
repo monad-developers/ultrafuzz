@@ -715,8 +715,9 @@ describe("Modal node sandbox provider", () => {
       const client = fakeClient({});
       const provider = createModalNodeSandboxProvider(providerOptions(client));
       const heartbeat = vi.fn();
+      const handoffPrefix = `ultrafuzz-node-handoff-${process.pid}-`;
       const handoffDirectories = (): string[] =>
-        fs.readdirSync(os.tmpdir()).filter((entry) => entry.startsWith("ultrafuzz-node-handoff-"));
+        fs.readdirSync(os.tmpdir()).filter((entry) => entry.startsWith(handoffPrefix));
       const before = new Set(handoffDirectories());
       try {
         await expect(

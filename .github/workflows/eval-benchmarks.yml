@@ -211,9 +211,16 @@ jobs:
           skip-token-revoke: true
 
       - name: Prove pinned private reference access before any paid compute
+        id: reference-preflight
         env:
           ULTRAFUZZ_REFERENCE_GITHUB_TOKEN: ${{ steps.reference-token.outputs.token }}
-        run: node scripts/ci/preflight-reference-access.mjs .ultrafuzz/references.yml
+        run: |
+          node scripts/ci/preflight-reference-access.mjs .ultrafuzz/references.yml
+          # Installation tokens live for one hour. Stop treating this proof as current after thirty
+          # minutes, leaving at least another thirty minutes for a started launch and its detached
+          # worker to fetch the pinned reference.
+          proven_at_epoch="$(date +%s)"
+          echo "usable_until_epoch=$((proven_at_epoch + 1800))" >> "$GITHUB_OUTPUT"
 
       - name: Build an immutable Modal image for the candidate
         env:
@@ -228,6 +235,7 @@ jobs:
 
       - name: Launch detached Modal benchmark sandboxes
         env:
+          REFERENCE_ACCESS_PROVEN_UNTIL_EPOCH: ${{ steps.reference-preflight.outputs.usable_until_epoch }}
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -240,20 +248,28 @@ jobs:
           : > "$BENCHMARK_CONTROL/launch-attempts.jsonl"
           while IFS=$'\t' read -r config state pair; do
             launch_outcome=succeeded
-            if ! timeout --signal=TERM --kill-after=30s 20m \
+            launch_category=launched
+            if ! [[ "$REFERENCE_ACCESS_PROVEN_UNTIL_EPOCH" =~ ^[0-9]+$ ]] || \
+              (( $(date +%s) >= REFERENCE_ACCESS_PROVEN_UNTIL_EPOCH )); then
+              launch_outcome=failed
+              launch_category=reference-access-unproven
+              echo "Pinned private reference access is no longer freshly proven for $pair; refusing to launch paid compute" >&2
+            elif ! timeout --signal=TERM --kill-after=30s 20m \
               node packages/modal/dist/cli.js launch \
               --config "$BENCHMARK_CONTROL/$config" \
               --state "$BENCHMARK_CONTROL/$state" \
               --mode fresh \
               --repo-root .; then
               launch_outcome=failed
+              launch_category=initial-launch-failed
               echo "Initial detached launch failed for $pair; continuing with the remaining pairs" >&2
             fi
             jq -cn \
               --arg pair "$pair" \
               --arg state "$state" \
               --arg outcome "$launch_outcome" \
-              '{pair: $pair, state_path: $state, outcome: $outcome}' \
+              --arg category "$launch_category" \
+              '{pair: $pair, state_path: $state, outcome: $outcome, category: $category}' \
               >> "$BENCHMARK_CONTROL/launch-attempts.jsonl"
           done < <(jq -r '.pairs[] | [.config_path, .state_path, .pair] | @tsv' "$BENCHMARK_CONTROL/manifest.json")
 
@@ -408,6 +424,13 @@ jobs:
             --arg category "reference-access-preflight" \
             '{category: $category, exit_code: $exit_code, proven: ($exit_code == 0)}' \
             > "$BENCHMARK_CONTROL/diagnostics/reference-access-preflight.json"
+          if [ "$preflight_exit" -eq 0 ]; then
+            # The wait loop can run for hours, but this token cannot. A successful proof is launch
+            # authority for only thirty minutes, leaving at least another thirty minutes for any
+            # recovery launch and detached reference fetch. Later recovery is terminally refused.
+            proven_at_epoch="$(date +%s)"
+            echo "usable_until_epoch=$((proven_at_epoch + 1800))" >> "$GITHUB_OUTPUT"
+          fi
           exit "$preflight_exit"
 
       - name: Wait for Modal compute and retry only pre-model launch failures
@@ -416,6 +439,7 @@ jobs:
           # Every recovery relaunch below is gated on this. Waiting and collection are deliberately
           # not: unproven access must never abandon a sandbox that is already running.
           REFERENCE_ACCESS_PROVEN: ${{ steps.reference-preflight.outcome == 'success' }}
+          REFERENCE_ACCESS_PROVEN_UNTIL_EPOCH: ${{ steps.reference-preflight.outputs.usable_until_epoch }}
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -452,7 +476,9 @@ jobs:
               recovery_category=
               if [ "$initial_outcome" = failed ] && [ -n "$recovery_mode" ]; then
                 recovery_exit=0
-                if [ "$REFERENCE_ACCESS_PROVEN" != true ]; then
+                if [ "$REFERENCE_ACCESS_PROVEN" != true ] || \
+                  ! [[ "$REFERENCE_ACCESS_PROVEN_UNTIL_EPOCH" =~ ^[0-9]+$ ]] || \
+                  (( $(date +%s) >= REFERENCE_ACCESS_PROVEN_UNTIL_EPOCH )); then
                   # A relaunch would materialize the pinned private reference, so it is refused before
                   # any image, sandbox, or model work rather than attempted and failed.
                   recovery_exit=78
@@ -558,7 +584,9 @@ jobs:
                   all_terminal=false
                   ;;
                 transient-operational-failure)
-                  if [ "$REFERENCE_ACCESS_PROVEN" != true ]; then
+                  if [ "$REFERENCE_ACCESS_PROVEN" != true ] || \
+                    ! [[ "$REFERENCE_ACCESS_PROVEN_UNTIL_EPOCH" =~ ^[0-9]+$ ]] || \
+                    (( $(date +%s) >= REFERENCE_ACCESS_PROVEN_UNTIL_EPOCH )); then
                     # Resuming re-dispatches the attempt, which re-materializes the pinned private
                     # reference. Without proven access that cannot succeed, so the pair terminates here
                     # with the exact category instead of burning a relaunch timeout.
@@ -643,6 +671,11 @@ jobs:
           DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
           KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
+          # Collection needs the exact value that entered the sandbox so its public-evidence scanner
+          # can reject an echoed token. This is redaction input only; collection never fetches a
+          # reference or launches compute.
+          ULTRAFUZZ_REFERENCE_GITHUB_TOKEN: ${{ steps.reference-token.outputs.token }}
+          ULTRAFUZZ_REFERENCE_GITHUB_REPOS: ${{ env.ULTRAFUZZ_REFERENCE_GITHUB_REPOS }}
         run: |
           mkdir -p "$BENCHMARK_RESULTS"
           collect_pair() {
