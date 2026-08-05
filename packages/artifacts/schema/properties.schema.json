@@ -18,6 +18,12 @@
           "description": { "type": "string", "minLength": 1 },
           "category": { "type": "string", "minLength": 1 },
           "priority": { "enum": ["high", "medium", "low"] },
+          "reference_expectations": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          },
           "sources": {
             "type": "array",
             "minItems": 1,
