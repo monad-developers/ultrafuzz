@@ -107,7 +107,9 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
     /resetTaskArtifactContents\(path\.join\(artifactsParent, task\.attemptId\), task\.attemptId, "mirror"\)/u
   );
   assert.match(reset, /output\.contract === "ultrafuzz\/generated-tests@1"/u);
-  assert.match(reset, /path\.resolve\(workspaceRoot, "test", "foundry"\)/u);
+  assert.match(reset, /for \(const testRoot of invariantTestRoots\(workspaceRoot\)\)/u);
+  assert.match(reset, /path\.resolve\(workspaceRoot, testRoot, "foundry"\)/u);
+  assert.match(reset, /INVARIANT_SUITE_BASELINE_FILE/u);
   assert.match(
     reset,
     /path\.join\(foundryParent, task\.metadata\.node\.logicalNodeId\),\s*task\.metadata\.node\.logicalNodeId,\s*"generated-test"/u
@@ -121,6 +123,15 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
   assert.match(reset, /for \(const entry of readdirSync\(anchoredRoot\)\)/u);
   assert.match(reset, /rmSync\(candidate, \{ recursive: true, force: true \}\)/u);
   assert.match(reset, /prepareArtifactMirror\(task\)/u);
+});
+
+test("generated Smithers invariant handoff accepts plural Foundry test roots", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  assert.match(source, /const INVARIANT_TEST_ROOT_NAMES = \["test", "tests"\]/u);
+  assert.match(source, /invariant suite test path must be under test\/ or tests\//u);
+  assert.match(source, /gitTestTreePaths\(workspaceRoot\)/u);
+  assert.match(source, /--exclude-standard", "--", \.\.\.INVARIANT_TEST_ROOT_NAMES/u);
+  assert.match(source, /path\.resolve\(workspaceRoot, testRoot, "foundry"/u);
 });
 
 test("generated Smithers agent preserves its final response as missing non-report Markdown", () => {

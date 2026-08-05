@@ -252,20 +252,22 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
   resetTaskArtifactContents(path.join(artifactsParent, task.attemptId), task.attemptId, "mirror");
 
   if (task.outputs.some((output) => output.contract === "ultrafuzz/generated-tests@1")) {
-    const foundryParentCandidate = path.resolve(workspaceRoot, "test", "foundry");
-    if (!isStrictlyInsideDirectory(workspaceRoot, foundryParentCandidate)) {
-      throw new Error(`artifact-contract failure: unsafe generated test parent ${task.attemptId}`);
+    for (const testRoot of invariantTestRoots(workspaceRoot)) {
+      const foundryParentCandidate = path.resolve(workspaceRoot, testRoot, "foundry");
+      if (!isStrictlyInsideDirectory(workspaceRoot, foundryParentCandidate)) {
+        throw new Error(`artifact-contract failure: unsafe generated test parent ${task.attemptId}`);
+      }
+      mkdirSync(foundryParentCandidate, { recursive: true });
+      const foundryParent = realpathSync(foundryParentCandidate);
+      if (!isStrictlyInsideDirectory(workspaceRoot, foundryParent)) {
+        throw new Error(`artifact-contract failure: unsafe generated test parent ${task.attemptId}`);
+      }
+      resetTaskArtifactContents(
+        path.join(foundryParent, task.metadata.node.logicalNodeId),
+        task.metadata.node.logicalNodeId,
+        "generated-test"
+      );
     }
-    mkdirSync(foundryParentCandidate, { recursive: true });
-    const foundryParent = realpathSync(foundryParentCandidate);
-    if (!isStrictlyInsideDirectory(workspaceRoot, foundryParent)) {
-      throw new Error(`artifact-contract failure: unsafe generated test parent ${task.attemptId}`);
-    }
-    resetTaskArtifactContents(
-      path.join(foundryParent, task.metadata.node.logicalNodeId),
-      task.metadata.node.logicalNodeId,
-      "generated-test"
-    );
   }
   prepareArtifactMirror(task);
 }
@@ -306,7 +308,7 @@ function resetTaskArtifactContents(
   }
   for (const entry of readdirSync(anchoredRoot)) {
     const candidate = path.join(anchoredRoot, entry);
-    if (candidate === preservedInput) continue;
+    if (candidate === preservedInput || (label === "canonical" && entry === INVARIANT_SUITE_BASELINE_FILE)) continue;
     rmSync(candidate, { recursive: true, force: true });
   }
 }
@@ -387,11 +389,12 @@ function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspa
   }
   const files = new Map<string, { path: string; sha256: string; size: number }>();
   try {
-    for (const value of execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "--", "test"], {
-      cwd: workspaceRoot,
-      encoding: "utf8"
-    }).split(/\r?\n/u)) {
-      if (value.length === 0 || !value.startsWith("test/")) continue;
+    for (const value of execFileSync(
+      "git",
+      ["ls-files", "--cached", "--others", "--exclude-standard", "--", ...INVARIANT_TEST_ROOT_NAMES],
+      { cwd: workspaceRoot, encoding: "utf8" }
+    ).split(/\r?\n/u)) {
+      if (value.length === 0 || !INVARIANT_TEST_ROOT_NAMES.some((root) => value.startsWith(`${root}/`))) continue;
       const relativePath = assertSafeInvariantSuiteTestPath(value);
       const sourcePath = path.resolve(workspaceRoot, relativePath);
       const source = resolveNonEmptyRegularArtifactFile(
@@ -1221,13 +1224,11 @@ function materializeGeneratedTestCompanion(
   }
 
   const workspaceRelativePath = relativePath.slice(generatedPrefix.length);
-  const directSourceCandidate = path.resolve(workspaceRoot, "test", "foundry", workspaceRelativePath);
-  const nodeScopedSourceCandidate = path.resolve(workspaceRoot, "test", "foundry", nodeId, workspaceRelativePath);
-  const sourceCandidate = existsSync(directSourceCandidate)
-    ? directSourceCandidate
-    : existsSync(nodeScopedSourceCandidate)
-      ? nodeScopedSourceCandidate
-      : directSourceCandidate;
+  const sourceCandidates = invariantTestRoots(workspaceRoot).flatMap((testRoot) => [
+    path.resolve(workspaceRoot, testRoot, "foundry", workspaceRelativePath),
+    path.resolve(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath)
+  ]);
+  const sourceCandidate = sourceCandidates.find((candidate) => existsSync(candidate)) ?? sourceCandidates[0];
   if (!isStrictlyInsideDirectory(workspaceRoot, sourceCandidate)) {
     throw new Error(`artifact-contract failure: unsafe generated test source ${relativePath}`);
   }
@@ -1446,6 +1447,7 @@ const invariantSuiteNodeIds = new Set([
   "stateful-invariant-coverage",
   "stateful-invariant-implement-properties"
 ]);
+const INVARIANT_TEST_ROOT_NAMES = ["test", "tests"] as const;
 const INVARIANT_SUITE_SENSITIVE_SEGMENTS = new Set([".git", ".ultrafuzz", ".smithers", "node_modules", ".env"]);
 
 /**
@@ -1481,10 +1483,32 @@ function assertSafeInvariantSuitePath(value: string): string {
 
 function assertSafeInvariantSuiteTestPath(value: string): string {
   const safePath = assertSafeInvariantSuitePath(value);
-  if (!safePath.startsWith("test/")) {
-    throw new Error(`artifact-contract failure: invariant suite test path must be under test/: ${safePath}`);
+  if (!INVARIANT_TEST_ROOT_NAMES.some((root) => safePath.startsWith(`${root}/`))) {
+    throw new Error(`artifact-contract failure: invariant suite test path must be under test/ or tests/: ${safePath}`);
   }
   return safePath;
+}
+
+function invariantTestRoots(workspaceRoot: string): readonly string[] {
+  const discovered: string[] = [];
+  for (const root of INVARIANT_TEST_ROOT_NAMES) {
+    const candidate = path.resolve(workspaceRoot, root);
+    if (!isStrictlyInsideDirectory(workspaceRoot, candidate)) {
+      throw new Error(`artifact-contract failure: unsafe invariant test root ${root}`);
+    }
+    try {
+      const stat = lstatSync(candidate);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(candidate) !== candidate) continue;
+      const files = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "--", root], {
+        cwd: workspaceRoot,
+        encoding: "utf8"
+      });
+      if (files.split(/\r?\n/u).some((value) => value.startsWith(`${root}/`))) discovered.push(root);
+    } catch {
+      // A repository may not have a test root yet; the caller will create `test/`.
+    }
+  }
+  return discovered.length > 0 ? discovered : ["test"];
 }
 
 function assertInvariantSuiteSourceBudget(fileCount: number, totalBytes: number): void {
@@ -1574,15 +1598,17 @@ function changedTestTreePaths(workspaceRoot: string, baselinePath?: string): str
     });
     const diffArgs =
       baseRef === undefined
-        ? ["diff", "--name-only", "HEAD", "--", "test"]
-        : ["diff", "--name-only", `${baseRef}...HEAD`, "--", "test"];
+        ? ["diff", "--name-only", "HEAD", "--", ...INVARIANT_TEST_ROOT_NAMES]
+        : ["diff", "--name-only", `${baseRef}...HEAD`, "--", ...INVARIANT_TEST_ROOT_NAMES];
     for (const args of [
       diffArgs,
-      ["diff", "--name-only", "HEAD", "--", "test"],
-      ["ls-files", "--others", "--exclude-standard", "--", "test"]
+      ["diff", "--name-only", "HEAD", "--", ...INVARIANT_TEST_ROOT_NAMES],
+      ["ls-files", "--others", "--exclude-standard", "--", ...INVARIANT_TEST_ROOT_NAMES]
     ]) {
       for (const value of execFileSync("git", args, { cwd: workspaceRoot, encoding: "utf8" }).split(/\r?\n/u)) {
-        if (value.startsWith("test/")) changed.add(assertSafeInvariantSuiteTestPath(value));
+        if (INVARIANT_TEST_ROOT_NAMES.some((root) => value.startsWith(`${root}/`))) {
+          changed.add(assertSafeInvariantSuiteTestPath(value));
+        }
       }
     }
     return [...changed].sort();
@@ -1594,11 +1620,14 @@ function changedTestTreePaths(workspaceRoot: string, baselinePath?: string): str
 
 function gitTestTreePaths(workspaceRoot: string): string[] {
   const paths = new Set<string>();
-  for (const value of execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "--", "test"], {
-    cwd: workspaceRoot,
-    encoding: "utf8"
-  }).split(/\r?\n/u)) {
-    if (value.startsWith("test/")) paths.add(assertSafeInvariantSuiteTestPath(value));
+  for (const value of execFileSync(
+    "git",
+    ["ls-files", "--cached", "--others", "--exclude-standard", "--", ...INVARIANT_TEST_ROOT_NAMES],
+    { cwd: workspaceRoot, encoding: "utf8" }
+  ).split(/\r?\n/u)) {
+    if (INVARIANT_TEST_ROOT_NAMES.some((root) => value.startsWith(`${root}/`))) {
+      paths.add(assertSafeInvariantSuiteTestPath(value));
+    }
   }
   return [...paths].sort();
 }
