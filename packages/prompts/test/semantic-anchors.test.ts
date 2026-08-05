@@ -30,29 +30,28 @@ describe("prompt semantic anchors", () => {
   });
 
   it("preserves source-guided denial-of-service and liveness requirements", () => {
-    const lensPrompts = loadBuiltInPromptAssets().filter((asset) =>
-      [
-        "properties/0kn0t-lens.md",
-        "properties/aviggiano-lens.md",
-        "properties/certora-thinking-lens.md",
-        "properties/josselin-feist-lens.md",
-        "properties/property-specification-a16z.md",
-        "properties/property-specification-crytic.md",
-        "properties/property-specification-runtime-verification.md",
-        "properties/recon-lens.md"
-      ].includes(asset.relativePath)
+    const lensPrompts = loadBuiltInPromptAssets().filter(
+      (asset) =>
+        asset.relativePath.startsWith("properties/") &&
+        asset.relativePath !== "properties/property-specification-fanin.md"
     );
 
     expect(lensPrompts).toHaveLength(8);
     for (const asset of lensPrompts) {
-      expect(asset.markdown, asset.relativePath).toContain(
-        "Source-preserving liveness requirements"
+      expect(asset.markdown, asset.relativePath).toContain("Source-preserving liveness requirements");
+      expect(asset.markdown, asset.relativePath).toMatch(
+        /supply, withdraw,\s+repay,\s+or liquidation when applicable/u
       );
-      expect(asset.markdown, asset.relativePath).toContain(
-        "supply, withdraw, repay, and liquidation"
+      expect(asset.markdown, asset.relativePath).toMatch(
+        /input-validation exceptions and\s+other preconditions\s+when\s+they apply/u
       );
-      expect(asset.markdown, asset.relativePath).toContain(
-        "input-validation exceptions"
+      expect(asset.markdown, asset.relativePath).toContain("that guidance as explicit property rows");
+      expect(asset.markdown, asset.relativePath).toMatch(
+        /describe successful completion for valid\s+state and inputs/u
+      );
+      expect(asset.markdown, asset.relativePath).toContain("high`, `medium`, or `low");
+      expect(asset.markdown, asset.relativePath).toMatch(
+        /Use `high` for source-described liveness failures affecting user\s+funds or protocol health/u
       );
     }
   });
