@@ -1037,6 +1037,125 @@ test("property fan-in gate rejects Markdown that omits source-only canonical row
   assert.ok(headingParity.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING"));
 });
 
+test("property fan-in gate ignores optional ledger evidence when checking ledger ID parity", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-ledger-evidence" });
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [
+        {
+          id: "evidence-supply",
+          source_path: "docs/overview.md",
+          source_location: "line 1",
+          kind: "invariant",
+          verbatim: "Supply accounting remains consistent.",
+          inventory_ids: ["inventory-supply"]
+        }
+      ],
+      inventory_rows: [
+        {
+          id: "inventory-supply",
+          description: "Supply accounting remains consistent.",
+          ledger_ids: ["evidence-supply"]
+        }
+      ],
+      scan_probes: []
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-supply",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-supply" }],
+          ledger_ids: ["evidence-supply"],
+          ledger_evidence: [{ id: "evidence-supply", source_path: "docs/overview.md", source_location: "line 1" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    [
+      "### Canonical property: property-supply",
+      "- description: Supply accounting remains consistent.",
+      "- category: accounting",
+      "- priority: high",
+      "- sources: property-specification-recon:recon-supply",
+      "- ledger_ids: evidence-supply",
+      '- ledger_evidence: {"id":"evidence-supply","source_path":"docs/overview.md","source_location":"line 1"}',
+      "### End canonical property: property-supply"
+    ].join("\n")
+  );
+  const node = {
+    ...plannedNode(["properties.json", "properties.md"]),
+    id: "property-specification-fanin",
+    logical_id: "property-specification-fanin"
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+
+  for (const evidenceField of ["- ledger evidence:", "| ledger-evidence retained:", "ledger_evidence:"]) {
+    writeArtifact(
+      layout,
+      "property-specification-fanin",
+      "properties.md",
+      [
+        "### Canonical property: property-supply",
+        "- description: Supply accounting remains consistent.",
+        "- category: accounting",
+        "- priority: high",
+        "- sources: property-specification-recon:recon-supply",
+        "- ledger_ids: evidence-supply",
+        evidenceField,
+        '  {"id":"evidence-supply",',
+        '  "source_path":"docs/overview.md",',
+        '  "source_location":"line 1"}',
+        "### End canonical property: property-supply"
+      ].join("\n")
+    );
+    const multilineResult = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+    assert.equal(multilineResult.ok, true, `${evidenceField}: ${JSON.stringify(multilineResult.diagnostics)}`);
+  }
+
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    [
+      "### Canonical property: property-supply",
+      "- description: Supply accounting remains consistent.",
+      "- category: accounting",
+      "- priority: high",
+      "- sources: property-specification-recon:recon-supply",
+      "- ledger_ids: evidence-supply, evidence-extra",
+      "- ledger evidence:",
+      '  {"id":"evidence-supply",',
+      '  "source_path":"docs/overview.md",',
+      '  "source_location":"line 1"}',
+      "### End canonical property: property-supply"
+    ].join("\n")
+  );
+  const extraLedgerResult = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(extraLedgerResult.ok, false);
+  assert.ok(
+    extraLedgerResult.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MARKDOWN_MAPPING_EXTRA")
+  );
+});
+
 test("property fan-in gate preserves reference expectation metadata in Markdown", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-parity" });
   writeArtifact(
