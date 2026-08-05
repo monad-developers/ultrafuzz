@@ -104,6 +104,16 @@ describe("prompt semantic anchors", () => {
     expect(fanin).toMatch(/Map every ledger entry to at least one canonical property\s+row/u);
   });
 
+  it("requires a mechanical byte-preserving check for escaped ledger source text", () => {
+    const discovery = prompt("setup/project-discovery.md");
+
+    expect(discovery).toMatch(/obtain each cited source span mechanically/iu);
+    expect(discovery).toMatch(/Do not retype or render Markdown or LaTeX/iu);
+    expect(discovery).toMatch(/preserve every backslash/iu);
+    expect(discovery).toContain("load the JSON ledger and compare each `verbatim` field");
+    expect(discovery).toMatch(/JSON escaping is serialization only/iu);
+  });
+
   it("keeps protocol failures observable during invariant handler execution", () => {
     const handlers = prompt("strategies/invariants/handlers.md");
     const setup = prompt("strategies/invariants/setup.md");
@@ -136,6 +146,18 @@ describe("prompt semantic anchors", () => {
       /Record every reached protocol revert, panic, or out-of-gas failure as a\s+raw backend failure/u
     );
     expect(corpus).toContain("documented valid preconditions");
+  });
+
+  it("uses the repository's detected test root for invariant scaffolding", () => {
+    const setup = prompt("strategies/invariants/setup.md");
+    const implementation = prompt("strategies/invariants/implement-properties.md");
+    const campaign = prompt("strategies/invariants/invariant-testing-campaign.md");
+
+    expect(setup).toMatch(/Detect `?<test-root>`?.*test\/.*tests\//su);
+    expect(setup).toMatch(/existing test-root convention.*test\/recon.*tests\/recon/su);
+    expect(implementation).toContain("replace that prefix with the detected");
+    expect(implementation).toMatch(/test\/foundry.*tests\/foundry/su);
+    expect(campaign).toMatch(/test\/foundry.*tests\/foundry/su);
   });
 
   it("uses a configured smoke budget for every invariant Recon stage", () => {
@@ -188,6 +210,11 @@ describe("prompt semantic anchors", () => {
     );
     expect(discovery).toMatch(/source path and line or symbol location/u);
     expect(discovery).toContain("including statements under generic headings");
+    expect(discovery).toContain("Byte-preserving ledger construction");
+    expect(discovery).toMatch(/derive the value by reading the cited file and slicing the requested\s+line range/u);
+    expect(discovery).toMatch(/serializes the ledger with\s+`JSON\.stringify`/u);
+    expect(discovery).toMatch(/repeated\s+backslashes and other literals/u);
+    expect(discovery).toMatch(/Build the Markdown\s+handoff from those same parsed ledger objects/u);
   });
 
   it("keeps the final invariant campaign backend-neutral on the single recon-fuzzer backend", () => {

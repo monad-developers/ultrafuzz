@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +10,49 @@ import { assertRegularFileInside, writeFileDurable } from "@ultrafuzz/artifacts"
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
+
+function loadSafeInvariantSuiteDirectory(): (root: string, candidate: string) => string {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function safeInvariantSuiteDirectory");
+  const helperEnd = source.indexOf("\n\n", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+
+  // The workflow template is TypeScript, while this focused test exercises the
+  // generated helper's filesystem behavior directly. Strip only its annotations
+  // so the extracted function can run in Node's Function constructor.
+  const helper = source
+    .slice(helperStart, helperEnd)
+    .replaceAll("root: string", "root")
+    .replaceAll("candidate: string", "candidate")
+    .replaceAll(": string {", " {")
+    .replaceAll("const missing: string[]", "const missing");
+  return new Function(
+    "path",
+    "lstatSync",
+    "mkdirSync",
+    "realpathSync",
+    "isStrictlyInsideDirectory",
+    `${helper}; return safeInvariantSuiteDirectory;`
+  )(path, fs.lstatSync, fs.mkdirSync, fs.realpathSync, (root: string, candidate: string) =>
+    candidate.startsWith(`${root}${path.sep}`)
+  ) as (root: string, candidate: string) => string;
+}
+
+test("safe invariant-suite directory permits nested paths under a symlinked root alias", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-invariant-directory-"));
+  const realRoot = path.join(root, "files");
+  const rootAlias = path.join(root, "files-alias");
+  fs.mkdirSync(realRoot);
+  fs.symlinkSync(realRoot, rootAlias, "dir");
+
+  const safeInvariantSuiteDirectory = loadSafeInvariantSuiteDirectory();
+  const resolved = safeInvariantSuiteDirectory(rootAlias, path.join(rootAlias, "src", "access"));
+
+  assert.equal(resolved, path.join(realRoot, "src", "access"));
+  assert.equal(fs.statSync(resolved).isDirectory(), true);
+  fs.rmSync(root, { recursive: true, force: true });
+});
 
 test("generated Smithers verifier rejects zero-byte generated-test companions", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
@@ -70,6 +114,18 @@ test("generated Smithers workflow prepares canonical empty sidecars and primary 
 test("generated Smithers workflow prefers its relocatable task prompt path", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.match(source, /const promptPath = task\.promptPath \?\? inputTask\?\.prompt_path/u);
+});
+
+test("generated Smithers verifier explains byte-preserving invariant evidence", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  assert.match(source, /Derive verbatim from the cited source with a JSON serializer/u);
+  assert.match(source, /repeated backslashes and other literals remain intact/u);
+  const helperStart = source.indexOf("function normalizeInvariantSourceLines");
+  const workflowStart = source.indexOf("export default smithers");
+  assert.ok(helperStart >= 0, source);
+  assert.ok(workflowStart > helperStart, source);
+  assert.match(source.slice(helperStart, workflowStart), /\.join\("\\n"\)/u);
+  assert.match(source, /invariantSymbolDeclaration[\s\S]*?\.split\(\/\\r\?\\n\/u\)/u);
 });
 
 test("generated Smithers worktrees fail closed on any source other than the pinned benchmark ref", () => {
@@ -371,14 +427,143 @@ test("generated Smithers agent mirrors declared workspace tests before strict ve
   assert.match(materializer, /const generatedPrefix = "generated-tests\/"/u);
   assert.match(materializer, /task\.metadata\.node\.logicalNodeId/u);
   assert.doesNotMatch(materializer, /task\.metadata\.node\.concreteNodeId/u);
-  assert.match(materializer, /const directSourceCandidate = path\.resolve\(workspaceRoot, "test", "foundry"/u);
-  assert.match(materializer, /logicalNodeId,[\s\S]*?workspaceRelativePath/u);
-  assert.match(materializer, /existsSync\(directSourceCandidate\)/u);
-  assert.match(materializer, /existsSync\(nodeScopedSourceCandidate\)/u);
+  assert.match(materializer, /const sourceCandidates = INVARIANT_TEST_ROOT_NAMES\.flatMap/u);
+  assert.match(materializer, /testRoot, "foundry", logicalNodeId, workspaceRelativePath/u);
+  assert.match(materializer, /existingCandidates = sourceCandidates\.filter/u);
+  assert.match(materializer, /generated test sources conflict/u);
   assert.match(materializer, /resolveNonEmptyRegularArtifactFile\(workspaceRoot, sourceCandidate/u);
   assert.match(materializer, /sourceBefore\.nlink !== 1/u);
   assert.match(materializer, /writeFileSync\(anchoredArtifactPath, contents, \{ flag: "wx", mode: 0o600 \}\)/u);
   assert.match(materializer, /generated test copy mismatch/u);
+});
+
+test("generated Smithers workflow preserves the complete invariant suite across worktree handoffs", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const preparationStart = source.indexOf("function prepareArtifactMirror");
+  const resolverStart = source.indexOf("function resolveRegularArtifactFile");
+  const verifierStart = source.indexOf("function verifyArtifacts");
+  const workflowStart = source.indexOf("export default smithers");
+
+  assert.ok(preparationStart >= 0, source);
+  assert.ok(resolverStart > preparationStart, source);
+  assert.ok(workflowStart > verifierStart, source);
+  assert.match(source, /materializeInvariantSuiteFromDependencies\(task, workspaceRoot\)/u);
+  assert.match(source, /materializeInvariantSuiteCompanions\(task\)/u);
+  assert.match(source, /validateImplementedPropertiesSchema/u);
+  assert.match(source, /invariant-suite/u);
+  assert.match(source, /changedTestTreePaths/u);
+  assert.match(source, /changedInvariantSourcePaths/u);
+  assert.match(source, /CryticTester/u);
+  assert.match(source, /TargetFunctions/u);
+  assert.match(source, /Properties/u);
+  assert.match(source, /copyInvariantSuiteIntoWorkspace/u);
+  assert.match(source, /rememberInvariantSuitePublications\(task, publications, artifactRoots\)/u);
+  assert.match(source, /artifact handoff is missing invariant-suite sources/u);
+  assert.match(source, /stateful-invariant-setup/u);
+  assert.match(source, /stateful-invariant-handlers/u);
+  assert.match(source, /stateful-invariant-coverage/u);
+  assert.match(source, /directDependencies/u);
+  assert.match(source, /leftDirect \? 1 : -1/u);
+  assert.match(source, /safeInvariantSuiteDirectory/u);
+  assert.match(source, /invariant suite destination is a symlink/u);
+  assert.match(source, /invariant suite directory is unsafe/u);
+  assert.match(source, /MAX_INVARIANT_SUITE_PATH_LENGTH/u);
+  assert.match(source, /MAX_INVARIANT_SUITE_SEGMENT_LENGTH/u);
+  assert.match(source, /MAX_INVARIANT_SUITE_FILES/u);
+  assert.match(source, /MAX_INVARIANT_SUITE_SOURCE_BYTES/u);
+  assert.match(source, /MAX_INVARIANT_SUITE_TOTAL_BYTES/u);
+  assert.match(source, /INVARIANT_SUITE_BASELINE_FILE/u);
+  assert.match(source, /captureInvariantSuiteBaseline/u);
+  assert.match(source, /invariantSuiteProtectedBaselinePath/u);
+  assert.match(source, /protected invariant suite baseline was modified/u);
+  assert.match(source, /ultrafuzz\.invariant-suite-baseline\.v1/u);
+  assert.match(source, /gitTestTreePaths/u);
+  assert.match(source, /INVARIANT_SUITE_SENSITIVE_SEGMENTS/u);
+  assert.match(source, /assertSafeInvariantSuiteTestPath/u);
+  assert.match(source, /record\.implementation_paths/u);
+  assert.match(source, /record\.test_paths/u);
+  assert.match(source, /pinnedSourceRef, "HEAD\^"/u);
+  assert.match(source, /\$\{baseRef\}\.\.\.HEAD/u);
+  assert.match(source, /implemented properties JSON is malformed/u);
+  assert.match(source, /selectedSources/u);
+  assert.match(source, /ancestor invariant suite sources conflict/u);
+  assert.match(source, /src\/contracts/u);
+  assert.match(source, /invariant suite source is hard-linked/u);
+  assert.match(source, /unable to enumerate changed invariant suite sources/u);
+  assert.match(source, /writeFileDurable\(anchoredDestination/u);
+  assert.match(source, /copyDependencyInvariantSuiteToArtifact/u);
+  assert.match(source, /invariantSuiteDependencySnapshots/u);
+  assert.match(source, /invariant suite dependency changed/u);
+  assert.match(source, /captureInvariantSuiteWorkspaceSnapshot/u);
+  assert.match(source, /restoreInvariantSuiteWorkspaceSnapshot/u);
+  assert.match(source, /INVARIANT_SUITE_MANIFEST_FILE/u);
+  assert.match(source, /invariant-suite-manifest\.v1/u);
+  assert.match(source, /INVARIANT_SUITE_ALLOWED_ROOTS/u);
+  assert.match(source, /ancestor invariant suite sources conflict/u);
+
+  const suiteMaterializerStart = source.indexOf("function materializeInvariantSuiteFromDependencies");
+  const suitePublicationStart = source.indexOf("function rememberInvariantSuitePublications");
+  assert.ok(suiteMaterializerStart > preparationStart, source);
+  assert.ok(suitePublicationStart > suiteMaterializerStart, source);
+  assert.ok(resolverStart > suitePublicationStart, source);
+  assert.ok(workflowStart > resolverStart, source);
+});
+
+test("generated Smithers invariant discovery uses a Git-compatible ls-files invocation", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+
+  assert.doesNotMatch(source, /--no-exclude-standard/u);
+  assert.match(source, /\["ls-files", "--cached", "--others", "--", "src", "contracts", "test", "tests"\]/u);
+  assert.match(source, /\["ls-files", "--others", "--", "src", "contracts"\]/u);
+  assert.match(source, /\["ls-files", "--others", "--", "test", "tests"\]/u);
+});
+
+test("invariant git discovery includes tracked, untracked, and ignored sources", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-git-discovery-"));
+  try {
+    execFileSync("git", ["init", "--quiet", workspace]);
+    for (const relativePath of [
+      "src/tracked.sol",
+      "contracts/untracked.sol",
+      "test/ignored.sol",
+      "tests/visible.sol"
+    ]) {
+      const filePath = path.join(workspace, relativePath);
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, "contract Source {}\n");
+    }
+    fs.writeFileSync(path.join(workspace, ".gitignore"), "test/ignored.sol\n");
+    execFileSync("git", ["add", "--", ".gitignore", "src/tracked.sol", "tests/visible.sol"], { cwd: workspace });
+
+    const sourcePaths = execFileSync(
+      "git",
+      ["ls-files", "--cached", "--others", "--", "src", "contracts", "test", "tests"],
+      { cwd: workspace, encoding: "utf8" }
+    )
+      .split(/\r?\n/u)
+      .filter(Boolean);
+    assert.deepEqual(
+      new Set(sourcePaths),
+      new Set(["contracts/untracked.sol", "src/tracked.sol", "test/ignored.sol", "tests/visible.sol"])
+    );
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers invariant provenance accepts only supported source roots", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const pathStart = source.indexOf("function assertSafeInvariantSuitePath");
+  const pathEnd = source.indexOf("function assertSafeInvariantSuiteTestPath", pathStart);
+
+  assert.ok(pathStart >= 0, source);
+  assert.ok(pathEnd > pathStart, source);
+  const validator = source.slice(pathStart, pathEnd);
+  assert.match(validator, /INVARIANT_SUITE_ALLOWED_ROOTS\.some/u);
+  assert.match(source, /const INVARIANT_SUITE_ALLOWED_ROOTS = \["src", "contracts", "test", "tests"\]/u);
+  assert.match(validator, /unsupported invariant suite source root/u);
+  assert.doesNotMatch(validator, /artifacts/u);
+  assert.match(validator, /segment === "\.envrc"/u);
 });
 
 test("generated Smithers verifier rejects in-root leaf and parent symlinks", () => {
@@ -395,6 +580,43 @@ test("generated Smithers verifier rejects in-root leaf and parent symlinks", () 
   const parentSymlink = path.join(root, "linked-parent");
   fs.symlinkSync(realDirectory, parentSymlink, "dir");
   assert.throws(() => assertRegularFileInside(root, path.join(parentSymlink, "Test.t.sol")), /symlink/u);
+});
+
+test("generated Smithers retry snapshots are durable and restore through canonical parents", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const prepareStart = source.indexOf("function prepareArtifactMirror");
+  const materializeStart = source.indexOf("function materializeInvariantSuiteFromDependencies");
+  const restoreStart = source.indexOf("function restoreInvariantSuiteWorkspaceSnapshot");
+  const restoreEnd = source.indexOf("function assertTaskInputs", restoreStart);
+
+  assert.ok(prepareStart >= 0 && materializeStart > prepareStart && restoreStart > prepareStart, source);
+  assert.ok(restoreEnd > restoreStart, source);
+  const prepare = source.slice(prepareStart, materializeStart);
+  const restore = source.slice(restoreStart, restoreEnd);
+  assert.ok(
+    prepare.indexOf("restoreInvariantSuiteWorkspaceSnapshot(task)") <
+      prepare.indexOf("materializeInvariantSuiteFromDependencies(task, workspaceRoot)")
+  );
+  assert.match(source, /INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR/u);
+  assert.match(source, /INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE/u);
+  assert.match(source, /invariantSuiteWorkspaceSnapshotRoot/u);
+  assert.match(source, /invariant-workspace-snapshot\.v1/u);
+  assert.match(source, /loadInvariantSuiteWorkspaceSnapshot/u);
+  assert.match(source, /readStableWorkspaceSnapshotFile/u);
+  assert.match(source, /const runRootCandidate = path\.resolve\(process\.cwd\(\), task\.runRoot\)/u);
+  assert.match(source, /runRootStat = lstatSync\(runRootCandidate\)/u);
+  assert.match(source, /realpathSync\(runRootCandidate\) !== runRootCandidate/u);
+  assert.match(source, /before\.dev !== after\.dev/u);
+  assert.match(source, /before\.ino !== after\.ino/u);
+  assert.match(source, /writeFileDurable\(\s*path\.join\(snapshotRoot,\s*INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE/u);
+  assert.match(source, /const workspaceCandidate = path\.resolve\(task\.workspacePath\)/u);
+  assert.match(source, /const workspaceStat = lstatSync\(workspaceCandidate\)/u);
+  assert.match(source, /realpathSync\(workspaceCandidate\) !== workspaceCandidate/u);
+  assert.match(source, /isStrictlyInsideDirectory\(runRoot, workspaceCandidate\)/u);
+  assert.match(restore, /lstatSync\(workspaceCandidate\)/u);
+  assert.match(restore, /safeInvariantSuiteDirectory\(workspaceRoot, path\.dirname\(candidate\)\)/u);
+  assert.match(restore, /stat\.isSymbolicLink\(\)/u);
+  assert.match(restore, /writeFileDurable\(anchored, bytes\)/u);
 });
 
 test("generated Smithers verifier publishes the complete validated set before task success", () => {

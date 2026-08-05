@@ -195,7 +195,8 @@ Apply these Recon/Chimera rules:
    - Move `recon-coverage.json` into `magic/`.
    - Run `covg-eval magic/ echidna/ --return-json` or the local equivalent.
    - Inspect the chosen LCOV `SF:` entries and reject the coverage result if it
-     maps only to harness, generated tests, or `test/recon/**` files.
+     maps only to harness, generated tests, or the repository's test-root
+     `recon/**` files (`test/recon/**` or `tests/recon/**`).
    - If production sources are missing, stop handler iteration, document the
      attribution blocker, and identify the exact source files that must appear
      before coverage percentages are trusted.

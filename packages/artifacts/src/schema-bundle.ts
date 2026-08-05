@@ -58,7 +58,9 @@ export function materializePromptSchemas(destination: string): string[] {
     copied.push(targetPath);
   }
   if (copied.length === 0) throw new Error(`prompt schema source is empty: ${source}`);
-  fs.chmodSync(target, 0o500);
+  // Keep the schema files read-only while allowing the owning task/worktree
+  // cleanup to unlink and recreate the directory.
+  fs.chmodSync(target, 0o700);
   return copied;
 }
 

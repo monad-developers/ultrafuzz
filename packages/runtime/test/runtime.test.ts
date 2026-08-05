@@ -5920,10 +5920,11 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /normalizeLegacyReportProvenance\(task\)/);
   assert.match(workflowSource, /normalizeLegacyGeneratedTestManifests\(task\)/);
   assert.match(workflowSource, /materializeGeneratedTestCompanions\(task\)/);
-  assert.match(workflowSource, /const directSourceCandidate = path\.resolve\(workspaceRoot, "test", "foundry"/);
+  assert.match(workflowSource, /const sourceCandidates = INVARIANT_TEST_ROOT_NAMES\.flatMap\(\(testRoot\) => \[/);
+  assert.match(workflowSource, /path\.resolve\(workspaceRoot, testRoot, "foundry", workspaceRelativePath\)/);
   assert.match(
     workflowSource,
-    /const nodeScopedSourceCandidate = path\.resolve\(\s*workspaceRoot,\s*"test",\s*"foundry",\s*logicalNodeId,\s*workspaceRelativePath\s*\)/
+    /path\.resolve\(workspaceRoot, testRoot, "foundry", logicalNodeId, workspaceRelativePath\)/
   );
   assert.match(workflowSource, /typeof entry === "string" \? \{ path: entry \} : entry/);
   assert.match(workflowSource, /typeof finding\.confidence === "number"/);

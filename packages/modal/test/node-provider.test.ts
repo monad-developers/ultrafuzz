@@ -36,6 +36,7 @@ import {
   cloudAgentSubprocessInvocation,
   CloudWorkerCommandError,
   cloudPublicationBoundary,
+  copyPublishedEvidenceTree,
   copySafeTree,
   finalizeWorkerHandoffCleanup,
   finalizeWorkerSecretCleanup,
@@ -1062,6 +1063,106 @@ describe("Modal node sandbox provider", () => {
 
       expect(() => copySafeTree(source, destination)).toThrow(/cloud publication destination is unsafe/u);
       expect(fs.existsSync(path.join(outside, "finding.json"))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes every manifest-declared artifact and nested invariant evidence", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-worker-manifest-"));
+    try {
+      const source = path.join(root, "source");
+      const destination = path.join(root, "published");
+      const node = path.join(source, "property-specification-fanin");
+      fs.mkdirSync(node, { recursive: true });
+      const property = path.join(node, "properties.json");
+      const generated = path.join(node, "generated-tests", "HubInvariant.t.sol");
+      const nestedManifest = path.join(node, "fixtures", "artifact-manifest.json");
+      const oneLevelFixtureManifest = path.join(source, "reports", "artifact-manifest.json");
+      fs.mkdirSync(path.dirname(generated), { recursive: true });
+      fs.mkdirSync(path.dirname(nestedManifest), { recursive: true });
+      fs.mkdirSync(path.dirname(oneLevelFixtureManifest), { recursive: true });
+      fs.writeFileSync(property, '{"schema_version":"ultrafuzz.properties.v1"}\n');
+      fs.writeFileSync(generated, "contract HubInvariant {}\n");
+      fs.writeFileSync(nestedManifest, '{"schema_version":"fixture"}\n');
+      fs.writeFileSync(oneLevelFixtureManifest, '{"schema_version":"fixture"}\n');
+      const manifest = {
+        schema_version: "1.0",
+        files: [
+          manifestEntry("property-specification-fanin/properties.json", property),
+          manifestEntry("property-specification-fanin/generated-tests/HubInvariant.t.sol", generated)
+        ]
+      };
+      fs.writeFileSync(path.join(source, "artifact-manifest.json"), `${JSON.stringify(manifest)}\n`);
+
+      copyPublishedEvidenceTree(source, destination);
+
+      expect(fs.readFileSync(path.join(destination, "property-specification-fanin", "properties.json"), "utf8")).toBe(
+        '{"schema_version":"ultrafuzz.properties.v1"}\n'
+      );
+      expect(
+        fs.readFileSync(
+          path.join(destination, "property-specification-fanin", "generated-tests", "HubInvariant.t.sol"),
+          "utf8"
+        )
+      ).toBe("contract HubInvariant {}\n");
+      expect(fs.existsSync(path.join(destination, "artifact-manifest.json"))).toBe(true);
+      expect(
+        fs.readFileSync(
+          path.join(destination, "property-specification-fanin", "fixtures", "artifact-manifest.json"),
+          "utf8"
+        )
+      ).toBe('{"schema_version":"fixture"}\n');
+      expect(fs.readFileSync(path.join(destination, "reports", "artifact-manifest.json"), "utf8")).toBe(
+        '{"schema_version":"fixture"}\n'
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails publication when a manifest declaration is missing or has a wrong digest", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-worker-manifest-invalid-"));
+    try {
+      const source = path.join(root, "source");
+      const destination = path.join(root, "published");
+      fs.mkdirSync(source, { recursive: true });
+      const missing = path.join(source, "missing.json");
+      fs.writeFileSync(
+        path.join(source, "artifact-manifest.json"),
+        `${JSON.stringify({
+          schema_version: "1.0",
+          files: [
+            { path: "missing.json", size_bytes: 7, sha256: "0".repeat(64), provenance: { producer_node_id: "fixture" } }
+          ]
+        })}\n`
+      );
+      expect(() => copyPublishedEvidenceTree(source, destination)).toThrow(/manifest file is unavailable/u);
+
+      fs.writeFileSync(missing, "actual\n");
+      fs.writeFileSync(
+        path.join(source, "artifact-manifest.json"),
+        `${JSON.stringify({
+          schema_version: "1.0",
+          files: [{ ...manifestEntry("missing.json", missing), sha256: "0".repeat(64) }]
+        })}\n`
+      );
+      expect(() => copyPublishedEvidenceTree(source, destination)).toThrow(/manifest file digest mismatch/u);
+
+      fs.writeFileSync(
+        path.join(source, "artifact-manifest.json"),
+        `${JSON.stringify({ schema_version: "1.0", files: [] })}\n`
+      );
+      expect(() => copyPublishedEvidenceTree(source, destination)).toThrow(/at least one file/u);
+
+      fs.writeFileSync(
+        path.join(source, "artifact-manifest.json"),
+        `${JSON.stringify({
+          schema_version: "1.0",
+          files: [manifestEntry("missing.json", missing), manifestEntry("missing.json", missing)]
+        })}\n`
+      );
+      expect(() => copyPublishedEvidenceTree(source, destination)).toThrow(/duplicate file path/u);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -3576,6 +3677,15 @@ function openFileDescriptorsBelow(root: string): string[] {
       }
     })
     .filter((openedPath) => openedPath === root || openedPath.startsWith(`${root}${path.sep}`));
+}
+
+function manifestEntry(relativePath: string, filePath: string) {
+  return {
+    path: relativePath,
+    size_bytes: fs.statSync(filePath).size,
+    sha256: crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex"),
+    provenance: { producer_node_id: "fixture" }
+  };
 }
 
 function createResultArchive(
