@@ -17,6 +17,7 @@ export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/findings@1",
   "ultrafuzz/generated-tests@1",
   "ultrafuzz/implemented-properties@1",
+  "ultrafuzz/implemented-properties@2",
   "ultrafuzz/invariant-ledger@1",
   "ultrafuzz/json-array@1",
   "ultrafuzz/json-object@1",
@@ -100,12 +101,39 @@ const reportPropertyProvenanceSchema = z
     message: "Property provenance finding IDs must be unique"
   });
 
+const uniquePropertyIdArraySchema = z
+  .array(z.string().min(1))
+  .refine((propertyIds) => new Set(propertyIds).size === propertyIds.length, {
+    message: "Property implementation IDs must be unique"
+  });
+const propertyImplementationCoverageSchema = z.union([
+  z.literal("unavailable"),
+  z.looseObject({
+    priority_threshold: z.enum(["high", "medium", "low"]),
+    priorities: z
+      .array(z.enum(["high", "medium", "low"]))
+      .min(1)
+      .refine((priorities) => new Set(priorities).size === priorities.length, {
+        message: "Property implementation priorities must be unique"
+      }),
+    selected_property_ids: uniquePropertyIdArraySchema,
+    implemented_property_ids: uniquePropertyIdArraySchema,
+    blocked_property_ids: uniquePropertyIdArraySchema,
+    pending_property_ids: uniquePropertyIdArraySchema,
+    deferred_property_ids: uniquePropertyIdArraySchema,
+    reference_expected_property_ids: uniquePropertyIdArraySchema.optional(),
+    reference_expectation_ids: uniquePropertyIdArraySchema.optional(),
+    blocker_summaries: z.array(z.string().min(1)).optional()
+  })
+]);
+
 const terminalReportSchema = z.looseObject({
   schema_version: z.string().min(1),
   run_metadata: z.record(z.string(), z.unknown()),
   issues: z.array(z.unknown()),
   non_production_outcomes: z.array(z.unknown()),
-  property_provenance: z.union([z.literal("unavailable"), reportPropertyProvenanceSchema]).optional()
+  property_provenance: z.union([z.literal("unavailable"), reportPropertyProvenanceSchema]).optional(),
+  property_implementation_coverage: propertyImplementationCoverageSchema.optional()
 });
 
 const definitions = defineContracts([
@@ -135,8 +163,16 @@ const definitions = defineContracts([
     id: "ultrafuzz/implemented-properties@1",
     format: "json",
     description:
-      "Implementation records keyed by canonical property_id, with implementation status and implementation/test paths.",
+      "Implementation records keyed by canonical property_id, with implementation status and implementation/test paths. Current runs also emit selection metadata and a typed blocker for every selected property that is not implemented.",
     validEmptyExample: '{"schema_version":"ultrafuzz.implemented-properties.v1","properties":[]}'
+  },
+  {
+    id: "ultrafuzz/implemented-properties@2",
+    format: "json",
+    description:
+      "Current invariant implementation records keyed by canonical property_id. The artifact must declare the exact inclusive priority selection and a typed blocker for every selected property that is not implemented.",
+    validEmptyExample:
+      '{"schema_version":"ultrafuzz.implemented-properties.v1","selection":{"priority_threshold":"high","priorities":["high"],"property_ids":[]},"properties":[]}'
   },
   {
     id: "ultrafuzz/json-array@1",
@@ -178,7 +214,7 @@ const definitions = defineContracts([
     id: "ultrafuzz/report@1",
     format: "json",
     description:
-      "A terminal report object with non-empty schema_version, run_metadata, canonical normalized issues, and non_production_outcomes. Additional adapter fields are allowed.",
+      "A terminal report object with non-empty schema_version, run_metadata, canonical normalized issues, and non_production_outcomes. Current invariant runs also include property_implementation_coverage from the implementation handoff. Additional adapter fields are allowed.",
     validEmptyExample: '{"schema_version":"1.0","run_metadata":{},"issues":[],"non_production_outcomes":[]}'
   },
   {
@@ -286,8 +322,10 @@ export function validateArtifactContract(
       ...(result.value === undefined ? {} : { value: result.value })
     };
   }
-  if (contract === "ultrafuzz/implemented-properties@1") {
-    const result = validateImplementedPropertiesSchema(parsed, artifactPath);
+  if (contract === "ultrafuzz/implemented-properties@1" || contract === "ultrafuzz/implemented-properties@2") {
+    const result = validateImplementedPropertiesSchema(parsed, artifactPath, {
+      requireSelection: contract === "ultrafuzz/implemented-properties@2"
+    });
     return {
       ok: result.ok,
       issues: result.issues,

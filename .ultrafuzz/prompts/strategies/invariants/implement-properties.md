@@ -35,12 +35,20 @@ catalog priority values are:
 
 `{{invariant_property_priorities}}`
 
+Also inspect each property's optional `reference_expectations` array. A
+property with one or more reference expectation identifiers is mandatory for
+this current run even when its priority is below the configured threshold;
+include every such canonical ID in the selection so named benchmark behavior
+cannot be lost during priority filtering.
+
 ## Work
 
 1. Parse `properties.json` into a stable property list. Use `properties.md`
    only as its human-readable companion.
-   - Only select properties whose `priority` is one of the included priority
-     values above.
+   - Select properties whose `priority` is one of the included priority values
+     above or whose `reference_expectations` array is non-empty.
+   - Preserve each selected property's complete `reference_expectations` array
+     in the implementation summary and use it to explain any blocker.
    - Preserve each selected property's canonical `id` as `property_id`, plus
      its title, priority, oracle, setup
      requirements, preconditions, source lenses, and false-positive risks in
@@ -60,7 +68,7 @@ catalog priority values are:
      empty generated-test manifest, and use an empty findings array. Update
      those artifacts as work progresses so timeout or interruption still leaves
      reviewable state.
-   - If no properties match the threshold, write empty implementation artifacts
+   - If no properties match the threshold or carry a reference expectation, write empty implementation artifacts
      explaining that no selected properties were eligible.
 
 3. Implement properties in the invariant suite.
@@ -127,19 +135,44 @@ repository test root when it uses `test/` instead.
 ```json
 {
   "schema_version": "ultrafuzz.implemented-properties.v1",
+  "selection": {
+    "priority_threshold": "{{invariant_property_priority_threshold}}",
+    "priorities": ["high"],
+    "property_ids": ["property-1"]
+  },
   "properties": [
     {
       "property_id": "property-1",
       "status": "implemented",
       "implementation_paths": ["tests/recon/Properties.sol"],
-      "test_paths": ["tests/foundry/stateful-invariant-implement-properties/Property1.t.sol"]
+      "test_paths": ["tests/foundry/stateful-invariant-implement-properties/Property1.t.sol"],
+      "reference_expectations": ["scfuzzbench:aave-v4:iSpoke_supply"]
     }
   ]
 }
 ```
 
+The `selection` object is required for current runs. Set `priorities` to the
+exact configured priority set above and list every canonical ID in
+`properties.json` whose priority is in that set, plus every canonical ID with
+one or more `reference_expectations`, in catalog order. Emit one
+implementation record for every selected ID. A selected property that cannot
+be implemented must use `status` `blocked`, `pending`, or `deferred` and carry
+an actionable `blocker` object with this shape:
+
+```json
+{
+  "code": "missing-oracle",
+  "summary": "The target exposes no stable getter for the required value.",
+  "next_action": "Add a read-only harness oracle or document the source-backed blocker."
+}
+```
+
 `status` must be `implemented`, `pending`, `deferred`, or `blocked`. Include
 both path arrays on every record, using empty arrays when no path exists. A
+selected property with `reference_expectations` carries the complete
+expectation-ID array on its implementation record in the same order-independent
+set. A
 `property_id` must exactly match a canonical ID in `properties.json`; dangling
 references fail artifact validation. Preserve generated and changed test paths
 in `test_paths` and invariant/helper implementation paths in

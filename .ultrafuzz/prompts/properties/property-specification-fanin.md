@@ -46,6 +46,12 @@ source row, preserve:
   table, such as `property-specification-certora`;
 - `source_property_id`: the prefixed property ID copied exactly from that
   source table.
+- `reference_expectations`: when a source row corresponds to a named benchmark
+  or reference expectation, preserve its exact stable identifier in this
+  non-empty array (for example
+  `scfuzzbench:aave-v4:iSpoke_supply`). Merge equivalent rows by taking the
+  union of their expectation identifiers; never drop an identifier during
+  deduplication. Omit the field only when no named expectation is represented.
 
 When several source rows describe one equivalent property, emit one canonical
 property with every distinct contributing source in `sources`. Never keep only
@@ -87,6 +93,8 @@ Within each block, render `description`, `category`, and `priority` as named
 fields, render each source as `<source_node_id>:<source_property_id>` under a
 `sources` field (separate multiple sources with `<br>`), and render the exact
 ledger IDs under a `ledger_ids` field (separate multiple IDs with commas or
+`<br>`). When present, render the exact `reference_expectations` identifiers
+under a `reference_expectations` field (separate multiple IDs with commas or
 `<br>`). Keep these field values identical to `properties.json`.
 
 Use neutral authorized-QA language in the consolidated table. Phrase each row as

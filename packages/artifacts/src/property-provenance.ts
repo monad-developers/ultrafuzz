@@ -16,6 +16,22 @@ export const PROPERTIES_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#
 const nonEmptyString = z.string().min(1);
 const stableLedgerId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
 const nonEmptyStringArray = z.array(nonEmptyString);
+const referenceExpectationIdsSchema = z
+  .array(nonEmptyString)
+  .min(1)
+  .superRefine((expectationIds, context) => {
+    const seen = new Set<string>();
+    for (const [expectationIndex, expectationId] of expectationIds.entries()) {
+      if (seen.has(expectationId)) {
+        context.addIssue({
+          code: "custom",
+          message: `Duplicate reference expectation ID ${JSON.stringify(expectationId)}`,
+          path: [expectationIndex]
+        });
+      }
+      seen.add(expectationId);
+    }
+  });
 export const PROPERTY_PRIORITIES = ["high", "medium", "low"] as const;
 export const propertyPrioritySchema = z.enum(PROPERTY_PRIORITIES);
 export type PropertyPriority = (typeof PROPERTY_PRIORITIES)[number];
@@ -46,6 +62,8 @@ export interface LensProperty extends Record<string, unknown> {
   description: string;
   category: string;
   priority: PropertyPriority;
+  /** Stable identities for named benchmark/reference expectations represented by this property. */
+  reference_expectations?: string[];
 }
 
 export interface LensPropertiesArtifact {
@@ -59,6 +77,8 @@ export interface CanonicalProperty extends Record<string, unknown> {
   category: string;
   priority: PropertyPriority;
   sources: PropertySource[];
+  /** Stable identities for named benchmark/reference expectations represented by this property. */
+  reference_expectations?: string[];
   /** Stable IDs from the project-discovery invariant evidence ledger. */
   ledger_ids?: string[];
 }
@@ -75,11 +95,32 @@ export interface ImplementedPropertyRecord extends Record<string, unknown> {
   status: PropertyImplementationStatus;
   implementation_paths: string[];
   test_paths: string[];
+  /** Benchmark/reference expectation IDs carried by this implementation record. */
+  reference_expectations?: string[];
+  /** A typed, actionable explanation for a selected property that is not implemented. */
+  blocker?: PropertyImplementationBlocker;
+}
+
+export interface PropertyImplementationBlocker extends Record<string, unknown> {
+  code: string;
+  summary: string;
+  next_action: string;
+}
+
+/**
+ * Selection metadata makes the implementation handoff auditable. It is
+ * optional so historical artifacts (which predate the field) remain readable.
+ */
+export interface ImplementedPropertySelection extends Record<string, unknown> {
+  priority_threshold: PropertyPriority;
+  priorities: PropertyPriority[];
+  property_ids: string[];
 }
 
 export interface ImplementedPropertiesArtifact {
   schema_version: typeof IMPLEMENTED_PROPERTIES_SCHEMA_VERSION;
   properties: ImplementedPropertyRecord[];
+  selection?: ImplementedPropertySelection;
 }
 
 export interface PropertyCampaignFailure extends Record<string, unknown> {
@@ -108,7 +149,8 @@ const lensPropertySchema = z.strictObject({
   id: nonEmptyString,
   description: nonEmptyString,
   category: nonEmptyString,
-  priority: propertyPrioritySchema
+  priority: propertyPrioritySchema,
+  reference_expectations: referenceExpectationIdsSchema.optional()
 });
 
 export const lensPropertiesSchema = z
@@ -135,6 +177,7 @@ const canonicalPropertySchema = z.looseObject({
   description: nonEmptyString,
   category: nonEmptyString,
   priority: propertyPrioritySchema,
+  reference_expectations: referenceExpectationIdsSchema.optional(),
   sources: z.array(propertySourceSchema).min(1),
   ledger_ids: z
     .array(stableLedgerId)
@@ -191,13 +234,55 @@ const implementedPropertySchema = z.looseObject({
   property_id: nonEmptyString,
   status: z.enum(["implemented", "pending", "deferred", "blocked"]),
   implementation_paths: nonEmptyStringArray,
-  test_paths: nonEmptyStringArray
+  test_paths: nonEmptyStringArray,
+  reference_expectations: referenceExpectationIdsSchema.optional(),
+  blocker: z
+    .strictObject({
+      code: nonEmptyString,
+      summary: nonEmptyString,
+      next_action: nonEmptyString
+    })
+    .optional()
+});
+
+const implementedPropertySelectionSchema = z.strictObject({
+  priority_threshold: propertyPrioritySchema,
+  priorities: z
+    .array(propertyPrioritySchema)
+    .min(1)
+    .superRefine((priorities, context) => {
+      const seen = new Set<PropertyPriority>();
+      for (const [priorityIndex, priority] of priorities.entries()) {
+        if (seen.has(priority)) {
+          context.addIssue({
+            code: "custom",
+            message: `Duplicate implementation selection priority ${JSON.stringify(priority)}`,
+            path: [priorityIndex]
+          });
+        }
+        seen.add(priority);
+      }
+    }),
+  property_ids: z.array(nonEmptyString).superRefine((propertyIds, context) => {
+    const seen = new Set<string>();
+    for (const [propertyIndex, propertyId] of propertyIds.entries()) {
+      if (seen.has(propertyId)) {
+        context.addIssue({
+          code: "custom",
+          message: `Duplicate implementation selection property ID ${JSON.stringify(propertyId)}`,
+          path: [propertyIndex]
+        });
+      }
+      seen.add(propertyId);
+    }
+  })
 });
 
 export const implementedPropertiesSchema = z
   .object({
     schema_version: z.literal(IMPLEMENTED_PROPERTIES_SCHEMA_VERSION),
-    properties: z.array(implementedPropertySchema)
+    properties: z.array(implementedPropertySchema),
+    selection: implementedPropertySelectionSchema.optional()
   })
   .superRefine((artifact, context) => {
     const propertyIds = new Set<string>();
@@ -271,6 +356,12 @@ export const propertiesJsonSchema = {
           description: { type: "string", minLength: 1 },
           category: { type: "string", minLength: 1 },
           priority: { enum: [...PROPERTY_PRIORITIES] },
+          reference_expectations: {
+            type: "array",
+            minItems: 1,
+            uniqueItems: true,
+            items: { type: "string", minLength: 1 }
+          },
           sources: {
             type: "array",
             minItems: 1,
@@ -317,7 +408,13 @@ export const lensPropertiesJsonSchema = {
           id: { type: "string", minLength: 1 },
           description: { type: "string", minLength: 1 },
           category: { type: "string", minLength: 1 },
-          priority: { enum: [...PROPERTY_PRIORITIES] }
+          priority: { enum: [...PROPERTY_PRIORITIES] },
+          reference_expectations: {
+            type: "array",
+            minItems: 1,
+            uniqueItems: true,
+            items: { type: "string", minLength: 1 }
+          }
         }
       }
     }
@@ -343,12 +440,26 @@ export function validatePropertiesSchema(value: unknown, path = "$"): SchemaVali
 
 export function validateImplementedPropertiesSchema(
   value: unknown,
-  path = "$"
+  path = "$",
+  options: { requireSelection?: boolean } = {}
 ): SchemaValidationResult<ImplementedPropertiesArtifact> {
-  return validateWithZod(implementedPropertiesSchema as z.ZodType<ImplementedPropertiesArtifact>, value, {
+  const result = validateWithZod(implementedPropertiesSchema as z.ZodType<ImplementedPropertiesArtifact>, value, {
     path,
     code: "IMPLEMENTED_PROPERTIES_SCHEMA_INVALID"
   });
+  if (options.requireSelection && result.ok && result.value?.selection === undefined) {
+    return {
+      ok: false,
+      issues: [
+        {
+          code: "IMPLEMENTED_PROPERTIES_SELECTION_REQUIRED",
+          message: "Current invariant implementation artifacts must declare selection metadata",
+          path: `${path}#$.selection`
+        }
+      ]
+    };
+  }
+  return result;
 }
 
 export function validatePropertyCampaignSchema(

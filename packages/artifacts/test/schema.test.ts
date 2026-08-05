@@ -159,6 +159,49 @@ test("artifact contract registry validates structured, empty, and malformed outp
       JSON.stringify({
         schema_version: "1.0",
         run_metadata: {},
+        issues: [],
+        non_production_outcomes: [],
+        property_implementation_coverage: {
+          priority_threshold: "high",
+          priorities: ["high"],
+          selected_property_ids: ["property-1"],
+          implemented_property_ids: ["property-1"],
+          blocked_property_ids: [],
+          pending_property_ids: [],
+          deferred_property_ids: []
+        }
+      })
+    ).ok,
+    true
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
+        schema_version: "1.0",
+        run_metadata: {},
+        issues: [],
+        non_production_outcomes: [],
+        property_implementation_coverage: {
+          priority_threshold: "high",
+          priorities: ["high"],
+          selected_property_ids: ["property-1", "property-1"],
+          implemented_property_ids: [],
+          blocked_property_ids: [],
+          pending_property_ids: [],
+          deferred_property_ids: []
+        }
+      })
+    ).ok,
+    false,
+    "coverage ID arrays must be unique"
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
+        schema_version: "1.0",
+        run_metadata: {},
         issues: [
           {
             schema_version: FINDINGS_SCHEMA_VERSION,
@@ -462,7 +505,8 @@ test("property lens schema requires normalized priorities and unique IDs", () =>
         id: "aviggiano-001",
         description: "Expected behavior",
         category: "accounting",
-        priority: "high"
+        priority: "high",
+        reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"]
       }
     ]
   };
@@ -478,6 +522,48 @@ test("property lens schema requires normalized priorities and unique IDs", () =>
     validateLensPropertiesSchema({
       ...valid,
       properties: [valid.properties[0], valid.properties[0]]
+    }).ok,
+    false
+  );
+  assert.equal(
+    validateLensPropertiesSchema({
+      ...valid,
+      properties: [
+        {
+          ...valid.properties[0],
+          reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply", "scfuzzbench:aave-v4:iSpoke_supply"]
+        }
+      ]
+    }).ok,
+    false,
+    "reference expectation IDs must be unique"
+  );
+});
+
+test("canonical property schema preserves typed benchmark expectations", () => {
+  const valid = {
+    schema_version: PROPERTIES_SCHEMA_VERSION,
+    properties: [
+      {
+        id: "property-1",
+        description: "Supply remains live for valid state",
+        category: "dos-liveness",
+        priority: "medium",
+        reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"],
+        sources: [{ source_node_id: "property-specification-recon", source_property_id: "iSpoke_supply" }]
+      }
+    ]
+  };
+  assert.equal(validatePropertiesSchema(valid).ok, true);
+  assert.equal(
+    validatePropertiesSchema({
+      ...valid,
+      properties: [
+        {
+          ...valid.properties[0],
+          reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply", "scfuzzbench:aave-v4:iSpoke_supply"]
+        }
+      ]
     }).ok,
     false
   );
@@ -558,6 +644,53 @@ test("property implementation schema rejects duplicate canonical references", ()
   const invalid = validateImplementedPropertiesSchema(duplicate);
   assert.equal(invalid.ok, false);
   assert.ok(invalid.issues.some((issue) => /Duplicate implemented property ID/u.test(issue.message)));
+});
+
+test("property implementation schema accepts selection metadata and typed blockers", () => {
+  const selected = {
+    schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+    selection: {
+      priority_threshold: "high",
+      priorities: ["high"],
+      property_ids: ["property-1"]
+    },
+    properties: [
+      {
+        property_id: "property-1",
+        status: "blocked",
+        implementation_paths: [],
+        test_paths: [],
+        blocker: {
+          code: "missing-oracle",
+          summary: "The target exposes no stable getter.",
+          next_action: "Add a read-only harness oracle."
+        }
+      }
+    ]
+  };
+  assert.equal(validateImplementedPropertiesSchema(selected).ok, true);
+  assert.equal(
+    validateImplementedPropertiesSchema({
+      ...selected,
+      properties: [{ ...selected.properties[0], blocker: { code: "missing-oracle", summary: "", next_action: "" } }]
+    }).ok,
+    false,
+    "blocker fields must carry actionable text"
+  );
+});
+
+test("current implementation contract requires selection while historical contract remains readable", () => {
+  const historical = JSON.stringify({
+    schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+    properties: []
+  });
+  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@1", historical).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@2", historical).ok, false);
+  assert.ok(
+    validateArtifactContract("ultrafuzz/implemented-properties@2", historical).issues.some(
+      (issue) => issue.code === "IMPLEMENTED_PROPERTIES_SELECTION_REQUIRED"
+    )
+  );
 });
 
 test("unknown canonical property references produce a clear diagnostic", () => {
