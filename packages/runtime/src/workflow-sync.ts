@@ -91,6 +91,8 @@ import { projectWorkflowControlState } from "./workflow-control.js";
 import {
   acquireWorkflowMutationLock,
   sameWorkflowLifecycleGeneration,
+  type WorkflowMutationLockControl,
+  WorkflowMutationLockInterruptedError,
   workflowLifecycleGeneration
 } from "./workflow-mutation.js";
 import { disposeWorkflowExecutionSnapshot, materializeWorkflowExecutionSnapshot } from "./workflow-integrity.js";
@@ -431,7 +433,8 @@ interface LinkedWorkflowExecutionContext {
  */
 export async function withLinkedWorkflowExecution<T>(
   input: SyncRunInput,
-  operation: (context: LinkedWorkflowExecutionContext) => Promise<T>
+  operation: (context: LinkedWorkflowExecutionContext) => Promise<T>,
+  cleanupLockControl: () => WorkflowMutationLockControl = () => ({})
 ): Promise<{ ok: true; value: T; diagnostics: RuntimeDiagnostic[] } | { ok: false; diagnostics: RuntimeDiagnostic[] }> {
   const projectRoot = path.resolve(input.projectRoot);
   const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
@@ -468,7 +471,7 @@ export async function withLinkedWorkflowExecution<T>(
     });
   } catch (error) {
     try {
-      await disposeWorkflowExecutionSnapshot(executionSnapshot);
+      await disposeWorkflowExecutionSnapshot(executionSnapshot, {}, cleanupLockControl());
     } catch {
       // Preserve the operation failure exactly; cleanup must never mask it.
     }
@@ -476,7 +479,7 @@ export async function withLinkedWorkflowExecution<T>(
   }
   const diagnostics: RuntimeDiagnostic[] = [];
   try {
-    await disposeWorkflowExecutionSnapshot(executionSnapshot);
+    await disposeWorkflowExecutionSnapshot(executionSnapshot, {}, cleanupLockControl());
   } catch (error) {
     diagnostics.push({
       ...smithersDiagnostic(error, "WORKFLOW_EXECUTION_SNAPSHOT_CLEANUP_FAILED"),
@@ -498,7 +501,11 @@ export async function synchronizeLinkedWorkflowRun(
   if (budgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [budgetDiagnostic] };
   }
-  const execution = await withLinkedWorkflowExecution(input, ({ synchronize }) => synchronize(control));
+  const execution = await withLinkedWorkflowExecution(
+    input,
+    ({ synchronize }) => synchronize(control),
+    () => synchronizationMutationLockControl(control)
+  );
   return execution.ok
     ? { ...execution.value, diagnostics: [...execution.value.diagnostics, ...execution.diagnostics] }
     : execution;
@@ -695,8 +702,34 @@ async function synchronizeLinkedWorkflowRunWithExecution(
   }
   const collectedLifecycleGeneration = workflowLifecycleGeneration(layout);
   await control.beforeCommit?.();
-  const releaseWorkflowMutationLock = await acquireWorkflowMutationLock(layout);
   try {
+    assertSynchronizationBudget(control);
+  } catch (error) {
+    const interrupted = synchronizationInterruptionDiagnostic(error);
+    if (interrupted !== undefined) return { ok: false, diagnostics: [interrupted] };
+    throw error;
+  }
+  let releaseWorkflowMutationLock: () => Promise<void>;
+  try {
+    releaseWorkflowMutationLock = await acquireWorkflowMutationLock(layout, {
+      ...(control.signal === undefined ? {} : { signal: control.signal }),
+      ...(control.deadlineMs === undefined
+        ? {}
+        : { timeoutMs: Math.max(0, control.deadlineMs - synchronizationClock(control)) })
+    });
+  } catch (error) {
+    const interrupted = synchronizationInterruptionDiagnostic(error);
+    if (interrupted !== undefined) return { ok: false, diagnostics: [interrupted] };
+    throw error;
+  }
+  try {
+    try {
+      assertSynchronizationBudget(control);
+    } catch (error) {
+      const interrupted = synchronizationInterruptionDiagnostic(error);
+      if (interrupted !== undefined) return { ok: false, diagnostics: [interrupted] };
+      throw error;
+    }
     const currentLifecycleGeneration = workflowLifecycleGeneration(layout);
     if (
       currentLifecycleGeneration.invoking ||
@@ -943,6 +976,17 @@ function synchronizationInterruptionDiagnostic(error: unknown): RuntimeDiagnosti
   if (error instanceof WorkflowSynchronizationInterruptedError) {
     return error.diagnostic;
   }
+  if (error instanceof WorkflowMutationLockInterruptedError) {
+    return {
+      code: error.reason === "cancelled" ? "WORKFLOW_SYNC_CANCELLED" : "WORKFLOW_SYNC_DEADLINE_EXCEEDED",
+      message:
+        error.reason === "cancelled"
+          ? "workflow synchronization was cancelled while waiting for the workflow mutation lock"
+          : "workflow synchronization reached its overall deadline while waiting for the workflow mutation lock",
+      severity: "error",
+      source: "workflow"
+    };
+  }
   if (error instanceof ArtifactReconciliationInterruptedError) {
     return {
       code: error.code,
@@ -966,6 +1010,14 @@ function inspectionExecutionControl(
   return {
     ...(control.signal === undefined ? {} : { signal: control.signal }),
     ...(timeoutMs === undefined ? {} : { timeoutMs })
+  };
+}
+
+function synchronizationMutationLockControl(control: WorkflowSynchronizationControl): WorkflowMutationLockControl {
+  const nowMs = synchronizationClock(control);
+  return {
+    ...(control.signal === undefined ? {} : { signal: control.signal }),
+    ...(control.deadlineMs === undefined ? {} : { timeoutMs: Math.max(0, control.deadlineMs - nowMs) })
   };
 }
 
@@ -2778,6 +2830,7 @@ async function synchronizeTasks(input: {
           control: input.control
         });
       } catch (error) {
+        if (synchronizationInterruptionDiagnostic(error) !== undefined) throw error;
         verifierOutputError = error;
       }
     }
@@ -2853,6 +2906,7 @@ async function synchronizeTasks(input: {
     let patchStatus = finalization.status;
     diagnostics.push(...finalization.diagnostics);
     let retryCount = previous?.retry_count ?? 0;
+    assertSynchronizationBudget(input.control);
     try {
       const ledger = appendTerminalTaskAttempts({
         layout: input.layout,

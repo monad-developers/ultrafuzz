@@ -110,6 +110,22 @@ export interface WorkflowRunLinkJournalEntry {
   committed_at?: string;
 }
 
+export interface WorkflowMutationLockControl {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+export class WorkflowMutationLockInterruptedError extends Error {
+  constructor(readonly reason: "cancelled" | "deadline") {
+    super(
+      reason === "cancelled"
+        ? "workflow mutation lock acquisition was cancelled"
+        : "workflow mutation lock acquisition exceeded its synchronization deadline"
+    );
+    this.name = "WorkflowMutationLockInterruptedError";
+  }
+}
+
 interface WorkflowRunLinkJournal {
   schema_version: typeof WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION;
   run_id: string;
@@ -143,8 +159,11 @@ export interface WorkflowLifecycleGeneration {
   invoking: boolean;
 }
 
-export async function acquireWorkflowMutationLock(layout: RunLayout): Promise<() => Promise<void>> {
-  return acquireOwnedWorkflowMutationLock(layout);
+export async function acquireWorkflowMutationLock(
+  layout: RunLayout,
+  control: WorkflowMutationLockControl = {}
+): Promise<() => Promise<void>> {
+  return acquireOwnedWorkflowMutationLock(layout, control);
 }
 
 export async function acquireWorkflowLifecycleActionLock(layout: RunLayout): Promise<() => Promise<void>> {
@@ -545,24 +564,41 @@ interface WorkflowRunLockOwner {
   acquired_at: string;
 }
 
-async function acquireOwnedWorkflowMutationLock(layout: RunLayout): Promise<() => Promise<void>> {
+async function acquireOwnedWorkflowMutationLock(
+  layout: RunLayout,
+  control: WorkflowMutationLockControl
+): Promise<() => Promise<void>> {
   return acquireOwnedRunLock(layout, {
     lockName: WORKFLOW_MUTATION_LOCK,
     stale: WORKFLOW_MUTATION_LOCK_STALE_MS,
     waitMs: 5 * 60 * 1_000,
-    label: "workflow mutation lock"
+    label: "workflow mutation lock",
+    ...control
   });
 }
 
 async function acquireOwnedRunLock(
   layout: RunLayout,
-  options: { lockName: string; stale: number; waitMs: number; label: string }
+  options: {
+    lockName: string;
+    stale: number;
+    waitMs: number;
+    label: string;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  }
 ): Promise<() => Promise<void>> {
   const root = anchoredRunRoot(layout);
   const lockPath = path.join(root, options.lockName);
   assertPathInside(root, lockPath, options.label);
   assertNoSymlinkComponents(root, lockPath, options.label);
-  const deadline = Date.now() + options.waitMs;
+  if (workflowRunLockCancelled(options.signal)) throw new WorkflowMutationLockInterruptedError("cancelled");
+  const externallyBounded = options.timeoutMs !== undefined;
+  if (externallyBounded && (!Number.isFinite(options.timeoutMs) || options.timeoutMs! <= 0)) {
+    throw new WorkflowMutationLockInterruptedError("deadline");
+  }
+  const waitMs = Math.max(0, Math.min(options.waitMs, options.timeoutMs ?? options.waitMs));
+  const deadline = Date.now() + waitMs;
   let release: (() => Promise<void>) | undefined;
   while (release === undefined) {
     try {
@@ -577,9 +613,17 @@ async function acquireOwnedRunLock(
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ELOCKED" && code !== "ENOENT") throw error;
-      if (Date.now() >= deadline) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      if (workflowRunLockCancelled(options.signal)) throw new WorkflowMutationLockInterruptedError("cancelled");
+      if (Date.now() >= deadline) {
+        if (externallyBounded) throw new WorkflowMutationLockInterruptedError("deadline");
+        throw error;
+      }
+      await waitForWorkflowRunLockRetry(Math.min(250, Math.max(1, deadline - Date.now())), options.signal);
     }
+  }
+  if (workflowRunLockCancelled(options.signal) || (externallyBounded && Date.now() >= deadline)) {
+    await release();
+    throw new WorkflowMutationLockInterruptedError(workflowRunLockCancelled(options.signal) ? "cancelled" : "deadline");
   }
   const ownerPath = path.join(lockPath, WORKFLOW_MUTATION_LOCK_OWNER);
   const processStart = workflowMutationProcessStartToken(process.pid);
@@ -614,6 +658,27 @@ async function acquireOwnedRunLock(
     fs.unlinkSync(ownerPath);
     await release();
   };
+}
+
+function waitForWorkflowRunLockRetry(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (workflowRunLockCancelled(signal)) return Promise.reject(new WorkflowMutationLockInterruptedError("cancelled"));
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => reject(new WorkflowMutationLockInterruptedError("cancelled")));
+    const timer = setTimeout(() => finish(resolve), ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function workflowRunLockCancelled(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 function reclaimTerminatedWorkflowRunLock(layout: RunLayout, lockPath: string, label: string): void {

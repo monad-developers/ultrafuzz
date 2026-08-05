@@ -43,6 +43,14 @@ const KIMI_REMOTE_QUIESCENCE_MAX_DELAY_MS = 2_000;
 const KIMI_CREDENTIAL_RECOVERY_FILE = "kimi-credential-recovery.json";
 const MAX_KIMI_CREDENTIAL_CANDIDATE_BYTES = 1024 * 1024;
 const MAX_RESULT_WAIT_MS = 24 * 60 * 60 * 1000;
+const MODAL_NODE_SHUTDOWN_TIMEOUT_MS = 30_000;
+
+export interface ModalNodeShutdownHooks {
+  /** @internal Test-only monotonic clock injection. */
+  now?: () => number;
+  /** @internal Test-only shutdown timeout injection. */
+  timeoutMs?: number;
+}
 
 export interface ModalNodeSandboxProviderOptions {
   app: string;
@@ -59,6 +67,8 @@ export interface ModalNodeSandboxProviderOptions {
   kimiExecutionLease?: typeof acquireKimiModalNodeExecutionLease;
   /** @internal Test-only remote quiescence timing injection. */
   kimiRemoteQuiescence?: KimiRemoteQuiescenceHooks;
+  /** @internal Test-only sandbox shutdown timing injection. */
+  modalShutdown?: ModalNodeShutdownHooks;
 }
 
 export class ModalNodeCleanupRefusedError extends Error {
@@ -462,7 +472,7 @@ async function runModalNodeSandbox(
             : aggregateWithPrimary(pendingExecutionError, publicationError);
       }
     }
-    await terminateAndConfirmStopped(sandbox);
+    await terminateAndConfirmStopped(sandbox, modalNodeShutdownBudget(options.modalShutdown));
     sandboxTerminationHandled = true;
 
     if (preparedAuth.kimi !== undefined) {
@@ -537,8 +547,22 @@ async function runModalNodeSandbox(
       () => client?.close(),
       kimiExecutionLease === undefined
         ? undefined
-        : async () => {
+        : async (terminationConfirmed) => {
             if (!kimiRemoteProofRequired) return;
+            if (!terminationConfirmed) {
+              // An unproven remote shutdown must leave the durable credential
+              // fence unresolved while still disposing this process's lock and
+              // descriptor handles. The next acquisition is then responsible
+              // for proving remote quiescence before it can use the credential.
+              await kimiExecutionLease.markRotationPossible();
+              kimiRotationPossible = true;
+              try {
+                await kimiExecutionLease.release();
+              } finally {
+                kimiRemoteProofRequired = false;
+              }
+              return;
+            }
             if (kimiRemoteProofScope === undefined) {
               throw new Error("cloud Kimi credential lease remote quiescence scope is unavailable");
             }
@@ -574,7 +598,8 @@ async function runModalNodeSandbox(
             }
             await kimiExecutionLease.release();
             kimiRemoteProofRequired = false;
-          }
+          },
+      options.modalShutdown
     );
   } catch (error) {
     finalizationTerminationUnproven = error instanceof ModalNodeFinalizationError && error.terminationUnproven;
@@ -645,25 +670,30 @@ export async function finalizeModalNodeSandbox(
   cleanup: () => void,
   sandbox: Sandbox | undefined,
   close: () => void,
-  afterTermination?: () => Promise<void> | void
+  afterTermination?: (terminationConfirmed: boolean) => Promise<void> | void,
+  shutdownHooks: ModalNodeShutdownHooks = {}
 ): Promise<void> {
   let cleanupError: unknown;
   let terminationError: unknown;
   let afterTerminationError: unknown;
   let closeError: unknown;
+  let terminationConfirmed = sandbox === undefined;
   try {
     cleanup();
   } catch (error) {
     cleanupError = error;
   }
   try {
-    if (sandbox !== undefined) await terminateAndConfirmStopped(sandbox);
+    if (sandbox !== undefined) {
+      await terminateAndConfirmStopped(sandbox, modalNodeShutdownBudget(shutdownHooks));
+      terminationConfirmed = true;
+    }
   } catch (error) {
     terminationError = error;
   }
-  if (terminationError === undefined && afterTermination !== undefined) {
+  if (afterTermination !== undefined) {
     try {
-      await afterTermination();
+      await afterTermination(terminationConfirmed);
     } catch (error) {
       afterTerminationError = error;
     }
@@ -695,6 +725,12 @@ export async function finalizeModalNodeSandbox(
     cause,
     terminationError !== undefined || afterTerminationError !== undefined
   );
+}
+
+function modalNodeShutdownBudget(hooks: ModalNodeShutdownHooks = {}): MonotonicDeadline {
+  const now = hooks.now ?? (() => performance.now());
+  const timeoutMs = Math.max(1, Math.floor(hooks.timeoutMs ?? MODAL_NODE_SHUTDOWN_TIMEOUT_MS));
+  return { deadline: now() + timeoutMs, now };
 }
 
 export function cleanupModalNodeLocalState(...cleanups: Array<(() => void) | undefined>): void {
@@ -2355,7 +2391,7 @@ async function beforeMonotonicDeadline<T>(
 ): Promise<T> {
   const remaining = budget.deadline - budget.now();
   if (remaining <= 0) {
-    throw new Error(`${label} exceeded the remote quiescence deadline`);
+    throw new Error(`${label} exceeded its monotonic deadline`);
   }
   return new Promise<T>((resolve, reject) => {
     let settled = false;
@@ -2366,7 +2402,7 @@ async function beforeMonotonicDeadline<T>(
       callback();
     };
     const timeout = setTimeout(
-      () => finish(() => reject(new Error(`${label} exceeded the remote quiescence deadline`))),
+      () => finish(() => reject(new Error(`${label} exceeded its monotonic deadline`))),
       Math.max(1, Math.ceil(remaining))
     );
     void Promise.resolve()
@@ -2375,7 +2411,7 @@ async function beforeMonotonicDeadline<T>(
         (value) =>
           finish(() => {
             if (budget.now() >= budget.deadline) {
-              reject(new Error(`${label} exceeded the remote quiescence deadline`));
+              reject(new Error(`${label} exceeded its monotonic deadline`));
             } else {
               resolve(value);
             }

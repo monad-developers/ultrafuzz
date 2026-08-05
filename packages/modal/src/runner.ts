@@ -163,36 +163,142 @@ const MODAL_FINGERPRINT_TAG = /^[a-f0-9]{64}$/u;
 const KIMI_SHARED_CREDENTIAL_SOURCE_SHA256_SUFFIX = ".ultrafuzz-source-refresh-token.sha256";
 const CLOUD_AUTH_VOLUME_STAGE_HELPERS = `
 const sleepState = new Int32Array(new SharedArrayBuffer(4));
+const stageLockSchema = "ultrafuzz.modal.kimi-stage-lock.v1";
 const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const fsyncDirectory = (directory) => {
   const descriptor = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
   try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
 };
-const acquireVolumeStageLock = (destination, timeoutMs = 120000) => {
+const safeSandboxId = (value) =>
+  typeof value === "string" && value.length > 0 && value.length <= 255 && !/[\\u0000\\r\\n]/.test(value);
+const processStartToken = (pid) => {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  try {
+    const stat = fs.readFileSync("/proc/" + pid + "/stat", "utf8");
+    const commandEnd = stat.lastIndexOf(") ");
+    if (commandEnd < 0) return undefined;
+    const start = stat.slice(commandEnd + 2).trim().split(/\\s+/)[19];
+    return /^\\d+$/.test(start ?? "") ? "linux-proc-stat:" + start : undefined;
+  } catch { return undefined; }
+};
+const validStageLockOwner = (value) =>
+  value && typeof value === "object" && !Array.isArray(value) &&
+  value.schema_version === stageLockSchema && safeSandboxId(value.sandbox_id) &&
+  Number.isSafeInteger(value.pid) && value.pid > 0 &&
+  typeof value.process_start === "string" && /^linux-proc-stat:\\d+$/.test(value.process_start) &&
+  typeof value.nonce === "string" && /^[0-9a-f-]{36}$/.test(value.nonce);
+const sameStageLockOwner = (left, right) =>
+  validStageLockOwner(left) && validStageLockOwner(right) &&
+  left.schema_version === right.schema_version && left.sandbox_id === right.sandbox_id &&
+  left.pid === right.pid && left.process_start === right.process_start && left.nonce === right.nonce;
+const stageLockPaths = (destination) => ({
+  parent: path.dirname(destination),
+  lock: destination + ".ultrafuzz-stage.lock",
+  ownerPath: path.join(destination + ".ultrafuzz-stage.lock", "owner.json")
+});
+const assertStageLockDirectory = (lock) => {
+  const current = fs.lstatSync(lock);
+  if (!current.isDirectory() || current.isSymbolicLink() || current.uid !== process.geteuid() ||
+      current.gid !== process.getegid() || (current.mode & 0o077) !== 0) {
+    throw new Error("persistent credential stage lock is unsafe");
+  }
+};
+const readStageLockOwnerAt = (lock) => {
+  assertStageLockDirectory(lock);
+  const ownerPath = path.join(lock, "owner.json");
+  let descriptor;
+  try {
+    descriptor = fs.openSync(ownerPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.geteuid() || stat.gid !== process.getegid() ||
+        (stat.mode & 0o077) !== 0 || stat.size <= 0 || stat.size > 4096) {
+      throw new Error("persistent credential stage lock owner is unsafe");
+    }
+    const owner = JSON.parse(fs.readFileSync(descriptor, "utf8"));
+    if (!validStageLockOwner(owner)) throw new Error("persistent credential stage lock owner is invalid");
+    return owner;
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      throw new Error("persistent credential stage lock owner is missing", { cause: error });
+    }
+    throw error;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+};
+const readVolumeStageLockOwner = (destination) => {
+  const { lock } = stageLockPaths(destination);
+  try { assertStageLockDirectory(lock); } catch (error) {
+    if (error && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+  return readStageLockOwnerAt(lock);
+};
+const reclaimVolumeStageLock = (destination, expectedOwner) => {
+  if (!validStageLockOwner(expectedOwner)) throw new Error("persistent credential stage lock reclaim owner is invalid");
+  const { parent, lock } = stageLockPaths(destination);
+  const currentOwner = readVolumeStageLockOwner(destination);
+  if (!sameStageLockOwner(currentOwner, expectedOwner)) {
+    throw new Error("persistent credential stage lock ownership changed before reclaim");
+  }
+  const reclaimed = lock + ".reclaimed-" + crypto.randomUUID();
+  fs.renameSync(lock, reclaimed);
+  try {
+    const moved = readStageLockOwnerAt(reclaimed);
+    if (!sameStageLockOwner(moved, expectedOwner)) {
+      throw new Error("persistent credential stage lock ownership changed during reclaim");
+    }
+    fs.rmSync(reclaimed, { recursive: true });
+    fsyncDirectory(parent);
+  } catch (error) {
+    if (!fs.existsSync(lock) && fs.existsSync(reclaimed)) fs.renameSync(reclaimed, lock);
+    throw error;
+  }
+};
+const acquireVolumeStageLock = (destination, sandboxId, timeoutMs = 120000) => {
+  if (!safeSandboxId(sandboxId)) throw new Error("persistent credential stage sandbox identity is invalid");
   const parent = path.dirname(destination);
   const lock = destination + ".ultrafuzz-stage.lock";
-  const owner = crypto.randomUUID();
-  const ownerPath = path.join(lock, "owner");
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    const nonce = crypto.randomUUID();
+    const temporary = lock + ".pending-" + nonce;
+    const owner = {
+      schema_version: stageLockSchema,
+      sandbox_id: sandboxId,
+      pid: process.pid,
+      process_start: processStartToken(process.pid),
+      nonce
+    };
+    if (!validStageLockOwner(owner)) throw new Error("persistent credential stage lock owner identity is unavailable");
     try {
-      fs.mkdirSync(lock, { mode: 0o700 });
-      fs.writeFileSync(ownerPath, owner, { encoding: "utf8", flag: "wx", mode: 0o600 });
-      const ownerDescriptor = fs.openSync(ownerPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      fs.mkdirSync(temporary, { mode: 0o700 });
+      const temporaryOwnerPath = path.join(temporary, "owner.json");
+      fs.writeFileSync(temporaryOwnerPath, JSON.stringify(owner) + "\\n", { encoding: "utf8", flag: "wx", mode: 0o600 });
+      const ownerDescriptor = fs.openSync(temporaryOwnerPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
       try { fs.fsyncSync(ownerDescriptor); } finally { fs.closeSync(ownerDescriptor); }
-      fsyncDirectory(lock);
+      fsyncDirectory(temporary);
+      fs.renameSync(temporary, lock);
       fsyncDirectory(parent);
       return () => {
-        if (fs.readFileSync(ownerPath, "utf8") !== owner) throw new Error("persistent credential stage lock ownership changed");
+        const currentOwner = readVolumeStageLockOwner(destination);
+        if (!sameStageLockOwner(currentOwner, owner)) throw new Error("persistent credential stage lock ownership changed");
         fs.rmSync(lock, { recursive: true });
         fsyncDirectory(parent);
       };
     } catch (error) {
-      if (!error || error.code !== "EEXIST") throw error;
-      const current = fs.lstatSync(lock);
-      if (!current.isDirectory() || current.isSymbolicLink() || current.uid !== process.geteuid() ||
-          current.gid !== process.getegid() || (current.mode & 0o077) !== 0) {
-        throw new Error("persistent credential stage lock is unsafe");
+      if (fs.existsSync(temporary)) fs.rmSync(temporary, { recursive: true });
+      if (!error || (error.code !== "EEXIST" && error.code !== "ENOTEMPTY")) throw error;
+      const currentOwner = readVolumeStageLockOwner(destination);
+      if (currentOwner === undefined) continue;
+      if (currentOwner.sandbox_id !== sandboxId) {
+        const foreign = new Error("persistent credential stage lock is owned by another sandbox");
+        foreign.code = "ULTRAFUZZ_FOREIGN_STAGE_LOCK";
+        throw foreign;
+      }
+      if (processStartToken(currentOwner.pid) !== currentOwner.process_start) {
+        reclaimVolumeStageLock(destination, currentOwner);
+        continue;
       }
       if (Date.now() >= deadline) throw new Error("persistent credential stage lock timed out");
       Atomics.wait(sleepState, 0, 0, 100);
@@ -200,12 +306,31 @@ const acquireVolumeStageLock = (destination, timeoutMs = 120000) => {
   }
 };
 `;
+export const KIMI_SHARED_CREDENTIAL_STAGE_LOCK_INSPECT_SCRIPT = `
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const path = require("node:path");
+${CLOUD_AUTH_VOLUME_STAGE_HELPERS}
+const [destination] = process.argv.slice(1);
+const owner = readVolumeStageLockOwner(destination);
+process.stdout.write(JSON.stringify(owner === undefined ? { state: "absent" } : { state: "owned", owner }) + "\\n");
+`;
+export const KIMI_SHARED_CREDENTIAL_STAGE_LOCK_RECLAIM_SCRIPT = `
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const path = require("node:path");
+${CLOUD_AUTH_VOLUME_STAGE_HELPERS}
+const [destination, encodedOwner] = process.argv.slice(1);
+const expectedOwner = JSON.parse(Buffer.from(encodedOwner, "base64url").toString("utf8"));
+reclaimVolumeStageLock(destination, expectedOwner);
+process.stdout.write('{"reclaimed":true}\\n');
+`;
 export const KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT = `
 const fs = require("node:fs");
 const crypto = require("node:crypto");
 const path = require("node:path");
 ${CLOUD_AUTH_VOLUME_STAGE_HELPERS}
-const [pending, destination, mode = "resume"] = process.argv.slice(1);
+const [pending, destination, mode = "resume", sandboxId] = process.argv.slice(1);
 if (mode !== "fresh" && mode !== "resume") {
   throw new Error("Kimi credential staging mode must be fresh or resume");
 }
@@ -233,7 +358,7 @@ const token = (file) => {
     return {};
   }
 };
-const releaseStageLock = acquireVolumeStageLock(destination);
+const releaseStageLock = acquireVolumeStageLock(destination, sandboxId);
 try {
 const pendingDescriptor = fs.openSync(
   pending,
@@ -674,6 +799,7 @@ export interface ModalLaunchStagingInput {
   statePath: string;
   state: ModalLaunchState;
   auth?: SubscriptionAuthCopy;
+  sandboxes: Pick<ModalClient["sandboxes"], "fromId">;
 }
 
 async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
@@ -829,7 +955,7 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       // that dies in the tiny create/commit window is recovered by exact tags.
       markModalSandboxCreated(record, sandbox.sandboxId);
       await writeModalLaunchState(input.statePath, input.state);
-      await finishReservedModalLaunch(input, record, sandbox);
+      await finishReservedModalLaunch({ ...input, sandboxes: input.modal.sandboxes }, record, sandbox);
       return;
     } catch (error) {
       const modelMayHaveStarted = record.phase === "launched";
@@ -890,7 +1016,7 @@ async function recoverExistingSandboxLaunch(
   sandbox: Sandbox
 ): Promise<void> {
   try {
-    await finishReservedModalLaunch(input, record, sandbox);
+    await finishReservedModalLaunch({ ...input, sandboxes: input.modal.sandboxes }, record, sandbox);
   } catch (error) {
     const modelMayHaveStarted = record.phase === "launched";
     const terminationConfirmed = await terminateModalSandbox(sandbox);
@@ -939,7 +1065,8 @@ export async function finishReservedModalLaunch(
       input.configPath,
       modalWorkerLineage(input.state, record),
       input.auth,
-      record.remote_root
+      record.remote_root,
+      input.sandboxes
     );
     markModalLaunchReady(record);
     await writeModalLaunchState(input.statePath, input.state);
@@ -955,7 +1082,8 @@ async function stageLaunchFiles(
   configPath: string,
   lineage: ReturnType<typeof modalWorkerLineage>,
   auth: SubscriptionAuthCopy | undefined,
-  remoteRoot?: string
+  remoteRoot: string | undefined,
+  sandboxes: Pick<ModalClient["sandboxes"], "fromId">
 ): Promise<void> {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "ultrafuzz-modal-lineage-"));
   const lineagePath = path.join(temporary, "lineage.json");
@@ -967,7 +1095,7 @@ async function stageLaunchFiles(
     await runChecked(sandbox, ["chmod", "600", REMOTE_CONFIG_PATH, REMOTE_LINEAGE_PATH]);
     if (auth !== undefined) {
       for (const entry of subscriptionAuthEntries(auth)) {
-        await stageSubscriptionAuthEntry(sandbox, entry, remoteRoot, lineage.workspace_mode);
+        await stageSubscriptionAuthEntry(sandbox, entry, remoteRoot, lineage.workspace_mode, sandboxes);
       }
     }
   } finally {
@@ -987,14 +1115,15 @@ async function stageSubscriptionAuthEntry(
   sandbox: Sandbox,
   entry: SubscriptionAuthCopyEntry,
   remoteRoot: string | undefined,
-  workspaceMode: ModalLaunchMode
+  workspaceMode: ModalLaunchMode,
+  sandboxes: Pick<ModalClient["sandboxes"], "fromId">
 ): Promise<void> {
   await access(entry.source);
   const source = await lstat(entry.source);
   const kimiSharedCredential = kimiSharedAuthCredentialDestination(entry.destination, remoteRoot);
   if (kimiSharedCredential !== undefined) {
     if (!source.isFile()) throw new Error(`Kimi subscription credential source must be a file: ${entry.source}`);
-    await stageKimiSharedCredential(sandbox, entry.source, kimiSharedCredential, workspaceMode);
+    await stageKimiSharedCredential(sandbox, entry.source, kimiSharedCredential, workspaceMode, sandboxes);
     return;
   }
   await runChecked(sandbox, ["install", "-d", "-m", "700", path.posix.dirname(entry.destination)]);
@@ -1020,7 +1149,8 @@ async function stageKimiSharedCredential(
   sandbox: Sandbox,
   source: string,
   destination: string,
-  workspaceMode: ModalLaunchMode
+  workspaceMode: ModalLaunchMode,
+  sandboxes: Pick<ModalClient["sandboxes"], "fromId">
 ): Promise<void> {
   const sharedHome = path.posix.dirname(path.posix.dirname(destination));
   const pending = `${destination}.pending-${randomUUID()}`;
@@ -1028,11 +1158,117 @@ async function stageKimiSharedCredential(
     await runChecked(sandbox, ["install", "-d", "-m", "700", path.posix.dirname(destination)]);
     await runChecked(sandbox, ["install", "-d", "-m", "700", path.posix.join(sharedHome, "oauth")]);
     await sandbox.filesystem.copyFromLocal(source, pending);
-    await runChecked(sandbox, ["node", "-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, workspaceMode]);
+    for (let attempt = 0; ; attempt += 1) {
+      await reclaimStoppedForeignKimiStageLock(sandbox, destination, sandboxes);
+      try {
+        await runChecked(sandbox, [
+          "node",
+          "-e",
+          KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT,
+          pending,
+          destination,
+          workspaceMode,
+          sandbox.sandboxId
+        ]);
+        break;
+      } catch (error) {
+        if (
+          attempt >= 1 ||
+          !errorMessageIncludes(error, "persistent credential stage lock is owned by another sandbox")
+        ) {
+          throw error;
+        }
+      }
+    }
     await runChecked(sandbox, ["chmod", "-R", "go-rwx", sharedHome]);
   } finally {
     await runChecked(sandbox, ["rm", "-f", pending]).catch(() => undefined);
   }
+}
+
+interface KimiStageLockOwner {
+  schema_version: "ultrafuzz.modal.kimi-stage-lock.v1";
+  sandbox_id: string;
+  pid: number;
+  process_start: string;
+  nonce: string;
+}
+
+export async function reclaimStoppedForeignKimiStageLock(
+  sandbox: Sandbox,
+  destination: string,
+  sandboxes: Pick<ModalClient["sandboxes"], "fromId">
+): Promise<void> {
+  const inspected = parseKimiStageLockInspection(
+    await runCheckedOutput(sandbox, ["node", "-e", KIMI_SHARED_CREDENTIAL_STAGE_LOCK_INSPECT_SCRIPT, destination])
+  );
+  if (inspected.state === "absent" || inspected.owner.sandbox_id === sandbox.sandboxId) return;
+
+  let ownerStopped: boolean;
+  let ownerSandbox: Sandbox | undefined;
+  try {
+    ownerSandbox = await sandboxes.fromId(inspected.owner.sandbox_id);
+    ownerStopped = (await ownerSandbox.poll()) !== null;
+  } catch (error) {
+    if (error instanceof NotFoundError) ownerStopped = true;
+    else throw new Error("foreign persistent credential stage lock owner state could not be proven", { cause: error });
+  } finally {
+    ownerSandbox?.detach();
+  }
+  if (!ownerStopped) {
+    throw new Error("persistent credential stage lock owner sandbox is still running");
+  }
+  const encodedOwner = Buffer.from(JSON.stringify(inspected.owner), "utf8").toString("base64url");
+  await runChecked(sandbox, [
+    "node",
+    "-e",
+    KIMI_SHARED_CREDENTIAL_STAGE_LOCK_RECLAIM_SCRIPT,
+    destination,
+    encodedOwner
+  ]);
+}
+
+function parseKimiStageLockInspection(
+  value: string
+): { state: "absent" } | { state: "owned"; owner: KimiStageLockOwner } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error("persistent credential stage lock inspection is invalid", { cause: error });
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("persistent credential stage lock inspection is invalid");
+  }
+  const state = (parsed as { state?: unknown }).state;
+  if (state === "absent") return { state };
+  const owner = (parsed as { owner?: unknown }).owner;
+  if (
+    state !== "owned" ||
+    typeof owner !== "object" ||
+    owner === null ||
+    Array.isArray(owner) ||
+    (owner as { schema_version?: unknown }).schema_version !== "ultrafuzz.modal.kimi-stage-lock.v1" ||
+    typeof (owner as { sandbox_id?: unknown }).sandbox_id !== "string" ||
+    (owner as { sandbox_id: string }).sandbox_id.length === 0 ||
+    (owner as { sandbox_id: string }).sandbox_id.length > 255 ||
+    (owner as { sandbox_id: string }).sandbox_id.includes("\0") ||
+    (owner as { sandbox_id: string }).sandbox_id.includes("\r") ||
+    (owner as { sandbox_id: string }).sandbox_id.includes("\n") ||
+    !Number.isSafeInteger((owner as { pid?: unknown }).pid) ||
+    Number((owner as { pid?: unknown }).pid) <= 0 ||
+    typeof (owner as { process_start?: unknown }).process_start !== "string" ||
+    !/^linux-proc-stat:\d+$/u.test((owner as { process_start: string }).process_start) ||
+    typeof (owner as { nonce?: unknown }).nonce !== "string" ||
+    !/^[0-9a-f-]{36}$/u.test((owner as { nonce: string }).nonce)
+  ) {
+    throw new Error("persistent credential stage lock inspection is invalid");
+  }
+  return { state, owner: owner as KimiStageLockOwner };
+}
+
+function errorMessageIncludes(error: unknown, expected: string): boolean {
+  return error instanceof Error && error.message.includes(expected);
 }
 
 function normalizedSha256(value: string | undefined): string | undefined {
@@ -1490,6 +1726,7 @@ export async function overseeModalBenchmarkOnce(
                 recoveryStatePath,
                 configPath,
                 auth,
+                sandboxes: modal.sandboxes,
                 now
               });
             } finally {
@@ -1706,6 +1943,7 @@ async function finishReservedModalRecoveryWorker(input: {
   recoveryStatePath: string;
   configPath: string;
   auth?: SubscriptionAuthCopy;
+  sandboxes: Pick<ModalClient["sandboxes"], "fromId">;
   now: () => number;
 }): Promise<ModalRecoveryRowState> {
   const published = await readOptionalModalSandboxText(input.sandbox.filesystem, REMOTE_LAUNCH_READY_PATH);
@@ -1731,7 +1969,8 @@ async function finishReservedModalRecoveryWorker(input: {
       input.configPath,
       modalWorkerLineage(input.launchState, input.launch),
       input.auth,
-      input.launch.remote_root
+      input.launch.remote_root,
+      input.sandboxes
     );
   }
   const now = new Date(input.now()).toISOString();
@@ -1847,6 +2086,7 @@ async function launchModalRecoveryWorker(input: {
         recoveryStatePath: input.recoveryStatePath,
         configPath: input.configPath,
         auth,
+        sandboxes: input.modal.sandboxes,
         now: input.now
       });
       sandbox.detach();
@@ -2931,6 +3171,10 @@ function assertStateImage(state: ModalLaunchState, image: Image): void {
 }
 
 async function runChecked(sandbox: Sandbox, argv: string[]): Promise<void> {
+  await runCheckedOutput(sandbox, argv);
+}
+
+async function runCheckedOutput(sandbox: Sandbox, argv: string[]): Promise<string> {
   const processHandle = await sandbox.exec(argv);
   const stdin = processHandle.stdin.getWriter();
   await stdin.close();
@@ -2943,6 +3187,7 @@ async function runChecked(sandbox: Sandbox, argv: string[]): Promise<void> {
     const detail = [stdoutText, stderrText].filter((value) => value !== "").join("\n");
     throw new Error(`${argv[0]} failed with exit code ${returnCode}${detail === "" ? "" : `\n${detail}`}`);
   }
+  return stdoutText;
 }
 
 async function drainStream(stream: ReadableStream<string>, limit = 12_000): Promise<string> {

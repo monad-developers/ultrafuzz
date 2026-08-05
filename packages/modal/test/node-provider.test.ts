@@ -167,7 +167,7 @@ describe("Modal node sandbox provider", () => {
       )
     ).rejects.toThrow("local cleanup failed");
     expect(sandbox.terminate).toHaveBeenCalledOnce();
-    expect(release).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledWith(true);
     expect(close).toHaveBeenCalledOnce();
   });
 
@@ -276,7 +276,7 @@ describe("Modal node sandbox provider", () => {
       message: "cloud node sandbox remained live after termination"
     });
     expect(sandbox.terminate).toHaveBeenCalledOnce();
-    expect(release).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledWith(false);
     expect(closeError.message).toBe("client close failed");
   });
 
@@ -1767,15 +1767,17 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     }
   });
 
-  it("fails closed when termination cannot prove that a published-result sandbox stopped", async () => {
+  it("bounds both normal and finalizer shutdown when published-result termination never settles", async () => {
     const fixture = createProjectFixture();
     const result = createResultArchive();
     const sandbox = fakeSandbox(result);
-    sandbox.terminate = vi.fn(async () => {
-      throw new Error("provider-secret-value termination failed");
+    sandbox.terminate = vi.fn(() => new Promise<number>(() => undefined)) as never;
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(fakeClient({ listed: [sandbox] })),
+      modalShutdown: { timeoutMs: 25 }
     });
-    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
     try {
+      const shutdownStartedAt = Date.now();
       const run = provider.run({
         runId: "controller-run",
         sandboxId: "node:attempt",
@@ -1783,8 +1785,10 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
         rootDir: fixture.root,
         heartbeat: vi.fn()
       });
-      await expect(run).rejects.toThrow("remained live after termination");
-      await expect(run).rejects.not.toThrow("provider-secret-value");
+      const failure = await Promise.resolve(run).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(errorGraphText(failure)).toContain("monotonic deadline");
+      expect(Date.now() - shutdownStartedAt).toBeLessThan(2_000);
       expect(sandbox.poll).toHaveBeenCalled();
       expect(fs.readFileSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"), "utf8")).toBe("stale\n");
       expect(fs.existsSync(path.join(fixture.root, fixture.input.artifact_dir, "finding.json"))).toBe(false);
@@ -3100,7 +3104,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     }
   });
 
-  it("keeps a Kimi execution lease held when sandbox termination cannot be proven", async () => {
+  it("bounds stuck shutdown and releases the local Kimi lease behind a durable unresolved fence", async () => {
     const fixture = createProjectFixture();
     const kimiSource = createKimiSubscriptionFixture();
     const sandbox = fakeSandbox(undefined);
@@ -3112,11 +3116,11 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
         ? fakeContainerProcess({ wait: () => new Promise<number>(() => undefined) })
         : fakeContainerProcess()
     ) as never;
-    sandbox.terminate = vi.fn(async () => {
-      throw new Error("termination failed");
-    });
+    sandbox.poll = vi.fn(() => new Promise<number | null>(() => undefined));
+    sandbox.terminate = vi.fn(() => new Promise<number>(() => undefined)) as never;
     const releaseLease = vi.fn(async () => undefined);
-    const acquireLease = vi.fn(async () => testKimiExecutionLease(kimiSource, releaseLease));
+    const lease = testKimiExecutionLease(kimiSource, releaseLease);
+    const acquireLease = vi.fn(async () => lease);
     fixture.input.agent_auth = {
       agent: "KimiAgent",
       provider: "kimi",
@@ -3125,7 +3129,8 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     fixture.input.agent_model = "kimi-k3";
     const provider = createModalNodeSandboxProvider({
       ...providerOptions(fakeClient({ created: sandbox })),
-      kimiExecutionLease: acquireLease as never
+      kimiExecutionLease: acquireLease as never,
+      modalShutdown: { timeoutMs: 25 }
     });
     const controller = new AbortController();
     try {
@@ -3142,10 +3147,15 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
           expect.arrayContaining(["node", expect.stringContaining("node-worker")])
         )
       );
+      const shutdownStartedAt = Date.now();
       controller.abort();
-      await expect(running).rejects.toThrow("remained live after termination");
+      const failure = await Promise.resolve(running).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(errorGraphText(failure)).toContain("deadline");
+      expect(Date.now() - shutdownStartedAt).toBeLessThan(2_000);
       expect(acquireLease).toHaveBeenCalledOnce();
-      expect(releaseLease).not.toHaveBeenCalled();
+      expect(lease.markRotationPossible).toHaveBeenCalled();
+      expect(releaseLease).toHaveBeenCalledOnce();
     } finally {
       fixture.cleanup();
       fs.rmSync(kimiSource, { recursive: true, force: true });

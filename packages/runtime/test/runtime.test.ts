@@ -63,6 +63,7 @@ import {
   validateProject
 } from "../src/index.js";
 import {
+  acquireWorkflowMutationLock,
   acquireWorkflowLifecycleActionLock,
   prepareWorkflowLifecycleAction,
   prepareWorkflowRunLink,
@@ -78,6 +79,7 @@ import {
   verifyWorkflowControlSnapshot,
   workflowControlGeneration
 } from "../src/workflow-integrity.js";
+import { withLinkedWorkflowExecution } from "../src/workflow-sync.js";
 import { sha256Stable } from "../src/utils.js";
 
 const runningUnderBun = typeof process.versions.bun === "string";
@@ -872,6 +874,8 @@ function fakeLifecycleSmithersEnv(
     forkRunId?: string;
     forkTimelineRunId?: string;
     outputOverrides?: Record<string, unknown>;
+    outputStartedMarkerPath?: string;
+    outputReleaseMarkerPath?: string;
     allowMissingVerifierArtifacts?: boolean;
     inspectExitCode?: number;
     persistedWorkflowPathLog?: string;
@@ -1196,6 +1200,12 @@ process.stdout.write(JSON.stringify({
       "    esac",
       "    ;;",
       "  output)",
+      ...(input.outputStartedMarkerPath === undefined
+        ? []
+        : [`    touch ${shellQuote(input.outputStartedMarkerPath)}`]),
+      ...(input.outputReleaseMarkerPath === undefined
+        ? []
+        : [`    while [ ! -e ${shellQuote(input.outputReleaseMarkerPath)} ]; do sleep 0.01; done`]),
       '    node "$SMITHERS_FAKE_OUTPUT_HELPER" "$2" "$3" "$SMITHERS_FAKE_INSPECT" "$SMITHERS_FAKE_EVENTS" "$SMITHERS_FAKE_OUTPUT_OVERRIDES"',
       "    ;;",
       "  timeline)",
@@ -10466,7 +10476,7 @@ test("syncRun honors cancellation and an overall deadline before starting artifa
   assert.ok(
     expiredAfterInspection.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED")
   );
-  assert.equal(clockReads, 2);
+  assert.equal(clockReads, 3);
   assert.equal(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8"), before);
 });
 
@@ -10579,10 +10589,15 @@ test("syncRun aborts or times out a blocked inspection child without durable mut
   const binDir = path.join(project, "blocked-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
+  const inspectStarted = path.join(project, "blocked-inspection-started");
   fs.writeFileSync(
     smithers,
     `#!${process.execPath}
+import fs from "node:fs";
 if (process.argv[2] === "inspect") {
+  if (process.env.SMITHERS_TEST_INSPECT_STARTED) {
+    fs.writeFileSync(process.env.SMITHERS_TEST_INSPECT_STARTED, "started\\n");
+  }
   setInterval(() => {}, 1000);
 } else {
   process.stdout.write('{"ok":true}\\n');
@@ -10592,6 +10607,7 @@ if (process.argv[2] === "inspect") {
   );
   fs.chmodSync(smithers, 0o755);
   const env = createSmithersTestEnvironment(smithers, {
+    SMITHERS_TEST_INSPECT_STARTED: inspectStarted,
     ULTRAFUZZ_PRICING_CATALOG_URL: "off"
   });
   const run = await startRun({ projectRoot: project, runId: "sync-blocked-child", env });
@@ -10600,27 +10616,138 @@ if (process.argv[2] === "inspect") {
   const before = fs.readFileSync(statePath, "utf8");
 
   const controller = new AbortController();
-  const abortTimer = setTimeout(() => controller.abort(), 50);
-  const abortStartedAt = Date.now();
-  const cancelled = await syncRun(
+  const cancelledPromise = syncRun(
     { projectRoot: project, runId: "sync-blocked-child", env },
     { signal: controller.signal }
   );
-  clearTimeout(abortTimer);
+  await waitForPath(inspectStarted);
+  const abortStartedAt = Date.now();
+  controller.abort();
+  const cancelled = await cancelledPromise;
   assert.equal(cancelled.ok, false);
   assert.ok(cancelled.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_CANCELLED"));
   assert.ok(Date.now() - abortStartedAt < 2_000);
   assert.equal(fs.readFileSync(statePath, "utf8"), before);
 
-  const deadlineStartedAt = Date.now();
-  const expired = await syncRun(
+  let deadlineStartedAt = 0;
+  let deadlineAt = 0;
+  const execution = await withLinkedWorkflowExecution(
     { projectRoot: project, runId: "sync-blocked-child", env },
-    { deadlineMs: deadlineStartedAt + 100 }
+    ({ synchronize }) => {
+      deadlineStartedAt = Date.now();
+      deadlineAt = deadlineStartedAt + 100;
+      return synchronize({ deadlineMs: deadlineAt });
+    },
+    () => ({ timeoutMs: Math.max(0, deadlineAt - Date.now()) })
   );
+  assert.equal(execution.ok, true, JSON.stringify(execution));
+  const expired = execution.value;
   assert.equal(expired.ok, false);
   assert.ok(expired.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"));
   assert.ok(Date.now() - deadlineStartedAt < 2_000);
   assert.equal(fs.readFileSync(statePath, "utf8"), before);
+});
+
+test("syncRun interruption during verifier output collection does not poison a successful retry", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-blocked-verifier-output";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const outputStarted = path.join(project, "verifier-output-started");
+  const outputRelease = path.join(project, "verifier-output-release");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ]),
+    outputStartedMarkerPath: outputStarted,
+    outputReleaseMarkerPath: outputRelease
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const attemptsPath = path.join(run.value!.run_root, "attempts.jsonl");
+  const attemptsBefore = fs.readFileSync(attemptsPath, "utf8");
+  const controller = new AbortController();
+
+  const interruptedPromise = syncRun({ projectRoot: project, runId, env }, { signal: controller.signal });
+  await waitForPath(outputStarted);
+  controller.abort();
+  const interrupted = await interruptedPromise;
+  assert.equal(interrupted.ok, false, JSON.stringify(interrupted.diagnostics));
+  assert.ok(interrupted.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_CANCELLED"));
+  assert.equal(fs.readFileSync(attemptsPath, "utf8"), attemptsBefore);
+
+  fs.writeFileSync(outputRelease, "release\n", "utf8");
+  const retried = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(retried.ok, true, JSON.stringify(retried.diagnostics));
+  assert.equal(retried.value?.status, "succeeded");
+  const attempts = fs
+    .readFileSync(attemptsPath, "utf8")
+    .trim()
+    .split(/\r?\n/u)
+    .filter((line) => line !== "")
+    .map((line) => JSON.parse(line) as { outcome?: string });
+  assert.ok(attempts.length > 0);
+  assert.ok(attempts.every((attempt) => attempt.outcome === "succeeded"));
+});
+
+test("syncRun cancellation and deadline bound workflow mutation lock acquisition", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-mutation-lock-budget";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({ workflowRunId, status: "running", state: "running", steps: [] }),
+    events: workflowEvents(workflowRunId, [])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const before = fs.readFileSync(statePath, "utf8");
+  const release = await acquireWorkflowMutationLock(layoutForRunRoot(run.value!.run_root));
+  try {
+    const controller = new AbortController();
+    let abortTimer: NodeJS.Timeout | undefined;
+    const cancelled = await syncRun(
+      { projectRoot: project, runId, env },
+      {
+        signal: controller.signal,
+        beforeCommit: () => {
+          abortTimer = setTimeout(() => controller.abort(), 50);
+        }
+      }
+    );
+    if (abortTimer !== undefined) clearTimeout(abortTimer);
+    assert.equal(cancelled.ok, false, JSON.stringify(cancelled.diagnostics));
+    assert.ok(cancelled.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_CANCELLED"));
+
+    let lockWaitStartedAt = 0;
+    const deadlineControl = {
+      deadlineMs: Date.now() + 60_000,
+      beforeCommit: () => {
+        lockWaitStartedAt = Date.now();
+        deadlineControl.deadlineMs = lockWaitStartedAt + 100;
+      }
+    };
+    const expired = await syncRun({ projectRoot: project, runId, env }, deadlineControl);
+    assert.equal(expired.ok, false, JSON.stringify(expired.diagnostics));
+    assert.ok(expired.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"));
+    assert.ok(lockWaitStartedAt > 0);
+    assert.ok(Date.now() - lockWaitStartedAt < 2_000);
+    assert.equal(fs.readFileSync(statePath, "utf8"), before);
+  } finally {
+    await release();
+  }
 });
 
 test("syncRun rejects conflicting inspect, event, and state evidence before mutating durable state", async () => {

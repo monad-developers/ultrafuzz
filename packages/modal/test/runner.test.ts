@@ -31,6 +31,8 @@ import { MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES, PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSI
 import { createModalRecoveryLifecycleDocument } from "../src/recovery-lifecycle.js";
 import {
   CODEX_CLI_VERSION,
+  KIMI_SHARED_CREDENTIAL_STAGE_LOCK_INSPECT_SCRIPT,
+  KIMI_SHARED_CREDENTIAL_STAGE_LOCK_RECLAIM_SCRIPT,
   KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT,
   MODAL_COLLECT_RESULT_FILES,
   ModalTerminationError,
@@ -56,6 +58,7 @@ import {
   modalWorkerEntrypointCommand,
   publicBenchmarkCollectionSecretValues,
   readOptionalModalSandboxText,
+  reclaimStoppedForeignKimiStageLock,
   replaceSanitizedModalCollectedFiles,
   selectModalCollectedEvidence,
   terminateModalBenchmarkSandboxes,
@@ -1168,7 +1171,7 @@ describe("Modal worker identity", () => {
       "utf8"
     );
 
-    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination]);
+    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, "resume", "sandbox-one"]);
 
     const staged = JSON.parse(fs.readFileSync(destination, "utf8")) as {
       access_token?: string;
@@ -1184,12 +1187,12 @@ describe("Modal worker identity", () => {
     expect(fs.existsSync(lineage)).toBe(false);
   });
 
-  it("fails closed on an abandoned Kimi credential stage lock without superseding its owner", () => {
+  it("reclaims a dead same-sandbox Kimi credential stage process by exact owner identity", () => {
     const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-lock-"));
     const pending = path.join(root, "kimi-code.json.pending");
     const destination = path.join(root, "kimi-code.json");
     const lock = `${destination}.ultrafuzz-stage.lock`;
-    const owner = path.join(lock, "owner");
+    const owner = path.join(lock, "owner.json");
     fs.writeFileSync(
       pending,
       `${JSON.stringify({ access_token: "pending-access", refresh_token: "pending-refresh" })}\n`,
@@ -1201,24 +1204,124 @@ describe("Modal worker identity", () => {
       "utf8"
     );
     fs.mkdirSync(lock, { mode: 0o700 });
-    fs.writeFileSync(owner, "original-owner", { mode: 0o600 });
+    fs.writeFileSync(
+      owner,
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.modal.kimi-stage-lock.v1",
+        sandbox_id: "sandbox-one",
+        pid: 2_147_483_647,
+        process_start: "linux-proc-stat:1",
+        nonce: "00000000-0000-4000-8000-000000000001"
+      })}\n`,
+      { mode: 0o600 }
+    );
     const abandonedAt = new Date("2020-01-01T00:00:00.000Z");
     fs.utimesSync(lock, abandonedAt, abandonedAt);
-    const boundedScript = KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT.replace(
-      "acquireVolumeStageLock(destination);",
-      "acquireVolumeStageLock(destination, 25);"
-    );
-    expect(boundedScript).not.toBe(KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT);
+    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, "resume", "sandbox-one"]);
 
-    expect(() => execFileSync("node", ["-e", boundedScript, pending, destination])).toThrow(
-      /persistent credential stage lock timed out/u
+    expect(fs.existsSync(lock)).toBe(false);
+    expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
+      access_token: "current-access",
+      refresh_token: "current-refresh"
+    });
+    expect(fs.existsSync(pending)).toBe(false);
+  });
+
+  it("never reclaims a foreign-sandbox Kimi stage lock based on age alone", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-lock-"));
+    const pending = path.join(root, "kimi-code.json.pending");
+    const destination = path.join(root, "kimi-code.json");
+    const lock = `${destination}.ultrafuzz-stage.lock`;
+    const owner = path.join(lock, "owner.json");
+    const ownerDocument = {
+      schema_version: "ultrafuzz.modal.kimi-stage-lock.v1",
+      sandbox_id: "sandbox-foreign",
+      pid: 2_147_483_647,
+      process_start: "linux-proc-stat:1",
+      nonce: "00000000-0000-4000-8000-000000000002"
+    };
+    fs.writeFileSync(
+      pending,
+      `${JSON.stringify({ access_token: "pending-access", refresh_token: "pending-refresh" })}\n`,
+      "utf8"
     );
-    expect(fs.readFileSync(owner, "utf8")).toBe("original-owner");
+    fs.writeFileSync(
+      destination,
+      `${JSON.stringify({ access_token: "current-access", refresh_token: "current-refresh" })}\n`,
+      "utf8"
+    );
+    fs.mkdirSync(lock, { mode: 0o700 });
+    fs.writeFileSync(owner, `${JSON.stringify(ownerDocument)}\n`, { mode: 0o600 });
+    const abandonedAt = new Date("2020-01-01T00:00:00.000Z");
+    fs.utimesSync(lock, abandonedAt, abandonedAt);
+
+    expect(() =>
+      execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, "resume", "sandbox-one"])
+    ).toThrow(/persistent credential stage lock is owned by another sandbox/u);
+    expect(JSON.parse(fs.readFileSync(owner, "utf8"))).toEqual(ownerDocument);
     expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
       access_token: "current-access",
       refresh_token: "current-refresh"
     });
     expect(fs.existsSync(pending)).toBe(true);
+  });
+
+  it("fails closed while a foreign stage-lock sandbox is live", async () => {
+    const owner = {
+      schema_version: "ultrafuzz.modal.kimi-stage-lock.v1" as const,
+      sandbox_id: "sandbox-foreign",
+      pid: 42,
+      process_start: "linux-proc-stat:7",
+      nonce: "00000000-0000-4000-8000-000000000003"
+    };
+    const exec = vi.fn(async (argv: string[]) => {
+      expect(argv).toContain(KIMI_SHARED_CREDENTIAL_STAGE_LOCK_INSPECT_SCRIPT);
+      return checkedProcess(`${JSON.stringify({ state: "owned", owner })}\n`);
+    });
+    const current = { sandboxId: "sandbox-current", exec } as unknown as Sandbox;
+    const foreign = {
+      poll: vi.fn(async () => null),
+      detach: vi.fn()
+    } as unknown as Sandbox;
+    const sandboxes = { fromId: vi.fn(async () => foreign) };
+
+    await expect(reclaimStoppedForeignKimiStageLock(current, "/data/kimi-code.json", sandboxes)).rejects.toThrow(
+      /owner sandbox is still running/u
+    );
+    expect(sandboxes.fromId).toHaveBeenCalledWith("sandbox-foreign");
+    expect(foreign.detach).toHaveBeenCalledOnce();
+    expect(exec).toHaveBeenCalledOnce();
+  });
+
+  it("reclaims a foreign stage lock only after controller-side stopped proof", async () => {
+    const owner = {
+      schema_version: "ultrafuzz.modal.kimi-stage-lock.v1" as const,
+      sandbox_id: "sandbox-foreign",
+      pid: 42,
+      process_start: "linux-proc-stat:7",
+      nonce: "00000000-0000-4000-8000-000000000004"
+    };
+    const exec = vi.fn(async (argv: string[]) => {
+      if (argv.includes(KIMI_SHARED_CREDENTIAL_STAGE_LOCK_INSPECT_SCRIPT)) {
+        return checkedProcess(`${JSON.stringify({ state: "owned", owner })}\n`);
+      }
+      expect(argv).toContain(KIMI_SHARED_CREDENTIAL_STAGE_LOCK_RECLAIM_SCRIPT);
+      expect(JSON.parse(Buffer.from(argv.at(-1)!, "base64url").toString("utf8"))).toEqual(owner);
+      return checkedProcess('{"reclaimed":true}\n');
+    });
+    const current = { sandboxId: "sandbox-current", exec } as unknown as Sandbox;
+    const foreign = {
+      poll: vi.fn(async () => 0),
+      detach: vi.fn()
+    } as unknown as Sandbox;
+    const sandboxes = { fromId: vi.fn(async () => foreign) };
+
+    await expect(
+      reclaimStoppedForeignKimiStageLock(current, "/data/kimi-code.json", sandboxes)
+    ).resolves.toBeUndefined();
+    expect(foreign.poll).toHaveBeenCalledOnce();
+    expect(foreign.detach).toHaveBeenCalledOnce();
+    expect(exec).toHaveBeenCalledTimes(2);
   });
 
   it("does not replace a rotated shared Modal Kimi credential with a stale ancestor", () => {
@@ -1248,7 +1351,7 @@ describe("Modal worker identity", () => {
     );
     fs.writeFileSync(lineage, `${createHash("sha256").update("ancestor-refresh").digest("hex")}\n`, "utf8");
 
-    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination]);
+    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, "resume", "sandbox-one"]);
 
     expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
       access_token: "rotated-volume-access",
@@ -1286,7 +1389,7 @@ describe("Modal worker identity", () => {
     );
     fs.writeFileSync(lineage, `${createHash("sha256").update("previous-host-refresh").digest("hex")}\n`, "utf8");
 
-    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, "fresh"]);
+    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, "fresh", "sandbox-one"]);
 
     expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
       access_token: "current-host-access",
@@ -1329,7 +1432,7 @@ describe("Modal worker identity", () => {
       if (lineageCase === "unreadable") fs.mkdirSync(lineage);
 
       expect(() =>
-        execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, "fresh"])
+        execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, "fresh", "sandbox-one"])
       ).toThrow(/Kimi credential lineage is missing or invalid/u);
       expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
         access_token: "rotated-volume-access",
@@ -1364,7 +1467,7 @@ describe("Modal worker identity", () => {
       "utf8"
     );
 
-    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination]);
+    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, "resume", "sandbox-one"]);
 
     expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
       access_token: "fresh-access",
@@ -1420,14 +1523,12 @@ describe("Modal worker identity", () => {
     let readinessObservedDurableState = false;
     const execMock = vi.fn(async (argv: string[]) => {
       execCalls.push(argv);
-      return {
-        stdin: new WritableStream<string>(),
-        stdout: emptyReadableStream(),
-        stderr: emptyReadableStream(),
-        wait: async () => 0
-      };
+      return argv.includes(KIMI_SHARED_CREDENTIAL_STAGE_LOCK_INSPECT_SCRIPT)
+        ? checkedProcess('{"state":"absent"}\n')
+        : checkedProcess();
     });
     const sandbox = {
+      sandboxId: "sandbox-one",
       filesystem: {
         readText: vi.fn(async () => {
           throw new SandboxFilesystemNotFoundError("missing");
@@ -1466,6 +1567,11 @@ describe("Modal worker identity", () => {
               destination: "/run/ultrafuzz-auth/kimi/device_id"
             }
           ]
+        },
+        sandboxes: {
+          fromId: vi.fn(async () => {
+            throw new Error("unexpected foreign stage lock owner lookup");
+          })
         }
       },
       record,
@@ -1566,12 +1672,20 @@ describe("Modal worker identity", () => {
   });
 });
 
-function emptyReadableStream(): ReadableStream<string> {
-  return new ReadableStream<string>({
-    start(controller) {
-      controller.close();
-    }
-  });
+function checkedProcess(stdout = "") {
+  const readable = (value: string) =>
+    new ReadableStream<string>({
+      start(controller) {
+        if (value !== "") controller.enqueue(value);
+        controller.close();
+      }
+    });
+  return {
+    stdin: new WritableStream<string>(),
+    stdout: readable(stdout),
+    stderr: readable(""),
+    wait: async () => 0
+  };
 }
 
 function remoteFileInfo(size: number): FileInfo {

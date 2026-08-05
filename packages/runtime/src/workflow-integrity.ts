@@ -20,6 +20,7 @@ import { bindSmithersExecutableCapability } from "./smithers-executable-capabili
 import {
   acquireWorkflowMutationLock,
   pendingWorkflowLifecycleAction,
+  type WorkflowMutationLockControl,
   workflowLifecycleAction
 } from "./workflow-mutation.js";
 import {
@@ -735,10 +736,11 @@ export function recoverWorkflowExecutionSnapshot(
  */
 export async function disposeWorkflowExecutionSnapshot(
   snapshot: MaterializedWorkflowExecutionSnapshot,
-  dependencyOverrides: Partial<WorkflowExecutionSnapshotFileSystemDependencies> = {}
+  dependencyOverrides: Partial<WorkflowExecutionSnapshotFileSystemDependencies> = {},
+  lockControl: WorkflowMutationLockControl = {}
 ): Promise<void> {
   const layout = layoutForRunRoot(snapshot.ownership.layoutRoot, snapshot.ownership.runId);
-  const release = await acquireWorkflowMutationLock(layout);
+  const release = await acquireWorkflowMutationLock(layout, lockControl);
   try {
     disposeWorkflowExecutionSnapshotUnlocked(snapshot, dependencyOverrides);
   } finally {
