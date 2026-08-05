@@ -53,8 +53,10 @@ test("captures tracked and untracked setup changes relative to the dependency ba
 
 test("applies a validated setup patch and rejects a base-tree mismatch", () => {
   const source = fixture();
-  const downstream = fixture();
+  const downstreamParent = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-handoff-downstream-"));
+  const downstream = path.join(downstreamParent, "downstream");
   try {
+    git(os.tmpdir(), ["clone", "--quiet", source, downstream]);
     const baseline = captureWorkspaceTree(source);
     writeFileSync(
       path.join(source, "foundry.toml"),
@@ -78,6 +80,6 @@ test("applies a validated setup patch and rejects a base-tree mismatch", () => {
     assert.throws(() => applyWorkspacePatch(downstream, captured), /base tree mismatch/u);
   } finally {
     rmSync(source, { recursive: true, force: true });
-    rmSync(downstream, { recursive: true, force: true });
+    rmSync(downstreamParent, { recursive: true, force: true });
   }
 });
