@@ -1860,9 +1860,23 @@ function verifyFinalReportImplementationCoverage(
       pending_property_ids: expectedByStatus("pending"),
       deferred_property_ids: expectedByStatus("deferred"),
       reference_expected_property_ids: expectedReferencePropertyIds,
-      reference_expectation_ids: expectedReferenceExpectationIds
+      reference_expectation_ids: expectedReferenceExpectationIds,
+      blocker_summaries: expectedIds.flatMap((propertyId) => {
+        const record = recordsById.get(propertyId);
+        if (record === undefined || record.status === "implemented" || record.blocker === undefined) return [];
+        return [`${propertyId}: ${record.blocker.summary}`];
+      })
     };
     const mismatches: string[] = [];
+    for (const field of [
+      "reference_expected_property_ids",
+      "reference_expectation_ids",
+      "blocker_summaries"
+    ]) {
+      if (!Array.isArray(coverage[field])) {
+        mismatches.push(field);
+      }
+    }
     if (coverage.priority_threshold !== selection.priority_threshold) {
       mismatches.push("priority_threshold");
     }
@@ -1889,7 +1903,21 @@ function verifyFinalReportImplementationCoverage(
     const markdownPath = path.join(path.dirname(reportPath), "report.md");
     if (fs.existsSync(markdownPath)) {
       const markdown = fs.readFileSync(markdownPath, "utf8");
-      if (!markdown.includes("\n## Property implementation coverage\n")) {
+      const markdownLines = markdown.split(/\r?\n/u);
+      let fenced = false;
+      let headingLineIndex = -1;
+      for (const [index, line] of markdownLines.entries()) {
+        const trimmed = line.trim();
+        if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
+          fenced = !fenced;
+          continue;
+        }
+        if (!fenced && trimmed === "## Property implementation coverage") {
+          headingLineIndex = index;
+          break;
+        }
+      }
+      if (headingLineIndex < 0) {
         diagnostics.push({
           code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISSING",
           message: "Current invariant report Markdown must render the property implementation coverage section",
@@ -1897,6 +1925,73 @@ function verifyFinalReportImplementationCoverage(
           source: "property-provenance",
           path: markdownPath
         });
+      } else if (isRecord(coverage)) {
+        fenced = false;
+        let nextHeadingLineIndex = -1;
+        for (const [index, line] of markdownLines.entries()) {
+          if (index <= headingLineIndex) continue;
+          const trimmed = line.trim();
+          if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
+            fenced = !fenced;
+            continue;
+          }
+          if (!fenced && trimmed.startsWith("## ")) {
+            nextHeadingLineIndex = index;
+            break;
+          }
+        }
+        const lines = markdownLines
+          .slice(headingLineIndex + 1, nextHeadingLineIndex < 0 ? undefined : nextHeadingLineIndex)
+          .map((line) => line.trim());
+        const expectedCountFields: Array<[string, number]> = [
+          ["Selected properties", stringArray(coverage.selected_property_ids).length],
+          ["Implemented properties", stringArray(coverage.implemented_property_ids).length],
+          ["Blocked properties", stringArray(coverage.blocked_property_ids).length],
+          ["Pending properties", stringArray(coverage.pending_property_ids).length],
+          ["Deferred properties", stringArray(coverage.deferred_property_ids).length],
+          ["Reference expectation properties", stringArray(coverage.reference_expected_property_ids).length]
+        ];
+        const markdownMismatches: string[] = [];
+        const expectedThreshold =
+          typeof coverage.priority_threshold === "string" ? coverage.priority_threshold : "unavailable";
+        const thresholdLine = lines.find((line) => line.startsWith("- Priority threshold:"));
+        if (thresholdLine !== `- Priority threshold: \`${expectedThreshold}\``) {
+          markdownMismatches.push("priority_threshold");
+        }
+        const expectedPriorities = stringArray(coverage.priorities);
+        const includedPrioritiesLine = lines.find((line) => line.startsWith("- Included priorities:"));
+        const renderedPriorities = expectedPriorities.length > 0 ? expectedPriorities.join("<br>") : "unavailable";
+        if (includedPrioritiesLine !== `- Included priorities: \`${renderedPriorities}\``) {
+          markdownMismatches.push("priorities");
+        }
+        for (const [label, expectedCount] of expectedCountFields) {
+          const prefix = `- ${label}:`;
+          const line = lines.find((candidate) => candidate.startsWith(prefix));
+          if (line !== `- ${label}: \`${expectedCount}\``) {
+            markdownMismatches.push(label);
+          }
+        }
+        const expectedBlockerSummaries = stringArray(coverage.blocker_summaries);
+        const blockerHeadingIndex = lines.indexOf("Blocker summaries:");
+        let renderedBlockerCount = 0;
+        if (blockerHeadingIndex >= 0) {
+          for (const line of lines.slice(blockerHeadingIndex + 1)) {
+            if (!line.startsWith("- ")) break;
+            renderedBlockerCount += 1;
+          }
+        }
+        if (renderedBlockerCount !== expectedBlockerSummaries.length) {
+          markdownMismatches.push("blocker_summaries");
+        }
+        if (markdownMismatches.length > 0) {
+          diagnostics.push({
+            code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISMATCH",
+            message: `Current invariant report Markdown coverage does not match report.json (${markdownMismatches.join(", ")})`,
+            severity: "error",
+            source: "property-provenance",
+            path: markdownPath
+          });
+        }
       }
     }
   }

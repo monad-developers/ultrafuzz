@@ -2393,7 +2393,8 @@ test("current final reports preserve implementation coverage in JSON and Markdow
         pending_property_ids: [],
         deferred_property_ids: [],
         reference_expected_property_ids: [],
-        reference_expectation_ids: []
+        reference_expectation_ids: [],
+        blocker_summaries: []
       }
     })
   );
@@ -2401,9 +2402,85 @@ test("current final reports preserve implementation coverage in JSON and Markdow
     layout,
     node.id,
     "report.md",
-    "# Ultrafuzz report\n\n## Property implementation coverage\n\n- Implemented: 1\n"
+    "# Ultrafuzz report\n\n## Property implementation coverage\n\n- Priority threshold: `high`\n- Included priorities: `high`\n- Selected properties: `1`\n- Implemented properties: `1`\n- Blocked properties: `0`\n- Pending properties: `0`\n- Deferred properties: `0`\n- Reference expectation properties: `0`\n"
   );
-  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
+  const validCoverage = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(validCoverage.ok, true, JSON.stringify(validCoverage.diagnostics));
+
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-high"] },
+      properties: [
+        {
+          property_id: "property-high",
+          status: "blocked",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: ["test/foundry/PropertyHigh.t.sol"],
+          blocker: { code: "MISSING_ORACLE", summary: "Oracle unavailable", next_action: "Add oracle" }
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    node.id,
+    reportPath,
+    JSON.stringify({
+      ...baseReport,
+      property_implementation_coverage: {
+        priority_threshold: "high",
+        priorities: ["high"],
+        selected_property_ids: ["property-high"],
+        implemented_property_ids: [],
+        blocked_property_ids: ["property-high"],
+        pending_property_ids: [],
+        deferred_property_ids: [],
+        reference_expected_property_ids: [],
+        reference_expectation_ids: [],
+        blocker_summaries: ["property-high: Oracle unavailable"]
+      }
+    })
+  );
+  writeArtifact(
+    layout,
+    node.id,
+    "report.md",
+    "# Ultrafuzz report\n\n## Property implementation coverage\n\n- Priority threshold: `high`\n- Included priorities: `high`\n- Selected properties: `1`\n- Implemented properties: `0`\n- Blocked properties: `1`\n- Pending properties: `0`\n- Deferred properties: `0`\n- Reference expectation properties: `0`\n\nBlocker summaries:\n- property-high: Oracle unavailable\n"
+  );
+  const validBlockedCoverage = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(validBlockedCoverage.ok, true, JSON.stringify(validBlockedCoverage.diagnostics));
+
+  writeArtifact(
+    layout,
+    node.id,
+    "report.md",
+    "# Ultrafuzz report\n\n## Property implementation coverage\n\n- Priority threshold: `high`\n- Included priorities: `high`\n- Selected properties: `1`\n- Implemented properties: `0`\n- Blocked properties: `1`\n- Pending properties: `0`\n- Deferred properties: `0`\n- Reference expectation properties: `0`\n\nBlocker summaries:\n"
+  );
+  const blockerMarkdownMismatch = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.ok(
+    blockerMarkdownMismatch.diagnostics.some(
+      (diagnostic) => diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISMATCH"
+    ),
+    JSON.stringify(blockerMarkdownMismatch.diagnostics)
+  );
+
+  writeArtifact(
+    layout,
+    node.id,
+    "report.md",
+    "# Ultrafuzz report\n\n## Property implementation coverage\n\n- Priority threshold: `high`\n- Included priorities: `high`\n- Selected properties: `1`\n- Implemented properties: `0`\n- Blocked properties: `0`\n- Pending properties: `0`\n- Deferred properties: `0`\n- Reference expectation properties: `0`\n"
+  );
+  const markdownMismatch = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.ok(
+    markdownMismatch.diagnostics.some(
+      (diagnostic) => diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISMATCH"
+    ),
+    JSON.stringify(markdownMismatch.diagnostics)
+  );
 
   writeArtifact(
     layout,
@@ -2420,7 +2497,8 @@ test("current final reports preserve implementation coverage in JSON and Markdow
         pending_property_ids: [],
         deferred_property_ids: [],
         reference_expected_property_ids: [],
-        reference_expectation_ids: []
+        reference_expectation_ids: [],
+        blocker_summaries: []
       }
     })
   );
