@@ -13,6 +13,12 @@ Investigate whether a base test file already exists, typically `BaseTest[.t].sol
 
 If the configuration is not close to the ideal one, restructure Foundry fuzz tests around a [BaseTest.t.sol](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/BaseTest.t.sol#L44) which [extends from Setup.t.sol](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/BaseTest.t.sol#L30) that is an [abstract contract](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/Setup.t.sol#L45) containing a [`deploy`](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/Setup.t.sol#L80) type of function that will create all production contracts, mint tokens, and setup allowances that are necessary for subsequent test files.
 
+The workflow applies the validated setup patch from the preceding Foundry
+setup node before this workspace starts, and captures this node's own tracked
+and untracked fixture/configuration changes for later strategy nodes. Use and
+validate the files that are present in this workspace, then record every file
+you create or change in the handoff.
+
 If an existing Foundry fixture already compiles and provides a reusable deploy/setup base, preserve its current file names and imports. Do not rename working fixtures, change import paths, or rewrite source files only to match reference filenames such as `Setup.t.sol`; those examples describe structure, not a required naming migration.
 
 If the setup handoffs identify Vyper-only or mixed Solidity/Vyper production

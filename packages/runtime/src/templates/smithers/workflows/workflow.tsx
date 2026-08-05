@@ -38,7 +38,8 @@ const {
   validateInvariantSourceProofSchema,
   writeFileDurable
 } = await import(artifactsModule);
-const { normalizeFinalReportSeverityRecord } = await import(runtimeModule);
+const { applyWorkspacePatch, captureWorkspacePatch, captureWorkspaceTree, normalizeFinalReportSeverityRecord } =
+  await import(runtimeModule);
 
 const inputTaskSchema = z.object({
   id: z.string(),
@@ -216,6 +217,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       normalizeLegacyGeneratedTestManifests(task);
       materializeGeneratedTestCompanions(task);
       materializeInvariantSuiteCompanions(task);
+      materializeWorkspacePatch(task);
       // Keep artifact validation inside the agent task completion boundary.
       // This does not create a second model opportunity; it validates and, for
       // Markdown only, preserves the same agent's final response as its output.
@@ -347,6 +349,7 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof
   const workspaceRoot = realpathSync(task.workspacePath);
   materializePromptSchemas(path.join(workspaceRoot, ".ultrafuzz", "schemas"));
   assertTaskInputs(task, workspaceRoot);
+  materializeWorkspacePatchDependencies(task, workspaceRoot);
   restoreInvariantSuiteWorkspaceSnapshot(task);
   materializeInvariantSuiteFromDependencies(task, workspaceRoot);
   captureInvariantSuiteWorkspaceSnapshot(task, workspaceRoot);
@@ -379,6 +382,90 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof
     }
   }
   return { prepared: true };
+}
+
+function taskPublishesWorkspacePatch(task: (typeof taskSpecs)[number]): boolean {
+  return (
+    task.outputs.some((output) => output.path === "workspace.patch" && output.contract === "ultrafuzz/text@1") &&
+    task.outputs.some(
+      (output) => output.path === "workspace-patch.json" && output.contract === "ultrafuzz/workspace-patch@1"
+    )
+  );
+}
+
+function materializeWorkspacePatchDependencies(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
+  const dependencies = [...task.dependencyArtifactDirs]
+    .filter(
+      (dependency) =>
+        existsSync(path.join(dependency, "workspace.patch")) &&
+        existsSync(path.join(dependency, "workspace-patch.json"))
+    )
+    .sort((left, right) => {
+      const leftIndex = taskSpecs.findIndex((candidate) => candidate.attemptId === path.basename(left));
+      const rightIndex = taskSpecs.findIndex((candidate) => candidate.attemptId === path.basename(right));
+      return leftIndex - rightIndex || left.localeCompare(right);
+    });
+  for (const dependency of dependencies) {
+    const patchPath = resolveRegularArtifactFile(
+      dependency,
+      path.join(dependency, "workspace.patch"),
+      "artifact-contract failure: workspace patch is not a regular file"
+    );
+    const manifestPath = resolveRegularArtifactFile(
+      dependency,
+      path.join(dependency, "workspace-patch.json"),
+      "artifact-contract failure: workspace patch manifest is not a regular file"
+    );
+    let manifest: unknown;
+    try {
+      manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as unknown;
+    } catch (error) {
+      throw new Error(`artifact-contract failure: workspace patch manifest is malformed ${manifestPath}`, {
+        cause: error
+      });
+    }
+    applyWorkspacePatch(workspaceRoot, {
+      patch: readFileSync(patchPath, "utf8"),
+      manifest: manifest as Parameters<typeof applyWorkspacePatch>[1]["manifest"]
+    });
+  }
+  if (taskPublishesWorkspacePatch(task)) {
+    workspacePatchBaselineTrees.set(task.attemptId, captureWorkspaceTree(workspaceRoot));
+  }
+}
+
+function materializeWorkspacePatch(task: (typeof taskSpecs)[number]): void {
+  if (!taskPublishesWorkspacePatch(task)) return;
+  const baselineTree = workspacePatchBaselineTrees.get(task.attemptId);
+  if (baselineTree === undefined) {
+    throw new Error(`artifact-contract failure: workspace patch baseline is unavailable ${task.attemptId}`);
+  }
+  const captured = captureWorkspacePatch(realpathSync(task.workspacePath), baselineTree);
+  const manifest = `${JSON.stringify(captured.manifest, null, 2)}\n`;
+  for (const artifactRoot of taskArtifactRoots(task, realpathSync(task.metadata.artifacts.dir))) {
+    writeWorkspacePatchArtifact(artifactRoot, "workspace.patch", captured.patch);
+    writeWorkspacePatchArtifact(artifactRoot, "workspace-patch.json", manifest);
+  }
+}
+
+function writeWorkspacePatchArtifact(root: string, relativePath: string, contents: string): void {
+  const target = path.resolve(root, relativePath);
+  if (!isStrictlyInsideDirectory(root, target)) {
+    throw new Error(`artifact-contract failure: unsafe workspace patch artifact path ${relativePath}`);
+  }
+  mkdirSync(path.dirname(target), { recursive: true });
+  if (existsSync(target)) {
+    const existing = resolveRegularArtifactFile(
+      root,
+      target,
+      "artifact-contract failure: workspace patch artifact is unsafe"
+    );
+    if (readFileSync(existing, "utf8") !== contents) {
+      throw new Error(`artifact-contract failure: workspace patch artifact was modified ${relativePath}`);
+    }
+    return;
+  }
+  writeFileDurable(target, contents);
 }
 
 function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
@@ -1966,6 +2053,7 @@ const invariantSuiteDependencySnapshots = new Map<
 >();
 const invariantSuitePublicationSnapshots = new Map<string, Map<string, Buffer>>();
 const invariantSuiteWorkspaceSnapshots = new Map<string, Map<string, Buffer>>();
+const workspacePatchBaselineTrees = new Map<string, string>();
 
 function invariantTestRoots(workspaceRoot: string): readonly string[] {
   const discovered = INVARIANT_TEST_ROOT_NAMES.filter((root) => {

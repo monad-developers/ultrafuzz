@@ -167,7 +167,8 @@
                     "ultrafuzz/properties@1",
                     "ultrafuzz/property-campaign@1",
                     "ultrafuzz/report@1",
-                    "ultrafuzz/text@1"
+                    "ultrafuzz/text@1",
+                    "ultrafuzz/workspace-patch@1"
                   ]
                 },
                 "primary": {

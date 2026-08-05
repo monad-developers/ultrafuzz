@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/workspace-patch",
+  "title": "Ultrafuzz workspace patch manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "base_commit", "base_tree", "result_tree", "patch_sha256", "files"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.workspace-patch.v1" },
+    "base_commit": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "base_tree": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "result_tree": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "patch_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\\\\\u0000]+$",
+            "allOf": [
+              { "not": { "pattern": "^/" } },
+              { "not": { "pattern": "^[A-Za-z]:" } },
+              { "not": { "pattern": "(^|/)\\.\\.(?:/|$)" } },
+              { "not": { "pattern": "(^|/)(?:\\.git|\\.ultrafuzz|\\.smithers|node_modules)(?:/|$)" } },
+              { "not": { "pattern": "(^|/)\\.env(?:\\.|/|$)" } }
+            ]
+          }
+        }
+      }
+    }
+  }
+}
