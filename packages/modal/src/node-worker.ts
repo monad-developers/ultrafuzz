@@ -5,7 +5,7 @@ import path from "node:path";
 import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 
-import { parseModalNodeSandboxInput } from "./node-provider.js";
+import { modalAttemptVerificationMarkerName, parseModalNodeSandboxInput } from "./node-provider.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
 const DURABLE_WORKSPACE_DIRECTORY = "workspace";
@@ -788,7 +788,11 @@ export function copyAttemptVerificationMarker(
 ): void {
   const markerRoot = anchoredProjectPath(projectRoot, path.join(input.run_root, ARTIFACT_VERIFICATION_DIRECTORY));
   assertSafeDirectoryTarget(markerRoot);
-  const markerPath = path.join(markerRoot, `${input.attempt_id}.json`);
+  const markerName = modalAttemptVerificationMarkerName(input.attempt_id);
+  const markerPath = path.join(markerRoot, markerName);
+  if (path.dirname(markerPath) !== markerRoot) {
+    throw new Error("cloud publication verification marker path is unsafe");
+  }
   if (!fs.existsSync(markerPath)) {
     throw new Error("cloud publication verification marker is missing");
   }
@@ -798,7 +802,12 @@ export function copyAttemptVerificationMarker(
   }
   assertSafeDirectoryTarget(destinationRoot);
   fs.mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
-  fs.copyFileSync(markerPath, path.join(destinationRoot, `${input.attempt_id}.json`), fs.constants.COPYFILE_EXCL);
+  const resolvedDestinationRoot = path.resolve(destinationRoot);
+  const destinationPath = path.join(resolvedDestinationRoot, markerName);
+  if (path.dirname(destinationPath) !== resolvedDestinationRoot) {
+    throw new Error("cloud publication verification marker path is unsafe");
+  }
+  fs.copyFileSync(markerPath, destinationPath, fs.constants.COPYFILE_EXCL);
 }
 
 function recursiveRegularFiles(root: string): string[] {

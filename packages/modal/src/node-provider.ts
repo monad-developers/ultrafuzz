@@ -23,6 +23,18 @@ const REMOTE_WORKER = "/opt/ultrafuzz/packages/modal/dist/node-worker.js";
 const REMOTE_DATA_ROOT = "/data/ultrafuzz-nodes";
 const MAX_RESULT_WAIT_MS = 24 * 60 * 60 * 1000;
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
+const SAFE_ATTEMPT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+
+export function isSafeModalAttemptId(value: string): boolean {
+  return SAFE_ATTEMPT_ID_PATTERN.test(value);
+}
+
+export function modalAttemptVerificationMarkerName(attemptId: string): string {
+  if (!isSafeModalAttemptId(attemptId)) {
+    throw new Error("cloud node attempt_id is invalid");
+  }
+  return `${attemptId}.json`;
+}
 
 export interface ModalNodeSandboxProviderOptions {
   app: string;
@@ -314,6 +326,9 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value.execution_generation as string)) {
     throw new Error("cloud node execution generation is invalid");
   }
+  if (!isSafeModalAttemptId(value.attempt_id as string)) {
+    throw new Error("cloud node attempt_id is invalid");
+  }
   if (
     !Array.isArray(value.agent_credential_env) ||
     !value.agent_credential_env.every((entry) => typeof entry === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/u.test(entry))
@@ -599,6 +614,27 @@ async function publishModalNodeResult(
     fs.mkdirSync(extracted, { recursive: true });
     await extractSafeTarArchive(archive, extracted, { gzip: true, label: "cloud node result" });
     assertSafeTree(extracted);
+    const verificationMarkerName = modalAttemptVerificationMarkerName(input.attempt_id);
+    const verificationMarker = path.join(extracted, "verification", verificationMarkerName);
+    let verificationDestination: string | undefined;
+    if (fs.existsSync(verificationMarker)) {
+      const markerStat = fs.lstatSync(verificationMarker);
+      if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.nlink !== 1) {
+        throw new Error("cloud node result verification marker is unsafe");
+      }
+      const verificationRoot = checkedPath(
+        root,
+        path.join(input.run_root, ARTIFACT_VERIFICATION_DIRECTORY),
+        "artifact verification directory",
+        false
+      );
+      verificationDestination = path.join(verificationRoot, verificationMarkerName);
+      if (path.dirname(verificationDestination) !== verificationRoot) {
+        throw new Error("cloud node result verification marker path is unsafe");
+      }
+    } else if (result.schema_version === "ultrafuzz.modal.node-result.v2") {
+      throw new Error("cloud node result is missing artifact verification marker");
+    }
     const workspace = path.join(extracted, "workspace");
     if (fs.existsSync(workspace)) {
       replacePublishedDirectory(workspace, workspaceDir);
@@ -611,17 +647,8 @@ async function publishModalNodeResult(
         replacePublishedFile(sourceProof, path.join(proofRoot, `${input.attempt_id}${suffix}`));
       }
     }
-    const verificationMarker = path.join(extracted, "verification", `${input.attempt_id}.json`);
-    if (fs.existsSync(verificationMarker)) {
-      const verificationRoot = checkedPath(
-        root,
-        path.join(input.run_root, ARTIFACT_VERIFICATION_DIRECTORY),
-        "artifact verification directory",
-        false
-      );
-      replacePublishedFile(verificationMarker, path.join(verificationRoot, `${input.attempt_id}.json`));
-    } else if (result.schema_version === "ultrafuzz.modal.node-result.v2") {
-      throw new Error("cloud node result is missing artifact verification marker");
+    if (verificationDestination !== undefined) {
+      replacePublishedFile(verificationMarker, verificationDestination);
     }
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });

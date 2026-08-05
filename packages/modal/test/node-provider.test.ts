@@ -15,6 +15,7 @@ import {
   modalNodeSandboxName,
   modalNodeTags,
   modalNodeVolumeName,
+  parseModalNodeSandboxInput,
   type ModalNodeSandboxInput
 } from "../src/node-provider.js";
 import {
@@ -44,6 +45,19 @@ describe("Modal node sandbox provider", () => {
       /^ufz-run-with-spaces-node-attempt-bas-[0-9a-f]{12}$/u
     );
     expect(modalNodeTags("run/with spaces", "node:attempt", "reset-one").attempt).not.toBe(tags.attempt);
+  });
+
+  it("rejects unsafe cloud attempt identifiers before marker paths are created", () => {
+    const fixture = createProjectFixture();
+    try {
+      for (const attemptId of ["../attempt-one", "nested/attempt-one", ".attempt-one", "attempt one"]) {
+        expect(() => parseModalNodeSandboxInput({ ...fixture.input, attempt_id: attemptId })).toThrow(
+          /cloud node attempt_id is invalid/u
+        );
+      }
+    } finally {
+      fixture.cleanup();
+    }
   });
 
   it("creates an immutable handoff from committed source plus only declared dependency evidence", async () => {
@@ -278,6 +292,24 @@ describe("Modal node sandbox provider", () => {
       expect(() => copyAttemptVerificationMarker(fixture.root, fixture.input, destination)).toThrow(
         /verification marker is unsafe/u
       );
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(destination, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unsafe cloud attempt ids before staging verification markers", () => {
+    const fixture = createProjectFixture();
+    const destination = path.join(path.dirname(fixture.root), "verification-staging");
+    try {
+      expect(() =>
+        copyAttemptVerificationMarker(
+          fixture.root,
+          { run_root: fixture.input.run_root, attempt_id: "../attempt-one" },
+          destination
+        )
+      ).toThrow(/cloud node attempt_id is invalid/u);
+      expect(fs.existsSync(destination)).toBe(false);
     } finally {
       fixture.cleanup();
       fs.rmSync(destination, { recursive: true, force: true });
@@ -660,6 +692,11 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     const sandbox = fakeSandbox(result);
     const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
     try {
+      const artifactFinding = path.join(fixture.root, fixture.input.artifact_dir, "finding.json");
+      const workspaceWork = path.join(fixture.root, fixture.input.workspace_dir, "work.txt");
+      const sourceProofRoot = path.join(fixture.root, fixture.input.run_root, "source-proofs");
+      fs.writeFileSync(artifactFinding, "existing artifact\n");
+      fs.writeFileSync(workspaceWork, "existing workspace\n");
       await expect(
         provider.run({
           runId: "controller-run",
@@ -669,6 +706,14 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
           heartbeat: vi.fn()
         })
       ).rejects.toThrow(/missing artifact verification marker/u);
+      expect(fs.readFileSync(artifactFinding, "utf8")).toBe("existing artifact\n");
+      expect(fs.existsSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"))).toBe(true);
+      expect(fs.readFileSync(workspaceWork, "utf8")).toBe("existing workspace\n");
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.json"))).toBe(false);
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.invariant.json"))).toBe(false);
+      expect(
+        fs.existsSync(path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification", "attempt-one.json"))
+      ).toBe(false);
     } finally {
       result.cleanup();
       fixture.cleanup();
