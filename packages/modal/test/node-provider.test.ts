@@ -720,6 +720,46 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     }
   });
 
+  it("rejects v2 cloud results with conflicting existing verification markers before mutating publications", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const sandbox = fakeSandbox(result);
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
+    try {
+      const artifactFinding = path.join(fixture.root, fixture.input.artifact_dir, "finding.json");
+      const workspaceWork = path.join(fixture.root, fixture.input.workspace_dir, "work.txt");
+      const sourceProofRoot = path.join(fixture.root, fixture.input.run_root, "source-proofs");
+      const verificationMarker = path.join(
+        fixture.root,
+        fixture.input.run_root,
+        ".ultrafuzz-verification",
+        "attempt-one.json"
+      );
+      fs.writeFileSync(artifactFinding, "existing artifact\n");
+      fs.writeFileSync(workspaceWork, "existing workspace\n");
+      fs.writeFileSync(verificationMarker, "existing marker\n");
+
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/would replace an immutable publication file/u);
+      expect(fs.readFileSync(artifactFinding, "utf8")).toBe("existing artifact\n");
+      expect(fs.existsSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"))).toBe(true);
+      expect(fs.readFileSync(workspaceWork, "utf8")).toBe("existing workspace\n");
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.json"))).toBe(false);
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.invariant.json"))).toBe(false);
+      expect(fs.readFileSync(verificationMarker, "utf8")).toBe("existing marker\n");
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("refuses a terminal result that lacks a durable checkpoint reference", async () => {
     const fixture = createProjectFixture();
     const result = createResultArchive({ includeDurableCheckpoint: false });
