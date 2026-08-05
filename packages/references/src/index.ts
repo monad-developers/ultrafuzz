@@ -17,6 +17,12 @@ import {
 import { parse, stringify } from "yaml";
 
 import {
+  redactReferenceGitCredential,
+  referenceGitCredential,
+  referenceGitCredentialEnv,
+  type ReferenceGitCredential
+} from "./git-credential.js";
+import {
   VULNERABILITY_DATABASE_CATALOG_ARTIFACT_PATH,
   VULNERABILITY_DATABASE_MATERIALIZED_DIRECTORY,
   VULNERABILITY_DATABASE_REFERENCE_KIND,
@@ -30,6 +36,7 @@ import {
 } from "./vulnerability-database.js";
 
 export * from "./vulnerability-database.js";
+export * from "./git-credential.js";
 
 export const PROJECT_REFERENCES_FILE = ".ultrafuzz/references.yml";
 export const REFERENCES_VERSION = 1;
@@ -701,8 +708,16 @@ function fetchReference(id: string, reference: ReferenceEntry, cacheDir: string)
   const tempRoot = fs.mkdtempSync(path.join(cacheParent, ".sync-"));
   try {
     runGit(tempRoot, ["init"]);
+    // The remote URL stays credential-free, so the token cannot leak through the temp repo config,
+    // `git remote -v`, or any diagnostic that reports the configured remote.
     runGit(tempRoot, ["remote", "add", "origin", remote]);
-    runGit(tempRoot, ["fetch", "--depth=1", "--filter=blob:none", "origin", reference.commit]);
+    const credential = referenceGitCredential();
+    runGit(
+      tempRoot,
+      ["fetch", "--depth=1", "--filter=blob:none", "origin", reference.commit],
+      referenceGitCredentialEnv(credential, reference.repo, remote),
+      credential
+    );
 
     const staging = path.join(tempRoot, "cache");
     fs.mkdirSync(staging, { recursive: true });
@@ -759,16 +774,22 @@ function resolveGithubDefaultBranchSha(repo: string): string {
   };
   const { owner, repo: repoName } = githubRepoParts(reference, "update-latest");
   const remote = `https://github.com/${owner}/${repoName}.git`;
+  const credential = referenceGitCredential();
+  const credentialEnv = referenceGitCredentialEnv(credential, repo, remote);
   let stdout: string;
   try {
     stdout = execFileSync("git", ["ls-remote", "--symref", remote, "HEAD"], {
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      ...(Object.keys(credentialEnv).length === 0 ? {} : { env: { ...process.env, ...credentialEnv } })
     });
   } catch (error) {
     throw referenceError(
       "GIT_FAILED",
-      `git command failed: git ls-remote --symref ${remote} HEAD: ${stderrFor(error)}`
+      redactReferenceGitCredential(
+        `git command failed: git ls-remote --symref ${remote} HEAD: ${stderrFor(error)}`,
+        credential
+      )
     );
   }
   for (const line of stdout.split("\n")) {
@@ -780,13 +801,31 @@ function resolveGithubDefaultBranchSha(repo: string): string {
   throw referenceError("MISSING_HEAD_SHA", `git output for \`${repo}\` did not contain a full HEAD SHA`, { repo });
 }
 
-function runGit(cwd: string, args: string[]): void {
+/**
+ * Runs one git command, optionally authenticated to a single remote.
+ *
+ * `credentialEnv` carries only `GIT_CONFIG_*` settings, so the token never reaches `args` and cannot
+ * appear in the failure message this throws -- which deliberately echoes the command. The stderr is
+ * still redacted, because git may quote a rejected authorization header back at us.
+ */
+function runGit(
+  cwd: string,
+  args: string[],
+  credentialEnv: Record<string, string> = {},
+  credential?: ReferenceGitCredential
+): void {
   try {
-    execFileSync("git", args, { cwd, stdio: ["ignore", "ignore", "pipe"] });
-  } catch (error) {
-    throw referenceError("GIT_FAILED", `git command failed: git ${args.join(" ")}: ${stderrFor(error)}`, {
-      command: ["git", ...args]
+    execFileSync("git", args, {
+      cwd,
+      stdio: ["ignore", "ignore", "pipe"],
+      ...(Object.keys(credentialEnv).length === 0 ? {} : { env: { ...process.env, ...credentialEnv } })
     });
+  } catch (error) {
+    throw referenceError(
+      "GIT_FAILED",
+      redactReferenceGitCredential(`git command failed: git ${args.join(" ")}: ${stderrFor(error)}`, credential),
+      { command: ["git", ...args] }
+    );
   }
 }
 

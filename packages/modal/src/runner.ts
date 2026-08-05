@@ -22,6 +22,7 @@ import {
   type AnalysisRecoverySummary
 } from "@ultrafuzz/artifacts";
 import { boundedEvalId } from "@ultrafuzz/evals";
+import { REFERENCE_GITHUB_REPOS_ENV, REFERENCE_GITHUB_TOKEN_ENV } from "@ultrafuzz/references";
 import { redactSecretsInText } from "@ultrafuzz/security";
 
 import {
@@ -2601,7 +2602,10 @@ export async function publicBenchmarkCollectionSecretValues(
     ...new Set([
       ...retainedSecretValues,
       ...runnerSecretValues,
-      requiredEnv(env, config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY")
+      requiredEnv(env, config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY"),
+      // The reference token entered the sandbox, so it is a forbidden value everywhere a collected
+      // bundle, diagnostic, or lifecycle log is checked -- exactly like a model API key.
+      ...modalReferenceCredentialRedactionValues(env)
     ])
   ];
 }
@@ -2850,7 +2854,41 @@ export function modalBenchmarkSecretValues(
   );
   const kimiBaseUrl = optionalKimiApiBaseUrl(model, env);
   if (kimiBaseUrl !== undefined) values.KIMI_BASE_URL = kimiBaseUrl;
-  return values;
+  return { ...values, ...modalReferenceCredentialSecretValues(env) };
+}
+
+/**
+ * Forwards the private-reference read credential into the sandbox secret, or nothing at all.
+ *
+ * The detached worker fetches the pinned vulnerability database during its pre-model phase, so the
+ * credential has to be inside the sandbox rather than only on the runner. It travels as a Modal
+ * secret -- the same channel as the model API keys -- so it is never baked into the immutable image,
+ * never written into the launch state, and never part of the handoff archive.
+ *
+ * The allowlist is forwarded alongside the token deliberately. It is what stops the token from being
+ * attached to any remote other than the private repository it was minted for, so a sandbox that
+ * received the token without it would be strictly less safe than one that received neither.
+ *
+ * A declared allowlist with no token is a hard launch failure rather than a silent anonymous fetch:
+ * failing here costs nothing, whereas the same misconfiguration discovered inside the sandbox burns
+ * an image build and a launch and then reports itself as a pre-model dependency error.
+ */
+export function modalReferenceCredentialSecretValues(env: Record<string, string | undefined>): Record<string, string> {
+  const repos = env[REFERENCE_GITHUB_REPOS_ENV]?.trim();
+  if (repos === undefined || repos === "") return {};
+  const token = env[REFERENCE_GITHUB_TOKEN_ENV]?.trim();
+  if (token === undefined || token === "") {
+    throw new Error(
+      `${REFERENCE_GITHUB_REPOS_ENV} declares private pinned references but ${REFERENCE_GITHUB_TOKEN_ENV} is empty`
+    );
+  }
+  return { [REFERENCE_GITHUB_TOKEN_ENV]: token, [REFERENCE_GITHUB_REPOS_ENV]: repos };
+}
+
+/** The reference token as a forbidden value, so it can never survive into a published artifact. */
+export function modalReferenceCredentialRedactionValues(env: Record<string, string | undefined>): string[] {
+  const token = env[REFERENCE_GITHUB_TOKEN_ENV]?.trim();
+  return token === undefined || token === "" ? [] : [token];
 }
 
 function secretEnvNames(config: ModalBenchmarkConfig, model: ModalModelSpec): Set<string> {

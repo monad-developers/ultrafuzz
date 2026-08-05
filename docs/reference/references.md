@@ -58,27 +58,77 @@ before running offline.
 #### Read access is a prerequisite
 
 `monad-developers/web3-vulnerability-database` is currently a **private**
-repository. Reference materialization fetches `https://github.com/<owner>/<repo>.git`
-with plain `git fetch` and supplies no credential of its own, so the sync only
-succeeds where the ambient git configuration already resolves a credential with
-read access to that repository. Without one, `ultrafuzz references sync` fails
-closed with the `GIT_FAILED` reference diagnostic wrapping the git stderr:
+repository, so materializing it needs a read credential. References are fetched
+anonymously by default — the right default, because most references are public
+and a fetch must never carry a credential it does not need — and a credential is
+attached only when it is declared explicitly:
+
+| Variable                           | Meaning                                                       |
+| ---------------------------------- | ------------------------------------------------------------- |
+| `ULTRAFUZZ_REFERENCE_GITHUB_TOKEN` | The short-lived read token.                                   |
+| `ULTRAFUZZ_REFERENCE_GITHUB_REPOS` | Comma-separated `owner/repo` values the token may be sent to. |
+
+Both are required together. A token with no allowlist is inert, and a reference
+whose repo is not in the allowlist is still fetched anonymously even while a
+token is present — so a token minted for one private repository can never be
+leaked to an unrelated remote just because the catalog names it.
+
+The token reaches git through `GIT_CONFIG_*` variables carrying an
+`http.<remote>.extraheader` setting keyed to the exact remote URL. It is never
+written into the remote URL, a command argument, a config file, or a credential
+helper, so it cannot surface in `git remote -v`, a process listing, a cache
+manifest, or a `GIT_FAILED` diagnostic — those redact both the token and its
+derived basic-auth encoding.
+
+Without a usable credential, `ultrafuzz references sync` fails closed with the
+`GIT_FAILED` reference diagnostic wrapping the git stderr:
 
 ```text
 error: GIT_FAILED: git command failed: git fetch --depth=1 --filter=blob:none origin fbf00e990b1316879b674e9903548dba452e40d5: remote: Repository not found.
 fatal: Authentication failed for 'https://github.com/monad-developers/web3-vulnerability-database.git/'
 ```
 
-Every downstream node fails closed behind that, and any environment that is
-given only model-provider credentials — including the Modal benchmark sandbox —
-cannot materialize the database at all. Making the repository readable (or
-provisioning a read credential into the environment and, for cloud runs, into
-the Modal secret set) is therefore a prerequisite for exercising the
-database-backed nodes end to end. Until then, a project that cannot reach the
-repository must remove the `vulnerability-database.web3` entry together with the
-`reference-vulnerability-database` node and the nodes that consume it; removing
-only the catalog entry leaves the reference node dangling and validation fails
-with `INVALID_REFERENCE_NODE`.
+Every downstream node fails closed behind that. A project that genuinely cannot
+reach the repository must remove the `vulnerability-database.web3` entry together
+with the `reference-vulnerability-database` node and the nodes that consume it;
+removing only the catalog entry leaves the reference node dangling and validation
+fails with `INVALID_REFERENCE_NODE`.
+
+##### Cloud runs
+
+The detached Modal benchmark worker runs `ultrafuzz references sync` in its
+**pre-model** phase, so the credential must be inside the sandbox, not merely on
+the CI runner. `Modal Eval Benchmarks` therefore:
+
+1. mints a short-lived installation token from the existing eval-history GitHub
+   App (`vars.EVAL_HISTORY_APP_CLIENT_ID` plus
+   `secrets.EVAL_HISTORY_APP_PRIVATE_KEY`), scoped to
+   `permission-contents: read` on `web3-vulnerability-database` alone;
+2. proves read access with `scripts/ci/preflight-reference-access.mjs` **before**
+   the immutable image build, using only immutable repository metadata and the
+   pinned commit — no clone, no blob fetch, no model contact — so a missing
+   installation or permission costs nothing;
+3. forwards only the token and its allowlist into the Modal secret, alongside the
+   model API keys. The App private key never leaves the trusted GitHub runner.
+
+The App private key is reachable only from `push` and `workflow_dispatch`, which
+never expose repository secrets to fork code — the same trust boundary the Modal
+and model-provider secrets already rely on. Adding a `pull_request` or
+`pull_request_target` trigger to that workflow would break it.
+
+Both the `launch` job and the `collect` job mint their **own** token with
+`skip-token-revoke: true`. Two independent timing constraints require this: an
+installation token expires one hour after creation while `collect` can wait far
+longer, and the sandboxes are detached, so a post-job revocation would invalidate
+the credential a worker still needs. The token is also registered as a forbidden
+value for public bundles, diagnostics, and lifecycle logs, exactly like a model
+API key.
+
+If the App is not installed on the database repository, or its installation lacks
+`Contents: Read-only`, the preflight stops the run before any paid compute and
+prints the exact external action required. That action is external by
+construction: a repository administrator must grant it, and no change inside this
+repository can substitute for it.
 
 Replace the commit only with another reviewed database release commit. The three
 configured paths are fixed. Ultrafuzz reads the canonically ordered record

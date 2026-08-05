@@ -54,6 +54,16 @@ on:
 env:
   BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}
   BENCHMARK_CANDIDATE: ${{ github.event_name == 'push' && github.event.after || github.sha }}
+  # The private repositories a pinned reference is fetched from. The read token is only ever attached
+  # to a remote named here, and the preflight cross-checks this list against
+  # `.ultrafuzz/references.yml`, so neither a drifted pin nor a stale entry can pass silently.
+  #
+  # This workflow only ever runs on `push` and `workflow_dispatch`. Neither event exposes repository
+  # secrets to code from a fork, so the GitHub App private key below is reachable only from refs a
+  # collaborator with write access already pushed -- the same trust boundary the Modal and model-provider
+  # secrets have always relied on. Adding a `pull_request` or `pull_request_target` trigger would break
+  # that boundary and must not be done.
+  ULTRAFUZZ_REFERENCE_GITHUB_REPOS: monad-developers/web3-vulnerability-database
 
 permissions:
   actions: read
@@ -177,6 +187,29 @@ jobs:
           overwrite: true
           retention-days: 30
 
+      # Minted before the image build so a missing installation or permission costs nothing. The
+      # private key never leaves this trusted runner; only the short-lived token it produces travels
+      # onward, and only into a Modal secret.
+      #
+      # `skip-token-revoke: true` is required, not incidental: the sandboxes this job starts are
+      # detached and fetch the reference *after* this job finishes, so a post-job revocation would
+      # invalidate the credential the worker still needs.
+      - name: Create the narrowly scoped private reference read token
+        id: reference-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.EVAL_HISTORY_APP_CLIENT_ID }}
+          private-key: ${{ secrets.EVAL_HISTORY_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: web3-vulnerability-database
+          permission-contents: read
+          skip-token-revoke: true
+
+      - name: Prove pinned private reference access before any paid compute
+        env:
+          ULTRAFUZZ_REFERENCE_GITHUB_TOKEN: ${{ steps.reference-token.outputs.token }}
+        run: node scripts/ci/preflight-reference-access.mjs .ultrafuzz/references.yml
+
       - name: Build an immutable Modal image for the candidate
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
@@ -197,6 +230,7 @@ jobs:
           DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
           KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
+          ULTRAFUZZ_REFERENCE_GITHUB_TOKEN: ${{ steps.reference-token.outputs.token }}
         run: |
           : > "$BENCHMARK_CONTROL/launch-attempts.jsonl"
           while IFS=$'\t' read -r config state pair; do
@@ -319,6 +353,23 @@ jobs:
               > "$BENCHMARK_CONTROL/failures/launch-control-unavailable.json"
           fi
 
+      # This job re-launches pre-model failures and recovers detached sandboxes, so it mints its own
+      # token rather than inheriting the launch job's. An installation token expires one hour after it
+      # is created and this job can wait far longer than that, so a shared credential would be
+      # unusable exactly when recovery needs it. Revocation is skipped for the same reason it is in the
+      # launch job: any sandbox this job (re)starts fetches the reference after the job ends.
+      - name: Create a fresh private reference read token for recovery relaunches
+        id: reference-token
+        if: steps.launch_control.outputs.available == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.EVAL_HISTORY_APP_CLIENT_ID }}
+          private-key: ${{ secrets.EVAL_HISTORY_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: web3-vulnerability-database
+          permission-contents: read
+          skip-token-revoke: true
+
       - name: Wait for Modal compute and retry only pre-model launch failures
         if: steps.launch_control.outputs.available == 'true'
         env:
@@ -329,6 +380,7 @@ jobs:
           DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
           KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
+          ULTRAFUZZ_REFERENCE_GITHUB_TOKEN: ${{ steps.reference-token.outputs.token }}
         run: |
           control_timeout_seconds="$(jq -er \
             '.control_timeout_seconds | select(type == "number" and . == floor and . >= 300)' \

@@ -27,6 +27,7 @@
   "dependencies": {
     "@ultrafuzz/artifacts": "workspace:*",
     "@ultrafuzz/evals": "workspace:*",
+    "@ultrafuzz/references": "workspace:*",
     "@ultrafuzz/runtime": "workspace:*",
     "@ultrafuzz/security": "workspace:*",
     "modal": "0.9.0",

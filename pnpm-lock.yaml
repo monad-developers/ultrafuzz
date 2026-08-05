@@ -191,6 +191,9 @@ importers:
       '@ultrafuzz/evals':
         specifier: workspace:*
         version: link:../evals
+      '@ultrafuzz/references':
+        specifier: workspace:*
+        version: link:../references
       '@ultrafuzz/runtime':
         specifier: workspace:*
         version: link:../runtime
