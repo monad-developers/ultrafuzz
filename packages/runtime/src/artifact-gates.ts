@@ -245,6 +245,8 @@ function verifyInvariantEvidenceArtifacts(
         });
       }
       if (fs.existsSync(discoveryWorkspace)) {
+        // Probe paths may intentionally name optional files; the probe result
+        // records absence, so containment is the invariant we can enforce.
         for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
           const probePath = path.resolve(discoveryWorkspace, probe.source_path);
           if (probePath === discoveryWorkspace || !probePath.startsWith(`${discoveryWorkspace}${path.sep}`)) {
@@ -305,6 +307,8 @@ function verifyInvariantEvidenceArtifacts(
       });
     }
     if (fs.existsSync(discoveryWorkspace)) {
+      // Probe paths may intentionally name optional files; the probe result
+      // records absence, so containment is the invariant we can enforce.
       for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
         const probePath = path.resolve(discoveryWorkspace, probe.source_path);
         if (probePath === discoveryWorkspace || !probePath.startsWith(`${discoveryWorkspace}${path.sep}`)) {

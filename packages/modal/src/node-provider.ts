@@ -601,11 +601,12 @@ async function publishModalNodeResult(
       replacePublishedDirectory(workspace, workspaceDir);
     }
     replacePublishedDirectory(path.join(extracted, "artifacts"), artifactDir);
-    const sourceProof = path.join(extracted, "source-proofs", `${input.attempt_id}.invariant.json`);
-    if (fs.existsSync(sourceProof)) {
-      const proofRoot = checkedPath(root, path.join(input.run_root, "source-proofs"), "source proof directory", false);
-      const destination = path.join(proofRoot, `${input.attempt_id}.invariant.json`);
-      replacePublishedFile(sourceProof, destination);
+    const proofRoot = checkedPath(root, path.join(input.run_root, "source-proofs"), "source proof directory", false);
+    for (const suffix of [".json", ".invariant.json"] as const) {
+      const sourceProof = path.join(extracted, "source-proofs", `${input.attempt_id}${suffix}`);
+      if (fs.existsSync(sourceProof)) {
+        replacePublishedFile(sourceProof, path.join(proofRoot, `${input.attempt_id}${suffix}`));
+      }
     }
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
@@ -751,6 +752,12 @@ function replacePublishedFile(source: string, destination: string): void {
   const destinationStat = fs.existsSync(destination) ? fs.lstatSync(destination) : undefined;
   if (destinationStat?.isSymbolicLink() || (destinationStat !== undefined && !destinationStat.isFile())) {
     throw new Error("cloud node result destination file is unsafe");
+  }
+  if (destinationStat !== undefined) {
+    if (!fs.readFileSync(destination).equals(fs.readFileSync(source))) {
+      throw new Error("cloud node result would replace immutable source proof");
+    }
+    return;
   }
   const pending = `${destination}.publishing-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
   fs.copyFileSync(source, pending);

@@ -103,16 +103,16 @@ async function main(): Promise<void> {
     const staging = path.join(publishing, "bundle");
     fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
     copySafeTree(artifactDir, path.join(staging, "artifacts"));
-    const sourceProof = anchoredProjectPath(
-      projectRoot,
-      path.join(input.run_root, "source-proofs", `${input.attempt_id}.invariant.json`)
-    );
-    if (fs.existsSync(sourceProof)) {
+    const sourceProofRoot = anchoredProjectPath(projectRoot, path.join(input.run_root, "source-proofs"));
+    assertSafeDirectoryTarget(sourceProofRoot);
+    for (const suffix of [".json", ".invariant.json"] as const) {
+      const sourceProof = path.join(sourceProofRoot, `${input.attempt_id}${suffix}`);
+      if (!fs.existsSync(sourceProof)) continue;
       const proofStat = fs.lstatSync(sourceProof);
       if (!proofStat.isFile() || proofStat.isSymbolicLink() || proofStat.nlink !== 1) {
         throw new Error("cloud publication source proof is unsafe");
       }
-      const proofDestination = path.join(staging, "source-proofs", `${input.attempt_id}.invariant.json`);
+      const proofDestination = path.join(staging, "source-proofs", `${input.attempt_id}${suffix}`);
       fs.mkdirSync(path.dirname(proofDestination), { recursive: true, mode: 0o700 });
       fs.copyFileSync(sourceProof, proofDestination);
     }
