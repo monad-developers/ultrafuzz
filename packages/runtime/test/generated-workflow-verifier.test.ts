@@ -463,6 +463,17 @@ test("generated Smithers workflow prefers its relocatable task prompt path", () 
   assert.match(source, /const promptPath = task\.promptPath \?\? inputTask\?\.prompt_path/u);
 });
 
+test("generated Smithers input avoids runner-reserved persistence fields", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const schemaStart = source.indexOf("const inputSchema = z.strictObject");
+  const schemaEnd = source.indexOf("const taskOutput", schemaStart);
+
+  assert.ok(schemaStart >= 0, source);
+  assert.ok(schemaEnd > schemaStart, source);
+  assert.doesNotMatch(source.slice(schemaStart, schemaEnd), /\brun_id\s*:/u);
+  assert.match(source, /Smithers reserves `run_id`/u);
+});
+
 test("generated Smithers verifier explains byte-preserving invariant evidence", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.match(source, /Derive verbatim from the cited source with a JSON serializer/u);

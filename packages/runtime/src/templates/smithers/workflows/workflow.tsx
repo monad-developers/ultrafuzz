@@ -74,12 +74,13 @@ const inputTaskSchema = z.object({
  * A relocated cloud worker is launched with an untrusted input document, so the outer object is
  * strict: an unknown dispatch key -- a future field, a camelCase or hydrated-only alias such as
  * `selectedTask`, or smuggled controller state -- is refused instead of transiting the boundary.
- * The controller's own submitted document (`schema_version`, `run_id`, `tasks`, operator fields) is
- * part of the same contract, so the non-worker invocation shape keeps working unchanged.
+ * The controller's own submitted document (`schema_version`, `tasks`, operator fields) is part of
+ * the same contract, so the non-worker invocation shape keeps working unchanged. The product run ID
+ * is a compiled constant and is deliberately absent here because Smithers reserves `run_id` for its
+ * own persisted input column.
  */
 const inputSchema = z.strictObject({
   schema_version: z.string().min(1).optional(),
-  run_id: z.string().min(1).optional(),
   tasks: z.array(inputTaskSchema).default([]),
   operator_prompt: z.string().optional(),
   operator_input: z.unknown().optional(),

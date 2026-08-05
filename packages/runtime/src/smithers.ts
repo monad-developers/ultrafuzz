@@ -679,7 +679,6 @@ function smithersInputDocument(
 ): Record<string, unknown> {
   return {
     schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
-    run_id: compiled.runId,
     ...(operatorPrompt ? { operator_prompt: operatorPrompt } : {}),
     ...(operatorInput !== undefined ? { operator_input: operatorInput } : {}),
     tasks: compiled.tasks.map((task) => ({

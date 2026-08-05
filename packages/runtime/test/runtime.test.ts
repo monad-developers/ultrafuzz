@@ -4158,7 +4158,8 @@ ${`${marker} `.repeat(2000)}
 
   const smithersInput = JSON.parse(
     fs.readFileSync(path.join(run.value!.run_root, "smithers", "input.json"), "utf8")
-  ) as { tasks?: Array<{ prompt?: string; prompt_path?: string }> };
+  ) as { run_id?: unknown; tasks?: Array<{ prompt?: string; prompt_path?: string }> };
+  assert.equal(smithersInput.run_id, undefined);
   assert.equal(smithersInput.tasks?.[0]?.prompt, undefined);
   const promptPath = smithersInput.tasks?.[0]?.prompt_path ?? "";
   assert.match(promptPath, /prompt\.rendered\.md$/);

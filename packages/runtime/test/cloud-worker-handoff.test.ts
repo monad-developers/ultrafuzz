@@ -311,7 +311,8 @@ test("a relocated cloud worker rejects an unsafe dynamic selected_task handoff",
  *
  * A worker is launched from a request document it does not own, so an unknown outer key -- a future
  * field, a camelCase alias, or smuggled controller state -- must be refused before the dispatch can
- * reach task selection. The controller's own submitted shape must keep working unchanged.
+ * reach task selection. The controller's own submitted shape must keep working without using
+ * Smithers-reserved persistence fields.
  */
 test("a relocated cloud worker rejects unknown outer dispatch keys", async () => {
   const fixture = await cloudFixture();
@@ -360,7 +361,6 @@ test("a relocated cloud worker rejects unknown outer dispatch keys", async () =>
     cwd: fixture.project,
     workflowInput: {
       schema_version: "ultrafuzz.smithers.compiled-workflow.v1",
-      run_id: "cloud-worker",
       operator_prompt: "operator note",
       operator_input: { issue: 2 },
       tasks: []
