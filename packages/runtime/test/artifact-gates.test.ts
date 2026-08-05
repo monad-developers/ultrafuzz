@@ -829,7 +829,7 @@ test("fanin gate requires every invariant ledger entry to map to a canonical pro
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below total supplied assets.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon / recon-1\n- ledger_ids: evidence-borrowed-assets\n### End canonical property: property-1\n"
+    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below total supplied assets.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1\n- ledger_ids: evidence-borrowed-assets\n### End canonical property: property-1\n"
   );
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, false);
   const missingMapping = verifyRequiredArtifactsForAttempt(layout, node, node.id);
@@ -845,7 +845,7 @@ test("fanin gate requires every invariant ledger entry to map to a canonical pro
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below total supplied assets.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon / recon-1\n- ledger_ids: evidence-borrowed-assets, evidence-borrowed-shares\n### End canonical property: property-1\n"
+    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below total supplied assets.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1\n- ledger_ids: evidence-borrowed-assets, evidence-borrowed-shares\n### End canonical property: property-1\n"
   );
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
 
@@ -853,7 +853,7 @@ test("fanin gate requires every invariant ledger entry to map to a canonical pro
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below total supplied assets.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon / recon-1\n- ledger_ids: missing mapping\n### End canonical property: property-1\n"
+    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below total supplied assets.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1\n- ledger_ids: missing mapping\n### End canonical property: property-1\n"
   );
   const missingMarkdownMapping = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(missingMarkdownMapping.ok, false);
@@ -931,7 +931,7 @@ test("property fan-in gate rejects Markdown that omits source-only canonical row
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- description: Total borrowed assets \\| supplied assets remain bounded.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon / recon-1\n- ledger_ids: evidence-borrowed-assets\n### End canonical property: property-1\n"
+    "### Canonical property: property-1\n- description: Total borrowed assets \\| supplied assets remain bounded.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1\n- ledger_ids: evidence-borrowed-assets\n### End canonical property: property-1\n"
   );
   const node = {
     ...plannedNode(["properties.json", "properties.md"]),
@@ -942,6 +942,65 @@ test("property fan-in gate rejects Markdown that omits source-only canonical row
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, false);
   assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING"));
+
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-1",
+          description: "Total borrowed assets | supplied assets remain bounded.",
+          category: "hub-accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-1" }],
+          ledger_ids: ["evidence-borrowed-assets"]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    "### Canonical property: property-1\n- description: Total borrowed assets \\| supplied assets remain bounded.\n- category: hub-accounting\n- priority: high\n- ledger_ids: evidence-borrowed-assets\n### End canonical property: property-1\n"
+  );
+  const missingSources = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(missingSources.ok, false);
+  assert.ok(
+    missingSources.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING" &&
+        diagnostic.message.includes("property-specification-recon:recon-1")
+    )
+  );
+
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below supplied assets; evidence-borrowed-assets\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1\n- ledger_ids: evidence-other\n### End canonical property: property-1\n"
+  );
+  const missingLedgerField = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(missingLedgerField.ok, false);
+  assert.ok(
+    missingLedgerField.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MARKDOWN_MAPPING_MISSING")
+  );
+
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below supplied assets.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1<br>property-specification-extra:extra-1\n- ledger_ids: evidence-borrowed-assets, evidence-extra\n### End canonical property: property-1\n"
+  );
+  const extraMappings = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(extraMappings.ok, false);
+  assert.ok(extraMappings.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_EXTRA"));
+  assert.ok(
+    extraMappings.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MARKDOWN_MAPPING_EXTRA")
+  );
 });
 
 test("property implementation gate rejects an unknown canonical property reference", () => {

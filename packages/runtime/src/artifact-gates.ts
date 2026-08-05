@@ -477,32 +477,70 @@ function verifyInvariantEvidenceArtifacts(
     if (fs.existsSync(markdownPath)) {
       const markdown = fs.readFileSync(markdownPath, "utf8");
       for (const [propertyIndex, property] of catalog.value.properties.entries()) {
-        const propertyTokens = [
-          property.id,
-          property.description,
-          property.category,
-          property.priority,
-          ...property.sources.flatMap((source) => [source.source_node_id, source.source_property_id])
-        ];
         const block = markdownDelimitedBlock(markdown, `### Canonical property: ${property.id}`, [property.id]);
-        const missingPropertyToken = propertyTokens.find(
-          (token) => block === undefined || !markdownContainsCanonicalValue(block, token)
+        const propertyFields: Array<[string, string]> = [
+          ["description", property.description],
+          ["category", property.category],
+          ["priority", property.priority]
+        ];
+        const missingPropertyField = propertyFields.find(
+          ([field, value]) => block === undefined || !markdownFieldContainsValue(block, field, value)
         );
-        if (missingPropertyToken !== undefined) {
+        const missingSource =
+          block === undefined
+            ? property.sources[0]
+            : property.sources.find(
+                (source) =>
+                  !markdownFieldContainsAnyValue(
+                    block,
+                    "sources",
+                    sourcePairVariants(source.source_node_id, source.source_property_id)
+                  )
+              );
+        const expectedSourcePairs = property.sources.map((source) =>
+          normalizeSourcePair(`${source.source_node_id}:${source.source_property_id}`)
+        );
+        const renderedSourcePairs =
+          block === undefined ? [] : markdownFieldEntries(block, "sources", normalizeSourcePair);
+        const extraSourcePair = renderedSourcePairs.find((source) => !expectedSourcePairs.includes(source));
+        if (missingPropertyField !== undefined || missingSource !== undefined) {
+          const missingValue =
+            missingPropertyField?.[1] ?? `${missingSource?.source_node_id}:${missingSource?.source_property_id}`;
           diagnostics.push({
             code: "PROPERTY_MARKDOWN_PARITY_MISSING",
-            message: `Properties Markdown must preserve canonical property ${JSON.stringify(property.id)} with its description, category, priority, and sources (missing ${JSON.stringify(missingPropertyToken)})`,
+            message: `Properties Markdown must preserve canonical property ${JSON.stringify(property.id)} with its description, category, priority, and sources (missing ${JSON.stringify(missingValue)})`,
             severity: "error",
             source: "property-fanin",
             path: `${markdownPath}#$.properties[${propertyIndex}]`
           });
-          continue;
         }
+        if (extraSourcePair !== undefined) {
+          diagnostics.push({
+            code: "PROPERTY_MARKDOWN_PARITY_EXTRA",
+            message: `Properties Markdown must not add an unlisted source pair ${JSON.stringify(extraSourcePair)} to canonical property ${JSON.stringify(property.id)}`,
+            severity: "error",
+            source: "property-fanin",
+            path: `${markdownPath}#$.properties[${propertyIndex}].sources`
+          });
+        }
+        if (block === undefined) continue;
+        const expectedLedgerIds = new Set(property.ledger_ids ?? []);
+        const renderedLedgerIds = markdownFieldEntries(block, "ledger_ids", normalizeLedgerId);
         for (const ledgerId of property.ledger_ids ?? []) {
-          if (markdownContainsToken(block!, ledgerId)) continue;
+          if (markdownFieldContainsValue(block, "ledger_ids", ledgerId)) continue;
           diagnostics.push({
             code: "INVARIANT_LEDGER_MARKDOWN_MAPPING_MISSING",
             message: `Properties Markdown must preserve canonical property ${JSON.stringify(property.id)} and ledger ID ${JSON.stringify(ledgerId)}`,
+            severity: "error",
+            source: "invariant-ledger",
+            path: `${markdownPath}#$.properties[${propertyIndex}].ledger_ids`
+          });
+        }
+        for (const ledgerId of renderedLedgerIds) {
+          if (expectedLedgerIds.has(ledgerId)) continue;
+          diagnostics.push({
+            code: "INVARIANT_LEDGER_MARKDOWN_MAPPING_EXTRA",
+            message: `Properties Markdown must not add an unlisted ledger ID ${JSON.stringify(ledgerId)} to canonical property ${JSON.stringify(property.id)}`,
             severity: "error",
             source: "invariant-ledger",
             path: `${markdownPath}#$.properties[${propertyIndex}].ledger_ids`
@@ -940,6 +978,60 @@ function markdownContainsCanonicalValue(markdown: string, value: string): boolea
   const variants = new Set([normalized, normalized.replaceAll("|", "\\|"), normalized.replaceAll("\n", "<br>")]);
   if (markdownContainsToken(rendered, normalized)) return true;
   return [...variants].some((variant) => markdownContainsToken(markdown, variant));
+}
+
+function markdownFieldContainsValue(markdown: string, field: string, value: string): boolean {
+  return markdownFieldContainsAnyValue(markdown, field, [value]);
+}
+
+function markdownFieldContainsAnyValue(markdown: string, field: string, values: readonly string[]): boolean {
+  return markdownFieldValues(markdown, field).some((fieldValue) =>
+    values.some((value) => markdownContainsCanonicalValue(fieldValue, value))
+  );
+}
+
+function markdownFieldEntries<T>(markdown: string, field: string, normalize: (value: string) => T): T[] {
+  return markdownFieldValues(markdown, field)
+    .flatMap((value) => value.replaceAll("<br>", "\n").split(/[,;\n]/u))
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0 && value !== "[]")
+    .map(normalize);
+}
+
+function normalizeSourcePair(value: string): string {
+  return value.replace(/\s*(?::|\/)\s*/u, ":").trim();
+}
+
+function normalizeLedgerId(value: string): string {
+  return value.replaceAll("`", "").trim();
+}
+
+function markdownFieldValues(markdown: string, field: string): string[] {
+  const lines = markdown.replace(/\r\n?/gu, "\n").split("\n");
+  const fieldPattern = new RegExp(`^\\s*(?:\\|\\s*)?(?:[-*+]\\s*)?${escapeRegExp(field)}\\s*(?::|\\|)\\s*(.*)$`, "iu");
+  const nextFieldPattern = /^\s*(?:\|\s*)?(?:[-*+]\s*)?[A-Za-z][A-Za-z0-9_-]*\s*(?::|\|)/u;
+  const values: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = fieldPattern.exec(lines[index] ?? "");
+    if (match?.[1] === undefined) continue;
+    const parts = [match[1].replace(/\s*\|\s*$/u, "")];
+    for (let continuation = index + 1; continuation < lines.length; continuation += 1) {
+      const line = lines[continuation] ?? "";
+      if (/^\s*###\s/u.test(line) || nextFieldPattern.test(line)) break;
+      if (line.trim() !== "") parts.push(line.trim());
+      index = continuation;
+    }
+    values.push(parts.join("\n"));
+  }
+  return values;
+}
+
+function sourcePairVariants(sourceNodeId: string, sourcePropertyId: string): string[] {
+  return [
+    `${sourceNodeId}:${sourcePropertyId}`,
+    `${sourceNodeId} / ${sourcePropertyId}`,
+    `${sourceNodeId}/${sourcePropertyId}`
+  ];
 }
 
 function escapeRegExp(value: string): string {
