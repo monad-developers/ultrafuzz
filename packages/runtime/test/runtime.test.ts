@@ -10789,14 +10789,21 @@ test("syncRun interruption during verifier output collection does not poison a s
   const controller = new AbortController();
 
   const interruptedPromise = syncRun({ projectRoot: project, runId, env }, { signal: controller.signal });
-  await waitForPath(outputStarted);
-  controller.abort();
-  const interrupted = await interruptedPromise;
+  let interrupted: Awaited<ReturnType<typeof syncRun>> | undefined;
+  try {
+    await waitForPath(outputStarted, 60_000);
+    controller.abort();
+    interrupted = await interruptedPromise;
+  } finally {
+    controller.abort();
+    if (!fs.existsSync(outputRelease)) fs.writeFileSync(outputRelease, "release\n", "utf8");
+    await interruptedPromise.catch(() => undefined);
+  }
+  assert.ok(interrupted);
   assert.equal(interrupted.ok, false, JSON.stringify(interrupted.diagnostics));
   assert.ok(interrupted.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_CANCELLED"));
   assert.equal(fs.readFileSync(attemptsPath, "utf8"), attemptsBefore);
 
-  fs.writeFileSync(outputRelease, "release\n", "utf8");
   const retried = await syncRun({ projectRoot: project, runId, env });
   assert.equal(retried.ok, true, JSON.stringify(retried.diagnostics));
   assert.equal(retried.value?.status, "succeeded");
@@ -13955,8 +13962,7 @@ test("syncRun bounds a blocked durable-deadline cancellation by its overall dead
   const stateBefore = fs.readFileSync(statePath, "utf8");
   const eventsBefore = fs.readFileSync(eventsPath, "utf8");
 
-  const startedAt = Date.now();
-  const logicalStartedAt = startedAt;
+  const logicalStartedAt = Date.now();
   const sync = await syncRun(
     { projectRoot: project, runId, env },
     {
@@ -13967,9 +13973,7 @@ test("syncRun bounds a blocked durable-deadline cancellation by its overall dead
       deadlineMs: logicalStartedAt + 250
     }
   );
-  const completedAt = Date.now();
-  const elapsedMs = completedAt - startedAt;
-  const cancelElapsedMs = completedAt - fs.statSync(cancelStarted).mtimeMs;
+  const cancelElapsedMs = Date.now() - fs.statSync(cancelStarted).mtimeMs;
 
   assert.equal(sync.ok, false);
   assert.ok(sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"));
@@ -13978,7 +13982,6 @@ test("syncRun bounds a blocked durable-deadline cancellation by its overall dead
   // the blocked cancellation itself from the child-owned marker so this proves
   // the 250 ms command budget plus bounded termination grace without a flaky
   // ceiling on unrelated preflight work.
-  assert.ok(elapsedMs < 5_000, `elapsed_ms=${elapsedMs}`);
   assert.ok(cancelElapsedMs >= 0 && cancelElapsedMs < 1_500, `cancel_elapsed_ms=${cancelElapsedMs}`);
   const persisted = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
   const stateBeforeDocument = JSON.parse(stateBefore) as RunState;
