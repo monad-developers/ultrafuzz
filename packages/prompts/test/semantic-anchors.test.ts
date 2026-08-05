@@ -629,6 +629,10 @@ describe("prompt semantic anchors", () => {
     expect(threatModel).toContain("canonical repository-relative POSIX path");
     expect(threatModel).toContain("existing regular file in the current task workspace");
     expect(smokeThreatModel).toMatch(/canonical\s+repository-relative POSIX path/u);
+    const smokeStrategy = prompt("smoke/smoke-strategy.md");
+    expect(smokeStrategy).toMatch(/canonical\s+repository-relative POSIX `path`/u);
+    expect(smokeStrategy).toContain("exactly one contiguous range per evidence object");
+    expect(smokeStrategy).toMatch(/Never put line suffixes,\s+comma-separated ranges, symbols, or prose in `path`/u);
     expect(hunter).toContain("{{item.goal_prompt}}");
     expect(dedupe).toContain("stable first-seen union");
     expect(report).toContain("`source_nodes`");
