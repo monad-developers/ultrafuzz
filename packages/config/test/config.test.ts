@@ -72,6 +72,7 @@ describe("config loading and resolution", () => {
     });
     expect(resolved.value.run.workflowDeadlineSeconds).toBe(86_400);
     expect(resolved.value.run.controllerLeaseSeconds).toBe(30);
+    expect(resolved.value.invariants.invariantTestingSmokeTimeoutSeconds).toBe(600);
     expect(resolved.value.run.forgeGuardEnabled).toBe(true);
     expect(resolved.value.run.forgeVmemLimitKb).toBe(12_582_912);
     expect(resolved.value.run.forgeRayonThreads).toBe(1);
@@ -86,6 +87,24 @@ describe("config loading and resolution", () => {
       nodes: {},
       providers: {}
     });
+  });
+
+  it("accepts a target-sized invariant Recon smoke timeout", () => {
+    const parsed = parseProjectConfigToml(`
+[invariants]
+invariant_testing_smoke_timeout = "10min"
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.invariants?.invariantTestingSmokeTimeoutSeconds).toBe(600);
+
+    const resolved = resolveConfig({
+      env: {},
+      projectConfig: { invariants: { invariantTestingSmokeTimeoutSeconds: 900 } }
+    });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.invariants.invariantTestingSmokeTimeoutSeconds).toBe(900);
   });
 
   it("resolves provider-neutral cloud resources and logical-node overrides without persisting credentials", () => {

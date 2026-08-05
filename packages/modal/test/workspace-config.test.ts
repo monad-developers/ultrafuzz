@@ -20,6 +20,7 @@ describe("Modal target model profiles", () => {
     expect(config).toContain("max_parallel_agents = 16");
     expect(config).toContain("max_parallel_nodes = 32");
     expect(config).toContain("keep_workspaces = false");
+    expect(config).toContain('invariant_testing_smoke_timeout = "10min"');
     expect(config).toContain(
       '[execution]\nmode = "cloud"\nprovider = "modal"\n\n[execution.resources]\ntimeout_seconds = 7200'
     );

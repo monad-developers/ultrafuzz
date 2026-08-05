@@ -50,7 +50,7 @@ Apply these Recon/Chimera rules:
   constructor path.
 - When `recon` is available and `CryticTester` exists after your edits, rerun
   the bounded Recon deployment smoke:
-  `timeout 120 recon fuzz . --contract CryticTester --test-mode assertion --test-limit 1 --seq-len 1 --workers 1 --corpus-dir echidna --recon-corpus-dir recon-corpus`.
+  `timeout {{invariant_testing_smoke_timeout}} recon fuzz . --contract CryticTester --test-mode assertion --test-limit 1 --seq-len 1 --workers 1 --corpus-dir echidna --recon-corpus-dir recon-corpus`.
   Add `--config <path>` only when the repository's Recon/Echidna config
   requires it. If the smoke reverts before fuzzing, repair the harness before
   writing a successful handler handoff; if tooling or dependencies are absent,

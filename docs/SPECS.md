@@ -97,7 +97,8 @@ A compatible config MUST support:
   `timeout_seconds`
 - `[permissions] trust_model`, `prompt_review_required`, and
   `materialize_outputs_as_unstaged`
-- `[invariants] property_priority_threshold` and
+- `[invariants] property_priority_threshold`,
+  `invariant_testing_smoke_timeout`, and
   `invariant_testing_fuzzer_timeout`
 - `[triage] quorum` and `panel_size`
 
@@ -249,6 +250,7 @@ The prompt variable set includes:
 - `invariant_property_priority_threshold`
 - `invariant_property_priority_filter`
 - `invariant_property_priorities`
+- `invariant_testing_smoke_timeout`
 - `invariant_testing_fuzzer_timeout`
 - `strategy_attempt_test_dir`
 - `artifact_path:<logical-node-id>`

@@ -67,6 +67,7 @@ timeouts, backend settings, or artifact requirements.
 | `invariant_property_priority_threshold` | Resolved invariant property priority threshold.                                |
 | `invariant_property_priority_filter`    | Human-readable inclusive invariant priority filter derived from the threshold. |
 | `invariant_property_priorities`         | Comma-separated invariant priority values selected by the inclusive threshold. |
+| `invariant_testing_smoke_timeout`       | Configured bounded Recon deployment/compile smoke timeout.                     |
 | `invariant_testing_fuzzer_timeout`      | Resolved invariant testing fuzzer timeout.                                     |
 
 ## Artifact Variables

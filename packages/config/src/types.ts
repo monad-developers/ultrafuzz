@@ -142,6 +142,7 @@ export interface PermissionConfig {
 
 export interface InvariantConfig {
   propertyPriorityThreshold: "high" | "medium" | "low";
+  invariantTestingSmokeTimeoutSeconds: number;
   invariantTestingFuzzerTimeoutSeconds: number;
 }
 

@@ -29,6 +29,25 @@ You must produce a typed JSON catalog and a matching Markdown companion. Use
 the catalog, and set every property priority to `high`, `medium`, or `low`.
 The JSON catalog is the machine-readable source of truth.
 
+## Target-derived invariant extraction
+
+Use the upstream handoffs as a starting point and inspect the target source,
+documentation, public interfaces, tests, and existing harnesses for
+target-derived requirements. Add a target-derived pass alongside the assigned
+reference:
+
+- preserve every explicit mathematical invariant, accounting equation, bound,
+  and state relation as its own property row, retaining exact operands,
+  constants, named formulas, units, denominator expressions, and rounding
+  direction;
+- Keep distinct formula, denominator, and rounding variants as separate
+  property rows, even when they share a business-level description;
+- include explicitly documented or source-observed aggregate accounting
+  relationships between supplied assets, borrowed assets, and shares;
+- record the target getter, function, or source location that supplies its
+  oracle in the property description so implementation can observe the exact
+  relation.
+
 ## Source-preserving liveness requirements
 
 When the assigned reference discusses Denial-of-Service or liveness, preserve
