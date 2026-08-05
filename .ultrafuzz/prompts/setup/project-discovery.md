@@ -112,6 +112,26 @@ If no invariant statement is found, emit `entries: []`, `inventory_rows: []`,
 and at least one non-empty `scan_probes` record explaining the searches and
 their results.
 
+### Byte-preserving ledger construction
+
+Treat every `verbatim` value as a byte-preserving source slice. The verifier
+normalizes only line endings, terminal line separators, and a leading Markdown
+presentation prefix; retain internal and trailing source whitespace. For a line
+location, derive the value by reading the cited file and slicing the requested
+line range; for a symbol location, derive it from the matching declaration.
+Use a short local script that reads the source and serializes the ledger with
+`JSON.stringify` (or an equivalent JSON serializer), then inspect the parsed
+JSON value before publishing it. This keeps Markdown math and escaped literals
+such as `\\%` and `\\times` intact: JSON source shows each backslash escaped,
+while the parsed `verbatim` value must equal the source slice, including repeated
+backslashes and other literals. Build the Markdown
+handoff from those same parsed ledger objects so its `verbatim` blocks carry the
+identical text. Render multiline `verbatim` values as an indented literal block:
+place two spaces before each source line after the `verbatim:` field. This keeps
+source headings and delimiter-looking lines inside the field while preserving
+the parsed text. Keep extraction scripts small and file-based so source slices
+are not retyped in a large inline shell command.
+
 Extract every explicit equation, inequality, bound, and state relation into the
 discovery artifact with its exact operands, units, and rounding semantics.
 Preserve distinct denominator and rounding variants as separate entries, even

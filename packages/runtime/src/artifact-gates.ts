@@ -307,7 +307,13 @@ function verifyInvariantEvidenceArtifacts(
       } else if (!sourceProofPresent && fs.existsSync(discoveryWorkspace)) {
         verifyInvariantSourceEvidence(discoveryWorkspace, entry, entryIndex, ledgerPath, diagnostics);
       }
-      const block = markdownDelimitedBlock(markdown, `### Ledger entry: ${entry.id}`);
+      const block = markdownDelimitedBlock(markdown, `### Ledger entry: ${entry.id}`, [
+        entry.id,
+        entry.source_path,
+        entry.source_location,
+        entry.verbatim,
+        ...entry.inventory_ids
+      ]);
       if (block === undefined) {
         diagnostics.push({
           code: "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING",
@@ -333,7 +339,14 @@ function verifyInvariantEvidenceArtifacts(
       }
       for (const inventoryId of entry.inventory_ids) {
         const row = parsed.value.inventory_rows.find((candidate) => candidate.id === inventoryId);
-        const rowBlock = markdownDelimitedBlock(markdown, `### Inventory row: ${inventoryId}`);
+        const rowBlock =
+          row === undefined
+            ? undefined
+            : markdownDelimitedBlock(markdown, `### Inventory row: ${inventoryId}`, [
+                inventoryId,
+                row.description,
+                ...row.ledger_ids
+              ]);
         if (row === undefined || rowBlock === undefined || !markdownContainsToken(rowBlock, row.description)) {
           diagnostics.push({
             code: "INVARIANT_LEDGER_MARKDOWN_INVENTORY_MISSING",
@@ -465,7 +478,10 @@ function verifyInvariantEvidenceArtifacts(
       const markdown = fs.readFileSync(markdownPath, "utf8");
       for (const [propertyIndex, property] of catalog.value.properties.entries()) {
         for (const ledgerId of property.ledger_ids ?? []) {
-          const block = markdownDelimitedBlock(markdown, `### Canonical property: ${property.id}`);
+          const block = markdownDelimitedBlock(markdown, `### Canonical property: ${property.id}`, [
+            property.id,
+            ledgerId
+          ]);
           if (block !== undefined && markdownContainsToken(block, ledgerId)) {
             continue;
           }
@@ -815,7 +831,11 @@ function verifyInvariantSourceText(
       });
       return;
     }
-    if (!normalizeInvariantSourceText(declaration).includes(normalizeInvariantSourceLines([entry.verbatim]))) {
+    if (
+      !normalizeInvariantSourceLines(declaration.split(/\r?\n/u)).includes(
+        normalizeInvariantSourceLines([entry.verbatim])
+      )
+    ) {
       diagnostics.push({
         code: "INVARIANT_LEDGER_SOURCE_TEXT_MISMATCH",
         message: `Invariant ledger verbatim text does not occur in ${JSON.stringify(entry.source_path)}`,
@@ -828,7 +848,7 @@ function verifyInvariantSourceText(
   }
   const startLine = Number(lineMatch[1]);
   const endLine = Number(lineMatch[2] ?? lineMatch[1]);
-  const lines = source.split(/\r?\n/u).slice(Math.max(0, startLine - 1), endLine);
+  const lines = source.split(/\r\n|\r|\n/u).slice(Math.max(0, startLine - 1), endLine);
   if (lines.length === 0 || normalizeInvariantSourceLines(lines) !== normalizeInvariantSourceLines([entry.verbatim])) {
     diagnostics.push({
       code: "INVARIANT_LEDGER_SOURCE_TEXT_MISMATCH",
@@ -840,12 +860,12 @@ function verifyInvariantSourceText(
   }
 }
 
-function normalizeInvariantSourceText(value: string): string {
-  return value.replace(/\s+/gu, " ").trim();
-}
-
 function normalizeInvariantSourceLines(lines: readonly string[]): string {
-  return normalizeInvariantSourceText(lines.map((line) => line.replace(/^\s*(?:[-*+]\s+|>\s+)/u, "").trim()).join(" "));
+  return lines
+    .flatMap((line) => line.replace(/\r\n?/gu, "\n").split("\n"))
+    .map((line) => line.replace(/^\s*(?:[-*+]\s+|>\s+)/u, ""))
+    .join("\n")
+    .replace(/\n+$/u, "");
 }
 
 function invariantSymbolDeclaration(source: string, symbol: string): string | undefined {
@@ -859,28 +879,44 @@ function invariantSymbolDeclaration(source: string, symbol: string): string | un
   return source.slice(declaration.index, declaration.index + declaration[0].length + (next?.index ?? tail.length));
 }
 
-function markdownDelimitedBlock(markdown: string, marker: string): string | undefined {
-  const markerPattern = new RegExp(`^${escapeRegExp(marker)}[ \\t]*$`, "mu");
-  const match = markerPattern.exec(markdown);
-  if (match === null || match.index === undefined) {
-    return undefined;
-  }
-  const start = match.index;
+function markdownDelimitedBlock(
+  markdown: string,
+  marker: string,
+  requiredTokens: readonly string[] = []
+): string | undefined {
   const endMarker = marker
     .replace("### Ledger entry:", "### End ledger entry:")
     .replace("### Inventory row:", "### End inventory row:")
     .replace("### Canonical property:", "### End canonical property:");
-  const endPattern = new RegExp(`^${escapeRegExp(endMarker)}[ \\t]*$`, "mu");
-  endPattern.lastIndex = start + match[0].length;
-  const endMatch = endPattern.exec(markdown);
-  if (endMatch === null || endMatch.index === undefined) {
-    return undefined;
+  const markerPattern = new RegExp(`^${escapeRegExp(marker)}[ \\t]*$`, "gmu");
+  for (const match of markdown.matchAll(markerPattern)) {
+    if (match.index === undefined) continue;
+    const start = match.index;
+    const contentStart = start + match[0].length;
+    const nextBlockPattern = /^### (?:Ledger entry:|Inventory row:|Canonical property:)/gmu;
+    nextBlockPattern.lastIndex = contentStart;
+    const nextBlock = nextBlockPattern.exec(markdown);
+    const contentLimit = nextBlock?.index ?? markdown.length;
+    const endPattern = new RegExp(`^${escapeRegExp(endMarker)}[ \\t]*$`, "gmu");
+    let endMatch: RegExpExecArray | null = null;
+    for (const candidate of markdown.slice(contentStart, contentLimit).matchAll(endPattern)) {
+      endMatch = candidate;
+    }
+    if (endMatch?.index !== undefined) {
+      const block = markdown.slice(start, contentStart + endMatch.index + endMatch[0].length);
+      if (requiredTokens.every((token) => markdownContainsToken(block, token))) {
+        return block;
+      }
+    }
   }
-  return markdown.slice(start, endMatch.index + endMatch[0].length);
+  return undefined;
 }
 
 function markdownContainsToken(markdown: string, token: string): boolean {
-  return new RegExp(`(?<![A-Za-z0-9._-])${escapeRegExp(token)}(?![A-Za-z0-9._-])`, "u").test(markdown);
+  const pattern = new RegExp(`(?<![A-Za-z0-9._-])${escapeRegExp(token)}(?![A-Za-z0-9._-])`, "u");
+  if (pattern.test(markdown)) return true;
+  const normalizeIndented = (value: string): string => value.replace(/\r\n?/gu, "\n").replace(/^ {2}/gmu, "");
+  return pattern.test(normalizeIndented(markdown));
 }
 
 function escapeRegExp(value: string): string {
