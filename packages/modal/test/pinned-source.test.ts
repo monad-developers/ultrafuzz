@@ -60,10 +60,8 @@ describe("pinned benchmark source", () => {
 
   it("hydrates submodules at the gitlink revisions recorded by the pinned commit", async () => {
     const fixture = submoduleSourceRepository();
-    expect(git(fixture.repository, ["ls-tree", "HEAD", "vendor/dependency"]).split("\t")[0].split(" ")[2]).toBe(
-      fixture.submoduleCommit
-    );
-    expect(git(fixture.submodule, ["ls-tree", "HEAD", "nested/child"]).split("\t")[1]).toBe("nested/child");
+    expect(gitlinkHash(fixture.repository, "vendor/dependency")).toBe(fixture.submoduleCommit);
+    expect(git(fixture.submodule, ["ls-tree", "HEAD", "nested/child"])).toMatch(/\tnested\/child$/u);
     const destination = path.join(fixture.root, "sanitized-submodule");
 
     const previousAllowedProtocols = process.env.GIT_ALLOW_PROTOCOL;
@@ -201,5 +199,8 @@ function git(cwd: string, args: string[]): string {
 }
 
 function gitlinkHash(repository: string, relativePath: string): string {
-  return git(repository, ["ls-tree", "HEAD", relativePath]).split("\t")[0].split(" ")[2]!;
+  const metadata = git(repository, ["ls-tree", "HEAD", relativePath]).split("\t")[0];
+  const hash = metadata?.split(" ")[2];
+  if (hash === undefined) throw new Error(`gitlink ${relativePath} is missing from ${repository}`);
+  return hash;
 }
