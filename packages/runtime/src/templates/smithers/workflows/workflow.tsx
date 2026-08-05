@@ -1507,16 +1507,23 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
     if (!existsSync(suiteRoot)) continue;
     const manifestPath = path.join(dependencyRoot, INVARIANT_SUITE_MANIFEST_FILE);
     if (!existsSync(manifestPath)) continue;
-    const manifest = JSON.parse(
-      readFileSync(
-        resolveRegularArtifactFile(
-          dependencyRoot,
-          manifestPath,
-          "artifact-contract failure: invariant suite manifest is not a regular file"
-        ),
-        "utf8"
-      )
-    ) as { schema_version?: unknown; producer_node_id?: unknown };
+    let manifest: { schema_version?: unknown; producer_node_id?: unknown };
+    try {
+      manifest = JSON.parse(
+        readFileSync(
+          resolveRegularArtifactFile(
+            dependencyRoot,
+            manifestPath,
+            "artifact-contract failure: invariant suite manifest is not a regular file"
+          ),
+          "utf8"
+        )
+      ) as { schema_version?: unknown; producer_node_id?: unknown };
+    } catch (error) {
+      throw new Error(`artifact-contract failure: invariant suite manifest is malformed ${manifestPath}`, {
+        cause: error
+      });
+    }
     if (
       manifest.schema_version !== "ultrafuzz.invariant-suite-manifest.v1" ||
       typeof manifest.producer_node_id !== "string" ||
@@ -1665,6 +1672,9 @@ function assertSafeInvariantSuitePath(value: string): string {
         segment === "." ||
         segment === ".." ||
         INVARIANT_SUITE_SENSITIVE_SEGMENTS.has(segment) ||
+        segment === ".envrc" ||
+        segment === ".gitignore" ||
+        segment === ".npmrc" ||
         segment.startsWith(".env.")
     ) ||
     /^[A-Za-z]:/u.test(value)
