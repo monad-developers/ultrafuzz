@@ -1363,6 +1363,25 @@ describe("Modal worker identity", () => {
     const shellScripts = execCalls
       .filter((command) => command[0] === "bash" && command[1] === "-lc")
       .map((command) => command[2] ?? "");
+    expect(execCalls).toContainEqual([
+      "install",
+      "-d",
+      "-m",
+      "700",
+      "-o",
+      "ubuntu",
+      "-g",
+      "ubuntu",
+      "/run/ultrafuzz-config"
+    ]);
+    expect(execCalls).toContainEqual([
+      "chown",
+      "ubuntu:ubuntu",
+      REMOTE_CONFIG_PATH,
+      REMOTE_LINEAGE_PATH,
+      "/run/ultrafuzz-config"
+    ]);
+    expect(execCalls).toContainEqual(["chown", "ubuntu:ubuntu", REMOTE_LAUNCH_READY_PATH]);
     expect(shellScripts.join("\n")).toContain("kimi-code.lock");
     expect(shellScripts.join("\n")).toContain("ultrafuzz-source-refresh-token.sha256");
     expect(copied.some((entry) => entry.localPath === path.join(kimiAuthRoot, "credentials"))).toBe(false);
