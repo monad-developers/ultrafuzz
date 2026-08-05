@@ -179,13 +179,13 @@ describe("prompt semantic anchors", () => {
       /aggregate accounting relationships between supplied assets, borrowed assets,\s+and shares when those relationships are explicitly documented or observed/u
     );
     expect(discovery).toContain("Verbatim source-evidence ledger");
+    expect(discovery).toMatch(/every explicitly enumerated bullet or formula/u);
+    expect(discovery).toMatch(/Copy each such statement\s+verbatim/u);
     expect(discovery).toMatch(
-      /copy every explicitly enumerated invariant, equation, inequality, or bound verbatim/u
-    );
-    expect(discovery).toMatch(
-      /Do not summarize, merge, or omit a source bullet before it has a corresponding inventory entry/u
+      /Do not summarize, merge, or omit a source\s+bullet before it has a corresponding ledger entry/u
     );
     expect(discovery).toMatch(/source path and line or symbol location/u);
+    expect(discovery).toContain("including statements under generic headings");
   });
 
   it("keeps the final invariant campaign backend-neutral on the single recon-fuzzer backend", () => {

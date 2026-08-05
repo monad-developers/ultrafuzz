@@ -58,6 +58,8 @@ export interface CanonicalProperty extends Record<string, unknown> {
   category: string;
   priority: PropertyPriority;
   sources: PropertySource[];
+  /** Stable IDs from the project-discovery invariant evidence ledger. */
+  ledger_ids?: string[];
 }
 
 export interface PropertiesArtifact {
@@ -132,7 +134,24 @@ const canonicalPropertySchema = z.looseObject({
   description: nonEmptyString,
   category: nonEmptyString,
   priority: propertyPrioritySchema,
-  sources: z.array(propertySourceSchema).min(1)
+  sources: z.array(propertySourceSchema).min(1),
+  ledger_ids: z
+    .array(nonEmptyString)
+    .min(1)
+    .superRefine((ledgerIds, context) => {
+      const seen = new Set<string>();
+      for (const [ledgerIndex, ledgerId] of ledgerIds.entries()) {
+        if (seen.has(ledgerId)) {
+          context.addIssue({
+            code: "custom",
+            message: `Duplicate invariant ledger ID ${JSON.stringify(ledgerId)}`,
+            path: [ledgerIndex]
+          });
+        }
+        seen.add(ledgerId);
+      }
+    })
+    .optional()
 });
 
 export const propertiesSchema = z
@@ -252,6 +271,12 @@ export const propertiesJsonSchema = {
                 source_property_id: { type: "string", minLength: 1 }
               }
             }
+          },
+          ledger_ids: {
+            type: "array",
+            minItems: 1,
+            uniqueItems: true,
+            items: { type: "string", minLength: 1 }
           }
         }
       }

@@ -42,6 +42,8 @@ nodes:
       - path: setup/project-discovery.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: setup/invariant-evidence-ledger.json
+        contract: ultrafuzz/invariant-ledger@1
   - id: actors-flows
     kind: agentic
     prompt: setup/actors-flows.md

@@ -42,11 +42,13 @@ function plannedNode(paths: string[]): PlannedGraphNode {
               ? "ultrafuzz/properties@1"
               : outputPath === "implemented-properties.json"
                 ? "ultrafuzz/implemented-properties@1"
-                : ["echidna-results.json", "medusa-results.json", "recon-fuzzer-results.json"].includes(outputPath)
-                  ? "ultrafuzz/property-campaign@1"
-                  : outputPath === "report.json"
-                    ? "ultrafuzz/report@1"
-                    : "ultrafuzz/nonempty-markdown@1",
+                : outputPath === "setup/invariant-evidence-ledger.json"
+                  ? "ultrafuzz/invariant-ledger@1"
+                  : ["echidna-results.json", "medusa-results.json", "recon-fuzzer-results.json"].includes(outputPath)
+                    ? "ultrafuzz/property-campaign@1"
+                    : outputPath === "report.json"
+                      ? "ultrafuzz/report@1"
+                      : "ultrafuzz/nonempty-markdown@1",
       contract_digest: "a".repeat(64),
       primary: index === 0
     })),
@@ -169,6 +171,147 @@ test("artifact contracts reject malformed outputs and accept canonical empty out
   fs.writeFileSync(path.join(artifactDir, "findings.json"), "[]", "utf8");
   fs.writeFileSync(path.join(artifactDir, "notes.md"), "# No findings\n", "utf8");
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, "strategy-a").ok, true);
+});
+
+test("project discovery gate requires ledger evidence to survive in the markdown handoff", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-ledger-markdown" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const ledger = {
+    schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+    entries: [
+      {
+        id: "evidence-borrowed-assets",
+        source_path: "docs/overview.md",
+        source_location: "lines 54-55",
+        kind: "inequality",
+        verbatim: "Total borrowed assets <= total supplied assets",
+        inventory_ids: ["inventory-hub-solvency"]
+      }
+    ]
+  };
+  writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", JSON.stringify(ledger));
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/project-discovery.md",
+    [
+      "# Discovery",
+      "evidence-borrowed-assets",
+      "docs/overview.md",
+      "lines 54-55",
+      "inequality",
+      "Total borrowed assets <= total supplied assets",
+      "inventory-hub-solvency"
+    ].join("\n")
+  );
+
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
+
+  writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", "{}");
+  const malformedLedger = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(malformedLedger.ok, false);
+  assert.ok(malformedLedger.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SCHEMA_INVALID"));
+
+  writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", JSON.stringify(ledger));
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/project-discovery.md",
+    "# Discovery\nevidence-borrowed-assets\ndocs/overview.md\nlines 54-55\n"
+  );
+  const missingEvidence = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(missingEvidence.ok, false);
+  assert.ok(
+    missingEvidence.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING")
+  );
+});
+
+test("fanin gate requires every invariant ledger entry to map to a canonical property", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-ledger-properties" });
+  const ledger = {
+    schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+    entries: [
+      {
+        id: "evidence-borrowed-assets",
+        source_path: "docs/overview.md",
+        source_location: "lines 54-55",
+        kind: "inequality",
+        verbatim: "Total borrowed assets <= total supplied assets",
+        inventory_ids: ["inventory-hub-solvency"]
+      },
+      {
+        id: "evidence-borrowed-shares",
+        source_path: "docs/overview.md",
+        source_location: "line 56",
+        kind: "invariant",
+        verbatim: "Total borrowed shares == total minted debt shares",
+        inventory_ids: ["inventory-hub-borrowed-shares"]
+      }
+    ]
+  };
+  writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", JSON.stringify(ledger));
+  const node = {
+    ...plannedNode(["properties.json", "properties.md"]),
+    id: "property-specification-fanin",
+    logical_id: "property-specification-fanin"
+  };
+  const catalog = (ledgerIds: string[]) =>
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-1",
+          description: "Total borrowed assets remain at or below total supplied assets.",
+          category: "hub-accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-1" }],
+          ledger_ids: ledgerIds
+        }
+      ]
+    });
+
+  writeArtifact(layout, "property-specification-fanin", "properties.json", catalog(["evidence-borrowed-assets"]));
+  writeArtifact(layout, "property-specification-fanin", "properties.md", "| property-1 | evidence-borrowed-assets |\n");
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, false);
+  const missingMapping = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.ok(missingMapping.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_REFERENCE_MISSING"));
+
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    catalog(["evidence-borrowed-assets", "evidence-borrowed-shares"])
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    "| property-1 | evidence-borrowed-assets | evidence-borrowed-shares |\n"
+  );
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
+
+  writeArtifact(layout, "property-specification-fanin", "properties.md", "| property-1 | missing mapping |\n");
+  const missingMarkdownMapping = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(missingMarkdownMapping.ok, false);
+  assert.ok(
+    missingMarkdownMapping.diagnostics.some(
+      (diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MARKDOWN_MAPPING_MISSING"
+    )
+  );
+
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    catalog(["evidence-borrowed-assets", "evidence-unknown"])
+  );
+  const unknownMapping = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(unknownMapping.ok, false);
+  assert.ok(unknownMapping.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_REFERENCE_UNKNOWN"));
 });
 
 test("property implementation gate rejects an unknown canonical property reference", () => {

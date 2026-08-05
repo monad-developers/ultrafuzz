@@ -68,6 +68,12 @@ row, retaining the copied source wording and its path plus line or symbol
 location in the description or source list. A ledger entry may be merged with an
 equivalent row only when the canonical row preserves every operand, comparison
 direction, unit, denominator, and rounding term; otherwise keep a separate row.
+For machine-verifiable provenance, add a `ledger_ids` array to every canonical
+property that represents one or more ledger entries, copying the stable ledger
+IDs exactly. Every ledger ID must appear in at least one canonical property's
+`ledger_ids`; one source statement may map to several canonical properties and
+several equivalent source statements may share one canonical property. Preserve
+the complete mapping in both `properties.json` and the Markdown table.
 
 Use neutral authorized-QA language in the consolidated table. Phrase each row as
 an expected property, invariant, boundary condition, state transition, or

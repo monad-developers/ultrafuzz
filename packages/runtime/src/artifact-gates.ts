@@ -11,6 +11,7 @@ import {
   validateArtifactContract,
   validateFindingsSchema,
   validateGeneratedTestManifestSchema,
+  validateInvariantLedgerSchema,
   validateImplementedPropertiesSchema,
   validatePropertiesSchema,
   validatePropertyCampaignSchema,
@@ -164,6 +165,7 @@ export function verifyRequiredArtifactsForAttempt(
     }
   }
   diagnostics.push(...verifySeverityMatrixArtifacts(artifactDir, node));
+  diagnostics.push(...verifyInvariantEvidenceArtifacts(layout, artifactDir, node));
   try {
     diagnostics.push(...verifyPropertyProvenanceArtifacts(layout, artifactDir, node));
   } catch (error) {
@@ -175,6 +177,121 @@ export function verifyRequiredArtifactsForAttempt(
     diagnostics,
     missing
   };
+}
+
+/**
+ * Enforce the cross-artifact joins that cannot be expressed by an individual
+ * JSON schema: discovery's source evidence must survive into the Markdown
+ * handoff, and every discovered source statement must reach at least one
+ * canonical property before invariant implementation begins.
+ */
+function verifyInvariantEvidenceArtifacts(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode
+): RuntimeDiagnostic[] {
+  const logicalId = node.logical_id ?? node.id;
+  const diagnostics: RuntimeDiagnostic[] = [];
+  if (
+    logicalId === "project-discovery" &&
+    node.outputs.some((output) => output.path === "setup/invariant-evidence-ledger.json")
+  ) {
+    const ledgerPath = path.join(artifactDir, "setup", "invariant-evidence-ledger.json");
+    const markdownPath = path.join(artifactDir, "setup", "project-discovery.md");
+    if (!fs.existsSync(ledgerPath) || !fs.existsSync(markdownPath)) {
+      return diagnostics;
+    }
+    const parsed = validateInvariantLedgerSchema(readJsonFile(ledgerPath), ledgerPath);
+    if (!parsed.ok || parsed.value === undefined) {
+      return diagnostics;
+    }
+    const markdown = fs.readFileSync(markdownPath, "utf8");
+    for (const [entryIndex, entry] of parsed.value.entries.entries()) {
+      const evidence = [entry.id, entry.source_path, entry.source_location, entry.verbatim, ...entry.inventory_ids];
+      for (const token of evidence) {
+        if (markdown.includes(token)) {
+          continue;
+        }
+        diagnostics.push({
+          code: "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING",
+          message: `Discovery Markdown must preserve ledger entry ${JSON.stringify(entry.id)} token ${JSON.stringify(token)}`,
+          severity: "error",
+          source: "invariant-ledger",
+          path: `${markdownPath}#$.entries[${entryIndex}]`
+        });
+      }
+    }
+    return diagnostics;
+  }
+
+  if (
+    logicalId !== "property-specification-fanin" ||
+    !node.outputs.some((output) => output.path === "properties.json")
+  ) {
+    return diagnostics;
+  }
+
+  const ledgerPath = findLogicalNodeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json");
+  const catalogPath = path.join(artifactDir, "properties.json");
+  if (ledgerPath === undefined || !fs.existsSync(catalogPath)) {
+    return diagnostics;
+  }
+  const ledger = validateInvariantLedgerSchema(readJsonFile(ledgerPath), ledgerPath);
+  const catalog = validatePropertiesSchema(readJsonFile(catalogPath), catalogPath);
+  if (!ledger.ok || ledger.value === undefined || !catalog.ok || catalog.value === undefined) {
+    return diagnostics;
+  }
+
+  const ledgerIds = new Set(ledger.value.entries.map((entry) => entry.id));
+  const referenced = new Set<string>();
+  for (const [propertyIndex, property] of catalog.value.properties.entries()) {
+    for (const [ledgerIndex, ledgerId] of (property.ledger_ids ?? []).entries()) {
+      if (!ledgerIds.has(ledgerId)) {
+        diagnostics.push({
+          code: "INVARIANT_LEDGER_REFERENCE_UNKNOWN",
+          message: `Canonical property ${JSON.stringify(property.id)} references unknown invariant ledger ID ${JSON.stringify(ledgerId)}`,
+          severity: "error",
+          source: "invariant-ledger",
+          path: `${catalogPath}#$.properties[${propertyIndex}].ledger_ids[${ledgerIndex}]`
+        });
+      } else {
+        referenced.add(ledgerId);
+      }
+    }
+  }
+  for (const [entryIndex, entry] of ledger.value.entries.entries()) {
+    if (referenced.has(entry.id)) {
+      continue;
+    }
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_REFERENCE_MISSING",
+      message: `Invariant ledger entry ${JSON.stringify(entry.id)} is not mapped to a canonical property`,
+      severity: "error",
+      source: "invariant-ledger",
+      path: `${ledgerPath}#$.entries[${entryIndex}].id`
+    });
+  }
+  if (node.outputs.some((output) => output.path === "properties.md")) {
+    const markdownPath = path.join(artifactDir, "properties.md");
+    if (fs.existsSync(markdownPath)) {
+      const markdown = fs.readFileSync(markdownPath, "utf8");
+      for (const [propertyIndex, property] of catalog.value.properties.entries()) {
+        for (const ledgerId of property.ledger_ids ?? []) {
+          if (markdown.includes(property.id) && markdown.includes(ledgerId)) {
+            continue;
+          }
+          diagnostics.push({
+            code: "INVARIANT_LEDGER_MARKDOWN_MAPPING_MISSING",
+            message: `Properties Markdown must preserve canonical property ${JSON.stringify(property.id)} and ledger ID ${JSON.stringify(ledgerId)}`,
+            severity: "error",
+            source: "invariant-ledger",
+            path: `${markdownPath}#$.properties[${propertyIndex}].ledger_ids`
+          });
+        }
+      }
+    }
+  }
+  return diagnostics;
 }
 
 function verifyRequiredArtifactShape(
