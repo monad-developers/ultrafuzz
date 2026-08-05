@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import path from "node:path";
 
 import {
   REFERENCE_GITHUB_REPOS_ENV,
@@ -160,19 +161,71 @@ describe("pinned private reference access preflight", () => {
     expect(verdicts[0]!.ok).toBe(false);
   });
 
-  it("reports the installation prerequisite when the mint step produced no token", () => {
-    // The mint step fails with GitHub's bare `Not Found`, which reads like an infrastructure fault.
-    // An absent token in CI means exactly one actionable thing, so say it rather than restate that a
-    // variable is empty.
+  it("keeps the installation remedy prominent but conditional on the observed mint failure", () => {
     const prerequisite = missingReferenceTokenPrerequisite([PRIVATE_REPO]);
+
+    // The installation case stays first, concrete, and marked external, because it is the one no
+    // change in this repository can fix.
     expect(prerequisite).toContain("EXTERNAL PREREQUISITE");
     expect(prerequisite).toContain("install the eval-history GitHub App");
     expect(prerequisite).toContain(PRIVATE_REPO);
     expect(prerequisite).toContain("Contents: Read-only");
+    expect(prerequisite).toContain("administrator");
     expect(prerequisite).toContain("/repos/{owner}/{repo}/installation");
     // The forbidden workarounds are named so the failure cannot be "fixed" by weakening the pin.
     expect(prerequisite).toContain("must not be replaced, vendored, or removed");
-    expect(prerequisite).toContain("administrator");
+  });
+
+  it("does not claim an absent token proves the App is uninstalled", () => {
+    const prerequisite = missingReferenceTokenPrerequisite([PRIVATE_REPO]);
+
+    // An absent token proves only that the mint produced nothing. Asserting a missing installation
+    // unconditionally would send someone to the wrong settings page and, worse, would make a plain
+    // credential misconfiguration look like an external prerequisite nobody here can resolve.
+    const installationClaim = prerequisite.indexOf("install the eval-history GitHub App");
+    const conditional = prerequisite.indexOf("If it reports `Not Found`");
+    expect(conditional).toBeGreaterThanOrEqual(0);
+    expect(conditional).toBeLessThan(installationClaim);
+    expect(prerequisite).toContain("does not by itself identify the cause");
+
+    // Every other cause that produces the same empty output is named, with the remedy that actually
+    // applies to it.
+    for (const cause of [
+      "EVAL_HISTORY_APP_CLIENT_ID",
+      "EVAL_HISTORY_APP_PRIVATE_KEY",
+      "App authentication error",
+      "outage or rate limit",
+      "action regression"
+    ]) {
+      expect(prerequisite).toContain(cause);
+    }
+    expect(prerequisite).toContain("installing the App will not help");
+  });
+
+  it("fails closed on an absent, blank, or rejected token", async () => {
+    const script = path.join(import.meta.dir, "preflight-reference-access.mjs");
+    const catalogPath = path.join(import.meta.dir, "..", "..", ".ultrafuzz", "references.yml");
+
+    // An empty or whitespace token must never be treated as "no private reference declared".
+    for (const token of ["", "   "]) {
+      const proc = Bun.spawnSync(["node", script, catalogPath], {
+        env: {
+          ...process.env,
+          ULTRAFUZZ_REFERENCE_GITHUB_REPOS: PRIVATE_REPO,
+          ULTRAFUZZ_REFERENCE_GITHUB_TOKEN: token
+        }
+      });
+      const output = new TextDecoder().decode(proc.stderr) + new TextDecoder().decode(proc.stdout);
+      expect(proc.exitCode, JSON.stringify(token)).toBe(1);
+      expect(output).toContain("refusing to start model-backed compute");
+      expect(output).toContain("does not by itself identify the cause");
+    }
+
+    // A token GitHub rejects is unproven access, not proven access.
+    const rejected = await verifyReferenceAccess([target()], "ghs_rejected", (async () => ({
+      status: 401
+    })) as unknown as typeof fetch);
+    expect(rejected.every((verdict) => verdict.ok)).toBe(false);
   });
 
   it("names the environment variable a caller must set", () => {

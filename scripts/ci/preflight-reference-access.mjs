@@ -182,24 +182,34 @@ export function readReferenceCatalog(catalogPath) {
 }
 
 /**
- * The prerequisite to report when no token reached this step at all.
+ * What to report when no token reached this step at all.
  *
- * In CI an empty token almost always means the mint step itself failed, and it fails for exactly one
- * reason worth acting on: `actions/create-github-app-token` asks GitHub for the App's installation on
- * the target repository and gets `404 Not Found` when there is none. That 404 is indistinguishable
- * from "repository does not exist" at the API level but is reported before any permission is
- * evaluated, so the actionable instruction is to install the App -- not to adjust a permission and not
- * to change anything in this repository.
+ * An absent token proves only that the mint step produced nothing -- it does not prove *why*. A
+ * missing installation is one cause, but an invalid `EVAL_HISTORY_APP_CLIENT_ID` or
+ * `EVAL_HISTORY_APP_PRIVATE_KEY`, an App authentication failure, a GitHub outage or rate limit, and an
+ * action regression all produce the same empty output. Asserting the installation is absent in every
+ * case would send someone to a settings page that is not the problem, and -- worse -- would make a
+ * genuine credential misconfiguration look like an unmet external prerequisite nobody here can fix.
+ *
+ * So the remedy is stated conditionally on what the mint log actually reports. The installation case
+ * stays first and concrete because it is the one that needs an administrator outside this repository,
+ * but it is explicitly gated on the observed `Not Found`.
  */
 export function missingReferenceTokenPrerequisite(allowlist) {
   return (
-    `EXTERNAL PREREQUISITE: install the eval-history GitHub App on ${allowlist.join(", ")} with ` +
-    "Repository permission `Contents: Read-only`.\n" +
-    `No token reached this step, which means the mint step could not find an installation of the App ` +
-    "on that repository (`actions/create-github-app-token` reports GitHub's `Not Found` from " +
-    "`GET /repos/{owner}/{repo}/installation`).\n" +
-    "A repository or organization administrator must install it; no change inside this repository can " +
-    "substitute for that, and the pin must not be replaced, vendored, or removed to work around it."
+    `Pinned private reference access is unproven for ${allowlist.join(", ")}: no read token reached ` +
+    "this step.\n" +
+    "An absent token does not by itself identify the cause. Read the preceding token-mint step's log " +
+    "and act on what it reports:\n" +
+    "  - If it reports `Not Found` from `GET /repos/{owner}/{repo}/installation`, the App has no " +
+    "installation on that repository. EXTERNAL PREREQUISITE: a repository or organization " +
+    "administrator must install the eval-history GitHub App there with Repository permission " +
+    "`Contents: Read-only`. No change inside this repository can substitute for that.\n" +
+    "  - Otherwise the token mint itself failed: a missing or invalid `EVAL_HISTORY_APP_CLIENT_ID` or " +
+    "`EVAL_HISTORY_APP_PRIVATE_KEY`, an App authentication error, a GitHub outage or rate limit, or an " +
+    "action regression. Inspect and fix the token-mint configuration; installing the App will not " +
+    "help.\n" +
+    "In either case the pin must not be replaced, vendored, or removed to work around this."
   );
 }
 

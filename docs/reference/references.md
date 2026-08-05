@@ -124,11 +124,30 @@ the credential a worker still needs. The token is also registered as a forbidden
 value for public bundles, diagnostics, and lifecycle logs, exactly like a model
 API key.
 
+The two jobs fail differently on purpose:
+
+- In `launch`, the preflight fails **hard**. There is no work in flight to protect,
+  so an unproven credential must stop the job before the image build and before any
+  sandbox starts.
+- In `collect`, the mint and the preflight both fail **soft**, and the preflight's
+  verdict is recorded to `diagnostics/reference-access-preflight.{json,log}`.
+  Waiting and collection are never gated on it: unproven access to a _future_
+  relaunch says nothing about sandboxes already running and still collectable. Only
+  the recovery relaunches are gated — with access unproven they record
+  `reference-access-unproven` and terminate that pair, and the incomplete-matrix
+  gate then fails the job after the artifacts are preserved.
+
 If the App is not installed on the database repository, or its installation lacks
-`Contents: Read-only`, the preflight stops the run before any paid compute and
-prints the exact external action required. That action is external by
-construction: a repository administrator must grant it, and no change inside this
-repository can substitute for it.
+`Contents: Read-only`, the run stops before any paid compute and prints the exact
+action required. An absent token alone does **not** prove the installation is
+missing, though: an invalid `EVAL_HISTORY_APP_CLIENT_ID` or
+`EVAL_HISTORY_APP_PRIVATE_KEY`, an App authentication error, a GitHub outage or
+rate limit, and an action regression all produce the same empty output. The
+preflight therefore states the installation remedy conditionally on the mint log
+reporting `Not Found` from `GET /repos/{owner}/{repo}/installation`, and points at
+the mint configuration otherwise. Only the first case is external by construction:
+a repository administrator must grant it, and no change inside this repository can
+substitute for it.
 
 Replace the commit only with another reviewed database release commit. The three
 configured paths are fixed. Ultrafuzz reads the canonically ordered record

@@ -381,9 +381,41 @@ jobs:
           permission-contents: read
           skip-token-revoke: true
 
+      # Fail-soft and recorded, for two different reasons. Soft, because sandboxes that are already
+      # running must still be waited on and collected -- unproven access to a *future* relaunch says
+      # nothing about work already in flight. Recorded, because the wait step below consumes only the
+      # step outcome, so the human-readable prerequisite has to be persisted into the diagnostics that
+      # are uploaded rather than living only in this step's log.
+      #
+      # Without this step the empty token would instead be handed to the recovery `launch` invocations
+      # below and stopped only by the secret constructor throwing -- a correct refusal, but an implicit
+      # one that costs a 5-minute timeout per pair and reports itself as a generic launch failure.
+      - name: Prove pinned private reference access before any recovery relaunch
+        id: reference-preflight
+        continue-on-error: true
+        if: steps.launch_control.outputs.available == 'true'
+        env:
+          ULTRAFUZZ_REFERENCE_GITHUB_TOKEN: ${{ steps.reference-token.outputs.token }}
+        run: |
+          mkdir -p "$BENCHMARK_CONTROL/diagnostics"
+          log="$BENCHMARK_CONTROL/diagnostics/reference-access-preflight.log"
+          preflight_exit=0
+          node scripts/ci/preflight-reference-access.mjs .ultrafuzz/references.yml \
+            > "$log" 2>&1 || preflight_exit=$?
+          cat "$log"
+          jq -n \
+            --argjson exit_code "$preflight_exit" \
+            --arg category "reference-access-preflight" \
+            '{category: $category, exit_code: $exit_code, proven: ($exit_code == 0)}' \
+            > "$BENCHMARK_CONTROL/diagnostics/reference-access-preflight.json"
+          exit "$preflight_exit"
+
       - name: Wait for Modal compute and retry only pre-model launch failures
         if: steps.launch_control.outputs.available == 'true'
         env:
+          # Every recovery relaunch below is gated on this. Waiting and collection are deliberately
+          # not: unproven access must never abandon a sandbox that is already running.
+          REFERENCE_ACCESS_PROVEN: ${{ steps.reference-preflight.outcome == 'success' }}
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -420,7 +452,11 @@ jobs:
               recovery_category=
               if [ "$initial_outcome" = failed ] && [ -n "$recovery_mode" ]; then
                 recovery_exit=0
-                if [ ! -f "$BENCHMARK_CONTROL/$config" ]; then
+                if [ "$REFERENCE_ACCESS_PROVEN" != true ]; then
+                  # A relaunch would materialize the pinned private reference, so it is refused before
+                  # any image, sandbox, or model work rather than attempted and failed.
+                  recovery_exit=78
+                elif [ ! -f "$BENCHMARK_CONTROL/$config" ]; then
                   recovery_exit=66
                 else
                   timeout --signal=TERM --kill-after=30s 5m \
@@ -433,6 +469,8 @@ jobs:
                 recovery_category=initial-launch-recovery-failed
                 if [ "$recovery_exit" -eq 0 ]; then
                   recovery_category=initial-launch-recovery-succeeded
+                elif [ "$recovery_exit" -eq 78 ]; then
+                  recovery_category=reference-access-unproven
                 elif [ "$recovery_exit" -eq 124 ] || [ "$recovery_exit" -eq 137 ]; then
                   recovery_category=initial-launch-recovery-timeout
                 fi
@@ -520,14 +558,23 @@ jobs:
                   all_terminal=false
                   ;;
                 transient-operational-failure)
-                  all_terminal=false
-                  if [ ! -f "$BENCHMARK_CONTROL/$config" ]; then
+                  if [ "$REFERENCE_ACCESS_PROVEN" != true ]; then
+                    # Resuming re-dispatches the attempt, which re-materializes the pinned private
+                    # reference. Without proven access that cannot succeed, so the pair terminates here
+                    # with the exact category instead of burning a relaunch timeout.
+                    jq -n \
+                      --arg pair "$pair" \
+                      --arg category "reference-access-unproven" \
+                      '{pair: $pair, terminal_status: "failed", category: $category}' \
+                      > "$outcome_file"
+                  elif [ ! -f "$BENCHMARK_CONTROL/$config" ]; then
                     jq -n \
                       --arg pair "$pair" \
                       --arg category "launch-config-missing" \
                       '{pair: $pair, terminal_status: "failed", category: $category}' \
                       > "$outcome_file"
                   else
+                    all_terminal=false
                     resume_exit=0
                     timeout --signal=TERM --kill-after=30s 5m \
                     node packages/modal/dist/cli.js launch \
