@@ -7,9 +7,9 @@ import {
   USAGE_INCOMPLETE_REASON_CODES,
   appendUsageEvents,
   appendNodeAttempts,
-  appendEvent,
   assertNoSymlinkComponents,
   assertPathInside,
+  createEventRecord,
   FindingsValidationError,
   createNodeAttemptLedgerEntry,
   getPricingCatalogSnapshotPath,
@@ -19,6 +19,7 @@ import {
   listSafeFiles,
   normalizeFindings,
   manifestDigest,
+  projectNodeState,
   queryNodeAttempts,
   replayEvents,
   readRunState,
@@ -32,10 +33,10 @@ import {
   writeFileDurable,
   writeArtifactManifest,
   writeJsonDurable,
-  writeRunState,
   type AppendNodeAttemptInput,
   type ArtifactProvenance,
   type AppendUsageEventInput,
+  type EventRecord,
   type NodeAttemptFailureCategory,
   type NodeAttemptId,
   type NodeAttemptLedgerEntry,
@@ -90,6 +91,7 @@ import { runsRootForProject } from "./validate.js";
 import { projectWorkflowControlState } from "./workflow-control.js";
 import {
   acquireWorkflowMutationLock,
+  commitWorkflowSynchronizationState,
   sameWorkflowLifecycleGeneration,
   type WorkflowMutationLockControl,
   WorkflowMutationLockInterruptedError,
@@ -375,6 +377,8 @@ export interface WorkflowSynchronizationControl {
   signal?: AbortSignal;
   deadlineMs?: number;
   beforeCommit?: () => void | Promise<void>;
+  afterEventsPersisted?: () => void | Promise<void>;
+  afterStatePersisted?: () => void | Promise<void>;
 }
 
 interface ArtifactReconciliationGrace {
@@ -880,18 +884,19 @@ async function synchronizeLinkedWorkflowRunWithExecution(
     if (preLocalCommitBudgetDiagnostic !== undefined) {
       return { ok: false, diagnostics: [preLocalCommitBudgetDiagnostic] };
     }
-    if (runStatusChanged || workflowControl.changed || deadlineApplied) {
-      writeRunState(layout, workflowControl.state);
-    }
+    const commitEvents: EventRecord[] = [];
     if (deadlineApplied) {
-      appendEvent(layout, {
-        eventType: "workflow-deadline-exceeded",
-        status: "timed-out",
-        payload: {
-          workflow_run_id: evidence.smithersRunId,
-          deadline_at: workflowControl.state.workflow_deadline_at
-        }
-      });
+      commitEvents.push(
+        createEventRecord(layout, {
+          eventType: "workflow-deadline-exceeded",
+          status: "timed-out",
+          timestamp: statusObservedAt,
+          payload: {
+            workflow_run_id: evidence.smithersRunId,
+            deadline_at: workflowControl.state.workflow_deadline_at
+          }
+        })
+      );
     }
     if (
       runStatusChanged ||
@@ -900,19 +905,29 @@ async function synchronizeLinkedWorkflowRunWithExecution(
       workflowControl.transitioned ||
       deadlineApplied
     ) {
-      appendEvent(layout, {
-        eventType: "workflow-synced",
-        status: deadlineApplied ? "timed-out" : finalStatus,
-        payload: {
-          workflow_run_id: evidence.smithersRunId,
-          workflow_status: inspect.runStatus,
-          workflow_state: inspect.runState,
-          synced_nodes: syncResult.syncedNodes,
-          accounting_available: accountingResult.available,
-          recovery_due: workflowControl.recoveryDue,
-          deadline_exceeded: deadlineApplied
-        }
-      });
+      commitEvents.push(
+        createEventRecord(layout, {
+          eventType: "workflow-synced",
+          status: deadlineApplied ? "timed-out" : finalStatus,
+          timestamp: statusObservedAt,
+          payload: {
+            workflow_run_id: evidence.smithersRunId,
+            workflow_status: inspect.runStatus,
+            workflow_state: inspect.runState,
+            synced_nodes: syncResult.syncedNodes,
+            accounting_available: accountingResult.available,
+            recovery_due: workflowControl.recoveryDue,
+            deadline_exceeded: deadlineApplied
+          }
+        })
+      );
+    }
+    if (runStatusChanged || workflowControl.changed || deadlineApplied || commitEvents.length > 0) {
+      await commitWorkflowSynchronizationState(
+        layout,
+        { state: workflowControl.state, events: commitEvents },
+        workflowSyncCommitControl(control)
+      );
     }
 
     return {
@@ -1024,6 +1039,14 @@ function synchronizationMutationLockControl(control: WorkflowSynchronizationCont
   return {
     ...(control.signal === undefined ? {} : { signal: control.signal }),
     ...(control.deadlineMs === undefined ? {} : { timeoutMs: Math.max(0, control.deadlineMs - nowMs) })
+  };
+}
+
+function workflowSyncCommitControl(control: WorkflowSynchronizationControl) {
+  return {
+    ...(control.afterEventsPersisted === undefined ? {} : { afterEventsPersisted: control.afterEventsPersisted }),
+    ...(control.afterStatePersisted === undefined ? {} : { afterStatePersisted: control.afterStatePersisted }),
+    ...(control.now === undefined ? {} : { now: control.now })
   };
 }
 
@@ -3027,26 +3050,47 @@ async function synchronizeTasks(input: {
       }
     };
     const stateChanged = nodePatchChanges(previous, patch);
-    if (stateChanged) {
-      updateNodeState(input.layout, task.attemptId, patch);
-      appendNodeEvents(input.layout, task.attemptId, effectiveFinalization.events);
-      changed = true;
+    const commitTimestamp = new Date(synchronizationClock(input.control)).toISOString();
+    const commitEvents: EventRecord[] = stateChanged
+      ? effectiveFinalization.events.map((event) =>
+          createEventRecord(input.layout, {
+            eventType: event.eventType,
+            nodeId: task.attemptId,
+            status: event.status,
+            timestamp: commitTimestamp,
+            payload: event.payload
+          })
+        )
+      : [];
+    if (previous?.status !== patchStatus) {
+      commitEvents.push(
+        createEventRecord(input.layout, {
+          eventType: "node-synced",
+          nodeId: task.attemptId,
+          status: patchStatus,
+          timestamp: commitTimestamp,
+          payload: {
+            workflow_run_id: input.workflowRunId,
+            workflow_task_id: attemptEvidence.taskId,
+            previous_status: previous?.status,
+            workflow_state: evidence.workflowState,
+            attempt: evidence.attempt
+          }
+        })
+      );
+    }
+    if (stateChanged || commitEvents.length > 0) {
+      const projectedState = stateChanged
+        ? projectNodeState(readRunState(input.layout), task.attemptId, patch, commitTimestamp)
+        : readRunState(input.layout);
+      await commitWorkflowSynchronizationState(
+        input.layout,
+        { state: projectedState, events: commitEvents },
+        workflowSyncCommitControl(input.control)
+      );
+      changed ||= stateChanged;
     }
     syncedNodes += 1;
-    if (previous?.status !== patchStatus) {
-      appendEvent(input.layout, {
-        eventType: "node-synced",
-        nodeId: task.attemptId,
-        status: patchStatus,
-        payload: {
-          workflow_run_id: input.workflowRunId,
-          workflow_task_id: attemptEvidence.taskId,
-          previous_status: previous?.status,
-          workflow_state: evidence.workflowState,
-          attempt: evidence.attempt
-        }
-      });
-    }
   }
 
   for (const [concreteNodeId, statuses] of taskStatusesByConcreteNode) {
@@ -3779,17 +3823,6 @@ function dependencyCascadeFailure(
     causal_failure_category: "agent-failure",
     dependent_task_ids: [task.smithersNodeId]
   };
-}
-
-function appendNodeEvents(layout: RunLayout, nodeId: string, events: PendingNodeEvent[]): void {
-  for (const event of events) {
-    appendEvent(layout, {
-      eventType: event.eventType,
-      nodeId,
-      status: event.status,
-      payload: event.payload
-    });
-  }
 }
 
 function appendTerminalTaskAttempts(input: {

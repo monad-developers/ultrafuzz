@@ -5,6 +5,7 @@ import path from "node:path";
 import type { Readable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse, stringify } from "smol-toml";
+import { redactSecretValueRepresentations } from "@ultrafuzz/security";
 
 import {
   assertNoForwardedCredentialBytes,
@@ -2075,12 +2076,7 @@ function findCloudWorkerCommandError(error: unknown, seen: Set<unknown>): CloudW
 }
 
 function redactWorkerText(value: string, credentialValues: readonly string[]): string {
-  let redacted = value;
-  for (const credential of [...new Set(credentialValues)]
-    .filter(Boolean)
-    .sort((left, right) => right.length - left.length)) {
-    redacted = redacted.replaceAll(credential, "[credential]");
-  }
+  const redacted = redactSecretValueRepresentations(value, credentialValues, "[credential]");
   return redacted
     .replace(/((?:access_token|refresh_token)["']?\s*[:=]\s*["']?)[^"'\s,&}\]]+/giu, "$1[credential]")
     .replace(/(\bBearer\s+)[A-Za-z0-9._~+/=-]+/giu, "$1[credential]");

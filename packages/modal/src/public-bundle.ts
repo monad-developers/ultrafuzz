@@ -42,7 +42,7 @@ import {
   type VerifierReceipt,
   type WorkspaceSourceAttestation
 } from "@ultrafuzz/runtime";
-import { redactSecretsInText } from "@ultrafuzz/security";
+import { containsSecretValueRepresentation, redactSecretsInText } from "@ultrafuzz/security";
 import { z } from "zod/v4";
 
 import type { ModalWorkerLineage } from "./launch-state.js";
@@ -512,45 +512,7 @@ function assertPublicBenchmarkMetadataContainsNoSecrets(
 }
 
 function containsForbiddenSecretRepresentation(contents: Buffer, forbiddenSecretValues: readonly string[]): boolean {
-  for (const secret of forbiddenSecretValues) {
-    for (const representation of forbiddenSecretRepresentations(secret)) {
-      if (contents.includes(Buffer.from(representation, "utf8"))) return true;
-    }
-  }
-  return false;
-}
-
-function forbiddenSecretRepresentations(secret: string): string[] {
-  if (secret.length === 0) return [];
-  const bytes = Buffer.from(secret, "utf8");
-  const base64 = bytes.toString("base64");
-  const base64Url = base64.replaceAll("+", "-").replaceAll("/", "_");
-  const hex = bytes.toString("hex");
-  const percentUpper = [...bytes].map((byte) => `%${byte.toString(16).padStart(2, "0").toUpperCase()}`).join("");
-  const percentLower = percentUpper.toLowerCase();
-  const representations = new Set([
-    secret,
-    base64,
-    base64.replace(/=+$/u, ""),
-    base64Url,
-    base64Url.replace(/=+$/u, ""),
-    hex,
-    hex.toUpperCase(),
-    percentUpper,
-    percentLower
-  ]);
-  try {
-    const uriComponent = encodeURIComponent(secret);
-    representations.add(uriComponent);
-    representations.add(uriComponent.replace(/%[0-9A-F]{2}/gu, (escape) => escape.toLowerCase()));
-    representations.add(uriComponent.replaceAll("%20", "+"));
-    const jsonString = JSON.stringify(secret);
-    representations.add(jsonString.slice(1, -1));
-  } catch {
-    // The byte-oriented encodings above still cover malformed surrogate input.
-  }
-  representations.delete("");
-  return [...representations];
+  return containsSecretValueRepresentation(contents, forbiddenSecretValues);
 }
 
 function readRegularFileNoFollow(

@@ -10,7 +10,9 @@ import {
   appendNodeAttempt,
   appendEvent,
   appendLineDurable,
+  createEventRecord,
   createRunLayout,
+  ensureEventRecord,
   getNodeArtifactDir,
   normalizeFindings,
   normalizeSafeRelativePath,
@@ -507,6 +509,39 @@ test("events append to JSONL, redact secrets, replay, and expose query indexes",
   assert.equal(queryEvents(layout, { nodeId: "node-a", status: "succeeded" }).length, 1);
   assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "node", "node-a.jsonl")), true);
   assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "status", "succeeded.jsonl")), true);
+});
+
+test("event recovery repairs every missing index without duplicating the authoritative record", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-recovery" });
+  const record = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "succeeded",
+    timestamp: "2026-08-04T00:00:00.000Z",
+    payload: { recovered: true }
+  });
+  ensureEventRecord(layout, record);
+  const nodeIndex = path.join(layout.eventsIndexDir, "node", "node-a.jsonl");
+  fs.rmSync(nodeIndex);
+
+  ensureEventRecord(layout, record);
+  ensureEventRecord(layout, record);
+
+  for (const filePath of [
+    layout.eventsPath,
+    path.join(layout.eventsIndexDir, "run", "run-event-recovery.jsonl"),
+    path.join(layout.eventsIndexDir, "type", "node-synced.jsonl"),
+    path.join(layout.eventsIndexDir, "timestamp", "2026-08-04.jsonl"),
+    nodeIndex,
+    path.join(layout.eventsIndexDir, "status", "succeeded.jsonl")
+  ]) {
+    const matches = fs
+      .readFileSync(filePath, "utf8")
+      .trim()
+      .split(/\r?\n/u)
+      .filter((line) => (JSON.parse(line) as { event_id?: string }).event_id === record.event_id);
+    assert.equal(matches.length, 1, filePath);
+  }
 });
 
 test("event indexes encode long IDs in a collision-free hash namespace", () => {

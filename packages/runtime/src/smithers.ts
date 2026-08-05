@@ -41,7 +41,8 @@ import { resolveCheckedOutCommit } from "./workspace-provenance.js";
 const execFileAsync = promisify(execFile);
 const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
 const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
-const STREAM_TERMINATION_GRACE_MS = 5_000;
+const STREAM_TERMINATION_GRACE_MS = 500;
+const STREAM_TERMINATION_HARD_LIMIT_MS = 1_500;
 const ONE_SHOT_TERMINATION_GRACE_MS = 500;
 const ONE_SHOT_TERMINATION_HARD_LIMIT_MS = 1_500;
 const STREAM_CALLBACK_DRAIN_TIMEOUT_MS = 1_000;
@@ -1685,7 +1686,8 @@ async function streamSmithersCommandUnanchored(input: {
       {
         cwd: input.projectRoot,
         env: commandEnvironment,
-        stdio: ["ignore", "pipe", "pipe"]
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: process.platform !== "win32"
       }
     );
   } catch (error) {
@@ -1699,21 +1701,41 @@ async function streamSmithersCommandUnanchored(input: {
   let stderr = "";
   let stoppedByCaller = false;
   let killTimer: NodeJS.Timeout | undefined;
+  let hardTeardownTimer: NodeJS.Timeout | undefined;
+  let terminationStarted = false;
+  let childClosed = false;
+  let resolveHardTeardown: ((value: { code: number | null; signal: NodeJS.Signals | null }) => void) | undefined;
+  const hardTeardown = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    resolveHardTeardown = resolve;
+  });
+  const signalCommandTree = (signal: NodeJS.Signals): void => {
+    if (process.platform !== "win32" && child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, signal);
+        return;
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && String(error.code) === "ESRCH")) throw error;
+      }
+    }
+    if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+  };
   const stopStreaming = (): void => {
     stoppedByCaller = true;
     reader.close();
     child.stdout.destroy();
     child.stderr.destroy();
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
-      // A wedged engine can ignore SIGTERM, which would leave this awaiting
-      // `close` forever. Escalate once, and never hold the event loop open.
-      killTimer ??= setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) {
-          child.kill("SIGKILL");
-        }
-      }, STREAM_TERMINATION_GRACE_MS).unref();
-    }
+    if (terminationStarted) return;
+    if (childClosed) return;
+    terminationStarted = true;
+    signalCommandTree("SIGTERM");
+    killTimer = setTimeout(() => signalCommandTree("SIGKILL"), STREAM_TERMINATION_GRACE_MS).unref();
+    hardTeardownTimer = setTimeout(() => {
+      signalCommandTree("SIGKILL");
+      reader.close();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      resolveHardTeardown?.({ code: child.exitCode, signal: child.signalCode });
+    }, STREAM_TERMINATION_HARD_LIMIT_MS);
   };
   const onAbort = (): void => {
     stopStreaming();
@@ -1731,12 +1753,13 @@ async function streamSmithersCommandUnanchored(input: {
   try {
     let streamError: Error | undefined;
     const pendingLineCallbacks: Promise<void>[] = [];
-    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
       child.once("error", (error) => {
         streamError ??= error;
         stopStreaming();
       });
       child.once("close", (code, signal) => {
+        childClosed = true;
         resolve({ code, signal });
       });
       reader.on("line", (line) => {
@@ -1768,6 +1791,7 @@ async function streamSmithersCommandUnanchored(input: {
         }
       });
     });
+    const exit = await Promise.race([closed, hardTeardown]);
     // Child `close` can win the race with a consumer promise that rejects on a
     // later turn. Wait until readline can emit no more lines, then settle every
     // bounded callback before deciding whether streaming succeeded.
@@ -1789,6 +1813,7 @@ async function streamSmithersCommandUnanchored(input: {
     if (killTimer !== undefined) {
       clearTimeout(killTimer);
     }
+    if (hardTeardownTimer !== undefined) clearTimeout(hardTeardownTimer);
     try {
       executableAnchor?.assertCurrent();
     } finally {

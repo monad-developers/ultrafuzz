@@ -1183,6 +1183,22 @@ describe("Modal node sandbox provider", () => {
       expect(() => assertNoForwardedCredentialBytes(root, ["controller-token-value"])).toThrow(
         /canonical artifacts contain a forwarded credential/u
       );
+      fs.unlinkSync(path.join(root, "controller-token-value.txt"));
+
+      const encodedCredential = "agent key/value+with=encoding";
+      for (const [name, encoded] of [
+        ["base64", Buffer.from(encodedCredential).toString("base64")],
+        ["base64url", Buffer.from(encodedCredential).toString("base64url")],
+        ["hex", Buffer.from(encodedCredential).toString("hex")],
+        ["percent", encodeURIComponent(encodedCredential)]
+      ]) {
+        const leak = path.join(root, `${name}.txt`);
+        fs.writeFileSync(leak, `${encoded}\n`);
+        expect(() => assertNoForwardedCredentialBytes(root, [encodedCredential])).toThrow(
+          /canonical artifacts contain a forwarded credential/u
+        );
+        fs.unlinkSync(leak);
+      }
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -1866,22 +1882,30 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("aggregates the original worker failure with redacted termination and close failures", async () => {
     const fixture = createProjectFixture();
+    const providerCredential = Buffer.from("provider-secret-value").toString("base64");
+    const agentCredential = Buffer.from("agent-key-value").toString("hex");
     const sandbox = fakeSandbox(undefined);
     sandbox.exec = vi.fn(async (command: string[]) =>
       command[0] === "node"
         ? fakeContainerProcess({
             exitCode: 7,
-            stderr:
-              '{"schema_version":"ultrafuzz.modal.node-worker-error.v1","message":"provider-secret-value run-workflow failed","phase":"run-workflow","command":"smithers","exit_code":7,"stderr":"workflow failed"}\n'
+            stderr: `${JSON.stringify({
+              schema_version: "ultrafuzz.modal.node-worker-error.v1",
+              message: `${providerCredential} run-workflow failed`,
+              phase: "run-workflow",
+              command: "smithers",
+              exit_code: 7,
+              stderr: "workflow failed"
+            })}\n`
           })
         : fakeContainerProcess()
     ) as never;
     sandbox.terminate = vi.fn(async () => {
-      throw new Error("provider-secret-value termination failed");
+      throw new Error(`${providerCredential} termination failed`);
     });
     const client = fakeClient({ created: sandbox });
     client.close = vi.fn(() => {
-      throw new Error("agent-key-value close failed");
+      throw new Error(`${agentCredential} close failed`);
     });
     const provider = createModalNodeSandboxProvider(providerOptions(client));
     try {
@@ -1908,7 +1932,9 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
       expect(closeFailure?.message).toBe("[credential] close failed");
       expect(executionFailure?.message).toMatch(/\[credential\] run-workflow failed/u);
       expect((failure as AggregateError).errors).toHaveLength(3);
-      expect(JSON.stringify(aggregateErrorMessages(failure))).not.toMatch(/provider-secret-value|agent-key-value/u);
+      expect(JSON.stringify(aggregateErrorMessages(failure))).not.toMatch(
+        new RegExp(`${providerCredential}|${agentCredential}`, "u")
+      );
     } finally {
       fixture.cleanup();
     }

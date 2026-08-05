@@ -9,6 +9,7 @@ import { ModalClient, SandboxFilesystemNotFoundError, type App, type Image, type
 import { materializePromptSchemas } from "@ultrafuzz/artifacts";
 import { getToolContext, type ToolContext } from "@smithers-orchestrator/tool-context";
 import type { CompiledCloudAgentAuthDescriptor } from "@ultrafuzz/runtime";
+import { containsSecretValueRepresentation, redactSecretValueRepresentations } from "@ultrafuzz/security";
 
 import {
   acquireKimiModalNodeExecutionLease,
@@ -1717,35 +1718,29 @@ function canonicalResultBundle(
 }
 
 export function assertNoForwardedCredentialBytes(root: string, credentialValues: readonly string[]): void {
-  const needles = uniqueCredentialNeedles(credentialValues);
-  if (needles.length === 0) return;
+  if (!credentialValues.some((value) => value !== "")) return;
   const resolvedRoot = fs.realpathSync(path.resolve(root));
   for (const entry of fs.readdirSync(resolvedRoot, { recursive: true, withFileTypes: true })) {
     const full = path.join(entry.parentPath, entry.name);
     const relative = path.relative(resolvedRoot, full);
-    assertBufferExcludesCredentials(Buffer.from(relative), needles);
+    assertBufferExcludesCredentials(Buffer.from(relative), credentialValues);
     if (!entry.isFile()) continue;
     const stat = fs.lstatSync(full);
     if (stat.isSymbolicLink() || stat.nlink !== 1) {
       throw new Error("cloud node credential scan encountered an unsafe artifact");
     }
-    assertBufferExcludesCredentials(fs.readFileSync(full), needles);
+    assertBufferExcludesCredentials(fs.readFileSync(full), credentialValues);
   }
 }
 
 function assertNoCredentialText(value: string, credentialValues: readonly string[], label: string): void {
-  const needles = uniqueCredentialNeedles(credentialValues);
-  if (needles.some((needle) => Buffer.from(value).includes(needle))) {
+  if (containsSecretValueRepresentation(value, credentialValues)) {
     throw new Error(`${label} contains a forwarded credential`);
   }
 }
 
-function uniqueCredentialNeedles(credentialValues: readonly string[]): Buffer[] {
-  return [...new Set(credentialValues.filter((value) => value !== ""))].map((value) => Buffer.from(value));
-}
-
-function assertBufferExcludesCredentials(value: Buffer, needles: readonly Buffer[]): void {
-  if (needles.some((needle) => value.includes(needle))) {
+function assertBufferExcludesCredentials(value: Buffer, credentialValues: readonly string[]): void {
+  if (containsSecretValueRepresentation(value, credentialValues)) {
     throw new Error("cloud node canonical artifacts contain a forwarded credential");
   }
 }
@@ -2371,10 +2366,7 @@ function redactModalNodeErrorMessage(
   secretValues: readonly string[],
   authPathValues: readonly string[]
 ): string {
-  let message = errorMessage(error);
-  for (const secret of [...secretValues].filter(Boolean).sort((left, right) => right.length - left.length)) {
-    message = message.replaceAll(secret, "[credential]");
-  }
+  let message = redactSecretValueRepresentations(errorMessage(error), secretValues, "[credential]");
   for (const authPath of [...new Set(authPathValues)]
     .filter(Boolean)
     .sort((left, right) => right.length - left.length)) {

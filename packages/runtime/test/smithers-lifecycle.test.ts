@@ -406,6 +406,52 @@ test("stream cancellation does not wait for a never-settling line consumer", asy
   assert.ok(Date.now() - abortedAt < 2_000);
 });
 
+test(
+  "stream truncation kills a signal-resistant command and descendant process group",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-stream-process-group-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const runner = path.join(root, "smithers");
+    const commandPidPath = path.join(root, "command.pid");
+    const descendantPidPath = path.join(root, "descendant.pid");
+    fs.writeFileSync(
+      runner,
+      `#!/bin/sh
+printf '%s\n' "$$" > "$SMITHERS_STREAM_COMMAND_PID"
+( trap '' TERM; while :; do sleep 1; done ) &
+printf '%s\n' "$!" > "$SMITHERS_STREAM_DESCENDANT_PID"
+trap '' TERM
+printf '%s\n' '{"event":1}'
+while :; do sleep 1; done
+`,
+      "utf8"
+    );
+    fs.chmodSync(runner, 0o755);
+    const env = createSmithersTestEnvironment(runner, {
+      PATH: process.env.PATH,
+      SMITHERS_STREAM_COMMAND_PID: commandPidPath,
+      SMITHERS_STREAM_DESCENDANT_PID: descendantPidPath
+    });
+
+    const startedAt = Date.now();
+    const result = await streamSmithersCommand({
+      args: ["events", "run-id", "--follow", "--json"],
+      projectRoot: root,
+      env,
+      maxLines: 1,
+      onLine: () => undefined
+    });
+
+    assert.equal(result.truncated, true);
+    assert.equal(result.stoppedByCaller, true);
+    assert.ok(Date.now() - startedAt < 3_000);
+    for (const pidPath of [commandPidPath, descendantPidPath]) {
+      await assertProcessGone(Number(fs.readFileSync(pidPath, "utf8").trim()));
+    }
+  }
+);
+
 test("stream callback drain has an absolute deadline after the runner exits", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-stream-callback-deadline-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -426,3 +472,20 @@ test("stream callback drain has an absolute deadline after the runner exits", as
   );
   assert.ok(Date.now() - startedAt < 3_000);
 });
+
+async function assertProcessGone(pid: number): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.throws(
+    () => process.kill(pid, 0),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH"
+  );
+}

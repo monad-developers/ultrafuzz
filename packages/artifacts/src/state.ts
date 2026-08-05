@@ -278,13 +278,18 @@ export function createNodeState(input: NodeStateInput): NodeState {
 }
 
 export function writeRunState(target: RunLayoutStateLike | string, state: RunState): void {
+  writeJsonDurable(resolveStatePath(target), runStateForPersistence(state));
+}
+
+/** Returns the exact redacted state representation written to durable storage. */
+export function runStateForPersistence(state: RunState): RunState {
   const nodes = Object.fromEntries(
     Object.entries(state.nodes).map(([nodeId, node]) => [
       nodeId,
       node.last_error === undefined ? node : { ...node, last_error: redactSecretsInText(node.last_error) }
     ])
-  );
-  writeJsonDurable(resolveStatePath(target), { ...state, nodes });
+  ) as Record<string, NodeState>;
+  return { ...state, nodes };
 }
 
 export function readRunState(target: RunLayoutStateLike | string): RunState {
@@ -328,8 +333,20 @@ export function updateNodeState(
   patch: Partial<Omit<NodeState, "node_id">>,
   timestamp = new Date().toISOString()
 ): RunState {
+  const state = projectNodeState(readRunState(target), nodeId, patch, timestamp);
+  writeRunState(target, state);
+  return state;
+}
+
+/** Projects a node patch without writing, for crash-consistent outer commits. */
+export function projectNodeState(
+  current: RunState,
+  nodeId: string,
+  patch: Partial<Omit<NodeState, "node_id">>,
+  timestamp = new Date().toISOString()
+): RunState {
   const safeNodeId = validateSafeId(nodeId, "node ID");
-  const state = readRunState(target);
+  const state = structuredClone(current);
   const previous = state.nodes[safeNodeId] ?? createNodeState({ id: safeNodeId });
   const next: NodeState = {
     ...previous,
@@ -353,7 +370,6 @@ export function updateNodeState(
     state.last_transition_at = timestamp;
   }
   state.nodes[safeNodeId] = next;
-  writeRunState(target, state);
   return state;
 }
 

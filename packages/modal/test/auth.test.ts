@@ -236,6 +236,74 @@ describe("runtime-only subscription auth", () => {
     }
   });
 
+  it("recovers reused PIDs and replacement PID namespaces while legacy live-PID records fail closed", async () => {
+    const currentIdentity = testProcessIdentity(process.pid);
+    for (const [name, identityPatch] of [
+      ["reused-pid", { owner_process_start: `${currentIdentity.owner_process_start}-reused` }],
+      ["replacement-namespace", { owner_pid_namespace: `${currentIdentity.owner_pid_namespace}-replacement` }]
+    ] as const) {
+      const source = kimiAuthFixture({ fresh: true });
+      const credentials = path.join(source, "credentials");
+      const leaseFile = path.join(credentials, ".kimi-code.ultrafuzz-modal-node-execution");
+      const fenceFile = path.join(credentials, ".kimi-code.ultrafuzz-modal-node-fence");
+      const active = `${JSON.stringify({
+        schema_version: "ultrafuzz.kimi-modal-execution-lease.v1",
+        credential_lease: "b".repeat(64),
+        owner_id: name,
+        owner_process_id: process.pid,
+        ...currentIdentity,
+        ...identityPatch,
+        journal_pair_id: "21111111-2222-4333-8444-555555555555",
+        transition_sequence: 1,
+        rotation_state: "active"
+      })}\n`;
+      fs.writeFileSync(leaseFile, active, { mode: 0o600 });
+      fs.writeFileSync(fenceFile, active, { mode: 0o600 });
+      let lease: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+      try {
+        lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+          timeoutMs: 5_000
+        });
+        const records = fs
+          .readFileSync(leaseFile, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { owner_id?: string; rotation_state?: string });
+        expect(records).toHaveLength(3);
+        expect(records[1]).toMatchObject({ owner_id: name, rotation_state: "resolved" });
+        expect(records[2]).toMatchObject({ owner_id: lease.ownerId, rotation_state: "active" });
+      } finally {
+        await lease?.release().catch(() => undefined);
+        fs.rmSync(source, { recursive: true, force: true });
+      }
+    }
+
+    const legacySource = kimiAuthFixture({ fresh: true });
+    const credentials = path.join(legacySource, "credentials");
+    const leaseFile = path.join(credentials, ".kimi-code.ultrafuzz-modal-node-execution");
+    const fenceFile = path.join(credentials, ".kimi-code.ultrafuzz-modal-node-fence");
+    const legacyActive = `${JSON.stringify({
+      schema_version: "ultrafuzz.kimi-modal-execution-lease.v1",
+      credential_lease: "c".repeat(64),
+      owner_id: "legacy-live-owner",
+      owner_process_id: process.pid,
+      journal_pair_id: "31111111-2222-4333-8444-555555555555",
+      transition_sequence: 1,
+      rotation_state: "active"
+    })}\n`;
+    fs.writeFileSync(leaseFile, legacyActive, { mode: 0o600 });
+    fs.writeFileSync(fenceFile, legacyActive, { mode: 0o600 });
+    try {
+      await expect(
+        acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: legacySource }, "/unused", {
+          timeoutMs: 5_000
+        })
+      ).rejects.toThrow(/durable unresolved Kimi Modal credential-rotation fence/u);
+    } finally {
+      fs.rmSync(legacySource, { recursive: true, force: true });
+    }
+  });
+
   it("fsyncs a new Kimi execution fence from file through both containing directories", async () => {
     const source = kimiAuthFixture({ fresh: true });
     const credentialsDirectory = path.join(source, "credentials");
@@ -1824,6 +1892,26 @@ default_effort = "max"
   );
   fs.writeFileSync(path.join(source, "device_id"), "device-test\n", { mode: 0o600 });
   return source;
+}
+
+function testProcessIdentity(pid: number): {
+  owner_process_start: string;
+  owner_boot_id: string;
+  owner_pid_namespace: string;
+} {
+  const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+  const closingParenthesis = stat.lastIndexOf(")");
+  if (closingParenthesis < 0) throw new Error("test process stat is malformed");
+  const startToken = stat
+    .slice(closingParenthesis + 2)
+    .trim()
+    .split(/\s+/u)[19];
+  if (startToken === undefined) throw new Error("test process stat has no start token");
+  return {
+    owner_process_start: startToken,
+    owner_boot_id: fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(),
+    owner_pid_namespace: fs.readlinkSync(`/proc/${pid}/ns/pid`)
+  };
 }
 
 function openFileDescriptorsBelow(root: string): string[] {

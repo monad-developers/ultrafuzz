@@ -1,6 +1,6 @@
 import os from "node:os";
 import { createHash, randomUUID } from "node:crypto";
-import { constants, type BigIntStats } from "node:fs";
+import { constants, readFileSync, readlinkSync, type BigIntStats } from "node:fs";
 import {
   access,
   cp,
@@ -75,6 +75,19 @@ interface KimiLeaseCredentialHandleBinding {
   pendingLocalRefresh?: {
     intendedCredentialSha256: string;
   };
+}
+
+interface KimiLeaseOwnerProcessRecord {
+  pid: number;
+  startToken?: string;
+  bootId?: string;
+  pidNamespace?: string;
+}
+
+interface KimiLeaseOwnerProcessIdentity extends KimiLeaseOwnerProcessRecord {
+  startToken: string;
+  bootId: string;
+  pidNamespace: string;
 }
 
 export function subscriptionAuthCopy(
@@ -195,6 +208,7 @@ export async function acquireKimiModalNodeExecutionLease(
   home = os.homedir(),
   options: { timeoutMs?: number; lockUpdateMs?: number } = {}
 ): Promise<KimiModalNodeExecutionLease> {
+  const ownerProcess = currentKimiLeaseOwnerProcessIdentity();
   // Canonicalize a whole-home alias, which makes aliases of the same Kimi
   // home share one lease, then reject nested aliases and hard-linked
   // credentials. Otherwise two distinct homes could point at one rotating
@@ -336,7 +350,7 @@ export async function acquireKimiModalNodeExecutionLease(
           fenceHandle,
           abandonedActive.credentialLeaseId,
           abandonedActive.ownerId,
-          abandonedActive.ownerProcessId,
+          abandonedActive.ownerProcess,
           abandonedActive.journalPairId,
           abandonedActive.transitionSequence + 1,
           "resolved"
@@ -423,7 +437,6 @@ export async function acquireKimiModalNodeExecutionLease(
     .update(heldCredentialName)
     .digest("hex");
   const ownerId = randomUUID();
-  const ownerProcessId = process.pid;
   const journalPairId = randomUUID();
 
   let handleState: KimiModalNodeExecutionLeaseHandleState = "open";
@@ -439,7 +452,7 @@ export async function acquireKimiModalNodeExecutionLease(
       heldFenceHandle,
       credentialLeaseId,
       ownerId,
-      ownerProcessId,
+      ownerProcess,
       journalPairId,
       transitionSequence,
       rotationState
@@ -530,7 +543,7 @@ export async function acquireKimiModalNodeExecutionLease(
           metadata,
           credentialLeaseId,
           ownerId,
-          ownerProcessId,
+          ownerProcess,
           journalPairId,
           transitionSequence,
           rotationState
@@ -550,7 +563,7 @@ export async function acquireKimiModalNodeExecutionLease(
       heldFenceHandle,
       credentialLeaseId,
       ownerId,
-      ownerProcessId,
+      ownerProcess,
       journalPairId,
       nextSequence,
       next
@@ -1171,7 +1184,7 @@ async function writeBoundKimiExecutionLeaseMetadata(
   label: string,
   credentialLeaseId: string,
   ownerId: string,
-  ownerProcessId: number,
+  ownerProcess: KimiLeaseOwnerProcessRecord,
   journalPairId: string,
   transitionSequence: number,
   rotationState: KimiModalNodeExecutionLeaseState
@@ -1181,7 +1194,7 @@ async function writeBoundKimiExecutionLeaseMetadata(
     handle,
     credentialLeaseId,
     ownerId,
-    ownerProcessId,
+    ownerProcess,
     journalPairId,
     transitionSequence,
     rotationState
@@ -1197,7 +1210,7 @@ async function writeKimiExecutionLeaseStatePair(
   fenceHandle: FileHandle,
   credentialLeaseId: string,
   ownerId: string,
-  ownerProcessId: number,
+  ownerProcess: KimiLeaseOwnerProcessRecord,
   journalPairId: string,
   transitionSequence: number,
   rotationState: KimiModalNodeExecutionLeaseState
@@ -1224,7 +1237,7 @@ async function writeKimiExecutionLeaseStatePair(
       entry.label,
       credentialLeaseId,
       ownerId,
-      ownerProcessId,
+      ownerProcess,
       journalPairId,
       transitionSequence,
       rotationState
@@ -1239,7 +1252,7 @@ function isKimiExecutionLeaseOwnerState(
   metadata: unknown,
   credentialLeaseId: string,
   ownerId: string,
-  ownerProcessId: number,
+  ownerProcess: KimiLeaseOwnerProcessIdentity,
   journalPairId: string,
   transitionSequence: number,
   rotationState: KimiModalNodeExecutionLeaseState
@@ -1249,7 +1262,10 @@ function isKimiExecutionLeaseOwnerState(
     metadata.schema_version === "ultrafuzz.kimi-modal-execution-lease.v1" &&
     metadata.credential_lease === credentialLeaseId &&
     metadata.owner_id === ownerId &&
-    metadata.owner_process_id === ownerProcessId &&
+    metadata.owner_process_id === ownerProcess.pid &&
+    metadata.owner_process_start === ownerProcess.startToken &&
+    metadata.owner_boot_id === ownerProcess.bootId &&
+    metadata.owner_pid_namespace === ownerProcess.pidNamespace &&
     metadata.journal_pair_id === journalPairId &&
     metadata.transition_sequence === transitionSequence &&
     metadata.rotation_state === rotationState
@@ -1259,7 +1275,7 @@ function isKimiExecutionLeaseOwnerState(
 function assertKimiExecutionLeaseJournalsAcquirable(
   target: Record<string, unknown> | undefined,
   fence: Record<string, unknown> | undefined
-): KimiExecutionLeasePairState | undefined {
+): RecoverableKimiExecutionLeasePairState | undefined {
   if (target === undefined && fence === undefined) return undefined;
 
   const targetPair = kimiExecutionLeasePairState(target);
@@ -1269,7 +1285,7 @@ function assertKimiExecutionLeaseJournalsAcquirable(
     fencePair !== undefined &&
     targetPair.credentialLeaseId === fencePair.credentialLeaseId &&
     targetPair.ownerId === fencePair.ownerId &&
-    targetPair.ownerProcessId === fencePair.ownerProcessId &&
+    sameKimiLeaseOwnerProcess(targetPair.ownerProcess, fencePair.ownerProcess) &&
     targetPair.journalPairId === fencePair.journalPairId &&
     targetPair.transitionSequence === fencePair.transitionSequence &&
     targetPair.rotationState === fencePair.rotationState;
@@ -1277,10 +1293,10 @@ function assertKimiExecutionLeaseJournalsAcquirable(
   if (
     exactPair &&
     targetPair?.rotationState === "active" &&
-    targetPair.ownerProcessId !== undefined &&
-    !kimiExecutionLeaseProcessIsAlive(targetPair.ownerProcessId)
+    targetPair.ownerProcess !== undefined &&
+    !kimiExecutionLeaseProcessIsAlive(targetPair.ownerProcess)
   ) {
-    return targetPair as KimiExecutionLeasePairState;
+    return { ...targetPair, ownerProcess: targetPair.ownerProcess };
   }
   {
     throw new Error(
@@ -1292,20 +1308,100 @@ function assertKimiExecutionLeaseJournalsAcquirable(
 interface KimiExecutionLeasePairState {
   credentialLeaseId: string;
   ownerId: string;
-  ownerProcessId: number;
+  ownerProcess?: KimiLeaseOwnerProcessRecord;
   journalPairId: string;
   transitionSequence: number;
   rotationState: KimiModalNodeExecutionLeaseState;
 }
 
-function kimiExecutionLeaseProcessIsAlive(pid: number): boolean {
+interface RecoverableKimiExecutionLeasePairState extends KimiExecutionLeasePairState {
+  ownerProcess: KimiLeaseOwnerProcessRecord;
+}
+
+function kimiExecutionLeaseProcessIsAlive(owner: KimiLeaseOwnerProcessRecord): boolean {
   try {
-    process.kill(pid, 0);
-    return true;
+    process.kill(owner.pid, 0);
   } catch (error) {
     if (isNodeError(error) && error.code === "ESRCH") return false;
     if (isNodeError(error) && error.code === "EPERM") return true;
     throw error;
+  }
+  if (!isCompleteKimiLeaseOwnerProcess(owner)) return true;
+  const observed = observedKimiLeaseOwnerProcessIdentity(owner.pid);
+  if (observed === undefined) return true;
+  return sameKimiLeaseOwnerProcess(owner, observed);
+}
+
+function kimiLeaseOwnerProcessRecord(
+  metadata: Record<string, unknown> | undefined
+): KimiLeaseOwnerProcessRecord | undefined | null {
+  if (metadata === undefined) return undefined;
+  const pid = metadata.owner_process_id;
+  const startToken = metadata.owner_process_start;
+  const bootId = metadata.owner_boot_id;
+  const pidNamespace = metadata.owner_pid_namespace;
+  const identityFields = [startToken, bootId, pidNamespace];
+  if (pid === undefined) return identityFields.every((value) => value === undefined) ? undefined : null;
+  if (!Number.isSafeInteger(pid) || (pid as number) <= 0) return null;
+  if (identityFields.every((value) => value === undefined)) return { pid: pid as number };
+  if (identityFields.some((value) => typeof value !== "string" || value.length === 0)) return null;
+  return {
+    pid: pid as number,
+    startToken: startToken as string,
+    bootId: bootId as string,
+    pidNamespace: pidNamespace as string
+  };
+}
+
+function isCompleteKimiLeaseOwnerProcess(owner: KimiLeaseOwnerProcessRecord): owner is KimiLeaseOwnerProcessIdentity {
+  return (
+    typeof owner.startToken === "string" &&
+    owner.startToken.length > 0 &&
+    typeof owner.bootId === "string" &&
+    owner.bootId.length > 0 &&
+    typeof owner.pidNamespace === "string" &&
+    owner.pidNamespace.length > 0
+  );
+}
+
+function sameKimiLeaseOwnerProcess(
+  left: KimiLeaseOwnerProcessRecord | undefined,
+  right: KimiLeaseOwnerProcessRecord | undefined
+): boolean {
+  return (
+    left?.pid === right?.pid &&
+    left?.startToken === right?.startToken &&
+    left?.bootId === right?.bootId &&
+    left?.pidNamespace === right?.pidNamespace
+  );
+}
+
+function currentKimiLeaseOwnerProcessIdentity(): KimiLeaseOwnerProcessIdentity {
+  const identity = observedKimiLeaseOwnerProcessIdentity(process.pid);
+  if (identity === undefined) {
+    throw new Error("unable to bind Kimi Modal execution lease to the current process identity");
+  }
+  return identity;
+}
+
+function observedKimiLeaseOwnerProcessIdentity(pid: number): KimiLeaseOwnerProcessIdentity | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const closingParenthesis = stat.lastIndexOf(")");
+    if (closingParenthesis < 0) return undefined;
+    const fields = stat
+      .slice(closingParenthesis + 2)
+      .trim()
+      .split(/\s+/u);
+    const startToken = fields[19];
+    const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    const pidNamespace = readlinkSync(`/proc/${pid}/ns/pid`);
+    if (startToken === undefined || startToken.length === 0 || bootId.length === 0 || pidNamespace.length === 0) {
+      return undefined;
+    }
+    return { pid, startToken, bootId, pidNamespace };
+  } catch {
+    return undefined;
   }
 }
 
@@ -1350,18 +1446,18 @@ function kimiExecutionLeasePairState(metadata: Record<string, unknown> | undefin
   | {
       credentialLeaseId: string;
       ownerId: string;
-      ownerProcessId: number | undefined;
+      ownerProcess: KimiLeaseOwnerProcessRecord | undefined;
       journalPairId: string;
       transitionSequence: number;
       rotationState: KimiModalNodeExecutionLeaseState;
     }
   | undefined {
+  const ownerProcess = kimiLeaseOwnerProcessRecord(metadata);
   if (
     metadata === undefined ||
     typeof metadata.credential_lease !== "string" ||
     typeof metadata.owner_id !== "string" ||
-    (metadata.owner_process_id !== undefined &&
-      (!Number.isSafeInteger(metadata.owner_process_id) || (metadata.owner_process_id as number) <= 0)) ||
+    ownerProcess === null ||
     typeof metadata.journal_pair_id !== "string" ||
     metadata.journal_pair_id === "" ||
     !Number.isSafeInteger(metadata.transition_sequence) ||
@@ -1375,7 +1471,7 @@ function kimiExecutionLeasePairState(metadata: Record<string, unknown> | undefin
   return {
     credentialLeaseId: metadata.credential_lease,
     ownerId: metadata.owner_id,
-    ownerProcessId: metadata.owner_process_id as number | undefined,
+    ownerProcess,
     journalPairId: metadata.journal_pair_id,
     transitionSequence: metadata.transition_sequence as number,
     rotationState: metadata.rotation_state
@@ -1414,7 +1510,7 @@ async function readKimiExecutionLeaseJournal(handle: FileHandle): Promise<{
   const records = journal.slice(0, -1).split("\n");
   let last: Record<string, unknown> | undefined;
   let activeOwner: string | undefined;
-  let activeOwnerProcessId: number | undefined;
+  let activeOwnerProcess: KimiLeaseOwnerProcessRecord | undefined;
   let activeCredentialLease: string | undefined;
   let activeState: KimiModalNodeExecutionLeaseState | undefined;
   let declaresPairState = false;
@@ -1425,13 +1521,13 @@ async function readKimiExecutionLeaseJournal(handle: FileHandle): Promise<{
     } catch (error) {
       throw new Error("Kimi Modal execution lease journal has a malformed record", { cause: error });
     }
+    const parsedOwnerProcess = isRecord(parsed) ? kimiLeaseOwnerProcessRecord(parsed) : null;
     if (
       !isRecord(parsed) ||
       parsed.schema_version !== "ultrafuzz.kimi-modal-execution-lease.v1" ||
       typeof parsed.credential_lease !== "string" ||
       typeof parsed.owner_id !== "string" ||
-      (parsed.owner_process_id !== undefined &&
-        (!Number.isSafeInteger(parsed.owner_process_id) || (parsed.owner_process_id as number) <= 0)) ||
+      parsedOwnerProcess === null ||
       (parsed.rotation_state !== "active" &&
         parsed.rotation_state !== "rotation-possible" &&
         parsed.rotation_state !== "resolved")
@@ -1447,7 +1543,7 @@ async function readKimiExecutionLeaseJournal(handle: FileHandle): Promise<{
         throw new Error("Kimi Modal execution lease journal has an invalid state transition");
       }
       activeOwner = owner;
-      activeOwnerProcessId = parsed.owner_process_id as number | undefined;
+      activeOwnerProcess = parsedOwnerProcess;
       activeCredentialLease = credentialLease;
       activeState = state;
     } else {
@@ -1455,7 +1551,7 @@ async function readKimiExecutionLeaseJournal(handle: FileHandle): Promise<{
         activeState === undefined ||
         activeState === "resolved" ||
         owner !== activeOwner ||
-        parsed.owner_process_id !== activeOwnerProcessId ||
+        !sameKimiLeaseOwnerProcess(parsedOwnerProcess, activeOwnerProcess) ||
         credentialLease !== activeCredentialLease ||
         (state === "rotation-possible" && activeState !== "active")
       ) {
@@ -1476,7 +1572,7 @@ async function writeKimiExecutionLeaseMetadata(
   handle: FileHandle,
   credentialLeaseId: string,
   ownerId: string,
-  ownerProcessId: number,
+  ownerProcess: KimiLeaseOwnerProcessRecord,
   journalPairId: string,
   transitionSequence: number,
   rotationState: KimiModalNodeExecutionLeaseState
@@ -1486,7 +1582,10 @@ async function writeKimiExecutionLeaseMetadata(
       schema_version: "ultrafuzz.kimi-modal-execution-lease.v1",
       credential_lease: credentialLeaseId,
       owner_id: ownerId,
-      owner_process_id: ownerProcessId,
+      owner_process_id: ownerProcess.pid,
+      ...(ownerProcess.startToken === undefined ? {} : { owner_process_start: ownerProcess.startToken }),
+      ...(ownerProcess.bootId === undefined ? {} : { owner_boot_id: ownerProcess.bootId }),
+      ...(ownerProcess.pidNamespace === undefined ? {} : { owner_pid_namespace: ownerProcess.pidNamespace }),
       journal_pair_id: journalPairId,
       transition_sequence: transitionSequence,
       rotation_state: rotationState

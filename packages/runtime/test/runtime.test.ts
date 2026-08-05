@@ -73,6 +73,7 @@ import {
   workflowLifecycleCorrelationLabel,
   workflowLifecycleActionJournalPath,
   workflowRunLinkJournalPath,
+  workflowSyncCommitJournalPath,
   WORKFLOW_CHECKPOINT_FRAME_MAX
 } from "../src/workflow-mutation.js";
 import {
@@ -11001,6 +11002,166 @@ test("syncRun finishes the final run state-and-event commit unit when cancellati
       .length,
     1
   );
+});
+
+test("syncRun recovers prepared node commits after both event and state persistence fault windows", async () => {
+  for (const fault of ["after-events", "after-state"] as const) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = `sync-journal-${fault}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+        { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+        { type: "RunFinished" }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, `${fault}: ${JSON.stringify(run.diagnostics)}`);
+    writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+    const layout = layoutForRunRoot(run.value!.run_root);
+    const nodeIndex = path.join(layout.eventsIndexDir, "node", "project-discovery.jsonl");
+    let injected = false;
+    let preparedNodeSyncedId: string | undefined;
+    let statusInFaultWindow: string | undefined;
+    const inject = () => {
+      if (injected) return;
+      injected = true;
+      const prepared = JSON.parse(fs.readFileSync(workflowSyncCommitJournalPath(layout), "utf8")) as {
+        phase?: string;
+        events?: Array<{ event_id?: string; event_type?: string }>;
+      };
+      assert.equal(prepared.phase, "prepared", fault);
+      preparedNodeSyncedId = prepared.events?.find((event) => event.event_type === "node-synced")?.event_id;
+      statusInFaultWindow = readRunState(layout).nodes["project-discovery"]?.status;
+      fs.rmSync(nodeIndex);
+      throw new Error(`injected ${fault} synchronization fault`);
+    };
+    await assert.rejects(
+      syncRun(
+        { projectRoot: project, runId, env },
+        fault === "after-events" ? { afterEventsPersisted: inject } : { afterStatePersisted: inject }
+      ),
+      new RegExp(`injected ${fault} synchronization fault`, "u")
+    );
+    assert.equal(injected, true, fault);
+    const nodeSyncedId = preparedNodeSyncedId;
+    if (nodeSyncedId === undefined) throw new Error(`${fault}: prepared journal has no node-synced event`);
+    assert.equal(statusInFaultWindow, fault === "after-state" ? "succeeded" : "pending", fault);
+
+    const applied = JSON.parse(fs.readFileSync(workflowSyncCommitJournalPath(layout), "utf8")) as {
+      phase?: string;
+    };
+    assert.equal(applied.phase, "applied", fault);
+    assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "succeeded", fault);
+    const release = await acquireWorkflowMutationLock(layout);
+    await release();
+    for (const filePath of [layout.eventsPath, nodeIndex]) {
+      const occurrences: number = fs
+        .readFileSync(filePath, "utf8")
+        .split(/\r?\n/u)
+        .filter((line) => line.includes(nodeSyncedId)).length;
+      assert.equal(occurrences, 1, `${fault}: ${filePath}`);
+    }
+
+    const retried = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(retried.ok, true, `${fault}: ${JSON.stringify(retried.diagnostics)}`);
+    assert.equal(
+      replayEvents(layout, Number.MAX_SAFE_INTEGER).records.filter((event) => event.event_id === nodeSyncedId).length,
+      1,
+      fault
+    );
+  }
+});
+
+test("syncRun recovers prepared final-status commits after both event and state persistence fault windows", async () => {
+  for (const fault of ["after-events", "after-state"] as const) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = `sync-final-journal-${fault}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+        { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+        { type: "RunFinished" }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, `${fault}: ${JSON.stringify(run.diagnostics)}`);
+    writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+    const layout = layoutForRunRoot(run.value!.run_root);
+    const typeIndex = path.join(layout.eventsIndexDir, "type", "workflow-synced.jsonl");
+    let injected = false;
+    let preparedWorkflowSyncedId: string | undefined;
+    let statusInFaultWindow: string | undefined;
+    const inject = () => {
+      if (injected) return;
+      const prepared = JSON.parse(fs.readFileSync(workflowSyncCommitJournalPath(layout), "utf8")) as {
+        phase?: string;
+        events?: Array<{ event_id?: string; event_type?: string }>;
+      };
+      const workflowSynced = prepared.events?.find((event) => event.event_type === "workflow-synced");
+      if (workflowSynced === undefined) return;
+      injected = true;
+      assert.equal(prepared.phase, "prepared", fault);
+      preparedWorkflowSyncedId = workflowSynced.event_id;
+      statusInFaultWindow = readRunState(layout).status;
+      fs.rmSync(typeIndex);
+      throw new Error(`injected final ${fault} synchronization fault`);
+    };
+
+    await assert.rejects(
+      syncRun(
+        { projectRoot: project, runId, env },
+        fault === "after-events" ? { afterEventsPersisted: inject } : { afterStatePersisted: inject }
+      ),
+      new RegExp(`injected final ${fault} synchronization fault`, "u")
+    );
+
+    assert.equal(injected, true, fault);
+    const workflowSyncedId = preparedWorkflowSyncedId;
+    if (workflowSyncedId === undefined) throw new Error(`${fault}: prepared journal has no workflow-synced event`);
+    assert.equal(statusInFaultWindow, fault === "after-state" ? "succeeded" : "running", fault);
+    const applied = JSON.parse(fs.readFileSync(workflowSyncCommitJournalPath(layout), "utf8")) as {
+      phase?: string;
+    };
+    assert.equal(applied.phase, "applied", fault);
+    assert.equal(readRunState(layout).status, "succeeded", fault);
+    for (const filePath of [layout.eventsPath, typeIndex]) {
+      assert.equal(
+        fs
+          .readFileSync(filePath, "utf8")
+          .split(/\r?\n/u)
+          .filter((line) => line.includes(workflowSyncedId)).length,
+        1,
+        `${fault}: ${filePath}`
+      );
+    }
+    const retried = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(retried.ok, true, `${fault}: ${JSON.stringify(retried.diagnostics)}`);
+    assert.equal(
+      replayEvents(layout, Number.MAX_SAFE_INTEGER).records.filter((event) => event.event_id === workflowSyncedId)
+        .length,
+      1,
+      fault
+    );
+  }
 });
 
 test("syncRun rejects conflicting inspect, event, and state evidence before mutating durable state", async () => {

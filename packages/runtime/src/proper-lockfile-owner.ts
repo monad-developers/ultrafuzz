@@ -2,6 +2,34 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { writeJsonDurable } from "@ultrafuzz/artifacts";
+import lockfile from "proper-lockfile";
+
+const RECLAIM_GUARD_STALE_MS = 30_000;
+
+/**
+ * Serializes liveness-based reclamation with every other conforming contender.
+ * The guard itself relies only on proper-lockfile's atomic mkdir/heartbeat
+ * protocol; it is never manually removed from a pathname after observation.
+ */
+export async function withProperLockfileReclaimGuard<T>(lockPath: string, operation: () => T | Promise<T>): Promise<T> {
+  const resolvedLockPath = path.resolve(lockPath);
+  const guardPath = `${resolvedLockPath}.reclaim-guard`;
+  // Use the guard pathname as proper-lockfile's in-process ownership key too.
+  // Reusing the run root would collide with a concurrently held start lock
+  // even though the two lockfilePath values are different.
+  const release = await lockfile.lock(guardPath, {
+    lockfilePath: guardPath,
+    realpath: false,
+    stale: RECLAIM_GUARD_STALE_MS,
+    update: 10_000,
+    retries: 0
+  });
+  try {
+    return await operation();
+  } finally {
+    await release();
+  }
+}
 
 export interface ProperLockfileDirectoryIdentity {
   device: number;

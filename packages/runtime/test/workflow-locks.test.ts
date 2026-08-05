@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -32,6 +33,72 @@ test(
     for (const lockPath of [path.join(runRoot, ".start-preparation-lock"), path.join(runRoot, ".workflow-mutation")]) {
       assert.equal(fs.existsSync(path.join(lockPath, "owner.json")), false);
       assert.equal(fs.existsSync(lockPath), false);
+    }
+  }
+);
+
+test(
+  "stale workflow lock reclamation never removes a replacement acquired by another process",
+  { skip: process.platform !== "linux", concurrency: false },
+  async (t) => {
+    for (const lockKind of ["start", "mutation"] as const) {
+      const runRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), `ufz-lock-race-${lockKind}-`));
+      t.after(() => fs.rmSync(runRoot, { recursive: true, force: true }));
+      const lockName = lockKind === "start" ? ".start-preparation-lock" : ".workflow-mutation";
+      const lockPath = path.join(runRoot, lockName);
+      fs.mkdirSync(lockPath);
+      fs.writeFileSync(
+        path.join(lockPath, "owner.json"),
+        `${JSON.stringify({ pid: 2_147_483_647, process_start: "dead", acquired_at: new Date().toISOString() })}\n`
+      );
+      const childScript = path.join(runRoot, "contend.mjs");
+      const planRunModule = new URL("../src/plan-run.js", import.meta.url).href;
+      const mutationModule = new URL("../src/workflow-mutation.js", import.meta.url).href;
+      const artifactsModule = import.meta.resolve("@ultrafuzz/artifacts");
+      fs.writeFileSync(
+        childScript,
+        `import fs from "node:fs";\n` +
+          `import path from "node:path";\n` +
+          `import { layoutForRunRoot } from ${JSON.stringify(artifactsModule)};\n` +
+          `import { acquireWorkflowStartPreparationLock } from ${JSON.stringify(planRunModule)};\n` +
+          `import { acquireWorkflowMutationLock } from ${JSON.stringify(mutationModule)};\n` +
+          `const [root, kind, id] = process.argv.slice(2);\n` +
+          `const layout = layoutForRunRoot(root, path.basename(root));\n` +
+          `const acquire = kind === "start" ? acquireWorkflowStartPreparationLock : acquireWorkflowMutationLock;\n` +
+          `const release = await acquire(layout);\n` +
+          `const active = path.join(root, "critical-section");\n` +
+          `let descriptor;\n` +
+          `try { descriptor = fs.openSync(active, "wx"); } catch { fs.writeFileSync(path.join(root, "violation"), "overlap\\n"); }\n` +
+          `fs.writeFileSync(path.join(root, \`held-\${id}\`), "held\\n");\n` +
+          `while (!fs.existsSync(path.join(root, \`release-\${id}\`))) await new Promise((resolve) => setTimeout(resolve, 10));\n` +
+          `if (descriptor !== undefined) { fs.closeSync(descriptor); fs.unlinkSync(active); }\n` +
+          `await release();\n`,
+        "utf8"
+      );
+      const children = ["a", "b"].map((id) =>
+        spawn(process.execPath, [childScript, runRoot, lockKind, id], {
+          cwd: runRoot,
+          stdio: ["ignore", "ignore", "pipe"]
+        })
+      );
+      try {
+        const first = await waitForOneHeldMarker(runRoot);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        assert.equal(fs.existsSync(path.join(runRoot, "violation")), false, lockKind);
+        assert.deepEqual(heldMarkerIds(runRoot), [first], lockKind);
+        fs.writeFileSync(path.join(runRoot, `release-${first}`), "release\n");
+        const second = first === "a" ? "b" : "a";
+        await waitForPath(path.join(runRoot, `held-${second}`));
+        assert.equal(fs.existsSync(path.join(runRoot, "violation")), false, lockKind);
+        fs.writeFileSync(path.join(runRoot, `release-${second}`), "release\n");
+        const exits = await Promise.all(children.map((child) => childExit(child)));
+        assert.deepEqual(exits, [0, 0], lockKind);
+        assert.equal(fs.existsSync(lockPath), false, lockKind);
+      } finally {
+        for (const child of children) {
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        }
+      }
     }
   }
 );
@@ -75,4 +142,35 @@ async function waitForHeartbeat(
     if (Date.now() >= deadline) throw new Error("proper-lockfile heartbeat did not update every owned lock");
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
+}
+
+function heldMarkerIds(root: string): string[] {
+  return ["a", "b"].filter((id) => fs.existsSync(path.join(root, `held-${id}`)));
+}
+
+async function waitForOneHeldMarker(root: string): Promise<string> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const held = heldMarkerIds(root);
+    if (held.length === 1) return held[0]!;
+    if (held.length > 1) throw new Error("both lock contenders entered the critical section");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("workflow lock contender did not acquire the stale lock");
+}
+
+async function waitForPath(filePath: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!fs.existsSync(filePath)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${filePath}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function childExit(child: ReturnType<typeof spawn>): Promise<number | null> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(child.exitCode);
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => resolve(code));
+  });
 }

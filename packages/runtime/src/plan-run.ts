@@ -81,6 +81,7 @@ import { checkDependencyLegality } from "./artifact-gates.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
 import {
   captureProperLockfileDirectoryIdentity,
+  withProperLockfileReclaimGuard,
   writeProperLockfileOwner,
   type ProperLockfileDirectoryIdentity
 } from "./proper-lockfile-owner.js";
@@ -413,7 +414,7 @@ export async function acquireWorkflowStartPreparationLock(layout: RunLayout): Pr
   let acquiredIdentity: ProperLockfileDirectoryIdentity | undefined;
   while (release === undefined) {
     try {
-      reclaimTerminatedStartPreparationLock(layout, lockPath);
+      await withProperLockfileReclaimGuard(lockPath, () => reclaimTerminatedStartPreparationLock(layout, lockPath));
       const acquiredRelease = await lockfile.lock(layout.root, {
         lockfilePath: lockPath,
         realpath: false,

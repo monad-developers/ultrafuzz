@@ -80,6 +80,72 @@ export function redactSecretsInText(value: string, placeholder = SENSITIVE_REDAC
   return redacted;
 }
 
+/**
+ * Enumerates common lossless textual encodings of an exact credential. This is
+ * intentionally separate from heuristic secret detection: callers that know
+ * the actual credential bytes must reject encoded copies as well as literals.
+ */
+export function secretValueRepresentations(secret: string): string[] {
+  if (secret.length === 0) return [];
+  const bytes = Buffer.from(secret, "utf8");
+  const base64 = bytes.toString("base64");
+  const base64Url = base64.replaceAll("+", "-").replaceAll("/", "_");
+  const hex = bytes.toString("hex");
+  const percentUpper = [...bytes].map((byte) => `%${byte.toString(16).padStart(2, "0").toUpperCase()}`).join("");
+  const representations = new Set([
+    secret,
+    base64,
+    base64.replace(/=+$/u, ""),
+    base64Url,
+    base64Url.replace(/=+$/u, ""),
+    hex,
+    hex.toUpperCase(),
+    percentUpper,
+    percentUpper.toLowerCase()
+  ]);
+  try {
+    const uriComponent = encodeURIComponent(secret);
+    representations.add(uriComponent);
+    representations.add(uriComponent.replace(/%[0-9A-F]{2}/gu, (escape) => escape.toLowerCase()));
+    representations.add(uriComponent.replaceAll("%20", "+"));
+    representations.add(JSON.stringify(secret).slice(1, -1));
+  } catch {
+    // Byte-oriented encodings above still cover malformed surrogate input.
+  }
+  representations.delete("");
+  return [...representations].sort((left, right) => right.length - left.length || left.localeCompare(right));
+}
+
+export function containsSecretValueRepresentation(
+  value: string | Uint8Array,
+  secretValues: readonly string[]
+): boolean {
+  const contents = typeof value === "string" ? Buffer.from(value, "utf8") : Buffer.from(value);
+  return uniqueSecretRepresentations(secretValues).some((representation) =>
+    contents.includes(Buffer.from(representation, "utf8"))
+  );
+}
+
+export function redactSecretValueRepresentations(
+  value: string,
+  secretValues: readonly string[],
+  placeholder = SENSITIVE_REDACTION_PLACEHOLDER
+): string {
+  let redacted = value;
+  for (const representation of uniqueSecretRepresentations(secretValues)) {
+    redacted = redacted.replaceAll(representation, placeholder);
+  }
+  return redacted;
+}
+
+function uniqueSecretRepresentations(secretValues: readonly string[]): string[] {
+  const representations = new Set<string>();
+  for (const secret of new Set(secretValues.filter((value) => value.length > 0))) {
+    for (const representation of secretValueRepresentations(secret)) representations.add(representation);
+  }
+  return [...representations].sort((left, right) => right.length - left.length || left.localeCompare(right));
+}
+
 export function redactSecretsInValue(value: unknown, placeholder = SENSITIVE_REDACTION_PLACEHOLDER): unknown {
   if (Array.isArray(value)) {
     return value.map((entry) => redactSecretsInValue(entry, placeholder));

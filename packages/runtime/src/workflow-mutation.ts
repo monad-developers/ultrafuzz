@@ -3,17 +3,23 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  assertRunStateSchema,
   assertNoSymlinkComponents,
   assertPathInside,
+  ensureEventRecord,
   replayEvents,
+  runStateForPersistence,
   writeJsonDurable,
+  writeRunState,
   type EventRecord,
-  type RunLayout
+  type RunLayout,
+  type RunState
 } from "@ultrafuzz/artifacts";
 import lockfile from "proper-lockfile";
 
 import {
   captureProperLockfileDirectoryIdentity,
+  withProperLockfileReclaimGuard,
   writeProperLockfileOwner,
   type ProperLockfileDirectoryIdentity
 } from "./proper-lockfile-owner.js";
@@ -22,11 +28,13 @@ const WORKFLOW_MUTATION_LOCK = ".workflow-mutation";
 const WORKFLOW_LIFECYCLE_ACTION_LOCK = ".workflow-lifecycle-action";
 const WORKFLOW_LIFECYCLE_ACTION_JOURNAL = "lifecycle-action-journal.json";
 const WORKFLOW_RUN_LINK_JOURNAL = "workflow-run-link-journal.json";
+const WORKFLOW_SYNC_COMMIT_JOURNAL = "workflow-sync-commit-journal.json";
 const WORKFLOW_MUTATION_LOCK_STALE_MS = 30 * 60 * 1_000;
 const WORKFLOW_LIFECYCLE_ACTION_LOCK_STALE_MS = 10 * 60 * 1_000;
 const WORKFLOW_MUTATION_LOCK_OWNER = "owner.json";
 const WORKFLOW_LIFECYCLE_ACTION_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-lifecycle-action-journal.v1" as const;
 const WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-run-link-journal.v1" as const;
+const WORKFLOW_SYNC_COMMIT_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-sync-commit-journal.v1" as const;
 export const WORKFLOW_CHECKPOINT_FRAME_MAX = 0x7fff_ffff;
 const LIFECYCLE_EVENT_TYPES = new Set([
   "workflow-lifecycle-invoking",
@@ -135,6 +143,24 @@ interface WorkflowRunLinkJournal {
   entries: WorkflowRunLinkJournalEntry[];
 }
 
+type WorkflowSyncCommitPhase = "prepared" | "applied";
+
+interface WorkflowSyncCommitJournal {
+  schema_version: typeof WORKFLOW_SYNC_COMMIT_JOURNAL_SCHEMA_VERSION;
+  transaction_id: string;
+  phase: WorkflowSyncCommitPhase;
+  prepared_at: string;
+  updated_at: string;
+  state: RunState;
+  events: EventRecord[];
+}
+
+export interface WorkflowSyncCommitControl {
+  afterEventsPersisted?: () => void | Promise<void>;
+  afterStatePersisted?: () => void | Promise<void>;
+  now?: () => number;
+}
+
 const TERMINAL_LIFECYCLE_ACTION_PHASES = new Set<WorkflowLifecycleActionPhase>(["reconciled", "cancelled", "failed"]);
 const WORKFLOW_LIFECYCLE_ACTION_TRANSITIONS: Readonly<
   Record<WorkflowLifecycleActionPhase, ReadonlySet<WorkflowLifecycleActionPhase>>
@@ -167,6 +193,48 @@ export async function acquireWorkflowMutationLock(
   control: WorkflowMutationLockControl = {}
 ): Promise<() => Promise<void>> {
   return acquireOwnedWorkflowMutationLock(layout, control);
+}
+
+/**
+ * Crash-consistently commits workflow synchronization evidence and its state
+ * projection. The caller must hold this run's workflow mutation lock.
+ */
+export async function commitWorkflowSynchronizationState(
+  layout: RunLayout,
+  input: { state: RunState; events: readonly EventRecord[] },
+  control: WorkflowSyncCommitControl = {}
+): Promise<void> {
+  assertCurrentWorkflowMutationLockOwner(layout);
+  const existing = readWorkflowSyncCommitJournal(layout);
+  if (existing?.phase === "prepared") applyWorkflowSyncCommitJournal(layout, existing);
+  const now = new Date(control.now?.() ?? Date.now()).toISOString();
+  const journal: WorkflowSyncCommitJournal = {
+    schema_version: WORKFLOW_SYNC_COMMIT_JOURNAL_SCHEMA_VERSION,
+    transaction_id: crypto.randomUUID(),
+    phase: "prepared",
+    prepared_at: now,
+    updated_at: now,
+    state: runStateForPersistence(structuredClone(input.state)),
+    events: input.events.map((event) => structuredClone(event))
+  };
+  writeWorkflowSyncCommitJournal(layout, journal);
+  for (const event of journal.events) ensureEventRecord(layout, event);
+  await control.afterEventsPersisted?.();
+  writeRunState(layout, journal.state);
+  await control.afterStatePersisted?.();
+  writeWorkflowSyncCommitJournal(layout, {
+    ...journal,
+    phase: "applied",
+    updated_at: new Date(control.now?.() ?? Date.now()).toISOString()
+  });
+}
+
+export function workflowSyncCommitJournalPath(layout: RunLayout): string {
+  const root = anchoredRunRoot(layout);
+  const journalPath = path.join(root, WORKFLOW_SYNC_COMMIT_JOURNAL);
+  assertPathInside(root, journalPath, "workflow synchronization commit journal");
+  assertNoSymlinkComponents(root, journalPath, "workflow synchronization commit journal");
+  return journalPath;
 }
 
 export async function acquireWorkflowLifecycleActionLock(layout: RunLayout): Promise<() => Promise<void>> {
@@ -606,7 +674,9 @@ async function acquireOwnedRunLock(
   let acquiredIdentity: ProperLockfileDirectoryIdentity | undefined;
   while (release === undefined) {
     try {
-      reclaimTerminatedWorkflowRunLock(layout, lockPath, options.label, options.stale);
+      await withProperLockfileReclaimGuard(lockPath, () =>
+        reclaimTerminatedWorkflowRunLock(layout, lockPath, options.label, options.stale)
+      );
       const acquiredRelease = await lockfile.lock(lockPath, {
         lockfilePath: lockPath,
         realpath: false,
@@ -659,6 +729,20 @@ async function acquireOwnedRunLock(
     }
     throw error;
   }
+  if (options.lockName === WORKFLOW_MUTATION_LOCK) {
+    try {
+      recoverPreparedWorkflowSyncCommit(layout);
+    } catch (error) {
+      try {
+        fs.unlinkSync(ownerPath);
+        await release();
+      } catch {
+        // Preserve the recovery failure. Identity-bound evidence remains
+        // fail-closed if exact cleanup cannot be completed.
+      }
+      throw error;
+    }
+  }
   let released = false;
   return async () => {
     if (released) return;
@@ -670,6 +754,112 @@ async function acquireOwnedRunLock(
     fs.unlinkSync(ownerPath);
     await release();
   };
+}
+
+function recoverPreparedWorkflowSyncCommit(layout: RunLayout): void {
+  const journal = readWorkflowSyncCommitJournal(layout);
+  if (journal?.phase === "prepared") applyWorkflowSyncCommitJournal(layout, journal);
+}
+
+function applyWorkflowSyncCommitJournal(layout: RunLayout, journal: WorkflowSyncCommitJournal): void {
+  for (const event of journal.events) ensureEventRecord(layout, event);
+  writeRunState(layout, journal.state);
+  writeWorkflowSyncCommitJournal(layout, {
+    ...journal,
+    phase: "applied",
+    updated_at: new Date().toISOString()
+  });
+}
+
+function readWorkflowSyncCommitJournal(layout: RunLayout): WorkflowSyncCommitJournal | undefined {
+  const journalPath = workflowSyncCommitJournalPath(layout);
+  if (!fs.existsSync(journalPath)) return undefined;
+  const stat = assertSafeJournalFile(layout, journalPath, "workflow synchronization commit journal");
+  if (stat.size < 1 || stat.size > 32 * 1024 * 1024) {
+    throw new Error("workflow synchronization commit journal has an invalid size");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readStableJournalFile(layout, journalPath, "workflow synchronization commit journal"));
+  } catch (error) {
+    throw new Error("workflow synchronization commit journal is malformed", { cause: error });
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("workflow synchronization commit journal is invalid");
+  }
+  const record = parsed as Record<string, unknown>;
+  if (
+    record.schema_version !== WORKFLOW_SYNC_COMMIT_JOURNAL_SCHEMA_VERSION ||
+    typeof record.transaction_id !== "string" ||
+    record.transaction_id.length === 0 ||
+    (record.phase !== "prepared" && record.phase !== "applied") ||
+    typeof record.prepared_at !== "string" ||
+    typeof record.updated_at !== "string" ||
+    !Array.isArray(record.events)
+  ) {
+    throw new Error("workflow synchronization commit journal is invalid");
+  }
+  const state = assertRunStateSchema(record.state);
+  if (state.run_id !== layout.runId) {
+    throw new Error("workflow synchronization commit journal targets a different run");
+  }
+  const events = record.events.map((value) => validateWorkflowSyncEventRecord(layout, value));
+  if (new Set(events.map((event) => event.event_id)).size !== events.length) {
+    throw new Error("workflow synchronization commit journal repeats an event ID");
+  }
+  return {
+    schema_version: WORKFLOW_SYNC_COMMIT_JOURNAL_SCHEMA_VERSION,
+    transaction_id: record.transaction_id,
+    phase: record.phase,
+    prepared_at: record.prepared_at,
+    updated_at: record.updated_at,
+    state,
+    events
+  };
+}
+
+function validateWorkflowSyncEventRecord(layout: RunLayout, value: unknown): EventRecord {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("workflow synchronization commit journal contains an invalid event");
+  }
+  const event = value as Record<string, unknown>;
+  if (
+    typeof event.schema_version !== "string" ||
+    typeof event.event_id !== "string" ||
+    !/^evt-[0-9a-f]{24}$/u.test(event.event_id) ||
+    typeof event.timestamp !== "string" ||
+    event.run_id !== layout.runId ||
+    typeof event.event_type !== "string" ||
+    (event.node_id !== undefined && typeof event.node_id !== "string") ||
+    (event.status !== undefined && typeof event.status !== "string") ||
+    (event.provenance !== undefined &&
+      (typeof event.provenance !== "object" || event.provenance === null || Array.isArray(event.provenance)))
+  ) {
+    throw new Error("workflow synchronization commit journal contains an invalid event");
+  }
+  return structuredClone(value) as EventRecord;
+}
+
+function writeWorkflowSyncCommitJournal(layout: RunLayout, journal: WorkflowSyncCommitJournal): void {
+  const journalPath = workflowSyncCommitJournalPath(layout);
+  if (fs.existsSync(journalPath)) {
+    assertSafeJournalFile(layout, journalPath, "workflow synchronization commit journal");
+  }
+  writeJsonDurable(journalPath, journal);
+  assertSafeJournalFile(layout, journalPath, "workflow synchronization commit journal");
+}
+
+function assertCurrentWorkflowMutationLockOwner(layout: RunLayout): void {
+  const lockPath = path.join(anchoredRunRoot(layout), WORKFLOW_MUTATION_LOCK);
+  const owner = readWorkflowRunLockOwner(
+    layout,
+    path.join(lockPath, WORKFLOW_MUTATION_LOCK_OWNER),
+    "workflow mutation lock"
+  );
+  const currentStart = workflowMutationProcessStartToken(process.pid);
+  if (owner.pid !== process.pid || currentStart === null || owner.process_start !== currentStart) {
+    throw new Error("workflow synchronization commit requires the current workflow mutation lock owner");
+  }
 }
 
 function waitForWorkflowRunLockRetry(ms: number, signal: AbortSignal | undefined): Promise<void> {

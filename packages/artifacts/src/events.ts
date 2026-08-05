@@ -79,6 +79,18 @@ export function appendEvent(layout: RunLayout, input: AppendEventInput): EventRe
   return record;
 }
 
+/**
+ * Makes one already-materialized event durable exactly once in both the
+ * authoritative append log and every derived query index. A caller can safely
+ * retry this after any interrupted append: existing exact records are retained,
+ * missing projections are repaired, and an event-ID collision fails closed.
+ */
+export function ensureEventRecord(layout: RunLayout, record: EventRecord): void {
+  ensureExactEventLine(layout.eventsPath, record, "event log");
+  ensureEventIndexes(layout, record);
+  writeQueryFacadeInputs(layout);
+}
+
 export function createEventRecord(layout: RunLayout, input: AppendEventInput): EventRecord {
   const runId = validateSafeId(input.runId ?? layout.runId, "run ID");
   const nodeId = input.nodeId === undefined ? undefined : validateSafeId(input.nodeId, "node ID");
@@ -225,6 +237,18 @@ function appendEventIndexes(layout: RunLayout, record: EventRecord): void {
   }
 }
 
+function ensureEventIndexes(layout: RunLayout, record: EventRecord): void {
+  ensureIndexLine(layout, ["run", ...eventIndexPath(record.run_id)], record);
+  ensureIndexLine(layout, ["type", ...eventIndexPath(record.event_type)], record);
+  ensureIndexLine(layout, ["timestamp", ...eventIndexPath(record.timestamp.slice(0, 10))], record);
+  if (record.node_id !== undefined) {
+    ensureIndexLine(layout, ["node", ...eventIndexPath(record.node_id)], record);
+  }
+  if (record.status !== undefined) {
+    ensureIndexLine(layout, ["status", ...eventIndexPath(record.status)], record);
+  }
+}
+
 function eventIndexPath(value: string): string[] {
   const direct = `${value}${EVENT_INDEX_EXTENSION}`;
   if (direct.length <= MAX_EVENT_INDEX_FILENAME_LENGTH) return [direct];
@@ -236,6 +260,42 @@ function appendIndexLine(layout: RunLayout, segments: string[], line: string): v
   const relativePath = segments.join("/");
   const filePath = prepareSafeFilePath(layout.eventsIndexDir, relativePath);
   appendLineDurable(filePath, line);
+}
+
+function ensureIndexLine(layout: RunLayout, segments: string[], record: EventRecord): void {
+  const relativePath = segments.join("/");
+  const filePath = prepareSafeFilePath(layout.eventsIndexDir, relativePath);
+  ensureExactEventLine(filePath, record, `event index ${relativePath}`);
+}
+
+function ensureExactEventLine(filePath: string, record: EventRecord, label: string): void {
+  const expected = JSON.stringify({ ...record, payload: redactValue(record.payload) });
+  let matches = 0;
+  if (fs.existsSync(filePath)) {
+    for (const line of fs.readFileSync(filePath, "utf8").split(/\r?\n/u)) {
+      if (line.trim().length === 0) continue;
+      let candidate: unknown;
+      try {
+        candidate = JSON.parse(line) as unknown;
+      } catch {
+        continue;
+      }
+      if (
+        typeof candidate !== "object" ||
+        candidate === null ||
+        Array.isArray(candidate) ||
+        (candidate as { event_id?: unknown }).event_id !== record.event_id
+      ) {
+        continue;
+      }
+      if (JSON.stringify(candidate) !== expected) {
+        throw new Error(`${label} contains a conflicting event ID: ${record.event_id}`);
+      }
+      matches += 1;
+    }
+  }
+  if (matches > 1) throw new Error(`${label} duplicates event ID: ${record.event_id}`);
+  if (matches === 0) appendLineDurable(filePath, expected);
 }
 
 function writeQueryFacadeInputs(layout: RunLayout): void {
