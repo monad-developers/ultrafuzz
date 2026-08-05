@@ -99,6 +99,7 @@ async function main(): Promise<void> {
     mergeWorkspaceArtifacts(workspaceDir, artifactDir, input.attempt_id);
     const completedCheckpoint = durableWorkspace.recordCheckpoint("completed");
     syncDurableData(projectRoot);
+    cleanupStalePublicationDirectories(dataRoot);
     publishing = path.join(dataRoot, `.result-publishing-${process.pid}-${crypto.randomBytes(8).toString("hex")}`);
     fs.mkdirSync(publishing, { recursive: true, mode: 0o700 });
     const staging = path.join(publishing, "bundle");
@@ -142,25 +143,47 @@ async function main(): Promise<void> {
     );
     const publicationLock = path.join(dataRoot, ".result-publishing.lock");
     let lockFd: number | undefined;
+    let lockIdentity: { dev: number; ino: number } | undefined;
     try {
       try {
         lockFd = fs.openSync(publicationLock, "wx", 0o600);
       } catch (error) {
         if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
         const lockStat = fs.lstatSync(publicationLock);
-        if (Date.now() - lockStat.mtimeMs < 60 * 60 * 1000) throw error;
+        let ownerAlive = false;
+        try {
+          const ownerPid = Number(fs.readFileSync(publicationLock, "utf8").trim());
+          if (Number.isSafeInteger(ownerPid) && ownerPid > 0) {
+            process.kill(ownerPid, 0);
+            ownerAlive = true;
+          }
+        } catch {
+          ownerAlive = false;
+        }
+        if (ownerAlive || Date.now() - lockStat.mtimeMs < 60 * 60 * 1000) throw error;
         fs.unlinkSync(publicationLock);
         lockFd = fs.openSync(publicationLock, "wx", 0o600);
       }
       fs.writeFileSync(lockFd, `${process.pid}\n`);
+      const lockStat = fs.fstatSync(lockFd);
+      lockIdentity = { dev: lockStat.dev, ino: lockStat.ino };
       replacePublishedFile(artifactArchive, path.join(dataRoot, "artifacts.tgz"));
       replacePublishedFile(path.join(publishing, "result.json"), path.join(dataRoot, "result.json"));
     } finally {
-      if (lockFd !== undefined) fs.closeSync(lockFd);
-      try {
-        fs.unlinkSync(publicationLock);
-      } catch {
-        // Preserve the publication result if lock cleanup races with a failed worker.
+      if (lockFd !== undefined) {
+        fs.closeSync(lockFd);
+        try {
+          const currentLock = fs.lstatSync(publicationLock);
+          if (
+            lockIdentity !== undefined &&
+            currentLock.dev === lockIdentity.dev &&
+            currentLock.ino === lockIdentity.ino
+          ) {
+            fs.unlinkSync(publicationLock);
+          }
+        } catch {
+          // Preserve the publication result if lock cleanup races with a failed worker.
+        }
       }
     }
     fs.rmSync(publishing, { recursive: true, force: true });
@@ -177,6 +200,21 @@ async function main(): Promise<void> {
     }
     if (publishing !== undefined) fs.rmSync(publishing, { recursive: true, force: true });
     throw error;
+  }
+}
+
+function cleanupStalePublicationDirectories(dataRoot: string): void {
+  const now = Date.now();
+  for (const entry of fs.readdirSync(dataRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^\.result-publishing-[0-9]+-[0-9a-f]{16}$/u.test(entry.name)) continue;
+    const candidate = path.join(dataRoot, entry.name);
+    const stat = fs.lstatSync(candidate);
+    if (stat.isSymbolicLink() || fs.realpathSync(candidate) !== candidate) {
+      throw new Error("cloud publication staging directory is unsafe");
+    }
+    if (now - stat.mtimeMs > 60 * 60 * 1000) {
+      fs.rmSync(candidate, { recursive: true, force: true });
+    }
   }
 }
 
@@ -720,11 +758,9 @@ export function copyPublishedEvidenceTree(source: string, destination: string): 
   copySafeTree(source, destination);
   const sourceRoot = path.resolve(source);
   const destinationRoot = path.resolve(destination);
-  for (const manifestPath of recursiveRegularFiles(sourceRoot).filter((filePath) => {
-    if (path.basename(filePath) !== "artifact-manifest.json") return false;
-    const parentRelative = path.relative(sourceRoot, path.dirname(filePath));
-    return parentRelative === "" || parentRelative.split(path.sep).length === 1;
-  })) {
+  for (const manifestPath of recursiveRegularFiles(sourceRoot).filter(
+    (filePath) => path.basename(filePath) === "artifact-manifest.json" && path.dirname(filePath) === sourceRoot
+  )) {
     const manifest = parsePublicationManifest(manifestPath);
     const nodeRoot = path.dirname(manifestPath);
     for (const entry of manifest.files) {
@@ -807,7 +843,11 @@ function parsePublicationManifest(manifestPath: string): {
       !Number.isSafeInteger((entry as { size_bytes?: unknown }).size_bytes) ||
       ((entry as { size_bytes: number }).size_bytes ?? -1) < 0 ||
       typeof (entry as { sha256?: unknown }).sha256 !== "string" ||
-      !/^[a-f0-9]{64}$/u.test((entry as { sha256: string }).sha256)
+      !/^[a-f0-9]{64}$/u.test((entry as { sha256: string }).sha256) ||
+      typeof (entry as { provenance?: unknown }).provenance !== "object" ||
+      (entry as { provenance?: unknown }).provenance === null ||
+      typeof (entry as { provenance?: { producer_node_id?: unknown } }).provenance?.producer_node_id !== "string" ||
+      (entry as { provenance: { producer_node_id: string } }).provenance.producer_node_id.length === 0
     ) {
       throw new Error(`artifact manifest entry is invalid: ${manifestPath}`);
     }
@@ -826,7 +866,7 @@ function safeManifestFilePath(nodeRoot: string, relativePath: string): string {
     relativePath.includes("\0") ||
     relativePath.includes("\\") ||
     path.isAbsolute(relativePath) ||
-    !/^[A-Za-z0-9._/-]+$/u.test(relativePath)
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/u.test(relativePath)
   ) {
     throw new Error(`unsafe artifact manifest path: ${relativePath}`);
   }
