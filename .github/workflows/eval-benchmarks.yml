@@ -363,8 +363,14 @@ jobs:
       # is created and this job can wait far longer than that, so a shared credential would be
       # unusable exactly when recovery needs it. Revocation is skipped for the same reason it is in the
       # launch job: any sandbox this job (re)starts fetches the reference after the job ends.
+      # `continue-on-error` protects work that is already running. The wait step below is gated on
+      # `available == 'true'` without `always()`, so a hard failure here would skip it and abandon
+      # every live sandbox uncollected. Failing soft keeps waiting and collection intact; a relaunch
+      # that genuinely needs the token still fails on its own pair, with a recorded diagnostic, rather
+      # than taking the whole matrix down with it.
       - name: Create a fresh private reference read token for recovery relaunches
         id: reference-token
+        continue-on-error: true
         if: steps.launch_control.outputs.available == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
