@@ -361,9 +361,13 @@ test("a relocated cloud worker rejects unknown outer dispatch keys", async () =>
     cwd: fixture.project,
     workflowInput: {
       schema_version: "ultrafuzz.smithers.compiled-workflow.v1",
-      operator_prompt: "operator note",
+      operator_prompt: null,
       operator_input: { issue: 2 },
-      tasks: []
+      tasks: [],
+      cloud_worker: null,
+      task_id: null,
+      attempt_id: null,
+      execution_generation: null
     }
   });
   assert.ok(

@@ -472,6 +472,8 @@ test("generated Smithers input avoids runner-reserved persistence fields", () =>
   assert.ok(schemaEnd > schemaStart, source);
   assert.doesNotMatch(source.slice(schemaStart, schemaEnd), /\brun_id\s*:/u);
   assert.match(source, /Smithers reserves `run_id`/u);
+  assert.match(source, /Smithers 0\.31 persists absent top-level workflow inputs as null/u);
+  assert.match(source.slice(schemaStart, schemaEnd), /\.nullish\(\)[\s\S]*?value \?\? undefined/u);
 });
 
 test("generated Smithers verifier explains byte-preserving invariant evidence", () => {

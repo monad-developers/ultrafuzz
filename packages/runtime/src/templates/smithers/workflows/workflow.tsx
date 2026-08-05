@@ -81,13 +81,34 @@ const inputTaskSchema = z.object({
  */
 const inputSchema = z.strictObject({
   schema_version: z.string().min(1).optional(),
-  tasks: z.array(inputTaskSchema).default([]),
-  operator_prompt: z.string().optional(),
+  // Smithers 0.31 persists absent top-level workflow inputs as null. Normalize those storage
+  // placeholders before applying the product dispatch contract; nested task entries are preserved.
+  tasks: z
+    .array(inputTaskSchema)
+    .nullish()
+    .transform((value) => value ?? []),
+  operator_prompt: z
+    .string()
+    .nullish()
+    .transform((value) => value ?? undefined),
   operator_input: z.unknown().optional(),
-  cloud_worker: z.boolean().optional(),
-  task_id: z.string().optional(),
-  attempt_id: z.string().optional(),
-  execution_generation: z.string().refine(isCloudExecutionGeneration, "must be a bounded generation").optional(),
+  cloud_worker: z
+    .boolean()
+    .nullish()
+    .transform((value) => value ?? undefined),
+  task_id: z
+    .string()
+    .nullish()
+    .transform((value) => value ?? undefined),
+  attempt_id: z
+    .string()
+    .nullish()
+    .transform((value) => value ?? undefined),
+  execution_generation: z
+    .string()
+    .refine(isCloudExecutionGeneration, "must be a bounded generation")
+    .nullish()
+    .transform((value) => value ?? undefined),
   // Validated against the shared versioned contract, never trusted as a task spec.
   selected_task: z.unknown().optional()
 });
