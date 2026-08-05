@@ -366,7 +366,12 @@ function prepareArtifactMirror(
   materializePromptSchemas(path.join(workspaceRoot, ".ultrafuzz", "schemas"));
   assertTaskInputs(task, workspaceRoot);
   materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true);
-  restoreInvariantSuiteWorkspaceSnapshot(task);
+  restoreInvariantSuiteWorkspaceSnapshot(task, {
+    // On the post-agent pass, preserve source files authored in this attempt
+    // until materializeWorkspacePatch captures them. Initial preparation and
+    // retry reset calls use the default and remove stale sources.
+    preserveCurrentSources: options.replayWorkspacePatches === false
+  });
   materializeInvariantSuiteFromDependencies(task, workspaceRoot);
   captureInvariantSuiteWorkspaceSnapshot(task, workspaceRoot);
   const candidate = path.resolve(workspaceRoot, "artifacts", task.attemptId);
@@ -1027,7 +1032,11 @@ function captureInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number]
   invariantSuiteWorkspaceSnapshots.set(task.attemptId, snapshot);
 }
 
-function restoreInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number]): void {
+function restoreInvariantSuiteWorkspaceSnapshot(
+  task: (typeof taskSpecs)[number],
+  options: { preserveCurrentSources?: boolean } = {}
+): void {
+  const preserveCurrentSources = options.preserveCurrentSources === true;
   const snapshot = invariantSuiteWorkspaceSnapshots.get(task.attemptId) ?? loadInvariantSuiteWorkspaceSnapshot(task);
   if (snapshot === undefined) return;
   const projectRoot = realpathSync(process.cwd());
@@ -1063,7 +1072,7 @@ function restoreInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number]
   const workspaceRoot = workspaceCandidate;
   for (const relativePath of invariantWorkspaceSourcePaths(workspaceRoot)) {
     const safePath = assertSafeInvariantSuitePath(relativePath);
-    if (snapshot.has(safePath)) continue;
+    if (snapshot.has(safePath) || preserveCurrentSources) continue;
     const candidate = path.resolve(workspaceRoot, safePath);
     const parent = safeInvariantSuiteDirectory(workspaceRoot, path.dirname(candidate));
     const entry = path.join(parent, path.basename(candidate));
@@ -1079,6 +1088,10 @@ function restoreInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number]
     }
     rmSync(entry, { force: true });
   }
+  // The post-agent pass must preserve modified and deleted baseline sources as
+  // well as newly added files; materializeWorkspacePatch captures the complete
+  // resulting worktree immediately after preparation.
+  if (preserveCurrentSources) return;
   for (const [relativePath, bytes] of snapshot) {
     const destination = path.resolve(workspaceRoot, relativePath);
     const parent = safeInvariantSuiteDirectory(workspaceRoot, path.dirname(destination));

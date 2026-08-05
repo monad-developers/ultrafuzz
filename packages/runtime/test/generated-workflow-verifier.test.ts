@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +11,63 @@ import { assertRegularFileInside, writeFileDurable } from "@ultrafuzz/artifacts"
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
+
+function loadRestoreInvariantSuiteWorkspaceSnapshot(
+  snapshots: Map<string, Map<string, Buffer>>
+): (
+  task: { attemptId: string; workspacePath: string; runRoot: string },
+  options?: { preserveCurrentSources?: boolean }
+) => void {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function restoreInvariantSuiteWorkspaceSnapshot");
+  const helperEnd = source.indexOf("function assertTaskInputs", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = source
+    .slice(helperStart, helperEnd)
+    .replace("task: (typeof taskSpecs)[number]", "task")
+    .replace("options: { preserveCurrentSources?: boolean } = {}", "options = {}")
+    .replace("): void {", ") {")
+    .replaceAll("let stat: ReturnType<typeof lstatSync>;", "let stat;");
+  return new Function(
+    "path",
+    "lstatSync",
+    "realpathSync",
+    "rmSync",
+    "isStrictlyInsideDirectory",
+    "invariantSuiteWorkspaceSnapshots",
+    "loadInvariantSuiteWorkspaceSnapshot",
+    "invariantWorkspaceSourcePaths",
+    "assertSafeInvariantSuitePath",
+    "safeInvariantSuiteDirectory",
+    "isMissingPathError",
+    "writeFileDurable",
+    "readStableWorkspaceSnapshotFile",
+    "createHash",
+    `${helper}; return restoreInvariantSuiteWorkspaceSnapshot;`
+  )(
+    path,
+    fs.lstatSync,
+    fs.realpathSync,
+    fs.rmSync,
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    snapshots,
+    () => undefined,
+    (workspaceRoot: string) => ["test/baseline.t.sol", "test/new.t.sol"],
+    (value: string) => value,
+    (root: string, candidate: string) => {
+      fs.mkdirSync(candidate, { recursive: true });
+      return fs.realpathSync(candidate);
+    },
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT",
+    writeFileDurable,
+    () => Buffer.alloc(0),
+    createHash
+  ) as (
+    task: { attemptId: string; workspacePath: string; runRoot: string },
+    options?: { preserveCurrentSources?: boolean }
+  ) => void;
+}
 
 function loadSafeInvariantSuiteDirectory(): (root: string, candidate: string) => string {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
@@ -258,6 +316,65 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
   assert.match(reset, /rmSync\(candidate, \{ recursive: true, force: true \}\)/u);
   assert.match(reset, /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\)/u);
   assert.match(reset, /WORKSPACE_PATCH_BASELINE_FILE/u);
+});
+
+test("post-agent preparation preserves newly added invariant sources for workspace-patch capture", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const preparationStart = source.indexOf("function prepareArtifactMirror");
+  const materializeStart = source.indexOf("function materializeInvariantSuiteFromDependencies");
+  const restoreStart = source.indexOf("function restoreInvariantSuiteWorkspaceSnapshot");
+  const restoreEnd = source.indexOf("function assertTaskInputs", restoreStart);
+
+  assert.ok(preparationStart >= 0, source);
+  assert.ok(materializeStart > preparationStart, source);
+  assert.ok(restoreStart >= 0, source);
+  assert.ok(restoreEnd > restoreStart, source);
+
+  const preparation = source.slice(preparationStart, materializeStart);
+  const restore = source.slice(restoreStart, restoreEnd);
+
+  // The post-agent preparation pass must not delete a source that the agent
+  // just authored before materializeWorkspacePatch can capture it.
+  assert.match(
+    preparation,
+    /restoreInvariantSuiteWorkspaceSnapshot\(task, \{[\s\S]*preserveCurrentSources: options\.replayWorkspacePatches === false/u
+  );
+  assert.match(restore, /preserveCurrentSources\?: boolean/u);
+  assert.match(restore, /snapshot\.has\(safePath\) \|\| preserveCurrentSources/u);
+  assert.match(restore, /if \(preserveCurrentSources\) return/u);
+});
+
+test("post-agent snapshot restoration keeps modified, deleted, and new source state", () => {
+  const runRoot = fs.mkdtempSync(path.join(process.cwd(), "ultrafuzz-invariant-restore-"));
+  const workspace = path.join(runRoot, "workspace");
+  fs.mkdirSync(path.join(workspace, "test"), { recursive: true });
+  const baselinePath = path.join(workspace, "test", "baseline.t.sol");
+  const newPath = path.join(workspace, "test", "new.t.sol");
+  const snapshots = new Map<string, Map<string, Buffer>>([
+    ["attempt", new Map([["test/baseline.t.sol", Buffer.from("baseline\n")]])]
+  ]);
+  const restore = loadRestoreInvariantSuiteWorkspaceSnapshot(snapshots);
+  const task = {
+    attemptId: "attempt",
+    workspacePath: workspace,
+    runRoot: path.relative(process.cwd(), runRoot)
+  };
+
+  try {
+    fs.writeFileSync(baselinePath, "agent-modified\n");
+    fs.writeFileSync(newPath, "agent-added\n");
+    restore(task, { preserveCurrentSources: true });
+    assert.equal(fs.readFileSync(baselinePath, "utf8"), "agent-modified\n");
+    assert.equal(fs.readFileSync(newPath, "utf8"), "agent-added\n");
+
+    fs.writeFileSync(baselinePath, "retry-modified\n");
+    fs.writeFileSync(newPath, "retry-added\n");
+    restore(task);
+    assert.equal(fs.readFileSync(baselinePath, "utf8"), "baseline\n");
+    assert.equal(fs.existsSync(newPath), false);
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
 });
 
 test("generated Smithers agent preserves its final response as missing non-report Markdown", () => {
