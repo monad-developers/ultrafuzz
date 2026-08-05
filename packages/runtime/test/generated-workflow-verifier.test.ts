@@ -327,7 +327,11 @@ test("generated Smithers agent mirrors declared workspace tests before strict ve
   assert.match(materializer, /const generatedPrefix = "generated-tests\/"/u);
   assert.match(materializer, /const sourceCandidates = INVARIANT_TEST_ROOT_NAMES\.flatMap/u);
   assert.match(materializer, /path\.resolve\(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath\)/u);
-  assert.match(materializer, /sourceCandidates\.find\(\(candidate\) => existsSync\(candidate\)/u);
+  assert.match(
+    materializer,
+    /const existingCandidates = sourceCandidates\.filter\(\(candidate\) => existsSync\(candidate\)\)/u
+  );
+  assert.match(materializer, /generated test sources conflict/u);
   assert.match(materializer, /resolveNonEmptyRegularArtifactFile\(workspaceRoot, sourceCandidate/u);
   assert.match(materializer, /sourceBefore\.nlink !== 1/u);
   assert.match(materializer, /writeFileSync\(anchoredArtifactPath, contents, \{ flag: "wx", mode: 0o600 \}\)/u);
