@@ -74,14 +74,19 @@ Apply these Recon/Chimera rules:
   property-scoped expected-revert case is valid only when the catalog names the
   expected protocol error and the handler matches its exact documented selector
   while recording the property ID and expected outcome.
-- A blanket `try/catch`, low-level `.call` or `.delegatecall`, and an ignored
-  return or status are audit violations; represent protocol actions with the
-  typed call and checked result that keeps failures observable.
+- A blanket `try/catch` or an ignored return or status is an audit violation;
+  represent protocol actions with the typed call and checked result that keeps
+  failures observable. When a documented protocol boundary has no typed ABI,
+  a low-level `.call` or `.delegatecall` is valid only with its source-backed
+  selector, checked success and return data, and explicit failure propagation.
 - Use a narrowly documented non-protocol dependency boundary only when the
   dependency contract explicitly defines an expected failure result; preserve
   the target protocol call and its failure semantics in all other cases.
 - Keep assertions strong, keep coverage handlers tied to real entrypoints, and
-  keep stateful tests focused on sequence behavior.
+  keep stateful tests focused on sequence behavior. Synthetic coverage-only
+  handlers, sweep/surface handlers, forced require/revert branches, and
+  stateful-unit-test scripts are audit violations; replace them with natural
+  sequence actions.
 
 Before handoff, audit every handler source. Enumerate each protocol call with
 its typed call form, valid precondition, return-value handling, and failure

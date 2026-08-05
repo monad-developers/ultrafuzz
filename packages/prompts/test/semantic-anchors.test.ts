@@ -73,8 +73,10 @@ describe("prompt semantic anchors", () => {
     expect(handlers).toContain("typed high-level function call");
     expect(handlers).toContain("blanket `try/catch`");
     expect(handlers).toContain("Scan `try/catch`, `.call`, and `.delegatecall`");
+    expect(handlers).toMatch(/Synthetic coverage-only\s+handlers/u);
     expect(handlers).toContain("audit every handler source");
     expect(setup).toContain("Every protocol call made during setup remains directly observable");
+    expect(setup).toMatch(/revert,\s+panic, or out-of-gas failure propagate/u);
     expect(coverage).toContain("Audit inherited handlers before coverage fuzzing");
     expect(coverage).toMatch(
       /Every reached protocol revert, panic, or out-of-gas failure remains part of\s+the coverage evidence/u
