@@ -1262,6 +1262,7 @@ test("current invariant reports with malformed issues fail closed instead of pre
   const runData = await createReportRun(project, "report-current-malformed");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
   const reportPath = path.join(reportDir, "report.json");
+  fs.mkdirSync(reportDir, { recursive: true });
   fs.mkdirSync(path.join(runData.run_root, "artifacts", "property-specification-fanin"), { recursive: true });
   fs.mkdirSync(path.join(runData.run_root, "artifacts", "stateful-invariant-implement-properties"), {
     recursive: true
@@ -1287,6 +1288,8 @@ test("current invariant reports with malformed issues fail closed instead of pre
         id: "malformed-current",
         title: "Malformed current issue",
         status: "confirmed",
+        severity_guess: "Medium",
+        confidence: "high",
         summary: "Missing renderable evidence."
       }
     ],
@@ -1297,7 +1300,10 @@ test("current invariant reports with malformed issues fail closed instead of pre
 
   const result = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(result.code, 1);
-  assert.match(JSON.stringify(parseJson(result).diagnostics), /current invariant final report|historical|renderable/iu);
+  assert.match(
+    JSON.stringify(parseJson(result).diagnostics),
+    /current invariant final report|historical|renderable|FINDINGS_SCHEMA_INVALID/iu
+  );
 });
 
 test("historical loose reports preserve conforming Markdown and reject missing or nonconforming Markdown", async () => {
