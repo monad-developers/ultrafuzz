@@ -102,7 +102,7 @@ async function main(): Promise<void> {
     fs.mkdirSync(publishing, { recursive: true, mode: 0o700 });
     const staging = path.join(publishing, "bundle");
     fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
-    copySafeTree(artifactDir, path.join(staging, "artifacts"));
+    copyPublishedEvidenceTree(artifactDir, path.join(staging, "artifacts"));
     const sourceProofRoot = anchoredProjectPath(projectRoot, path.join(input.run_root, "source-proofs"));
     assertSafeDirectoryTarget(sourceProofRoot);
     for (const suffix of [".json", ".invariant.json"] as const) {
@@ -684,6 +684,138 @@ export function copySafeTree(source: string, destination: string, onlyMissing = 
     } else {
       throw new Error("cloud publication excludes links and special files");
     }
+  }
+}
+
+/**
+ * Publish the complete artifact tree and verify every manifest declaration
+ * against both the source tree and the staged copy.  The normal worker
+ * archive must be self-contained: a terminal result is not considered
+ * publishable when a declared property, harness, or provenance file is
+ * missing or altered.
+ */
+export function copyPublishedEvidenceTree(source: string, destination: string): void {
+  copySafeTree(source, destination);
+  const sourceRoot = path.resolve(source);
+  const destinationRoot = path.resolve(destination);
+  for (const manifestPath of recursiveRegularFiles(sourceRoot).filter(
+    (filePath) => path.basename(filePath) === "artifact-manifest.json"
+  )) {
+    const manifest = parsePublicationManifest(manifestPath);
+    const nodeRoot = path.dirname(manifestPath);
+    for (const entry of manifest.files) {
+      const sourcePath = safeManifestFilePath(nodeRoot, entry.path);
+      assertManifestFile(sourcePath, entry, "source");
+      const relative = path.relative(sourceRoot, sourcePath);
+      const destinationPath = path.resolve(destinationRoot, relative);
+      if (destinationPath === destinationRoot || !destinationPath.startsWith(`${destinationRoot}${path.sep}`)) {
+        throw new Error(`artifact manifest destination path escapes publication root: ${entry.path}`);
+      }
+      assertManifestFile(destinationPath, entry, "published");
+    }
+  }
+}
+
+function recursiveRegularFiles(root: string): string[] {
+  const files: string[] = [];
+  const visit = (directory: string): void => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const fullPath = path.join(directory, entry.name);
+      const stat = fs.lstatSync(fullPath);
+      if (entry.isDirectory()) {
+        if (stat.isSymbolicLink() || fs.realpathSync(fullPath) !== fullPath) {
+          throw new Error("cloud publication source is unsafe");
+        }
+        visit(fullPath);
+      } else if (entry.isFile() && !stat.isSymbolicLink()) {
+        if (stat.nlink !== 1) throw new Error("cloud publication file is hard-linked");
+        files.push(fullPath);
+      } else {
+        throw new Error("cloud publication excludes links and special files");
+      }
+    }
+  };
+  visit(root);
+  return files;
+}
+
+function parsePublicationManifest(manifestPath: string): {
+  files: Array<{ path: string; size_bytes: number; sha256: string }>;
+} {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  } catch (error) {
+    throw new Error(`artifact manifest is not valid JSON: ${manifestPath}`, { cause: error });
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    !Array.isArray((parsed as { files?: unknown }).files)
+  ) {
+    throw new Error(`artifact manifest is missing its files array: ${manifestPath}`);
+  }
+  const files = (parsed as { files: unknown[] }).files;
+  for (const entry of files) {
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      Array.isArray(entry) ||
+      typeof (entry as { path?: unknown }).path !== "string" ||
+      !Number.isSafeInteger((entry as { size_bytes?: unknown }).size_bytes) ||
+      ((entry as { size_bytes: number }).size_bytes ?? -1) < 0 ||
+      typeof (entry as { sha256?: unknown }).sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/u.test((entry as { sha256: string }).sha256)
+    ) {
+      throw new Error(`artifact manifest entry is invalid: ${manifestPath}`);
+    }
+  }
+  return { files: files as Array<{ path: string; size_bytes: number; sha256: string }> };
+}
+
+function safeManifestFilePath(nodeRoot: string, relativePath: string): string {
+  if (
+    relativePath.length === 0 ||
+    relativePath.includes("\0") ||
+    relativePath.includes("\\") ||
+    path.isAbsolute(relativePath)
+  ) {
+    throw new Error(`unsafe artifact manifest path: ${relativePath}`);
+  }
+  const normalized = path.normalize(relativePath);
+  if (
+    normalized !== relativePath ||
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith(`..${path.sep}`)
+  ) {
+    throw new Error(`unsafe artifact manifest path: ${relativePath}`);
+  }
+  const resolvedRoot = path.resolve(nodeRoot);
+  const resolved = path.resolve(resolvedRoot, normalized);
+  if (resolved === resolvedRoot || !resolved.startsWith(`${resolvedRoot}${path.sep}`)) {
+    throw new Error(`unsafe artifact manifest path: ${relativePath}`);
+  }
+  return resolved;
+}
+
+function assertManifestFile(
+  filePath: string,
+  entry: { path: string; size_bytes: number; sha256: string },
+  label: string
+): void {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(filePath);
+  } catch (error) {
+    throw new Error(`artifact manifest file is unavailable in ${label}: ${entry.path}`, { cause: error });
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+    throw new Error(`artifact manifest file is unsafe in ${label}: ${entry.path}`);
+  }
+  if (stat.size !== entry.size_bytes || sha256File(filePath) !== entry.sha256) {
+    throw new Error(`artifact manifest file digest mismatch in ${label}: ${entry.path}`);
   }
 }
 
