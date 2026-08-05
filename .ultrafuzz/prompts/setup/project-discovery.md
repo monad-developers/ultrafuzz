@@ -93,7 +93,15 @@ the section heading. Classify statements that express invariants, accounting,
 solvency, conservation, monotonicity, safety, risk, interest accrual,
 liquidation, liveness, or another state relation. Copy each such statement
 verbatim before interpreting it, including statements under generic headings such
-as `Hub`, `Risk`, or `Operations`. Include source path and line or symbol location
+as `Hub`, `Risk`, or `Operations`. Obtain each cited source span mechanically from
+the checked-out file (for example with a line-range `sed` or `nl`/`sed` probe) and
+paste that output into the JSON value. Do not retype or render Markdown or LaTeX.
+Preserve every backslash, quote, punctuation mark, repeated escape, and source
+character exactly; JSON escaping is serialization only, so the parsed `verbatim`
+value must contain the same characters as the cited source span. Before finishing
+discovery, load the JSON ledger and compare each `verbatim` field with its cited
+source line range (allowing only the source's line-ending convention), then fix
+any mismatch before publishing the artifact. Include source path and line or symbol location
 beside each copied entry. Do not summarize, merge, or omit a source
 bullet before it has a corresponding ledger entry; the normalized inventory must
 map each ledger entry to one or more `inventory_ids` and retain the original
