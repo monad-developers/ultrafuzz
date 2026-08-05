@@ -58,6 +58,32 @@ describe("pinned benchmark source", () => {
     ).resolves.toMatchObject({ commit: fixture.pinned, revision_count: 1 });
   });
 
+  it("hydrates submodules at the gitlink revisions recorded by the pinned commit", async () => {
+    const fixture = submoduleSourceRepository();
+    const destination = path.join(fixture.root, "sanitized-submodule");
+
+    const previousAllowedProtocols = process.env.GIT_ALLOW_PROTOCOL;
+    process.env.GIT_ALLOW_PROTOCOL = "file";
+    let proof: Awaited<ReturnType<typeof materializePinnedSource>>;
+    try {
+      proof = await materializePinnedSource({
+        repository: fixture.repository,
+        revision: fixture.pinned,
+        destination
+      });
+    } finally {
+      if (previousAllowedProtocols === undefined) delete process.env.GIT_ALLOW_PROTOCOL;
+      else process.env.GIT_ALLOW_PROTOCOL = previousAllowedProtocols;
+    }
+
+    expect(fs.readFileSync(path.join(destination, "vendor/dependency/dependency.txt"), "utf8")).toBe(
+      "pinned dependency\n"
+    );
+    expect(git(path.join(destination, "vendor/dependency"), ["rev-parse", "HEAD"])).toBe(fixture.submoduleCommit);
+    expect(proof).toMatchObject({ commit: fixture.pinned, revision_count: 1, remotes: [] });
+    await expect(inspectPinnedSource(destination, fixture.pinned)).resolves.toEqual(proof);
+  });
+
   it("fails closed for symbolic refs and revisions that are not full commits", async () => {
     const fixture = sourceRepository();
 
@@ -102,6 +128,38 @@ function sourceRepository(): { root: string; repository: string; pinned: string;
   git(repository, ["add", "."]);
   git(repository, ["commit", "--quiet", "-m", "later"]);
   return { root, repository, pinned, later: git(repository, ["rev-parse", "HEAD"]) };
+}
+
+function submoduleSourceRepository(): {
+  root: string;
+  repository: string;
+  pinned: string;
+  submoduleCommit: string;
+} {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-pinned-submodule-"));
+  roots.push(root);
+  const submodule = path.join(root, "dependency");
+  fs.mkdirSync(submodule);
+  git(submodule, ["init", "--quiet", "--initial-branch=main"]);
+  git(submodule, ["config", "user.name", "Ultrafuzz test"]);
+  git(submodule, ["config", "user.email", "test@example.invalid"]);
+  fs.writeFileSync(path.join(submodule, "dependency.txt"), "pinned dependency\n");
+  git(submodule, ["add", "dependency.txt"]);
+  git(submodule, ["commit", "--quiet", "-m", "dependency"]);
+  const submoduleCommit = git(submodule, ["rev-parse", "HEAD"]);
+
+  const repository = path.join(root, "source");
+  fs.mkdirSync(repository);
+  git(repository, ["init", "--quiet", "--initial-branch=main"]);
+  git(repository, ["config", "user.name", "Ultrafuzz test"]);
+  git(repository, ["config", "user.email", "test@example.invalid"]);
+  fs.writeFileSync(path.join(repository, "source.txt"), "pinned\n");
+  git(repository, ["add", "source.txt"]);
+  git(repository, ["commit", "--quiet", "-m", "source"]);
+  git(repository, ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", submodule, "vendor/dependency"]);
+  git(repository, ["commit", "--quiet", "-am", "submodule"]);
+  const pinned = git(repository, ["rev-parse", "HEAD"]);
+  return { root, repository, pinned, submoduleCommit };
 }
 
 function git(cwd: string, args: string[]): string {

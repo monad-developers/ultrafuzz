@@ -65,7 +65,8 @@ export async function materializePinnedSource(input: {
 
     await git(destination, ["checkout", "--quiet", "-B", PINNED_SOURCE_BRANCH, revision], input.signal);
     if (await containsGitlinks(destination, input.signal)) {
-      throw new Error("pinned benchmark sources with Git submodules are not supported");
+      await git(destination, ["submodule", "sync", "--recursive"], input.signal);
+      await git(destination, ["submodule", "update", "--init", "--recursive", "--depth", "1"], input.signal);
     }
 
     await rm(path.join(destination, ".git", "FETCH_HEAD"), { force: true });
