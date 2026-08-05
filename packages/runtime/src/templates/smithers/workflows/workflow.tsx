@@ -208,7 +208,12 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       // Agent work may replace or clean its worktree, including the prepared
       // artifact mirror. Re-establish the same path-checked directories before
       // preserving outputs; this remains deterministic and model-free.
-      prepareArtifactMirror(task);
+      // Rebuild the artifact mirror after the agent without replaying setup
+      // patches against the agent's now-dirty workspace. The first preparation
+      // captured the producer baseline and applied all dependency patches;
+      // replaying them here would either overwrite that baseline or fail with
+      // a base-tree mismatch.
+      prepareArtifactMirror(task, { replayWorkspacePatches: false });
       materializeMissingMarkdownArtifacts(task, result);
       materializeMissingDedupeArtifact(task);
       materializeMissingFinalReportArtifacts(task);
@@ -278,7 +283,7 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
       );
     }
   }
-  prepareArtifactMirror(task);
+  prepareArtifactMirror(task, { replayWorkspacePatches: false });
 }
 
 function resetTaskArtifactContents(
@@ -344,12 +349,15 @@ function taskArtifactRoots(task: (typeof taskSpecs)[number], canonicalArtifactDi
   return roots;
 }
 
-function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof preparationOutput> {
+function prepareArtifactMirror(
+  task: (typeof taskSpecs)[number],
+  options: { replayWorkspacePatches?: boolean } = {}
+): z.infer<typeof preparationOutput> {
   preservePinnedSourceProof(task);
   const workspaceRoot = realpathSync(task.workspacePath);
   materializePromptSchemas(path.join(workspaceRoot, ".ultrafuzz", "schemas"));
   assertTaskInputs(task, workspaceRoot);
-  materializeWorkspacePatchDependencies(task, workspaceRoot);
+  materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true);
   restoreInvariantSuiteWorkspaceSnapshot(task);
   materializeInvariantSuiteFromDependencies(task, workspaceRoot);
   captureInvariantSuiteWorkspaceSnapshot(task, workspaceRoot);
@@ -393,7 +401,25 @@ function taskPublishesWorkspacePatch(task: (typeof taskSpecs)[number]): boolean 
   );
 }
 
-function materializeWorkspacePatchDependencies(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
+function materializeWorkspacePatchDependencies(
+  task: (typeof taskSpecs)[number],
+  workspaceRoot: string,
+  replayWorkspacePatches: boolean
+): void {
+  if (!replayWorkspacePatches) {
+    // The agent may have changed the worktree after the initial preparation.
+    // Keep the original baseline and dependency materialization intact while
+    // the post-agent path restores only artifact mirrors and invariant-suite
+    // companions.
+    if (taskPublishesWorkspacePatch(task) && !workspacePatchBaselineTrees.has(task.attemptId)) {
+      // A resumed Smithers process does not retain in-memory maps. Re-run the
+      // deterministic initial preparation once to reconstruct the baseline;
+      // same-process post-agent preparation never enters this branch because
+      // its baseline was captured before the agent ran.
+      materializeWorkspacePatchDependencies(task, workspaceRoot, true);
+    }
+    return;
+  }
   const dependencies = [...task.dependencyArtifactDirs]
     .filter(
       (dependency) =>
@@ -429,7 +455,7 @@ function materializeWorkspacePatchDependencies(task: (typeof taskSpecs)[number],
       manifest: manifest as Parameters<typeof applyWorkspacePatch>[1]["manifest"]
     });
   }
-  if (taskPublishesWorkspacePatch(task)) {
+  if (taskPublishesWorkspacePatch(task) && !workspacePatchBaselineTrees.has(task.attemptId)) {
     workspacePatchBaselineTrees.set(task.attemptId, captureWorkspaceTree(workspaceRoot));
   }
 }

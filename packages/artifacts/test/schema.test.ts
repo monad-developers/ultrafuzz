@@ -34,6 +34,7 @@ import {
   runStateJsonSchema,
   validateAnalysisBundleManifestSchema,
   usageLedgerJsonSchema,
+  workspacePatchJsonSchema,
   validateFindingSchema,
   validateFindingsSchema,
   validateGeneratedTestManifestSchema,
@@ -937,6 +938,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   const lensPropertiesSnapshot = readSchemaSnapshot("property-lens.schema.json");
   const runStateSnapshot = readSchemaSnapshot("run-state.schema.json");
   const usageLedgerSnapshot = readSchemaSnapshot("usage-ledger.schema.json");
+  const workspacePatchSnapshot = readSchemaSnapshot("workspace-patch.schema.json");
 
   assert.equal(findingSnapshot.$id, findingJsonSchema.$id);
   assert.deepEqual(analysisBundleSnapshot, analysisBundleManifestJsonSchema);
@@ -961,6 +963,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(propertiesSnapshot, propertiesJsonSchema);
   assert.deepEqual(lensPropertiesSnapshot, lensPropertiesJsonSchema);
   assert.deepEqual(usageLedgerSnapshot, usageLedgerJsonSchema);
+  assert.deepEqual(workspacePatchSnapshot, workspacePatchJsonSchema);
 });
 
 function readSchemaSnapshot(name: string): Record<string, unknown> {

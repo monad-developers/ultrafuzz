@@ -4,7 +4,7 @@ import { lstatSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { normalizeSafeRelativePath } from "@ultrafuzz/artifacts";
+import { normalizeWorkspacePatchPath } from "@ultrafuzz/artifacts";
 
 const WORKSPACE_PATCH_SCHEMA_VERSION = "ultrafuzz.workspace-patch.v1" as const;
 const GIT_OBJECT_ID = /^[0-9a-f]{40,64}$/u;
@@ -136,7 +136,7 @@ function validateManifest(manifest: WorkspacePatchManifest): void {
     if (entry === null || typeof entry !== "object" || typeof entry.path !== "string") {
       throw new Error("workspace patch file entry is invalid");
     }
-    const normalized = normalizeSafeRelativePath(entry.path, "workspace patch file path");
+    const normalized = normalizeWorkspacePatchPath(entry.path, "workspace patch file path");
     if (normalized !== entry.path || seen.has(normalized)) {
       throw new Error(`workspace patch file path is not canonical or is duplicated: ${entry.path}`);
     }
@@ -146,7 +146,7 @@ function validateManifest(manifest: WorkspacePatchManifest): void {
 }
 
 function assertWorkspacePatchPath(workspaceRoot: string, relativePath: string): void {
-  const normalized = normalizeSafeRelativePath(relativePath, "workspace patch file path");
+  const normalized = normalizeWorkspacePatchPath(relativePath, "workspace patch file path");
   rejectSensitivePath(normalized);
   const absolute = path.resolve(workspaceRoot, ...normalized.split("/"));
   if (!absolute.startsWith(`${path.resolve(workspaceRoot)}${path.sep}`)) {
