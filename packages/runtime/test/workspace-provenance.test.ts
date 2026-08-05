@@ -1232,6 +1232,7 @@ test(
 
     git(modeRepository, ["config", "core.fileMode", "false"]);
     fs.chmodSync(modeTarget, 0o755);
+    git(modeRepository, ["update-index", "--refresh"]);
     assert.doesNotThrow(() =>
       execFileSync("git", ["diff-index", "--quiet", "HEAD", "--"], {
         cwd: modeRepository,

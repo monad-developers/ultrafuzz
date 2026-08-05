@@ -5,15 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
-import {
-  ModalClient,
-  SandboxFilesystemNotFoundError,
-  type App,
-  type Image,
-  type Sandbox,
-  type Secret,
-  type Volume
-} from "modal";
+import { ModalClient, SandboxFilesystemNotFoundError, type App, type Image, type Sandbox, type Secret } from "modal";
 import { materializePromptSchemas } from "@ultrafuzz/artifacts";
 import { getToolContext, type ToolContext } from "@smithers-orchestrator/tool-context";
 import type { CompiledCloudAgentAuthDescriptor } from "@ultrafuzz/runtime";
