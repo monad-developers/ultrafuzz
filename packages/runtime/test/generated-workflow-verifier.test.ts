@@ -395,6 +395,8 @@ test("generated Smithers workflow preserves the complete invariant suite across 
   assert.match(source, /copyDependencyInvariantSuiteToArtifact/u);
   assert.match(source, /invariantSuiteDependencySnapshots/u);
   assert.match(source, /invariant suite dependency changed/u);
+  assert.match(source, /captureInvariantSuiteWorkspaceSnapshot/u);
+  assert.match(source, /restoreInvariantSuiteWorkspaceSnapshot/u);
   assert.match(source, /INVARIANT_SUITE_MANIFEST_FILE/u);
   assert.match(source, /invariant-suite-manifest\.v1/u);
   assert.match(source, /INVARIANT_SUITE_ALLOWED_ROOTS/u);
@@ -420,7 +422,7 @@ test("generated Smithers invariant provenance accepts only supported source root
   assert.match(source, /const INVARIANT_SUITE_ALLOWED_ROOTS = \["src", "contracts", "test", "tests"\]/u);
   assert.match(validator, /unsupported invariant suite source root/u);
   assert.doesNotMatch(validator, /artifacts/u);
-  assert.doesNotMatch(validator, /\.envrc/u);
+  assert.match(validator, /segment === "\.envrc"/u);
 });
 
 test("generated Smithers verifier rejects in-root leaf and parent symlinks", () => {

@@ -244,6 +244,7 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
   if (baselineSnapshot !== undefined) {
     writeFileDurable(baselinePath, baselineSnapshot.contents);
   }
+  restoreInvariantSuiteWorkspaceSnapshot(task);
 
   const workspaceRoot = realpathSync(task.workspacePath);
   const artifactsParentCandidate = path.resolve(workspaceRoot, "artifacts");
@@ -347,6 +348,7 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof
   materializePromptSchemas(path.join(workspaceRoot, ".ultrafuzz", "schemas"));
   assertTaskInputs(task, workspaceRoot);
   materializeInvariantSuiteFromDependencies(task, workspaceRoot);
+  captureInvariantSuiteWorkspaceSnapshot(task, workspaceRoot);
   const candidate = path.resolve(workspaceRoot, "artifacts", task.attemptId);
   if (!isStrictlyInsideDirectory(workspaceRoot, candidate)) {
     throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
@@ -490,6 +492,62 @@ function invariantSuiteProtectedBaselinePath(task: (typeof taskSpecs)[number]): 
     throw new Error(`artifact-contract failure: unsafe invariant suite baseline root ${task.attemptId}`);
   }
   return path.join(resolvedRoot, `${task.attemptId}.json`);
+}
+
+function invariantWorkspaceSourcePaths(workspaceRoot: string): string[] {
+  const values = execFileSync(
+    "git",
+    ["ls-files", "--cached", "--others", "--no-exclude-standard", "--", "src", "contracts", "test", "tests"],
+    { cwd: workspaceRoot, encoding: "utf8" }
+  ).split(/\r?\n/u);
+  return values.filter(
+    (value) =>
+      value.startsWith("src/") ||
+      value.startsWith("contracts/") ||
+      value.startsWith("test/") ||
+      value.startsWith("tests/")
+  );
+}
+
+function captureInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
+  if (invariantSuiteWorkspaceSnapshots.has(task.attemptId)) return;
+  const snapshot = new Map<string, Buffer>();
+  let totalBytes = 0;
+  for (const value of invariantWorkspaceSourcePaths(workspaceRoot)) {
+    const relativePath = assertSafeInvariantSuitePath(value);
+    const source = resolveRegularArtifactFile(
+      workspaceRoot,
+      path.resolve(workspaceRoot, relativePath),
+      `artifact-contract failure: invariant workspace source is not regular ${relativePath}`
+    );
+    const stat = statSync(source);
+    if (stat.nlink !== 1)
+      throw new Error(`artifact-contract failure: invariant workspace source is hard-linked ${relativePath}`);
+    const bytes = readFileSync(source);
+    totalBytes += bytes.length;
+    if (snapshot.size >= 4096 || totalBytes > 128 * 1024 * 1024) {
+      throw new Error("artifact-contract failure: invariant workspace snapshot exceeds its budget");
+    }
+    snapshot.set(relativePath, bytes);
+  }
+  invariantSuiteWorkspaceSnapshots.set(task.attemptId, snapshot);
+}
+
+function restoreInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number]): void {
+  const snapshot = invariantSuiteWorkspaceSnapshots.get(task.attemptId);
+  if (snapshot === undefined) return;
+  const workspaceRoot = realpathSync(task.workspacePath);
+  for (const relativePath of invariantWorkspaceSourcePaths(workspaceRoot)) {
+    if (snapshot.has(relativePath)) continue;
+    const candidate = path.resolve(workspaceRoot, relativePath);
+    if (existsSync(candidate)) rmSync(candidate, { force: true });
+  }
+  for (const [relativePath, bytes] of snapshot) {
+    const destination = path.resolve(workspaceRoot, relativePath);
+    const parent = path.dirname(destination);
+    mkdirSync(parent, { recursive: true });
+    writeFileDurable(destination, bytes);
+  }
 }
 
 function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
@@ -1510,8 +1568,8 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
   const suitePathsByDependency = new Map<string, string[]>();
   for (const dependency of dependencies) {
     const producer = invariantSuiteProducerTask(dependency);
+    if (producer === undefined) continue;
     const dependencyAttemptId = path.basename(dependency);
-    if (!task.metadata.dependencies.attemptIds.includes(dependencyAttemptId)) continue;
     const isDirect = directDependencies.has(dependency) || directDependencies.has(path.basename(dependency));
     const dependencyRoot = realpathSync(dependency);
     const suiteRoot = path.join(dependencyRoot, "invariant-suite");
@@ -1649,6 +1707,7 @@ const invariantSuiteDependencySnapshots = new Map<
   string,
   Map<string, { dependency: string; bytes: Buffer; direct: boolean }>
 >();
+const invariantSuiteWorkspaceSnapshots = new Map<string, Map<string, Buffer>>();
 
 function invariantTestRoots(workspaceRoot: string): readonly string[] {
   const discovered = INVARIANT_TEST_ROOT_NAMES.filter((root) => {
