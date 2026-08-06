@@ -350,6 +350,160 @@ test("project discovery gate accepts a repository-root scan probe", () => {
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
+// R45's `project-discovery` died on `artifact-contract failure: invariant scan probe tests is
+// unavailable: scan probe is not a regular file` (issue #289). A scan probe records WHERE the agent
+// searched, and a directory like `tests/` is a perfectly reasonable thing to have scanned. The
+// repository-root probe above is already accepted on exactly that reasoning; a subdirectory was not.
+test("project discovery gate accepts a directory scan probe", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-directory-probe" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const discoveryWorkspace = path.join(layout.workspacesDir, "project-discovery");
+  fs.mkdirSync(path.join(discoveryWorkspace, "tests"), { recursive: true });
+  fs.writeFileSync(path.join(discoveryWorkspace, "tests", "Base.t.sol"), "contract Base {}\n");
+  writeArtifact(layout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: [
+        {
+          id: "probe-tests-directory",
+          source_path: "tests",
+          query: "invariant harness scan",
+          result: "Scanned the tests directory"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID"),
+    false,
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+// A symlink that resolves to a directory is deliberately NOT a directory probe: the allowance keys on
+// `lstat`, so a leaf symlink cannot be used to reach outside the workspace unread.
+test("project discovery gate rejects a symlinked-directory scan probe", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-symlinked-probe" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const discoveryWorkspace = path.join(layout.workspacesDir, "project-discovery");
+  fs.mkdirSync(path.join(discoveryWorkspace, "tests"), { recursive: true });
+  fs.symlinkSync(path.join(discoveryWorkspace, "tests"), path.join(discoveryWorkspace, "tests-alias"), "dir");
+  writeArtifact(layout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: [
+        {
+          id: "probe-tests-alias",
+          source_path: "tests-alias",
+          query: "invariant harness scan",
+          result: "Scanned the tests directory"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID"),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+// An invariant SOURCE is different: its bytes are the evidence, so a directory must still be refused.
+// The ledger here is schema-valid and its markdown handoff is complete, so the directory source is the
+// only thing left that can fail the gate.
+test("project discovery gate still rejects a directory invariant source", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-directory-source" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const discoveryWorkspace = path.join(layout.workspacesDir, "project-discovery");
+  fs.mkdirSync(path.join(discoveryWorkspace, "src"), { recursive: true });
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/project-discovery.md",
+    [
+      "# Discovery",
+      "### Ledger entry: evidence-directory-source",
+      "- source_path: src",
+      "- source_location: line 1",
+      "- kind: inequality",
+      "- verbatim: contract Hub {}",
+      "- inventory_ids: inventory-hub-solvency",
+      "### End ledger entry: evidence-directory-source",
+      "### Inventory row: inventory-hub-solvency",
+      "- description: Hub borrowed assets remain at or below supplied assets.",
+      "- ledger_ids: evidence-directory-source",
+      "### End inventory row: inventory-hub-solvency"
+    ].join("\n")
+  );
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [
+        {
+          id: "evidence-directory-source",
+          source_path: "src",
+          source_location: "line 1",
+          kind: "inequality",
+          verbatim: "contract Hub {}",
+          inventory_ids: ["inventory-hub-solvency"]
+        }
+      ],
+      inventory_rows: [
+        {
+          id: "inventory-hub-solvency",
+          description: "Hub borrowed assets remain at or below supplied assets.",
+          ledger_ids: ["evidence-directory-source"]
+        }
+      ],
+      scan_probes: []
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SCHEMA_INVALID"),
+    false,
+    JSON.stringify(result.diagnostics)
+  );
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "not-file"),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
 test("project discovery gate rejects root-normalizing traversal and a symlinked workspace root", () => {
   const traversalLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-root-traversal" });
   const traversalNode = {
@@ -1037,6 +1191,179 @@ test("property fan-in gate rejects Markdown that omits source-only canonical row
   assert.ok(headingParity.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING"));
 });
 
+// R45 and R46 both lost a full `property-specification-fanin` attempt to this (issue #297). Read from
+// R46's own artifacts: 219 canonical properties, 78 with a non-empty `ledger_ids`, and the markdown
+// renders the field exactly 78 times. The model did what the prompt asks -- "add a `ledger_ids` array to
+// every canonical property THAT REPRESENTS one or more ledger entries" -- and what the schema allows,
+// since `ledger_ids` is `.optional()`. Only the gate demanded the field unconditionally.
+test("property fan-in gate does not demand a ledger_ids field from a property that has none", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-ledger-optional" });
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [
+        {
+          id: "evidence-supply",
+          source_path: "docs/overview.md",
+          source_location: "line 1",
+          kind: "invariant",
+          verbatim: "Supply accounting remains consistent.",
+          inventory_ids: ["inventory-supply"]
+        }
+      ],
+      inventory_rows: [
+        {
+          id: "inventory-supply",
+          description: "Supply accounting remains consistent.",
+          ledger_ids: ["evidence-supply"]
+        }
+      ],
+      scan_probes: []
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-from-lens-only",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-supply" }]
+        },
+        {
+          id: "property-from-ledger",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-accounting" }],
+          ledger_ids: ["evidence-supply"]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    [
+      "### Canonical property: property-from-lens-only",
+      "- description: Supply completes for valid state.",
+      "- category: dos-liveness",
+      "- priority: high",
+      "- sources: property-specification-recon:recon-supply",
+      "### End canonical property: property-from-lens-only",
+      "### Canonical property: property-from-ledger",
+      "- description: Supply accounting remains consistent.",
+      "- category: accounting",
+      "- priority: high",
+      "- sources: property-specification-recon:recon-accounting",
+      "- ledger_ids: evidence-supply",
+      "### End canonical property: property-from-ledger"
+    ].join("\n")
+  );
+  const node = {
+    ...plannedNode(["properties.json", "properties.md"]),
+    id: "property-specification-fanin",
+    logical_id: "property-specification-fanin"
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING" && diagnostic.message.includes('"ledger_ids"')
+    ),
+    false,
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+// The other half: a property that DOES have ledger IDs must still render them, so this cannot be read
+// as dropping ledger parity altogether.
+test("property fan-in gate still requires the ledger_ids field when the property has ledger IDs", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-ledger-required" });
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [
+        {
+          id: "evidence-supply",
+          source_path: "docs/overview.md",
+          source_location: "line 1",
+          kind: "invariant",
+          verbatim: "Supply accounting remains consistent.",
+          inventory_ids: ["inventory-supply"]
+        }
+      ],
+      inventory_rows: [
+        {
+          id: "inventory-supply",
+          description: "Supply accounting remains consistent.",
+          ledger_ids: ["evidence-supply"]
+        }
+      ],
+      scan_probes: []
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-from-ledger",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-accounting" }],
+          ledger_ids: ["evidence-supply"]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    [
+      "### Canonical property: property-from-ledger",
+      "- description: Supply accounting remains consistent.",
+      "- category: accounting",
+      "- priority: high",
+      "- sources: property-specification-recon:recon-accounting",
+      "### End canonical property: property-from-ledger"
+    ].join("\n")
+  );
+  const node = {
+    ...plannedNode(["properties.json", "properties.md"]),
+    id: "property-specification-fanin",
+    logical_id: "property-specification-fanin"
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING" && diagnostic.message.includes('"ledger_ids"')
+    ),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
 test("property fan-in gate ignores optional ledger evidence when checking ledger ID parity", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-ledger-evidence" });
   writeArtifact(
@@ -1520,6 +1847,236 @@ test("property lens gate rejects schema-invalid expectation catalogs even when d
   );
 });
 
+// R45's `property-specification-runtime-verification` died at 2026-08-06T18:28:20Z on five camelCase
+// test-function names copied from its own pinned reference (issue #293):
+//
+//   Property lens expectation "testConvertToAssetsSharesDesirable" is not present in a supplied
+//   pinned-reference catalog
+//
+// This is the THIRD identifier shape to hit the gate: `LEND-01` was stripped, `LEND_ACC_01` killed R44
+// (#283) until the shape test was widened, and a camelCase name is not a shape any widening should
+// chase. The distinction the gate actually cares about is already stated in its own comment: a
+// NAMESPACED identifier asserts external authority and must fail closed, an unnamespaced one is a
+// citation the model copied from a document and can be stripped.
+test("property lens authority sanitizer strips an unnamespaced camelCase expectation", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-camel" });
+  writeArtifact(
+    layout,
+    "recon-properties",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: ["testConvertToAssetsSharesDesirable", "testPreviewDepositZeroAmountReturnsZero"]
+        }
+      ]
+    })
+  );
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "recon-properties",
+    logical_id: "recon-properties",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
+    JSON.stringify(result.diagnostics)
+  );
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+    false,
+    JSON.stringify(result.diagnostics)
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
+      .properties[0].reference_expectations,
+    undefined
+  );
+});
+
+// A colon is NOT the discriminator. Real catalogue identifiers are bare labels (`total-borrowed-v0`)
+// and `.ultrafuzz/references.yml` namespaces with dots, so keying on a colon would have made the
+// fail-closed half dead code. A dotted identifier is an ordinary citation and must strip.
+test("property lens authority sanitizer strips dotted and mixed-separator citations", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-dotted" });
+  writeArtifact(
+    layout,
+    "recon-properties",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: [
+            "properties.a16z-erc4626",
+            "RoundingProps.sol:88",
+            "total-borrowed-v0",
+            "4626-01",
+            "_internal"
+          ]
+        }
+      ]
+    })
+  );
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "recon-properties",
+    logical_id: "recon-properties",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
+      .properties[0].reference_expectations,
+    undefined
+  );
+});
+
+// The strippable set is bounded positively, so an entry that no prompt would ever produce still fails
+// the node instead of vanishing. Without this bound, "anything without an authority prefix" would have
+// swallowed all four of these.
+test("property lens authority sanitizer fails closed on entries that are not plausible citations", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-implausible" });
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "recon-properties",
+    logical_id: "recon-properties",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+
+  for (const implausible of [
+    "the vault must not lose funds, per the ERC4626 README",
+    "https://evil.example/expectations#1",
+    " ",
+    '{"id"="scfuzzbench=aave-v4=iSpoke_supply"}'
+  ]) {
+    writeArtifact(
+      layout,
+      "recon-properties",
+      "properties/recon.json",
+      JSON.stringify({
+        schema_version: "ultrafuzz.property-lens.v1",
+        properties: [
+          {
+            id: "iSpoke_supply",
+            description: "Supply completes for valid state.",
+            category: "dos-liveness",
+            priority: "high",
+            reference_expectations: [implausible]
+          }
+        ]
+      })
+    );
+    const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+    assert.equal(result.ok, false, `${implausible}: ${JSON.stringify(result.diagnostics)}`);
+    assert.ok(
+      result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+      `${implausible}: ${JSON.stringify(result.diagnostics)}`
+    );
+  }
+});
+
+// The other half of the rule, kept explicit so a future widening cannot quietly relax it: an
+// identifier claiming a reserved authority namespace is a benchmark-mapping claim and must still fail
+// the node, mixed in with strippable citations so the all-or-nothing guard is exercised too. Case and
+// separator variants are included because a prefix allowlist is only as good as its normalisation.
+test("property lens authority sanitizer still fails closed on a reserved authority namespace", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-namespaced" });
+  writeArtifact(
+    layout,
+    "recon-properties",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: ["testConvertToAssetsSharesDesirable", "ScFuzzBench:aave-v4:iSpoke_supply"]
+        }
+      ]
+    })
+  );
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "recon-properties",
+    logical_id: "recon-properties",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+    JSON.stringify(result.diagnostics)
+  );
+  // The forged claim must survive byte-for-byte so the failure is diagnosable.
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
+      .properties[0].reference_expectations,
+    ["testConvertToAssetsSharesDesirable", "ScFuzzBench:aave-v4:iSpoke_supply"]
+  );
+
+  // Every entry here matches COPIED_REFERENCE_CITATION, so each one is pinning the authority check
+  // itself rather than the implausibility bound. `Benchmark_unexpected` is the normalisation canary:
+  // drop `.toLowerCase()` and only this case fails.
+  for (const forged of [
+    "benchmark.unexpected",
+    "benchmark_unexpected",
+    "benchmark-unexpected",
+    "Benchmark_unexpected",
+    "scfuzzbench_aave_v4_iSpoke_supply",
+    "scfuzz-bench.total-borrowed-v0",
+    "ground_truth.total-borrowed-v0",
+    "ground.truth.total-borrowed-v0",
+    "groundtruth.total-borrowed-v0"
+  ]) {
+    writeArtifact(
+      layout,
+      "recon-properties",
+      "properties/recon.json",
+      JSON.stringify({
+        schema_version: "ultrafuzz.property-lens.v1",
+        properties: [
+          {
+            id: "iSpoke_supply",
+            description: "Supply completes for valid state.",
+            category: "dos-liveness",
+            priority: "high",
+            reference_expectations: [forged]
+          }
+        ]
+      })
+    );
+    const variant = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+    assert.equal(variant.ok, false, `${forged}: ${JSON.stringify(variant.diagnostics)}`);
+    assert.ok(
+      variant.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+      `${forged}: ${JSON.stringify(variant.diagnostics)}`
+    );
+  }
+});
+
 test("property lens authority sanitizer applies to custom logical lens IDs", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-custom-lens" });
   writeArtifact(
@@ -1797,6 +2354,161 @@ test("property lens authority gate accepts a marker digest that matches disk", (
     result.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_VERIFICATION_DIGEST_DRIFTED"),
     false,
     JSON.stringify(result.diagnostics)
+  );
+});
+
+// R44's `property-specification-0kn0t` node was killed by `LEND_ACC_01` (issue #283). The matcher
+// only allowed a hyphen before the digits, so an underscore-separated catalog ID was not recognized as
+// an unsupported external label, survived sanitization, and was then reported as an unauthorized
+// expectation — failing the node. `LEND-01` was stripped in the same position, so the outcome turned
+// on punctuation rather than on anything meaningful.
+// Review pointed out the first version of this fix was a point fix for a class bug: only `_` was
+// widened, so hyphen-segmented labels like `CRYTIC-ERC4626-05` still killed the node, and the
+// per-property all-or-nothing check meant one unrecognised sibling poisoned every ID beside it.
+test("property lens authority sanitizer strips multi-segment catalog labels per identifier", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-multisegment" });
+  writeArtifact(
+    layout,
+    "recon-properties",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: ["LEND_ACC_01", "LEND-ACC-01", "CRYTIC-ERC4626-05", "ERC4626-999"]
+        }
+      ]
+    })
+  );
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "recon-properties",
+    logical_id: "recon-properties",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  const sanitized = result.diagnostics.find(
+    (diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"
+  );
+  assert.ok(sanitized, JSON.stringify(result.diagnostics));
+  // The audit trail is the only record an operator gets of what was dropped.
+  assert.deepEqual(
+    (
+      (sanitized?.details as { removed_reference_expectations?: string[] } | undefined)
+        ?.removed_reference_expectations ?? []
+    )
+      .slice()
+      .sort(),
+    ["CRYTIC-ERC4626-05", "ERC4626-999", "LEND-ACC-01", "LEND_ACC_01"]
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
+      .properties[0].reference_expectations,
+    undefined
+  );
+});
+
+// A lens that mixes a recognisable catalogue label with a forged namespaced citation is left
+// byte-unchanged on purpose: the artifact as the model wrote it is the evidence the authority check
+// exists to surface, so sanitizing around the forgery would destroy it. This pins that the widened
+// label matcher did NOT weaken that rule — reviewing suggested stripping per identifier, which would
+// have silently rewritten a forged mapping.
+test("property lens authority sanitizer leaves a forged namespaced citation untouched", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-mixed" });
+  const written = ["LEND_ACC_01", "benchmark:unexpected"];
+  writeArtifact(
+    layout,
+    "recon-properties",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: written
+        }
+      ]
+    })
+  );
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "recon-properties",
+    logical_id: "recon-properties",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+    JSON.stringify(result.diagnostics)
+  );
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
+    false,
+    JSON.stringify(result.diagnostics)
+  );
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
+      .properties[0].reference_expectations,
+    written
+  );
+});
+
+test("property lens authority sanitizer strips underscore-separated catalog labels", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-underscore" });
+  writeArtifact(
+    layout,
+    "recon-properties",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: ["LEND_ACC_01", "LEND_ACC_02", "ERC4626-999"]
+        }
+      ]
+    })
+  );
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "recon-properties",
+    logical_id: "recon-properties",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
+    JSON.stringify(result.diagnostics)
+  );
+  // The node must not fail: an unauthorized citation is stripped, not treated as a fatal artifact.
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+    false,
+    JSON.stringify(result.diagnostics)
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
+      .properties[0].reference_expectations,
+    undefined
   );
 });
 

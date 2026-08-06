@@ -90,14 +90,17 @@ IDs exactly. Every ledger ID must appear in at least one canonical property's
 several equivalent source statements may share one canonical property. Preserve
 the complete mapping in both `properties.json` and the Markdown table.
 In `properties.md`, render each canonical row in a delimited block beginning
-with `### Canonical property: <property-id>` and include its complete
-`ledger_ids` list in that block. Close it with
-`### End canonical property: <property-id>`.
+with `### Canonical property: <property-id>` and, when that property has ledger
+IDs, include its complete `ledger_ids` list in that block. Omit the `ledger_ids`
+field entirely for a property that maps to no ledger entry: `ledger_ids` is
+optional in the schema and cannot be empty, so there is nothing to render. Close
+the block with `### End canonical property: <property-id>`.
 Within each block, render `description`, `category`, and `priority` as named
 fields, render each source as `<source_node_id>:<source_property_id>` under a
-`sources` field (separate multiple sources with `<br>`), and render the exact
-ledger IDs under a `ledger_ids` field (separate multiple IDs with commas or
-`<br>`). When present, render the exact `reference_expectations` identifiers
+`sources` field (separate multiple sources with `<br>`), and, when present,
+render the exact ledger IDs under a `ledger_ids` field (separate multiple IDs
+with commas or `<br>`). When present, render the exact `reference_expectations`
+identifiers
 under a `reference_expectations` field (separate multiple IDs with commas or
 `<br>`). Keep these field values identical to `properties.json`.
 

@@ -178,6 +178,69 @@ describe("Modal launch ownership", () => {
     expect(fs.existsSync(`${statePath}.lock`)).toBe(false);
   });
 
+  // Three Aave v4 runs lost their sandbox at `stateful-invariant-setup` and none could be diagnosed,
+  // because on an unattended run the overseer's reservation is the ONLY path that closes the dying
+  // attempt's lifecycle row, and it hardcoded every diagnostic to "unknown" -- discarding an exit code
+  // `probeModalSandbox` had already computed. 137 says OOM, 0 says clean exit, a signal says eviction;
+  // "unknown" says nothing and costs another ~$400 relaunch to learn nothing again (issue #302).
+  it("records an observed sandbox exit code when force-closing the replaced attempt", () => {
+    const state = launchState();
+    reserveModalLaunchAttempt({
+      state,
+      model: MODEL,
+      modelFingerprint: fingerprintModalModel(MODEL),
+      volumeName: "volume-placeholder",
+      remoteRoot: "/data/logical-run/model-one",
+      workspaceMode: "fresh",
+      attemptId: "attempt-one",
+      now: "2026-01-01T00:00:00.000Z"
+    });
+    reserveModalLaunchAttempt({
+      state,
+      model: MODEL,
+      modelFingerprint: fingerprintModalModel(MODEL),
+      volumeName: "volume-placeholder",
+      remoteRoot: "/data/logical-run/model-one",
+      workspaceMode: "resume",
+      attemptId: "attempt-two",
+      now: "2026-01-01T00:05:00.000Z",
+      observedWorkerExitCode: 137
+    });
+
+    const closed = state.recovery_lifecycle.find((record) => record.attempt_id === "attempt-one");
+    expect(closed?.worker_exit_code).toBe(137);
+
+    // Omitting the observation still records "unknown" rather than inventing a code, so a caller that
+    // genuinely could not probe is distinguishable from one that observed a clean exit.
+    reserveModalLaunchAttempt({
+      state,
+      model: MODEL,
+      modelFingerprint: fingerprintModalModel(MODEL),
+      volumeName: "volume-placeholder",
+      remoteRoot: "/data/logical-run/model-one",
+      workspaceMode: "resume",
+      attemptId: "attempt-three",
+      now: "2026-01-01T00:10:00.000Z"
+    });
+    expect(state.recovery_lifecycle.find((record) => record.attempt_id === "attempt-two")?.worker_exit_code).toBe(
+      "unknown"
+    );
+
+    // A clean exit is a real observation and must survive as 0, not be coerced away by a falsy check.
+    reserveModalLaunchAttempt({
+      state,
+      model: MODEL,
+      modelFingerprint: fingerprintModalModel(MODEL),
+      volumeName: "volume-placeholder",
+      remoteRoot: "/data/logical-run/model-one",
+      workspaceMode: "resume",
+      attemptId: "attempt-four",
+      now: "2026-01-01T00:15:00.000Z",
+      observedWorkerExitCode: 0
+    });
+    expect(state.recovery_lifecycle.find((record) => record.attempt_id === "attempt-three")?.worker_exit_code).toBe(0);
+  });
+
   it("persists reservation, sandbox identity, readiness, and replacement provenance", () => {
     const state = launchState();
     const first = reserveModalLaunchAttempt({

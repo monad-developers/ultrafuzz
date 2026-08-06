@@ -5965,7 +5965,19 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /typeof args\?\.rootDir === "string"/);
   assert.match(workflowSource, /taskWorkspaceOutputRoots\(task\)\s*\n\s*\);/);
   assert.match(workflowSource, /function taskTestOutputRelativeRoots/);
-  assert.match(workflowSource, /task\.workspaceOutputRoots\.filter/);
+  // The compiled spec still names singular roots, but the generated workflow must
+  // re-anchor them onto the test root(s) the target repository actually has (#212).
+  assert.match(workflowSource, /resolvedWorkspaceOutputRoots\(task, workspaceRoot\)\.filter/);
+  // taskWorkspaceOutputRoots feeds allowedUntrackedRoots into the provenance check, so
+  // pin it too: reverting only this call site would leave every other assertion green
+  // while every task on a `tests/`-only target died on a bare ENOENT.
+  assert.match(workflowSource, /resolvedWorkspaceOutputRoots\(task, workspaceRoot\)\.map/);
+  assert.match(workflowSource, /function invariantTestRootName/);
+  assert.match(workflowSource, /function repositoryAwareWorkspaceOutputRoots/);
+  assert.match(workflowSource, /function resolvedWorkspaceOutputRoots/);
+  assert.match(workflowSource, /preparedWorkspaceOutputRoots\.set\(/);
+  assert.doesNotMatch(workflowSource, /for \(const relativeRoot of task\.workspaceOutputRoots\)/);
+  assert.doesNotMatch(workflowSource, /repositoryAwareWorkspaceOutputRoots\(task, workspaceRoot\)\.map/);
   assert.match(workflowSource, /function prepareTaskWorkspaceOutputRoots/);
   assert.match(workflowSource, /function prepareAnchoredDirectory/);
   assert.match(workflowSource, /cleanWorkspaceOutputRootsForRetry\(workspaceRoot, testOutputRoots\)/);

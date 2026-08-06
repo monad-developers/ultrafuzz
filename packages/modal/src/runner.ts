@@ -48,6 +48,7 @@ import {
   DEFAULT_MODAL_APP,
   DEFAULT_MODAL_IMAGE,
   MODAL_BENCHMARK_SANDBOX_RESOURCES,
+  MODAL_OVERSEER_MAX_CONSECUTIVE_FAILURES,
   MODAL_OVERSEER_POLL_MS,
   MODAL_PRE_MODEL_RETRY_LIMIT,
   MODAL_RECOVERY_LEASE_TIMEOUT_MS,
@@ -1643,21 +1644,90 @@ export interface ModalOverseerSnapshot {
   rows: ModalRecoveryRowSnapshot[];
 }
 
+/**
+ * Polls every supervised job until all are complete.
+ *
+ * A failed poll tick must not take the process down. R45's detached overseer exited 1 mid-run on
+ * `NotFoundError: The Sandbox is unavailable. This Sandbox may have already shut down.` (issue #295),
+ * and the run it was watching then hit a transient `agent-failure` half an hour later with nothing
+ * alive to retry it. Restarting the overseer produced `action: "launch", reason: "owner-missing"`
+ * within seconds, so recovery had been available the whole time and simply had no process to trigger
+ * it. An overseer whose purpose is supervising runs whose sandboxes die must not die because a sandbox
+ * died — and the sandbox-unavailable read is only one of many ways a tick can throw, so the resilience
+ * belongs here rather than in any single read.
+ *
+ * A persistently broken job must still surface, so the loop gives up loudly after
+ * `maxConsecutiveFailures` consecutive ticks in which every job threw. Anything less than every job is
+ * absorbed indefinitely: one wedged run should not stop the others from being supervised.
+ */
 export async function overseeModalBenchmarks(input: {
   jobs: ModalOverseerJob[];
   pollMs?: number;
   env?: Record<string, string | undefined>;
+  maxConsecutiveFailures?: number;
+  overseeOnce?: (
+    job: ModalOverseerJob & { env?: Record<string, string | undefined> }
+  ) => Promise<ModalOverseerSnapshot>;
 }): Promise<ModalOverseerSnapshot[]> {
   if (input.jobs.length === 0) throw new Error("at least one Modal overseer job is required");
   const pollMs = input.pollMs ?? MODAL_OVERSEER_POLL_MS;
   if (!Number.isSafeInteger(pollMs) || pollMs <= 0) throw new Error("Modal overseer poll interval must be positive");
+  const maxConsecutiveFailures = input.maxConsecutiveFailures ?? MODAL_OVERSEER_MAX_CONSECUTIVE_FAILURES;
+  if (!Number.isSafeInteger(maxConsecutiveFailures) || maxConsecutiveFailures <= 0) {
+    throw new Error("Modal overseer consecutive failure limit must be positive");
+  }
+  const overseeOnce = input.overseeOnce ?? overseeModalBenchmarkOnce;
+  // Counted PER JOB. A shared counter only tripped when every job failed on the same tick, so with two
+  // or more jobs a permanently broken one — an incompatible config fingerprint, a launch state naming a
+  // different run — was absorbed forever while a healthy sibling kept resetting the count. "Loud"
+  // silently became "never" as the job count grew.
+  const consecutiveFailures = new Map<string, number>();
+  const abandoned = new Map<string, unknown>();
+  let active = [...input.jobs];
   for (;;) {
-    const snapshots = [];
-    for (const job of input.jobs) {
-      snapshots.push(await overseeModalBenchmarkOnce({ ...job, env: input.env }));
+    const snapshots: ModalOverseerSnapshot[] = [];
+    const failures: { config_path: string; error: string; consecutive_failures: number }[] = [];
+    for (const job of active) {
+      try {
+        snapshots.push(await overseeOnce({ ...job, env: input.env }));
+        consecutiveFailures.set(job.configPath, 0);
+      } catch (error) {
+        const count = (consecutiveFailures.get(job.configPath) ?? 0) + 1;
+        consecutiveFailures.set(job.configPath, count);
+        failures.push({
+          config_path: job.configPath,
+          error: error instanceof Error ? error.message : String(error),
+          consecutive_failures: count
+        });
+        if (count >= maxConsecutiveFailures) abandoned.set(job.configPath, error);
+      }
     }
-    console.log(JSON.stringify({ updated_at: new Date().toISOString(), jobs: snapshots }));
-    if (snapshots.every((snapshot) => snapshot.complete)) return snapshots;
+    // A wedged job stops being polled so its healthy siblings keep being supervised, but it is never
+    // forgotten: the process still ends non-zero below, naming it.
+    active = active.filter((job) => !abandoned.has(job.configPath));
+    console.log(
+      JSON.stringify({
+        updated_at: new Date().toISOString(),
+        jobs: snapshots,
+        ...(failures.length > 0 ? { failed_jobs: failures } : {}),
+        ...(abandoned.size > 0 ? { abandoned_jobs: [...abandoned.keys()] } : {})
+      })
+    );
+    // Guarded on length as well as completeness: a tick in which every remaining job failed leaves
+    // `snapshots` empty, and `[].every(...)` is true, so without this the overseer would report a wedged
+    // job as complete and exit 0.
+    const remainingComplete =
+      snapshots.length === active.length && snapshots.length > 0 && snapshots.every((snapshot) => snapshot.complete);
+    if (abandoned.size > 0 && (active.length === 0 || remainingComplete)) {
+      // Deliberately not a bare rethrow. The underlying message is often the very symptom this loop
+      // exists to survive (`The Sandbox is unavailable...`), so rethrowing it verbatim would read as the
+      // fix having regressed. The cause is preserved for whoever needs the original.
+      throw new Error(
+        `Modal overseer abandoned ${abandoned.size} job(s) after ${maxConsecutiveFailures} consecutive failed ticks: ${[...abandoned.keys()].join(", ")}`,
+        { cause: [...abandoned.values()].at(-1) }
+      );
+    }
+    if (remainingComplete) return snapshots;
     await sleep(pollMs);
   }
 }
@@ -1825,7 +1895,8 @@ export async function overseeModalBenchmarkOnce(
               recoveryState,
               recoveryStatePath,
               env,
-              now
+              now,
+              ...(resolution.launchExitCode === undefined ? {} : { observedExitCode: resolution.launchExitCode })
             });
           } else {
             await writeModalRecoveryState(recoveryStatePath, recoveryState);
@@ -1854,6 +1925,8 @@ interface ResolvedModalRecoveryOwner {
   pending?: boolean;
   changed?: boolean;
   reserved?: { worker: ModalRecoveryWorker; sandbox: Sandbox };
+  /** Exit code observed on the original launch sandbox while resolving ownership (issue #302). */
+  launchExitCode?: number;
 }
 
 async function resolveModalRecoveryOwner(input: {
@@ -1868,7 +1941,7 @@ async function resolveModalRecoveryOwner(input: {
     .filter((worker) => worker.phase === "reserved")
     .sort((left, right) => right.generation - left.generation)[0];
   if (newestReserved !== undefined) {
-    const sandbox = await runningRecoverySandbox(
+    const { sandbox } = await runningRecoverySandbox(
       input.modal,
       newestReserved.sandbox_id,
       input.launchState.app,
@@ -1887,14 +1960,20 @@ async function resolveModalRecoveryOwner(input: {
   }
 
   const live: Array<{ owner: ModalRecoveryOwner; sandbox: Sandbox }> = [];
+  let launchExitCode: number | undefined;
   const launchRecovery = row.workers.find((worker) => worker.attempt_id === input.launch.attempt_id);
   if (launchRecovery === undefined) {
-    const original = await runningRecoverySandbox(
+    const probed = await runningRecoverySandbox(
       input.modal,
       input.launch.sandbox_id,
       input.launchState.app,
       modalSandboxName(input.launchState.logical_run_id, input.launch)
     );
+    // Captured here rather than re-probed later: by the time a replacement is reserved this tick has
+    // created and terminated an inspector sandbox and copied credentials, so the id may have been reaped
+    // and a second probe can only return a worse answer than this one.
+    launchExitCode = probed.exitCode;
+    const original = probed.sandbox;
     if (original !== undefined) {
       live.push({
         owner: {
@@ -1908,7 +1987,12 @@ async function resolveModalRecoveryOwner(input: {
     }
   }
   for (const worker of row.workers.filter((candidate) => candidate.phase === "launched")) {
-    const sandbox = await runningRecoverySandbox(input.modal, worker.sandbox_id, input.launchState.app, worker.name);
+    const { sandbox } = await runningRecoverySandbox(
+      input.modal,
+      worker.sandbox_id,
+      input.launchState.app,
+      worker.name
+    );
     if (sandbox !== undefined) {
       live.push({ owner: recoveryOwner(row, worker.generation, true), sandbox });
     }
@@ -1937,7 +2021,8 @@ async function resolveModalRecoveryOwner(input: {
     return {
       row,
       owner: recoveryOwner(row, latestWorker.generation, false),
-      changed: row !== input.row
+      changed: row !== input.row,
+      ...(launchExitCode === undefined ? {} : { launchExitCode })
     };
   }
   return {
@@ -1948,7 +2033,8 @@ async function resolveModalRecoveryOwner(input: {
       image: input.launchState.image,
       launched_at: input.launch.launched_at ?? input.launch.reserved_at
     },
-    changed: row !== input.row
+    changed: row !== input.row,
+    ...(launchExitCode === undefined ? {} : { launchExitCode })
   };
 }
 
@@ -2027,6 +2113,8 @@ async function launchModalRecoveryWorker(input: {
   recoveryStatePath: string;
   env: Record<string, string | undefined>;
   now: () => number;
+  /** Exit code already observed on the sandbox being replaced, when ownership resolution saw one. */
+  observedExitCode?: number;
 }): Promise<ModalRecoveryRowState> {
   await reconcileKimiSubscriptionCredentialFromLaunchVolume({
     modal: input.modal,
@@ -2052,7 +2140,11 @@ async function launchModalRecoveryWorker(input: {
       workspaceMode: "resume",
       postModelRecovery: "relaunch",
       now: new Date(input.now()).toISOString(),
-      attemptId
+      attemptId,
+      // Threaded from the poll `resolveModalRecoveryOwner` already performed this tick, rather than
+      // re-probing here. A second probe would add a throw site to the rescue path and, because this tick
+      // creates and terminates an inspector sandbox in between, could only return a worse answer.
+      ...(input.observedExitCode === undefined ? {} : { observedWorkerExitCode: input.observedExitCode })
     });
     await writeModalLaunchState(input.statePath, input.launchState);
     const nextGeneration = Math.max(0, ...input.row.workers.map((worker) => worker.generation)) + 1;
@@ -2135,25 +2227,35 @@ function recoveryOwner(row: ModalRecoveryRowState, generation: number, live: boo
   };
 }
 
-async function runningRecoverySandbox(
+/**
+ * Returns the sandbox when it is still live, and otherwise the exit code it reported.
+ *
+ * The exit code used to be polled and dropped on the floor. On unattended runs nothing else observes a
+ * sandbox death, so it was the only sighting of the one number that distinguishes an OOM kill from an
+ * eviction from a clean exit — and three Aave v4 runs died at `stateful-invariant-setup` with no way to
+ * tell which (issue #302). Returning it here is free: the poll already happened.
+ */
+export async function runningRecoverySandbox(
   modal: ModalClient,
   sandboxId: string | undefined,
   appName: string,
   name: string
-): Promise<Sandbox | undefined> {
+): Promise<{ sandbox?: Sandbox; exitCode?: number }> {
   let sandbox: Sandbox | undefined;
+  let observed: number;
   try {
     sandbox =
       sandboxId === undefined ? await modal.sandboxes.fromName(appName, name) : await modal.sandboxes.fromId(sandboxId);
     const exitCode = await sandbox.poll();
-    if (exitCode === null) return sandbox;
+    if (exitCode === null) return { sandbox };
+    observed = exitCode;
   } catch (error) {
     sandbox?.detach();
-    if (error instanceof NotFoundError) return undefined;
+    if (error instanceof NotFoundError) return {};
     throw error;
   }
   sandbox.detach();
-  return undefined;
+  return { exitCode: observed };
 }
 
 async function terminateRecoveryOwner(sandbox: Sandbox): Promise<void> {
@@ -3291,6 +3393,16 @@ export async function readOptionalModalSandboxText(
     }
     return contents;
   } catch (error) {
+    // Deliberately NOT widened to `NotFoundError`, even though the overseer crash in issue #295 was
+    // raised from this frame. `translateExecErrors` in modal@0.9.0 relabels five distinct gRPC
+    // conditions — NOT_FOUND, CANCELLED, UNKNOWN, DEADLINE_EXCEEDED and UNAVAILABLE — as
+    // `NotFoundError("The Sandbox is unavailable. This Sandbox may have already shut down.")`, so an
+    // ordinary network hiccup against a perfectly healthy sandbox is indistinguishable from a real
+    // shutdown at this layer. Treating that as "file absent" would let a blip drive writes: the
+    // readiness-marker reads at `finishReservedModalLaunch` and `finishReservedModalRecoveryWorker`
+    // would re-stage config, lineage and credentials over a live worker, and `collect` would write an
+    // empty artifact bundle because its retry shield only fires when a status file was read.
+    // Issue #295 is fixed in the overseer's poll loop instead, where a failed tick belongs.
     if (error instanceof SandboxFilesystemNotFoundError) return undefined;
     throw error;
   }

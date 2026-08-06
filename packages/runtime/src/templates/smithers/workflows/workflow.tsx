@@ -527,12 +527,13 @@ function mirroredArtifactDir(task: (typeof taskSpecs)[number]): string {
 
 function taskTestOutputRelativeRoots(task: (typeof taskSpecs)[number]): string[] {
   const artifactMirror = `artifacts/${task.attemptId}`;
-  return task.workspaceOutputRoots.filter((relativeRoot) => relativeRoot !== artifactMirror);
+  const workspaceRoot = realpathSync(task.workspacePath);
+  return resolvedWorkspaceOutputRoots(task, workspaceRoot).filter((relativeRoot) => relativeRoot !== artifactMirror);
 }
 
 function taskWorkspaceOutputRoots(task: (typeof taskSpecs)[number]): string[] {
   const workspaceRoot = realpathSync(task.workspacePath);
-  return task.workspaceOutputRoots.map((relativeRoot) => {
+  return resolvedWorkspaceOutputRoots(task, workspaceRoot).map((relativeRoot) => {
     const candidate = path.resolve(workspaceRoot, relativeRoot);
     if (!isStrictlyInsideDirectory(workspaceRoot, candidate)) {
       throw new Error(`artifact-contract failure: unsafe workspace output root ${task.attemptId}`);
@@ -551,7 +552,13 @@ function prepareTaskWorkspaceOutputRoots(
   options: { replayWorkspacePatches?: boolean } = {}
 ): void {
   const workspaceRoot = realpathSync(task.workspacePath);
-  for (const relativeRoot of task.workspaceOutputRoots) {
+  // Resolve once and remember it, so every consumer in this attempt sees exactly the
+  // roots that were created here. `prepareArtifactMirror` below can introduce the
+  // other test root by replaying an ancestor workspace patch, and a later independent
+  // discovery would then pick a root whose subdirectories do not exist.
+  const relativeRoots = repositoryAwareWorkspaceOutputRoots(task, workspaceRoot);
+  preparedWorkspaceOutputRoots.set(preparedWorkspaceOutputRootsKey(task, workspaceRoot), relativeRoots);
+  for (const relativeRoot of relativeRoots) {
     prepareAnchoredDirectory(
       workspaceRoot,
       relativeRoot,
@@ -569,6 +576,13 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
   if (baselineSnapshot !== undefined) {
     writeFileDurable(baselinePath, baselineSnapshot.contents);
   }
+  // Tombstones are re-derived from the protected baseline on every companions
+  // pass, so the previous attempt's deletions must not survive into this one.
+  // The restored workspace snapshot puts a deleted source physically back, and
+  // a stale tombstone would then suppress it durably for the whole invariant
+  // chain: this stage would publish it as deleted and every descendant would
+  // honour that in `inheritedInvariantSuiteTombstones`.
+  invariantSuiteTombstones.delete(realpathSync(task.workspacePath));
   restoreInvariantSuiteWorkspaceSnapshot(task);
 
   const workspaceRoot = realpathSync(task.workspacePath);
@@ -1177,6 +1191,16 @@ function invariantWorkspaceSourcePaths(workspaceRoot: string): string[] {
 }
 
 function invariantSuiteWorkspaceSnapshotRoot(task: (typeof taskSpecs)[number]): string {
+  return invariantSuiteAttemptStateRoot(task, INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR);
+}
+
+/**
+ * Anchor a per-attempt directory of durable invariant-suite run state. Run
+ * state has to live under the run root rather than under a task artifact
+ * directory, because artifact roots are emptied on every retry and are
+ * reachable from the model-controlled workspace.
+ */
+function invariantSuiteAttemptStateRoot(task: (typeof taskSpecs)[number], directoryName: string): string {
   const projectRoot = realpathSync(process.cwd());
   const runRootCandidate = path.resolve(process.cwd(), task.runRoot);
   if (runRootCandidate !== projectRoot && !isStrictlyInsideDirectory(projectRoot, runRootCandidate)) {
@@ -1198,7 +1222,7 @@ function invariantSuiteWorkspaceSnapshotRoot(task: (typeof taskSpecs)[number]): 
   if (runRoot !== runRootCandidate || (runRoot !== projectRoot && !isStrictlyInsideDirectory(projectRoot, runRoot))) {
     throw new Error(`artifact-contract failure: unsafe invariant workspace snapshot root ${task.attemptId}`);
   }
-  const rootCandidate = path.join(runRoot, INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR);
+  const rootCandidate = path.join(runRoot, directoryName);
   mkdirSync(rootCandidate, { recursive: true, mode: 0o700 });
   const root = realpathSync(rootCandidate);
   if (root !== rootCandidate || !isStrictlyInsideDirectory(runRoot, root)) {
@@ -2743,10 +2767,7 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
   let totalBytes = 0;
   const publicationSnapshot = new Map<string, Buffer>();
   const tombstones = invariantSuiteTombstones.get(realpathSync(task.workspacePath)) ?? new Set<string>();
-  const selectedDependencies = invariantSuiteDependencySnapshots.get(task.attemptId);
-  if (selectedDependencies === undefined) {
-    throw new Error(`artifact-contract failure: invariant suite dependency snapshot is unavailable ${task.attemptId}`);
-  }
+  const selectedDependencies = resolveInvariantSuiteDependencySnapshot(task);
   for (const [relativePath, entry] of selectedDependencies) {
     if (!tombstones.has(relativePath)) publicationSnapshot.set(relativePath, Buffer.from(entry.bytes));
   }
@@ -2776,6 +2797,13 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
       size_bytes: contents.length,
       sha256: createHash("sha256").update(contents).digest("hex")
     }));
+  // Publish the deletion channel alongside the surviving files. Tombstones
+  // accumulate down the chain and a path this stage still publishes clears its
+  // own tombstone, so a deleted-then-re-added source is not suppressed.
+  const manifestTombstones = [...new Set([...resolveInheritedInvariantSuiteTombstones(task), ...tombstones])]
+    .filter((relativePath) => !publicationSnapshot.has(relativePath))
+    .sort();
+  assertInvariantSuiteTombstoneBudget(manifestTombstones.length, task.attemptId);
   for (const artifactRoot of artifactRoots) {
     resetInvariantSuiteArtifactRoot(artifactRoot);
     copyDependencyInvariantSuiteToArtifact(task, artifactRoot);
@@ -2788,7 +2816,8 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
         schema_version: "ultrafuzz.invariant-suite-manifest.v1",
         producer_node_id: task.metadata.node.logicalNodeId,
         producer_attempt_id: task.attemptId,
-        files: manifestFiles
+        files: manifestFiles,
+        tombstones: manifestTombstones
       })}\n`
     );
   }
@@ -2812,35 +2841,426 @@ function invariantSuiteProducerTask(dependencyArtifactDir: string): (typeof task
   return producer;
 }
 
-function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
-  if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) return;
-  const previousSnapshot = invariantSuiteDependencySnapshots.get(task.attemptId);
-  if (previousSnapshot !== undefined) {
-    for (const [relativePath, entry] of previousSnapshot) {
-      const sourceRoot = path.join(realpathSync(entry.dependency), "invariant-suite");
-      const current = readInvariantSuiteSourceBytes(sourceRoot, relativePath, "artifact handoff invariant suite");
-      if (!current.equals(entry.bytes)) {
-        throw new Error(`artifact-contract failure: invariant suite dependency changed ${relativePath}`);
-      }
-    }
-    return;
+function assertInvariantSuiteTombstoneBudget(count: number, label: string): void {
+  if (count > MAX_INVARIANT_SUITE_FILES) {
+    throw new Error(`artifact-contract failure: invariant suite tombstones exceed their budget ${label}`);
   }
-  const tombstones = invariantSuiteTombstones.get(realpathSync(workspaceRoot)) ?? new Set<string>();
+}
+
+/**
+ * Parse a published invariant-suite manifest into its file digests and its
+ * deletion channel. `tombstones` is an additive v1 field: a manifest published
+ * before deletions were represented simply carries no deletion channel and is
+ * read as an empty set.
+ */
+function parseInvariantSuiteManifestRecord(
+  manifestBytes: Buffer,
+  manifestPath: string
+): {
+  producerNodeId: string;
+  producerAttemptId: string;
+  files: Map<string, { sha256: string; sizeBytes: number }>;
+  tombstones: Set<string>;
+} {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(manifestBytes.toString("utf8")) as unknown;
+  } catch (error) {
+    throw new Error(`artifact-contract failure: invariant suite manifest is malformed ${manifestPath}`, {
+      cause: error
+    });
+  }
+  if (
+    !isPlainRecord(parsed) ||
+    parsed.schema_version !== "ultrafuzz.invariant-suite-manifest.v1" ||
+    typeof parsed.producer_node_id !== "string" ||
+    typeof parsed.producer_attempt_id !== "string" ||
+    !Array.isArray(parsed.files)
+  ) {
+    throw new Error(`artifact-contract failure: invariant suite manifest is invalid ${manifestPath}`);
+  }
+  const files = new Map<string, { sha256: string; sizeBytes: number }>();
+  for (const file of parsed.files) {
+    if (
+      !isPlainRecord(file) ||
+      typeof file.path !== "string" ||
+      typeof file.size_bytes !== "number" ||
+      !Number.isSafeInteger(file.size_bytes) ||
+      file.size_bytes < 1 ||
+      typeof file.sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(file.sha256)
+    ) {
+      throw new Error(`artifact-contract failure: invariant suite manifest file entry is invalid ${manifestPath}`);
+    }
+    const relativePath = assertSafeInvariantSuitePath(file.path);
+    assertInvariantSuiteSourceSize(relativePath, file.size_bytes);
+    if (files.has(relativePath)) {
+      throw new Error(`artifact-contract failure: duplicate invariant suite manifest file ${relativePath}`);
+    }
+    files.set(relativePath, { sha256: file.sha256, sizeBytes: file.size_bytes });
+  }
+  const tombstones = new Set<string>();
+  if (parsed.tombstones !== undefined) {
+    if (!Array.isArray(parsed.tombstones)) {
+      throw new Error(`artifact-contract failure: invariant suite manifest tombstones are invalid ${manifestPath}`);
+    }
+    for (const entry of parsed.tombstones) {
+      if (typeof entry !== "string") {
+        throw new Error(`artifact-contract failure: invariant suite manifest tombstones are invalid ${manifestPath}`);
+      }
+      tombstones.add(assertSafeInvariantSuitePath(entry));
+    }
+    assertInvariantSuiteTombstoneBudget(tombstones.size, manifestPath);
+  }
+  return {
+    producerNodeId: parsed.producer_node_id,
+    producerAttemptId: parsed.producer_attempt_id,
+    files,
+    tombstones
+  };
+}
+
+function readInvariantSuiteManifestRecord(artifactRoot: string):
+  | {
+      producerNodeId: string;
+      producerAttemptId: string;
+      files: Map<string, { sha256: string; sizeBytes: number }>;
+      tombstones: Set<string>;
+    }
+  | undefined {
+  const manifestPath = path.join(artifactRoot, INVARIANT_SUITE_MANIFEST_FILE);
+  if (!existsSync(manifestPath)) return undefined;
+  const resolvedManifest = resolveNonEmptyRegularArtifactFile(
+    artifactRoot,
+    manifestPath,
+    `artifact-contract failure: invariant suite manifest is missing ${manifestPath}`,
+    `artifact-contract failure: invariant suite manifest is empty ${manifestPath}`
+  );
+  return parseInvariantSuiteManifestRecord(readFileSync(resolvedManifest), manifestPath);
+}
+
+/**
+ * Rebuild the deletion channel a stage inherits from its declared predecessors.
+ * `dependencyArtifactDirs` is the full transitive ancestor closure, so a source
+ * an earlier invariant stage deleted still exists in an indirect ancestor's
+ * artifact and would otherwise be re-selected and re-copied into every
+ * descendant workspace, including the campaign workspace Recon fuzzes.
+ *
+ * A predecessor that still carries the path outranks the tombstone, so a source
+ * that was deleted and later re-added stays alive.
+ */
+function inheritedInvariantSuiteTombstones(task: (typeof taskSpecs)[number]): Set<string> {
   const directDependencies = new Set(task.metadata.dependencies.attemptIds);
-  const dependencies = [...task.dependencyArtifactDirs].sort((left, right) => {
+  const tombstones = new Set<string>();
+  const present = new Set<string>();
+  for (const dependency of task.dependencyArtifactDirs) {
+    const dependencyAttemptId = path.basename(dependency);
+    if (!directDependencies.has(dependency) && !directDependencies.has(dependencyAttemptId)) continue;
+    const producer = invariantSuiteProducerTask(dependency);
+    if (producer === undefined) continue;
+    let dependencyRoot: string;
+    try {
+      dependencyRoot = realpathSync(dependency);
+    } catch {
+      continue;
+    }
+    const manifest = readInvariantSuiteManifestRecord(dependencyRoot);
+    if (
+      manifest === undefined ||
+      manifest.producerAttemptId !== dependencyAttemptId ||
+      manifest.producerNodeId !== producer.metadata.node.logicalNodeId
+    ) {
+      continue;
+    }
+    for (const relativePath of manifest.tombstones) tombstones.add(relativePath);
+    for (const relativePath of manifest.files.keys()) present.add(relativePath);
+  }
+  for (const relativePath of present) tombstones.delete(relativePath);
+  assertInvariantSuiteTombstoneBudget(tombstones.size, task.attemptId);
+  return tombstones;
+}
+
+function invariantSuiteHandoffRoot(task: (typeof taskSpecs)[number]): string {
+  return invariantSuiteAttemptStateRoot(task, INVARIANT_SUITE_HANDOFF_DIR);
+}
+
+/**
+ * Path of the durable handoff record, computed without touching the
+ * filesystem. Diagnostics must be able to name the record even when the run
+ * state directory itself is in an unexpected state, which is exactly when
+ * `invariantSuiteHandoffRoot` would throw a different, less useful error.
+ */
+function invariantSuiteHandoffRecordPath(task: (typeof taskSpecs)[number]): string {
+  return path.join(
+    path.resolve(process.cwd(), task.runRoot),
+    INVARIANT_SUITE_HANDOFF_DIR,
+    task.attemptId,
+    INVARIANT_SUITE_HANDOFF_FILE
+  );
+}
+
+/**
+ * Fingerprint every ancestor artifact this stage may select from, by the digest
+ * of its published invariant-suite manifest. The handoff record binds itself to
+ * these, so a legitimately re-executed ancestor (operator `retry-task`,
+ * `timetravel`, or a new Modal execution generation republishing the directory)
+ * is recognisable as "this record describes a superseded handoff" rather than
+ * as tampering. Without this the record could never go stale, and a `retries=0`
+ * preparation node would fail closed forever on a recovery flow.
+ */
+function invariantSuiteDependencyFingerprints(
+  task: (typeof taskSpecs)[number]
+): Array<{ attempt_id: string; manifest_sha256: string | null }> {
+  const fingerprints: Array<{ attempt_id: string; manifest_sha256: string | null }> = [];
+  for (const dependency of task.dependencyArtifactDirs) {
+    if (invariantSuiteProducerTask(dependency) === undefined) continue;
+    let digest: string | null = null;
+    try {
+      const dependencyRoot = realpathSync(dependency);
+      const manifestPath = path.join(dependencyRoot, INVARIANT_SUITE_MANIFEST_FILE);
+      if (existsSync(manifestPath)) {
+        digest = createHash("sha256")
+          .update(
+            readFileSync(
+              resolveRegularArtifactFile(
+                dependencyRoot,
+                manifestPath,
+                "artifact-contract failure: invariant suite manifest is not a regular file"
+              )
+            )
+          )
+          .digest("hex");
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("artifact-contract failure:")) throw error;
+      digest = null;
+    }
+    fingerprints.push({ attempt_id: path.basename(dependency), manifest_sha256: digest });
+  }
+  return fingerprints.sort((left, right) => left.attempt_id.localeCompare(right.attempt_id));
+}
+
+function invariantSuiteFingerprintKey(
+  fingerprints: readonly { attempt_id: string; manifest_sha256: string | null }[]
+): string {
+  return fingerprints.map((entry) => `${entry.attempt_id}:${entry.manifest_sha256 ?? "-"}`).join("\n");
+}
+
+/**
+ * Record the exact dependency handoff this attempt materialized under durable
+ * run state, so recovery never has to re-derive it from the mutable dependency
+ * artifact directories.
+ */
+function writeInvariantSuiteDependencyHandoff(
+  task: (typeof taskSpecs)[number],
+  selected: ReadonlyMap<string, { dependency: string; bytes: Buffer; direct: boolean }>,
+  tombstones: ReadonlySet<string>
+): void {
+  const dependencies = [...selected]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([relativePath, entry]) => ({
+      path: relativePath,
+      attempt_id: path.basename(entry.dependency),
+      size: entry.bytes.length,
+      sha256: createHash("sha256").update(entry.bytes).digest("hex"),
+      direct: entry.direct
+    }));
+  assertInvariantSuiteTombstoneBudget(tombstones.size, task.attemptId);
+  writeFileDurable(
+    path.join(invariantSuiteHandoffRoot(task), INVARIANT_SUITE_HANDOFF_FILE),
+    `${JSON.stringify(
+      {
+        schema_version: INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION,
+        producer_node_id: task.metadata.node.logicalNodeId,
+        producer_attempt_id: task.attemptId,
+        producers: invariantSuiteDependencyFingerprints(task),
+        dependencies,
+        tombstones: [...tombstones].sort()
+      },
+      null,
+      2
+    )}\n`
+  );
+}
+
+/**
+ * Rebuild the dependency handoff from durable run state and re-verify it
+ * against the current ancestor artifacts. Recovery must not depend on a
+ * module-level Map: after a controller restart the in-process selection is
+ * gone, and re-deriving a fresh selection would copy ancestor bytes over the
+ * harness this attempt already authored.
+ *
+ * A record whose ancestor fingerprints no longer match describes a superseded
+ * handoff: an ancestor was legitimately re-executed and republished, so the
+ * record is discarded and the caller re-derives. Only a record whose ancestors
+ * are byte-identical yet whose recorded suite bytes are not fails closed, which
+ * is the actual tampering case.
+ */
+function loadInvariantSuiteDependencyHandoff(task: (typeof taskSpecs)[number]):
+  | {
+      selected: Map<string, { dependency: string; bytes: Buffer; direct: boolean }>;
+      tombstones: Set<string>;
+    }
+  | undefined {
+  const handoffRoot = invariantSuiteHandoffRoot(task);
+  const handoffPath = path.join(handoffRoot, INVARIANT_SUITE_HANDOFF_FILE);
+  if (!existsSync(handoffPath)) return undefined;
+  const resolvedHandoff = resolveNonEmptyRegularArtifactFile(
+    handoffRoot,
+    handoffPath,
+    `artifact-contract failure: invariant suite handoff record is missing ${handoffPath}`,
+    `artifact-contract failure: invariant suite handoff record is empty ${handoffPath}`
+  );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(resolvedHandoff, "utf8")) as unknown;
+  } catch (error) {
+    throw new Error(`artifact-contract failure: invariant suite handoff record is malformed ${handoffPath}`, {
+      cause: error
+    });
+  }
+  if (
+    !isPlainRecord(parsed) ||
+    parsed.schema_version !== INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION ||
+    parsed.producer_node_id !== task.metadata.node.logicalNodeId ||
+    parsed.producer_attempt_id !== task.attemptId ||
+    !Array.isArray(parsed.dependencies) ||
+    !Array.isArray(parsed.tombstones)
+  ) {
+    throw new Error(`artifact-contract failure: invariant suite handoff record is invalid ${handoffPath}`);
+  }
+  // A record that predates the ancestor fingerprint, or whose ancestors have
+  // since republished, describes a handoff that no longer exists. Discard it
+  // and let the caller re-derive rather than failing a retries=0 node closed on
+  // a legitimate recovery flow.
+  const recordedProducers: Array<{ attempt_id: string; manifest_sha256: string | null }> = [];
+  if (!Array.isArray(parsed.producers)) return undefined;
+  for (const entry of parsed.producers) {
+    if (
+      !isPlainRecord(entry) ||
+      typeof entry.attempt_id !== "string" ||
+      (entry.manifest_sha256 !== null &&
+        (typeof entry.manifest_sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(entry.manifest_sha256)))
+    ) {
+      throw new Error(`artifact-contract failure: invariant suite handoff producer entry is invalid ${handoffPath}`);
+    }
+    recordedProducers.push({ attempt_id: entry.attempt_id, manifest_sha256: entry.manifest_sha256 });
+  }
+  if (
+    invariantSuiteFingerprintKey(recordedProducers) !==
+    invariantSuiteFingerprintKey(invariantSuiteDependencyFingerprints(task))
+  ) {
+    return undefined;
+  }
+  const dependencyRoots = new Map<string, string>(
+    [...task.dependencyArtifactDirs].map((dependency) => [path.basename(dependency), dependency])
+  );
+  const selected = new Map<string, { dependency: string; bytes: Buffer; direct: boolean }>();
+  let selectedBytes = 0;
+  for (const entry of parsed.dependencies) {
+    if (
+      !isPlainRecord(entry) ||
+      typeof entry.path !== "string" ||
+      typeof entry.attempt_id !== "string" ||
+      typeof entry.size !== "number" ||
+      !Number.isSafeInteger(entry.size) ||
+      entry.size < 1 ||
+      typeof entry.sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(entry.sha256) ||
+      typeof entry.direct !== "boolean"
+    ) {
+      throw new Error(`artifact-contract failure: invariant suite handoff entry is invalid ${handoffPath}`);
+    }
+    const relativePath = assertSafeInvariantSuitePath(entry.path);
+    assertInvariantSuiteSourceSize(relativePath, entry.size);
+    if (selected.has(relativePath)) {
+      throw new Error(`artifact-contract failure: duplicate invariant suite handoff path ${relativePath}`);
+    }
+    const dependency = dependencyRoots.get(entry.attempt_id);
+    if (dependency === undefined) {
+      throw new Error(`artifact-contract failure: invariant suite handoff producer is unavailable ${entry.attempt_id}`);
+    }
+    const bytes = readInvariantSuiteSourceBytes(
+      path.join(realpathSync(dependency), "invariant-suite"),
+      relativePath,
+      "artifact handoff invariant suite"
+    );
+    if (bytes.length !== entry.size || createHash("sha256").update(bytes).digest("hex") !== entry.sha256) {
+      throw new Error(`artifact-contract failure: invariant suite dependency changed ${relativePath}`);
+    }
+    selectedBytes += bytes.length;
+    selected.set(relativePath, { dependency, bytes, direct: entry.direct });
+    assertInvariantSuiteSourceBudget(selected.size, selectedBytes);
+  }
+  const tombstones = new Set<string>();
+  for (const entry of parsed.tombstones) {
+    if (typeof entry !== "string") {
+      throw new Error(`artifact-contract failure: invariant suite handoff record is invalid ${handoffPath}`);
+    }
+    tombstones.add(assertSafeInvariantSuitePath(entry));
+  }
+  assertInvariantSuiteTombstoneBudget(tombstones.size, handoffPath);
+  invariantSuiteDependencySnapshots.set(task.attemptId, selected);
+  return { selected, tombstones };
+}
+
+/**
+ * Resolve the dependency handoff this attempt is publishing against, preferring
+ * in-process state and falling back to the durable record. An empty selection
+ * is a legitimate outcome (the first invariant stage has no suite ancestor), so
+ * only a genuinely absent record is an error, and it names the missing file.
+ */
+function resolveInvariantSuiteDependencySnapshot(
+  task: (typeof taskSpecs)[number]
+): Map<string, { dependency: string; bytes: Buffer; direct: boolean }> {
+  const selected =
+    invariantSuiteDependencySnapshots.get(task.attemptId) ?? loadInvariantSuiteDependencyHandoff(task)?.selected;
+  if (selected === undefined) {
+    throw new Error(
+      `artifact-contract failure: invariant suite dependency handoff record is unavailable ${invariantSuiteHandoffRecordPath(
+        task
+      )}`
+    );
+  }
+  return selected;
+}
+
+/**
+ * Resolve the deletion channel this stage inherits, preferring the durable
+ * handoff record. The record is the statement of what was actually suppressed
+ * when the handoff was materialized; recomputing from the ancestor manifests is
+ * the fallback for an absent or superseded record, where re-derivation is the
+ * correct answer anyway.
+ */
+function resolveInheritedInvariantSuiteTombstones(task: (typeof taskSpecs)[number]): Set<string> {
+  return loadInvariantSuiteDependencyHandoff(task)?.tombstones ?? inheritedInvariantSuiteTombstones(task);
+}
+
+/**
+ * Order the ancestor closure so indirect ancestors are visited before declared
+ * dependencies. A declared dependency therefore always wins a byte conflict.
+ */
+function orderedInvariantSuiteDependencies(task: (typeof taskSpecs)[number]): string[] {
+  const directDependencies = new Set(task.metadata.dependencies.attemptIds);
+  return [...task.dependencyArtifactDirs].sort((left, right) => {
     const leftDirect = directDependencies.has(left) || directDependencies.has(path.basename(left));
     const rightDirect = directDependencies.has(right) || directDependencies.has(path.basename(right));
     if (leftDirect !== rightDirect) return leftDirect ? 1 : -1;
     return left.localeCompare(right);
   });
-  const selectedSources = new Map<string, { dependency: string; bytes: Buffer; direct: boolean }>();
-  let selectedBytes = 0;
+}
+
+/**
+ * List the published suite sources of every dependency whose invariant-suite
+ * manifest validates against its producer. A dependency with no manifest, or
+ * one that does not identify its own producer, contributes nothing.
+ */
+function invariantSuiteDependencySuitePaths(dependencies: readonly string[]): Map<string, string[]> {
   const suitePathsByDependency = new Map<string, string[]>();
   for (const dependency of dependencies) {
     const producer = invariantSuiteProducerTask(dependency);
     if (producer === undefined) continue;
     const dependencyAttemptId = path.basename(dependency);
-    const isDirect = directDependencies.has(dependency) || directDependencies.has(path.basename(dependency));
     const dependencyRoot = realpathSync(dependency);
     const suiteRoot = path.join(dependencyRoot, "invariant-suite");
     if (!existsSync(suiteRoot)) continue;
@@ -2868,35 +3288,26 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
       typeof manifest.producer_node_id !== "string" ||
       !invariantSuiteNodeIds.has(manifest.producer_node_id) ||
       manifest.producer_attempt_id !== dependencyAttemptId ||
-      (producer !== undefined && manifest.producer_node_id !== producer.metadata.node.logicalNodeId)
+      manifest.producer_node_id !== producer.metadata.node.logicalNodeId
     ) {
       continue;
     }
-    const suitePaths = listInvariantSuiteSources(suiteRoot);
-    suitePathsByDependency.set(dependency, suitePaths);
-    for (const relativePath of suitePaths) {
-      const bytes = readInvariantSuiteSourceBytes(suiteRoot, relativePath, "artifact handoff invariant suite");
-      const previous = selectedSources.get(relativePath);
-      if (previous !== undefined && !previous.bytes.equals(bytes)) {
-        if (previous.direct === isDirect || (!previous.direct && !isDirect)) {
-          throw new Error(
-            `artifact handoff ancestor invariant suite sources conflict for ${relativePath}: ${previous.dependency} vs ${dependency}`
-          );
-        }
-        if (!isDirect) continue;
-      }
-      const prior = selectedSources.get(relativePath);
-      if (prior === undefined) selectedBytes += bytes.length;
-      else selectedBytes += bytes.length - prior.bytes.length;
-      selectedSources.set(relativePath, { dependency, bytes, direct: isDirect });
-      assertInvariantSuiteSourceBudget(selectedSources.size, selectedBytes);
-    }
+    suitePathsByDependency.set(dependency, listInvariantSuiteSources(suiteRoot));
   }
-  assertInvariantSuiteSourceBudget(
-    selectedSources.size,
-    [...selectedSources.values()].reduce((total, entry) => total + entry.bytes.length, 0)
-  );
-  invariantSuiteDependencySnapshots.set(task.attemptId, selectedSources);
+  return suitePathsByDependency;
+}
+
+/**
+ * Fail closed when an ancestor claims a property is implemented by a suite
+ * source it did not publish. This runs on the recovered path too: a durable
+ * handoff record binds the suite bytes, not the ancestors' implemented-property
+ * ledgers, so the expectation still has to be re-checked on every preparation.
+ */
+function assertInvariantSuiteDependencyExpectations(
+  task: (typeof taskSpecs)[number],
+  dependencies: readonly string[],
+  suitePathsByDependency: ReadonlyMap<string, string[]>
+): void {
   for (const dependency of dependencies) {
     const dependencyRoot = realpathSync(dependency);
     const implementationCandidate = path.join(dependencyRoot, "implemented-properties.json");
@@ -2943,6 +3354,116 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
       }
     }
   }
+}
+
+/**
+ * Repopulate a worktree that lost its inherited suite before the durable
+ * workspace snapshot existed, which is the only window in which no other
+ * durable record can restore it. Gated on the absence of that snapshot and on
+ * the absence of each individual path, so the post-agent pass never overwrites
+ * a source this attempt authored and never resurrects one it deleted.
+ */
+function reconcileInvariantSuiteWorkspace(
+  task: (typeof taskSpecs)[number],
+  workspaceRoot: string,
+  selected: ReadonlyMap<string, { dependency: string; bytes: Buffer; direct: boolean }>,
+  tombstones: ReadonlySet<string>
+): void {
+  if ((invariantSuiteWorkspaceSnapshots.get(task.attemptId) ?? loadInvariantSuiteWorkspaceSnapshot(task)) !== undefined)
+    return;
+  for (const [relativePath, entry] of selected) {
+    if (tombstones.has(relativePath)) continue;
+    const destination = path.resolve(workspaceRoot, relativePath);
+    if (!isStrictlyInsideDirectory(workspaceRoot, destination)) {
+      throw new Error(`artifact-contract failure: unsafe invariant suite workspace path ${relativePath}`);
+    }
+    try {
+      lstatSync(destination);
+      continue;
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+    }
+    copyInvariantSuiteIntoWorkspace(
+      workspaceRoot,
+      path.join(realpathSync(entry.dependency), "invariant-suite"),
+      relativePath
+    );
+  }
+}
+
+function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
+  if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) return;
+  const dependencies = orderedInvariantSuiteDependencies(task);
+  const previousSnapshot = invariantSuiteDependencySnapshots.get(task.attemptId);
+  if (previousSnapshot !== undefined) {
+    for (const [relativePath, entry] of previousSnapshot) {
+      const sourceRoot = path.join(realpathSync(entry.dependency), "invariant-suite");
+      const current = readInvariantSuiteSourceBytes(sourceRoot, relativePath, "artifact handoff invariant suite");
+      if (!current.equals(entry.bytes)) {
+        throw new Error(`artifact-contract failure: invariant suite dependency changed ${relativePath}`);
+      }
+    }
+    reconcileInvariantSuiteWorkspace(task, workspaceRoot, previousSnapshot, new Set());
+    return;
+  }
+  // A durable record means an earlier pass of this same attempt already
+  // materialized the handoff. loadInvariantSuiteDependencyHandoff re-verifies
+  // every recorded byte, so the attempt keeps the exact handoff it used before
+  // the restart instead of reverting sources it has since authored. It returns
+  // nothing when an ancestor has since republished, and materialization then
+  // re-derives against the new ancestor bytes rather than failing closed.
+  const recorded = loadInvariantSuiteDependencyHandoff(task);
+  if (recorded !== undefined) {
+    for (const relativePath of recorded.tombstones) {
+      if (recorded.selected.has(relativePath)) {
+        throw new Error(`artifact-contract failure: invariant suite handoff record is inconsistent ${relativePath}`);
+      }
+    }
+    assertInvariantSuiteDependencyExpectations(task, dependencies, invariantSuiteDependencySuitePaths(dependencies));
+    reconcileInvariantSuiteWorkspace(task, workspaceRoot, recorded.selected, recorded.tombstones);
+    return;
+  }
+  const tombstones = new Set([
+    ...(invariantSuiteTombstones.get(realpathSync(workspaceRoot)) ?? []),
+    ...inheritedInvariantSuiteTombstones(task)
+  ]);
+  const directDependencies = new Set(task.metadata.dependencies.attemptIds);
+  const selectedSources = new Map<string, { dependency: string; bytes: Buffer; direct: boolean }>();
+  let selectedBytes = 0;
+  const suitePathsByDependency = invariantSuiteDependencySuitePaths(dependencies);
+  for (const dependency of dependencies) {
+    const suitePaths = suitePathsByDependency.get(dependency);
+    if (suitePaths === undefined) continue;
+    const isDirect = directDependencies.has(dependency) || directDependencies.has(path.basename(dependency));
+    const suiteRoot = path.join(realpathSync(dependency), "invariant-suite");
+    for (const relativePath of suitePaths) {
+      // A deleted source must never re-enter the selection, otherwise it is
+      // republished to this stage's own artifact and copied into every
+      // descendant workspace.
+      if (tombstones.has(relativePath)) continue;
+      const bytes = readInvariantSuiteSourceBytes(suiteRoot, relativePath, "artifact handoff invariant suite");
+      const previous = selectedSources.get(relativePath);
+      if (previous !== undefined && !previous.bytes.equals(bytes)) {
+        if (previous.direct === isDirect || (!previous.direct && !isDirect)) {
+          throw new Error(
+            `artifact handoff ancestor invariant suite sources conflict for ${relativePath}: ${previous.dependency} vs ${dependency}`
+          );
+        }
+        if (!isDirect) continue;
+      }
+      const prior = selectedSources.get(relativePath);
+      if (prior === undefined) selectedBytes += bytes.length;
+      else selectedBytes += bytes.length - prior.bytes.length;
+      selectedSources.set(relativePath, { dependency, bytes, direct: isDirect });
+      assertInvariantSuiteSourceBudget(selectedSources.size, selectedBytes);
+    }
+  }
+  assertInvariantSuiteSourceBudget(
+    selectedSources.size,
+    [...selectedSources.values()].reduce((total, entry) => total + entry.bytes.length, 0)
+  );
+  invariantSuiteDependencySnapshots.set(task.attemptId, selectedSources);
+  assertInvariantSuiteDependencyExpectations(task, dependencies, suitePathsByDependency);
   for (const [relativePath, entry] of selectedSources) {
     if (tombstones.has(relativePath)) continue;
     copyInvariantSuiteIntoWorkspace(
@@ -2951,6 +3472,7 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
       relativePath
     );
   }
+  writeInvariantSuiteDependencyHandoff(task, selectedSources, tombstones);
 }
 
 const MAX_INVARIANT_SUITE_PATH_LENGTH = 4_096;
@@ -2962,6 +3484,9 @@ const INVARIANT_SUITE_BASELINE_FILE = "invariant-suite-baseline.json";
 const WORKSPACE_PATCH_BASELINE_FILE = "workspace-patch-baseline.json";
 const WORKSPACE_PATCH_PREPARATION_FILE = "workspace-patch-preparation.json";
 const INVARIANT_SUITE_MANIFEST_FILE = "invariant-suite-manifest.json";
+const INVARIANT_SUITE_HANDOFF_DIR = "invariant-suite-handoffs";
+const INVARIANT_SUITE_HANDOFF_FILE = "handoff.json";
+const INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION = "ultrafuzz.invariant-suite-handoff.v1";
 const INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR = "invariant-suite-workspace-snapshots";
 const INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE = "snapshot.json";
 const INVARIANT_SUITE_WORKSPACE_FILES_DIR = "files";
@@ -2969,6 +3494,96 @@ const MAX_INVARIANT_SUITE_WORKSPACE_FILES = 4_096;
 const MAX_INVARIANT_SUITE_WORKSPACE_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_INVARIANT_SUITE_WORKSPACE_TOTAL_BYTES = 128 * 1024 * 1024;
 const INVARIANT_TEST_ROOT_NAMES = ["test", "tests"] as const;
+
+/**
+ * The single conventional test root this repository uses.
+ *
+ * Targets are not consistent: some use singular `test/`, others plural `tests/`
+ * (the Aave v4 target at 6959e321 has no `test/` at all). Compiled task specs can
+ * only name one of them, because they are built before the worktree exists, so the
+ * choice has to be made here, against the materialized workspace.
+ *
+ * Exactly one name is returned, never both. Anchoring output under every root that
+ * happens to exist would recreate the defect this exists to fix: a repository that
+ * has grown a `test/` tree alongside its real `tests/` one would get an empty
+ * `test/recon`, `test/chimera` and `test/invariants` set created next to the real
+ * output, and `setup.md` tells the model to read the existing layout as the
+ * repository's convention.
+ *
+ * `INVARIANT_TEST_ROOT_NAMES` order is the preference order, so a repository that
+ * has `test/` keeps behaving exactly as it did before this function existed; only a
+ * repository without `test/` is redirected. Falls back to the first name when
+ * neither root exists, so a fresh repository still gets one conventional root.
+ */
+function invariantTestRootName(workspaceRoot: string): string {
+  for (const root of INVARIANT_TEST_ROOT_NAMES) {
+    const candidate = path.resolve(workspaceRoot, root);
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+      stat = lstatSync(candidate);
+    } catch (error) {
+      // Only a genuinely absent path means "this repository does not use this
+      // root". Swallowing EACCES or ELOOP here would silently fall back to the
+      // singular default and reintroduce the bug against a root that does exist.
+      if (isMissingPathError(error) || isNotADirectoryError(error)) continue;
+      throw error;
+    }
+    if (stat.isDirectory() && !stat.isSymbolicLink() && realpathSync(candidate) === candidate) return root;
+  }
+  return INVARIANT_TEST_ROOT_NAMES[0];
+}
+
+function isNotADirectoryError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOTDIR";
+}
+
+/**
+ * Re-anchor the compiled workspace output roots onto the test root this repository
+ * really uses.
+ *
+ * Without this, a `tests/`-only target gets an empty singular `test/recon`,
+ * `test/chimera` and `test/invariants` tree created underneath it, which misleads the
+ * model about the repository's convention, and retry cleanup then scrubs the invented
+ * `test/` tree while leaving the real `tests/` output behind.
+ */
+function repositoryAwareWorkspaceOutputRoots(task: (typeof taskSpecs)[number], workspaceRoot: string): string[] {
+  const testRootName = invariantTestRootName(workspaceRoot);
+  return [
+    ...new Set(
+      task.workspaceOutputRoots.map((relativeRoot) => {
+        const segments = relativeRoot.split("/");
+        if (segments[0] !== "test") return relativeRoot;
+        return [testRootName, ...segments.slice(1)].join("/");
+      })
+    )
+  ];
+}
+
+/**
+ * The output roots an attempt actually prepared, pinned so that every later consumer
+ * in the same attempt agrees with what was created.
+ *
+ * Rediscovering per call is not safe: `prepareTaskWorkspaceOutputRoots` finishes by
+ * replaying ancestor workspace patches, and an ancestor stage (for example
+ * `base-test-setup`, whose prompt writes under `test/foundry/`) can introduce the
+ * other test root as a side effect. A second, independent discovery would then select
+ * a root whose subdirectories were never created, and `taskWorkspaceOutputRoots`
+ * would `lstat` a missing path and throw a bare ENOENT instead of the typed
+ * artifact-contract failure — killing a `retries: 0` node on exactly the restart and
+ * resume paths this machinery exists to survive.
+ */
+const preparedWorkspaceOutputRoots = new Map<string, readonly string[]>();
+
+function preparedWorkspaceOutputRootsKey(task: (typeof taskSpecs)[number], workspaceRoot: string): string {
+  return `${workspaceRoot} ${task.attemptId}`;
+}
+
+function resolvedWorkspaceOutputRoots(task: (typeof taskSpecs)[number], workspaceRoot: string): string[] {
+  const remembered = preparedWorkspaceOutputRoots.get(preparedWorkspaceOutputRootsKey(task, workspaceRoot));
+  if (remembered !== undefined) return [...remembered];
+  return repositoryAwareWorkspaceOutputRoots(task, workspaceRoot);
+}
+
 const invariantSuiteNodeIds = new Set([
   "stateful-invariant-setup",
   "stateful-invariant-handlers",
@@ -3159,7 +3774,11 @@ function changedTestTreePaths(workspaceRoot: string, baselinePath?: string, prot
             candidate,
             `artifact-contract failure: invariant suite source is not regular ${value}`
           );
+          // An emptied source is a deletion the agent expressed by truncation.
+          // Without a tombstone it is merely skipped, and the ancestor copy is
+          // silently republished in its place.
           if (statSync(source).size > 0) changed.add(assertSafeInvariantSuiteTestPath(value));
+          else recordInvariantSuiteTombstone(workspaceRoot, assertSafeInvariantSuiteTestPath(value));
         }
       }
     }
@@ -3289,10 +3908,7 @@ function copyInvariantSuiteSource(
 
 function copyDependencyInvariantSuiteToArtifact(task: (typeof taskSpecs)[number], artifactRoot: string): void {
   const tombstones = invariantSuiteTombstones.get(realpathSync(task.workspacePath)) ?? new Set<string>();
-  const selected = invariantSuiteDependencySnapshots.get(task.attemptId);
-  if (selected === undefined) {
-    throw new Error(`artifact-contract failure: invariant suite dependency snapshot is unavailable ${task.attemptId}`);
-  }
+  const selected = resolveInvariantSuiteDependencySnapshot(task);
   for (const [relativePath, entry] of selected) {
     if (tombstones.has(relativePath)) continue;
     const destination = path.resolve(artifactRoot, "invariant-suite", relativePath);
@@ -3446,15 +4062,60 @@ function safeInvariantSuiteDirectory(root: string, candidate: string): string {
   return resolved;
 }
 
+/**
+ * Rebuild the publication expectation from the durable manifest this attempt
+ * already published. verifyArtifacts is its own retries:0 node, so a restart
+ * between an invariant agent task finishing and its verifier running left the
+ * in-process snapshot empty and killed the run at a stateful-invariant stage.
+ * The manifest is the durable record of the same publication, so recovery reads
+ * it and reports a typed artifact failure naming the file only when the
+ * manifest itself is unavailable.
+ */
+function recoverInvariantSuitePublicationSnapshot(
+  task: (typeof taskSpecs)[number],
+  artifactRoots: readonly string[]
+): Map<string, Buffer> {
+  for (const artifactRoot of artifactRoots) {
+    const manifest = readInvariantSuiteManifestRecord(artifactRoot);
+    if (
+      manifest === undefined ||
+      manifest.producerNodeId !== task.metadata.node.logicalNodeId ||
+      manifest.producerAttemptId !== task.attemptId
+    ) {
+      continue;
+    }
+    const suiteRoot = path.join(artifactRoot, "invariant-suite");
+    const recovered = new Map<string, Buffer>();
+    for (const [relativePath, entry] of manifest.files) {
+      const bytes = readInvariantSuiteSourceBytes(
+        suiteRoot,
+        relativePath,
+        "artifact-contract failure: invariant suite artifact"
+      );
+      if (bytes.length !== entry.sizeBytes || createHash("sha256").update(bytes).digest("hex") !== entry.sha256) {
+        throw new Error(`artifact-contract failure: invariant suite artifact changed ${relativePath}`);
+      }
+      recovered.set(relativePath, bytes);
+    }
+    invariantSuitePublicationSnapshots.set(task.attemptId, recovered);
+    return recovered;
+  }
+  throw new Error(
+    `artifact-contract failure: invariant suite manifest is unavailable for ${task.attemptId} ${path.join(
+      artifactRoots[0] ?? "",
+      INVARIANT_SUITE_MANIFEST_FILE
+    )}`
+  );
+}
+
 function rememberInvariantSuitePublications(
   task: (typeof taskSpecs)[number],
   publications: Map<string, Buffer>,
   artifactRoots: readonly string[]
 ): void {
-  const expected = invariantSuitePublicationSnapshots.get(task.attemptId);
-  if (expected === undefined) {
-    throw new Error(`artifact-contract failure: invariant suite publication snapshot is unavailable ${task.attemptId}`);
-  }
+  const expected =
+    invariantSuitePublicationSnapshots.get(task.attemptId) ??
+    recoverInvariantSuitePublicationSnapshot(task, artifactRoots);
   const expectedPaths = new Set(expected.keys());
   let observedRoot = false;
   for (const artifactRoot of artifactRoots) {
@@ -3869,11 +4530,17 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
     }
     // Scan probes may intentionally target optional files. When a probe path
     // is absent, its result text is the durable evidence of that absence.
+    let probeStat: ReturnType<typeof lstatSync>;
     try {
-      lstatSync(probeCandidate);
+      probeStat = lstatSync(probeCandidate);
     } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
       throw error;
+    }
+    // A directory probe names where the agent searched, exactly like the repository-root probe
+    // above. It is valid evidence but cannot be snapshotted as a regular UTF-8 file (issue #289).
+    if (probeStat.isDirectory() && !probeStat.isSymbolicLink()) {
+      continue;
     }
     const snapshot = readInvariantSourceSnapshot(workspaceRoot, probe.source_path, "scan probe");
     sourceSnapshots.set(probe.source_path, snapshot);

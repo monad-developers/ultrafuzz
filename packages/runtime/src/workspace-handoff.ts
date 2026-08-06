@@ -20,6 +20,63 @@ const SENSITIVE_SEGMENTS = new Set([
 ]);
 const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "artifacts"] as const;
 
+/**
+ * Harness-generated fuzzing output, which must never be staged into a workspace patch.
+ *
+ * The names come from the commands the invariant prompts actually run, not from guesses about what a
+ * fuzzer might emit. Every invariant stage issues
+ * `recon fuzz . --corpus-dir echidna --recon-corpus-dir recon-corpus`, and `coverage.md` additionally
+ * writes `recon-coverage.json` into `magic/` and runs `covg-eval magic/ echidna/`. An earlier draft of
+ * this list said `corpus` and `coverage`, which this pipeline never produces, while omitting `echidna/`,
+ * which it produces on every single invariant node.
+ *
+ * Measured on Aave v4 run R46 while `stateful-invariant-setup` was running: a 575 MB workspace whose
+ * largest entries were `recon-corpus/build-snapshot/<hash>.json` at 155 MB and 33 MB — byte-for-byte
+ * duplicates of Foundry's `out/build-info/` — plus several 5 MB coverage HTML files. Foundry's copies are
+ * safe because targets gitignore `out/`; `recon-corpus/` is not gitignored by this target, so
+ * `--exclude-standard` kept it and staging enumerated all of it (issue #304).
+ *
+ * This exclusion is NOT hygiene. It is the fix for the six sandboxes that died at this node across three
+ * Aave v4 runs with an empty `last_error`. From R47's workflow log:
+ *
+ *   SystemError: spawnSync git ENOBUFS (stdout or stderr buffer reached maxBuffer size limit)
+ *       at runGit → withTemporaryIndex → captureWorkspacePatch
+ *   output[3]: "diff --git a/echidna/coverage/4247432111492442234.txt ..."
+ *
+ * `captureWorkspacePatch` runs `git diff --cached --binary` over the staged tree, and with corpus
+ * enumerated that diff exceeded `runGit`'s `maxBuffer` of `MAX_PATCH_BYTES * 2`. Note the ordering: above
+ * 32 MB the ENOBUFS fires inside `runGit` BEFORE the `MAX_PATCH_BYTES` check below can produce a clean
+ * error, so the clean-error window is only 16-32 MB. Excluding these roots keeps the diff under it.
+ *
+ * Do not relax this list on tidiness grounds; it is load-bearing.
+ *
+ * The ENOBUFS was thrown but was not heard: nothing caught it (now #310), and the worker's top-level
+ * handler discarded the reason (#307), so the durable record showed only `exit_category: sandbox-exited`.
+ * Being throw-able is not the same as being visible, and assuming otherwise is what made this expensive —
+ * ENOBUFS was actively ruled OUT during the investigation on the grounds that it would have been loud.
+ *
+ * It was NOT a `git add` OOM, which an earlier version of this comment claimed. Measured:
+ *
+ *   $ for i in 1 2 3 4; do head -c 155000000 /dev/zero > "big$i.bin"; done   # 620 MB across four blobs
+ *   $ /usr/bin/time -v git add -A   →   Maximum resident set size: 155788 kbytes
+ *
+ * `git add` peak RSS is per-file, not cumulative, and a blob above `core.bigFileThreshold` streams at a
+ * few megabytes. Against `memoryMiB: 32_768` / `memoryLimitMiB: 65_536` in `packages/modal/src/defaults.ts`
+ * that is well under one percent of the memory request.
+ *
+ * Exclusions are applied to the UNTRACKED listing only. Generated corpus is untracked by definition, and
+ * excluding a tracked path would be silent data loss: staging runs after `read-tree <baseline>`, so the
+ * index would simply keep the baseline blob and an authored edit would vanish from the patch with no
+ * error and a manifest that still validates.
+ *
+ * The pathspecs are root-anchored, matching where `recon fuzz .` writes. A nested `test/recon-corpus/`
+ * is not excluded; the prompts do invite adapting corpus directories to local conventions, so that
+ * remains a gap a size ceiling would close and a name list cannot.
+ */
+const WORKSPACE_GENERATED_ROOTS = ["recon-corpus", "echidna", "magic"] as const;
+
+const WORKSPACE_EXCLUDED_ROOTS = [...WORKSPACE_RUNTIME_ROOTS, ...WORKSPACE_GENERATED_ROOTS] as const;
+
 export interface WorkspacePatchFile {
   path: string;
 }
@@ -130,12 +187,131 @@ function parseChangedPaths(raw: string): WorkspacePatchFile[] {
   return [...unique.values()].sort((left, right) => left.path.localeCompare(right.path));
 }
 
+/**
+ * Stage every worktree change except the runtime roots.
+ *
+ * Three earlier shapes were all wrong, each established by measurement rather than argument:
+ *
+ * - `git add -A -- . :(exclude)<root>/**` — a negative pathspec makes `git add` report an ignored
+ *   path as an error, so an ignored `node_modules` aborted capture (issue #281, killed a live run).
+ * - bare `git add -A -- .` — avoids that error but descends into the roots, hashing them into
+ *   unreachable objects and aborting on any unreadable file under `artifacts/`. `core.excludesFile`
+ *   does not prevent the descent either: it is the lowest-precedence ignore source, so a repository
+ *   `.gitignore` negation re-admits the path.
+ * - naming top-level entry names as positive pathspecs — aborts on ANY ignored top-level entry, not
+ *   just a runtime root. Foundry ignores `cache/` and `out/`, which `forge build` creates, so that
+ *   was a wider regression than the bug it fixed.
+ *
+ * Naming the exact paths git reports avoids all three. `--exclude-standard` drops ignored untracked
+ * paths so none is ever named, and `--cached` keeps tracked paths, including ones deleted from the
+ * worktree, so deletions are still captured. The roots are excluded in `ls-files` itself rather than
+ * filtered afterwards: unlike `git add`, `ls-files` tolerates negative pathspecs and prunes the
+ * traversal, which keeps a large `artifacts/` or `.smithers/` from producing path text that would
+ * overflow the output buffer.
+ *
+ * `--force` is required, and is safe because of `--exclude-standard`: the enumerated set is exactly
+ * `tracked-in-index` plus `non-ignored-untracked`, which is what a plain `git add -A -- .` would
+ * stage, so suppressing the ignored-path check cannot admit anything new. Without it, naming a
+ * tracked file whose parent directory is ignored still trips the ignored-path error.
+ *
+ * Paths stay as bytes: a non-UTF-8 filename decoded through a string returns replacement characters
+ * and matches nothing. They are fed over stdin so a wide repository cannot hit `E2BIG`, and
+ * `--literal-pathspecs` on the `add` stops a name containing glob or `:` magic being reinterpreted.
+ *
+ * No `reset` of the roots is needed afterwards. `read-tree <treeish>` already put exactly `treeish`
+ * in the index and nothing here ever names a root path, so their entries are `treeish` by
+ * construction.
+ */
 function stageWorkspaceTree(workspaceRoot: string, index: string): void {
-  runGit(
+  // A listed path can vanish before it is staged — agent subprocesses are still running during
+  // capture — and `git add --pathspec-from-file` fails the whole invocation when a name matches
+  // nothing (`--ignore-errors` does not suppress it). Re-list and retry rather than aborting the
+  // run, which is the failure this whole function exists to avoid.
+  for (let attempt = 0; ; attempt += 1) {
+    const pathspecs = stageableWorkspacePaths(workspaceRoot, index);
+    if (pathspecs.length === 0) return;
+    try {
+      runGit(
+        workspaceRoot,
+        ["--literal-pathspecs", "add", "-A", "--force", "--pathspec-from-file=-", "--pathspec-file-nul"],
+        index,
+        Buffer.concat(pathspecs.flatMap((entry) => [entry, NUL]))
+      );
+      return;
+    } catch (error) {
+      const vanished = /did not match any files/u.test(error instanceof Error ? error.message : String(error));
+      if (!vanished || attempt >= WORKSPACE_STAGE_ATTEMPTS - 1) throw error;
+    }
+  }
+}
+
+const WORKSPACE_STAGE_ATTEMPTS = 3;
+
+/** Every path git would stage, minus the runtime roots and any directory entry. */
+function stageableWorkspacePaths(workspaceRoot: string, index: string): Buffer[] {
+  // Two listings rather than one, so the generated-root exclusions apply to UNTRACKED paths only.
+  // Excluding a tracked path here would be silent data loss: staging runs after `read-tree <baseline>`,
+  // so the index keeps the baseline blob, the agent's edit never reaches the patch, and
+  // `applyWorkspacePatch` verifies both trees under the same exclusions — so every check still passes and
+  // the downstream node simply sees stale content. Generated corpus is untracked by definition, so
+  // narrowing the exclusion costs nothing it was meant to catch.
+  const tracked = runGitBuffer(
     workspaceRoot,
-    ["add", "-A", "--", ".", ...WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}/**`)],
+    ["ls-files", "-z", "--cached", "--", ".", ...WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}/**`)],
     index
   );
+  const untracked = runGitBuffer(
+    workspaceRoot,
+    [
+      "ls-files",
+      "-z",
+      "--others",
+      "--exclude-standard",
+      "--",
+      ".",
+      ...WORKSPACE_EXCLUDED_ROOTS.map((root) => `:(exclude)${root}/**`)
+    ],
+    index
+  );
+  const listed = Buffer.concat([tracked, untracked]);
+  // Deliberately the RUNTIME roots only. The name check below exists to catch a top-level *file* named
+  // like a root, which the `/**` pathspecs cannot match. That is right for runtime roots, which are never
+  // authored content, but a file named like a fuzzer output directory plausibly is authored, and the
+  // generated roots are directories in every layout this harness produces. A top-level SYMLINK named like
+  // one is the exception: it is neither matched by `/**` nor skipped here, so it reaches
+  // `assertWorkspacePatchPath` and fails closed there as a symlink, which is pre-existing behaviour for
+  // any symlink rather than something these exclusions introduce.
+  const runtimeRoots = new Set<string>(WORKSPACE_RUNTIME_ROOTS);
+  const pathspecs: Buffer[] = [];
+  for (const entry of splitNulBuffer(listed)) {
+    // `ls-files --others` reports an untracked nested repository as a directory. Naming it aborts
+    // `git add` when it has no commit checked out — an interrupted `forge install` or clone produces
+    // exactly that — and when it does have one, git records a gitlink pointing at an object that
+    // lives only in the nested repository, which `assertPatchPathsMatchManifest` later refuses. So a
+    // captured baseline containing one could never yield an applicable patch.
+    if (entry[entry.length - 1] === 0x2f) continue;
+    const separator = entry.indexOf(0x2f);
+    // Runtime-root names are ASCII and Node rejects overlong encodings, so no non-UTF-8 sequence can
+    // decode into one. Covers a top-level *file* named like a root, which the pathspecs above do not.
+    const top = (separator < 0 ? entry : entry.subarray(0, separator)).toString("utf8");
+    if (top === ".git" || runtimeRoots.has(top)) continue;
+    pathspecs.push(entry);
+  }
+  return pathspecs;
+}
+
+const NUL = Buffer.from([0]);
+
+function splitNulBuffer(raw: Buffer): Buffer[] {
+  const entries: Buffer[] = [];
+  let start = 0;
+  for (let index = 0; index < raw.length; index += 1) {
+    if (raw[index] !== 0) continue;
+    if (index > start) entries.push(raw.subarray(start, index));
+    start = index + 1;
+  }
+  if (raw.length > start) entries.push(raw.subarray(start));
+  return entries;
 }
 
 function assertPatchPathsMatchManifest(
@@ -284,7 +460,7 @@ function withTemporaryIndex<T>(workspaceRoot: string, callback: (index: string) 
   }
 }
 
-function runGit(workspaceRoot: string, args: string[], index?: string, input?: string): string {
+function runGit(workspaceRoot: string, args: string[], index?: string, input?: string | Buffer): string {
   const env = index === undefined ? undefined : { ...process.env, GIT_INDEX_FILE: index };
   return execFileSync("git", args, {
     cwd: workspaceRoot,
@@ -293,4 +469,10 @@ function runGit(workspaceRoot: string, args: string[], index?: string, input?: s
     input,
     maxBuffer: MAX_PATCH_BYTES * 2
   });
+}
+
+/** Byte-exact git output, for path lists that may not be valid UTF-8. */
+function runGitBuffer(workspaceRoot: string, args: string[], index?: string): Buffer {
+  const env = index === undefined ? undefined : { ...process.env, GIT_INDEX_FILE: index };
+  return execFileSync("git", args, { cwd: workspaceRoot, env, maxBuffer: MAX_PATCH_BYTES * 2 });
 }

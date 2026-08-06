@@ -47,6 +47,42 @@ describe("prompt semantic anchors", () => {
     expect(prompt("strategies/invariants/implement-properties.md")).not.toContain("scfuzzbench:aave-v4:iSpoke_supply");
   });
 
+  // Two prompts told the model to do something the gates then rejected, and each cost a live Aave run a
+  // full agentic node attempt before being found (#291, #297, #299). The gate halves are fixed; these
+  // anchors keep the prompt halves from drifting back, since a prompt that contradicts its gate is only
+  // discoverable by burning a node.
+  it("states that optional evidence fields are optional", () => {
+    // Matched on whitespace-normalised text. These anchors exist to stop prose from drifting back into
+    // contradicting its gate, and pinning exact line breaks would make an innocent reflow look like a
+    // semantic regression.
+    const flat = (relativePath: string) => prompt(relativePath).replace(/\s+/gu, " ");
+
+    // `canonical_property.ledger_ids` is `.optional()` with `minItems: 1`, so a property that maps to no
+    // ledger entry has nothing to render and must not be asked for an empty field (#297, #299).
+    const fanin = flat("properties/property-specification-fanin.md");
+    expect(fanin).toContain("when that property has ledger IDs, include its complete `ledger_ids` list");
+    expect(fanin).toContain("Omit the `ledger_ids` field entirely for a property that maps to no ledger entry");
+
+    // A scan probe records WHERE the agent searched, so a directory or an absent path is valid (#289,
+    // #291). But a probe naming a regular FILE still goes through `readInvariantSourceSnapshot` and is
+    // compared against the pinned commit -- an earlier draft of this sentence claimed only ledger
+    // entries are byte-checked, which is false, and that is precisely the prompt-versus-gate divergence
+    // this anchor exists to prevent.
+    const discovery = flat("setup/project-discovery.md");
+    expect(discovery).toContain("may name a real directory you searched, or a path that turned out not to exist");
+    expect(discovery).toContain("tracked at the pinned commit and unmodified");
+    // Both implementations gate on `isDirectory() && !isSymbolicLink()`, and any path reached through a
+    // symlinked parent is rejected too, so "a directory" without this caveat is over-broad.
+    expect(discovery).toContain("A symlink is not");
+    expect(discovery).not.toContain("only ledger `entries` are checked byte-for-byte");
+
+    // The twin sentence four lines below the fan-in change said "render the exact ledger IDs" with no
+    // condition, contradicting it. An unconditioned instruction here is worse than an absent one: an
+    // empty rendered field is tolerated, but a placeholder such as `ledger_ids: none` is rejected as
+    // `INVARIANT_LEDGER_MARKDOWN_MAPPING_EXTRA`.
+    expect(fanin).toContain("and, when present, render the exact ledger IDs under a `ledger_ids` field");
+  });
+
   it("preserves source-guided denial-of-service and liveness requirements", () => {
     const lensPrompts = loadBuiltInPromptAssets().filter(
       (asset) =>
