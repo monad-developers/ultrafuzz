@@ -24,6 +24,7 @@ import {
   validatePropertyCampaignSchema,
   validatePropertyReferences,
   verifyArtifactManifestPrerequisites,
+  writeJsonDurable,
   type ImplementedPropertiesArtifact,
   type InvariantLedgerEntry,
   type InvariantSourceProof,
@@ -180,13 +181,20 @@ export function verifyRequiredArtifactsForAttempt(
     diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_EVIDENCE_READ_FAILED"));
   }
   try {
+    diagnostics.push(...sanitizeLensReferenceExpectationAuthority(layout, artifactDir, node));
+  } catch (error) {
+    diagnostics.push(
+      diagnosticFromError(error, "property-provenance", "PROPERTY_REFERENCE_EXPECTATION_SANITIZE_FAILED")
+    );
+  }
+  try {
     diagnostics.push(...verifyPropertyProvenanceArtifacts(layout, artifactDir, node));
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "property-provenance", "PROPERTY_PROVENANCE_READ_FAILED"));
   }
 
   return {
-    ok: diagnostics.length === 0,
+    ok: diagnostics.every((diagnostic) => diagnostic.severity !== "error"),
     diagnostics,
     missing
   };
@@ -1534,11 +1542,9 @@ function verifyLensReferenceExpectationAuthority(
   artifactDir: string,
   node: PlannedGraphNode
 ): RuntimeDiagnostic[] {
-  const lensOutput = node.outputs.find(
-    (output) => output.contract === "ultrafuzz/property-lens@1" || output.path.endsWith(".json")
-  );
+  const lensOutput = propertyLensOutput(node);
   if (lensOutput === undefined) return [];
-  const lensPath = path.join(artifactDir, lensOutput.path);
+  const lensPath = safeResolveInside(artifactDir, lensOutput.path, "property lens output");
   if (!fs.existsSync(lensPath)) return [];
   const lens = validateLensPropertiesSchema(readJsonFile(lensPath), lensPath);
   if (!lens.ok || lens.value === undefined) return [];
@@ -1559,6 +1565,71 @@ function verifyLensReferenceExpectationAuthority(
     }
   }
   return diagnostics;
+}
+
+function sanitizeLensReferenceExpectationAuthority(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode
+): RuntimeDiagnostic[] {
+  const lensOutput = propertyLensOutput(node);
+  if (lensOutput === undefined) return [];
+  const lensPath = safeResolveInside(artifactDir, lensOutput.path, "property lens output");
+  if (!fs.existsSync(lensPath)) return [];
+  const lens = validateLensPropertiesSchema(readJsonFile(lensPath), lensPath);
+  if (!lens.ok || lens.value === undefined) return [];
+  const supplied = readLensSuppliedExpectationIds(layout, node);
+  if (supplied.diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
+    return supplied.diagnostics;
+  }
+
+  let removed = 0;
+  const removedExpectationIds = new Set<string>();
+  const properties = lens.value.properties.map((property) => {
+    const expectationIds = property.reference_expectations ?? [];
+    if (expectationIds.length === 0) return property;
+    const unauthorized = expectationIds.filter((expectationId) => !supplied.ids.has(expectationId));
+    if (unauthorized.some((expectationId) => !isUnsupportedExternalReferenceLabel(expectationId))) return property;
+    const authorized = expectationIds.filter((expectationId) => supplied.ids.has(expectationId));
+    if (authorized.length === expectationIds.length) return property;
+    removed += expectationIds.length - authorized.length;
+    for (const expectationId of expectationIds) {
+      if (!supplied.ids.has(expectationId)) removedExpectationIds.add(expectationId);
+    }
+    const sanitized = { ...property };
+    if (authorized.length === 0) {
+      delete sanitized.reference_expectations;
+    } else {
+      sanitized.reference_expectations = authorized;
+    }
+    return sanitized;
+  });
+  if (removed === 0) return [];
+
+  writeJsonDurable(lensPath, {
+    ...lens.value,
+    properties
+  });
+  return [
+    {
+      code: "PROPERTY_REFERENCE_EXPECTATION_SANITIZED",
+      message: `Removed ${removed} unauthorized reference expectation ID${removed === 1 ? "" : "s"} from property lens output`,
+      severity: "warning",
+      source: "property-provenance",
+      path: lensPath,
+      details: {
+        removed_reference_expectations: [...removedExpectationIds].sort()
+      }
+    }
+  ];
+}
+
+function propertyLensOutput(node: PlannedGraphNode): PlannedGraphNode["outputs"][number] | undefined {
+  return node.outputs.find((output) => output.contract === "ultrafuzz/property-lens@1");
+}
+
+function isUnsupportedExternalReferenceLabel(expectationId: string): boolean {
+  return /^[A-Z][A-Z0-9]*-\d+$/u.test(expectationId);
 }
 
 function readLensSuppliedExpectationIds(
