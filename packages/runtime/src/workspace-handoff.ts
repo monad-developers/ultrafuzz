@@ -20,6 +20,44 @@ const SENSITIVE_SEGMENTS = new Set([
 ]);
 const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "artifacts"] as const;
 
+/**
+ * Harness-generated fuzzing output, which must never be staged into a workspace patch.
+ *
+ * The names come from the commands the invariant prompts actually run, not from guesses about what a
+ * fuzzer might emit. Every invariant stage issues
+ * `recon fuzz . --corpus-dir echidna --recon-corpus-dir recon-corpus`, and `coverage.md` additionally
+ * writes `recon-coverage.json` into `magic/` and runs `covg-eval magic/ echidna/`. An earlier draft of
+ * this list said `corpus` and `coverage`, which this pipeline never produces, while omitting `echidna/`,
+ * which it produces on every single invariant node.
+ *
+ * Measured on Aave v4 run R46 while `stateful-invariant-setup` was running: a 575 MB workspace whose
+ * largest entries were `recon-corpus/build-snapshot/<hash>.json` at 155 MB and 33 MB — byte-for-byte
+ * duplicates of Foundry's `out/build-info/` — plus several 5 MB coverage HTML files. Foundry's copies are
+ * safe because targets gitignore `out/`; `recon-corpus/` is not gitignored by this target, so
+ * `--exclude-standard` kept it and staging enumerated all of it (issue #304).
+ *
+ * On the cost of staging that, be careful about which step is expensive. It is NOT the diff: `runGit`
+ * caps output at `MAX_PATCH_BYTES * 2` and `captureWorkspacePatch` refuses anything over
+ * `MAX_PATCH_BYTES`, so an oversized patch surfaces as a loud, catchable `ENOBUFS` — a failure this repo
+ * has already seen and fixed once. The unbounded step is `git add`, which hashes and zlib-compresses every
+ * enumerated blob inside the git subprocess before any of those ceilings apply. Four sandboxes died at
+ * this node with an empty `last_error` and only heartbeats in `worker.log`, which is what a cgroup OOM
+ * kill looks like from outside — but that attribution is reasoned, not measured, and no exit code has
+ * been captured yet.
+ *
+ * Exclusions are applied to the UNTRACKED listing only. Generated corpus is untracked by definition, and
+ * excluding a tracked path would be silent data loss: staging runs after `read-tree <baseline>`, so the
+ * index would simply keep the baseline blob and an authored edit would vanish from the patch with no
+ * error and a manifest that still validates.
+ *
+ * The pathspecs are root-anchored, matching where `recon fuzz .` writes. A nested `test/recon-corpus/`
+ * is not excluded; the prompts do invite adapting corpus directories to local conventions, so that
+ * remains a gap a size ceiling would close and a name list cannot.
+ */
+const WORKSPACE_GENERATED_ROOTS = ["recon-corpus", "echidna", "magic"] as const;
+
+const WORKSPACE_EXCLUDED_ROOTS = [...WORKSPACE_RUNTIME_ROOTS, ...WORKSPACE_GENERATED_ROOTS] as const;
+
 export interface WorkspacePatchFile {
   path: string;
 }
@@ -192,20 +230,38 @@ const WORKSPACE_STAGE_ATTEMPTS = 3;
 
 /** Every path git would stage, minus the runtime roots and any directory entry. */
 function stageableWorkspacePaths(workspaceRoot: string, index: string): Buffer[] {
-  const listed = runGitBuffer(
+  // Two listings rather than one, so the generated-root exclusions apply to UNTRACKED paths only.
+  // Excluding a tracked path here would be silent data loss: staging runs after `read-tree <baseline>`,
+  // so the index keeps the baseline blob, the agent's edit never reaches the patch, and
+  // `applyWorkspacePatch` verifies both trees under the same exclusions — so every check still passes and
+  // the downstream node simply sees stale content. Generated corpus is untracked by definition, so
+  // narrowing the exclusion costs nothing it was meant to catch.
+  const tracked = runGitBuffer(
+    workspaceRoot,
+    ["ls-files", "-z", "--cached", "--", ".", ...WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}/**`)],
+    index
+  );
+  const untracked = runGitBuffer(
     workspaceRoot,
     [
       "ls-files",
       "-z",
-      "--cached",
       "--others",
       "--exclude-standard",
       "--",
       ".",
-      ...WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}/**`)
+      ...WORKSPACE_EXCLUDED_ROOTS.map((root) => `:(exclude)${root}/**`)
     ],
     index
   );
+  const listed = Buffer.concat([tracked, untracked]);
+  // Deliberately the RUNTIME roots only. The name check below exists to catch a top-level *file* named
+  // like a root, which the `/**` pathspecs cannot match. That is right for runtime roots, which are never
+  // authored content, but a file named like a fuzzer output directory plausibly is authored, and the
+  // generated roots are directories in every layout this harness produces. A top-level SYMLINK named like
+  // one is the exception: it is neither matched by `/**` nor skipped here, so it reaches
+  // `assertWorkspacePatchPath` and fails closed there as a symlink, which is pre-existing behaviour for
+  // any symlink rather than something these exclusions introduce.
   const runtimeRoots = new Set<string>(WORKSPACE_RUNTIME_ROOTS);
   const pathspecs: Buffer[] = [];
   for (const entry of splitNulBuffer(listed)) {

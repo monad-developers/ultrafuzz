@@ -60,6 +60,101 @@ test("captures tracked and untracked setup changes relative to the dependency ba
 // aborted capture outright — `:(exclude)node_modules`, `:!node_modules` and the `/**` form all fail
 // identically, and the glob is irrelevant. It only reproduces when the agent actually installed
 // dependencies in that worktree, which is why most nodes survive.
+// R46's `stateful-invariant-setup` workspace was 575 MB, dominated by
+// `recon-corpus/build-snapshot/<hash>.json` at 155 MB and 33 MB -- byte-for-byte duplicates of Foundry's
+// `out/build-info/`. Foundry's copy is safe because targets gitignore `out/`; the Aave v4 target does NOT
+// gitignore `recon-corpus/`, so staging swallowed roughly 200 MB of untracked JSON and HTML that
+// `workspace.patch` then has to carry as unified diff TEXT. Three sandboxes died at that node with no
+// error text, which is what an OOM kill looks like from the outside (issue #304).
+test("captures a workspace without staging harness-generated corpus output", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\ncache/\nout/\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "ignore build output"]);
+    const baseline = captureWorkspaceTree(root);
+
+    // Deliberately NOT gitignored, exactly as on the real target: the exclusion has to come from the
+    // stager, because `--exclude-standard` will not drop these.
+    for (const generated of ["recon-corpus", "echidna", "magic"]) {
+      mkdirSync(path.join(root, generated, "build-snapshot"), { recursive: true });
+      writeFileSync(path.join(root, generated, "build-snapshot", "0b7f82b3.json"), `{"generated":"${generated}"}\n`);
+      writeFileSync(path.join(root, generated, "covered.1786048318.html"), "<html>coverage</html>\n");
+    }
+    writeFileSync(path.join(root, "UltrafuzzSmoke.t.sol"), "contract UltrafuzzSmoke {}\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["UltrafuzzSmoke.t.sol"]
+    );
+    const staged = git(root, ["ls-tree", "-r", "--name-only", captured.manifest.result_tree]);
+    for (const generated of ["recon-corpus", "echidna", "magic"]) {
+      assert.equal(
+        staged.split("\n").some((entry) => entry === generated || entry.startsWith(`${generated}/`)),
+        false,
+        `${generated} leaked into the captured tree: ${staged}`
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A top-level FILE that merely shares a generated root's name is authored content, not corpus. The
+// `/**` pathspecs cannot match it, and the name-based skip must not swallow it either -- otherwise
+// excluding corpus would silently drop a real source file (issue #304).
+// Excluding a TRACKED path would be silent data loss, not a saving: staging runs after
+// `read-tree <baseline>`, so the index keeps the baseline blob, the agent's edit never reaches the patch,
+// and `applyWorkspacePatch` verifies both trees under the same exclusions — every check passes and the
+// downstream node quietly sees stale content. A committed seed corpus is a real convention, so the
+// exclusions apply to the untracked listing only (issue #304).
+test("captures an edit to tracked content living under a generated corpus root", () => {
+  const root = fixture();
+  try {
+    mkdirSync(path.join(root, "recon-corpus"), { recursive: true });
+    writeFileSync(path.join(root, "recon-corpus", "seed.txt"), "committed seed\n");
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
+    git(root, ["add", ".gitignore", "recon-corpus/seed.txt"]);
+    git(root, ["commit", "--quiet", "-m", "committed seed corpus"]);
+    const baseline = captureWorkspaceTree(root);
+
+    // The agent edits the committed seed, and separately the harness drops a huge generated blob in the
+    // same directory. The edit must survive; the generated blob must not.
+    writeFileSync(path.join(root, "recon-corpus", "seed.txt"), "edited by the agent\n");
+    mkdirSync(path.join(root, "recon-corpus", "build-snapshot"), { recursive: true });
+    writeFileSync(path.join(root, "recon-corpus", "build-snapshot", "0b7f82b3.json"), '{"generated":true}\n');
+
+    const captured = captureWorkspacePatch(root, baseline);
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["recon-corpus/seed.txt"]
+    );
+    const staged = git(root, ["ls-tree", "-r", "--name-only", captured.manifest.result_tree]);
+    assert.equal(staged.split("\n").includes("recon-corpus/build-snapshot/0b7f82b3.json"), false, staged);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("captures an authored top-level file whose name matches a generated corpus root", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "base"]);
+    const baseline = captureWorkspaceTree(root);
+
+    writeFileSync(path.join(root, "echidna"), "authored, not corpus\n");
+    writeFileSync(path.join(root, "recon-corpus"), "authored, not corpus\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+    assert.deepEqual(captured.manifest.files.map((entry) => entry.path).sort(), ["echidna", "recon-corpus"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("captures a workspace containing ignored runtime roots", () => {
   const root = fixture();
   try {
