@@ -9,6 +9,25 @@ import { normalizeWorkspacePatchPath } from "@ultrafuzz/artifacts";
 const WORKSPACE_PATCH_SCHEMA_VERSION = "ultrafuzz.workspace-patch.v1" as const;
 const GIT_OBJECT_ID = /^[0-9a-f]{40,64}$/u;
 const MAX_PATCH_BYTES = 16 * 1024 * 1024;
+/**
+ * Ceiling on the bytes staging is allowed to hand to `git add`, checked BEFORE it runs.
+ *
+ * `MAX_PATCH_BYTES` is enforced on the finished patch, which is too late to be a safety net: `git add`
+ * has already hashed and zlib-compressed every enumerated blob inside the git subprocess by then, and a
+ * cgroup OOM there kills the container without writing a JS error. Four sandboxes died at
+ * `stateful-invariant-setup` across two Aave v4 runs with an empty `last_error` and only heartbeats in
+ * `worker.log`, and the workspace measured 575 MB at the time (issue #304).
+ *
+ * Excluding the generated corpus roots removes the known offender, but a name list cannot be complete —
+ * the invariant prompts explicitly invite adapting corpus directories to local conventions, and the
+ * pathspecs are root-anchored. This ceiling is the part that generalises: whatever the next unexcluded
+ * generated directory turns out to be, staging refuses it with a message naming the biggest contributors
+ * instead of the process disappearing.
+ *
+ * 256 MB is deliberately far above any plausible authored source tree — the Aave v4 target's tracked
+ * sources are a few megabytes — so this only fires on generated output, and fires loudly when it does.
+ */
+const MAX_STAGED_BYTES = 256 * 1024 * 1024;
 const SENSITIVE_SEGMENTS = new Set([
   ".git",
   ".ultrafuzz",
@@ -211,6 +230,7 @@ function stageWorkspaceTree(workspaceRoot: string, index: string): void {
   for (let attempt = 0; ; attempt += 1) {
     const pathspecs = stageableWorkspacePaths(workspaceRoot, index);
     if (pathspecs.length === 0) return;
+    assertStageableWorkspaceSize(workspaceRoot, pathspecs);
     try {
       runGit(
         workspaceRoot,
@@ -279,6 +299,37 @@ function stageableWorkspacePaths(workspaceRoot: string, index: string): Buffer[]
     pathspecs.push(entry);
   }
   return pathspecs;
+}
+
+/**
+ * Refuses to stage more than `MAX_STAGED_BYTES`, naming what made it large.
+ *
+ * A path that vanishes between listing and stat is ignored rather than fatal: agent subprocesses are
+ * still running during capture, which is the same race `stageWorkspaceTree` retries around.
+ */
+function assertStageableWorkspaceSize(workspaceRoot: string, pathspecs: readonly Buffer[]): void {
+  let total = 0;
+  const largest: { path: string; bytes: number }[] = [];
+  for (const entry of pathspecs) {
+    const relativePath = entry.toString("utf8");
+    let bytes: number;
+    try {
+      bytes = lstatSync(path.resolve(workspaceRoot, relativePath)).size;
+    } catch {
+      continue;
+    }
+    total += bytes;
+    largest.push({ path: relativePath, bytes });
+  }
+  if (total <= MAX_STAGED_BYTES) return;
+  const worst = largest
+    .sort((left, right) => right.bytes - left.bytes)
+    .slice(0, 5)
+    .map((entry) => `${entry.path} (${Math.round(entry.bytes / 1_000_000)} MB)`)
+    .join(", ");
+  throw new Error(
+    `workspace staging exceeds ${MAX_STAGED_BYTES} bytes across ${pathspecs.length} paths (${Math.round(total / 1_000_000)} MB); largest: ${worst}`
+  );
 }
 
 const NUL = Buffer.from([0]);

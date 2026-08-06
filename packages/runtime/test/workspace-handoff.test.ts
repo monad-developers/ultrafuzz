@@ -155,6 +155,39 @@ test("captures an authored top-level file whose name matches a generated corpus 
   }
 });
 
+// `MAX_PATCH_BYTES` is checked on the finished patch, which is too late to protect anything: `git add`
+// has already hashed and compressed every blob inside the git subprocess, and a cgroup OOM there kills
+// the container without writing a JS error. Four sandboxes died that way at `stateful-invariant-setup`
+// with an empty `last_error`. Excluding known corpus roots removes today's offender; this ceiling is what
+// generalises to the next one (issue #304).
+test("refuses to stage an oversized workspace and names what made it large", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "base"]);
+    const baseline = captureWorkspaceTree(root);
+
+    // Not under any excluded root, so only the ceiling can catch it — which is the point.
+    mkdirSync(path.join(root, "generated"), { recursive: true });
+    writeFileSync(path.join(root, "generated", "huge.json"), Buffer.alloc(300 * 1024 * 1024, 0x20));
+    writeFileSync(path.join(root, "small.sol"), "contract Small {}\n");
+
+    assert.throws(
+      () => captureWorkspacePatch(root, baseline),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        // Diagnosable rather than merely refused: the message has to say which path to look at.
+        assert.match(message, /workspace staging exceeds/u);
+        assert.match(message, /generated\/huge\.json \(3\d\d MB\)/u);
+        return true;
+      }
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("captures a workspace containing ignored runtime roots", () => {
   const root = fixture();
   try {
