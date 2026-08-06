@@ -6,7 +6,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { fingerprintModalModel } from "../src/config.js";
-import type { ModalModelSpec } from "../src/defaults.js";
+import { MODAL_PRE_MODEL_RETRY_LIMIT, type ModalModelSpec } from "../src/defaults.js";
 import {
   assertExactModalLineage,
   classifyModalRunnerStatus,
@@ -21,11 +21,14 @@ import {
   markModalLaunchFailedWithRecovery,
   markModalLaunchReady,
   markModalSandboxCreated,
+  modalAttemptProvenance,
   modalLaunchTags,
   modalPreModelAttempt,
+  modalPreModelBudgetExhausted,
   modalPreModelRetryDelay,
   modalRecoveryFinishedAtForWorkerStatus,
   modalRecoveryTerminalReasonForWorkerStatus,
+  modalRunnerAbandonmentMessage,
   parseCompatibleModalLaunchState,
   parseModalWorkerStatus,
   readModalLaunchState,
@@ -34,6 +37,7 @@ import {
   writeModalLaunchState,
   type ModalLaunchRecord,
   type ModalLaunchState,
+  type ModalPreModelAttempt,
   type ModalWorkerStatus
 } from "../src/launch-state.js";
 import type { ModalRecoveryLifecycleRecord } from "../src/recovery-lifecycle.js";
@@ -67,6 +71,15 @@ function launchState(): ModalLaunchState {
       image: IMAGE_FINGERPRINT
     }
   });
+}
+
+/**
+ * A pre-model streak of `attempt`, derived through the real function against an
+ * empty lifecycle. There is deliberately no cast and no other way to make one:
+ * `preModelAttempt: record.attempt` has to stay a compile error.
+ */
+function streak(attempt: number): ModalPreModelAttempt {
+  return modalPreModelAttempt({ recovery_lifecycle: [] }, { slug: MODEL.slug, generation: 1, attempt });
 }
 
 function workerStatus(category: ModalWorkerStatus["category"], modelWorkStarted: boolean): ModalWorkerStatus {
@@ -545,7 +558,7 @@ describe("Modal runner status", () => {
       error_code: "terminal-run-non-resumable"
     });
     expect(
-      classifyModalRunnerStatus({ sandbox: "exited", preModelAttempt: 1, workerStatus: nonResumable })
+      classifyModalRunnerStatus({ sandbox: "exited", preModelAttempt: streak(1), workerStatus: nonResumable })
     ).toMatchObject({
       category: "permanent-operational-failure",
       action: "none",
@@ -655,39 +668,39 @@ describe("Modal runner status", () => {
   });
 
   it("keeps live and genuine outcomes as no-ops while relaunching interrupted model work", () => {
-    expect(classifyModalRunnerStatus({ sandbox: "live", preModelAttempt: 1 }).action).toBe("none");
+    expect(classifyModalRunnerStatus({ sandbox: "live", preModelAttempt: streak(1) }).action).toBe("none");
     expect(
       classifyModalRunnerStatus({
         sandbox: "exited",
-        preModelAttempt: 1,
+        preModelAttempt: streak(1),
         workerStatus: workerStatus("genuine-task-outcome", true)
       })
     ).toMatchObject({ category: "genuine-task-outcome", action: "none", retryable: false });
     expect(
       modalRecoveryTerminalReasonForWorkerStatus({
         category: "genuine-task-outcome",
-        preModelAttempt: 1,
+        preModelAttempt: streak(1),
         modelWorkStarted: true
       })
     ).toBe("genuine-worker-failure");
     expect(
       modalRecoveryTerminalReasonForWorkerStatus({
         category: "permanent-operational-failure",
-        preModelAttempt: 3,
+        preModelAttempt: streak(3),
         modelWorkStarted: false
       })
     ).toBe("operational-failure");
     expect(
       modalRecoveryTerminalReasonForWorkerStatus({
         category: "transient-operational-failure",
-        preModelAttempt: 3,
+        preModelAttempt: streak(3),
         modelWorkStarted: false
       })
     ).toBe("recovery-budget-exhausted");
     expect(
       modalRecoveryTerminalReasonForWorkerStatus({
         category: "permanent-operational-failure",
-        preModelAttempt: 3,
+        preModelAttempt: streak(3),
         modelWorkStarted: false,
         recoveryBudgetExhausted: true
       })
@@ -695,7 +708,7 @@ describe("Modal runner status", () => {
     expect(
       modalRecoveryTerminalReasonForWorkerStatus({
         category: "succeeded",
-        preModelAttempt: 1,
+        preModelAttempt: streak(1),
         modelWorkStarted: true
       })
     ).toBe("succeeded");
@@ -708,14 +721,14 @@ describe("Modal runner status", () => {
     expect(
       classifyModalRunnerStatus({
         sandbox: "exited",
-        preModelAttempt: 1,
+        preModelAttempt: streak(1),
         workerStatus: workerStatus("model-work", true)
       })
     ).toMatchObject({ category: "resume-required", action: "relaunch", model_work_started: true });
     expect(
       classifyModalRunnerStatus({
         sandbox: "exited",
-        preModelAttempt: 1,
+        preModelAttempt: streak(1),
         workerStatus: workerStatus("model-work", true),
         postModelRecovery: "stop"
       })
@@ -723,7 +736,7 @@ describe("Modal runner status", () => {
     expect(
       classifyModalRunnerStatus({
         sandbox: "missing",
-        preModelAttempt: 1,
+        preModelAttempt: streak(1),
         postModelRecovery: "stop",
         modelWorkMayHaveStarted: true
       })
@@ -736,7 +749,7 @@ describe("Modal runner status", () => {
     expect(
       classifyModalRunnerStatus({
         sandbox: "missing",
-        preModelAttempt: 2,
+        preModelAttempt: streak(2),
         workerStatus: stalePartial,
         postModelRecovery: "stop",
         modelWorkMayHaveStarted: true
@@ -745,7 +758,7 @@ describe("Modal runner status", () => {
     expect(
       classifyModalRunnerStatus({
         sandbox: "missing",
-        preModelAttempt: 2,
+        preModelAttempt: streak(2),
         workerStatus: { ...stalePartial, terminal: true },
         postModelRecovery: "stop",
         modelWorkMayHaveStarted: true
@@ -759,7 +772,7 @@ describe("Modal runner status", () => {
     expect(
       classifyModalRunnerStatus({
         sandbox: "missing",
-        preModelAttempt: 3,
+        preModelAttempt: streak(3),
         workerStatus: workerStatus("transient-operational-failure", false)
       })
     ).toMatchObject({ category: "permanent-operational-failure", action: "none", retryable: false });
@@ -870,6 +883,164 @@ describe("Modal runner status", () => {
     });
   });
 
+  it("resets the pre-model streak only when a relaunch records the model work it observed", () => {
+    // The overseer advances an attempt through `reserveModalLaunchAttempt`
+    // alone: it never calls `finishModalLaunchRecoveryLifecycle`, so the
+    // outgoing attempt is force-closed here. Both halves run the same physical
+    // sequence and differ only in whether the observation is recorded.
+    const relaunch = (
+      state: ModalLaunchState,
+      now: string,
+      observedModelWorkStarted?: boolean | "unknown"
+    ): ModalLaunchRecord =>
+      reserveModalLaunchAttempt({
+        state,
+        model: MODEL,
+        modelFingerprint: fingerprintModalModel(MODEL),
+        volumeName: "volume-placeholder",
+        remoteRoot: "/data/logical-run/model-one",
+        workspaceMode: "resume",
+        now,
+        ...(observedModelWorkStarted === undefined ? {} : { observedModelWorkStarted })
+      });
+    const didModelWork = (record: ModalLaunchRecord, now: string): void => {
+      markModalSandboxCreated(record, `sandbox-${record.attempt}`);
+      markModalLaunchReady(record, now);
+    };
+
+    // Without the observation the streak stays fail-closed: an `"unknown"`
+    // lifecycle never resets it, so three relaunches still exhaust the budget.
+    const unobserved = launchState();
+    didModelWork(relaunch(unobserved, "2026-01-01T00:00:00.000Z"), "2026-01-01T00:01:00.000Z");
+    expect(modalPreModelAttempt(unobserved, relaunch(unobserved, "2026-01-01T00:02:00.000Z"))).toBe(2);
+    const unobservedThird = relaunch(unobserved, "2026-01-01T00:03:00.000Z");
+    expect(unobservedThird.attempt).toBe(3);
+    expect(modalPreModelAttempt(unobserved, unobservedThird)).toBe(3);
+    expect(
+      classifyModalRunnerStatus({
+        sandbox: "exited",
+        preModelAttempt: modalPreModelAttempt(unobserved, unobservedThird)
+      })
+    ).toMatchObject({ category: "permanent-operational-failure", action: "none", retryable: false });
+
+    // With the observation the run keeps its pre-model budget after real model
+    // work, which is the R40 sequence: attempt one worked, attempts two and
+    // three were launch flakes, and the run must still relaunch.
+    const observed = launchState();
+    didModelWork(relaunch(observed, "2026-01-01T00:00:00.000Z"), "2026-01-01T00:01:00.000Z");
+    const second = relaunch(observed, "2026-01-01T00:02:00.000Z", true);
+    expect(modalPreModelAttempt(observed, second)).toBe(1);
+    expect(observed.recovery_lifecycle[0]).toMatchObject({ attempt: 1, model_work_started: true });
+    const third = relaunch(observed, "2026-01-01T00:03:00.000Z", false);
+    expect(third.attempt).toBe(3);
+    expect(modalPreModelAttempt(observed, third)).toBe(2);
+    expect(
+      classifyModalRunnerStatus({ sandbox: "exited", preModelAttempt: modalPreModelAttempt(observed, third) })
+    ).toMatchObject({ category: "transient-operational-failure", action: "relaunch", retryable: true });
+
+    // The bound still closes: three consecutive pre-model relaunches exhaust it.
+    const fourth = relaunch(observed, "2026-01-01T00:04:00.000Z", false);
+    expect(modalPreModelAttempt(observed, fourth)).toBe(3);
+    expect(
+      classifyModalRunnerStatus({ sandbox: "exited", preModelAttempt: modalPreModelAttempt(observed, fourth) })
+    ).toMatchObject({ category: "permanent-operational-failure", action: "none", retryable: false });
+  });
+
+  it("scopes the pre-model streak to the generation that is spending it", () => {
+    const reserve = (state: ModalLaunchState, now: string, observedModelWorkStarted?: boolean): ModalLaunchRecord =>
+      reserveModalLaunchAttempt({
+        state,
+        model: MODEL,
+        modelFingerprint: fingerprintModalModel(MODEL),
+        volumeName: "volume-placeholder",
+        remoteRoot: "/data/logical-run/model-one",
+        workspaceMode: "resume",
+        now,
+        ...(observedModelWorkStarted === undefined ? {} : { observedModelWorkStarted })
+      });
+
+    // Generation one ends with a second attempt that definitely did model work.
+    const first = launchState();
+    reserve(first, "2026-01-01T00:00:00.000Z");
+    const worked = reserve(first, "2026-01-01T00:01:00.000Z", false);
+    markModalSandboxCreated(worked, "sandbox-two");
+    markModalLaunchReady(worked, "2026-01-01T00:02:00.000Z");
+    finishModalLaunchRecoveryLifecycle(first, worked, {
+      terminalReason: "operator-request",
+      finishedAt: "2026-01-01T00:03:00.000Z",
+      modelWorkStarted: true,
+      controllerRequested: true
+    });
+
+    // Generation two restarts `attempt` at one and must not inherit that credit.
+    const second = createModalLaunchState({
+      logicalRunId: "logical-run",
+      generation: 2,
+      generationMode: "resume",
+      app: "app-placeholder",
+      image: "image-placeholder",
+      imageId: "image-id-placeholder",
+      timeoutMs: 60_000,
+      sourceRevision: "revision-placeholder",
+      fingerprints: { config: CONFIG_FINGERPRINT, source: SOURCE_FINGERPRINT, image: IMAGE_FINGERPRINT },
+      attemptHistory: [
+        ...first.attempt_history,
+        ...first.launches.map((launch) => modalAttemptProvenance(launch, first.fingerprints))
+      ],
+      recoveryLifecycle: first.recovery_lifecycle
+    });
+    reserve(second, "2026-01-01T01:00:00.000Z");
+    reserve(second, "2026-01-01T01:01:00.000Z", false);
+    const third = reserve(second, "2026-01-01T01:02:00.000Z", false);
+
+    expect(third).toMatchObject({ generation: 2, attempt: 3 });
+    expect(modalPreModelAttempt(second, third)).toBe(3);
+    expect(
+      classifyModalRunnerStatus({ sandbox: "exited", preModelAttempt: modalPreModelAttempt(second, third) })
+    ).toMatchObject({ category: "permanent-operational-failure", action: "none", retryable: false });
+  });
+
+  it("names the pre-model budget only on the abandonment it actually caused", () => {
+    const exhausted = {
+      category: "permanent-operational-failure",
+      modelWorkStarted: false,
+      preModelAttempt: streak(MODAL_PRE_MODEL_RETRY_LIMIT),
+      workerCategory: undefined,
+      launchFailure: undefined
+    } as const;
+    expect(modalPreModelBudgetExhausted(exhausted)).toBe(true);
+    expect(modalPreModelBudgetExhausted({ ...exhausted, preModelAttempt: streak(1) })).toBe(false);
+    expect(modalPreModelBudgetExhausted({ ...exhausted, modelWorkStarted: true })).toBe(false);
+    // A worker-reported permanent failure and a permanent launch failure both
+    // abandon the run without ever spending a pre-model retry.
+    expect(modalPreModelBudgetExhausted({ ...exhausted, workerCategory: "permanent-operational-failure" })).toBe(false);
+    expect(modalPreModelBudgetExhausted({ ...exhausted, launchFailure: "permanent-operational-failure" })).toBe(false);
+    // So does `resume-required` under the stop-on-post-model public policy.
+    expect(modalPreModelBudgetExhausted({ ...exhausted, category: "resume-required", modelWorkStarted: true })).toBe(
+      false
+    );
+
+    expect(
+      modalRunnerAbandonmentMessage({
+        slug: "model-one",
+        category: "resume-required",
+        preModelAttempt: streak(6),
+        preModelBudgetExhausted: false
+      })
+    ).toBe("Modal runner cannot relaunch model-one: resume-required");
+    expect(
+      modalRunnerAbandonmentMessage({
+        slug: "model-one",
+        category: "permanent-operational-failure",
+        preModelAttempt: streak(MODAL_PRE_MODEL_RETRY_LIMIT),
+        preModelBudgetExhausted: true
+      })
+    ).toBe(
+      `Modal runner cannot relaunch model-one: permanent-operational-failure ` +
+        `(pre-model attempt ${MODAL_PRE_MODEL_RETRY_LIMIT} of ${MODAL_PRE_MODEL_RETRY_LIMIT})`
+    );
+  });
+
   it("records failed launch attempts without converting them into task outcomes", () => {
     const state = launchState();
     const record = reserveModalLaunchAttempt({
@@ -885,7 +1056,7 @@ describe("Modal runner status", () => {
     expect(
       classifyModalRunnerStatus({
         sandbox: "missing",
-        preModelAttempt: 1,
+        preModelAttempt: streak(1),
         launchFailure: "permanent-operational-failure"
       })
     ).toMatchObject({ category: "permanent-operational-failure", action: "none", retryable: false });
