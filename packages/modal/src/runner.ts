@@ -48,6 +48,7 @@ import {
   DEFAULT_MODAL_APP,
   DEFAULT_MODAL_IMAGE,
   MODAL_BENCHMARK_SANDBOX_RESOURCES,
+  MODAL_OVERSEER_MAX_CONSECUTIVE_FAILURES,
   MODAL_OVERSEER_POLL_MS,
   MODAL_PRE_MODEL_RETRY_LIMIT,
   MODAL_RECOVERY_LEASE_TIMEOUT_MS,
@@ -1353,21 +1354,90 @@ export interface ModalOverseerSnapshot {
   rows: ModalRecoveryRowSnapshot[];
 }
 
+/**
+ * Polls every supervised job until all are complete.
+ *
+ * A failed poll tick must not take the process down. R45's detached overseer exited 1 mid-run on
+ * `NotFoundError: The Sandbox is unavailable. This Sandbox may have already shut down.` (issue #295),
+ * and the run it was watching then hit a transient `agent-failure` half an hour later with nothing
+ * alive to retry it. Restarting the overseer produced `action: "launch", reason: "owner-missing"`
+ * within seconds, so recovery had been available the whole time and simply had no process to trigger
+ * it. An overseer whose purpose is supervising runs whose sandboxes die must not die because a sandbox
+ * died — and the sandbox-unavailable read is only one of many ways a tick can throw, so the resilience
+ * belongs here rather than in any single read.
+ *
+ * A persistently broken job must still surface, so the loop gives up loudly after
+ * `maxConsecutiveFailures` consecutive ticks in which every job threw. Anything less than every job is
+ * absorbed indefinitely: one wedged run should not stop the others from being supervised.
+ */
 export async function overseeModalBenchmarks(input: {
   jobs: ModalOverseerJob[];
   pollMs?: number;
   env?: Record<string, string | undefined>;
+  maxConsecutiveFailures?: number;
+  overseeOnce?: (
+    job: ModalOverseerJob & { env?: Record<string, string | undefined> }
+  ) => Promise<ModalOverseerSnapshot>;
 }): Promise<ModalOverseerSnapshot[]> {
   if (input.jobs.length === 0) throw new Error("at least one Modal overseer job is required");
   const pollMs = input.pollMs ?? MODAL_OVERSEER_POLL_MS;
   if (!Number.isSafeInteger(pollMs) || pollMs <= 0) throw new Error("Modal overseer poll interval must be positive");
+  const maxConsecutiveFailures = input.maxConsecutiveFailures ?? MODAL_OVERSEER_MAX_CONSECUTIVE_FAILURES;
+  if (!Number.isSafeInteger(maxConsecutiveFailures) || maxConsecutiveFailures <= 0) {
+    throw new Error("Modal overseer consecutive failure limit must be positive");
+  }
+  const overseeOnce = input.overseeOnce ?? overseeModalBenchmarkOnce;
+  // Counted PER JOB. A shared counter only tripped when every job failed on the same tick, so with two
+  // or more jobs a permanently broken one — an incompatible config fingerprint, a launch state naming a
+  // different run — was absorbed forever while a healthy sibling kept resetting the count. "Loud"
+  // silently became "never" as the job count grew.
+  const consecutiveFailures = new Map<string, number>();
+  const abandoned = new Map<string, unknown>();
+  let active = [...input.jobs];
   for (;;) {
-    const snapshots = [];
-    for (const job of input.jobs) {
-      snapshots.push(await overseeModalBenchmarkOnce({ ...job, env: input.env }));
+    const snapshots: ModalOverseerSnapshot[] = [];
+    const failures: { config_path: string; error: string; consecutive_failures: number }[] = [];
+    for (const job of active) {
+      try {
+        snapshots.push(await overseeOnce({ ...job, env: input.env }));
+        consecutiveFailures.set(job.configPath, 0);
+      } catch (error) {
+        const count = (consecutiveFailures.get(job.configPath) ?? 0) + 1;
+        consecutiveFailures.set(job.configPath, count);
+        failures.push({
+          config_path: job.configPath,
+          error: error instanceof Error ? error.message : String(error),
+          consecutive_failures: count
+        });
+        if (count >= maxConsecutiveFailures) abandoned.set(job.configPath, error);
+      }
     }
-    console.log(JSON.stringify({ updated_at: new Date().toISOString(), jobs: snapshots }));
-    if (snapshots.every((snapshot) => snapshot.complete)) return snapshots;
+    // A wedged job stops being polled so its healthy siblings keep being supervised, but it is never
+    // forgotten: the process still ends non-zero below, naming it.
+    active = active.filter((job) => !abandoned.has(job.configPath));
+    console.log(
+      JSON.stringify({
+        updated_at: new Date().toISOString(),
+        jobs: snapshots,
+        ...(failures.length > 0 ? { failed_jobs: failures } : {}),
+        ...(abandoned.size > 0 ? { abandoned_jobs: [...abandoned.keys()] } : {})
+      })
+    );
+    // Guarded on length as well as completeness: a tick in which every remaining job failed leaves
+    // `snapshots` empty, and `[].every(...)` is true, so without this the overseer would report a wedged
+    // job as complete and exit 0.
+    const remainingComplete =
+      snapshots.length === active.length && snapshots.length > 0 && snapshots.every((snapshot) => snapshot.complete);
+    if (abandoned.size > 0 && (active.length === 0 || remainingComplete)) {
+      // Deliberately not a bare rethrow. The underlying message is often the very symptom this loop
+      // exists to survive (`The Sandbox is unavailable...`), so rethrowing it verbatim would read as the
+      // fix having regressed. The cause is preserved for whoever needs the original.
+      throw new Error(
+        `Modal overseer abandoned ${abandoned.size} job(s) after ${maxConsecutiveFailures} consecutive failed ticks: ${[...abandoned.keys()].join(", ")}`,
+        { cause: [...abandoned.values()].at(-1) }
+      );
+    }
+    if (remainingComplete) return snapshots;
     await sleep(pollMs);
   }
 }
@@ -2976,6 +3046,16 @@ export async function readOptionalModalSandboxText(
     }
     return contents;
   } catch (error) {
+    // Deliberately NOT widened to `NotFoundError`, even though the overseer crash in issue #295 was
+    // raised from this frame. `translateExecErrors` in modal@0.9.0 relabels five distinct gRPC
+    // conditions — NOT_FOUND, CANCELLED, UNKNOWN, DEADLINE_EXCEEDED and UNAVAILABLE — as
+    // `NotFoundError("The Sandbox is unavailable. This Sandbox may have already shut down.")`, so an
+    // ordinary network hiccup against a perfectly healthy sandbox is indistinguishable from a real
+    // shutdown at this layer. Treating that as "file absent" would let a blip drive writes: the
+    // readiness-marker reads at `finishReservedModalLaunch` and `finishReservedModalRecoveryWorker`
+    // would re-stage config, lineage and credentials over a live worker, and `collect` would write an
+    // empty artifact bundle because its retry shield only fires when a status file was read.
+    // Issue #295 is fixed in the overseer's poll loop instead, where a failed tick belongs.
     if (error instanceof SandboxFilesystemNotFoundError) return undefined;
     throw error;
   }

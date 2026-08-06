@@ -6,6 +6,10 @@ export const MODAL_WORKER_STATUS_SCHEMA_VERSION = "ultrafuzz.modal.worker-status
 export const MODAL_MAX_SANDBOX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 export const MODAL_RECOVERY_SANDBOX_TIMEOUT_MS = MODAL_MAX_SANDBOX_TIMEOUT_MS;
 export const MODAL_OVERSEER_POLL_MS = 60 * 1000;
+// Consecutive poll ticks in which EVERY supervised job threw before the overseer gives up loudly.
+// A single tick failure is transient (a control-plane blip, a sandbox shutting down mid-read) and must
+// not end supervision — issue #295 — but a permanently broken config should not spin silently forever.
+export const MODAL_OVERSEER_MAX_CONSECUTIVE_FAILURES = 10;
 export const MODAL_RECOVERY_RESUME_GRACE_MS = 15 * 60 * 1000;
 export const MODAL_RECOVERY_STALE_AFTER_MS = 30 * 60 * 1000;
 export const MODAL_RECOVERY_MAX_NO_PROGRESS_GENERATIONS = 3;
