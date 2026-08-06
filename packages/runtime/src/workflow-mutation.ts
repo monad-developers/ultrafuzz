@@ -19,6 +19,8 @@ import lockfile from "proper-lockfile";
 
 import {
   captureProperLockfileDirectoryIdentity,
+  properLockfileContentionCode,
+  swallowProperLockfileCompromise,
   withProperLockfileReclaimGuard,
   writeProperLockfileOwner
 } from "./proper-lockfile-owner.js";
@@ -682,7 +684,8 @@ async function acquireOwnedRunLock(
           realpath: false,
           stale: options.stale,
           update: 30_000,
-          retries: 0
+          retries: 0,
+          onCompromised: swallowProperLockfileCompromise
         });
         try {
           if (workflowRunLockCancelled(options.signal) || (externallyBounded && Date.now() >= deadline)) {
@@ -716,7 +719,7 @@ async function acquireOwnedRunLock(
       owner = acquired.owner;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ELOCKED" && code !== "ENOENT") throw error;
+      if (!properLockfileContentionCode(code)) throw error;
       if (workflowRunLockCancelled(options.signal)) throw new WorkflowMutationLockInterruptedError("cancelled");
       if (Date.now() >= deadline) {
         if (externallyBounded) throw new WorkflowMutationLockInterruptedError("deadline");

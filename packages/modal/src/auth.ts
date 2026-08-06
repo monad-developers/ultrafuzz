@@ -24,6 +24,18 @@ import { parse, stringify } from "smol-toml";
 import type { ModalModelSpec, ModelProvider } from "./defaults.js";
 import { remoteAuthDir, remoteAuthPath } from "./layout.js";
 
+/**
+ * proper-lockfile's default `onCompromised` rethrows from inside the heartbeat's
+ * `fs.stat`/`fs.utimes` callback rather than from a promise, so leaving it unset
+ * turns a lost heartbeat into an unhandled exception that aborts the process.
+ * Credential lock holders here independently re-verify their own lease and fence
+ * ownership before acting, so a genuinely lost lock surfaces as a normal error in
+ * the caller's control flow instead of a process abort.
+ */
+function swallowProperLockfileCompromise(): void {
+  // Intentionally empty: see the contract above.
+}
+
 export interface SubscriptionAuthCopy {
   source: string;
   destination: string;
@@ -318,7 +330,8 @@ export async function acquireKimiModalNodeExecutionLease(
       // the token, do not let another controller immediately reuse that token.
       stale: timeoutMs + 300_000,
       ...(options.lockUpdateMs === undefined ? {} : { update: Math.max(1_000, Math.floor(options.lockUpdateMs)) }),
-      realpath: false
+      realpath: false,
+      onCompromised: swallowProperLockfileCompromise
     });
     const [previousTarget, previousFence] = await Promise.all([
       readBoundKimiExecutionLeaseMetadata(
@@ -948,7 +961,8 @@ async function acquireKimiRefreshLockAt(oauthAnchor: string, lockName: string): 
         maxTimeout: 1_000
       },
       stale: 5_000,
-      realpath: false
+      realpath: false,
+      onCompromised: swallowProperLockfileCompromise
     });
   } catch (error) {
     throw new Error(
@@ -2203,7 +2217,8 @@ async function acquireKimiRefreshLock(source: string, lockName = "kimi-code"): P
         maxTimeout: 1_000
       },
       stale: 5_000,
-      realpath: false
+      realpath: false,
+      onCompromised: swallowProperLockfileCompromise
     });
   } catch (error) {
     throw new Error(

@@ -2255,11 +2255,16 @@ test(
     }>;
     const events = [...lineEvents, ...exitEvents];
     const completed = events.find((event) => event.type === "completed");
+    // DeepSeek bills cache creation as an ordinary cache-miss input token and
+    // publishes no cache-write rate, so the 2 reported cache-creation tokens are
+    // folded into the uncached input component they are actually billed as. The
+    // token total is preserved exactly, and the cache-write component stays 0 so
+    // no token is ever priced against a nonexistent rate.
     assert.deepEqual(completed?.usage, {
-      input_tokens: 121,
+      input_tokens: 123,
       output_tokens: 31,
       cache_read_input_tokens: 401,
-      cache_creation_input_tokens: 2,
+      cache_creation_input_tokens: 0,
       reasoning_tokens: 0,
       total_tokens: 555
     });
@@ -14903,14 +14908,13 @@ test(
 type InitialWorkflowLinkCrashCut =
   "prepared-only" | "metadata-written" | "state-written" | "event-recorded" | "committed";
 
-type RealInitialStartCrashCut =
-  | "link-prepared"
-  | "link-metadata"
-  | "link-state"
-  | "link-event"
-  | "link-committed"
-  | "external-invoking"
-  | "external-result";
+/**
+ * The only cut still exercised as a real out-of-process crash. The child is killed
+ * once the fake runner reports that the external invocation is in flight, so the
+ * cut is observed through the runner's own hold marker and needs no filesystem
+ * interception inside the child.
+ */
+type RealInitialStartCrashCut = "external-invoking";
 
 async function killStartChildAtDurableCut(input: {
   project: string;
@@ -14918,42 +14922,13 @@ async function killStartChildAtDurableCut(input: {
   env: Record<string, string | undefined>;
   cut: RealInitialStartCrashCut;
 }): Promise<void> {
-  const runRoot = path.join(input.project, ".ultrafuzz", "runs", input.runId);
-  const cutMarker = path.join(input.project, `start-cut-${input.cut}`);
   const childScript = path.join(input.project, `start-cut-${input.cut}.mjs`);
   const runtimeModuleUrl = pathToFileURL(
     path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "index.js")
   ).href;
   fs.writeFileSync(
     childScript,
-    `import fs from "node:fs";\n` +
-      `import path from "node:path";\n` +
-      `const runRoot = ${JSON.stringify(runRoot)};\n` +
-      `const cut = ${JSON.stringify(input.cut)};\n` +
-      `const marker = ${JSON.stringify(cutMarker)};\n` +
-      `const journalPath = path.join(runRoot, "smithers", "workflow-run-link-journal.json");\n` +
-      `const submissionPath = path.join(runRoot, "smithers", "start-submission.json");\n` +
-      `const resultPath = path.join(runRoot, "smithers", "submission.json");\n` +
-      `const originalRenameSync = fs.renameSync.bind(fs);\n` +
-      `const originalFsyncSync = fs.fsyncSync.bind(fs);\n` +
-      `const originalWriteFileSync = fs.writeFileSync.bind(fs);\n` +
-      `let stopped = false;\n` +
-      `const json = (file) => { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return undefined; } };\n` +
-      `const phase = () => json(journalPath)?.entries?.[0]?.phase;\n` +
-      `const hasLinkEvent = () => { try { return fs.readFileSync(path.join(runRoot, "events.jsonl"), "utf8").includes('"event_type":"workflow-link-recorded"'); } catch { return false; } };\n` +
-      `const stop = () => { if (stopped) return; stopped = true; originalWriteFileSync(marker, "cut\\n", "utf8"); process.kill(process.pid, "SIGSTOP"); };\n` +
-      `const inspect = (destination = "") => {\n` +
-      `  if (stopped || cut === "external-invoking") return;\n` +
-      `  if (cut === "link-prepared" && destination === journalPath && phase() === "prepared") stop();\n` +
-      `  if (cut === "link-metadata" && destination === path.join(runRoot, "run.json") && json(destination)?.workflow && phase() === "prepared") stop();\n` +
-      `  if (cut === "link-state" && destination === path.join(runRoot, "state.json") && json(destination)?.provenance?.workflow && phase() === "prepared") stop();\n` +
-      `  if (cut === "link-event" && hasLinkEvent() && phase() === "prepared") stop();\n` +
-      `  if (cut === "link-committed" && destination === journalPath && phase() === "committed" && !fs.existsSync(submissionPath)) stop();\n` +
-      `  if (cut === "external-result" && fs.existsSync(resultPath)) stop();\n` +
-      `};\n` +
-      `fs.renameSync = (source, destination) => { const result = originalRenameSync(source, destination); inspect(path.resolve(String(destination))); return result; };\n` +
-      `fs.fsyncSync = (descriptor) => { const result = originalFsyncSync(descriptor); inspect(); return result; };\n` +
-      `const { startRun } = await import(${JSON.stringify(runtimeModuleUrl)});\n` +
+    `const { startRun } = await import(${JSON.stringify(runtimeModuleUrl)});\n` +
       `await startRun(JSON.parse(process.env.UFZ_START_INPUT));\n`,
     "utf8"
   );
@@ -14969,7 +14944,7 @@ async function killStartChildAtDurableCut(input: {
   const externalRelease = input.env.SMITHERS_START_HOLD_RELEASE;
   let cutObserved = false;
   try {
-    await waitForPath(input.cut === "external-invoking" ? externalMarker! : cutMarker, 60_000);
+    await waitForPath(externalMarker!, 60_000);
     cutObserved = true;
   } finally {
     const exited =
@@ -14984,7 +14959,7 @@ async function killStartChildAtDurableCut(input: {
     await exited;
     if (cutObserved && externalRelease !== undefined) fs.writeFileSync(externalRelease, "release\n", "utf8");
   }
-  if (input.cut === "external-invoking") await waitForPath(input.env.SMITHERS_START_EXTERNAL_RUN!, 5_000);
+  await waitForPath(input.env.SMITHERS_START_EXTERNAL_RUN!, 5_000);
 }
 
 test("startRun admits only an empty pre-intent run root and rejects traversal without writing", async () => {

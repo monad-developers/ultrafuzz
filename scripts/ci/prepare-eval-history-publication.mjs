@@ -1149,6 +1149,11 @@ export function assertAutomaticPublicationModelEvidence(bundle, configuredModelV
   if (!SAFE_MODEL.test(configuredModel)) {
     throw new Error(`public benchmark bundle ${pair} configured model is invalid`);
   }
+  // SAFE_MODEL permits uppercase and provider rate resolution lowercases before
+  // pinning a provider, so an aliased model must be recognized case-insensitively.
+  // Otherwise a mixed-case spelling resolves the alias's rates while claiming the
+  // stronger provider-reported-model-id scope and skipping its pinned rate check.
+  const normalizedConfiguredModel = configuredModel.trim().toLowerCase();
   if (
     bundle.schema_version !== AUTOMATIC_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION ||
     bundle.model !== configuredModel ||
@@ -1186,7 +1191,7 @@ export function assertAutomaticPublicationModelEvidence(bundle, configuredModelV
     const row = looseRecord(value, `public benchmark bundle ${pair} diagnostics row ${index}`);
     const rowId = safeId(row.row_id, `public benchmark bundle ${pair} diagnostics row ${index} ID`);
     const expectedIdentityScope =
-      configuredModel === DEEPSEEK_V4_FLASH_MODEL ? "provider-reported-alias" : "provider-reported-model-id";
+      normalizedConfiguredModel === DEEPSEEK_V4_FLASH_MODEL ? "provider-reported-alias" : "provider-reported-model-id";
     const identity = strictRecord(row.model_identity, `public benchmark bundle ${pair} row ${rowId} model identity`, [
       "schema_version",
       "configured_model",
@@ -1297,7 +1302,7 @@ export function assertAutomaticPublicationModelEvidence(bundle, configuredModelV
     }
     assertAutomaticPricingArithmetic({ rates, usage, componentCosts, pricing, pair, rowId });
     if (
-      configuredModel === DEEPSEEK_V4_FLASH_MODEL &&
+      normalizedConfiguredModel === DEEPSEEK_V4_FLASH_MODEL &&
       (rates.uncached_input !== DEEPSEEK_V4_FLASH_RATES_USD_PER_MILLION.uncached_input ||
         rates.cache_read !== DEEPSEEK_V4_FLASH_RATES_USD_PER_MILLION.cache_read ||
         rates.cache_write !== DEEPSEEK_V4_FLASH_RATES_USD_PER_MILLION.cache_write ||

@@ -208,14 +208,37 @@ equal weight. Macro precision and recall use the same equal-target weighting.
 Precision and recall remain available in `benchmarks/history.json` but are omitted
 from the overview charts.
 
-The `model` shown in history and charts is the provider-reported API identifier
-recorded for the observation at its timestamp. Public diagnostics distinguish a
-provider-reported model ID from a documented moving API alias. For example,
+The `model` shown in history and charts is the configured model identifier for the
+observation, which publication additionally requires to equal the
+provider-reported identifier for every invocation. Public diagnostics distinguish
+a provider-reported model ID from a documented moving API alias. For example,
 DeepSeek reports `deepseek-v4-flash` through the Anthropic-compatible runner, so
 that identity is published as `provider-reported-alias` with
 `provider_version_status: unverified`. Alias equality still has to hold for
 every invocation, but neither the label nor its timestamp attests immutable
-backend weights or a concrete provider version.
+backend weights or a concrete provider version. Model names are compared
+case-insensitively, so an alias cannot be published under the stronger
+`provider-reported-model-id` scope by varying its capitalization.
+
+Publication requires complete cost evidence, and for a model with a pinned rate
+table it requires that table to match exactly. `deepseek-v4-flash` is pinned to
+these USD-per-million rates, resolved from the `models.dev` catalog:
+
+| Component      | Rate           |
+| -------------- | -------------- |
+| Uncached input | `0.14`         |
+| Cache read     | `0.0028`       |
+| Cache write    | none published |
+| Output         | `0.28`         |
+| Reasoning      | `0.28`         |
+
+Because DeepSeek publishes no cache-write rate, DeepSeek cache-creation tokens are
+accounted as the ordinary cache-miss input tokens they are billed as rather than as
+a separate cache-write component; a cache-write component is never priced against a
+missing rate. If the upstream catalog stops publishing a reasoning rate, or any
+pinned rate changes, publication fails closed with `pricing-evidence-missing`
+rather than publishing a cost computed from unverified rates. Updating the pinned
+table is a deliberate code change.
 
 The latest-result summary sums target cost and uses the slowest target as the
 parallel run's wall clock. If any target lacks complete cost or runtime

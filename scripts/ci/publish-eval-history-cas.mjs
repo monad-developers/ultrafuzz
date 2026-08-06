@@ -380,16 +380,25 @@ function stageExactPublication(generation, worktree, publicationKind) {
   if (unstagedTracked.length > 0) {
     throw new Error(`eval history CLI changed unexpected tracked paths: ${unstagedTracked.join(", ")}`);
   }
-  const changesOverview = generation.runs.some((run) => run.benchmark === "ultrafuzz-bench");
-  const expected =
-    publicationKind === "first"
-      ? [HISTORY_JSON_PATH, ...(changesOverview ? HISTORY_OVERVIEW_PATHS : []), ...HISTORY_METRIC_PATHS]
-      : [];
-  if (!samePathSet(staged, expected)) {
+  if (publicationKind !== "first") {
+    if (staged.length > 0) {
+      throw new Error(`automatic publication replay must be a true zero-change rebuild; changed: ${staged.join(", ")}`);
+    }
+    return staged;
+  }
+  // A first publication must record its observations in history, and `staged` is
+  // already constrained to the publishable path set by `assertAllowedPaths`. The
+  // charts are always re-rendered, but requiring every one of them to differ in
+  // bytes would be wrong: chart rendering is deterministic, so a chart whose own
+  // inputs did not change is legitimately byte-identical. `latest-summary.svg` in
+  // particular renders only the newest observation by run timestamp, so a
+  // publication that is not the newest leaves it unchanged. Demanding an exact path
+  // set there would reject a fully scored result permanently, because this throw
+  // escapes the compare-and-swap retry loop. The semantic delta that actually
+  // matters is verified independently by `assertExactAutomaticPublicationDelta`.
+  if (!staged.includes(HISTORY_JSON_PATH)) {
     throw new Error(
-      publicationKind === "first"
-        ? `first automatic publication must change history and all ${changesOverview ? "nine" : "six metric"} charts; changed: ${staged.join(", ")}`
-        : `automatic publication replay must be a true zero-change rebuild; changed: ${staged.join(", ")}`
+      `first automatic publication must change ${HISTORY_JSON_PATH}; changed: ${staged.length === 0 ? "nothing" : staged.join(", ")}`
     );
   }
   return staged;

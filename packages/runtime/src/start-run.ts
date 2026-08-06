@@ -6,7 +6,10 @@ import {
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
+  createEventRecord,
+  ensureEventRecords,
   layoutForRunRoot,
+  projectRunStatus,
   readRunState,
   replayEvents,
   updateRunStatus,
@@ -54,6 +57,7 @@ import { loadResolvedProject, runsRootForProject } from "./validate.js";
 import {
   acquireWorkflowLifecycleActionLock,
   acquireWorkflowMutationLock,
+  commitWorkflowSynchronizationState,
   currentWorkflowRunLink,
   pendingWorkflowRunLink,
   pendingWorkflowLifecycleAction,
@@ -1291,12 +1295,10 @@ export async function pauseRun(input: PauseRunInput) {
     const releaseCompletionLock = await acquireWorkflowMutationLock(evidence.layout);
     try {
       evidence = await requireMatchingLinkedWorkflowEvidence(projectRoot, input.runId, evidence);
-      if (result.status === "paused") {
-        updateRunStatus(evidence.layout, "paused");
-      }
-      appendEvent(evidence.layout, {
-        eventType: result.status === "paused" ? "workflow-lifecycle-already-paused" : "workflow-pause-requested",
-        status: result.status === "paused" ? "paused" : readRunState(evidence.layout).status,
+      const paused = result.status === "paused";
+      const pauseEvent = createEventRecord(evidence.layout, {
+        eventType: paused ? "workflow-lifecycle-already-paused" : "workflow-pause-requested",
+        status: paused ? "paused" : readRunState(evidence.layout).status,
         payload: {
           action: "pause",
           workflow_run_id: evidence.smithersRunId,
@@ -1306,6 +1308,17 @@ export async function pauseRun(input: PauseRunInput) {
           controller_invoked_at: controllerInvocation.timestamp
         }
       });
+      // The paused status and the event that evidences it must be one recoverable
+      // commit, so a crash cannot leave a durably paused run with no event
+      // explaining the transition.
+      if (paused) {
+        await commitWorkflowSynchronizationState(evidence.layout, {
+          state: projectRunStatus(readRunState(evidence.layout), "paused"),
+          events: [pauseEvent]
+        });
+      } else {
+        ensureEventRecords(evidence.layout, [pauseEvent]);
+      }
     } finally {
       await releaseCompletionLock();
     }
@@ -1655,25 +1668,24 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         });
         evidence = await requireLinkedWorkflowEvidence(projectRoot, input.runId);
       }
+      let submittedState = readRunState(evidence.layout);
       if (!lifecycleResult.alreadyRunning) {
-        const state = readRunState(evidence.layout);
         const leaseDurationMs = resolved.config.run.controllerLeaseSeconds * 1_000;
-        state.concurrency.requested_concurrency = requestedConcurrency;
-        state.controller_lease = {
-          ...state.controller_lease,
+        submittedState.concurrency.requested_concurrency = requestedConcurrency;
+        submittedState.controller_lease = {
+          ...submittedState.controller_lease,
           status: "active",
           duration_ms: leaseDurationMs,
           renewed_at: submittedAt,
           expires_at: new Date(Date.parse(submittedAt) + leaseDurationMs).toISOString()
         };
-        state.workflow_deadline_at = new Date(
+        submittedState.workflow_deadline_at = new Date(
           Date.parse(submittedAt) + resolved.config.run.workflowDeadlineSeconds * 1_000
         ).toISOString();
-        state.last_transition_at = submittedAt;
-        writeRunState(evidence.layout, state);
+        submittedState.last_transition_at = submittedAt;
       }
-      updateRunStatus(evidence.layout, "running", submittedAt);
-      appendEvent(evidence.layout, {
+      submittedState = projectRunStatus(submittedState, "running", submittedAt);
+      const submittedEvent = createEventRecord(evidence.layout, {
         eventType: lifecycleResult.alreadyRunning
           ? "workflow-lifecycle-already-running"
           : "workflow-lifecycle-submitted",
@@ -1689,6 +1701,13 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
           ...(input.resetNode !== undefined ? { reset_node: input.resetNode } : {}),
           ...(lifecycleResult.recoveredMissingRun ? { recovered_missing_workflow_run: true } : {})
         }
+      });
+      // The submitted lease/deadline projection, the running status, and the event
+      // that evidences the submission are a single logical transition and must be
+      // committed as one recoverable unit rather than three separate writes.
+      await commitWorkflowSynchronizationState(evidence.layout, {
+        state: submittedState,
+        events: [submittedEvent]
       });
       if (journalEntry !== undefined) {
         journalEntry = transitionWorkflowLifecycleAction(evidence.layout, journalEntry.action_id, "submitted", {

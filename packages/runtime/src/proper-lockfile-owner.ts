@@ -7,6 +7,35 @@ import lockfile from "proper-lockfile";
 const RECLAIM_GUARD_STALE_MS = 30_000;
 
 /**
+ * proper-lockfile's default `onCompromised` rethrows, and it is invoked from
+ * inside the heartbeat's `fs.stat`/`fs.utimes` callback rather than from a
+ * promise, so the default turns a lost heartbeat into an unhandled exception that
+ * aborts the whole runtime process. Every lock this repository takes instead
+ * swallows the compromise notification: each holder independently re-verifies its
+ * own exact owner marker before releasing, so a genuinely lost lock surfaces as a
+ * normal error in the caller's control flow instead of a process abort.
+ */
+export function swallowProperLockfileCompromise(): void {
+  // Intentionally empty: see the contract above.
+}
+
+/**
+ * Classifies an acquisition failure as ordinary contention that must be retried
+ * rather than a fatal fault.
+ *
+ * `ENOTEMPTY` matters as much as `ELOCKED` here. proper-lockfile reclaims a stale
+ * lock with `fs.rmdir`, which fails `ENOTEMPTY` because this repository publishes an
+ * owner marker file inside the lock directory to bind the lock to an exact process
+ * identity. Treating that as fatal would rethrow past both the wait loop and
+ * liveness-based reclamation, so a lock whose owner cannot be proven dead — for
+ * example one created by another uid, where `kill(pid, 0)` answers `EPERM` — would
+ * wedge the run permanently instead of being waited on and then reclaimed.
+ */
+export function properLockfileContentionCode(code: string | undefined): boolean {
+  return code === "ELOCKED" || code === "ENOENT" || code === "ENOTEMPTY";
+}
+
+/**
  * Serializes liveness-based reclamation with every other conforming contender.
  * The guard itself relies only on proper-lockfile's atomic mkdir/heartbeat
  * protocol; it is never manually removed from a pathname after observation.
@@ -22,7 +51,8 @@ export async function withProperLockfileReclaimGuard<T>(lockPath: string, operat
     realpath: false,
     stale: RECLAIM_GUARD_STALE_MS,
     update: 10_000,
-    retries: 0
+    retries: 0,
+    onCompromised: swallowProperLockfileCompromise
   });
   try {
     return await operation();

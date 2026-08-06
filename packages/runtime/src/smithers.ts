@@ -2054,11 +2054,17 @@ async function terminateSpawnedCommandTree(input: {
   hardCleanup: () => void;
 }): Promise<void> {
   const startedAt = Date.now();
+  // Never signal a process group that is not observably ours: the group is named
+  // by the direct child's pid, and once that child is reaped the kernel may reuse
+  // the pid, so an unconditional negative-pid signal can terminate an unrelated
+  // co-tenant group.
+  if (!spawnedCommandTreeIsAlive(input.processGroupId, input.directChildAlive)) return;
   input.signal("SIGTERM");
   if (await waitForSpawnedCommandTreeExit(input, startedAt + input.graceMs)) return;
   input.signal("SIGKILL");
   if (await waitForSpawnedCommandTreeExit(input, startedAt + input.hardLimitMs)) return;
   input.hardCleanup();
+  if (!spawnedCommandTreeIsAlive(input.processGroupId, input.directChildAlive)) return;
   input.signal("SIGKILL");
   if (spawnedCommandTreeIsAlive(input.processGroupId, input.directChildAlive)) {
     throw new Error("workflow runner process group remained alive after SIGKILL");
@@ -2079,14 +2085,68 @@ async function waitForSpawnedCommandTreeExit(
 
 function spawnedCommandTreeIsAlive(processGroupId: number | undefined, directChildAlive: () => boolean): boolean {
   if (process.platform === "win32" || processGroupId === undefined) return directChildAlive();
-  try {
-    process.kill(-processGroupId, 0);
-    return true;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && String(error.code) === "ESRCH") return false;
-    if (error instanceof Error && "code" in error && String(error.code) === "EPERM") return true;
-    throw error;
+  if (directChildAlive()) {
+    // The group leader is still unreaped, so its pid cannot have been recycled and
+    // the group named by it is necessarily the one this process created.
+    try {
+      process.kill(-processGroupId, 0);
+      return true;
+    } catch (error) {
+      if (error instanceof Error && "code" in error && String(error.code) === "ESRCH") return false;
+      if (error instanceof Error && "code" in error && String(error.code) === "EPERM") return true;
+      throw error;
+    }
   }
+  // The leader has been reaped, so a bare `kill(-pgid, 0)` probe would also succeed
+  // for an unrelated group that reused the pid. Only a surviving non-leader member
+  // proves the group is still the one this process created, and those members are
+  // exactly the descendants that must still be torn down.
+  return spawnedCommandTreeHasSurvivingMember(processGroupId);
+}
+
+/**
+ * Reports whether any live process other than the (already reaped) group leader is
+ * still a member of the group. Membership is read from procfs, which is the only
+ * way to distinguish surviving descendants from a recycled process id. Platforms
+ * without procfs answer `false`, which is the fail-safe direction: a descendant may
+ * linger, but no unrelated process group is ever signalled.
+ */
+function spawnedCommandTreeHasSurvivingMember(processGroupId: number): boolean {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync("/proc");
+  } catch {
+    return false;
+  }
+  for (const entry of entries) {
+    if (!/^\d+$/u.test(entry)) continue;
+    const pid = Number(entry);
+    // A live process whose pid equals the group id is a reuse of the reaped
+    // leader's pid, never evidence that the original group survives.
+    if (pid === processGroupId) continue;
+    if (readProcessGroupId(pid) === processGroupId) return true;
+  }
+  return false;
+}
+
+function readProcessGroupId(pid: number): number | undefined {
+  let stat: string;
+  try {
+    stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+  } catch {
+    return undefined;
+  }
+  // `comm` is parenthesized and may itself contain spaces and parentheses, so the
+  // numeric fields are parsed after its final closing parenthesis. Field 5 of the
+  // published layout (index 2 after `comm`) is the process group id.
+  const commEnd = stat.lastIndexOf(")");
+  if (commEnd < 0) return undefined;
+  const fields = stat
+    .slice(commEnd + 1)
+    .trim()
+    .split(/\s+/u);
+  const group = Number(fields[2]);
+  return Number.isSafeInteger(group) && group > 0 ? group : undefined;
 }
 
 /**
@@ -2738,46 +2798,34 @@ export async function runSmithersLifecycleCommand(input: {
     };
   }
 
-  const command =
-    input.action === "resume"
-      ? [
-          "up",
-          input.workflowPath,
-          "--resume",
-          input.smithersRunId,
-          "--run-id",
-          input.smithersRunId,
-          ...(input.force === true ? ["--force"] : []),
-          "--detach",
-          ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
-          "--format",
-          "json",
-          ...supervisorCommandArgs(input.controllerLeaseSeconds)
-        ]
-      : [
-          input.action,
-          input.workflowPath,
-          "--run-id",
-          input.smithersRunId,
-          "--run",
-          "--label",
-          input.correlationLabel!,
-          "--format",
-          "json"
-        ];
+  // Only `resume` can reach this point: a checkpoint frame is mandatory for both
+  // `fork` and `replay` above, and each of those actions returns from its own
+  // dedicated prepare-only branch.
+  const command = [
+    "up",
+    input.workflowPath,
+    "--resume",
+    input.smithersRunId,
+    "--run-id",
+    input.smithersRunId,
+    ...(input.force === true ? ["--force"] : []),
+    "--detach",
+    ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+    "--format",
+    "json",
+    ...supervisorCommandArgs(input.controllerLeaseSeconds)
+  ];
   input.onDetachedInvocation?.();
   const result = await execSmithersCli({
     args: command,
     projectRoot: input.projectRoot,
     env: input.env,
     environmentVariableNames: input.environmentVariableNames,
-    keepWorkspaces: input.keepWorkspaces,
-    ...(input.action === "fork" ? { onSpawn: input.onExternalInvocationSpawned } : {})
+    keepWorkspaces: input.keepWorkspaces
   });
   return {
     ...result,
-    stderr: [preResumeStderr, result.stderr].filter((value) => value.length > 0).join("\n"),
-    ...(input.action === "fork" ? { workflowRunId: parseForkedRunId(result.stdout) } : {})
+    stderr: [preResumeStderr, result.stderr].filter((value) => value.length > 0).join("\n")
   };
 }
 

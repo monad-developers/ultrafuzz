@@ -83,6 +83,8 @@ import { checkDependencyLegality } from "./artifact-gates.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
 import {
   captureProperLockfileDirectoryIdentity,
+  properLockfileContentionCode,
+  swallowProperLockfileCompromise,
   withProperLockfileReclaimGuard,
   writeProperLockfileOwner
 } from "./proper-lockfile-owner.js";
@@ -442,7 +444,8 @@ export async function acquireWorkflowStartPreparationLock(layout: RunLayout): Pr
           realpath: false,
           stale: START_PREPARATION_LOCK_STALE_MS,
           update: 30_000,
-          retries: 0
+          retries: 0,
+          onCompromised: swallowProperLockfileCompromise
         });
         const acquiredOwner = startPreparationLockOwner();
         try {
@@ -469,7 +472,7 @@ export async function acquireWorkflowStartPreparationLock(layout: RunLayout): Pr
       owner = acquired.owner;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ELOCKED" && code !== "ENOENT") throw error;
+      if (!properLockfileContentionCode(code)) throw error;
       if (Date.now() >= deadline) throw error;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
@@ -1203,7 +1206,8 @@ export async function repairMissingRenderedPromptsForRun(input: {
       factor: 1,
       minTimeout: 250,
       maxTimeout: 1_000
-    }
+    },
+    onCompromised: swallowProperLockfileCompromise
   });
   try {
     return repairRenderedPromptsForRun({ projectRoot, runId: input.runId, layout });

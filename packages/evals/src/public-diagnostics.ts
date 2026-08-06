@@ -272,7 +272,19 @@ export type PublicPricingEvidence = z.infer<typeof pricingEvidenceSchema>;
  * documented. This is evidence scope, not an inference about provider weights.
  */
 export function publicModelIdentityScope(providerReportedModel: string): PublicModelIdentityScope {
-  return providerReportedModel === DEEPSEEK_V4_FLASH_MODEL ? "provider-reported-alias" : "provider-reported-model-id";
+  return normalizedPublicModelName(providerReportedModel) === DEEPSEEK_V4_FLASH_MODEL
+    ? "provider-reported-alias"
+    : "provider-reported-model-id";
+}
+
+/**
+ * Model names are compared case-insensitively because provider rate resolution
+ * already lowercases before pinning a provider. Without this, a mixed-case spelling
+ * would still resolve the aliased model's rates while being classified under the
+ * stronger `provider-reported-model-id` scope and skipping its pinned rate check.
+ */
+export function normalizedPublicModelName(value: string): string {
+  return value.trim().toLowerCase();
 }
 
 export function parsePublicModelIdentity(value: unknown): PublicModelIdentity {
@@ -325,7 +337,9 @@ export function parsePublicEvalDiagnostics(value: unknown): PublicEvalDiagnostic
   }
   const expected = legacy
     ? summarizeLegacyPublicEvalDiagnosticsRows(parsed.rows)
-    : summarizePublicEvalDiagnosticsRows(parsed.rows);
+    : parsed.schema_version === PUBLIC_EVAL_DIAGNOSTICS_V2_SCHEMA_VERSION
+      ? summarizePreviousPublicEvalDiagnosticsRows(parsed.rows)
+      : summarizePublicEvalDiagnosticsRows(parsed.rows);
   if (JSON.stringify(parsed.summary) !== JSON.stringify(expected)) {
     throw new Error("public eval diagnostics summary is inconsistent");
   }
@@ -348,6 +362,30 @@ export function summarizePublicEvalDiagnosticsRows(rows: PublicEvalDiagnosticsRo
     genuine_task_failure_rows: rows.filter((row) => row.terminal_disposition === "genuine-task-failures").length,
     terminal_reports_present: rows.filter((row) => row.terminal_report_present).length,
     scoring_ready: rows.every((row) => row.scoring_ready) && publicEvalDiagnosticsFailedTargetCount(rows) <= 1
+  };
+}
+
+/**
+ * The v2 summary differs from v4 only in the failed-datapoint rule used by the
+ * one-failed-target cap, which v2 evaluated with the operational-failure allowance.
+ */
+function summarizePreviousPublicEvalDiagnosticsRows(
+  rows: PublicEvalDiagnosticsRow[]
+): PublicEvalDiagnostics["summary"] {
+  const failedTargets = new Set(
+    rows
+      .filter(
+        (row) =>
+          row.final_status === "failed" &&
+          row.workflow_status === "failed" &&
+          row.workflow_terminal &&
+          (row.terminal_disposition === "genuine-task-failures" || row.terminal_disposition === "operational-failure")
+      )
+      .map((row) => row.target_id)
+  ).size;
+  return {
+    ...summarizePublicEvalDiagnosticsRows(rows),
+    scoring_ready: rows.every((row) => row.scoring_ready) && failedTargets <= 1
   };
 }
 
@@ -440,17 +478,34 @@ function v3PublicEvalDiagnosticsReadinessReasonCodes(
   return reasons;
 }
 
+/**
+ * Readiness exactly as the published v2 contract defined it. v2 admitted an
+ * operational failure as a scoreable failed datapoint; v4 deliberately does not.
+ * A compatibility branch must keep evaluating documents under the rule that was in
+ * force when they were written, otherwise a document that was valid when published
+ * is rejected as internally inconsistent rather than recognized as an older schema.
+ * v1 is intentionally not covered here: it always used the stricter
+ * genuine-task-failures-only rule.
+ */
 function previousPublicEvalDiagnosticsReadinessReasonCodes(
   row: Omit<Parameters<typeof publicEvalDiagnosticsReadinessReasonCodes>[0], "model_identity" | "pricing">
 ): PublicEvalDiagnosticsReasonCode[] {
-  const failedDatapoint = publicEvalDiagnosticsRowIsFailedDatapoint(row);
+  const failedDatapoint =
+    row.final_status === "failed" &&
+    row.workflow_status === "failed" &&
+    row.workflow_terminal &&
+    (row.terminal_disposition === "genuine-task-failures" || row.terminal_disposition === "operational-failure");
   const reasons: PublicEvalDiagnosticsReasonCode[] = [];
   if (row.run_status === "missing") reasons.push("run-record-missing");
   if (row.run_status === "failed") reasons.push("launch-failed");
   if (!row.workflow_terminal) reasons.push("workflow-nonterminal");
   if (row.workflow_status !== "succeeded" && !failedDatapoint) reasons.push("workflow-not-scoreable");
   if (row.final_status !== "succeeded" && !failedDatapoint) reasons.push("final-status-not-scoreable");
-  if (row.final_status === "failed" && row.terminal_disposition !== "genuine-task-failures") {
+  if (
+    row.final_status === "failed" &&
+    row.terminal_disposition !== "genuine-task-failures" &&
+    row.terminal_disposition !== "operational-failure"
+  ) {
     reasons.push("terminal-disposition-not-scoreable");
   }
   if (row.workflow_ids.length === 0) reasons.push("workflow-id-missing");
@@ -516,7 +571,7 @@ function assertPublicModelAndPricingEvidence(row: PublicEvalDiagnosticsRow, expe
       throw new Error(`public eval diagnostics row pricing identity is inconsistent: ${row.row_id}`);
     }
     assertPublicPricingArithmetic(pricing, row.row_id);
-    if (pricing.configured_model === DEEPSEEK_V4_FLASH_MODEL) {
+    if (normalizedPublicModelName(pricing.configured_model) === DEEPSEEK_V4_FLASH_MODEL) {
       assertDeepSeekV4FlashPricing(pricing, row.row_id);
     }
   }

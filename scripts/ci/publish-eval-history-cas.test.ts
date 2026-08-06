@@ -253,7 +253,12 @@ describe("eval history Git CAS publisher", () => {
     );
   });
 
-  it("rejects a first publication when the history CLI changes only a subset of charts", () => {
+  it("publishes a first publication whose deterministic chart rendering leaves one chart unchanged", () => {
+    // Chart rendering is deterministic, so a chart whose own inputs did not change
+    // is legitimately byte-identical. `latest-summary.svg` in particular renders only
+    // the newest observation by run timestamp. Requiring an exact staged path set
+    // would permanently reject a fully scored result, because the rejection escapes
+    // the compare-and-swap retry loop. The semantic delta is asserted separately.
     const fixture = createRepositoryFixture();
     const inputRoot = path.join(fixture.root, "inputs");
     const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
@@ -261,14 +266,31 @@ describe("eval history Git CAS publisher", () => {
     const generation = writeGeneration(fixture.root, "generation-subset.json", ["run-subset"], candidateCommit);
     const previous = process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS;
     process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS = "1";
+    let result;
     try {
-      expect(() => publishEvalHistoryGeneration(publisherInput(fixture.checkoutA, generation, inputRoot))).toThrow(
-        /must change history and all six metric charts/u
-      );
+      result = publishEvalHistoryGeneration(publisherInput(fixture.checkoutA, generation, inputRoot));
     } finally {
       if (previous === undefined) delete process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS;
       else process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS = previous;
     }
+    expect(result.published).toBe(true);
+    expect(result.eval_run_ids).toEqual(["run-subset"]);
+    const changed = git(fixture.bare, ["show", "--name-only", "--format=", TARGET_REF])
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .sort();
+    // History must still be recorded, and the unchanged chart must simply be absent
+    // rather than causing a rejection.
+    expect(changed).toContain("benchmarks/history.json");
+    expect(changed).not.toContain("docs/assets/eval-history/cost.svg");
+    const history = JSON.parse(git(fixture.bare, ["show", `${TARGET_REF}:benchmarks/history.json`])) as {
+      observations: Array<{ id: string }>;
+    };
+    expect(history.observations.map((observation) => observation.id)).toEqual([
+      "observation-a",
+      "observation-b",
+      "observation-c"
+    ]);
   });
 
   it("rejects a coherently parseable publication tree substituted after generation preparation", () => {

@@ -390,20 +390,28 @@ function deepSeekUsageEvidenceFromResultLine(
   const inputTokens = exactTokenCount(modelUsage, "inputTokens");
   const outputTokens = exactTokenCount(modelUsage, "outputTokens");
   const cacheReadTokens = exactTokenCount(modelUsage, "cacheReadInputTokens");
-  const cacheWriteTokens = exactTokenCount(modelUsage, "cacheCreationInputTokens");
+  const cacheCreationTokens = exactTokenCount(modelUsage, "cacheCreationInputTokens");
   if (
     inputTokens.status !== "complete" ||
     outputTokens.status !== "complete" ||
     cacheReadTokens.status !== "complete" ||
-    cacheWriteTokens.status !== "complete"
+    cacheCreationTokens.status !== "complete"
   ) {
     return { status: "incomplete" };
   }
+  // DeepSeek bills cache creation as an ordinary cache-miss input token and
+  // therefore publishes no cache-write rate at all. Reporting these tokens as a
+  // separate cache-write component would price them against a nonexistent rate,
+  // which fails accounting completeness for the whole run rather than costing
+  // them correctly, so they are folded into the uncached input component they
+  // are actually billed as. The token total is unchanged by the fold.
+  const uncachedInputTokens = inputTokens.value + cacheCreationTokens.value;
+  if (!Number.isSafeInteger(uncachedInputTokens)) return { status: "incomplete" };
   const normalized = {
-    inputTokens: inputTokens.value,
+    inputTokens: uncachedInputTokens,
     outputTokens: outputTokens.value,
     cacheReadTokens: cacheReadTokens.value,
-    cacheWriteTokens: cacheWriteTokens.value
+    cacheWriteTokens: 0
   };
   const totalTokens =
     normalized.inputTokens + normalized.cacheReadTokens + normalized.cacheWriteTokens + normalized.outputTokens;

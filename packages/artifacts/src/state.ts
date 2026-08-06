@@ -309,24 +309,34 @@ export function loadOrCreateRunState(target: RunLayoutStateLike | string, state:
   return state;
 }
 
+/**
+ * Applies a run status transition without persisting it, so a caller that must
+ * commit the transition together with its evidence events can hand both to one
+ * crash-consistent commit instead of writing state and events separately.
+ */
+export function projectRunStatus(state: RunState, status: RunStatus, timestamp = new Date().toISOString()): RunState {
+  const projected = { ...state };
+  if (projected.status !== status) {
+    projected.last_transition_at = timestamp;
+  }
+  projected.status = status;
+  if (status === "running" && projected.started_at === undefined) {
+    projected.started_at = timestamp;
+  }
+  if (isTerminalRunStatus(status)) {
+    projected.finished_at = timestamp;
+  } else {
+    delete projected.finished_at;
+  }
+  return projected;
+}
+
 export function updateRunStatus(
   target: RunLayoutStateLike | string,
   status: RunStatus,
   timestamp = new Date().toISOString()
 ): RunState {
-  const state = readRunState(target);
-  if (state.status !== status) {
-    state.last_transition_at = timestamp;
-  }
-  state.status = status;
-  if (status === "running" && state.started_at === undefined) {
-    state.started_at = timestamp;
-  }
-  if (isTerminalRunStatus(status)) {
-    state.finished_at = timestamp;
-  } else {
-    delete state.finished_at;
-  }
+  const state = projectRunStatus(readRunState(target), status, timestamp);
   writeRunState(target, state);
   return state;
 }

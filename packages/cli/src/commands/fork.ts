@@ -8,7 +8,10 @@ export default class Fork extends Command {
   static override args = { runId: Args.string({ required: true, description: "Ultrafuzz run ID" }) };
   static override flags = {
     ...globalFlags,
-    frame: Flags.integer({ required: true, summary: "Checkpoint frame to fork from" }),
+    // Deliberately not oclif-`required`, matching `replay`: the runtime owns this
+    // rule and reports it as the typed WORKFLOW_FORK_FRAME_REQUIRED diagnostic, so
+    // automation can branch on a stable code instead of a generic parser error.
+    frame: Flags.integer({ summary: "Non-negative checkpoint frame to fork from" }),
     "reset-node": Flags.string({ summary: "Workflow node ID to reset to pending" }),
     label: Flags.string({ summary: "Fork label" }),
     "max-concurrency": Flags.integer({ summary: "Maximum parallel tasks when starting the fork" })

@@ -1,7 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { appendEvent, readRunState, updateRunStatus } from "@ultrafuzz/artifacts";
+import {
+  appendEvent,
+  createEventRecord,
+  ensureEventRecords,
+  projectRunStatus,
+  readRunState,
+  type RunState
+} from "@ultrafuzz/artifacts";
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 
 import {
@@ -50,6 +57,7 @@ import {
 import {
   acquireWorkflowLifecycleActionLock,
   acquireWorkflowMutationLock,
+  commitWorkflowSynchronizationState,
   pendingWorkflowLifecycleAction,
   workflowLifecyclePublicBranchLabels
 } from "./workflow-mutation.js";
@@ -111,7 +119,7 @@ export async function cancelRun(input: CancelRunInput) {
     });
     const confirmed = result.status === "cancelled";
     let persistedStatus: ReturnType<typeof readRunState>["status"] | "pending" = "pending";
-    let state: ReturnType<typeof updateRunStatus> | undefined;
+    let state: RunState | undefined;
     const releaseCompletionLock = await acquireWorkflowMutationLock(evidence.layout);
     try {
       evidence = await requireMatchingLinkedWorkflowEvidence(projectRoot, input.runId, evidence);
@@ -119,10 +127,7 @@ export async function cancelRun(input: CancelRunInput) {
       // `pending` runs are cancellable too, and the append-only event evidence
       // must not record a state the run was never in.
       persistedStatus = fs.existsSync(evidence.layout.statePath) ? readRunState(evidence.layout).status : "pending";
-      // A durable request keeps the product run nonterminal; only a confirmed
-      // cancellation writes Ultrafuzz's canonical terminal spelling.
-      state = confirmed ? updateRunStatus(evidence.layout, "canceled") : undefined;
-      appendEvent(evidence.layout, {
+      const cancelEvent = createEventRecord(evidence.layout, {
         eventType: confirmed ? "workflow-cancel-confirmed" : "workflow-cancel-requested",
         status: confirmed ? "canceled" : persistedStatus,
         payload: {
@@ -135,6 +140,21 @@ export async function cancelRun(input: CancelRunInput) {
           confirmed
         }
       });
+      // A durable request keeps the product run nonterminal; only a confirmed
+      // cancellation writes Ultrafuzz's canonical terminal spelling. That terminal
+      // status and its confirming event must land as one recoverable commit:
+      // cancellation has no lifecycle-action journal entry, so a crash between two
+      // separate writes would leave a durably canceled run with no confirming
+      // event and nothing able to repair it, after which orphan closing would
+      // append a contradictory lifecycle-failed event.
+      if (confirmed) {
+        const canceled = projectRunStatus(readRunState(evidence.layout), "canceled");
+        await commitWorkflowSynchronizationState(evidence.layout, { state: canceled, events: [cancelEvent] });
+        state = canceled;
+      } else {
+        ensureEventRecords(evidence.layout, [cancelEvent]);
+        state = undefined;
+      }
     } finally {
       await releaseCompletionLock();
     }

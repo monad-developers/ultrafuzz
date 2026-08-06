@@ -605,6 +605,21 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     "WORKFLOW_REPLAY_FRAME_INVALID"
   );
 
+  // `fork` must report the same rule through the same typed contract as `replay`,
+  // rather than as a generic parser error that automation cannot branch on.
+  const missingForkFrame = await cli(project, ["fork", runData.run_id, "--json"], env);
+  assert.equal(missingForkFrame.code, 1, missingForkFrame.stderr);
+  assert.equal(
+    (parseJson(missingForkFrame).diagnostics as Array<{ code?: string }>)[0]?.code,
+    "WORKFLOW_FORK_FRAME_REQUIRED"
+  );
+  const invalidForkFrame = await cli(project, ["fork", runData.run_id, "--frame", "-1", "--json"], env);
+  assert.equal(invalidForkFrame.code, 1, invalidForkFrame.stderr);
+  assert.equal(
+    (parseJson(invalidForkFrame).diagnostics as Array<{ code?: string }>)[0]?.code,
+    "WORKFLOW_FORK_FRAME_INVALID"
+  );
+
   for (const command of ["resume", "replay"]) {
     const args =
       command === "resume"

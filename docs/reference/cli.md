@@ -28,7 +28,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `ultrafuzz doctor`                  | Report validation, toolchain, and pinned workflow engine install posture without mutating anything.              |
 | `ultrafuzz resume <run-id>`         | Delegate resume for the linked workflow run after product checks.                                                |
 | `ultrafuzz replay <run-id>`         | Replay the linked workflow run from a required checkpoint frame after product checks.                            |
-| `ultrafuzz fork <run-id>`           | Delegate fork for the linked workflow run after product checks.                                                  |
+| `ultrafuzz fork <run-id>`           | Delegate fork for the linked workflow run from a required checkpoint frame after product checks.                 |
 | `ultrafuzz report <run-id>`         | Locate the agent-written final report artifacts.                                                                 |
 | `ultrafuzz materialize <run-id>`    | Copy selected reviewed outputs into the target project after confirmation and path checks.                       |
 | `ultrafuzz clean <run-id>`          | Remove selected generated `.ultrafuzz/**` paths after confirmation and path checks.                              |

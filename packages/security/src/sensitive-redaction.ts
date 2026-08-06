@@ -101,7 +101,9 @@ export function secretValueRepresentations(secret: string): string[] {
     hex,
     hex.toUpperCase(),
     percentUpper,
-    percentUpper.toLowerCase()
+    percentUpper.toLowerCase(),
+    ...embeddedBase64Representations(bytes),
+    ...unicodeEscapeRepresentations(secret)
   ]);
   try {
     const uriComponent = encodeURIComponent(secret);
@@ -114,6 +116,46 @@ export function secretValueRepresentations(secret: string): string[] {
   }
   representations.delete("");
   return [...representations].sort((left, right) => right.length - left.length || left.localeCompare(right));
+}
+
+/**
+ * Base64 encodes three bytes into four characters, so a credential embedded at a
+ * byte offset that is not a multiple of three encodes to entirely different
+ * characters than the credential encoded on its own. That is the common case in
+ * practice: an HTTP request/response body or a JSON envelope is base64-encoded as
+ * a whole, placing the credential at an arbitrary offset. This enumerates, for
+ * each of the three alignments, the substring of the encoding that depends only on
+ * the credential's own bytes, so a plain substring search finds it at any offset.
+ */
+function embeddedBase64Representations(bytes: Buffer): string[] {
+  const representations: string[] = [];
+  for (const phase of [1, 2]) {
+    // Only whole 3-byte groups encode to characters determined solely by the
+    // credential, so drop the leading group (shared with the prefix) and any
+    // trailing partial group (shared with whatever follows).
+    const padded = Buffer.concat([Buffer.alloc(phase), bytes]);
+    const encoded = padded.toString("base64");
+    const start = 4;
+    const end = encoded.length - (padded.length % 3 === 0 ? 0 : 4);
+    if (end - start < 8) continue;
+    const aligned = encoded.slice(start, end);
+    representations.push(aligned, aligned.replaceAll("+", "-").replaceAll("/", "_"));
+  }
+  return representations;
+}
+
+/**
+ * A credential serialized through a JSON encoder that escapes non-ASCII, or
+ * embedded in source that escapes every character, survives as `\uXXXX` units.
+ */
+function unicodeEscapeRepresentations(secret: string): string[] {
+  let lower = "";
+  for (const unit of secret) {
+    const code = unit.codePointAt(0);
+    if (code === undefined || code > 0xff_ff) return [];
+    lower += `\\u${code.toString(16).padStart(4, "0")}`;
+  }
+  return lower === "" ? [] : [lower, lower.toUpperCase().replaceAll("\\U", "\\u")];
 }
 
 export function containsSecretValueRepresentation(

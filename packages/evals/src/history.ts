@@ -495,13 +495,15 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
     .map((rows) => {
       const first = rows[0]!;
       const scores = rows.map((row) => summaryRows.get(row.id)!);
+      // `verifiedPublishableFailureRows` admits only genuine task failures, so a
+      // publishable non-succeeded observation is always a genuine task failure. The
+      // `"failed"` status stays in the schema because observations published under
+      // the earlier, laxer rule still carry it.
       const status: EvalHistoryObservationStatus = scores.every(
         (score) => score.lifecycle.workflow.terminal && score.lifecycle.workflow.status === "succeeded"
       )
         ? "succeeded"
-        : rows.some((row) => verifiedFailureStatuses.get(row.id) === "failed")
-          ? "failed"
-          : "genuine-task-failures";
+        : "genuine-task-failures";
       const targetPublication = targetPublicationForRows(rows, scores, status, publicationBundlePath);
       const model = requiredConsistent(
         rows.map((row) => row.runner_model),
