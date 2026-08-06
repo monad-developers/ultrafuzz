@@ -355,10 +355,12 @@ const SMITHERS_CLI_FORK_PREPARE_SOURCE = "            autoRun: c.options.run,";
 const SMITHERS_CLI_FORK_PREPARE_PATCH = "            autoRun: c.options.run || c.options.ultrafuzzPrepareOnly,";
 const SMITHERS_CLI_FORK_FOREGROUND_SOURCE = "          if (c.options.run) {";
 const SMITHERS_CLI_FORK_FOREGROUND_PATCH = "          if (c.options.run && !c.options.ultrafuzzPrepareOnly) {";
-// Invariants rather than rewrites: the descriptor-anchored execution paths must
-// remain exactly as upstream publishes them. Describing them as patches whose
-// patchable and patched text are identical keeps them verified by the same registry
-// that reports and applies every other workaround, so neither can silently vanish.
+// Invariants rather than rewrites: the descriptor-anchored execution paths must remain
+// exactly as upstream publishes them. They are described in
+// SMITHERS_REQUIRED_ENGINE_ANCHORS rather than as compatibility patches, because a
+// patch is defined by the upstream text it replaces and the retirement check requires
+// that replacement to be absent upstream, which can never hold for text that must
+// already be present.
 // `activateRunForResume` writes the durable run row on the RESUME path. Upstream
 // passes it `resolvedWorkflowPath`, which is the descriptor-anchored argument — a
 // per-process `/proc/<pid>/fd/...` path. Persisting that would rewrite the row on the
@@ -1277,7 +1279,7 @@ export interface SmithersInstallationPosture {
   installed_bin_target: string | null;
   bin_path: string | null;
   layout_error: string | null;
-  compatibility_patches: Record<SmithersCompatibilityPatchId, SmithersPatchPosture>;
+  compatibility_patches: Record<string, SmithersPatchPosture>;
 }
 
 export interface SmithersCommandSnapshot {
@@ -2581,7 +2583,7 @@ function inspectSmithersCompatibilityPatches(
   projectRoot: string
 ): SmithersInstallationPosture["compatibility_patches"] {
   const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
-  const postures = {} as Record<SmithersCompatibilityPatchId, SmithersPatchPosture>;
+  const postures: Record<string, SmithersPatchPosture> = {};
   for (const patch of SMITHERS_COMPATIBILITY_PATCHES) {
     const candidateRoots = smithersDependencyRootCandidates(nodeModules, patch.packageName);
     if (candidateRoots.length === 1) {
@@ -2593,6 +2595,23 @@ function inspectSmithersCompatibilityPatches(
     // so this must not read as merely unavailable. No root at all genuinely leaves
     // the posture unknown.
     postures[patch.id] = candidateRoots.length > 1 ? "incompatible" : "unknown";
+  }
+  // Report the never-rewritten anchors too. They are not patches, but applying hard-
+  // fails when one is missing, and an unreported posture reads as healthy — so leaving
+  // them out would let a tree that cannot run look fine in `doctor`. Presence is the
+  // only meaningful state: `applied` when intact, `incompatible` when upstream moved it.
+  for (const required of SMITHERS_REQUIRED_ENGINE_ANCHORS) {
+    const candidateRoots = smithersDependencyRootCandidates(nodeModules, required.packageName);
+    if (candidateRoots.length !== 1) {
+      postures[required.id] = candidateRoots.length > 1 ? "incompatible" : "unknown";
+      continue;
+    }
+    const source = path.join(candidateRoots[0]!, ...required.sourceRelativePath.split("/"));
+    if (!fs.existsSync(source)) {
+      postures[required.id] = "unknown";
+      continue;
+    }
+    postures[required.id] = fs.readFileSync(source, "utf8").includes(required.anchor) ? "applied" : "incompatible";
   }
   return postures;
 }

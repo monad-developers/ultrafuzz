@@ -20,10 +20,12 @@ import lockfile from "proper-lockfile";
 import {
   beginProperLockfileHold,
   captureProperLockfileDirectoryIdentity,
+  discardStaleOwnerPublicationDebris,
   forgetProperLockfileCompromise,
   properLockfileCompromiseHandler,
   properLockfileContentionCode,
   properLockfileIsCompromised,
+  recordLostProperLockfileHold,
   releaseOwnedProperLockfile,
   withProperLockfileReclaimGuard,
   writeProperLockfileOwner
@@ -785,7 +787,7 @@ async function releaseOwnedRunLock(
   label: string,
   release: () => Promise<void>
 ): Promise<void> {
-  await releaseOwnedProperLockfile({
+  const { lost } = await releaseOwnedProperLockfile({
     lockPath,
     ownerPath,
     label,
@@ -798,6 +800,10 @@ async function releaseOwnedRunLock(
       }
     }
   });
+  // A release that could not complete leaves the lock directory behind with a live
+  // owner, which reclamation refuses to touch. Refuse further guarded mutation on this
+  // run rather than continuing as though the lock were free.
+  if (lost) recordLostProperLockfileHold(lockPath);
 }
 
 /**
@@ -953,6 +959,7 @@ function reclaimTerminatedWorkflowRunLock(layout: RunLayout, lockPath: string, l
   const ownerPath = path.join(lockPath, WORKFLOW_MUTATION_LOCK_OWNER);
   if (!fs.existsSync(ownerPath)) {
     if (Date.now() - lockStat.mtimeMs < staleMs) return;
+    discardStaleOwnerPublicationDebris(lockPath, ownerPath);
     if (fs.readdirSync(lockPath).length !== 0) {
       throw new Error(`ownerless ${label} contains unexpected evidence`);
     }

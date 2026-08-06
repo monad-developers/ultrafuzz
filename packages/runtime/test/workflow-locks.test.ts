@@ -321,3 +321,44 @@ function linuxProcessStartToken(pid: number): string | null {
     return null;
   }
 }
+
+test(
+  "a stale lock left with only owner-publication debris is reclaimed, and foreign evidence still fails closed",
+  { concurrency: false },
+  async (t) => {
+    // Publishing the owner marker writes a scratch file inside the lock directory and
+    // renames it. A crash inside that window leaves the scratch file with no marker.
+    // Reclamation treats a non-empty ownerless directory as foreign evidence, so
+    // without recognising its own debris the lock would be unrecoverable by any code
+    // path and every later lifecycle operation on the run would fail forever.
+    for (const lockKind of ["start", "mutation"] as const) {
+      const runRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), `ufz-lock-debris-${lockKind}-`));
+      t.after(() => fs.rmSync(runRoot, { recursive: true, force: true }));
+      const lockName = lockKind === "start" ? ".start-preparation-lock" : ".workflow-mutation";
+      const lockPath = path.join(runRoot, lockName);
+      const layout = layoutForRunRoot(runRoot, `debris-${lockKind}`);
+      const acquire = async (): Promise<() => Promise<void>> =>
+        lockKind === "start"
+          ? await acquireWorkflowStartPreparationLock(layout)
+          : await acquireWorkflowMutationLock(layout);
+
+      // A stale, ownerless lock directory holding only this module's scratch file.
+      fs.mkdirSync(lockPath, { recursive: true });
+      fs.writeFileSync(path.join(lockPath, ".owner.json.tmp-123-456-abcdef"), "", "utf8");
+      const stale = new Date(Date.now() - 60 * 60 * 1_000);
+      fs.utimesSync(lockPath, stale, stale);
+
+      const release = await acquire();
+      assert.equal(fs.existsSync(path.join(lockPath, "owner.json")), true, `${lockKind} republished its owner`);
+      await release();
+
+      // Genuinely foreign evidence must still fail closed rather than be deleted.
+      fs.mkdirSync(lockPath, { recursive: true });
+      fs.writeFileSync(path.join(lockPath, "operator-evidence.txt"), "keep\n", "utf8");
+      fs.utimesSync(lockPath, stale, stale);
+      await assert.rejects(acquire, /contains unexpected evidence/u, `${lockKind} rejects foreign evidence`);
+      assert.equal(fs.existsSync(path.join(lockPath, "operator-evidence.txt")), true, `${lockKind} kept evidence`);
+      fs.rmSync(lockPath, { recursive: true, force: true });
+    }
+  }
+);

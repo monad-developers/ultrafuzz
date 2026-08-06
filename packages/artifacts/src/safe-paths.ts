@@ -156,11 +156,21 @@ export function toPosixRelativePath(root: string, candidate: string): string {
   return normalizeSafeRelativePath(relative.split(path.sep).join("/"));
 }
 
+/**
+ * The scratch-file prefix `writeFileDurable` uses for a given destination. A crash
+ * between creating that scratch file and renaming it leaves debris beside the
+ * destination, so code that asserts a directory is otherwise empty needs to be able
+ * to recognise this module's own leftovers rather than treat them as foreign.
+ */
+export function durableWriteTempPrefix(filePath: string): string {
+  return `.${path.basename(filePath)}.tmp-`;
+}
+
 export function writeFileDurable(filePath: string, data: string | Uint8Array): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const tempPath = path.join(
     path.dirname(filePath),
-    `.${path.basename(filePath)}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`
+    `${durableWriteTempPrefix(filePath)}${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`
   );
   // A temp file left behind by a failed write is not inert. When the destination is
   // a marker inside a lock directory, the stray sibling makes that directory

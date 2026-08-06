@@ -84,6 +84,7 @@ import { forgeGuardMetadata } from "./forge-guard.js";
 import {
   beginProperLockfileHold,
   captureProperLockfileDirectoryIdentity,
+  discardStaleOwnerPublicationDebris,
   endProperLockfileHoldPublic,
   forgetProperLockfileCompromise,
   properLockfileCompromiseHandler,
@@ -541,6 +542,7 @@ function reclaimTerminatedStartPreparationLock(layout: RunLayout, lockPath: stri
   const ownerPath = path.join(lockPath, START_PREPARATION_LOCK_OWNER);
   if (!pathEntryExists(ownerPath)) {
     if (Date.now() - lockStat.mtimeMs < START_PREPARATION_LOCK_STALE_MS) return;
+    discardStaleOwnerPublicationDebris(lockPath, ownerPath);
     if (fs.readdirSync(lockPath).length !== 0) {
       throw new Error("ownerless workflow start preparation lock contains unexpected evidence");
     }

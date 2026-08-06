@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { writeJsonDurable } from "@ultrafuzz/artifacts";
+import { durableWriteTempPrefix, writeJsonDurable } from "@ultrafuzz/artifacts";
 import lockfile from "proper-lockfile";
 
 const RECLAIM_GUARD_STALE_MS = 30_000;
@@ -219,6 +219,47 @@ export async function releaseOwnedProperLockfile(input: OwnedProperLockfileRelea
   // against further guarded mutation for as long as the loss is unresolved.
   forgetProperLockfileCompromise(input.lockPath);
   return { lost: true };
+}
+
+/**
+ * Records a release that could not complete cleanly, so this process refuses further
+ * guarded mutation on that lock until it genuinely re-acquires it. Acquisition clears
+ * the record, which is correct: a fresh successful acquisition means the lock was
+ * reclaimed and proceeding is safe again.
+ */
+export function recordLostProperLockfileHold(lockPath: string): void {
+  properLockfileCompromiseHandler(lockPath)();
+}
+
+/**
+ * Clears this module's own owner-publication debris from a lock directory that has
+ * already been proven stale and ownerless.
+ *
+ * Publishing the owner marker writes a scratch file inside the lock directory and
+ * renames it. A crash inside that window leaves the scratch file with no marker, and
+ * because reclamation treats any non-empty ownerless directory as foreign evidence, the
+ * lock would otherwise be unrecoverable by any code path — every later lifecycle
+ * operation on that run would fail with no in-product repair. Only names matching the
+ * exact scratch prefix for this lock's own marker are removed, so genuinely foreign
+ * evidence still fails closed.
+ */
+export function discardStaleOwnerPublicationDebris(lockPath: string, ownerPath: string): void {
+  const prefix = durableWriteTempPrefix(ownerPath);
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(lockPath);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix)) continue;
+    const candidate = path.join(lockPath, entry);
+    try {
+      if (fs.lstatSync(candidate).isFile()) fs.unlinkSync(candidate);
+    } catch {
+      // Best effort: a racing reclaimer may have removed it already.
+    }
+  }
 }
 
 export interface ProperLockfileDirectoryIdentity {

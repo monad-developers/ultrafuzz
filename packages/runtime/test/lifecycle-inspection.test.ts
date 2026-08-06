@@ -1220,6 +1220,20 @@ test("diagnoseProject reports a posture for every tracked compatibility patch", 
     fs.writeFileSync(source, `${lines.join("\n")}\n`, "utf8");
   }
 
+  // The never-rewritten anchors are reported too, and are only ever `applied` (intact)
+  // or `incompatible` (upstream moved them). Seed them so the expectation is exact.
+  const { SMITHERS_REQUIRED_ENGINE_ANCHORS } = await import("../src/smithers.js");
+  for (const required of SMITHERS_REQUIRED_ENGINE_ANCHORS) {
+    const source = path.join(
+      nodeModules,
+      ...required.packageName.split("/"),
+      ...required.sourceRelativePath.split("/")
+    );
+    fs.mkdirSync(path.dirname(source), { recursive: true });
+    fs.appendFileSync(source, `${required.anchor}\n`, "utf8");
+    expected[required.id] = "applied";
+  }
+
   const doctor = await diagnoseProject({ projectRoot: project, env, offline: true });
 
   const reported = doctor.value?.workflow_engine.compatibility_patches ?? {};
