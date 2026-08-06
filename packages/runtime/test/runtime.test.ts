@@ -8137,6 +8137,102 @@ test("resume retries one failed workflow task before continuing a terminal unfin
   );
 });
 
+// R43 (issue #275) stranded permanently: a published artifact diverged from its verification
+// marker, so `prepare:<dependent>` failed forever while every `node:` stayed finished or pending.
+// With no failed node there was nothing for --retry-failed to reset. Recovery must reset the
+// DEPENDENCY so it re-runs and is genuinely re-verified, and must quarantine the inconsistent
+// marker and artifact so the exclusive publish can succeed on the re-run.
+test("resume re-runs a dependency whose verified artifact diverged from its marker", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "unverified-dependency-recovery-run";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: {
+      ok: true,
+      data: {
+        run: {
+          id: workflowRunId,
+          status: "failed",
+          error: {
+            name: "SmithersError",
+            code: "SESSION_ERROR",
+            message: "Task failed: prepare:strategy",
+            cause: {
+              message:
+                "artifact-contract failure: artifact dependency has not passed verification project-discovery for strategy",
+              cause: { message: "verified dependency artifact changed properties/lens.json" }
+            }
+          }
+        },
+        runState: { runId: workflowRunId, state: "failed" },
+        steps: [
+          { id: "prepare:strategy", state: "failed", attempt: 1 },
+          { id: "node:project-discovery", state: "finished", attempt: 1 },
+          { id: "verify:project-discovery", state: "finished", attempt: 1 },
+          { id: "node:strategy", state: "pending" }
+        ]
+      }
+    },
+    timeline: { timeline: { frames: [{ frameNo: 1 }, { frameNo: 4 }] } }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const runRoot = run.value!.run_root;
+
+  // Reproduce the diverged on-disk state: a well-formed marker whose recorded sha no longer
+  // matches the published artifact.
+  const markerDir = path.join(runRoot, ".ultrafuzz-verification");
+  fs.mkdirSync(markerDir, { recursive: true });
+  const artifactDir = path.join(runRoot, "artifacts", "project-discovery", "properties");
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.writeFileSync(path.join(artifactDir, "lens.json"), '{"properties":[]}\n', "utf8");
+  fs.writeFileSync(
+    path.join(markerDir, "project-discovery.json"),
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.artifact-verification.v1",
+      attempt_id: "project-discovery",
+      node_id: "project-discovery",
+      artifacts: [{ path: "properties/lens.json", sha256: "0".repeat(64) }],
+      publications: [{ path: "properties/lens.json", sha256: "0".repeat(64) }]
+    })}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    maxConcurrency: 8,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  // The dependency's verify and node tasks are both reset so it re-runs and re-verifies.
+  assert.match(commands, /--node-id verify:project-discovery --iteration 0 --no-deps --force/u);
+  assert.match(commands, /--node-id node:project-discovery --iteration 0 --no-deps --force/u);
+  // The inconsistent marker and artifact are quarantined, not deleted, so the re-run can publish
+  // exclusively and the original bytes stay available as evidence.
+  assert.equal(fs.existsSync(path.join(markerDir, "project-discovery.json")), false);
+  assert.equal(fs.existsSync(path.join(artifactDir, "lens.json")), false);
+  const quarantineRoot = path.join(runRoot, ".ultrafuzz-quarantine");
+  assert.equal(fs.existsSync(quarantineRoot), true);
+  const evidence = JSON.parse(
+    fs.readFileSync(path.join(runRoot, "smithers", "unverified-dependency-recovery.json"), "utf8")
+  ) as { dependencies?: string[]; quarantined?: string[] };
+  assert.deepEqual(evidence.dependencies, ["project-discovery"]);
+  assert.equal(
+    evidence.quarantined?.some((entry) => entry.endsWith("properties/lens.json")),
+    true,
+    JSON.stringify(evidence.quarantined)
+  );
+});
+
 test("resume retries failed tasks reported inside a successful terminal workflow", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
