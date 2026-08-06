@@ -682,6 +682,31 @@ test("property implementation schema accepts selection metadata and typed blocke
   );
 });
 
+test("property implementation schema treats empty optional reference lists as absent", () => {
+  const implemented = {
+    schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+    selection: {
+      priority_threshold: "high",
+      priorities: ["high"],
+      property_ids: ["property-1"]
+    },
+    properties: [
+      {
+        property_id: "property-1",
+        status: "implemented",
+        implementation_paths: ["test/recon/Properties.sol"],
+        test_paths: [],
+        reference_expectations: []
+      }
+    ]
+  };
+
+  const result = validateImplementedPropertiesSchema(implemented, "$", { requireSelection: true });
+  assert.equal(result.ok, true);
+  assert.equal(result.value?.properties[0]?.reference_expectations, undefined);
+  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@2", JSON.stringify(implemented)).ok, true);
+});
+
 test("current implementation contract requires selection while historical contract remains readable", () => {
   const historical = JSON.stringify({
     schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,

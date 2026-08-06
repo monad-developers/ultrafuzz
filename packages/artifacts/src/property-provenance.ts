@@ -35,6 +35,10 @@ const referenceExpectationIdsSchema = z
       seen.add(expectationId);
     }
   });
+const optionalReferenceExpectationIdsSchema = z.preprocess(
+  (value) => (Array.isArray(value) && value.length === 0 ? undefined : value),
+  referenceExpectationIdsSchema.optional()
+);
 export const PROPERTY_PRIORITIES = ["high", "medium", "low"] as const;
 export const propertyPrioritySchema = z.enum(PROPERTY_PRIORITIES);
 export type PropertyPriority = (typeof PROPERTY_PRIORITIES)[number];
@@ -169,7 +173,7 @@ const lensPropertySchema = z.strictObject({
   description: nonEmptyString,
   category: nonEmptyString,
   priority: propertyPrioritySchema,
-  reference_expectations: referenceExpectationIdsSchema.optional()
+  reference_expectations: optionalReferenceExpectationIdsSchema
 });
 
 export const lensPropertiesSchema = z
@@ -196,7 +200,7 @@ const canonicalPropertySchema = z.looseObject({
   description: nonEmptyString,
   category: nonEmptyString,
   priority: propertyPrioritySchema,
-  reference_expectations: referenceExpectationIdsSchema.optional(),
+  reference_expectations: optionalReferenceExpectationIdsSchema,
   sources: z.array(propertySourceSchema).min(1),
   ledger_ids: z
     .array(stableLedgerId)
@@ -254,7 +258,7 @@ const implementedPropertySchema = z.looseObject({
   status: z.enum(["implemented", "pending", "deferred", "blocked"]),
   implementation_paths: nonEmptyStringArray,
   test_paths: nonEmptyStringArray,
-  reference_expectations: referenceExpectationIdsSchema.optional(),
+  reference_expectations: optionalReferenceExpectationIdsSchema,
   blocker: z
     .strictObject({
       code: nonEmptyString,
