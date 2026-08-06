@@ -150,6 +150,176 @@ function loadPreservePinnedSourceProof(): (task: {
   ) as (task: { attemptId: string; workspacePath: string; metadata: { artifacts: { dir: string } } }) => void;
 }
 
+// The generated template carries its own copy of the invariant-ledger evidence rule, and it is the
+// copy that failed Aave run R45 (issue #289) with `invariant scan probe tests is unavailable: scan
+// probe is not a regular file`. Extracting it here means the directory allowance is pinned where it
+// actually runs, not only in the runtime gate's twin.
+function loadVerifyInvariantLedgerSourceEvidence(snapshotPaths: string[]): (
+  task: {
+    attemptId: string;
+    workspacePath: string;
+    outputs: readonly { path: string }[];
+    metadata: { node: { logicalNodeId: string }; artifacts: { dir: string } };
+  },
+  artifactRoots: readonly string[]
+) => void {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function verifyInvariantLedgerSourceEvidence");
+  const helperEnd = source.indexOf("\n\nfunction normalizeInvariantSourceLines", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+
+  const helper = source
+    .slice(helperStart, helperEnd)
+    .replace("task: (typeof taskSpecs)[number], artifactRoots: readonly string[]): void {", "task, artifactRoots) {")
+    .replace("let ledgerPath: string | undefined;", "let ledgerPath;")
+    .replace("let parsed: unknown;", "let parsed;")
+    .replace(" as unknown;", ";")
+    .replaceAll(/new Map<[^>]*>\(\)/gu, "new Map()")
+    .replaceAll("let probeStat: ReturnType<typeof lstatSync>;", "let probeStat;")
+    .replaceAll("entry.source_location)!", "entry.source_location)")
+    .replaceAll(")!.split(", ").split(");
+
+  // `readInvariantSourceSnapshot` is the step that demanded a regular file. Stubbing it records
+  // exactly which paths the loop still tries to snapshot, and reproduces R45's error for them.
+  const readInvariantSourceSnapshot = (_workspaceRoot: string, sourcePath: string, label: string) => {
+    snapshotPaths.push(sourcePath);
+    throw new Error(
+      `artifact-contract failure: invariant ${label} ${sourcePath} is unavailable: ${label} is not a regular file`
+    );
+  };
+
+  return new Function(
+    "path",
+    "readFileSync",
+    "lstatSync",
+    "realpathSync",
+    "mkdirSync",
+    "execFileSync",
+    "createHash",
+    "writeFileDurable",
+    "resolveRegularArtifactFile",
+    "validateInvariantLedgerSchema",
+    "validateInvariantSourceProofSchema",
+    "isSafeInvariantProbePath",
+    "isStrictlyInsideDirectory",
+    "invariantPathParentsInsideWorkspace",
+    "readInvariantSourceSnapshot",
+    "normalizeInvariantSourceLines",
+    "symbolFromInvariantLocation",
+    "invariantSymbolDeclaration",
+    `${helper}; return verifyInvariantLedgerSourceEvidence;`
+  )(
+    path,
+    fs.readFileSync,
+    fs.lstatSync,
+    fs.realpathSync,
+    fs.mkdirSync,
+    () => "0000000000000000000000000000000000000000\n",
+    createHash,
+    writeFileDurable,
+    (_root: string, candidate: string) => candidate,
+    (value: unknown) => ({ ok: true, value }),
+    () => ({ ok: true }),
+    (value: string) => !path.isAbsolute(value) && !value.split(/[\\/]/u).includes(".."),
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    (root: string, candidate: string) => {
+      let current = path.dirname(candidate);
+      while (current !== root) {
+        if (!(current !== root && current.startsWith(`${root}${path.sep}`))) return false;
+        if (fs.lstatSync(current).isSymbolicLink()) return false;
+        current = path.dirname(current);
+      }
+      return true;
+    },
+    readInvariantSourceSnapshot,
+    (lines: readonly string[]) => lines.join("\n"),
+    () => undefined,
+    () => undefined
+  ) as (
+    task: {
+      attemptId: string;
+      workspacePath: string;
+      outputs: readonly { path: string }[];
+      metadata: { node: { logicalNodeId: string }; artifacts: { dir: string } };
+    },
+    artifactRoots: readonly string[]
+  ) => void;
+}
+
+function invariantLedgerProbeFixture(probes: readonly Record<string, string>[]): {
+  root: string;
+  task: {
+    attemptId: string;
+    workspacePath: string;
+    outputs: readonly { path: string }[];
+    metadata: { node: { logicalNodeId: string }; artifacts: { dir: string } };
+  };
+  artifactRoots: string[];
+} {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-ledger-probe-")));
+  const workspacePath = path.join(root, "workspace");
+  const artifactDir = path.join(root, "run", "artifacts", "project-discovery");
+  fs.mkdirSync(workspacePath, { recursive: true });
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.mkdirSync(path.join(artifactDir, "setup"), { recursive: true });
+  fs.writeFileSync(
+    path.join(artifactDir, "setup", "invariant-evidence-ledger.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: probes
+    }),
+    "utf8"
+  );
+  return {
+    root,
+    task: {
+      attemptId: "attempt-project-discovery",
+      workspacePath,
+      outputs: [{ path: "setup/invariant-evidence-ledger.json" }],
+      metadata: { node: { logicalNodeId: "project-discovery" }, artifacts: { dir: artifactDir } }
+    },
+    artifactRoots: [artifactDir]
+  };
+}
+
+test("generated Smithers invariant ledger accepts a directory scan probe", () => {
+  const snapshotPaths: string[] = [];
+  const verify = loadVerifyInvariantLedgerSourceEvidence(snapshotPaths);
+  const fixture = invariantLedgerProbeFixture([
+    { id: "probe-tests-directory", source_path: "tests", query: "invariant harness scan", result: "Scanned tests" }
+  ]);
+  fs.mkdirSync(path.join(fixture.task.workspacePath, "tests"), { recursive: true });
+
+  verify(fixture.task, fixture.artifactRoots);
+
+  // A directory probe must never reach the regular-file snapshot; that call is what killed R45.
+  assert.deepEqual(snapshotPaths, []);
+  fs.rmSync(fixture.root, { recursive: true, force: true });
+});
+
+test("generated Smithers invariant ledger still snapshots a symlinked-directory scan probe", () => {
+  const snapshotPaths: string[] = [];
+  const verify = loadVerifyInvariantLedgerSourceEvidence(snapshotPaths);
+  const fixture = invariantLedgerProbeFixture([
+    { id: "probe-tests-alias", source_path: "tests-alias", query: "invariant harness scan", result: "Scanned tests" }
+  ]);
+  fs.mkdirSync(path.join(fixture.task.workspacePath, "tests"), { recursive: true });
+  fs.symlinkSync(
+    path.join(fixture.task.workspacePath, "tests"),
+    path.join(fixture.task.workspacePath, "tests-alias"),
+    "dir"
+  );
+
+  // The directory allowance keys on `lstat`, so a symlink that resolves to a directory is not a
+  // directory probe. It stays on the strict path and fails there.
+  assert.throws(() => verify(fixture.task, fixture.artifactRoots), /scan probe is not a regular file/u);
+  assert.deepEqual(snapshotPaths, ["tests-alias"]);
+  fs.rmSync(fixture.root, { recursive: true, force: true });
+});
+
 test("safe invariant-suite directory permits nested paths under a symlinked root alias", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-invariant-directory-"));
   const realRoot = path.join(root, "files");

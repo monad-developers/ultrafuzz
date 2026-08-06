@@ -393,7 +393,49 @@ test("project discovery gate accepts a directory scan probe", () => {
   );
 });
 
+// A symlink that resolves to a directory is deliberately NOT a directory probe: the allowance keys on
+// `lstat`, so a leaf symlink cannot be used to reach outside the workspace unread.
+test("project discovery gate rejects a symlinked-directory scan probe", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-symlinked-probe" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const discoveryWorkspace = path.join(layout.workspacesDir, "project-discovery");
+  fs.mkdirSync(path.join(discoveryWorkspace, "tests"), { recursive: true });
+  fs.symlinkSync(path.join(discoveryWorkspace, "tests"), path.join(discoveryWorkspace, "tests-alias"), "dir");
+  writeArtifact(layout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: [
+        {
+          id: "probe-tests-alias",
+          source_path: "tests-alias",
+          query: "invariant harness scan",
+          result: "Scanned the tests directory"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID"),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
 // An invariant SOURCE is different: its bytes are the evidence, so a directory must still be refused.
+// The ledger here is schema-valid and its markdown handoff is complete, so the directory source is the
+// only thing left that can fail the gate.
 test("project discovery gate still rejects a directory invariant source", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-directory-source" });
   const node = {
@@ -403,7 +445,25 @@ test("project discovery gate still rejects a directory invariant source", () => 
   };
   const discoveryWorkspace = path.join(layout.workspacesDir, "project-discovery");
   fs.mkdirSync(path.join(discoveryWorkspace, "src"), { recursive: true });
-  writeArtifact(layout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/project-discovery.md",
+    [
+      "# Discovery",
+      "### Ledger entry: evidence-directory-source",
+      "- source_path: src",
+      "- source_location: line 1",
+      "- kind: inequality",
+      "- verbatim: contract Hub {}",
+      "- inventory_ids: inventory-hub-solvency",
+      "### End ledger entry: evidence-directory-source",
+      "### Inventory row: inventory-hub-solvency",
+      "- description: Hub borrowed assets remain at or below supplied assets.",
+      "- ledger_ids: evidence-directory-source",
+      "### End inventory row: inventory-hub-solvency"
+    ].join("\n")
+  );
   writeArtifact(
     layout,
     "project-discovery",
@@ -412,20 +472,36 @@ test("project discovery gate still rejects a directory invariant source", () => 
       schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
       entries: [
         {
-          id: "inv-1",
-          statement: "Total borrowed must not exceed supplied",
+          id: "evidence-directory-source",
           source_path: "src",
           source_location: "line 1",
-          verbatim: "contract Hub {}"
+          kind: "inequality",
+          verbatim: "contract Hub {}",
+          inventory_ids: ["inventory-hub-solvency"]
         }
       ],
-      inventory_rows: [],
+      inventory_rows: [
+        {
+          id: "inventory-hub-solvency",
+          description: "Hub borrowed assets remain at or below supplied assets.",
+          ledger_ids: ["evidence-directory-source"]
+        }
+      ],
       scan_probes: []
     })
   );
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SCHEMA_INVALID"),
+    false,
+    JSON.stringify(result.diagnostics)
+  );
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "not-file"),
+    JSON.stringify(result.diagnostics)
+  );
 });
 
 test("project discovery gate rejects root-normalizing traversal and a symlinked workspace root", () => {

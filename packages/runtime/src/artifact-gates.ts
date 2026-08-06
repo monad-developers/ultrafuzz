@@ -958,7 +958,7 @@ function verifyInvariantProbePath(
     if (!stat.isFile() || stat.isSymbolicLink()) {
       diagnostics.push({
         code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
-        message: `Invariant scan probe path must be a regular file or directory when present: ${relativePath}`,
+        message: `Invariant scan probe path must be a regular file or a non-symlink directory when present: ${relativePath}`,
         severity: "error",
         source: "invariant-ledger",
         path: diagnosticPath
