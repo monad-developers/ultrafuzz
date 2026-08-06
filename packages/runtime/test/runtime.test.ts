@@ -414,7 +414,13 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
 
 function fakeLifecycleSmithersEnv(
   project: string,
-  input: { inspect: unknown; events?: string; inspectMarkerPath?: string; timeline?: unknown }
+  input: {
+    inspect: unknown;
+    events?: string;
+    inspectMarkerPath?: string;
+    timeline?: unknown;
+    rejectFreshUpAsExistingRun?: boolean;
+  }
 ): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
@@ -459,6 +465,12 @@ function fakeLifecycleSmithersEnv(
       "      printf '%s\\n' 'fake up failure' >&2",
       "      exit 1",
       "    fi",
+      // Only the fresh replacement-lineage submission is rejected, so the original run still
+      // starts normally and the recovery path is what has to cope with the orphan.
+      '    if [ -n "$SMITHERS_FAKE_RUN_EXISTS" ] && printf \'%s\' "$*" | grep -q -- "ufz-recovery-" && ! printf \'%s\' "$*" | grep -q -- "--resume"; then',
+      '      printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_EXISTS","message":"Run already exists"}}\' >&2',
+      "      exit 4",
+      "    fi",
       "    printf '%s\\n' '{\"ok\":true}'",
       "    ;;",
       "  *)",
@@ -477,6 +489,7 @@ function fakeLifecycleSmithersEnv(
     SMITHERS_FAKE_INSPECT: inspectPath,
     SMITHERS_FAKE_EVENTS: eventsPath,
     SMITHERS_FAKE_TIMELINE: timelinePath,
+    ...(input.rejectFreshUpAsExistingRun === true ? { SMITHERS_FAKE_RUN_EXISTS: "1" } : {}),
     ULTRAFUZZ_PRICING_CATALOG_URL: "off"
   };
 }
@@ -8546,11 +8559,15 @@ test("resume transfers an empty-timeline terminal pending workflow to a valid du
   assert.doesNotMatch(commands, new RegExp(`--resume ${workflowRunId}`, "u"));
 });
 
-test("resume still rewinds a render-failed workflow to the latest timeline frame", async () => {
+// Rewinding to the latest frame is a no-op upstream: `jumpToFrame` returns early without
+// clearing the terminal run row when the target equals the latest frame, so it cannot
+// un-terminalize the run. A render failure that ALSO leaves pending work must therefore still
+// target the preceding frame, or the resume walks straight back into `terminal-run-non-resumable`.
+test("resume rewinds a render-failed workflow with pending work to the preceding timeline frame", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeOutOfOrderTopology(project);
-  const runId = "render-failed-latest-frame-recovery-run";
+  const runId = "render-failed-pending-preceding-frame-recovery-run";
   const workflowRunId = `ultrafuzz-${runId}`;
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -8581,8 +8598,97 @@ test("resume still rewinds a render-failed workflow to the latest timeline frame
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.workflow_run_id, workflowRunId);
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, new RegExp(`rewind ${workflowRunId} 3 --yes --json`, "u"));
+  assert.doesNotMatch(commands, new RegExp(`rewind ${workflowRunId} 9`, "u"));
+  assert.match(commands, new RegExp(`--resume ${workflowRunId}`, "u"));
+});
+
+test("resume rewinds a render-failed workflow without pending work to the latest timeline frame", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const runId = "render-failed-latest-frame-recovery-run";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { code: "WORKFLOW_RENDER_FAILED" },
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "node:actors-flows", state: "finished", attempt: 1 }
+      ]
+    }),
+    timeline: { timeline: { frames: [{ frameNo: 3 }, { frameNo: 9 }] } }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    maxConcurrency: 8,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.workflow_run_id, workflowRunId);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(commands, new RegExp(`rewind ${workflowRunId} 9 --yes --json`, "u"));
   assert.match(commands, new RegExp(`--resume ${workflowRunId}`, "u"));
+});
+
+// If an earlier recovery generation created the replacement run and then died before the new
+// lineage was persisted, the durable run still points at the old id and every later generation
+// recomputes the same deterministic replacement id. Without adoption that wedges on RUN_EXISTS
+// forever, which is the same permanently-stuck class this recovery exists to eliminate.
+test("resume adopts an orphaned replacement lineage instead of wedging on RUN_EXISTS", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const runId = "terminal-pending-orphan-adoption-recovery-run";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "node:actors-flows", state: "pending", attempt: 0 }
+      ]
+    }),
+    timeline: { timeline: { frames: [{ frameNo: 11 }] } },
+    rejectFreshUpAsExistingRun: true
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    maxConcurrency: 8,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  assert.match(resumed.value?.workflow_run_id ?? "", /^ufz-recovery-[a-f0-9]{32}$/u);
+  const replacementRunId = resumed.value!.workflow_run_id;
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, new RegExp(`up .* --detach --resume ${replacementRunId} --run-id ${replacementRunId}`, "u"));
+  const recovery = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "recovery-submission.json"), "utf8")
+  ) as { recovery?: string; smithers_run_id?: string };
+  assert.equal(recovery.recovery, "terminal-pending-non-rewindable-adopted");
+  assert.equal(recovery.smithers_run_id, replacementRunId);
 });
 
 test("resume transfers an incompatible legacy workflow ID to a valid durable lineage", async () => {

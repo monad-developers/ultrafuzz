@@ -145,6 +145,9 @@ const SMITHERS_ACTIVE_RUN_STATES = new Set([
   "waiting-timer"
 ]);
 
+// `smithers up` exits 4 with code RUN_EXISTS when a non-resume submission names an existing run.
+const SMITHERS_RUN_EXISTS_EXIT_CODE = 4;
+
 export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v1" as const;
 export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v1" as const;
 export const SMITHERS_SUBMISSION_SCHEMA_VERSION = "ultrafuzz.smithers.submission.v1" as const;
@@ -936,33 +939,58 @@ export async function runSmithersLifecycleCommand(input: {
           fs.mkdirSync(recovery.logsDir, { recursive: true });
           assertNoSymlinkComponents(recovery.runRoot, recovery.logsDir, "workflow log directory");
           const replacementRunId = compatibleRecoveryRunId(input.smithersRunId);
-          const submission = await execSmithersCli({
-            args: [
-              "up",
-              input.workflowPath,
-              "--detach",
-              "--run-id",
-              replacementRunId,
-              ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
-              "--root",
-              input.projectRoot,
-              "--log-dir",
-              recovery.logsDir,
-              "--input",
-              fs.readFileSync(recovery.inputPath, "utf8"),
-              "--format",
-              "json",
-              ...supervisorCommandArgs(input.controllerLeaseSeconds)
-            ],
+          const inputJson = fs.readFileSync(recovery.inputPath, "utf8");
+          const submissionArgs = (adoptExisting: boolean) => [
+            "up",
+            input.workflowPath,
+            "--detach",
+            ...(adoptExisting ? ["--resume", replacementRunId] : []),
+            "--run-id",
+            replacementRunId,
+            ...(adoptExisting && input.force === true ? ["--force"] : []),
+            ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+            "--root",
+            input.projectRoot,
+            "--log-dir",
+            recovery.logsDir,
+            "--input",
+            inputJson,
+            "--format",
+            "json",
+            ...supervisorCommandArgs(input.controllerLeaseSeconds)
+          ];
+          let submission = await execSmithersCli({
+            args: submissionArgs(false),
             projectRoot: input.projectRoot,
             env: input.env,
             environmentVariableNames: input.environmentVariableNames,
-            keepWorkspaces: input.keepWorkspaces
+            keepWorkspaces: input.keepWorkspaces,
+            acceptedExitCodes: [SMITHERS_RUN_EXISTS_EXIT_CODE]
           });
+          let appliedRecovery = reason;
+          if (submission.exitCode !== 0) {
+            if (!smithersOutputRejectsExistingRun(submission)) {
+              throw new Error(
+                `replacement workflow lineage submission failed: ${submission.stderr.trim() || submission.stdout.trim() || `exit ${submission.exitCode}`}`
+              );
+            }
+            // An earlier recovery generation created this replacement run and then died before
+            // the new lineage was persisted, so the durable run still points at the old id and
+            // every later generation recomputes the same replacement id. Adopt the orphan by
+            // resuming it instead of failing on RUN_EXISTS forever.
+            submission = await execSmithersCli({
+              args: submissionArgs(true),
+              projectRoot: input.projectRoot,
+              env: input.env,
+              environmentVariableNames: input.environmentVariableNames,
+              keepWorkspaces: input.keepWorkspaces
+            });
+            appliedRecovery = `${reason}-adopted`;
+          }
           writeJsonDurable(path.join(path.dirname(recovery.inputPath), "recovery-submission.json"), {
             schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
             smithers_run_id: replacementRunId,
-            recovery: reason,
+            recovery: appliedRecovery,
             command: submission.command,
             stdout: redactedEvidenceText(submission.stdout),
             stderr: redactedEvidenceText(submission.stderr),
@@ -979,10 +1007,14 @@ export async function runSmithersLifecycleCommand(input: {
           env: input.env
         });
         const timelineJson = jsonField(timeline.stdout).json;
-        const rewindFrame =
-          terminalPendingWork && !renderFailed
-            ? previousSmithersTimelineFrame(timelineJson)
-            : latestSmithersTimelineFrame(timelineJson);
+        // Rewinding to the latest frame is a no-op upstream: the jump returns early without
+        // clearing the terminal run row, so it cannot un-terminalize anything. Only an earlier
+        // frame resets the run to `running` and re-pends nodes. So whenever there is pending
+        // work to dispatch we must target the preceding frame, regardless of whether the
+        // failure was also reported as a render failure.
+        const rewindFrame = terminalPendingWork
+          ? previousSmithersTimelineFrame(timelineJson)
+          : latestSmithersTimelineFrame(timelineJson);
         if (rewindFrame !== undefined) {
           const rewind = await execSmithersCli({
             args: ["rewind", input.smithersRunId, String(rewindFrame), "--yes", "--json"],
@@ -990,7 +1022,7 @@ export async function runSmithersLifecycleCommand(input: {
             env: input.env
           });
           preResumeStderr = [timeline.stderr, rewind.stderr].filter((value) => value.length > 0).join("\n");
-        } else if (terminalPendingWork && !renderFailed) {
+        } else if (terminalPendingWork) {
           // A terminal failed run with pending ready work and no earlier frame to rewind to
           // cannot be resumed in place: the backend re-finalizes it as failed without
           // dispatching. Transfer the durable run to a fresh workflow lineage instead.
@@ -1352,6 +1384,10 @@ function smithersTimelineFrameNumbers(value: unknown): number[] {
       : [];
   });
   return [...new Set(frameNumbers)].sort((left, right) => left - right);
+}
+
+function smithersOutputRejectsExistingRun(snapshot: { stdout: string; stderr: string }): boolean {
+  return [snapshot.stdout, snapshot.stderr].some((value) => value.includes("RUN_EXISTS"));
 }
 
 function isCompatibleSmithersRunId(value: string): boolean {
