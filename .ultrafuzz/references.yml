@@ -85,9 +85,9 @@ references:
     kind: vulnerability-database
     provider: github
     repo: aviggiano/web3-vulnerability-database
-    commit: fbf00e990b1316879b674e9903548dba452e40d5
+    commit: e46c0e472c28596f30decbb08549c9d9630f47cb
     paths:
       - database.yml
       - capabilities.yml
       - catalog.json
-    resolved_at: "2026-08-04T22:33:24Z"
+    resolved_at: "2026-08-06T23:31:09Z"

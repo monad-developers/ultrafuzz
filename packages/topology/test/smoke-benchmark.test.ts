@@ -89,7 +89,7 @@ describe("smoke benchmark topology", () => {
         kind: "vulnerability-database",
         provider: "github",
         repo: "aviggiano/web3-vulnerability-database",
-        commit: "fbf00e990b1316879b674e9903548dba452e40d5"
+        commit: "e46c0e472c28596f30decbb08549c9d9630f47cb"
       })
     );
     const declarations = graph.nodes.filter((node) => node.kind === "agentic");

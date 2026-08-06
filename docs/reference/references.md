@@ -41,12 +41,12 @@ vulnerability-database.web3:
   kind: vulnerability-database
   provider: github
   repo: aviggiano/web3-vulnerability-database
-  commit: fbf00e990b1316879b674e9903548dba452e40d5
+  commit: e46c0e472c28596f30decbb08549c9d9630f47cb
   paths:
     - database.yml
     - capabilities.yml
     - catalog.json
-  resolved_at: "2026-08-04T22:33:24Z"
+  resolved_at: "2026-08-06T23:31:09Z"
 ```
 
 The shipped `.ultrafuzz/references.yml` defines exactly this entry, so a clean
@@ -57,25 +57,26 @@ before running offline.
 
 #### Public unauthenticated materialization
 
-`aviggiano/web3-vulnerability-database` is public. The repository was transferred
-without changing the pinned Git object, so the immutable commit
-`fbf00e990b1316879b674e9903548dba452e40d5` remains valid and is fetched
+`aviggiano/web3-vulnerability-database` is public, so the immutable commit
+`e46c0e472c28596f30decbb08549c9d9630f47cb` is fetched
 anonymously by `ultrafuzz references sync`, including in the detached Modal
 worker's pre-model phase. This reference needs no GitHub token, App installation,
 SSH agent, or credential helper.
 
-The transfer was verified from a fresh unauthenticated fetch of the full pin. The
-three contract files are byte-for-byte identical to the pre-transfer source:
+The pin was verified from a fresh unauthenticated fetch of the full commit. The
+three contract files carry these digests:
 
 | Path               |  Bytes | SHA-256                                                            |
 | ------------------ | -----: | ------------------------------------------------------------------ |
 | `database.yml`     |     96 | `0da89f82af4680a9d62770c520073d9937f55d932f2a16f737024e48633694f1` |
-| `capabilities.yml` |  4,414 | `f96b2683e0ccece2cde6cf503c098a2458629cdb954ed528d82fe099ce37644d` |
-| `catalog.json`     | 34,570 | `0d7f385c882ac81699bdaffaf251a891e35f472b3dd8aa26b7eeefdde961461b` |
+| `capabilities.yml` |  6,176 | `fabaae6efe20335b53e978699fe90049d9a8bf90bd51813a80ca60bd9f39ac82` |
+| `catalog.json`     | 44,680 | `8710705a3fb50707c32ccfe55775f7fca4cb87cb7c0fece54af62ea557f35402` |
 
 The catalog declares `schemaVersion: 1`, `algorithm: sha256`, aggregate digest
-`c0ed7d23166e4726881d99b53b9e6abd561efc97d6cd606051e4c42e038400dc`,
-21 capabilities, and 18 records (all currently `draft`). Ultrafuzz does not trust
+`62b7fb8047b3e74783283cd1aa23eca14c24846d8c62233b34fa47e44cc5ff91`,
+28 capabilities, and 23 records (all currently `draft`) across the `accounting`,
+`authorization`, `cross-chain`, `derivatives`, `governance`, `integrations`,
+`lending`, `numeric`, `operations`, and `oracle` categories. Ultrafuzz does not trust
 repository visibility or the mutable default branch as integrity evidence: it
 fetches the exact 40-character commit, verifies the selected Git tree and every
 declared file digest, recomputes the catalog aggregate, and records the pinned
