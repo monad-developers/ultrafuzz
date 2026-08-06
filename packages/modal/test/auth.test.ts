@@ -146,6 +146,7 @@ describe("runtime-only subscription auth", () => {
         schema_version: "ultrafuzz.kimi-modal-execution-lease.v1",
         credential_lease: first.credentialLeaseId,
         owner_id: first.ownerId,
+        owner_host_id: expect.any(String),
         journal_pair_id: expect.stringMatching(/^[0-9a-f-]{36}$/u),
         transition_sequence: 1,
         rotation_state: "active"
@@ -191,12 +192,14 @@ describe("runtime-only subscription auth", () => {
     const leaseFile = path.join(credentials, ".kimi-code.ultrafuzz-modal-node-execution");
     const fenceFile = path.join(credentials, ".kimi-code.ultrafuzz-modal-node-fence");
     const deadPid = 2_147_483_647;
+    const currentIdentity = testProcessIdentity(process.pid);
     const record = (rotationState: "active" | "rotation-possible", transitionSequence: number) =>
       JSON.stringify({
         schema_version: "ultrafuzz.kimi-modal-execution-lease.v1",
         credential_lease: "a".repeat(64),
         owner_id: "crashed-before-remote-exposure",
         owner_process_id: deadPid,
+        ...currentIdentity,
         journal_pair_id: "11111111-2222-4333-8444-555555555555",
         transition_sequence: transitionSequence,
         rotation_state: rotationState
@@ -236,11 +239,10 @@ describe("runtime-only subscription auth", () => {
     }
   });
 
-  it("recovers reused PIDs and replacement PID namespaces while legacy live-PID records fail closed", async () => {
+  it("recovers a same-host reused PID while foreign locality and legacy PID records fail closed", async () => {
     const currentIdentity = testProcessIdentity(process.pid);
     for (const [name, identityPatch] of [
-      ["reused-pid", { owner_process_start: `${currentIdentity.owner_process_start}-reused` }],
-      ["replacement-namespace", { owner_pid_namespace: `${currentIdentity.owner_pid_namespace}-replacement` }]
+      ["reused-pid", { owner_process_start: `${currentIdentity.owner_process_start}-reused` }]
     ] as const) {
       const source = kimiAuthFixture({ fresh: true });
       const credentials = path.join(source, "credentials");
@@ -278,29 +280,66 @@ describe("runtime-only subscription auth", () => {
       }
     }
 
-    const legacySource = kimiAuthFixture({ fresh: true });
-    const credentials = path.join(legacySource, "credentials");
-    const leaseFile = path.join(credentials, ".kimi-code.ultrafuzz-modal-node-execution");
-    const fenceFile = path.join(credentials, ".kimi-code.ultrafuzz-modal-node-fence");
-    const legacyActive = `${JSON.stringify({
-      schema_version: "ultrafuzz.kimi-modal-execution-lease.v1",
-      credential_lease: "c".repeat(64),
-      owner_id: "legacy-live-owner",
-      owner_process_id: process.pid,
-      journal_pair_id: "31111111-2222-4333-8444-555555555555",
-      transition_sequence: 1,
-      rotation_state: "active"
-    })}\n`;
-    fs.writeFileSync(leaseFile, legacyActive, { mode: 0o600 });
-    fs.writeFileSync(fenceFile, legacyActive, { mode: 0o600 });
-    try {
-      await expect(
-        acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: legacySource }, "/unused", {
-          timeoutMs: 5_000
-        })
-      ).rejects.toThrow(/durable unresolved Kimi Modal credential-rotation fence/u);
-    } finally {
-      fs.rmSync(legacySource, { recursive: true, force: true });
+    for (const [name, identityPatch] of [
+      ["foreign-host", { owner_host_id: `${currentIdentity.owner_host_id}-replacement` }],
+      ["foreign-namespace", { owner_pid_namespace: `${currentIdentity.owner_pid_namespace}-replacement` }]
+    ] as const) {
+      const source = kimiAuthFixture({ fresh: true });
+      const credentials = path.join(source, "credentials");
+      const leaseFile = path.join(credentials, ".kimi-code.ultrafuzz-modal-node-execution");
+      const fenceFile = path.join(credentials, ".kimi-code.ultrafuzz-modal-node-fence");
+      const active = `${JSON.stringify({
+        schema_version: "ultrafuzz.kimi-modal-execution-lease.v1",
+        credential_lease: "d".repeat(64),
+        owner_id: name,
+        owner_process_id: process.pid,
+        ...currentIdentity,
+        ...identityPatch,
+        journal_pair_id: "41111111-2222-4333-8444-555555555555",
+        transition_sequence: 1,
+        rotation_state: "active"
+      })}\n`;
+      fs.writeFileSync(leaseFile, active, { mode: 0o600 });
+      fs.writeFileSync(fenceFile, active, { mode: 0o600 });
+      try {
+        await expect(
+          acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+            timeoutMs: 5_000
+          })
+        ).rejects.toThrow(/durable unresolved Kimi Modal credential-rotation fence/u);
+      } finally {
+        fs.rmSync(source, { recursive: true, force: true });
+      }
+    }
+
+    for (const [name, pid] of [
+      ["legacy-live-owner", process.pid],
+      ["legacy-locally-missing-owner", 2_147_483_647]
+    ] as const) {
+      const legacySource = kimiAuthFixture({ fresh: true });
+      const credentials = path.join(legacySource, "credentials");
+      const leaseFile = path.join(credentials, ".kimi-code.ultrafuzz-modal-node-execution");
+      const fenceFile = path.join(credentials, ".kimi-code.ultrafuzz-modal-node-fence");
+      const legacyActive = `${JSON.stringify({
+        schema_version: "ultrafuzz.kimi-modal-execution-lease.v1",
+        credential_lease: "c".repeat(64),
+        owner_id: name,
+        owner_process_id: pid,
+        journal_pair_id: "31111111-2222-4333-8444-555555555555",
+        transition_sequence: 1,
+        rotation_state: "active"
+      })}\n`;
+      fs.writeFileSync(leaseFile, legacyActive, { mode: 0o600 });
+      fs.writeFileSync(fenceFile, legacyActive, { mode: 0o600 });
+      try {
+        await expect(
+          acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: legacySource }, "/unused", {
+            timeoutMs: 5_000
+          })
+        ).rejects.toThrow(/durable unresolved Kimi Modal credential-rotation fence/u);
+      } finally {
+        fs.rmSync(legacySource, { recursive: true, force: true });
+      }
     }
   });
 
@@ -1896,6 +1935,7 @@ default_effort = "max"
 
 function testProcessIdentity(pid: number): {
   owner_process_start: string;
+  owner_host_id: string;
   owner_boot_id: string;
   owner_pid_namespace: string;
 } {
@@ -1909,6 +1949,7 @@ function testProcessIdentity(pid: number): {
   if (startToken === undefined) throw new Error("test process stat has no start token");
   return {
     owner_process_start: startToken,
+    owner_host_id: fs.readFileSync("/etc/machine-id", "utf8").trim(),
     owner_boot_id: fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(),
     owner_pid_namespace: fs.readlinkSync(`/proc/${pid}/ns/pid`)
   };

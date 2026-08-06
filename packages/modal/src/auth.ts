@@ -80,12 +80,14 @@ interface KimiLeaseCredentialHandleBinding {
 interface KimiLeaseOwnerProcessRecord {
   pid: number;
   startToken?: string;
+  hostId?: string;
   bootId?: string;
   pidNamespace?: string;
 }
 
 interface KimiLeaseOwnerProcessIdentity extends KimiLeaseOwnerProcessRecord {
   startToken: string;
+  hostId: string;
   bootId: string;
   pidNamespace: string;
 }
@@ -1264,6 +1266,7 @@ function isKimiExecutionLeaseOwnerState(
     metadata.owner_id === ownerId &&
     metadata.owner_process_id === ownerProcess.pid &&
     metadata.owner_process_start === ownerProcess.startToken &&
+    metadata.owner_host_id === ownerProcess.hostId &&
     metadata.owner_boot_id === ownerProcess.bootId &&
     metadata.owner_pid_namespace === ownerProcess.pidNamespace &&
     metadata.journal_pair_id === journalPairId &&
@@ -1319,6 +1322,15 @@ interface RecoverableKimiExecutionLeasePairState extends KimiExecutionLeasePairS
 }
 
 function kimiExecutionLeaseProcessIsAlive(owner: KimiLeaseOwnerProcessRecord): boolean {
+  if (!isCompleteKimiLeaseOwnerProcess(owner)) return true;
+  const current = observedKimiLeaseOwnerProcessIdentity(process.pid);
+  if (current === undefined) return true;
+  // A local PID is meaningful only after stable host and PID-namespace
+  // locality have been established. A different boot on the same stable host
+  // proves that the recorded process generation cannot still be alive.
+  if (owner.hostId !== current.hostId) return true;
+  if (owner.bootId !== current.bootId) return false;
+  if (owner.pidNamespace !== current.pidNamespace) return true;
   try {
     process.kill(owner.pid, 0);
   } catch (error) {
@@ -1326,7 +1338,6 @@ function kimiExecutionLeaseProcessIsAlive(owner: KimiLeaseOwnerProcessRecord): b
     if (isNodeError(error) && error.code === "EPERM") return true;
     throw error;
   }
-  if (!isCompleteKimiLeaseOwnerProcess(owner)) return true;
   const observed = observedKimiLeaseOwnerProcessIdentity(owner.pid);
   if (observed === undefined) return true;
   return sameKimiLeaseOwnerProcess(owner, observed);
@@ -1338,9 +1349,10 @@ function kimiLeaseOwnerProcessRecord(
   if (metadata === undefined) return undefined;
   const pid = metadata.owner_process_id;
   const startToken = metadata.owner_process_start;
+  const hostId = metadata.owner_host_id;
   const bootId = metadata.owner_boot_id;
   const pidNamespace = metadata.owner_pid_namespace;
-  const identityFields = [startToken, bootId, pidNamespace];
+  const identityFields = [startToken, hostId, bootId, pidNamespace];
   if (pid === undefined) return identityFields.every((value) => value === undefined) ? undefined : null;
   if (!Number.isSafeInteger(pid) || (pid as number) <= 0) return null;
   if (identityFields.every((value) => value === undefined)) return { pid: pid as number };
@@ -1348,6 +1360,7 @@ function kimiLeaseOwnerProcessRecord(
   return {
     pid: pid as number,
     startToken: startToken as string,
+    hostId: hostId as string,
     bootId: bootId as string,
     pidNamespace: pidNamespace as string
   };
@@ -1357,6 +1370,8 @@ function isCompleteKimiLeaseOwnerProcess(owner: KimiLeaseOwnerProcessRecord): ow
   return (
     typeof owner.startToken === "string" &&
     owner.startToken.length > 0 &&
+    typeof owner.hostId === "string" &&
+    owner.hostId.length > 0 &&
     typeof owner.bootId === "string" &&
     owner.bootId.length > 0 &&
     typeof owner.pidNamespace === "string" &&
@@ -1371,6 +1386,7 @@ function sameKimiLeaseOwnerProcess(
   return (
     left?.pid === right?.pid &&
     left?.startToken === right?.startToken &&
+    left?.hostId === right?.hostId &&
     left?.bootId === right?.bootId &&
     left?.pidNamespace === right?.pidNamespace
   );
@@ -1394,12 +1410,20 @@ function observedKimiLeaseOwnerProcessIdentity(pid: number): KimiLeaseOwnerProce
       .trim()
       .split(/\s+/u);
     const startToken = fields[19];
+    const hostId = readFileSync("/etc/machine-id", "utf8").trim();
     const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
     const pidNamespace = readlinkSync(`/proc/${pid}/ns/pid`);
-    if (startToken === undefined || startToken.length === 0 || bootId.length === 0 || pidNamespace.length === 0) {
+    if (
+      startToken === undefined ||
+      startToken.length === 0 ||
+      hostId.length === 0 ||
+      hostId.length > 256 ||
+      bootId.length === 0 ||
+      pidNamespace.length === 0
+    ) {
       return undefined;
     }
-    return { pid, startToken, bootId, pidNamespace };
+    return { pid, startToken, hostId, bootId, pidNamespace };
   } catch {
     return undefined;
   }
@@ -1584,6 +1608,7 @@ async function writeKimiExecutionLeaseMetadata(
       owner_id: ownerId,
       owner_process_id: ownerProcess.pid,
       ...(ownerProcess.startToken === undefined ? {} : { owner_process_start: ownerProcess.startToken }),
+      ...(ownerProcess.hostId === undefined ? {} : { owner_host_id: ownerProcess.hostId }),
       ...(ownerProcess.bootId === undefined ? {} : { owner_boot_id: ownerProcess.bootId }),
       ...(ownerProcess.pidNamespace === undefined ? {} : { owner_pid_namespace: ownerProcess.pidNamespace }),
       journal_pair_id: journalPairId,

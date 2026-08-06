@@ -14,6 +14,7 @@ import {
   createEventRecord,
   createRunLayout,
   ensureEventRecord,
+  ensureEventRecords,
   getNodeArtifactDir,
   normalizeFindings,
   normalizeSafeRelativePath,
@@ -593,6 +594,41 @@ test("event recovery repairs an exact truncated record in the log and every deri
     fs.writeFileSync(filePath, serialized.slice(0, -7), "utf8");
     ensureEventRecord(layout, record);
     assert.equal(fs.readFileSync(filePath, "utf8"), `${serialized}\n`, filePath);
+  }
+});
+
+test("event batch recovery repairs a torn second record in the log and every shared index", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-batch-tail-recovery" });
+  const first = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { sequence: 1 }
+  });
+  const second = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:01.000Z",
+    payload: { sequence: 2 }
+  });
+  ensureEventRecords(layout, [first, second]);
+  const firstSerialized = JSON.stringify(first);
+  const secondSerialized = JSON.stringify(second);
+  const recordPaths = [
+    layout.eventsPath,
+    path.join(layout.eventsIndexDir, "run", "run-event-batch-tail-recovery.jsonl"),
+    path.join(layout.eventsIndexDir, "type", "node-synced.jsonl"),
+    path.join(layout.eventsIndexDir, "timestamp", "2026-08-05.jsonl"),
+    path.join(layout.eventsIndexDir, "node", "node-a.jsonl"),
+    path.join(layout.eventsIndexDir, "status", "succeeded.jsonl")
+  ];
+
+  for (const filePath of recordPaths) {
+    fs.writeFileSync(filePath, `${firstSerialized}\n${secondSerialized.slice(0, -7)}`, "utf8");
+    ensureEventRecords(layout, [first, second]);
+    assert.equal(fs.readFileSync(filePath, "utf8"), `${firstSerialized}\n${secondSerialized}\n`, filePath);
   }
 });
 

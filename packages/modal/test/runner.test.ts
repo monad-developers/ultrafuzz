@@ -744,6 +744,19 @@ describe("Modal result collection", () => {
     expect(() => assertSanitizedModalCollectedFiles(files, { ...context, attempt_id: "different-attempt" })).toThrow(
       /mismatched attempt ID/u
     );
+
+    const encodedSecret = "recovery-boundary-secret";
+    const encodedAttempt = Buffer.from(encodedSecret, "utf8").toString("base64url");
+    const encodedDocument = createModalRecoveryLifecycleDocument([
+      { ...document.records[0]!, attempt_id: encodedAttempt }
+    ]);
+    expect(() =>
+      assertSanitizedModalCollectedFiles(
+        { "recovery-lifecycle.json": `${JSON.stringify(encodedDocument)}\n` },
+        { ...context, attempt_id: encodedAttempt },
+        [encodedSecret]
+      )
+    ).toThrow(/unsanitized Modal recovery lifecycle/u);
   });
 
   it("omits diagnostics unless an exact config supplies every injected secret value", async () => {

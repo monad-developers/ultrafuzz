@@ -6,7 +6,7 @@ import {
   assertRunStateSchema,
   assertNoSymlinkComponents,
   assertPathInside,
-  ensureEventRecord,
+  ensureEventRecords,
   replayEvents,
   runStateForPersistence,
   writeJsonDurable,
@@ -217,7 +217,7 @@ export async function commitWorkflowSynchronizationState(
     events: input.events.map((event) => structuredClone(event))
   };
   writeWorkflowSyncCommitJournal(layout, journal);
-  for (const event of journal.events) ensureEventRecord(layout, event);
+  ensureEventRecords(layout, journal.events);
   await control.afterEventsPersisted?.();
   writeRunState(layout, journal.state);
   await control.afterStatePersisted?.();
@@ -763,7 +763,7 @@ function recoverPreparedWorkflowSyncCommit(layout: RunLayout): void {
 }
 
 function applyWorkflowSyncCommitJournal(layout: RunLayout, journal: WorkflowSyncCommitJournal): void {
-  for (const event of journal.events) ensureEventRecord(layout, event);
+  ensureEventRecords(layout, journal.events);
   writeRunState(layout, journal.state);
   writeWorkflowSyncCommitJournal(layout, {
     ...journal,

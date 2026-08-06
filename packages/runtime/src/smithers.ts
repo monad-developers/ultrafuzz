@@ -1701,7 +1701,6 @@ async function streamSmithersCommandUnanchored(input: {
   let stderr = "";
   let stoppedByCaller = false;
   let terminationStarted = false;
-  let childClosed = false;
   let terminationCompletion: Promise<void> | undefined;
   const signalCommandTree = (signal: NodeJS.Signals): void => {
     if (process.platform !== "win32" && child.pid !== undefined) {
@@ -1720,7 +1719,6 @@ async function streamSmithersCommandUnanchored(input: {
     child.stdout.destroy();
     child.stderr.destroy();
     if (terminationStarted) return;
-    if (childClosed) return;
     terminationStarted = true;
     terminationCompletion = terminateSpawnedCommandTree({
       processGroupId: child.pid,
@@ -1758,7 +1756,6 @@ async function streamSmithersCommandUnanchored(input: {
         stopStreaming();
       });
       child.once("close", (code, signal) => {
-        childClosed = true;
         resolve({ code, signal });
       });
       reader.on("line", (line) => {

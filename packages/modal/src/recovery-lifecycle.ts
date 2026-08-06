@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 
-import { redactSecretsInText } from "@ultrafuzz/security";
+import { containsSecretValueRepresentation, redactSecretsInText } from "@ultrafuzz/security";
 import { z } from "zod/v4";
 
 export const MODAL_RECOVERY_LIFECYCLE_SCHEMA_VERSION = "ultrafuzz.modal.recovery-lifecycle.v1" as const;
@@ -469,7 +469,7 @@ export function assertModalRecoveryLifecycleContainsNoSecrets(
   forbiddenSecretValues: readonly string[] = []
 ): void {
   const text = JSON.stringify(value);
-  if ([...new Set(forbiddenSecretValues)].filter(Boolean).some((secret) => text.includes(secret))) {
+  if (containsSecretValueRepresentation(text, forbiddenSecretValues)) {
     throw new Error("Modal recovery lifecycle contains an injected secret value");
   }
   if (redactSecretsInText(text) !== text) {

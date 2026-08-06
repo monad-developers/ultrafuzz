@@ -87,8 +87,31 @@ export function appendEvent(layout: RunLayout, input: AppendEventInput): EventRe
  * missing projections are repaired, and an event-ID collision fails closed.
  */
 export function ensureEventRecord(layout: RunLayout, record: EventRecord): void {
-  ensureExactEventLine(layout.eventsPath, record, "event log");
-  ensureEventIndexes(layout, record);
+  ensureEventRecords(layout, [record]);
+}
+
+/**
+ * Makes an ordered batch of already-materialized events durable exactly once.
+ * Batch recovery is required for prepared transactions: a crash can leave the
+ * second or later record as a prefix after earlier records were completed.
+ */
+export function ensureEventRecords(layout: RunLayout, records: readonly EventRecord[]): void {
+  if (new Set(records.map((record) => record.event_id)).size !== records.length) {
+    throw new Error("event recovery batch repeats an event ID");
+  }
+  ensureExactEventLines(layout.eventsPath, records, "event log");
+  const projections = new Map<string, { segments: string[]; records: EventRecord[] }>();
+  for (const record of records) {
+    for (const segments of eventIndexSegments(record)) {
+      const key = segments.join("\0");
+      const projection = projections.get(key) ?? { segments, records: [] };
+      projection.records.push(record);
+      projections.set(key, projection);
+    }
+  }
+  for (const projection of projections.values()) {
+    ensureIndexLines(layout, projection.segments, projection.records);
+  }
   writeQueryFacadeInputs(layout);
 }
 
@@ -227,27 +250,22 @@ export function redactValue(value: unknown): unknown {
 
 function appendEventIndexes(layout: RunLayout, record: EventRecord): void {
   const serialized = JSON.stringify(record);
-  appendIndexLine(layout, ["run", ...eventIndexPath(record.run_id)], serialized);
-  appendIndexLine(layout, ["type", ...eventIndexPath(record.event_type)], serialized);
-  appendIndexLine(layout, ["timestamp", ...eventIndexPath(record.timestamp.slice(0, 10))], serialized);
-  if (record.node_id !== undefined) {
-    appendIndexLine(layout, ["node", ...eventIndexPath(record.node_id)], serialized);
-  }
-  if (record.status !== undefined) {
-    appendIndexLine(layout, ["status", ...eventIndexPath(record.status)], serialized);
-  }
+  for (const segments of eventIndexSegments(record)) appendIndexLine(layout, segments, serialized);
 }
 
-function ensureEventIndexes(layout: RunLayout, record: EventRecord): void {
-  ensureIndexLine(layout, ["run", ...eventIndexPath(record.run_id)], record);
-  ensureIndexLine(layout, ["type", ...eventIndexPath(record.event_type)], record);
-  ensureIndexLine(layout, ["timestamp", ...eventIndexPath(record.timestamp.slice(0, 10))], record);
+function eventIndexSegments(record: EventRecord): string[][] {
+  const segments = [
+    ["run", ...eventIndexPath(record.run_id)],
+    ["type", ...eventIndexPath(record.event_type)],
+    ["timestamp", ...eventIndexPath(record.timestamp.slice(0, 10))]
+  ];
   if (record.node_id !== undefined) {
-    ensureIndexLine(layout, ["node", ...eventIndexPath(record.node_id)], record);
+    segments.push(["node", ...eventIndexPath(record.node_id)]);
   }
   if (record.status !== undefined) {
-    ensureIndexLine(layout, ["status", ...eventIndexPath(record.status)], record);
+    segments.push(["status", ...eventIndexPath(record.status)]);
   }
+  return segments;
 }
 
 function eventIndexPath(value: string): string[] {
@@ -263,21 +281,30 @@ function appendIndexLine(layout: RunLayout, segments: string[], line: string): v
   appendLineDurable(filePath, line);
 }
 
-function ensureIndexLine(layout: RunLayout, segments: string[], record: EventRecord): void {
+function ensureIndexLines(layout: RunLayout, segments: string[], records: readonly EventRecord[]): void {
   const relativePath = segments.join("/");
   const filePath = prepareSafeFilePath(layout.eventsIndexDir, relativePath);
-  ensureExactEventLine(filePath, record, `event index ${relativePath}`);
+  ensureExactEventLines(filePath, records, `event index ${relativePath}`);
 }
 
-function ensureExactEventLine(filePath: string, record: EventRecord, label: string): void {
-  const expected = JSON.stringify({ ...record, payload: redactValue(record.payload) });
-  const expectedBytes = Buffer.from(expected, "utf8");
+function ensureExactEventLines(filePath: string, records: readonly EventRecord[], label: string): void {
+  if (records.length === 0) return;
+  const expectations = records.map((record) => ({
+    record,
+    serialized: JSON.stringify({ ...record, payload: redactValue(record.payload) })
+  }));
   if (fs.existsSync(filePath)) {
     const contents = fs.readFileSync(filePath);
     const finalNewline = contents.lastIndexOf(0x0a);
     const complete = contents.subarray(0, finalNewline + 1);
     const tail = contents.subarray(finalNewline + 1);
-    inspectExactEventLines(complete.toString("utf8"), record, expected, label, false);
+    const completeText = complete.toString("utf8");
+    const matches = expectations.map(({ record, serialized }) =>
+      inspectExactEventLines(completeText, record, serialized, label, false)
+    );
+    for (const [index, count] of matches.entries()) {
+      if (count > 1) throw new Error(`${label} duplicates event ID: ${expectations[index]!.record.event_id}`);
+    }
     if (tail.length > 0) {
       let parsedTail: unknown;
       try {
@@ -285,31 +312,44 @@ function ensureExactEventLine(filePath: string, record: EventRecord, label: stri
       } catch {
         parsedTail = undefined;
       }
+      const nextMissing = matches.findIndex((count) => count === 0);
       if (parsedTail !== undefined) {
-        if (!assertExactEventCandidate(parsedTail, record, expected, label)) {
+        const matchingIndex = expectations.findIndex(({ record, serialized }) =>
+          assertExactEventCandidate(parsedTail, record, serialized, label)
+        );
+        if (matchingIndex < 0 || matchingIndex !== nextMissing) {
           throw new Error(`${label} contains an unrelated unterminated event record`);
         }
         appendBytesDurable(filePath, Buffer.from("\n"));
-      } else if (tail.length <= expectedBytes.length && expectedBytes.subarray(0, tail.length).equals(tail)) {
-        appendBytesDurable(filePath, Buffer.concat([expectedBytes.subarray(tail.length), Buffer.from("\n")]));
       } else {
-        throw new Error(`${label} contains an unrepairable trailing event record`);
+        const next = expectations[nextMissing];
+        const expectedBytes = next === undefined ? undefined : Buffer.from(next.serialized, "utf8");
+        if (
+          expectedBytes === undefined ||
+          tail.length > expectedBytes.length ||
+          !expectedBytes.subarray(0, tail.length).equals(tail)
+        ) {
+          throw new Error(`${label} contains an unrepairable trailing event record`);
+        }
+        appendBytesDurable(filePath, Buffer.concat([expectedBytes.subarray(tail.length), Buffer.from("\n")]));
       }
     }
   }
-  let matches = inspectExactEventLines(
-    fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : "",
-    record,
-    expected,
-    label,
-    true
-  );
-  if (matches > 1) throw new Error(`${label} duplicates event ID: ${record.event_id}`);
-  if (matches === 0) {
-    appendLineDurable(filePath, expected);
-    matches = inspectExactEventLines(fs.readFileSync(filePath, "utf8"), record, expected, label, true);
+  for (const { record, serialized } of expectations) {
+    let matches = inspectExactEventLines(
+      fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : "",
+      record,
+      serialized,
+      label,
+      true
+    );
+    if (matches > 1) throw new Error(`${label} duplicates event ID: ${record.event_id}`);
+    if (matches === 0) {
+      appendLineDurable(filePath, serialized);
+      matches = inspectExactEventLines(fs.readFileSync(filePath, "utf8"), record, serialized, label, true);
+    }
+    if (matches !== 1) throw new Error(`${label} did not durably persist event ID: ${record.event_id}`);
   }
-  if (matches !== 1) throw new Error(`${label} did not durably persist event ID: ${record.event_id}`);
 }
 
 function inspectExactEventLines(

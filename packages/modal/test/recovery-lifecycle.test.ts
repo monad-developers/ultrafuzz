@@ -233,6 +233,25 @@ describe("Modal recovery lifecycle", () => {
         createModalRecoveryLifecycleDocument([{ ...records[0]!, attempt_id: `ghp_${"x".repeat(36)}` }])
       )
     ).toThrow(/secret-like/u);
+
+    const encodedSecret = "recovery secret/with+symbols\n";
+    const encodedRepresentations = [
+      Buffer.from(encodedSecret, "utf8").toString("base64"),
+      Buffer.from(encodedSecret, "utf8").toString("base64url"),
+      Buffer.from(encodedSecret, "utf8").toString("hex"),
+      [...Buffer.from(encodedSecret, "utf8")]
+        .map((byte) => `%${byte.toString(16).padStart(2, "0").toUpperCase()}`)
+        .join(""),
+      encodedSecret
+    ];
+    for (const representation of encodedRepresentations) {
+      expect(() =>
+        assertModalRecoveryLifecycleContainsNoSecrets(
+          { ...document, injected_boundary_value: representation } as unknown as typeof document,
+          [encodedSecret]
+        )
+      ).toThrow(/injected secret/u);
+    }
   });
 });
 

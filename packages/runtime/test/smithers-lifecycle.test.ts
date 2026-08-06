@@ -452,6 +452,61 @@ while :; do sleep 1; done
   }
 );
 
+test(
+  "late stream callback failure kills a redirected descendant after the direct parent already exited",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-stream-late-process-group-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const runner = path.join(root, "smithers");
+    const commandPidPath = path.join(root, "command.pid");
+    const descendantPidPath = path.join(root, "descendant.pid");
+    fs.writeFileSync(
+      runner,
+      `#!/bin/sh
+printf '%s\n' "$$" > "$SMITHERS_STREAM_COMMAND_PID"
+( trap '' TERM; exec </dev/null >/dev/null 2>&1; while :; do sleep 1; done ) &
+printf '%s\n' "$!" > "$SMITHERS_STREAM_DESCENDANT_PID"
+printf '%s\n' '{"event":1}'
+exit 0
+`,
+      "utf8"
+    );
+    fs.chmodSync(runner, 0o755);
+    const env = createSmithersTestEnvironment(runner, {
+      PATH: process.env.PATH,
+      SMITHERS_STREAM_COMMAND_PID: commandPidPath,
+      SMITHERS_STREAM_DESCENDANT_PID: descendantPidPath
+    });
+    t.after(() => {
+      if (!fs.existsSync(descendantPidPath)) return;
+      const pid = Number(fs.readFileSync(descendantPidPath, "utf8").trim());
+      if (!Number.isSafeInteger(pid) || pid <= 0) return;
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    });
+
+    await assert.rejects(
+      streamSmithersCommand({
+        args: ["events", "run-id", "--follow", "--json"],
+        projectRoot: root,
+        env,
+        maxLines: 10,
+        onLine: async () => {
+          await assertProcessGone(Number(fs.readFileSync(commandPidPath, "utf8").trim()));
+          throw new Error("late stream consumer failure");
+        }
+      }),
+      /late stream consumer failure/u
+    );
+
+    await assertProcessGone(Number(fs.readFileSync(descendantPidPath, "utf8").trim()));
+  }
+);
+
 test("stream callback drain has an absolute deadline after the runner exits", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-stream-callback-deadline-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
