@@ -18,6 +18,7 @@ import {
 import lockfile from "proper-lockfile";
 
 import {
+  beginProperLockfileHold,
   captureProperLockfileDirectoryIdentity,
   forgetProperLockfileCompromise,
   properLockfileCompromiseHandler,
@@ -710,6 +711,7 @@ async function acquireOwnedRunLock(
           };
           writeProperLockfileOwner(lockPath, ownerPath, acquiredOwner, options.label, acquiredIdentity);
           publishedOwner = acquiredOwner;
+          beginProperLockfileHold(lockPath);
           return { release: acquiredRelease, owner: acquiredOwner };
         } catch (error) {
           try {

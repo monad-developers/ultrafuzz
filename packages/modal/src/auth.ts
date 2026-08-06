@@ -199,7 +199,7 @@ export async function refreshKimiSubscriptionAuth(
   await access(credentialPath, constants.R_OK | constants.W_OK);
   await access(path.join(source, "device_id"), constants.R_OK);
 
-  const release = await acquireKimiRefreshLock(source, credential.lockName);
+  const { release, lockPath: refreshLockPath } = await acquireKimiRefreshLock(source, credential.lockName);
   try {
     const token = kimiOAuthToken(await readFile(credentialPath, "utf8"), credentialPath);
     const now = Math.floor((options.now?.() ?? Date.now()) / 1000);
@@ -217,6 +217,12 @@ export async function refreshKimiSubscriptionAuth(
       options
     );
     const next = mergeKimiOAuthRefresh(token, refreshed, now);
+    // The lock is the only serializer for this file, and a network exchange has
+    // elapsed since it was taken. Writing after losing it would clobber a refresh
+    // another holder already published.
+    if (credentialLockIsCompromised(refreshLockPath)) {
+      throw new Error("Kimi OAuth refresh lock was lost before the refreshed token could be written");
+    }
     await writeJsonAtomic(credentialPath, next);
     return credentialPath;
   } finally {
@@ -460,6 +466,7 @@ export async function acquireKimiModalNodeExecutionLease(
   const heldCredentialName = credentialName;
   const heldSourceAnchor = sourceAnchor;
   const heldCredentialsAnchor = credentialsAnchor;
+  const heldLockTarget = path.join(credentialsAnchor, leaseName);
   const heldOauthAnchor = oauthAnchor;
   const heldTarget = target;
   const heldLeaseName = leaseName;
@@ -481,6 +488,14 @@ export async function acquireKimiModalNodeExecutionLease(
   let transitionSequence = 1;
   let operationTail = Promise.resolve();
   try {
+    // The lock is the only serializer for this write, and several awaits have elapsed
+    // since it was taken, so re-check the hold immediately before publishing this
+    // process's lease as active. Publishing after losing the lock would overwrite a
+    // lease another controller legitimately acquired, leaving both using the same
+    // credential — exactly what the lock exists to prevent.
+    if (credentialLockIsCompromised(heldLockTarget)) {
+      throw new Error("Kimi Modal execution lease lock was lost before the lease could be published");
+    }
     await writeKimiExecutionLeaseStatePair(
       heldCredentialsAnchor,
       heldLeaseName,
@@ -752,7 +767,7 @@ async function refreshKimiSubscriptionCredentialHandle(
   markRotationPossible: () => Promise<void>,
   resolveAndRearmRotation: () => Promise<void>
 ): Promise<void> {
-  const release = await acquireKimiRefreshLockAt(oauthAnchor, credential.lockName);
+  const { release, lockPath: refreshLockPath } = await acquireKimiRefreshLockAt(oauthAnchor, credential.lockName);
   try {
     await assertKimiLeaseEntryMatchesHandle(
       credentialsAnchor,
@@ -809,6 +824,9 @@ async function refreshKimiSubscriptionCredentialHandle(
       intendedCredentialSha256: kimiLeaseJsonSha256(intendedCredential, credentialPath)
     };
     try {
+      if (credentialLockIsCompromised(refreshLockPath)) {
+        throw new Error("Kimi OAuth refresh lock was lost before the refreshed credential could be committed");
+      }
       await replaceKimiLeaseJsonAtomic(
         credentialHandle,
         credentialsDirectoryHandle,
@@ -880,7 +898,7 @@ async function reconcileKimiSubscriptionCredentialHandle(
     requireRefreshToken: false
   });
   if (remoteToken.refresh_token.trim() === "") return false;
-  const release = await acquireKimiRefreshLockAt(oauthAnchor, lockName);
+  const { release, lockPath: refreshLockPath } = await acquireKimiRefreshLockAt(oauthAnchor, lockName);
   try {
     if (credentialHandle.pendingLocalRefresh !== undefined) {
       throw new Error("pending Kimi local-refresh successor must be recovered before remote reconciliation");
@@ -909,6 +927,9 @@ async function reconcileKimiSubscriptionCredentialHandle(
       return true;
     }
     if (!shouldReplaceKimiCredential(localToken, remoteToken, options)) return false;
+    if (credentialLockIsCompromised(refreshLockPath)) {
+      throw new Error("Kimi OAuth refresh lock was lost before the reconciled credential could be committed");
+    }
     await replaceKimiLeaseJsonAtomic(
       credentialHandle,
       credentialsDirectoryHandle,
@@ -965,7 +986,10 @@ async function snapshotKimiSubscriptionAuthFromLease(input: {
   }
 }
 
-async function acquireKimiRefreshLockAt(oauthAnchor: string, lockName: string): Promise<() => Promise<void>> {
+async function acquireKimiRefreshLockAt(
+  oauthAnchor: string,
+  lockName: string
+): Promise<{ release: () => Promise<void>; lockPath: string }> {
   const targetHandle = await openKimiLeaseFileAt(
     oauthAnchor,
     lockName,
@@ -976,17 +1000,20 @@ async function acquireKimiRefreshLockAt(oauthAnchor: string, lockName: string): 
   const target = path.join(oauthAnchor, lockName);
   try {
     forgetCredentialLockCompromise(target);
-    return await lockfile.lock(target, {
-      retries: {
-        retries: 120,
-        factor: 1,
-        minTimeout: 500,
-        maxTimeout: 1_000
-      },
-      stale: 5_000,
-      realpath: false,
-      onCompromised: credentialLockCompromiseHandler(target)
-    });
+    return {
+      release: await lockfile.lock(target, {
+        retries: {
+          retries: 120,
+          factor: 1,
+          minTimeout: 500,
+          maxTimeout: 1_000
+        },
+        stale: 5_000,
+        realpath: false,
+        onCompromised: credentialLockCompromiseHandler(target)
+      }),
+      lockPath: target
+    };
   } catch (error) {
     throw new Error(
       `unable to acquire Kimi OAuth refresh lock: ${error instanceof Error ? error.message : String(error)}`,
@@ -1880,7 +1907,7 @@ export async function reconcileKimiSubscriptionAuthCredential(
   await access(credentialPath, constants.R_OK | constants.W_OK);
   await access(path.join(source, "device_id"), constants.R_OK);
 
-  const release = await acquireKimiRefreshLock(source, credential.lockName);
+  const { release, lockPath: refreshLockPath } = await acquireKimiRefreshLock(source, credential.lockName);
   try {
     const localToken = kimiOAuthToken(await readFile(credentialPath, "utf8"), credentialPath);
     if (isKimiCredentialCommitEquivalent(localToken, remoteToken)) {
@@ -1893,6 +1920,9 @@ export async function reconcileKimiSubscriptionAuthCredential(
       return true;
     }
     if (!shouldReplaceKimiCredential(localToken, remoteToken, options)) return false;
+    if (credentialLockIsCompromised(refreshLockPath)) {
+      throw new Error("Kimi OAuth refresh lock was lost before the refreshed token could be written");
+    }
     await writeJsonAtomic(credentialPath, remoteToken);
     return true;
   } finally {
@@ -2225,7 +2255,10 @@ function kimiRefreshTokenSha256(refreshToken: string): string {
   return createHash("sha256").update(refreshToken).digest("hex");
 }
 
-async function acquireKimiRefreshLock(source: string, lockName = "kimi-code"): Promise<() => Promise<void>> {
+async function acquireKimiRefreshLock(
+  source: string,
+  lockName = "kimi-code"
+): Promise<{ release: () => Promise<void>; lockPath: string }> {
   const oauthDir = path.join(source, "oauth");
   const target = path.join(oauthDir, lockName);
   await mkdir(oauthDir, { recursive: true, mode: 0o700 });
@@ -2233,17 +2266,20 @@ async function acquireKimiRefreshLock(source: string, lockName = "kimi-code"): P
   await targetHandle.close();
   try {
     forgetCredentialLockCompromise(target);
-    return await lockfile.lock(target, {
-      retries: {
-        retries: 120,
-        factor: 1,
-        minTimeout: 500,
-        maxTimeout: 1_000
-      },
-      stale: 5_000,
-      realpath: false,
-      onCompromised: credentialLockCompromiseHandler(target)
-    });
+    return {
+      release: await lockfile.lock(target, {
+        retries: {
+          retries: 120,
+          factor: 1,
+          minTimeout: 500,
+          maxTimeout: 1_000
+        },
+        stale: 5_000,
+        realpath: false,
+        onCompromised: credentialLockCompromiseHandler(target)
+      }),
+      lockPath: target
+    };
   } catch (error) {
     throw new Error(
       `unable to acquire Kimi OAuth refresh lock: ${error instanceof Error ? error.message : String(error)}`,

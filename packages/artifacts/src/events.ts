@@ -8,7 +8,7 @@ import { z } from "zod/v4";
 import { type RunLayout } from "./run-layout.js";
 import {
   SAFE_ID_PATTERN,
-  appendBytesDurable,
+  appendBytesDurableAt,
   appendLineDurable,
   prepareSafeFilePath,
   readJsonFile,
@@ -335,10 +335,15 @@ function ensureExactEventLines(filePath: string, records: readonly EventRecord[]
         // discarding an unrelated but complete record would lose evidence, and
         // refusing to proceed would strand the run — `replayEvents` already
         // tolerates such a line, so no reader depends on it being rejected.
+        if (matchingIndex >= 0 && nextMissing < 0) {
+          // Every record of this batch is already durable, so terminating this tail
+          // would commit a second copy of one of them.
+          throw new Error(`${label} duplicates an already durable event record as its unterminated tail`);
+        }
         if (matchingIndex >= 0 && matchingIndex !== nextMissing) {
           throw new Error(`${label} contains an out-of-order unterminated event record`);
         }
-        appendBytesDurable(filePath, Buffer.from("\n"));
+        appendBytesDurableAt(filePath, Buffer.from("\n"), { expectedSize: contents.length });
       } else {
         const next = expectations[nextMissing];
         const expectedBytes = next === undefined ? undefined : Buffer.from(next.serialized, "utf8");
@@ -347,7 +352,9 @@ function ensureExactEventLines(filePath: string, records: readonly EventRecord[]
           tail.length <= expectedBytes.length &&
           expectedBytes.subarray(0, tail.length).equals(tail)
         ) {
-          appendBytesDurable(filePath, Buffer.concat([expectedBytes.subarray(tail.length), Buffer.from("\n")]));
+          appendBytesDurableAt(filePath, Buffer.concat([expectedBytes.subarray(tail.length), Buffer.from("\n")]), {
+            expectedSize: contents.length
+          });
         } else {
           // A trailing fragment that does not parse and is not a prefix of the next
           // record is a torn write from a process that died mid-append. It was never

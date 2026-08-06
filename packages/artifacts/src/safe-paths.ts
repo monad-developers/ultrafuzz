@@ -162,14 +162,32 @@ export function writeFileDurable(filePath: string, data: string | Uint8Array): v
     path.dirname(filePath),
     `.${path.basename(filePath)}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`
   );
-  const fd = fs.openSync(tempPath, "wx", 0o600);
+  // A temp file left behind by a failed write is not inert. When the destination is
+  // a marker inside a lock directory, the stray sibling makes that directory
+  // non-empty forever, which blocks both proper-lockfile's stale `rmdir` and this
+  // repository's liveness-based reclamation — wedging the run with no repair path
+  // short of manual filesystem surgery. Remove it on every failure.
+  let renamed = false;
   try {
-    fs.writeFileSync(fd, data);
-    fs.fsyncSync(fd);
+    const fd = fs.openSync(tempPath, "wx", 0o600);
+    try {
+      fs.writeFileSync(fd, data);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tempPath, filePath);
+    renamed = true;
   } finally {
-    fs.closeSync(fd);
+    if (!renamed) {
+      try {
+        fs.unlinkSync(tempPath);
+      } catch {
+        // The temp file may never have been created. Nothing here may mask the
+        // original write failure.
+      }
+    }
   }
-  fs.renameSync(tempPath, filePath);
   fsyncDirectory(path.dirname(filePath));
 }
 
@@ -339,6 +357,49 @@ export function appendBytesDurable(filePath: string, bytes: Uint8Array, trustedR
     fs.closeSync(fd);
   }
   fsyncDirectory(directory);
+}
+
+/**
+ * Durably appends at an exact expected end-of-file offset.
+ *
+ * Repairing a torn trailing record means deciding what to write from a read that
+ * already happened. A plain `O_APPEND` write would land after anything another
+ * writer appended in between, concatenating two records into one malformed line, so
+ * the size is re-checked under the same descriptor that performs the write and the
+ * bytes are placed at that exact offset.
+ */
+export function appendBytesDurableAt(
+  filePath: string,
+  bytes: Uint8Array,
+  options: { expectedSize: number; trustedRoot?: string }
+): void {
+  if (options.trustedRoot !== undefined) {
+    assertNoSymlinkComponents(options.trustedRoot, filePath, "append path");
+  }
+  const fd = fs.openSync(filePath, fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      throw new ArtifactPathError("not-file", `append path must be a regular file: ${filePath}`);
+    }
+    if (stat.nlink !== 1) {
+      throw new ArtifactPathError("not-file", `append path must not be hard-linked: ${filePath}`);
+    }
+    if (stat.size !== options.expectedSize) {
+      throw new ArtifactPathError("not-file", `append path changed size before repair: ${filePath}`);
+    }
+    const contents = Buffer.from(bytes);
+    let offset = 0;
+    while (offset < contents.length) {
+      const written = fs.writeSync(fd, contents, offset, contents.length - offset, options.expectedSize + offset);
+      if (written <= 0) throw new Error(`append write made no progress: ${filePath}`);
+      offset += written;
+    }
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fsyncDirectory(path.dirname(filePath));
 }
 
 /**

@@ -82,7 +82,9 @@ import {
 import { checkDependencyLegality } from "./artifact-gates.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
 import {
+  beginProperLockfileHold,
   captureProperLockfileDirectoryIdentity,
+  endProperLockfileHoldPublic,
   forgetProperLockfileCompromise,
   properLockfileCompromiseHandler,
   properLockfileContentionCode,
@@ -461,6 +463,7 @@ export async function acquireWorkflowStartPreparationLock(layout: RunLayout): Pr
             "workflow start preparation lock",
             acquiredIdentity
           );
+          beginProperLockfileHold(lockPath);
         } catch (error) {
           try {
             await acquiredRelease();
@@ -1227,6 +1230,7 @@ export async function repairMissingRenderedPromptsForRun(input: {
     },
     onCompromised: properLockfileCompromiseHandler(promptRepairLockPath)
   });
+  beginProperLockfileHold(promptRepairLockPath);
   try {
     const repaired = repairRenderedPromptsForRun({ projectRoot, runId: input.runId, layout });
     // This lock publishes no owner marker, so a lost hold cannot be cleaned up by
@@ -1242,6 +1246,7 @@ export async function repairMissingRenderedPromptsForRun(input: {
     } catch {
       // A compromised hold is already gone; its pathname is reclaimed by staleness.
     }
+    endProperLockfileHoldPublic(promptRepairLockPath);
     forgetProperLockfileCompromise(promptRepairLockPath);
   }
 }

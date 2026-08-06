@@ -10,6 +10,7 @@ import {
   appendNodeAttempt,
   appendEvent,
   appendBytesDurable,
+  appendBytesDurableAt,
   appendLineDurable,
   createEventRecord,
   createRunLayout,
@@ -29,11 +30,13 @@ import {
   replayUsageEvents,
   safeResolveInside,
   summarizeNodeAttempts,
+  truncateDurable,
   updateNodeState,
   verifyArtifactManifestPrerequisites,
   writeArtifact,
   writeArtifactManifest,
   writeGeneratedTestManifest,
+  writeJsonDurable,
   writeRunState
 } from "../src/index.js";
 
@@ -659,10 +662,27 @@ test("event recovery fails closed on integrity violations and repairs torn tails
 
   // A record of this batch that is already durably present AND duplicated as the
   // unterminated tail must fail closed: terminating that tail would commit a second
-  // copy of the same event.
+  // copy of the same event. This is a duplicate, not an ordering fault, and says so.
   fs.writeFileSync(layout.eventsPath, `${serialized}\n${serialized}`, "utf8");
-  assert.throws(() => ensureEventRecord(layout, record), /out-of-order unterminated event record/u);
+  assert.throws(
+    () => ensureEventRecord(layout, record),
+    /duplicates an already durable event record as its unterminated tail/u
+  );
   assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), `${serialized}\n${serialized}`);
+
+  // A genuine ordering fault: a two-record batch with neither durable, where the tail
+  // is the SECOND record. Completing it would commit the batch out of order.
+  const laterRecord = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-b",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:01.000Z",
+    payload: { recovered: true }
+  });
+  const laterSerialized = JSON.stringify(laterRecord);
+  fs.writeFileSync(layout.eventsPath, laterSerialized, "utf8");
+  assert.throws(() => ensureEventRecords(layout, [record, laterRecord]), /out-of-order unterminated event record/u);
+  assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), laterSerialized);
 
   // An unterminated trailing line, by contrast, is the signature of a process that
   // died mid-append. Recovery must proceed, because refusing would make every
@@ -694,6 +714,76 @@ test("event recovery fails closed on integrity violations and repairs torn tails
   assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), `${serialized}\n`);
   ensureEventRecord(layout, record);
   assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), `${serialized}\n`);
+});
+
+test("torn-tail repair refuses to act when the file changed since it was read", () => {
+  const project = tempProject();
+  const filePath = path.join(project, "events.jsonl");
+  fs.writeFileSync(filePath, "first\nsecond", "utf8");
+  const observedSize = fs.statSync(filePath).size;
+
+  // A repair decides what to write from a read that already happened. If another
+  // writer appended in between, both the truncation and the newline termination must
+  // refuse rather than destroy or concatenate that writer's durable record.
+  fs.appendFileSync(filePath, "-raced\n", "utf8");
+  assert.throws(() => truncateDurable(filePath, 6, { expectedSize: observedSize }), /changed size before truncation/u);
+  assert.throws(
+    () => appendBytesDurableAt(filePath, Buffer.from("\n"), { expectedSize: observedSize }),
+    /changed size before repair/u
+  );
+  assert.equal(fs.readFileSync(filePath, "utf8"), "first\nsecond-raced\n");
+
+  // With the size unchanged both succeed and write at exactly that offset.
+  const currentSize = fs.statSync(filePath).size;
+  appendBytesDurableAt(filePath, Buffer.from("tail"), { expectedSize: currentSize });
+  assert.equal(fs.readFileSync(filePath, "utf8"), "first\nsecond-raced\ntail");
+  truncateDurable(filePath, currentSize, { expectedSize: currentSize + 4 });
+  assert.equal(fs.readFileSync(filePath, "utf8"), "first\nsecond-raced\n");
+});
+
+test("durable repair rejects hard links and out-of-range lengths", () => {
+  const project = tempProject();
+  const filePath = path.join(project, "events.jsonl");
+  fs.writeFileSync(filePath, "line\n", "utf8");
+  const size = fs.statSync(filePath).size;
+
+  assert.throws(() => truncateDurable(filePath, size + 1, { expectedSize: size }), /exceeds the file size/u);
+
+  const linkPath = path.join(project, "events-link.jsonl");
+  fs.linkSync(filePath, linkPath);
+  assert.throws(() => truncateDurable(filePath, 0, { expectedSize: size }), /must not be hard-linked/u);
+  assert.throws(
+    () => appendBytesDurableAt(filePath, Buffer.from("x"), { expectedSize: size }),
+    /must not be hard-linked/u
+  );
+  assert.equal(fs.readFileSync(filePath, "utf8"), "line\n");
+});
+
+test("a failed durable write leaves no temp file beside its destination", () => {
+  const project = tempProject();
+  const directory = path.join(project, "lock-directory");
+  fs.mkdirSync(directory);
+  const target = path.join(directory, "owner.json");
+  const originalWriteFileSync = fs.writeFileSync;
+  // A temp file stranded inside a lock directory keeps that directory non-empty
+  // forever, which blocks every form of lock reclamation.
+  Object.defineProperty(fs, "writeFileSync", {
+    configurable: true,
+    writable: true,
+    value: () => {
+      throw new Error("simulated write failure");
+    }
+  });
+  try {
+    assert.throws(() => writeJsonDurable(target, { pid: 1 }), /simulated write failure/u);
+  } finally {
+    Object.defineProperty(fs, "writeFileSync", {
+      configurable: true,
+      writable: true,
+      value: originalWriteFileSync
+    });
+  }
+  assert.deepEqual(fs.readdirSync(directory), []);
 });
 
 test("event indexes encode long IDs in a collision-free hash namespace", () => {

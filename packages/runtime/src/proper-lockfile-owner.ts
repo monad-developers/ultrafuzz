@@ -31,12 +31,41 @@ export function properLockfileIsCompromised(lockPath: string): boolean {
   return compromisedLockPaths.has(path.resolve(lockPath));
 }
 
+const outstandingProperLockfileHolds = new Map<string, number>();
+
 /**
  * Clears a recorded loss so a later, genuinely held acquisition of the same
- * pathname in this process is not judged by a previous holder's failure.
+ * pathname in this process is not judged by a previous holder's failure — but only
+ * while no hold for that pathname is still outstanding.
+ *
+ * The record is process-global and keyed by pathname, so clearing it unconditionally
+ * before an acquisition attempt would re-open the fail-closed guards of a holder in
+ * the same process that has lost its lock and is still running. The outstanding count
+ * makes that impossible: a contender that is merely waiting cannot absolve a live
+ * holder's loss.
  */
 export function forgetProperLockfileCompromise(lockPath: string): void {
-  compromisedLockPaths.delete(path.resolve(lockPath));
+  const resolved = path.resolve(lockPath);
+  if ((outstandingProperLockfileHolds.get(resolved) ?? 0) > 0) return;
+  compromisedLockPaths.delete(resolved);
+}
+
+/** Records that this process now holds `lockPath`, so a contender cannot clear its loss. */
+export function beginProperLockfileHold(lockPath: string): void {
+  const resolved = path.resolve(lockPath);
+  outstandingProperLockfileHolds.set(resolved, (outstandingProperLockfileHolds.get(resolved) ?? 0) + 1);
+}
+
+function endProperLockfileHold(lockPath: string): void {
+  const resolved = path.resolve(lockPath);
+  const remaining = (outstandingProperLockfileHolds.get(resolved) ?? 1) - 1;
+  if (remaining <= 0) outstandingProperLockfileHolds.delete(resolved);
+  else outstandingProperLockfileHolds.set(resolved, remaining);
+}
+
+/** Ends a hold for a lock that publishes no owner marker and so releases directly. */
+export function endProperLockfileHoldPublic(lockPath: string): void {
+  endProperLockfileHold(lockPath);
 }
 
 /**
@@ -75,6 +104,7 @@ export async function withProperLockfileReclaimGuard<T>(lockPath: string, operat
     retries: 0,
     onCompromised: properLockfileCompromiseHandler(guardPath)
   });
+  beginProperLockfileHold(guardPath);
   // Releasing the guard must not be able to discard or mask the operation's result.
   // A guard whose own heartbeat was lost rejects with ERELEASED, and doing this in a
   // bare `finally` would throw that away along with a lock the operation had already
@@ -92,6 +122,7 @@ export async function withProperLockfileReclaimGuard<T>(lockPath: string, operat
 }
 
 async function releaseProperLockfileReclaimGuard(release: () => Promise<void>, guardPath: string): Promise<void> {
+  endProperLockfileHold(guardPath);
   try {
     await release();
   } catch {
@@ -128,8 +159,20 @@ export interface OwnedProperLockfileRelease {
  * contradict the state.
  */
 export async function releaseOwnedProperLockfile(input: OwnedProperLockfileRelease): Promise<{ lost: boolean }> {
+  endProperLockfileHold(input.lockPath);
   if (!properLockfileIsCompromised(input.lockPath)) {
-    if (!input.ownerIsOurs()) throw new Error(`${input.label} ownership changed before release`);
+    if (!input.ownerIsOurs()) {
+      // Release before reporting the mismatch. Throwing first would leave the
+      // proper-lockfile hold and its heartbeat alive, so the lock directory's mtime
+      // would keep being refreshed, staleness would never reclaim it, and the run
+      // would stay locked out for the remaining life of this process.
+      try {
+        await input.release();
+      } catch {
+        // The mismatch is the caller's diagnosis; a release failure must not mask it.
+      }
+      throw new Error(`${input.label} ownership changed before release`);
+    }
     fs.unlinkSync(input.ownerPath);
     await input.release();
     return { lost: false };
