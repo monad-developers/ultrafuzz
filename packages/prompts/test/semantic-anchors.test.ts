@@ -52,17 +52,26 @@ describe("prompt semantic anchors", () => {
   // anchors keep the prompt halves from drifting back, since a prompt that contradicts its gate is only
   // discoverable by burning a node.
   it("states that optional evidence fields are optional", () => {
-    const fanin = prompt("properties/property-specification-fanin.md");
-    // `canonical_property.ledger_ids` is `.optional()` with `minItems: 1`, so a property that maps to no
-    // ledger entry has nothing to render and must not be asked for an empty field.
-    expect(fanin).toContain("when that property has ledger\nIDs");
-    expect(fanin).toContain("Omit the `ledger_ids`\nfield entirely for a property that maps to no ledger entry");
+    // Matched on whitespace-normalised text. These anchors exist to stop prose from drifting back into
+    // contradicting its gate, and pinning exact line breaks would make an innocent reflow look like a
+    // semantic regression.
+    const flat = (relativePath: string) => prompt(relativePath).replace(/\s+/gu, " ");
 
-    const discovery = prompt("setup/project-discovery.md");
-    // A scan probe records WHERE the agent searched. A directory and an absent path are both valid, and
-    // only ledger entries are byte-checked against the pinned commit.
-    expect(discovery).toContain("may name a directory you searched or a path that");
-    expect(discovery).toContain("only ledger `entries` are checked byte-for-byte");
+    // `canonical_property.ledger_ids` is `.optional()` with `minItems: 1`, so a property that maps to no
+    // ledger entry has nothing to render and must not be asked for an empty field (#297, #299).
+    const fanin = flat("properties/property-specification-fanin.md");
+    expect(fanin).toContain("when that property has ledger IDs, include its complete `ledger_ids` list");
+    expect(fanin).toContain("Omit the `ledger_ids` field entirely for a property that maps to no ledger entry");
+
+    // A scan probe records WHERE the agent searched, so a directory or an absent path is valid (#289,
+    // #291). But a probe naming a regular FILE still goes through `readInvariantSourceSnapshot` and is
+    // compared against the pinned commit -- an earlier draft of this sentence claimed only ledger
+    // entries are byte-checked, which is false, and that is precisely the prompt-versus-gate divergence
+    // this anchor exists to prevent.
+    const discovery = flat("setup/project-discovery.md");
+    expect(discovery).toContain("may name a directory you searched or a path that turned out not to exist");
+    expect(discovery).toContain("that file must be tracked and unmodified in the checkout");
+    expect(discovery).not.toContain("only ledger `entries` are checked byte-for-byte");
   });
 
   it("preserves source-guided denial-of-service and liveness requirements", () => {
