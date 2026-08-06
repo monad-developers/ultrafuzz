@@ -1583,6 +1583,96 @@ test("property lens authority sanitizer applies to custom logical lens IDs", () 
   );
 });
 
+// R43 (issue #275) was stranded permanently by this exact sequence: the workflow verifier
+// published `properties/<lens>.json` and sealed its digest in a verification marker, then this
+// runtime gate rewrote the artifact to strip unauthorized reference expectations and left the
+// marker describing the old bytes. Every dependent's `assertVerifiedDependency` then failed
+// forever, and because the failure lands on a `prepare:` wrapper rather than a node there was no
+// failed node for --retry-failed to reset.
+test("property lens authority sanitizer keeps the verification marker digest consistent", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-marker" });
+  const lens = JSON.stringify({
+    schema_version: "ultrafuzz.property-lens.v1",
+    properties: [
+      {
+        id: "iSpoke_supply",
+        description: "Supply completes for valid state.",
+        category: "dos-liveness",
+        priority: "high",
+        reference_expectations: ["ERC4626-999"]
+      }
+    ]
+  });
+  writeArtifact(layout, "recon-properties", "properties/recon.json", lens);
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "recon-properties",
+    logical_id: "recon-properties",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+  const artifactPath = path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json");
+
+  // The verifier has already sealed the pre-sanitization bytes.
+  const sealed = createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex");
+  const markerDir = path.join(layout.root, ".ultrafuzz-verification");
+  fs.mkdirSync(markerDir, { recursive: true });
+  const markerPath = path.join(markerDir, `${node.id}.json`);
+  fs.writeFileSync(
+    markerPath,
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.artifact-verification.v1",
+      attempt_id: node.id,
+      node_id: node.id,
+      artifacts: [
+        { path: "properties/recon.json", sha256: sealed, primary: true },
+        { path: "findings.json", sha256: "0".repeat(64), primary: false }
+      ],
+      publications: [
+        { path: "properties/recon.json", sha256: sealed },
+        { path: "findings.json", sha256: "0".repeat(64) }
+      ]
+    })}\n`,
+    "utf8"
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
+    JSON.stringify(result.diagnostics)
+  );
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_VERIFICATION_DIGEST_REFRESHED"),
+    JSON.stringify(result.diagnostics)
+  );
+
+  const sanitizedSha = createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex");
+  assert.notEqual(sanitizedSha, sealed, "sanitizer did not actually rewrite the artifact");
+  const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as {
+    artifacts: Array<{ path: string; sha256: string; primary?: boolean }>;
+    publications: Array<{ path: string; sha256: string }>;
+  };
+  // The rewritten path now matches disk in both sets, and nothing else was touched.
+  for (const entries of [marker.artifacts, marker.publications]) {
+    const lensEntry = entries.find((entry) => entry.path === "properties/recon.json");
+    assert.equal(lensEntry?.sha256, sanitizedSha);
+    const untouched = entries.find((entry) => entry.path === "findings.json");
+    assert.equal(untouched?.sha256, "0".repeat(64));
+  }
+  assert.equal(marker.artifacts.find((entry) => entry.path === "properties/recon.json")?.primary, true);
+
+  // Idempotent: a second pass removes nothing, so it must not rewrite or re-report anything.
+  const second = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+  assert.equal(
+    second.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_VERIFICATION_DIGEST_REFRESHED"),
+    false,
+    JSON.stringify(second.diagnostics)
+  );
+  assert.equal(createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex"), sanitizedSha);
+});
+
 test("property lens authority sanitizer does not mutate non-lens JSON outputs", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-non-lens-json" });
   writeArtifact(

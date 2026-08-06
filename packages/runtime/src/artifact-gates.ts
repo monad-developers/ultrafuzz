@@ -181,7 +181,7 @@ export function verifyRequiredArtifactsForAttempt(
     diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_EVIDENCE_READ_FAILED"));
   }
   try {
-    diagnostics.push(...sanitizeLensReferenceExpectationAuthority(layout, artifactDir, node));
+    diagnostics.push(...sanitizeLensReferenceExpectationAuthority(layout, artifactDir, node, attemptId));
   } catch (error) {
     diagnostics.push(
       diagnosticFromError(error, "property-provenance", "PROPERTY_REFERENCE_EXPECTATION_SANITIZE_FAILED")
@@ -1462,6 +1462,9 @@ function severityArtifactForNode(
  */
 export const CAMPAIGN_LOGICAL_NODE_IDS = ["stateful-invariant-campaign", "stateful-invariant-recon-campaign"] as const;
 
+// Mirrors the generated workflow's verification-marker directory inside the run root.
+const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
+
 const campaignLogicalNodeIds = CAMPAIGN_LOGICAL_NODE_IDS;
 
 const campaignResultArtifactNames = [
@@ -1567,10 +1570,60 @@ function verifyLensReferenceExpectationAuthority(
   return diagnostics;
 }
 
+/**
+ * Keep a verification marker consistent with an artifact a runtime gate just rewrote. Updates the
+ * recorded sha256 for that one path in both `artifacts` and `publications`, leaving every other
+ * entry and the rest of the marker untouched, so the marker still attests exactly what is on disk.
+ */
+function refreshVerifiedArtifactDigest(
+  layout: RunLayout,
+  attemptId: string,
+  relativePath: string,
+  absolutePath: string
+): RuntimeDiagnostic[] {
+  const markerPath = path.join(layout.root, ARTIFACT_VERIFICATION_DIRECTORY, `${attemptId}.json`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+  } catch {
+    // No marker yet: the verifier has not run, so it will hash the sanitized bytes itself.
+    return [];
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return [];
+  const marker = parsed as Record<string, unknown>;
+  const digest = crypto.createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex");
+  let updated = false;
+  for (const key of ["artifacts", "publications"] as const) {
+    const entries = marker[key];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+      const record = entry as Record<string, unknown>;
+      if (record.path !== relativePath || typeof record.sha256 !== "string") continue;
+      if (record.sha256 === digest) continue;
+      record.sha256 = digest;
+      updated = true;
+    }
+  }
+  if (!updated) return [];
+  writeJsonDurable(markerPath, marker);
+  return [
+    {
+      code: "ARTIFACT_VERIFICATION_DIGEST_REFRESHED",
+      message: `Refreshed the verification marker digest for ${relativePath} after runtime sanitization`,
+      severity: "warning",
+      source: "property-provenance",
+      path: markerPath,
+      details: { attempt_id: attemptId, artifact_path: relativePath, sha256: digest }
+    }
+  ];
+}
+
 function sanitizeLensReferenceExpectationAuthority(
   layout: RunLayout,
   artifactDir: string,
-  node: PlannedGraphNode
+  node: PlannedGraphNode,
+  attemptId: string
 ): RuntimeDiagnostic[] {
   const lensOutput = propertyLensOutput(node);
   if (lensOutput === undefined) return [];
@@ -1610,7 +1663,14 @@ function sanitizeLensReferenceExpectationAuthority(
     ...lens.value,
     properties
   });
+  // This gate rewrites an artifact the workflow verifier may already have published and sealed.
+  // Leaving the marker describing the pre-sanitization bytes makes every dependent's
+  // `assertVerifiedDependency` fail permanently with no failed node to retry, which stranded Aave
+  // run R43 (issue #275). The sanitizer is trusted runtime policy removing unauthorized reference
+  // expectation IDs, so the marker must follow its edit rather than contradict it.
+  const markerDiagnostics = refreshVerifiedArtifactDigest(layout, attemptId, lensOutput.path, lensPath);
   return [
+    ...markerDiagnostics,
     {
       code: "PROPERTY_REFERENCE_EXPECTATION_SANITIZED",
       message: `Removed ${removed} unauthorized reference expectation ID${removed === 1 ? "" : "s"} from property lens output`,
