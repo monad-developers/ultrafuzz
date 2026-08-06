@@ -1915,6 +1915,17 @@ const fs = require("node:fs");
 const path = require("node:path");
 const root = process.argv[1];
 const runsRoot = path.join(root, "workspace", "target", ".ultrafuzz", "runs");
+function unavailable() {
+  process.stdout.write("{}");
+  process.exit(0);
+}
+function readJson(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    unavailable();
+  }
+}
 let candidates = [];
 try {
   for (const name of fs.readdirSync(runsRoot)) {
@@ -1930,8 +1941,8 @@ if (candidates.length === 0) {
 }
 candidates.sort((left, right) => right.modified - left.modified);
 const statePath = candidates[0].statePath;
-const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
-const plan = JSON.parse(fs.readFileSync(path.join(path.dirname(statePath), "plan.json"), "utf8"));
+const state = readJson(statePath);
+const plan = readJson(path.join(path.dirname(statePath), "plan.json"));
 const nodes = state && typeof state.nodes === "object" && state.nodes !== null ? Object.values(state.nodes) : [];
 const successful = new Set(["succeeded", "reused-from-prior-run"]);
 const logical = new Map();

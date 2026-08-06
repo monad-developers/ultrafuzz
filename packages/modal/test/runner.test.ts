@@ -1120,6 +1120,27 @@ describe("Modal canonical recovery probe", () => {
     });
   });
 
+  it("treats a transient partial durable state read as unavailable canonical progress", () => {
+    const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-partial-"));
+    const remoteRoot = "/data/logical-run/model-one";
+    const runRoot = path.join(
+      mount,
+      "logical-run",
+      "model-one",
+      "workspace",
+      "target",
+      ".ultrafuzz",
+      "runs",
+      "durable-run"
+    );
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(path.join(runRoot, "state.json"), "\0".repeat(16));
+    fs.writeFileSync(path.join(runRoot, "plan.json"), JSON.stringify({ topology: { logical_nodes: 3 } }));
+    const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount);
+
+    expect(JSON.parse(execFileSync(command[0]!, command.slice(1), { encoding: "utf8" }))).toEqual({});
+  });
+
   it("uses durable worker rows instead of topology-only nodes for strict completion", () => {
     const canonical = {
       status: "succeeded",
