@@ -6,7 +6,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { applyWorkspacePatch, captureWorkspacePatch, captureWorkspaceTree } from "../src/workspace-handoff.js";
+import {
+  applyWorkspacePatch,
+  captureWorkspacePatch,
+  captureWorkspaceTree,
+  rethrowOversizedGitOutput
+} from "../src/workspace-handoff.js";
 import * as runtime from "../src/index.js";
 
 function git(cwd: string, args: string[], input?: string): string {
@@ -170,7 +175,7 @@ test("attributes a capture overflow to what fed the diff, not to bulk that contr
     // sank the earlier size-ceiling attempt, and it came back here.
     mkdirSync(path.join(root, "lib"), { recursive: true });
     for (let file = 0; file < 12; file += 1) {
-      writeFileSync(path.join(root, "lib", `${file}.bin`), randomBytes(5 * 1024 * 1024));
+      writeFileSync(path.join(root, "lib", `${file}.bin`), randomBytes(3 * 1024 * 1024));
     }
     git(root, ["add", "."]);
     git(root, ["commit", "--quiet", "-m", "base"]);
@@ -179,7 +184,7 @@ test("attributes a capture overflow to what fed the diff, not to bulk that contr
     // The only new content, and so the only possible source of diff bytes. Incompressible, because
     // `git diff --binary` deflates the payload.
     mkdirSync(path.join(root, "generated"), { recursive: true });
-    writeFileSync(path.join(root, "generated", "huge.bin"), randomBytes(40 * 1024 * 1024));
+    writeFileSync(path.join(root, "generated", "huge.bin"), randomBytes(34 * 1024 * 1024));
 
     assert.throws(
       () => captureWorkspacePatch(root, baseline),
@@ -189,152 +194,6 @@ test("attributes a capture overflow to what fed the diff, not to bulk that contr
         assert.match(message, /generated \(>=\d+ diff bytes in \d+ files?\)/u);
         assert.doesNotMatch(message, /lib/u, message);
         assert.equal((error as { cause?: { code?: string } }).cause?.code, "ENOBUFS");
-        return true;
-      }
-    );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("attributes an overflow made of many small files to their root", () => {
-  const root = fixture();
-  try {
-    writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
-    git(root, ["add", ".gitignore"]);
-    git(root, ["commit", "--quiet", "-m", "base"]);
-    const baseline = captureWorkspaceTree(root);
-
-    // The recorded Aave v4 stack burst inside `echidna/coverage/<digits>.txt` -- a directory of SMALL
-    // files whose aggregate crossed the buffer. Ranking by largest single file is blind to this shape:
-    // the biggest file here is 1 MB and the cause is 40 MB spread across forty of them.
-    mkdirSync(path.join(root, "coverage"), { recursive: true });
-    for (let file = 0; file < 40; file += 1) {
-      writeFileSync(path.join(root, "coverage", `${file}.txt`), randomBytes(1024 * 1024));
-    }
-
-    assert.throws(
-      () => captureWorkspacePatch(root, baseline),
-      (error: unknown) => {
-        assert.match(
-          error instanceof Error ? error.message : String(error),
-          /coverage \(>=\d+ diff bytes in \d+ files?\)/u
-        );
-        return true;
-      }
-    );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("attributes quoted paths and ignores header lines inside file content", () => {
-  const root = fixture();
-  try {
-    writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
-    git(root, ["add", ".gitignore"]);
-    git(root, ["commit", "--quiet", "-m", "base"]);
-    const baseline = captureWorkspaceTree(root);
-
-    // git renders a non-ASCII path as `"a/caf\303\251.txt" "b/..."`, which moves the separator from
-    // ` b/` to `" "b/`. A pattern written only for the unquoted form drops these silently -- the file
-    // contributes bytes to the overflow and never appears in the attribution.
-    mkdirSync(path.join(root, "quoted"), { recursive: true });
-    writeFileSync(path.join(root, "quoted", "café.txt"), randomBytes(20 * 1024 * 1024).toString("base64"));
-
-    // A file whose own CONTENT is a diff header. In a unified diff these arrive prefixed with `+`, so
-    // anchoring to line start is what keeps them from inventing a root that does not exist.
-    mkdirSync(path.join(root, "authored"), { recursive: true });
-    writeFileSync(
-      path.join(root, "authored", "notes.md"),
-      `diff --git a/fabricated b/fabricated\n${randomBytes(20 * 1024 * 1024).toString("base64")}\n`
-    );
-
-    assert.throws(
-      () => captureWorkspacePatch(root, baseline),
-      (error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        assert.match(message, /quoted \(>=\d+ diff bytes/u, message);
-        assert.doesNotMatch(message, /fabricated/u, message);
-        return true;
-      }
-    );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("ranks competing roots by their span in the capture and caps the list", () => {
-  const root = fixture();
-  try {
-    writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
-    git(root, ["add", ".gitignore"]);
-    git(root, ["commit", "--quiet", "-m", "base"]);
-    const baseline = captureWorkspaceTree(root);
-
-    // Eight roots that all land inside the captured prefix, with sizes ASCENDING in path order so that
-    // reporting them in encounter order, or with the comparator reversed, gives a different answer than
-    // ranking by span. Base64 so the diff is text and each root's span is proportional to its bytes.
-    // `a1` is smallest and `a8` largest; the message must lead with `a8` and must not mention `a1`.
-    for (let index = 1; index <= 8; index += 1) {
-      mkdirSync(path.join(root, `a${index}`), { recursive: true });
-      writeFileSync(path.join(root, `a${index}`, "d.txt"), randomBytes(index * 700 * 1024).toString("base64"));
-    }
-
-    assert.throws(
-      () => captureWorkspacePatch(root, baseline),
-      (error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        const ranked = [...message.matchAll(/\ba(\d) \(>=(\d+) diff bytes/gu)].map((match) => ({
-          root: match[1],
-          bytes: Number(match[2])
-        }));
-        assert.equal(ranked.length, 5, `expected the list capped at five, got ${message}`);
-        assert.equal(ranked[0]?.root, "8", message);
-        assert.deepEqual(
-          ranked.map((entry) => entry.bytes),
-          [...ranked.map((entry) => entry.bytes)].sort((left, right) => right - left),
-          `not sorted by span: ${message}`
-        );
-        // Spans must be real byte counts, not per-file constants: a8 carries ~8x what a2 does.
-        const largest = ranked[0]?.bytes ?? 0;
-        const smallestListed = ranked[ranked.length - 1]?.bytes ?? 0;
-        assert.ok(largest > smallestListed * 1.5, `spans look uniform: ${message}`);
-        assert.doesNotMatch(message, /\ba1 \(/u, message);
-        return true;
-      }
-    );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("does not carry the multi-megabyte capture into the rethrown cause", () => {
-  const root = fixture();
-  try {
-    writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
-    git(root, ["add", ".gitignore"]);
-    git(root, ["commit", "--quiet", "-m", "base"]);
-    const baseline = captureWorkspaceTree(root);
-    mkdirSync(path.join(root, "generated"), { recursive: true });
-    writeFileSync(path.join(root, "generated", "huge.bin"), randomBytes(40 * 1024 * 1024));
-
-    assert.throws(
-      () => captureWorkspacePatch(root, baseline),
-      (error: unknown) => {
-        // Node hands back the truncated capture in `stdout` AND a duplicate in `output[1]`. The engine's
-        // error serializer walks `cause` and copies own enumerable keys; it de-cycles, so it does not
-        // crash, but it does not truncate either. Measured against the real module, an unstripped cause
-        // serialized to 222706512 bytes versus 1277 stripped. Size is the failure mode, not a throw.
-        const cause = (error as { cause?: Record<string, unknown> }).cause ?? {};
-        assert.equal(cause.code, "ENOBUFS");
-        for (const field of ["stdout", "stderr", "output", "error"]) {
-          assert.equal(cause[field], undefined, `${field} was carried into the cause`);
-        }
-        // Naming `cause` explicitly is what a walking serializer does; `new Error(msg, { cause })` makes
-        // it non-enumerable, so a plain `JSON.stringify(error)` would pass this vacuously.
-        const serialized = JSON.stringify({ message: (error as Error).message, cause });
-        assert.ok(serialized.length < 64 * 1024, `serialized failure record was ${serialized.length} bytes`);
         return true;
       }
     );
@@ -646,4 +505,160 @@ test("applies a validated setup patch and rejects a base-tree mismatch", () => {
     rmSync(source, { recursive: true, force: true });
     rmSync(downstreamParent, { recursive: true, force: true });
   }
+});
+
+/**
+ * A `spawnSync` ENOBUFS failure, shaped exactly as Node builds it: the capture in `stdout`, a duplicate
+ * in `output[1]`, and `error` pointing at the error itself.
+ */
+function enobufs(stdout: string, stderr = ""): Error {
+  const error = new Error("spawnSync git ENOBUFS") as Error & Record<string, unknown>;
+  const out = Buffer.from(stdout);
+  const err = Buffer.from(stderr);
+  error.code = "ENOBUFS";
+  error.errno = -105;
+  error.stdout = out;
+  error.stderr = err;
+  error.output = [null, out, err];
+  error.error = error;
+  return error;
+}
+
+/** A capture holding one hunk per entry, each padded so its span is proportional to `bytes`. */
+function syntheticDiff(entries: ReadonlyArray<{ path: string; bytes: number }>): string {
+  return entries
+    .map((entry) => {
+      const header = `diff --git a/${entry.path} b/${entry.path}\n@@ -0,0 +1 @@\n+`;
+      return `${header}${"x".repeat(Math.max(1, entry.bytes - header.length))}\n`;
+    })
+    .join("");
+}
+
+function messageOf(capture: string, stderr = ""): string {
+  try {
+    rethrowOversizedGitOutput(["diff", "--cached"], enobufs(capture, stderr));
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  throw new Error("expected rethrowOversizedGitOutput to throw");
+}
+
+test("ranks contributors by span, largest first, capped at five", () => {
+  // Sizes ASCENDING in path order, so encounter order and a reversed comparator each give a different
+  // answer than ranking by span. a8 is largest and must lead; a1..a3 must fall off the five-entry cap.
+  const message = messageOf(
+    syntheticDiff(Array.from({ length: 8 }, (_, index) => ({ path: `a${index + 1}/d.txt`, bytes: (index + 1) * 1000 })))
+  );
+  const ranked = [...message.matchAll(/\ba(\d) \(>=(\d+) diff bytes/gu)].map((match) => ({
+    root: match[1],
+    bytes: Number(match[2])
+  }));
+  assert.equal(ranked.length, 5, message);
+  assert.deepEqual(
+    ranked.map((entry) => entry.root),
+    ["8", "7", "6", "5", "4"],
+    message
+  );
+  assert.doesNotMatch(message, /\ba1 \(/u, message);
+});
+
+test("ranks by span when path order is the reverse of size order", () => {
+  // The mirror of the case above, and the one an end-to-end fixture could never afford. If the message
+  // ever reverts to reporting encounter order, exactly one of these two tests still passes -- which is
+  // how a version of this helper shipped claiming "in git's path order" while sorting by size.
+  const message = messageOf(
+    syntheticDiff(Array.from({ length: 8 }, (_, index) => ({ path: `b${index + 1}/d.txt`, bytes: (8 - index) * 1000 })))
+  );
+  const ranked = [...message.matchAll(/\bb(\d) \(>=\d+ diff bytes/gu)].map((match) => match[1]);
+  assert.deepEqual(ranked, ["1", "2", "3", "4", "5"], message);
+});
+
+test("aggregates many small files in one root rather than ranking single files", () => {
+  // The recorded Aave v4 stack burst inside `echidna/coverage/<digits>.txt`: forty small files whose
+  // aggregate crossed the buffer, against one larger file that must not outrank them.
+  const message = messageOf(
+    syntheticDiff([
+      ...Array.from({ length: 40 }, (_, index) => ({ path: `coverage/${index}.txt`, bytes: 1000 })),
+      { path: "single/big.bin", bytes: 9000 }
+    ])
+  );
+  assert.match(message, /coverage \(>=\d+ diff bytes in 40 files\)/u, message);
+  assert.ok(message.indexOf("coverage") < message.indexOf("single"), message);
+});
+
+test("counts bytes rather than UTF-16 code units", () => {
+  // A 3-byte character counts as 1 in a decoded string, so an ASCII root of the same string length would
+  // otherwise tie with a CJK root that carries three times the bytes.
+  const cjk = "契約".repeat(500);
+  const message = messageOf(
+    `diff --git a/ascii/a.txt b/ascii/a.txt\n@@ -0,0 +1 @@\n+${"x".repeat(1200)}\n` +
+      `diff --git a/wide/b.txt b/wide/b.txt\n@@ -0,0 +1 @@\n+${cjk}\n`
+  );
+  const wide = Number(/wide \(>=(\d+) diff bytes/u.exec(message)?.[1]);
+  const ascii = Number(/ascii \(>=(\d+) diff bytes/u.exec(message)?.[1]);
+  assert.ok(wide > ascii * 2, `expected the CJK root to outweigh the ASCII one: ${message}`);
+});
+
+test("attributes git-quoted paths and ignores header lines inside file content", () => {
+  // git renders a non-ASCII path as `"a/caf\303\251.txt" "b/..."`, moving the separator from ` b/` to
+  // `" "b/`. Unhandled, those bytes are credited to the PRECEDING root. The `+` prefixed line is what a
+  // file whose own content is a diff header looks like; line anchoring is what stops it forging a root.
+  const message = messageOf(
+    `diff --git a/innocent/tiny.txt b/innocent/tiny.txt\n@@ -0,0 +1 @@\n+ok\n` +
+      `diff --git "a/culprit/caf\\303\\251.txt" "b/culprit/caf\\303\\251.txt"\n@@ -0,0 +1 @@\n+${"y".repeat(5000)}\n` +
+      `+diff --git a/fabricated/x b/fabricated/x\n`
+  );
+  assert.match(message, /culprit \(>=\d+ diff bytes/u, message);
+  assert.doesNotMatch(message, /fabricated/u, message);
+  assert.ok(message.indexOf("culprit") < message.indexOf("innocent"), message);
+});
+
+test("blames stderr, not the workspace, when stderr is the stream that overflowed", () => {
+  const message = messageOf("", "warning: LF will be replaced by CRLF\n".repeat(50));
+  assert.match(message, /wrote more than the \d+-byte capture buffer to stderr/u, message);
+  assert.doesNotMatch(message, /workspace is too large/u, message);
+  // A little stdout alongside a stderr flood is still a stderr overflow.
+  const mixed = messageOf("a".repeat(100), "x".repeat(5000));
+  assert.match(mixed, /to stderr/u, mixed);
+});
+
+test("names both the capture buffer and the patch ceiling", () => {
+  // An operator told only about the 32 MB buffer who trims to just under it fails again at 16 MB.
+  const message = messageOf(syntheticDiff([{ path: "generated/x.bin", bytes: 2000 }]));
+  assert.match(message, /33554432-byte capture buffer/u, message);
+  assert.match(message, /stay under 16777216 bytes/u, message);
+});
+
+test("strips the capture from the cause but keeps a readable head of stderr", () => {
+  // Node duplicates the capture in `stdout` and `output[1]` and self-references `error`. The engine's
+  // serializer walks `cause`, de-cycles, and does not truncate, so leaving these attached turns the
+  // failure record into a vast write. A head of stderr is the one part worth keeping.
+  let thrown: Error | undefined;
+  try {
+    rethrowOversizedGitOutput(["diff"], enobufs("x".repeat(200_000), "fatal: something git said\n"));
+  } catch (error) {
+    thrown = error as Error;
+  }
+  const cause = (thrown as { cause?: Record<string, unknown> }).cause ?? {};
+  assert.equal(cause.code, "ENOBUFS");
+  assert.equal(cause.stdout, undefined);
+  assert.equal(cause.output, undefined);
+  assert.equal(cause.error, undefined);
+  assert.equal(cause.stderr, "fatal: something git said\n");
+  assert.ok(JSON.stringify({ cause }).length < 4096, "the cause should serialize small");
+});
+
+test("rethrows a non-ENOBUFS failure completely unchanged", () => {
+  const other = new Error("fatal: not a git repository") as Error & Record<string, unknown>;
+  other.code = "ENOENT";
+  other.stdout = Buffer.from("keep me");
+  assert.throws(
+    () => rethrowOversizedGitOutput(["diff"], other),
+    (error: unknown) => {
+      // Identity, not equality: the retry paths match on `.message` and read `.stdout`.
+      assert.equal(error, other);
+      assert.equal((error as Record<string, unknown>).stdout?.toString(), "keep me");
+      return true;
+    }
+  );
 });

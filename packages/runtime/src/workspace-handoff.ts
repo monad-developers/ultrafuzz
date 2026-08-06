@@ -483,6 +483,9 @@ const DIFF_HEADER = /^diff --git "?a\/(.+?)"? "?b\//gmu;
  */
 const DISCARDED_SPAWN_FIELDS = ["stdout", "stderr", "output", "error"] as const;
 
+/** How much of git's own stderr to keep on the cause; enough to read, far too little to bloat a write. */
+const RETAINED_STDERR_BYTES = 2048;
+
 /**
  * Rethrows an oversized-output failure as something an operator can act on.
  *
@@ -493,23 +496,29 @@ const DISCARDED_SPAWN_FIELDS = ["stdout", "stderr", "output", "error"] as const;
  * Several causal theories were pursued and refuted before that stack was read out of a 68 MB log by hand.
  *
  * The attribution is read out of the truncated capture the error already carries, NOT by measuring the
- * workspace. Every earlier attempt here measured a proxy and ranked the wrong thing: file size on disk is
- * not diff size (`--binary` deflates), and a listing of staged paths is mostly tracked files that were
- * never modified and contribute nothing at all — on a real target the pinned `lib/` dependencies outweigh
- * the culprit and get named first. Counting the capture needs no estimate, no subprocess and no stat:
- * deflation is already applied, unmodified files are already absent, excluded roots are already gone.
+ * workspace. Measuring the workspace prices the wrong thing — file size on disk is not diff size, and a
+ * staged listing is mostly tracked files that were never modified and contribute nothing — which the
+ * `bulk that contributed nothing` test pins as an executable assertion rather than a claim here.
  *
- * Know what this is NOT. `error.stdout` holds the first `MAX_GIT_CAPTURE_BYTES` of a diff git emits in
- * path order, so the ranking covers a PREFIX, not the workspace. A large root sorting after the cutoff is
- * invisible: with 34 MB in `contracts/` and 100 MB in `zzz-corpus/`, this names `contracts` and never
- * mentions the bigger one. That is why the message says "first contributors ... in path order" rather
- * than "largest" — it is a lead, not a ranking, and overstating it is how the previous two versions of
- * this helper sent operators after the wrong directory. Completing it would need a second, bounded pass
- * (`diff --raw` plus `cat-file --batch-check`); worth doing if this message ever proves insufficient.
+ * Know the boundary. `error.stdout` holds roughly the first `MAX_GIT_CAPTURE_BYTES` git wrote, and git
+ * emits in path order, so this ranks a PREFIX. A big root sorting after the cutoff is invisible: with
+ * 34 MB in `contracts/` and 100 MB in `zzz-corpus/`, only `contracts` is named. Two consequences worth
+ * knowing before trusting the numbers — the message states the first, and both make every figure a floor:
+ *
+ *   1. Roots past the cutoff are missing entirely, so this is a lead, not a survey of the workspace.
+ *   2. The LAST root in the prefix is truncated mid-hunk, and it is often the one ranked first, so the
+ *      top entry is the one most understated. Two close entries can invert on where the cutoff landed.
+ *
+ * Completing it would need a second, bounded pass (`diff --raw` plus `cat-file --batch-check`); worth
+ * doing if this message ever proves insufficient.
  *
  * Scope: this improves the string. It does not prevent the failure — the run is over when it fires.
+ *
+ * @internal Exported only so its tests can hand it a captured payload directly. Reaching this through
+ * real git costs a >32 MB write per case, which priced the cheap cases out of existence — and one of the
+ * cases nobody could afford is what caught the message claiming an ordering the code does not produce.
  */
-function rethrowOversizedGitOutput(args: readonly string[], error: unknown): never {
+export function rethrowOversizedGitOutput(args: readonly string[], error: unknown): never {
   if (!(error instanceof Error) || (error as { code?: unknown }).code !== "ENOBUFS") throw error;
   const subcommand = args.find((argument) => !argument.startsWith("-")) ?? "git";
   const asText = (value: unknown): string =>
@@ -541,24 +550,29 @@ function rethrowOversizedGitOutput(args: readonly string[], error: unknown): nev
     .join(", ");
 
   // ENOBUFS fires on EITHER stream. Saying "the workspace is too large" when git merely wrote a lot of
-  // stderr would be a confident lie, so only claim that when the captured stdout is what overflowed.
-  const overflowedStderr = diff === "" && errorOutput !== "";
+  // stderr would be a confident lie, so claim it only when stdout is the larger capture. An earlier form
+  // tested `diff === ""`, which still told that lie whenever a little stdout accompanied the flood.
+  const overflowedStderr = errorOutput.length > diff.length;
   const detail = overflowedStderr
     ? `wrote more than the ${MAX_GIT_CAPTURE_BYTES}-byte capture buffer to stderr: ${errorOutput.slice(0, 400)}`
     : // Both ceilings, because they differ and only one of them is the one being reported. An operator
       // told about the 32 MB buffer who trims to just under it hits `workspace patch exceeds` next.
       `produced more than the ${MAX_GIT_CAPTURE_BYTES}-byte capture buffer (a handed-off patch must also stay under ${MAX_PATCH_BYTES} bytes); the workspace is too large to hand off`;
 
-  // Drop the payload before attaching this as a `cause`. The engine's `errorToJson` walks `cause`,
-  // de-cycles with a WeakSet — so it does NOT throw, and an earlier version of this comment was wrong to
-  // say it did — but it does not TRUNCATE. Node holds the capture in both `stdout` and `output[1]`, so an
-  // unstripped cause becomes a vast durable write. Measured against the real module: 222706512 bytes
-  // unstripped versus 1277 stripped. `error` goes with them because it is a self-reference
-  // (`e.error === e`) that only a de-cycling serializer survives. Everything useful is in the message.
+  // Drop the payload before attaching this as a `cause`. The engine's `errorToJson` walks `cause` and
+  // de-cycles with a WeakSet, so it does NOT throw — an earlier version of this comment was wrong to say
+  // it did — but it does not TRUNCATE either. Node holds the capture in both `stdout` and `output[1]`, so
+  // an unstripped cause serializes to hundreds of megabytes where a stripped one is about a kilobyte.
+  // (Exact figures depend entirely on the captured content, so none are quoted here.) `error` goes too:
+  // it is a self-reference, `e.error === e`, that only a de-cycling serializer survives.
+  const retainedStderr = errorOutput.slice(0, RETAINED_STDERR_BYTES);
   for (const field of DISCARDED_SPAWN_FIELDS) delete (error as unknown as Record<string, unknown>)[field];
+  // A head of stderr is cheap and is the only surviving record of what git actually said, which the
+  // message carries only when stderr was the stream that overflowed.
+  if (retainedStderr !== "") (error as unknown as Record<string, unknown>).stderr = retainedStderr;
 
   throw new Error(
-    `git ${subcommand} ${detail}${attribution === "" ? "" : `. First contributors, in git's path order within the captured ${MAX_GIT_CAPTURE_BYTES}-byte prefix (anything git had not written yet is not visible here): ${attribution}`}`,
+    `git ${subcommand} ${detail}${attribution === "" ? "" : `. Largest contributors within the first ${MAX_GIT_CAPTURE_BYTES} bytes git wrote; git emits in path order, so anything past that cutoff is not visible here: ${attribution}`}`,
     { cause: error }
   );
 }
