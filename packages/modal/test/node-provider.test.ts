@@ -15,13 +15,17 @@ import {
   modalNodeSandboxName,
   modalNodeTags,
   modalNodeVolumeName,
+  parseModalNodeSandboxInput,
   type ModalNodeSandboxInput
 } from "../src/node-provider.js";
 import {
+  copyAttemptVerificationMarker,
   copySafeTree,
   copyPublishedEvidenceTree,
+  copyVerifiedPublishedEvidenceTree,
   initializeDurableNodeWorkspace,
   runDurableWorkflow,
+  workerResultPublicationMode,
   workflowCommandArguments
 } from "../src/node-worker.js";
 import { extractSafeTarArchive } from "../src/safe-archive.js";
@@ -45,6 +49,19 @@ describe("Modal node sandbox provider", () => {
     expect(modalNodeTags("run/with spaces", "node:attempt", "reset-one").attempt).not.toBe(tags.attempt);
   });
 
+  it("rejects unsafe cloud attempt identifiers before marker paths are created", () => {
+    const fixture = createProjectFixture();
+    try {
+      for (const attemptId of ["../attempt-one", "nested/attempt-one", ".attempt-one", "attempt one"]) {
+        expect(() => parseModalNodeSandboxInput({ ...fixture.input, attempt_id: attemptId })).toThrow(
+          /cloud node attempt_id is invalid/u
+        );
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("creates an immutable handoff from committed source plus only declared dependency evidence", async () => {
     const fixture = createProjectFixture();
     fs.writeFileSync(path.join(fixture.root, "local-only-secret"), "must stay local\n");
@@ -57,9 +74,12 @@ describe("Modal node sandbox provider", () => {
       expect(entries).toContain("./.smithers/agents/kimi.ts");
       for (const dependency of fixture.input.dependency_artifact_dirs) {
         expect(entries).toContain(`./${dependency}/`);
+        const marker = `./${fixture.input.run_root}/.ultrafuzz-verification/${path.basename(dependency)}.json`;
+        expect(entries).toContain(marker);
       }
       expect(entries).not.toContain("local-only-secret");
       expect(entries).not.toContain("unrelated.txt");
+      expect(entries).not.toContain(`./${fixture.input.run_root}/.ultrafuzz-verification/unrelated.json`);
       expect(entries).not.toContain("stale.txt");
       expect(entries).not.toContain(`./${fixture.input.run_root}/workspaces/`);
       expect(entries).not.toContain(`./${fixture.input.run_root}/logs/`);
@@ -94,6 +114,39 @@ describe("Modal node sandbox provider", () => {
 
       await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
         /unsupported symlink entry/u
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects symlinked dependency verification marker directories in cloud handoff archives", async () => {
+    const fixture = createProjectFixture();
+    try {
+      const markerRoot = path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification");
+      const realMarkerRoot = path.join(fixture.root, fixture.input.run_root, "real-markers");
+      fs.rmSync(markerRoot, { recursive: true, force: true });
+      fs.mkdirSync(realMarkerRoot);
+      fs.symlinkSync(realMarkerRoot, markerRoot, "dir");
+
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /dependency verification marker directory is not an anchored run path/u
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects symlinked dependency verification marker files in cloud handoff archives", async () => {
+    const fixture = createProjectFixture();
+    try {
+      const markerRoot = path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification");
+      const marker = path.join(markerRoot, "dependency-one.json");
+      fs.rmSync(marker, { force: true });
+      fs.symlinkSync("dependency-two.json", marker);
+
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /cloud handoff file must be a regular unlinked file/u
       );
     } finally {
       fixture.cleanup();
@@ -207,6 +260,104 @@ describe("Modal node sandbox provider", () => {
       );
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("stages only marker-verified cloud artifact publications", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-worker-verified-publication-"));
+    try {
+      const source = path.join(root, "artifacts");
+      const destination = path.join(root, "published");
+      const marker = path.join(root, "attempt-one.json");
+      const finding = path.join(source, "finding.json");
+      const companion = path.join(source, "generated-tests", "Property.t.sol");
+      fs.mkdirSync(path.dirname(companion), { recursive: true });
+      fs.writeFileSync(finding, '{"ok":true}\n');
+      fs.writeFileSync(companion, "contract Property {}\n");
+      fs.writeFileSync(path.join(source, "workspace-mirror-extra.txt"), "unverified\n");
+      fs.writeFileSync(
+        marker,
+        `${JSON.stringify({
+          schema_version: "ultrafuzz.artifact-verification.v1",
+          attempt_id: "attempt-one",
+          artifacts: [],
+          publications: [
+            {
+              path: "finding.json",
+              sha256: crypto.createHash("sha256").update(fs.readFileSync(finding)).digest("hex")
+            },
+            {
+              path: "generated-tests/Property.t.sol",
+              sha256: crypto.createHash("sha256").update(fs.readFileSync(companion)).digest("hex")
+            }
+          ]
+        })}\n`
+      );
+
+      copyVerifiedPublishedEvidenceTree(source, destination, marker, "attempt-one");
+
+      expect(fs.readFileSync(path.join(destination, "finding.json"), "utf8")).toBe('{"ok":true}\n');
+      expect(fs.readFileSync(path.join(destination, "generated-tests", "Property.t.sol"), "utf8")).toBe(
+        "contract Property {}\n"
+      );
+      expect(fs.existsSync(path.join(destination, "workspace-mirror-extra.txt"))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("stages the current cloud attempt verification marker for controller publication", () => {
+    const fixture = createProjectFixture();
+    const destination = path.join(path.dirname(fixture.root), "verification-staging");
+    try {
+      fs.writeFileSync(
+        path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification", "attempt-one.json"),
+        '{"attempt_id":"attempt-one"}\n'
+      );
+      copyAttemptVerificationMarker(fixture.root, fixture.input, destination);
+
+      expect(fs.readFileSync(path.join(destination, "attempt-one.json"), "utf8")).toContain(
+        '"attempt_id":"attempt-one"'
+      );
+      expect(fs.existsSync(path.join(destination, "dependency-one.json"))).toBe(false);
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(destination, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unsafe cloud attempt verification markers before staging", () => {
+    const fixture = createProjectFixture();
+    const destination = path.join(path.dirname(fixture.root), "verification-staging");
+    try {
+      const markerRoot = path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification");
+      const marker = path.join(markerRoot, "attempt-one.json");
+      fs.symlinkSync("dependency-one.json", marker);
+
+      expect(() => copyAttemptVerificationMarker(fixture.root, fixture.input, destination)).toThrow(
+        /verification marker is unsafe/u
+      );
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(destination, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unsafe cloud attempt ids before staging verification markers", () => {
+    const fixture = createProjectFixture();
+    const destination = path.join(path.dirname(fixture.root), "verification-staging");
+    try {
+      expect(() =>
+        copyAttemptVerificationMarker(
+          fixture.root,
+          { run_root: fixture.input.run_root, attempt_id: "../attempt-one" },
+          destination
+        )
+      ).toThrow(/cloud node attempt_id is invalid/u);
+      expect(fs.existsSync(destination)).toBe(false);
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(destination, { recursive: true, force: true });
     }
   });
 
@@ -475,6 +626,39 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     }
   });
 
+  it("publishes only old markerless completed durable handoffs with the legacy result schema", async () => {
+    const fixture = createProjectFixture();
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    fixture.input.project_archive_sha256 = archive.sha256;
+    const volumeRoot = path.join(path.dirname(fixture.root), "modal-volume", "legacy-completed");
+    try {
+      const first = await initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input);
+      fs.rmSync(path.join(first.projectRoot, fixture.input.run_root, ".ultrafuzz-verification"), {
+        recursive: true,
+        force: true
+      });
+      first.recordCheckpoint("completed");
+
+      const retry = await initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input);
+
+      expect(retry.hasCompletedCheckpoint).toBe(true);
+      expect(workerResultPublicationMode(retry.projectRoot, retry.input, retry.hasCompletedCheckpoint)).toBe(
+        "legacy-markerless-v1"
+      );
+
+      fs.writeFileSync(
+        path.join(retry.projectRoot, retry.input.workflow_path),
+        'const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";\n'
+      );
+      expect(workerResultPublicationMode(retry.projectRoot, retry.input, retry.hasCompletedCheckpoint)).toBe(
+        "verified-v2"
+      );
+    } finally {
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("reattaches to one live attempt and atomically publishes its durable result", async () => {
     const fixture = createProjectFixture();
     const result = createResultArchive();
@@ -515,6 +699,12 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
       expect(fs.readFileSync(path.join(fixture.root, fixture.input.workspace_dir, "work.txt"), "utf8")).toBe(
         "remote workspace\n"
       );
+      expect(
+        fs.readFileSync(
+          path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification", "attempt-one.json"),
+          "utf8"
+        )
+      ).toBe('{"verified":true}\n');
     } finally {
       result.cleanup();
       fixture.cleanup();
@@ -540,6 +730,186 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
       expect(client.sandboxes.create).toHaveBeenCalledOnce();
       expect(sandbox.exec).not.toHaveBeenCalled();
       expect(sandbox.filesystem.copyFromLocal).not.toHaveBeenCalled();
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("accepts legacy v1 cloud results that predate verification marker archives", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive({
+      schemaVersion: "ultrafuzz.modal.node-result.v1",
+      includeVerificationMarker: false
+    });
+    const sandbox = fakeSandbox(result);
+    const client = fakeClient({ listed: [sandbox] });
+    const provider = createModalNodeSandboxProvider(providerOptions(client));
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished" });
+      expect(
+        fs.existsSync(path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification", "attempt-one.json"))
+      ).toBe(false);
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects v2 cloud results that omit the attempt verification marker", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive({ includeVerificationMarker: false });
+    const sandbox = fakeSandbox(result);
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
+    try {
+      const artifactFinding = path.join(fixture.root, fixture.input.artifact_dir, "finding.json");
+      const workspaceWork = path.join(fixture.root, fixture.input.workspace_dir, "work.txt");
+      const sourceProofRoot = path.join(fixture.root, fixture.input.run_root, "source-proofs");
+      fs.writeFileSync(artifactFinding, "existing artifact\n");
+      fs.writeFileSync(workspaceWork, "existing workspace\n");
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/missing artifact verification marker/u);
+      expect(fs.readFileSync(artifactFinding, "utf8")).toBe("existing artifact\n");
+      expect(fs.existsSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"))).toBe(true);
+      expect(fs.readFileSync(workspaceWork, "utf8")).toBe("existing workspace\n");
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.json"))).toBe(false);
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.invariant.json"))).toBe(false);
+      expect(
+        fs.existsSync(path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification", "attempt-one.json"))
+      ).toBe(false);
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects v2 cloud results with conflicting existing verification markers before mutating publications", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const sandbox = fakeSandbox(result);
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
+    try {
+      const artifactFinding = path.join(fixture.root, fixture.input.artifact_dir, "finding.json");
+      const workspaceWork = path.join(fixture.root, fixture.input.workspace_dir, "work.txt");
+      const sourceProofRoot = path.join(fixture.root, fixture.input.run_root, "source-proofs");
+      const verificationMarker = path.join(
+        fixture.root,
+        fixture.input.run_root,
+        ".ultrafuzz-verification",
+        "attempt-one.json"
+      );
+      fs.writeFileSync(artifactFinding, "existing artifact\n");
+      fs.writeFileSync(workspaceWork, "existing workspace\n");
+      fs.writeFileSync(verificationMarker, "existing marker\n");
+
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/would replace an immutable publication file/u);
+      expect(fs.readFileSync(artifactFinding, "utf8")).toBe("existing artifact\n");
+      expect(fs.existsSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"))).toBe(true);
+      expect(fs.readFileSync(workspaceWork, "utf8")).toBe("existing workspace\n");
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.json"))).toBe(false);
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.invariant.json"))).toBe(false);
+      expect(fs.readFileSync(verificationMarker, "utf8")).toBe("existing marker\n");
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects hard-linked existing verification marker destinations before mutating publications", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const sandbox = fakeSandbox(result);
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
+    try {
+      const artifactFinding = path.join(fixture.root, fixture.input.artifact_dir, "finding.json");
+      const workspaceWork = path.join(fixture.root, fixture.input.workspace_dir, "work.txt");
+      const sourceProofRoot = path.join(fixture.root, fixture.input.run_root, "source-proofs");
+      const verificationMarker = path.join(
+        fixture.root,
+        fixture.input.run_root,
+        ".ultrafuzz-verification",
+        "attempt-one.json"
+      );
+      const linkedMarker = path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification", "linked.json");
+      fs.writeFileSync(artifactFinding, "existing artifact\n");
+      fs.writeFileSync(workspaceWork, "existing workspace\n");
+      fs.writeFileSync(linkedMarker, '{"verified":true}\n');
+      fs.linkSync(linkedMarker, verificationMarker);
+
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/destination file is unsafe/u);
+      expect(fs.readFileSync(artifactFinding, "utf8")).toBe("existing artifact\n");
+      expect(fs.existsSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"))).toBe(true);
+      expect(fs.readFileSync(workspaceWork, "utf8")).toBe("existing workspace\n");
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.json"))).toBe(false);
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.invariant.json"))).toBe(false);
+      expect(fs.readFileSync(verificationMarker, "utf8")).toBe('{"verified":true}\n');
+      expect(fs.readFileSync(linkedMarker, "utf8")).toBe('{"verified":true}\n');
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects v2 cloud results missing artifacts before mutating workspace publications", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive({ includeArtifactsDirectory: false });
+    const sandbox = fakeSandbox(result);
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
+    try {
+      const artifactFinding = path.join(fixture.root, fixture.input.artifact_dir, "finding.json");
+      const workspaceWork = path.join(fixture.root, fixture.input.workspace_dir, "work.txt");
+      const sourceProofRoot = path.join(fixture.root, fixture.input.run_root, "source-proofs");
+      fs.writeFileSync(artifactFinding, "existing artifact\n");
+      fs.writeFileSync(workspaceWork, "existing workspace\n");
+
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/missing a required publication directory/u);
+      expect(fs.readFileSync(artifactFinding, "utf8")).toBe("existing artifact\n");
+      expect(fs.existsSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"))).toBe(true);
+      expect(fs.readFileSync(workspaceWork, "utf8")).toBe("existing workspace\n");
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.json"))).toBe(false);
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.invariant.json"))).toBe(false);
+      expect(
+        fs.existsSync(path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification", "attempt-one.json"))
+      ).toBe(false);
     } finally {
       result.cleanup();
       fixture.cleanup();
@@ -874,6 +1244,20 @@ function createProjectFixture() {
     fs.mkdirSync(path.join(root, dependency), { recursive: true });
     fs.writeFileSync(path.join(root, dependency, "declared.txt"), `${dependency}\n`);
   }
+  const markerRoot = path.join(root, runRoot, ".ultrafuzz-verification");
+  fs.mkdirSync(markerRoot, { recursive: true });
+  for (const dependency of dependencyArtifactDirs) {
+    fs.writeFileSync(
+      path.join(markerRoot, `${path.basename(dependency)}.json`),
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.artifact-verification.v1",
+        attempt_id: path.basename(dependency),
+        artifacts: [],
+        publications: []
+      })}\n`
+    );
+  }
+  fs.writeFileSync(path.join(markerRoot, "unrelated.json"), "{}\n");
   fs.mkdirSync(path.join(root, runRoot, "artifacts", "unrelated"), { recursive: true });
   fs.mkdirSync(path.join(root, workspaceDir), { recursive: true });
   fs.mkdirSync(path.join(root, runRoot, "logs"), { recursive: true });
@@ -925,17 +1309,34 @@ function manifestEntry(relativePath: string, filePath: string) {
   };
 }
 
-function createResultArchive(options: { includeDurableCheckpoint?: boolean } = {}) {
+function createResultArchive(
+  options: {
+    includeArtifactsDirectory?: boolean;
+    includeDurableCheckpoint?: boolean;
+    includeVerificationMarker?: boolean;
+    schemaVersion?: "ultrafuzz.modal.node-result.v1" | "ultrafuzz.modal.node-result.v2";
+  } = {}
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-result-test-"));
   const bundle = path.join(root, "bundle");
   const archive = path.join(root, "result.tgz");
-  fs.mkdirSync(path.join(bundle, "artifacts"), { recursive: true });
+  if (options.includeArtifactsDirectory !== false) {
+    fs.mkdirSync(path.join(bundle, "artifacts"), { recursive: true });
+  }
   fs.mkdirSync(path.join(bundle, "workspace"), { recursive: true });
   fs.mkdirSync(path.join(bundle, "source-proofs"), { recursive: true });
-  fs.writeFileSync(path.join(bundle, "artifacts", "finding.json"), '{"ok":true}\n');
+  if (options.includeVerificationMarker !== false) {
+    fs.mkdirSync(path.join(bundle, "verification"), { recursive: true });
+  }
+  if (options.includeArtifactsDirectory !== false) {
+    fs.writeFileSync(path.join(bundle, "artifacts", "finding.json"), '{"ok":true}\n');
+  }
   fs.writeFileSync(path.join(bundle, "workspace", "work.txt"), "remote workspace\n");
   fs.writeFileSync(path.join(bundle, "source-proofs", "attempt-one.invariant.json"), "durable source proof\n");
   fs.writeFileSync(path.join(bundle, "source-proofs", "attempt-one.json"), "pinned source proof\n");
+  if (options.includeVerificationMarker !== false) {
+    fs.writeFileSync(path.join(bundle, "verification", "attempt-one.json"), '{"verified":true}\n');
+  }
   execFileSync("tar", ["-czf", archive, "-C", bundle, "."]);
   const digest = crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
   const tags = modalNodeTags("controller-run", "node:attempt");
@@ -945,7 +1346,7 @@ function createResultArchive(options: { includeDurableCheckpoint?: boolean } = {
   return {
     archive,
     result: JSON.stringify({
-      schema_version: "ultrafuzz.modal.node-result.v1",
+      schema_version: options.schemaVersion ?? "ultrafuzz.modal.node-result.v2",
       status: "succeeded",
       artifact_archive: `${attemptRoot}/artifacts.tgz`,
       artifact_sha256: digest,
