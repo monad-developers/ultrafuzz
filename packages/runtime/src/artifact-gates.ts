@@ -1710,6 +1710,11 @@ function sanitizeLensReferenceExpectationAuthority(
   const properties = lens.value.properties.map((property) => {
     const expectationIds = property.reference_expectations ?? [];
     if (expectationIds.length === 0) return property;
+    // Judged per property, not per ID, and deliberately so: when any unauthorized ID is not
+    // catalogue-label shaped the lens is left byte-unchanged. Such an ID is a forged namespaced
+    // mapping, and the artifact as the model wrote it is the evidence of that, so rewriting it would
+    // destroy what the authority check exists to surface. `verifyPropertyProvenanceArtifacts` reports
+    // it and the node fails with the citation intact.
     const unauthorized = expectationIds.filter((expectationId) => !supplied.ids.has(expectationId));
     if (unauthorized.some((expectationId) => !isUnsupportedExternalReferenceLabel(expectationId))) return property;
     const authorized = expectationIds.filter((expectationId) => supplied.ids.has(expectationId));
@@ -1764,8 +1769,22 @@ function propertyLensOutput(node: PlannedGraphNode): PlannedGraphNode["outputs"]
   return node.outputs.find((output) => output.contract === "ultrafuzz/property-lens@1");
 }
 
+/**
+ * True for an identifier shaped like a citation into a reference catalog we were not given.
+ *
+ * Segments may be separated by `-` or `_`, in any combination, with a numeric suffix. R44's
+ * `property-specification-0kn0t` node was killed by `LEND_ACC_01` (issue #283) because the original
+ * pattern allowed only a single hyphen before the digits: the ID was not recognised, so the sanitizer
+ * left it in place and `verifyPropertyProvenanceArtifacts` failed the node as unauthorized, while
+ * `LEND-01` was stripped quietly in the same position. Multi-segment forms such as `LEND-ACC-01` and
+ * `CRYTIC-ERC4626-05` are common in the catalogues these lens prompts cite, so matching only one
+ * shape would leave the same trap for the next label.
+ *
+ * Namespaced identifiers such as `benchmark:unexpected` deliberately do NOT match: those are the
+ * benchmark-mapping citations the gate exists to reject, and they must keep failing the node.
+ */
 function isUnsupportedExternalReferenceLabel(expectationId: string): boolean {
-  return /^[A-Z][A-Z0-9]*-\d+$/u.test(expectationId);
+  return /^[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)*[-_]\d+$/u.test(expectationId);
 }
 
 function readLensSuppliedExpectationIds(
