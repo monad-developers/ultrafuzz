@@ -26,7 +26,7 @@ export const TRIAGE_CLASSIFICATIONS = [
 ] as const;
 
 export type FindingStatus = string;
-export type TriageClassification = (typeof TRIAGE_CLASSIFICATIONS)[number];
+export type TriageClassification = string;
 
 export interface FindingProvenance {
   nodeId?: string;
@@ -143,7 +143,7 @@ function normalizeFinding(value: unknown, index: number, input: NormalizeFinding
   normalized.confidence = normalizedConfidence(value, index);
   normalized.summary = requiredString(value, "summary", index);
   if (value.triage_classification !== undefined && value.triage_classification !== null) {
-    normalized.triage_classification = requiredEnum(value, "triage_classification", TRIAGE_CLASSIFICATIONS, index);
+    normalized.triage_classification = requiredString(value, "triage_classification", index);
   }
 
   assignIfMissing(normalized, "source_node_id", nodeId);

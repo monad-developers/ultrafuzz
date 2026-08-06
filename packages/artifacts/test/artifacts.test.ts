@@ -777,6 +777,29 @@ test("findings normalize agent lifecycle statuses and flexible evidence referenc
   assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /field kind/);
 });
 
+test("findings normalize non-disposition triage classifications", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Generated test reproduces issue",
+        status: "confirmed",
+        severity_guess: "medium",
+        confidence: "high",
+        summary: "The generated test fails deterministically.",
+        triage_classification: "domain-specific-category"
+      }
+    ])
+  );
+
+  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.equal(report.count, 1);
+  assert.equal(report.findings[0]!.triage_classification, "domain-specific-category");
+});
+
 test("findings normalize markdown evidence path fragments", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
   const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });

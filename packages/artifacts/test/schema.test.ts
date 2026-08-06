@@ -430,6 +430,7 @@ test("finding schema accepts minimal normalized findings and rejects malformed p
     severity_guess: "high",
     confidence: "medium",
     summary: "Input length reaches an expensive path.",
+    triage_classification: "domain-specific-category",
     evidence: ["test/foundry/Generated.t.sol::testIssue", { note: "Generated test reproduces issue" }]
   };
 
