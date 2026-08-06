@@ -177,8 +177,10 @@ test("attributes a git capture overflow to the root that actually fed the diff",
     // Aave v4 workspace, by far the biggest thing present. An enumeration that forgets the exclusions ranks
     // it first and hands the operator a top-5 made entirely of paths that are already fixed.
     mkdirSync(path.join(root, "echidna", "coverage"), { recursive: true });
+    // 60 MB total against the culprit's 40 MB: enough that a forgotten exclusion ranks echidna first,
+    // without writing a quarter of a gigabyte of incompressible bytes on every CI run.
     for (let file = 0; file < 3; file += 1) {
-      writeFileSync(path.join(root, "echidna", "coverage", `${file}.bin`), randomBytes(60 * 1024 * 1024));
+      writeFileSync(path.join(root, "echidna", "coverage", `${file}.bin`), randomBytes(20 * 1024 * 1024));
     }
 
     assert.throws(
