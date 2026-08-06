@@ -143,11 +143,10 @@ by `id`, and `class_replacement_key` is exactly `class:` followed by `id`.
 For a mapped class goal, `threat_replacement_keys` must contain exactly its
 `threat_ids`. For a coverage-gap class goal it must contain only
 `threat-model:coverage-gap`. Every listed key remains an MDX placeholder in
-`goal_prompt` and has a full contextual value in `replacements`: the literal
-`{{<key>}}` braces stay in `goal_prompt` for every key in
-`class_replacement_key` and `threat_replacement_keys` — including the literal
-text `{{threat-model:coverage-gap}}` in every coverage-gap goal — and are
-never substituted with their values.
+`goal_prompt` and has a full contextual value in `replacements`: keep each
+key wrapped in its literal double braces inside `goal_prompt` — every
+coverage-gap goal keeps the exact text `{{threat-model:coverage-gap}}` —
+and never substitute a placeholder with its replacement value.
 
 In both goal kinds, `attack_surface_ids` holds `id` values copied from the
 threat model's `attack_surfaces` records — lowercase slug IDs, never
