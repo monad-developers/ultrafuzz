@@ -412,6 +412,9 @@ test("generated Smithers pinned source proof ignores unrelated same-commit Ultra
     const canonicalProof = JSON.parse(fs.readFileSync(proofPath, "utf8")) as { refs: unknown[] };
     assert.deepEqual(canonicalProof.refs, [{ name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit }]);
 
+    fs.writeFileSync(proofPath, JSON.stringify(canonicalProof));
+    assert.throws(() => preservePinnedSourceProof(task), /pinned source proof property-specification-certora changed/u);
+
     const legacyNoisyProof = {
       ...canonicalProof,
       refs: [
@@ -422,6 +425,48 @@ test("generated Smithers pinned source proof ignores unrelated same-commit Ultra
     fs.writeFileSync(proofPath, `${JSON.stringify(legacyNoisyProof, null, 2)}\n`);
     git(["branch", "ultrafuzz/test-run/property-specification-crytic", pinnedCommit]);
     assert.doesNotThrow(() => preservePinnedSourceProof(task));
+
+    fs.writeFileSync(
+      proofPath,
+      `${JSON.stringify(
+        {
+          ...legacyNoisyProof,
+          injected: "metadata"
+        },
+        null,
+        2
+      )}\n`
+    );
+    assert.throws(() => preservePinnedSourceProof(task), /pinned source proof property-specification-certora changed/u);
+
+    fs.writeFileSync(
+      proofPath,
+      `${JSON.stringify(
+        {
+          ...canonicalProof,
+          refs: [{ name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit, injected: "metadata" }]
+        },
+        null,
+        2
+      )}\n`
+    );
+    assert.throws(() => preservePinnedSourceProof(task), /pinned source proof property-specification-certora changed/u);
+
+    fs.writeFileSync(
+      proofPath,
+      `${JSON.stringify(
+        {
+          ...canonicalProof,
+          refs: [
+            { name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit },
+            { name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit }
+          ]
+        },
+        null,
+        2
+      )}\n`
+    );
+    assert.throws(() => preservePinnedSourceProof(task), /pinned source proof property-specification-certora changed/u);
 
     fs.writeFileSync(
       proofPath,
