@@ -83,7 +83,7 @@ describe("terminal artifact-gate recovery", () => {
       retryable: false,
       error_code: "terminal-run-non-resumable"
     });
-    expect(classifyModalRunnerStatus({ sandbox: "exited", attempt: 1, workerStatus })).toMatchObject({
+    expect(classifyModalRunnerStatus({ sandbox: "exited", preModelAttempt: 1, workerStatus })).toMatchObject({
       category: "permanent-operational-failure",
       action: "none",
       retryable: false

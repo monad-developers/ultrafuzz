@@ -842,6 +842,35 @@ export function markModalLaunchFailed(
   record.finished_at = now;
 }
 
+/**
+ * How many consecutive attempts, ending at `record`, have failed to start model
+ * work in this generation.
+ *
+ * `record.attempt` counts every attempt a model has made in the current
+ * generation, including attempts that ran real model work and then asked for a
+ * durable resume. `MODAL_PRE_MODEL_RETRY_LIMIT` only bounds launch flakes that
+ * happen before model work, so it must be charged against this streak instead.
+ * The streak resets on an attempt whose recovery lifecycle definitely observed
+ * model work; an `"unknown"` observation does not reset it, which keeps the
+ * bound fail-closed against a zero-progress relaunch cycle.
+ */
+export function modalPreModelAttempt(
+  state: Pick<ModalLaunchState, "recovery_lifecycle">,
+  record: Pick<ModalLaunchRecord, "slug" | "generation" | "attempt">
+): number {
+  const lastModelWorkAttempt = state.recovery_lifecycle.reduce(
+    (latest, lifecycle) =>
+      lifecycle.model_slug === record.slug &&
+      lifecycle.generation === record.generation &&
+      lifecycle.attempt < record.attempt &&
+      lifecycle.model_work_started === true
+        ? Math.max(latest, lifecycle.attempt)
+        : latest,
+    0
+  );
+  return record.attempt - lastModelWorkAttempt;
+}
+
 export function markModalLaunchFailedWithRecovery(
   state: ModalLaunchState,
   record: ModalLaunchRecord,
@@ -855,7 +884,9 @@ export function markModalLaunchFailedWithRecovery(
   markModalLaunchFailed(record, category, input.now);
   return finishModalLaunchRecoveryLifecycle(state, record, {
     terminalReason:
-      category === "transient-operational-failure" && record.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT
+      category === "transient-operational-failure" &&
+      input.modelWorkStarted === false &&
+      modalPreModelAttempt(state, record) >= MODAL_PRE_MODEL_RETRY_LIMIT
         ? "recovery-budget-exhausted"
         : "operational-failure",
     finishedAt: record.finished_at!,
@@ -916,7 +947,8 @@ export interface ModalRunnerStatus {
 
 export function classifyModalRunnerStatus(input: {
   sandbox: ModalSandboxState;
-  attempt: number;
+  /** Consecutive attempts that never reached model work; see `modalPreModelAttempt`. */
+  preModelAttempt: number;
   workerStatus?: ModalWorkerStatus;
   launchFailure?: ModalLaunchFailureCategory;
   postModelRecovery?: "relaunch" | "stop";
@@ -950,15 +982,22 @@ export function classifyModalRunnerStatus(input: {
   if (input.launchFailure === "permanent-operational-failure") {
     return status("permanent-operational-failure", "none", false, false, 0);
   }
-  if (input.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT) {
+  if (input.preModelAttempt >= MODAL_PRE_MODEL_RETRY_LIMIT) {
     return status("permanent-operational-failure", "none", false, false, 0);
   }
-  return status("transient-operational-failure", "relaunch", false, true, modalPreModelRetryDelay(input.attempt));
+  return status(
+    "transient-operational-failure",
+    "relaunch",
+    false,
+    true,
+    modalPreModelRetryDelay(input.preModelAttempt)
+  );
 }
 
 export function modalRecoveryTerminalReasonForWorkerStatus(input: {
   category: ModalRunnerStatusCategory | ModalWorkerStatusCategory;
-  attempt: number;
+  /** Consecutive attempts that never reached model work; see `modalPreModelAttempt`. */
+  preModelAttempt: number;
   modelWorkStarted: boolean;
   recoveryBudgetExhausted?: boolean;
 }): Exclude<ModalRecoveryTerminalReason, "active"> {
@@ -966,7 +1005,7 @@ export function modalRecoveryTerminalReasonForWorkerStatus(input: {
   if (input.category === "genuine-task-outcome") return "genuine-worker-failure";
   if (
     (input.recoveryBudgetExhausted === true || input.category === "transient-operational-failure") &&
-    input.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT &&
+    input.preModelAttempt >= MODAL_PRE_MODEL_RETRY_LIMIT &&
     !input.modelWorkStarted
   ) {
     return "recovery-budget-exhausted";

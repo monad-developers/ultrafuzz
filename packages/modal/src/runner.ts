@@ -74,6 +74,7 @@ import {
   markModalLaunchReady,
   markModalSandboxCreated,
   modalLaunchTags,
+  modalPreModelAttempt,
   modalRecoveryFinishedAtForWorkerStatus,
   modalRecoveryTerminalReasonForWorkerStatus,
   modalWorkerLineage,
@@ -653,9 +654,10 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       "result.json"
     ]);
     const workerStatus = latestPersistedWorkerStatus(persisted, record);
+    const preModelAttempt = modalPreModelAttempt(input.state, record);
     const runnerStatus = classifyModalRunnerStatus({
       sandbox: probe.state,
-      attempt: record.attempt,
+      preModelAttempt,
       postModelRecovery: configuredPostModelRecovery(input.config),
       modelWorkMayHaveStarted: record.launched_at !== undefined,
       ...(workerStatus === undefined ? {} : { workerStatus }),
@@ -669,7 +671,7 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
         finishActiveModalRecoveryLifecycle(input.state, record, {
           terminalReason: modalRecoveryTerminalReasonForWorkerStatus({
             category: runnerStatus.category,
-            attempt: record.attempt,
+            preModelAttempt,
             modelWorkStarted: runnerStatus.model_work_started,
             recoveryBudgetExhausted:
               runnerStatus.category === "permanent-operational-failure" &&
@@ -686,7 +688,10 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
         await writeModalLaunchState(input.statePath, input.state);
       }
       if (["succeeded", "genuine-task-outcome"].includes(runnerStatus.category)) return;
-      throw new Error(`Modal runner cannot relaunch ${record.slug}: ${runnerStatus.category}`);
+      throw new Error(
+        `Modal runner cannot relaunch ${record.slug}: ${runnerStatus.category} ` +
+          `(pre-model attempt ${preModelAttempt} of ${MODAL_PRE_MODEL_RETRY_LIMIT})`
+      );
     }
     const finishedAt = new Date().toISOString();
     if (
@@ -784,9 +789,10 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       if (modelMayHaveStarted) {
         throw new Error("Modal launch readiness was uncertain", { cause: error });
       }
-      if (category !== "transient-operational-failure" || record.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT) throw error;
+      const preModelAttempt = modalPreModelAttempt(input.state, record);
+      if (category !== "transient-operational-failure" || preModelAttempt >= MODAL_PRE_MODEL_RETRY_LIMIT) throw error;
       nextStartReason = "pre-model-retry";
-      await sleep(classifyModalRunnerStatus({ sandbox: "missing", attempt: record.attempt }).retry_after_ms);
+      await sleep(classifyModalRunnerStatus({ sandbox: "missing", preModelAttempt }).retry_after_ms);
     }
   }
 }
@@ -1296,9 +1302,10 @@ export async function modalBenchmarkStatus(input: {
         "result.json"
       ]);
       const workerStatus = latestPersistedWorkerStatus(persisted, launch);
+      const preModelAttempt = modalPreModelAttempt(state, launch);
       const runnerStatus = classifyModalRunnerStatus({
         sandbox: probe.state,
-        attempt: launch.attempt,
+        preModelAttempt,
         postModelRecovery: launch.post_model_recovery ?? "relaunch",
         modelWorkMayHaveStarted: launch.launched_at !== undefined,
         ...(workerStatus === undefined ? {} : { workerStatus }),
@@ -1310,6 +1317,7 @@ export async function modalBenchmarkStatus(input: {
         logical_run_id: state.logical_run_id,
         generation: launch.generation,
         attempt: launch.attempt,
+        pre_model_attempt: preModelAttempt,
         model: launch.model,
         slug: launch.slug,
         runner: probe.state,
@@ -2440,7 +2448,7 @@ export async function collectModalBenchmark(input: {
           finishActiveModalRecoveryLifecycle(state, launch, {
             terminalReason: modalRecoveryTerminalReasonForWorkerStatus({
               category: persistedStatus.category,
-              attempt: launch.attempt,
+              preModelAttempt: modalPreModelAttempt(state, launch),
               modelWorkStarted: persistedStatus.model_work_started
             }),
             finishedAt: modalRecoveryFinishedAtForWorkerStatus(persistedStatus, new Date().toISOString()),
