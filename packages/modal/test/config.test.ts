@@ -196,6 +196,50 @@ describe("Modal benchmark config", () => {
     expect(config.braintrust.judge_credential_ttl_seconds).toBe(57_600);
   });
 
+  it("accepts bounded private benchmark execution controls", () => {
+    const config = parseModalBenchmarkConfig({
+      ...minimalConfig(),
+      loops: 1,
+      benchmark_execution: {
+        excluded_node_ids: ["boundary-tests", "dynamic-strategy-generator"]
+      }
+    });
+
+    expect("target" in config && config.benchmark_execution).toEqual({
+      excluded_node_ids: ["boundary-tests", "dynamic-strategy-generator"]
+    });
+  });
+
+  it("rejects unsafe private benchmark execution controls", () => {
+    expect(() =>
+      parseModalBenchmarkConfig({
+        ...minimalConfig(),
+        benchmark_execution: {
+          excluded_node_ids: ["../outside"]
+        }
+      })
+    ).toThrow();
+
+    expect(() =>
+      parseModalBenchmarkConfig({
+        ...minimalConfig(),
+        benchmark_execution: {
+          excluded_node_ids: [""]
+        }
+      })
+    ).toThrow();
+
+    expect(() =>
+      parseModalBenchmarkConfig({
+        ...minimalConfig(),
+        benchmark_execution: {
+          excluded_node_ids: ["boundary-tests"],
+          unexpected: true
+        }
+      })
+    ).toThrow();
+  });
+
   it("accepts only the strict public benchmark shape and its one-hour default", () => {
     const config = parseModalBenchmarkConfig({
       schema_version: MODAL_BENCHMARK_SCHEMA_VERSION,

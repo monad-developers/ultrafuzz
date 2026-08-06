@@ -10,6 +10,8 @@ export const PINNED_SOURCE_PROOF_SCHEMA_VERSION = "ultrafuzz.pinned-source-proof
 
 const fullSha = /^[0-9a-f]{40}$/u;
 const execFileAsync = promisify(execFile);
+const unreachableCommitCountCommand =
+  'set -euo pipefail; git fsck --connectivity-only --unreachable --no-reflogs --no-progress 2>&1 | awk \'$1 == "unreachable" && $2 == "commit" { count++ } END { print count + 0 }\'';
 
 export interface PinnedSourceProof {
   schema_version: typeof PINNED_SOURCE_PROOF_SCHEMA_VERSION;
@@ -98,17 +100,27 @@ export async function inspectPinnedSource(
   options: { allowDirty?: boolean; allowUltrafuzzWorktreeRefs?: boolean } = {}
 ): Promise<PinnedSourceProof> {
   const expected = expectedRevision.toLowerCase();
-  const [commit, tree, refsText, remotesText, revisionCountText, objectTypes, status, currentBranch] =
-    await Promise.all([
-      git(repositoryRoot, ["rev-parse", "HEAD"], signal),
-      git(repositoryRoot, ["rev-parse", "HEAD^{tree}"], signal),
-      git(repositoryRoot, ["for-each-ref", "--format=%(refname)%00%(objectname)"], signal),
-      git(repositoryRoot, ["remote"], signal),
-      git(repositoryRoot, ["rev-list", "--all", "--count"], signal),
-      git(repositoryRoot, ["cat-file", "--batch-all-objects", "--batch-check=%(objecttype)"], signal),
-      git(repositoryRoot, ["status", "--porcelain=v1", "--untracked-files=all"], signal),
-      git(repositoryRoot, ["branch", "--show-current"], signal)
-    ]);
+  const [
+    commit,
+    tree,
+    refsText,
+    remotesText,
+    revisionCountText,
+    onlyRevisionText,
+    unreachableCommitCountText,
+    status,
+    currentBranch
+  ] = await Promise.all([
+    git(repositoryRoot, ["rev-parse", "HEAD"], signal),
+    git(repositoryRoot, ["rev-parse", "HEAD^{tree}"], signal),
+    git(repositoryRoot, ["for-each-ref", "--format=%(refname)%00%(objectname)"], signal),
+    git(repositoryRoot, ["remote"], signal),
+    git(repositoryRoot, ["rev-list", "--all", "--count"], signal),
+    git(repositoryRoot, ["rev-list", "--all", "--max-count=1"], signal),
+    gitUnreachableCommitCount(repositoryRoot, signal),
+    git(repositoryRoot, ["status", "--porcelain=v1", "--untracked-files=all"], signal),
+    git(repositoryRoot, ["branch", "--show-current"], signal)
+  ]);
   const normalizedCommit = commit.trim().toLowerCase();
   const normalizedTree = tree.trim().toLowerCase();
   const refs = refsText
@@ -123,10 +135,9 @@ export async function inspectPinnedSource(
     });
   const remotes = remotesText.trim().split("\n").filter(Boolean);
   const revisionCount = Number(revisionCountText.trim());
-  const commitObjectCount = objectTypes
-    .trim()
-    .split("\n")
-    .filter((type) => type === "commit").length;
+  const onlyRevision = onlyRevisionText.trim().toLowerCase();
+  const unreachableCommitCount = Number(unreachableCommitCountText.trim());
+  const commitObjectCount = revisionCount + unreachableCommitCount;
 
   if (
     !fullSha.test(expected) ||
@@ -135,8 +146,12 @@ export async function inspectPinnedSource(
     currentBranch.trim() !== PINNED_SOURCE_BRANCH ||
     (options.allowDirty !== true && status.trim() !== "") ||
     remotes.length !== 0 ||
+    !Number.isSafeInteger(revisionCount) ||
+    !Number.isSafeInteger(unreachableCommitCount) ||
+    unreachableCommitCount < 0 ||
     revisionCount !== 1 ||
     commitObjectCount !== 1 ||
+    onlyRevision !== expected ||
     refs.length === 0 ||
     refs.some(
       (ref) =>
@@ -194,6 +209,16 @@ async function git(cwd: string, args: string[], signal?: AbortSignal): Promise<s
     cwd,
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
+    ...(signal === undefined ? {} : { signal })
+  });
+  return result.stdout;
+}
+
+async function gitUnreachableCommitCount(cwd: string, signal?: AbortSignal): Promise<string> {
+  const result = await execFileAsync("bash", ["-lc", unreachableCommitCountCommand], {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 1024,
     ...(signal === undefined ? {} : { signal })
   });
   return result.stdout;

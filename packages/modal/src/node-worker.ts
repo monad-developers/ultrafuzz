@@ -9,6 +9,7 @@ import { redactSecretValueRepresentations } from "@ultrafuzz/security";
 
 import {
   assertNoForwardedCredentialBytes,
+  modalAttemptVerificationMarkerName,
   modalNodeExecutionIdentity,
   modalNodeRequestFingerprint,
   parseCloudAgentAuthDescriptor,
@@ -52,8 +53,12 @@ const DURABLE_INPUT_DIRECTORY = "input";
 const DURABLE_CHECKPOINT_DIRECTORY = "checkpoints";
 const DURABLE_CHECKPOINT_INDEX = "index.json";
 const DURABLE_RESTORE_MARKER = "restore.json";
+const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
+const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";
 const MAX_PUBLICATION_MANIFEST_BYTES = 4 * 1024 * 1024;
 const MAX_PUBLICATION_MANIFEST_ENTRIES = 4_096;
+const MAX_VERIFICATION_MARKER_BYTES = 4 * 1024 * 1024;
+const MAX_WORKFLOW_MARKER_PROBE_BYTES = 16 * 1024 * 1024;
 
 type DurableCheckpointStage = "prepared" | "running" | "failed" | "completed";
 type IdentifiedModalNodeSandboxInput = ModalNodeSandboxInput & {
@@ -231,6 +236,7 @@ async function main(): Promise<void> {
             resultRoot,
             durableWorkspace!.checkpointIndex,
             completedCheckpoint,
+            durableWorkspace!.hasCompletedCheckpoint,
             workerCredentialValues,
             candidate?.credential
           );
@@ -264,6 +270,18 @@ async function main(): Promise<void> {
       ? [() => fs.rmSync(AGENT_HOME, { recursive: true, force: true })]
       : [])
   );
+}
+
+export function workerResultPublicationMode(
+  projectRoot: string,
+  input: { run_root: string; attempt_id: string; workflow_path: string },
+  hasCompletedCheckpoint: boolean
+): "verified-v2" | "legacy-markerless-v1" {
+  if (hasAttemptVerificationMarker(projectRoot, input)) return "verified-v2";
+  if (hasCompletedCheckpoint && !workflowSupportsArtifactVerificationMarkers(projectRoot, input)) {
+    return "legacy-markerless-v1";
+  }
+  return "verified-v2";
 }
 
 export interface CloudAgentInvocation {
@@ -1000,6 +1018,7 @@ async function publishCanonicalResult(
   resultRoot: string,
   checkpointIndex: string,
   completedCheckpoint: DurableCheckpointRecord,
+  resumedCompletedCheckpoint: boolean,
   credentialValues: readonly string[],
   kimiCredentialCandidate?: string
 ): Promise<void> {
@@ -1023,14 +1042,18 @@ async function publishCanonicalResult(
   fs.chownSync(publishing, 0, 0);
   fs.chmodSync(publishing, 0o700);
   try {
+    const publicationMode = workerResultPublicationMode(projectRoot, input, resumedCompletedCheckpoint);
     const staging = path.join(publishing, "bundle");
     fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
     stageCanonicalNodeResultBundle({
       artifactDir: anchoredProjectPath(projectRoot, input.artifact_dir),
       workspaceDir: anchoredProjectPath(projectRoot, input.workspace_dir),
       sourceProofRoot: anchoredProjectPath(projectRoot, path.join(input.run_root, "source-proofs")),
+      projectRoot,
+      runRoot: input.run_root,
       attemptId: input.attempt_id,
-      stagingDir: staging
+      stagingDir: staging,
+      publicationMode
     });
     assertNoForwardedCredentialBytes(staging, credentialValues);
     const artifactArchive = path.join(publishing, "artifacts.tgz");
@@ -1049,7 +1072,10 @@ async function publishCanonicalResult(
       `${completedCheckpoint.checkpoint_id}.json`
     );
     const result = `${JSON.stringify({
-      schema_version: "ultrafuzz.modal.node-result.v1",
+      schema_version:
+        publicationMode === "legacy-markerless-v1"
+          ? "ultrafuzz.modal.node-result.v1"
+          : "ultrafuzz.modal.node-result.v2",
       status: "succeeded",
       artifact_archive: path.posix.join(resultRoot, "artifacts.tgz"),
       artifact_sha256: digest,
@@ -2092,8 +2118,11 @@ export function stageCanonicalNodeResultBundle(input: {
   artifactDir: string;
   workspaceDir: string;
   sourceProofRoot: string;
+  projectRoot: string;
+  runRoot: string;
   attemptId: string;
   stagingDir: string;
+  publicationMode: "verified-v2" | "legacy-markerless-v1";
 }): void {
   if (fs.readdirSync(input.stagingDir).length !== 0) {
     throw new Error("cloud publication staging directory is not empty");
@@ -2103,7 +2132,21 @@ export function stageCanonicalNodeResultBundle(input: {
   // the canonical directory alone. The rest of the worktree is disposable
   // tool state and must never become part of a cloud result archive.
   mergeWorkspaceArtifacts(input.workspaceDir, input.artifactDir, input.attemptId);
-  copyPublishedEvidenceTree(input.artifactDir, path.join(input.stagingDir, "artifacts"));
+  if (input.publicationMode === "legacy-markerless-v1") {
+    copyPublishedEvidenceTree(input.artifactDir, path.join(input.stagingDir, "artifacts"));
+  } else {
+    const stagedMarker = copyAttemptVerificationMarker(
+      input.projectRoot,
+      { run_root: input.runRoot, attempt_id: input.attemptId },
+      path.join(input.stagingDir, "verification")
+    );
+    copyVerifiedPublishedEvidenceTree(
+      input.artifactDir,
+      path.join(input.stagingDir, "artifacts"),
+      stagedMarker,
+      input.attemptId
+    );
+  }
   assertSafeDirectoryTarget(input.sourceProofRoot);
   for (const suffix of [".json", ".invariant.json"] as const) {
     const sourceProof = path.join(input.sourceProofRoot, `${input.attemptId}${suffix}`);
@@ -2176,6 +2219,149 @@ export function copyPublishedEvidenceTree(source: string, destination: string): 
   }
 }
 
+export function copyVerifiedPublishedEvidenceTree(
+  source: string,
+  destination: string,
+  markerPath: string,
+  attemptId: string
+): void {
+  const publications = readVerificationMarkerPublications(markerPath, attemptId);
+  const sourceRoot = path.resolve(source);
+  const sourceStat = fs.lstatSync(sourceRoot);
+  if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink() || fs.realpathSync(sourceRoot) !== sourceRoot) {
+    throw new Error("cloud publication source is unsafe");
+  }
+  assertSafeDirectoryTarget(destination);
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+
+  for (const [relativePath, expectedSha256] of publications) {
+    const sourcePath = safeVerifiedPublicationPath(sourceRoot, relativePath);
+    const sourceFile = assertRegularUnlinkedFile(sourcePath, `verified publication is unavailable: ${relativePath}`);
+    const destinationPath = safeVerifiedPublicationPath(path.resolve(destination), relativePath);
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true, mode: 0o700 });
+    fs.copyFileSync(sourceFile, destinationPath, fs.constants.COPYFILE_EXCL);
+    const publishedSha256 = sha256File(destinationPath);
+    if (publishedSha256 !== expectedSha256) {
+      throw new Error(`verified publication digest mismatch: ${relativePath}`);
+    }
+    const sourceSha256 = sha256File(sourceFile);
+    if (sourceSha256 !== expectedSha256) {
+      throw new Error(`verified publication changed during publication: ${relativePath}`);
+    }
+  }
+}
+
+export function copyAttemptVerificationMarker(
+  projectRoot: string,
+  input: { run_root: string; attempt_id: string },
+  destinationRoot: string
+): string {
+  const { markerName, markerPath } = attemptVerificationMarkerSource(projectRoot, input);
+  assertSafeDirectoryTarget(destinationRoot);
+  fs.mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
+  const resolvedDestinationRoot = path.resolve(destinationRoot);
+  const destinationPath = path.join(resolvedDestinationRoot, markerName);
+  if (path.dirname(destinationPath) !== resolvedDestinationRoot) {
+    throw new Error("cloud publication verification marker path is unsafe");
+  }
+  fs.copyFileSync(markerPath, destinationPath, fs.constants.COPYFILE_EXCL);
+  return destinationPath;
+}
+
+function attemptVerificationMarkerSource(
+  projectRoot: string,
+  input: { run_root: string; attempt_id: string }
+): { markerName: string; markerPath: string } {
+  const markerRoot = anchoredProjectPath(projectRoot, path.join(input.run_root, ARTIFACT_VERIFICATION_DIRECTORY));
+  assertSafeDirectoryTarget(markerRoot);
+  const markerName = modalAttemptVerificationMarkerName(input.attempt_id);
+  const markerPath = path.join(markerRoot, markerName);
+  if (path.dirname(markerPath) !== markerRoot) {
+    throw new Error("cloud publication verification marker path is unsafe");
+  }
+  if (!fs.existsSync(markerPath)) {
+    throw new Error("cloud publication verification marker is missing");
+  }
+  const markerStat = fs.lstatSync(markerPath);
+  if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.nlink !== 1) {
+    throw new Error("cloud publication verification marker is unsafe");
+  }
+  return { markerName, markerPath };
+}
+
+function hasAttemptVerificationMarker(projectRoot: string, input: { run_root: string; attempt_id: string }): boolean {
+  try {
+    attemptVerificationMarkerSource(projectRoot, input);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && /verification marker is missing/u.test(error.message)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function workflowSupportsArtifactVerificationMarkers(projectRoot: string, input: { workflow_path: string }): boolean {
+  try {
+    const workflowPath = anchoredProjectPath(projectRoot, input.workflow_path);
+    const stat = fs.lstatSync(workflowPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > MAX_WORKFLOW_MARKER_PROBE_BYTES) {
+      return true;
+    }
+    const source = fs.readFileSync(workflowPath, "utf8");
+    return source.includes(ARTIFACT_VERIFICATION_SCHEMA_VERSION) || source.includes(ARTIFACT_VERIFICATION_DIRECTORY);
+  } catch {
+    return true;
+  }
+}
+
+function readVerificationMarkerPublications(markerPath: string, attemptId: string): Map<string, string> {
+  const markerFile = assertRegularUnlinkedFile(markerPath, "cloud publication verification marker is unavailable");
+  const markerStat = fs.statSync(markerFile);
+  if (markerStat.size === 0 || markerStat.size > MAX_VERIFICATION_MARKER_BYTES) {
+    throw new Error("cloud publication verification marker size is invalid");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(markerFile, "utf8"));
+  } catch (error) {
+    throw new Error("cloud publication verification marker is invalid JSON", { cause: error });
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    (parsed as { schema_version?: unknown }).schema_version !== ARTIFACT_VERIFICATION_SCHEMA_VERSION ||
+    (parsed as { attempt_id?: unknown }).attempt_id !== attemptId ||
+    !Array.isArray((parsed as { publications?: unknown }).publications)
+  ) {
+    throw new Error("cloud publication verification marker is invalid");
+  }
+  const publications = new Map<string, string>();
+  for (const publication of (parsed as { publications: unknown[] }).publications) {
+    if (
+      typeof publication !== "object" ||
+      publication === null ||
+      Array.isArray(publication) ||
+      typeof (publication as { path?: unknown }).path !== "string" ||
+      typeof (publication as { sha256?: unknown }).sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/u.test((publication as { sha256: string }).sha256)
+    ) {
+      throw new Error("cloud publication verification marker publication is invalid");
+    }
+    const relativePath = (publication as { path: string }).path;
+    assertSafeVerifiedPublicationRelativePath(relativePath);
+    if (publications.has(relativePath)) {
+      throw new Error(`cloud publication verification marker has duplicate publication: ${relativePath}`);
+    }
+    publications.set(relativePath, (publication as { sha256: string }).sha256);
+  }
+  if (publications.size === 0) {
+    throw new Error("cloud publication verification marker has no publications");
+  }
+  return publications;
+}
+
 function recursiveRegularFiles(root: string): string[] {
   const files: string[] = [];
   const visit = (directory: string): void => {
@@ -2197,6 +2383,42 @@ function recursiveRegularFiles(root: string): string[] {
   };
   visit(root);
   return files;
+}
+
+function assertRegularUnlinkedFile(filePath: string, label: string): string {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(filePath);
+  } catch (error) {
+    throw new Error(label, { cause: error });
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+    throw new Error(label);
+  }
+  return filePath;
+}
+
+function safeVerifiedPublicationPath(root: string, relativePath: string): string {
+  assertSafeVerifiedPublicationRelativePath(relativePath);
+  const absoluteRoot = path.resolve(root);
+  const destination = path.resolve(absoluteRoot, ...relativePath.split("/"));
+  if (destination === absoluteRoot || !destination.startsWith(`${absoluteRoot}${path.sep}`)) {
+    throw new Error(`unsafe verified publication path: ${relativePath}`);
+  }
+  return destination;
+}
+
+function assertSafeVerifiedPublicationRelativePath(relativePath: string): void {
+  if (
+    relativePath.length === 0 ||
+    path.isAbsolute(relativePath) ||
+    relativePath.includes("\0") ||
+    relativePath.includes("\\") ||
+    /^[A-Za-z]:/u.test(relativePath) ||
+    relativePath.split("/").includes("..")
+  ) {
+    throw new Error(`unsafe verified publication path: ${relativePath}`);
+  }
 }
 
 function parsePublicationManifest(manifestPath: string): {

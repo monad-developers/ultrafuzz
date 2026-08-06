@@ -31,6 +31,7 @@ import {
   type ModalResumeWorkspace
 } from "./resume.js";
 import { materializePinnedSource } from "./pinned-source.js";
+import { renderPrivateEvalSuite } from "./private-suite.js";
 import {
   canScoreBenchmarkRow,
   inspectTerminalDisposition,
@@ -458,6 +459,7 @@ async function configureTarget(target: string): Promise<void> {
 }
 
 async function configureControl(control: string, target: string, groundTruth: string): Promise<string> {
+  const privateBenchmarkConfig = privateConfig();
   const configPath = path.join(control, "ultrafuzz.toml");
   let config = await readFile(configPath, "utf8");
   config = config.replace(
@@ -478,57 +480,12 @@ async function configureControl(control: string, target: string, groundTruth: st
   const suitePath = path.join(control, "modal-suite.yml");
   await writeFile(
     suitePath,
-    `schema_version: ultrafuzz.eval.v1
-suite: ${yamlString(`modal-${MODEL.slug}`)}
-
-model_profiles:
-  benchmark:
-    agent: ${yamlString(MODEL.agent)}
-    model: ${yamlString(MODEL.model)}
-    reasoning: ${yamlString(MODEL.reasoning)}
-
-targets:
-  - id: target
-    repo: ${yamlString(privateConfig().target.repo)}
-    ref: ${yamlString(privateConfig().target.ref)}
-    path: ${yamlString(target)}
-    sensitivity: private
-    ground_truth: findings.yml
-
-variants:
-  - id: ${yamlString(MODEL.slug)}
-    runner_model_profile: benchmark
-    judge_model_profile: benchmark
-
-run:
-  runner_model_profile: benchmark
-  judge_model_profile: benchmark
-  trials_per_variant: 1
-  max_parallel_targets: 1
-  max_parallel_runs: 1
-
-metrics:
-  primary: [precision, recall, f1_score]
-  recall_threshold: 0.7
-
-reporting:
-  node_telemetry: true
-  heartbeat_interval_seconds: 60
-  experiment_prefix: modal
-  artifacts:
-    mode: manifest-only
-    include: ["report.md", "report.json", "findings.normalized.json"]
-    max_file_bytes: 5000000
-`
+    renderPrivateEvalSuite({ config: privateBenchmarkConfig, model: MODEL, targetPath: target })
   );
   return suitePath;
 }
 
 function tomlString(value: string): string {
-  return JSON.stringify(value);
-}
-
-function yamlString(value: string): string {
   return JSON.stringify(value);
 }
 

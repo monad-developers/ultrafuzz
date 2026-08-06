@@ -45,6 +45,19 @@ const KIMI_CREDENTIAL_RECOVERY_FILE = "kimi-credential-recovery.json";
 const MAX_KIMI_CREDENTIAL_CANDIDATE_BYTES = 1024 * 1024;
 const MAX_RESULT_WAIT_MS = 24 * 60 * 60 * 1000;
 const MODAL_NODE_SHUTDOWN_TIMEOUT_MS = 30_000;
+const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
+const SAFE_ATTEMPT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+
+export function isSafeModalAttemptId(value: string): boolean {
+  return SAFE_ATTEMPT_ID_PATTERN.test(value);
+}
+
+export function modalAttemptVerificationMarkerName(attemptId: string): string {
+  if (!isSafeModalAttemptId(attemptId)) {
+    throw new Error("cloud node attempt_id is invalid");
+  }
+  return `${attemptId}.json`;
+}
 
 export interface ModalNodeShutdownHooks {
   /** @internal Test-only monotonic clock injection. */
@@ -998,6 +1011,9 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
     throw new Error("cloud node base commit is invalid");
   }
   const agentAuth = parseCloudAgentAuthDescriptor(value.agent_auth);
+  if (!isSafeModalAttemptId(value.attempt_id as string)) {
+    throw new Error("cloud node attempt_id is invalid");
+  }
   if (
     value.agent_model !== undefined &&
     (typeof value.agent_model !== "string" ||
@@ -1187,6 +1203,7 @@ export async function createModalNodeHandoffArchive(
     for (const dependencyArtifactDir of dependencyArtifactDirs) {
       copyTreeChecked(dependencyArtifactDir, path.join(staging, path.relative(root, dependencyArtifactDir)));
     }
+    copyDependencyVerificationMarkers(root, runRoot, dependencyArtifactDirs, staging);
     fs.mkdirSync(path.join(staging, path.relative(root, artifactDir)), { recursive: true, mode: 0o700 });
     for (const relative of [
       ".smithers/package.json",
@@ -1249,7 +1266,7 @@ function removeHandoffTemporaryRoot(temporaryRoot: string): void {
 }
 
 interface ModalNodeResult {
-  schema_version: "ultrafuzz.modal.node-result.v1";
+  schema_version: "ultrafuzz.modal.node-result.v1" | "ultrafuzz.modal.node-result.v2";
   status: "succeeded";
   artifact_archive: string;
   artifact_sha256: string;
@@ -1344,7 +1361,8 @@ async function readModalNodeResult(
   if (
     isRecord(parsed) &&
     hasExactKeys(parsed, resultKeys) &&
-    parsed.schema_version === "ultrafuzz.modal.node-result.v1" &&
+    (parsed.schema_version === "ultrafuzz.modal.node-result.v1" ||
+      parsed.schema_version === "ultrafuzz.modal.node-result.v2") &&
     parsed.status === "succeeded" &&
     parsed.artifact_archive === path.posix.join(resultRoot, "artifacts.tgz") &&
     typeof parsed.artifact_sha256 === "string" &&
@@ -1659,8 +1677,27 @@ async function stageModalNodeResult(
     fs.mkdirSync(extracted, { recursive: true });
     await extractSafeTarArchive(archive, extracted, { gzip: true, label: "cloud node result" });
     assertSafeTree(extracted);
-    const canonical = canonicalResultBundle(extracted, input.attempt_id);
+    const canonical = canonicalResultBundle(extracted, input.attempt_id, result.schema_version);
     assertNoForwardedCredentialBytes(extracted, sensitiveValues);
+    const verificationRoot =
+      canonical.verificationMarker === undefined
+        ? undefined
+        : checkedPath(
+            root,
+            path.join(input.run_root, ARTIFACT_VERIFICATION_DIRECTORY),
+            "artifact verification directory",
+            false
+          );
+    assertPublishedDirectoryReplacementAllowed(canonical.artifacts, artifactDir);
+    for (const sourceProof of canonical.sourceProofs) {
+      assertPublishedFileReplacementAllowed(sourceProof, path.join(proofRoot, path.basename(sourceProof)));
+    }
+    if (canonical.verificationMarker !== undefined && verificationRoot !== undefined) {
+      assertPublishedFileReplacementAllowed(
+        canonical.verificationMarker,
+        path.join(verificationRoot, path.basename(canonical.verificationMarker))
+      );
+    }
     let committed = false;
     return {
       commit: () => {
@@ -1673,10 +1710,27 @@ async function stageModalNodeResult(
         ) {
           throw new Error("cloud node source proof destination changed before commit");
         }
+        if (
+          verificationRoot !== undefined &&
+          checkedPath(
+            root,
+            path.join(input.run_root, ARTIFACT_VERIFICATION_DIRECTORY),
+            "artifact verification directory",
+            false
+          ) !== verificationRoot
+        ) {
+          throw new Error("cloud node artifact verification destination changed before commit");
+        }
         for (const sourceProof of canonical.sourceProofs) {
           replacePublishedFile(sourceProof, path.join(proofRoot, path.basename(sourceProof)));
         }
         replacePublishedDirectory(canonical.artifacts, artifactDir);
+        if (canonical.verificationMarker !== undefined && verificationRoot !== undefined) {
+          replacePublishedFile(
+            canonical.verificationMarker,
+            path.join(verificationRoot, path.basename(canonical.verificationMarker))
+          );
+        }
         committed = true;
       },
       cleanup: () => fs.rmSync(temporaryRoot, { recursive: true, force: true })
@@ -1689,18 +1743,33 @@ async function stageModalNodeResult(
 
 function canonicalResultBundle(
   extractedRoot: string,
-  attemptId: string
-): { artifacts: string; sourceProofs: string[] } {
+  attemptId: string,
+  schemaVersion: ModalNodeResult["schema_version"]
+): { artifacts: string; sourceProofs: string[]; verificationMarker?: string } {
   const entries = fs.readdirSync(extractedRoot, { withFileTypes: true });
   const artifacts = entries.find((entry) => entry.name === "artifacts");
   const sourceProofDirectory = entries.find((entry) => entry.name === "source-proofs");
+  const verificationDirectory = entries.find((entry) => entry.name === "verification");
+  const allowedEntries =
+    schemaVersion === "ultrafuzz.modal.node-result.v2"
+      ? new Set(["artifacts", "source-proofs", "verification"])
+      : new Set(["artifacts", "source-proofs"]);
+  if (artifacts === undefined || !artifacts.isDirectory()) {
+    throw new Error("cloud node result is missing a required publication directory");
+  }
   if (
-    artifacts === undefined ||
-    !artifacts.isDirectory() ||
-    entries.some((entry) => entry.name !== "artifacts" && entry.name !== "source-proofs") ||
+    schemaVersion === "ultrafuzz.modal.node-result.v2" &&
+    (verificationDirectory === undefined || !verificationDirectory.isDirectory())
+  ) {
+    throw new Error("cloud node result is missing artifact verification marker");
+  }
+  if (
+    entries.some((entry) => !allowedEntries.has(entry.name)) ||
     (sourceProofDirectory !== undefined && !sourceProofDirectory.isDirectory())
   ) {
-    throw new Error("cloud node result must contain only canonical artifacts and source proofs");
+    throw new Error(
+      "cloud node result must contain only canonical artifacts, source proofs, and verification evidence"
+    );
   }
   const sourceProofs: string[] = [];
   if (sourceProofDirectory !== undefined) {
@@ -1714,7 +1783,21 @@ function canonicalResultBundle(
     }
     sourceProofs.sort();
   }
-  return { artifacts: path.join(extractedRoot, artifacts.name), sourceProofs };
+  let verificationMarker: string | undefined;
+  if (verificationDirectory !== undefined) {
+    const verificationRoot = path.join(extractedRoot, verificationDirectory.name);
+    const markerName = modalAttemptVerificationMarkerName(attemptId);
+    const verificationEntries = fs.readdirSync(verificationRoot, { withFileTypes: true });
+    if (
+      verificationEntries.length !== 1 ||
+      !verificationEntries[0]!.isFile() ||
+      verificationEntries[0]!.name !== markerName
+    ) {
+      throw new Error("cloud node result verification evidence is not canonical");
+    }
+    verificationMarker = path.join(verificationRoot, markerName);
+  }
+  return { artifacts: path.join(extractedRoot, artifacts.name), sourceProofs, verificationMarker };
 }
 
 export function assertNoForwardedCredentialBytes(root: string, credentialValues: readonly string[]): void {
@@ -2005,6 +2088,30 @@ function assertExpectedWorkflowPath(root: string, workflowPath: string): void {
   }
 }
 
+function copyDependencyVerificationMarkers(
+  root: string,
+  runRoot: string,
+  dependencyArtifactDirs: readonly string[],
+  staging: string
+): void {
+  const markerRoot = path.join(runRoot, ARTIFACT_VERIFICATION_DIRECTORY);
+  if (!fs.existsSync(markerRoot)) return;
+  assertChildPath(runRoot, markerRoot, "dependency verification marker directory");
+  const markerRootStat = fs.lstatSync(markerRoot);
+  if (!markerRootStat.isDirectory() || markerRootStat.isSymbolicLink()) {
+    throw new Error("dependency verification marker directory is not an anchored run path");
+  }
+  const resolvedMarkerRoot = fs.realpathSync(markerRoot);
+  if (resolvedMarkerRoot !== markerRoot || !resolvedMarkerRoot.startsWith(`${runRoot}${path.sep}`)) {
+    throw new Error("dependency verification marker directory is not an anchored run path");
+  }
+  for (const dependencyArtifactDir of dependencyArtifactDirs) {
+    const markerPath = path.join(markerRoot, `${path.basename(dependencyArtifactDir)}.json`);
+    if (!fs.existsSync(markerPath)) continue;
+    copyFileChecked(root, markerPath, path.join(staging, path.relative(root, markerPath)));
+  }
+}
+
 function copyTreeChecked(source: string, destination: string): void {
   const stat = fs.lstatSync(source);
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
@@ -2050,9 +2157,7 @@ function assertSafeTree(root: string): void {
 }
 
 function replacePublishedDirectory(source: string, destination: string): void {
-  if (!fs.existsSync(source)) {
-    throw new Error("cloud node result is missing a required publication directory");
-  }
+  assertPublishedDirectoryReplacementAllowed(source, destination);
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   const pending = `${destination}.publishing-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
   const previous = `${destination}.previous-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
@@ -2068,20 +2173,30 @@ function replacePublishedDirectory(source: string, destination: string): void {
   if (hadPrevious) fs.rmSync(previous, { recursive: true, force: true });
 }
 
-function replacePublishedFile(source: string, destination: string): void {
+function assertPublishedDirectoryReplacementAllowed(source: string, destination: string): void {
+  if (!fs.existsSync(source)) {
+    throw new Error("cloud node result is missing a required publication directory");
+  }
   const sourceStat = fs.lstatSync(source);
-  if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.nlink !== 1) {
-    throw new Error("cloud node result source file is unsafe");
+  if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink() || fs.realpathSync(source) !== path.resolve(source)) {
+    throw new Error("cloud node result publication directory is unsafe");
   }
+  if (!fs.existsSync(destination)) return;
+  const destinationStat = fs.lstatSync(destination);
+  if (
+    !destinationStat.isDirectory() ||
+    destinationStat.isSymbolicLink() ||
+    fs.realpathSync(destination) !== path.resolve(destination)
+  ) {
+    throw new Error("cloud node result destination directory is unsafe");
+  }
+}
+
+function replacePublishedFile(source: string, destination: string): void {
+  assertPublishedFileReplacementAllowed(source, destination);
   fs.mkdirSync(path.dirname(destination), { recursive: true });
-  const destinationStat = fs.existsSync(destination) ? fs.lstatSync(destination) : undefined;
-  if (destinationStat?.isSymbolicLink() || (destinationStat !== undefined && !destinationStat.isFile())) {
-    throw new Error("cloud node result destination file is unsafe");
-  }
-  if (destinationStat !== undefined) {
-    if (!fs.readFileSync(destination).equals(fs.readFileSync(source))) {
-      throw new Error("cloud node result would replace immutable source proof");
-    }
+  if (fs.existsSync(destination)) {
+    assertPublishedFileReplacementAllowed(source, destination);
     return;
   }
   const pending = `${destination}.publishing-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
@@ -2090,6 +2205,25 @@ function replacePublishedFile(source: string, destination: string): void {
     fs.renameSync(pending, destination);
   } finally {
     if (fs.existsSync(pending)) fs.rmSync(pending, { force: true });
+  }
+}
+
+function assertPublishedFileReplacementAllowed(source: string, destination: string): void {
+  const sourceStat = fs.lstatSync(source);
+  if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.nlink !== 1) {
+    throw new Error("cloud node result source file is unsafe");
+  }
+  const destinationStat = fs.existsSync(destination) ? fs.lstatSync(destination) : undefined;
+  if (
+    destinationStat?.isSymbolicLink() ||
+    (destinationStat !== undefined && (!destinationStat.isFile() || destinationStat.nlink !== 1))
+  ) {
+    throw new Error("cloud node result destination file is unsafe");
+  }
+  if (destinationStat !== undefined) {
+    if (!fs.readFileSync(destination).equals(fs.readFileSync(source))) {
+      throw new Error("cloud node result would replace an immutable publication file");
+    }
   }
 }
 
