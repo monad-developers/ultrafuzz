@@ -57,6 +57,7 @@ import {
   modalWorkerEntrypointCommand,
   publicBenchmarkCollectionSecretValues,
   readModalCollectResultFilesWithStatusRetry,
+  overseeModalBenchmarks,
   readOptionalModalSandboxText,
   replaceSanitizedModalCollectedFiles,
   selectModalCollectedEvidence,
@@ -1553,11 +1554,12 @@ describe("Modal worker identity", () => {
     expect(sandbox.detach).toHaveBeenCalledTimes(1);
   });
 
-  // R45's overseer died at 2026-08-06T18:24:54Z with `NotFoundError: The Sandbox is unavailable. This
-  // Sandbox may have already shut down.` raised from this helper, and the run it was supervising then
-  // sat terminal on a transient agent failure that nothing was left alive to retry (issue #295). For an
-  // OPTIONAL read the two not-found conditions are one answer: a dead sandbox has no readable file.
-  it("treats a missing file and a shut-down sandbox alike as an absent persisted file", async () => {
+  // Kept narrow deliberately. modal@0.9.0 relabels NOT_FOUND, CANCELLED, UNKNOWN, DEADLINE_EXCEEDED and
+  // UNAVAILABLE all as `NotFoundError("The Sandbox is unavailable...")`, so treating that class as
+  // "file absent" would make an ordinary network blip against a healthy sandbox drive writes: it would
+  // defeat the readiness-marker guards and let `collect` persist an empty bundle. Issue #295 is fixed in
+  // the overseer poll loop instead.
+  it("treats only an explicit remote not-found as an absent persisted file", async () => {
     await expect(
       readOptionalModalSandboxText(
         {
@@ -1569,16 +1571,17 @@ describe("Modal worker identity", () => {
       )
     ).resolves.toBeUndefined();
 
+    const sandboxGone = new NotFoundError("The Sandbox is unavailable. This Sandbox may have already shut down.");
     await expect(
       readOptionalModalSandboxText(
         {
           readText: async () => {
-            throw new NotFoundError("The Sandbox is unavailable. This Sandbox may have already shut down.");
+            throw sandboxGone;
           }
         },
         "/data/status.json"
       )
-    ).resolves.toBeUndefined();
+    ).rejects.toBe(sandboxGone);
 
     const failure = new Error("generic remote read failure");
     await expect(
@@ -1591,6 +1594,70 @@ describe("Modal worker identity", () => {
         "/data/status.json"
       )
     ).rejects.toBe(failure);
+  });
+
+  // R45's detached overseer exited 1 mid-run on a sandbox-unavailable read (issue #295). The run then hit
+  // a transient `agent-failure` half an hour later with nothing alive to retry it, and restarting the
+  // overseer immediately produced `action: "launch", reason: "owner-missing"` -- recovery had been
+  // available the whole time and simply had no process to trigger it.
+  it("keeps polling after a job throws and reports the failure alongside healthy jobs", async () => {
+    const job = (configPath: string) => ({
+      configPath,
+      statePath: `${configPath}.state`,
+      recoveryStatePath: `${configPath}.recovery`
+    });
+    const calls: string[] = [];
+    const logged: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => void logged.push(String(line)));
+    try {
+      const snapshots = await overseeModalBenchmarks({
+        jobs: [job("/tmp/first"), job("/tmp/second")],
+        pollMs: 1,
+        overseeOnce: async (current) => {
+          calls.push(current.configPath);
+          if (current.configPath === "/tmp/first" && calls.length <= 2) {
+            throw new Error("The Sandbox is unavailable. This Sandbox may have already shut down.");
+          }
+          return {
+            logical_run_id: current.configPath === "/tmp/first" ? "run-first" : "run-second",
+            complete: calls.length > 2,
+            settled: calls.length > 2,
+            rows: []
+          };
+        }
+      });
+      expect(snapshots.map((entry) => entry.logical_run_id)).toEqual(["run-first", "run-second"]);
+    } finally {
+      log.mockRestore();
+    }
+    // The first tick failed for one job. Supervision must have continued, and that tick must not have
+    // been reported as complete even though its only successful snapshot said so.
+    expect(calls.length).toBeGreaterThan(2);
+    const first = JSON.parse(logged[0]!) as { jobs: unknown[]; failed_jobs?: { config_path: string }[] };
+    expect(first.jobs).toHaveLength(1);
+    expect(first.failed_jobs?.[0]?.config_path).toBe("/tmp/first");
+  });
+
+  it("gives up loudly once every job has failed for the consecutive limit", async () => {
+    const failure = new Error("permanently broken overseer configuration");
+    const attempts: number[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      await expect(
+        overseeModalBenchmarks({
+          jobs: [{ configPath: "/tmp/only", statePath: "/tmp/only.state", recoveryStatePath: "/tmp/only.recovery" }],
+          pollMs: 1,
+          maxConsecutiveFailures: 3,
+          overseeOnce: async () => {
+            attempts.push(attempts.length);
+            throw failure;
+          }
+        })
+      ).rejects.toBe(failure);
+    } finally {
+      log.mockRestore();
+    }
+    expect(attempts).toHaveLength(3);
   });
 
   it("rejects an oversized remote public result before reading and rechecks the returned byte length", async () => {
