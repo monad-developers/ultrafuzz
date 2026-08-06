@@ -5,7 +5,11 @@ import { promisify } from "node:util";
 
 import { referencesStatus } from "./references.js";
 import { inspectSmithersInstallation, type SmithersInstallationPosture } from "./smithers.js";
-import { SMITHERS_ORCHESTRATOR_VERSION } from "./smithers-package.js";
+import {
+  SMITHERS_ORCHESTRATOR_PACKAGE_NAME,
+  SMITHERS_ORCHESTRATOR_VERSION,
+  SMITHERS_SUCCESSOR_PACKAGE_NAME
+} from "./smithers-package.js";
 import type {
   DoctorCheck,
   DoctorCheckStatus,
@@ -132,6 +136,10 @@ export async function diagnoseProject(input: DoctorInput) {
       installed_bin_target: installation.installed_bin_target,
       bin_path: installation.bin_path,
       latest_published_version: latest !== undefined && "version" in latest ? latest.version : "unknown",
+      // The newest release can come from a renamed upstream package, so the version
+      // above is not necessarily comparable with the pinned one. Flag that rather
+      // than naming the package, which would leak engine branding.
+      latest_published_is_renamed_package: latest !== undefined && "version" in latest && latest.renamed,
       layout_status: engineCheck.check.status,
       layout_detail: installation.layout_error,
       compatibility_patches: installation.compatibility_patches
@@ -272,7 +280,7 @@ function compatibilityPatchCheck(installation: SmithersInstallationPosture): {
   };
 }
 
-function registryCheck(latest: { version: string } | { error: string } | undefined): {
+function registryCheck(latest: LatestPublishedEngine | { error: string } | undefined): {
   check: DoctorCheck;
   diagnostics: RuntimeDiagnostic[];
 } {
@@ -304,7 +312,29 @@ function registryCheck(latest: { version: string } | { error: string } | undefin
       ]
     };
   }
-  if (latest.version === SMITHERS_ORCHESTRATOR_VERSION) {
+  // The successor lookup failing while the legacy one succeeds must not read as
+  // "you are current": the legacy name is frozen at the pinned version forever, so
+  // that combination is exactly the false positive this check exists to remove.
+  if (latest.successorUnavailable) {
+    return {
+      check: {
+        name: "workflow-engine-registry",
+        status: "warning",
+        summary: "registry lookup was only partly available; a newer workflow engine cannot be ruled out"
+      },
+      diagnostics: [
+        {
+          code: "DOCTOR_REGISTRY_UNAVAILABLE",
+          message:
+            "the pinned workflow engine name is frozen upstream, and the renamed successor package could not be " +
+            `read, so ${SMITHERS_ORCHESTRATOR_VERSION} cannot be confirmed as current: ${latest.successorUnavailable}`,
+          severity: "warning",
+          source: "doctor"
+        }
+      ]
+    };
+  }
+  if (latest.version === SMITHERS_ORCHESTRATOR_VERSION && !latest.renamed) {
     return {
       check: {
         name: "workflow-engine-registry",
@@ -314,16 +344,24 @@ function registryCheck(latest: { version: string } | { error: string } | undefin
       diagnostics: []
     };
   }
+  // Deliberately never names the upstream package: operator-facing text keeps the
+  // engine de-branded, and the successor name would slip past the `smithers` scrub
+  // by spelling alone. "renamed upstream package" carries the actionable signal.
+  const newest = `${latest.version}${latest.renamed ? " under a renamed upstream package" : ""}`;
   return {
     check: {
       name: "workflow-engine-registry",
       status: "warning",
-      summary: `a newer stable workflow engine is published: ${latest.version} (Ultrafuzz pins ${SMITHERS_ORCHESTRATOR_VERSION})`
+      summary: `a newer stable workflow engine is published: ${newest} (Ultrafuzz pins ${SMITHERS_ORCHESTRATOR_VERSION})`
     },
     diagnostics: [
       {
         code: "DOCTOR_WORKFLOW_ENGINE_OUTDATED",
-        message: `Ultrafuzz pins workflow engine ${SMITHERS_ORCHESTRATOR_VERSION}; ${latest.version} is the latest published stable release`,
+        message:
+          `Ultrafuzz pins workflow engine ${SMITHERS_ORCHESTRATOR_VERSION}; ${newest} is the latest published stable release` +
+          (latest.renamed
+            ? `; upgrading past ${SMITHERS_ORCHESTRATOR_VERSION} requires migrating to the renamed upstream package`
+            : ""),
         severity: "warning",
         source: "doctor"
       }
@@ -331,12 +369,50 @@ function registryCheck(latest: { version: string } | { error: string } | undefin
   };
 }
 
+interface LatestPublishedEngine {
+  version: string;
+  /** True when the newest release comes from the renamed successor package. */
+  renamed: boolean;
+  /** Set when the successor lookup failed, so "current" cannot be concluded. */
+  successorUnavailable?: string;
+}
+
+// Upstream renamed the package after the version Ultrafuzz pins, so the old name
+// is frozen forever and asking only about it would silently report "you are on the
+// latest release" for every future release. Consult both names and report the
+// newer. The package names stay inside this module: operator-facing text keeps the
+// engine de-branded.
 async function latestPublishedSmithersVersion(
+  projectRoot: string,
+  env: Record<string, string | undefined>
+): Promise<LatestPublishedEngine | { error: string }> {
+  const [legacy, successor] = await Promise.all([
+    latestPublishedVersionOf(SMITHERS_ORCHESTRATOR_PACKAGE_NAME, projectRoot, env),
+    latestPublishedVersionOf(SMITHERS_SUCCESSOR_PACKAGE_NAME, projectRoot, env)
+  ]);
+  if ("error" in legacy && "error" in successor) {
+    return { error: legacy.error };
+  }
+  if ("error" in successor) {
+    // `legacy` resolved. Its name can never advance past the pinned version, so an
+    // unreadable successor leaves the question genuinely open rather than answered.
+    return { version: (legacy as { version: string }).version, renamed: false, successorUnavailable: successor.error };
+  }
+  if ("error" in legacy) {
+    return { version: successor.version, renamed: true };
+  }
+  return compareSemanticVersions(successor.version, legacy.version) > 0
+    ? { version: successor.version, renamed: true }
+    : { version: legacy.version, renamed: false };
+}
+
+async function latestPublishedVersionOf(
+  packageName: string,
   projectRoot: string,
   env: Record<string, string | undefined>
 ): Promise<{ version: string } | { error: string }> {
   try {
-    const { stdout } = await execFileAsync("npm", ["view", "smithers-orchestrator", "dist-tags.latest"], {
+    const { stdout } = await execFileAsync("npm", ["view", packageName, "dist-tags.latest"], {
       cwd: projectRoot,
       env: { ...process.env, ...env },
       timeout: REGISTRY_LOOKUP_TIMEOUT_MS
@@ -346,6 +422,22 @@ async function latestPublishedSmithersVersion(
   } catch (error) {
     return { error: error instanceof Error ? error.message.split("\n")[0]! : String(error) };
   }
+}
+
+// Callers only ever pass versions `latestPublishedVersionOf` has already matched
+// against `^\d+\.\d+\.\d+$`. That invariant lives in another function, so treat a
+// non-numeric segment as 0 rather than returning NaN, which would silently compare
+// as "not newer" and reinstate the dead upgrade signal.
+function compareSemanticVersions(left: string, right: string): number {
+  const segment = (value: string, index: number): number => {
+    const parsed = Number(value.split(".")[index]);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  for (let index = 0; index < 3; index += 1) {
+    const difference = segment(left, index) - segment(right, index);
+    if (difference !== 0) return difference;
+  }
+  return 0;
 }
 
 function configuredAgentRefs(profiles: Record<string, { agent: string }> | undefined): string[] {

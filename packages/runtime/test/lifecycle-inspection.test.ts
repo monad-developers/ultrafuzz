@@ -18,6 +18,7 @@ import {
   watchWorkflowNode,
   type WorkflowLifecycleEvent
 } from "../src/index.js";
+import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
 import { SMITHERS_ORCHESTRATOR_BIN_PATH, SMITHERS_ORCHESTRATOR_VERSION } from "../src/smithers-package.js";
 
 const WORKFLOW_RUN_ID = "ultrafuzz-inspect-run";
@@ -798,6 +799,46 @@ test("diagnoseProject reports a healthy pinned install and the latest published 
   assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-install")?.status, "ok");
   assert.equal(typeof doctor.value?.validation.policy_posture.config?.status, "string");
   assert.ok(doctor.value?.toolchain.some((entry) => entry.name === "forge"));
+});
+
+// The scheduler and engine workarounds are the two that carry durable resume
+// progress, and an unreported posture reads as healthy. Cover every tracked
+// workaround, not just the CLI pair.
+test("diagnoseProject reports a posture for every tracked compatibility patch", async () => {
+  const { project, env } = await launchedProject({});
+  writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
+  const nodeModules = path.join(project, ".smithers", "node_modules");
+  // A distinct posture per patch, so a swapped id-to-source mapping cannot pass and
+  // every branch of `patchPosture` is exercised rather than just applied/missing.
+  const postures = ["applied", "missing", "incompatible", "unknown"] as const;
+  assert.ok(
+    SMITHERS_COMPATIBILITY_PATCHES.length <= postures.length,
+    "extend the posture rotation to cover every described patch"
+  );
+  const expected: Record<string, string> = {};
+  for (const [index, patch] of SMITHERS_COMPATIBILITY_PATCHES.entries()) {
+    const posture = postures[index]!;
+    const source = path.join(nodeModules, ...patch.packageName.split("/"), ...patch.sourceRelativePath.split("/"));
+    fs.mkdirSync(path.dirname(source), { recursive: true });
+    if (posture === "applied") fs.writeFileSync(source, `${patch.patched}\n`, "utf8");
+    if (posture === "missing") fs.writeFileSync(source, `${patch.patchable}\n`, "utf8");
+    // Neither the patch nor the shape Ultrafuzz patches: the next run hard-fails.
+    if (posture === "incompatible") fs.writeFileSync(source, "export const unrelated = 1;\n", "utf8");
+    // `unknown` leaves the source absent while its package directory exists.
+    expected[patch.id] = posture;
+  }
+
+  const doctor = await diagnoseProject({ projectRoot: project, env, offline: true });
+
+  const reported = doctor.value?.workflow_engine.compatibility_patches ?? {};
+  assert.deepEqual(reported, expected);
+  // Named explicitly: these two were previously omitted from the posture report.
+  assert.ok(Object.hasOwn(reported, "terminal_state_restore"));
+  assert.ok(Object.hasOwn(reported, "resume_hydration"));
+  // An incompatible source means the next run throws, so doctor must not pass it.
+  assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-patches")?.status, "error");
+  assert.equal(doctor.ok, false);
+  assert.ok(doctor.diagnostics.some((entry) => entry.code === "DOCTOR_WORKFLOW_ENGINE_PATCHES_INCOMPATIBLE"));
 });
 
 test("diagnoseProject reports a missing install and a version mismatch", async () => {

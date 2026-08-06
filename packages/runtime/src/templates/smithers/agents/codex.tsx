@@ -11,7 +11,7 @@ type CodexCommandParams = Parameters<SmithersCodexAgent["buildCommand"]>[0];
 type CodexCommand = Awaited<ReturnType<SmithersCodexAgent["buildCommand"]>>;
 
 /**
- * Smithers 0.31.0 passes an `addDir` array as one flag followed by all
+ * Smithers passes an `addDir` array as one flag followed by all
  * directories. Codex accepts one directory per flag and otherwise treats the
  * second path as the prompt, making the trailing stdin `-` fail. Rewrite only
  * fresh commands; Smithers intentionally omits `addDir` for `exec resume`.

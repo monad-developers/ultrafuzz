@@ -31,9 +31,21 @@ function renderDoctor(value: DoctorValue): string {
     `- installed: ${engine.installed_version ?? "not installed"}`,
     `- installed bin target: ${engine.installed_bin_target ?? "unknown"}`,
     `- local binary: ${engine.bin_path ?? "not present"}`,
-    `- latest published stable: ${engine.latest_published_version}`,
+    `- latest published stable: ${engine.latest_published_version}${
+      engine.latest_published_is_renamed_package ? " (renamed upstream package)" : ""
+    }`,
     `- dependency layout: ${engine.layout_status}${engine.layout_detail === null ? "" : ` - ${engine.layout_detail}`}`,
-    `- compatibility patches: detached admission ${engine.compatibility_patches.detached_admission}, supervisor descriptor ${engine.compatibility_patches.supervisor_descriptor}`
+    `- compatibility patches: ${renderCompatibilityPatches(engine.compatibility_patches)}`
   ];
   return `${lines.join("\n")}\n`;
+}
+
+// Rendered from whatever the runtime reports rather than a fixed pair of keys, so
+// a newly tracked workaround shows up here without a second edit.
+function renderCompatibilityPatches(patches: Record<string, string>): string {
+  const entries = Object.entries(patches);
+  if (entries.length === 0) {
+    return "none tracked";
+  }
+  return entries.map(([name, posture]) => `${name.replaceAll("_", " ")} ${posture}`).join(", ");
 }

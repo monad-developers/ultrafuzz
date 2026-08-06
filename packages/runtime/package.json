@@ -32,6 +32,6 @@
   "devDependencies": {
     "@moonshot-ai/kimi-code": "0.29.1",
     "@types/proper-lockfile": "^4.1.4",
-    "smithers-orchestrator": "0.31.0"
+    "smithers-orchestrator": "0.32.0"
   }
 }

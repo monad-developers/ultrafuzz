@@ -51,6 +51,10 @@ function parseJson(capture: Capture): Record<string, unknown> {
 
 function assertNoEngineBranding(value: unknown): void {
   assert.doesNotMatch(JSON.stringify(value), /smithers/iu);
+  // The engine's successor package name does not contain "smithers", so it slips
+  // past the scrub by spelling alone. Name it explicitly or the de-branding
+  // invariant silently stops covering operator-facing engine text.
+  assert.doesNotMatch(JSON.stringify(value), /smthrs/iu);
 }
 
 function writeSmallTopology(project: string): void {
@@ -478,7 +482,16 @@ test("doctor reports install posture in human and JSON output", async () => {
   assert.match(human.stdout + human.stderr, /- bundled: \d+\.\d+\.\d+/u);
   assert.match(human.stdout + human.stderr, /- latest published stable: /u);
   assert.match(human.stdout + human.stderr, /- compatibility patches: detached admission /u);
+  // Every tracked workaround has to reach the operator, not just the first one.
+  // The two resume-durability patches are the ones whose absence silently costs
+  // durable resume progress, so assert them by name.
+  assert.match(human.stdout + human.stderr, /- compatibility patches: .*supervisor descriptor /u);
+  assert.match(human.stdout + human.stderr, /- compatibility patches: .*terminal state restore /u);
+  assert.match(human.stdout + human.stderr, /- compatibility patches: .*resume hydration /u);
   assert.doesNotMatch(human.stdout + human.stderr, /smithers-orchestrator/u);
+  // The registry check reports the renamed upstream package; it must describe it
+  // without naming it, on both the human and JSON surfaces.
+  assert.doesNotMatch(human.stdout + human.stderr, /smthrs/iu);
 
   const json = await cli(project, ["doctor", "--json"], env);
   const body = parseJson(json);
