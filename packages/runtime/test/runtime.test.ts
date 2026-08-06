@@ -499,6 +499,62 @@ function pricingCatalogDataUrl(catalog: unknown): string {
   return `data:application/json,${encodeURIComponent(JSON.stringify(catalog))}`;
 }
 
+function unverifiedDependencyInspect(workflowRunId: string, verifyState: string, runState = "failed"): unknown {
+  return {
+    ok: true,
+    data: {
+      run: {
+        id: workflowRunId,
+        status: runState,
+        error: {
+          message: "Task failed: prepare:strategy",
+          cause: {
+            message:
+              "artifact-contract failure: artifact dependency has not passed verification project-discovery for strategy"
+          }
+        }
+      },
+      runState: { runId: workflowRunId, state: runState },
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "verify:project-discovery", state: verifyState, attempt: 1 },
+        { id: "node:strategy", state: runState === "running" ? "running" : "pending" }
+      ]
+    }
+  };
+}
+
+/** A well-formed marker whose recorded sha does not match the published bytes. */
+function writeDivergedVerification(runRoot: string, dependency: string): void {
+  writeVerificationFixture(runRoot, dependency, "0".repeat(64));
+}
+
+/** A marker that correctly attests the published bytes. */
+function writeMatchingVerification(runRoot: string, dependency: string): void {
+  writeVerificationFixture(runRoot, dependency, undefined);
+}
+
+function writeVerificationFixture(runRoot: string, dependency: string, forcedSha: string | undefined): void {
+  const markerDir = path.join(runRoot, ".ultrafuzz-verification");
+  fs.mkdirSync(markerDir, { recursive: true });
+  const artifactDir = path.join(runRoot, "artifacts", dependency, "properties");
+  fs.mkdirSync(artifactDir, { recursive: true });
+  const contents = '{"properties":[]}\n';
+  fs.writeFileSync(path.join(artifactDir, "lens.json"), contents, "utf8");
+  const sha = forcedSha ?? crypto.createHash("sha256").update(Buffer.from(contents, "utf8")).digest("hex");
+  fs.writeFileSync(
+    path.join(markerDir, `${dependency}.json`),
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.artifact-verification.v1",
+      attempt_id: dependency,
+      node_id: dependency,
+      artifacts: [{ path: "properties/lens.json", sha256: sha }],
+      publications: [{ path: "properties/lens.json", sha256: sha }]
+    })}\n`,
+    "utf8"
+  );
+}
+
 function workflowInspect(input: {
   workflowRunId: string;
   status?: string;
@@ -8153,10 +8209,10 @@ test("resume retries one failed workflow task before continuing a terminal unfin
 
 // R43 (issue #275) stranded permanently: a published artifact diverged from its verification
 // marker, so `prepare:<dependent>` failed forever while every `node:` stayed finished or pending.
-// With no failed node there was nothing for --retry-failed to reset. Recovery must reset the
-// DEPENDENCY so it re-runs and is genuinely re-verified, and must quarantine the inconsistent
-// marker and artifact so the exclusive publish can succeed on the re-run.
-test("resume re-runs a dependency whose verified artifact diverged from its marker", async () => {
+// With no failed node there was nothing for --retry-failed to reset. Recovery re-runs the
+// dependency's VERIFIER, which clears its stale marker, re-checks every contract against the bytes
+// actually on disk, and writes a marker that matches them. No agent re-runs.
+test("resume re-verifies a dependency whose verified artifact diverged from its marker", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -8194,34 +8250,7 @@ test("resume re-runs a dependency whose verified artifact diverged from its mark
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   const runRoot = run.value!.run_root;
-
-  // Reproduce the diverged on-disk state: a well-formed marker whose recorded sha no longer
-  // matches the published artifact.
-  const markerDir = path.join(runRoot, ".ultrafuzz-verification");
-  fs.mkdirSync(markerDir, { recursive: true });
-  const artifactDir = path.join(runRoot, "artifacts", "project-discovery", "properties");
-  fs.mkdirSync(artifactDir, { recursive: true });
-  fs.writeFileSync(path.join(artifactDir, "lens.json"), '{"properties":[]}\n', "utf8");
-  fs.writeFileSync(
-    path.join(markerDir, "project-discovery.json"),
-    `${JSON.stringify({
-      schema_version: "ultrafuzz.artifact-verification.v1",
-      attempt_id: "project-discovery",
-      node_id: "project-discovery",
-      artifacts: [{ path: "properties/lens.json", sha256: "0".repeat(64) }],
-      // `publications` is a strict superset of `artifacts` in production: it also carries
-      // generated-test companions and invariant-suite files. Anything left behind would collide
-      // with the re-run's exclusive publish, so the companion must be quarantined too.
-      publications: [
-        { path: "properties/lens.json", sha256: "0".repeat(64) },
-        { path: "invariant-suite/Companion.t.sol", sha256: "1".repeat(64) }
-      ]
-    })}\n`,
-    "utf8"
-  );
-  const companionDir = path.join(runRoot, "artifacts", "project-discovery", "invariant-suite");
-  fs.mkdirSync(companionDir, { recursive: true });
-  fs.writeFileSync(path.join(companionDir, "Companion.t.sol"), "contract Companion {}\n", "utf8");
+  writeDivergedVerification(runRoot, "project-discovery");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
   const resumed = await resumeRun({
@@ -8236,35 +8265,21 @@ test("resume re-runs a dependency whose verified artifact diverged from its mark
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.submitted, true);
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  // The dependency's verify and node tasks are both reset so it re-runs and re-verifies.
   assert.match(commands, /--node-id verify:project-discovery --iteration 0 --no-deps --force/u);
-  assert.match(commands, /--node-id node:project-discovery --iteration 0 --no-deps --force/u);
-  // The inconsistent marker and artifact are quarantined, not deleted, so the re-run can publish
-  // exclusively and the original bytes stay available as evidence.
-  assert.equal(fs.existsSync(path.join(markerDir, "project-discovery.json")), false);
-  assert.equal(fs.existsSync(path.join(artifactDir, "lens.json")), false);
-  assert.equal(fs.existsSync(path.join(companionDir, "Companion.t.sol")), false);
-  const quarantineRoot = path.join(runRoot, ".ultrafuzz-quarantine");
-  assert.equal(fs.existsSync(quarantineRoot), true);
+  // The dependency's agent node is deliberately NOT reset: re-verification alone repairs the
+  // marker, and resetting the node would cost a full agent execution and a progress generation.
+  assert.doesNotMatch(commands, /--node-id node:project-discovery/u);
+  // Nothing is moved or deleted; the verifier reads the bytes in place.
+  assert.equal(fs.existsSync(path.join(runRoot, "artifacts", "project-discovery", "properties", "lens.json")), true);
   const evidence = JSON.parse(
     fs.readFileSync(path.join(runRoot, "smithers", "unverified-dependency-recovery.json"), "utf8")
-  ) as { dependencies?: string[]; quarantined?: string[]; quarantine_root?: string };
+  ) as { dependencies?: string[]; reported_dependencies?: string[] };
   assert.deepEqual(evidence.dependencies, ["project-discovery"]);
-  for (const expected of ["properties/lens.json", "invariant-suite/Companion.t.sol"]) {
-    assert.equal(
-      evidence.quarantined?.some((entry) => entry.endsWith(expected)),
-      true,
-      `${expected} not quarantined: ${JSON.stringify(evidence.quarantined)}`
-    );
-  }
-  // Each recovery gets its own quarantine subdirectory so a later occurrence cannot silently
-  // overwrite the preserved bytes from an earlier one.
-  assert.match(evidence.quarantine_root ?? "", /\.ultrafuzz-quarantine\/recovery-[0-9a-f-]{36}$/u);
+  assert.deepEqual(evidence.reported_dependencies, ["project-discovery"]);
 });
 
 // The trigger is error text on the run row, which persists and can outlive the failure it
-// describes. Acting on a stale message would quarantine correct artifacts and re-run an expensive
-// agent node for nothing, and each such generation is a wasted recovery generation.
+// describes. Acting on a stale message would reset a healthy verifier and waste a generation.
 test("resume ignores a stale unverified-dependency error when the artifacts still match", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -8272,51 +8287,12 @@ test("resume ignores a stale unverified-dependency error when the artifacts stil
   const runId = "stale-unverified-dependency-run";
   const workflowRunId = `ultrafuzz-${runId}`;
   const env = fakeLifecycleSmithersEnv(project, {
-    inspect: {
-      ok: true,
-      data: {
-        run: {
-          id: workflowRunId,
-          status: "failed",
-          error: {
-            message: "Task failed: prepare:strategy",
-            cause: {
-              message:
-                "artifact-contract failure: artifact dependency has not passed verification project-discovery for strategy"
-            }
-          }
-        },
-        runState: { runId: workflowRunId, state: "failed" },
-        steps: [
-          { id: "node:project-discovery", state: "finished", attempt: 1 },
-          { id: "node:strategy", state: "pending" }
-        ]
-      }
-    },
-    timeline: { timeline: { frames: [{ frameNo: 1 }, { frameNo: 4 }] } }
+    inspect: unverifiedDependencyInspect(workflowRunId, "finished")
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   const runRoot = run.value!.run_root;
-
-  const markerDir = path.join(runRoot, ".ultrafuzz-verification");
-  fs.mkdirSync(markerDir, { recursive: true });
-  const artifactDir = path.join(runRoot, "artifacts", "project-discovery", "properties");
-  fs.mkdirSync(artifactDir, { recursive: true });
-  const contents = '{"properties":[]}\n';
-  fs.writeFileSync(path.join(artifactDir, "lens.json"), contents, "utf8");
-  const sha = crypto.createHash("sha256").update(Buffer.from(contents, "utf8")).digest("hex");
-  fs.writeFileSync(
-    path.join(markerDir, "project-discovery.json"),
-    `${JSON.stringify({
-      schema_version: "ultrafuzz.artifact-verification.v1",
-      attempt_id: "project-discovery",
-      node_id: "project-discovery",
-      artifacts: [{ path: "properties/lens.json", sha256: sha }],
-      publications: [{ path: "properties/lens.json", sha256: sha }]
-    })}\n`,
-    "utf8"
-  );
+  writeMatchingVerification(runRoot, "project-discovery");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
   const resumed = await resumeRun({
@@ -8331,68 +8307,32 @@ test("resume ignores a stale unverified-dependency error when the artifacts stil
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.doesNotMatch(commands, /--node-id verify:project-discovery/u);
-  assert.doesNotMatch(commands, /--node-id node:project-discovery/u);
-  assert.equal(fs.existsSync(path.join(artifactDir, "lens.json")), true);
-  assert.equal(fs.existsSync(path.join(markerDir, "project-discovery.json")), true);
-  assert.equal(fs.existsSync(path.join(runRoot, ".ultrafuzz-quarantine")), false);
-  assert.equal(fs.existsSync(path.join(runRoot, "smithers", "unverified-dependency-recovery.json")), false);
+  const declined = JSON.parse(
+    fs.readFileSync(path.join(runRoot, "smithers", "unverified-dependency-recovery.json"), "utf8")
+  ) as { dependencies?: string[]; reported_dependencies?: string[] };
+  assert.deepEqual(declined.dependencies, []);
+  assert.deepEqual(declined.reported_dependencies, ["project-discovery"]);
 });
 
-// Quarantine is irreversible and runs before the resets, so a failed reset must not leave the run
-// with its only copies moved away and nothing reset.
-test("resume restores quarantined artifacts when the dependency reset fails", async () => {
+// Recovery quarantined nothing, but the marker it repairs is rewritten by the verifier it resets.
+// Until that verifier runs, the divergence still reads as real, so the already-reset verifier state
+// is what stops a second resume from resetting it again and restarting the dependency every
+// generation until the no-progress budget is exhausted.
+test("resume does not re-fire unverified-dependency recovery once the verifier is already reset", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
-  const runId = "unverified-dependency-reset-failure-run";
+  const runId = "unverified-dependency-inflight-run";
   const workflowRunId = `ultrafuzz-${runId}`;
   const env = fakeLifecycleSmithersEnv(project, {
-    inspect: {
-      ok: true,
-      data: {
-        run: {
-          id: workflowRunId,
-          status: "failed",
-          error: {
-            message: "Task failed: prepare:strategy",
-            cause: {
-              message:
-                "artifact-contract failure: artifact dependency has not passed verification project-discovery for strategy"
-            }
-          }
-        },
-        runState: { runId: workflowRunId, state: "failed" },
-        steps: [
-          { id: "node:project-discovery", state: "finished", attempt: 1 },
-          { id: "node:strategy", state: "pending" }
-        ]
-      }
-    },
-    timeline: { timeline: { frames: [{ frameNo: 1 }, { frameNo: 4 }] } },
-    failTimetravel: true
+    inspect: unverifiedDependencyInspect(workflowRunId, "pending")
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   const runRoot = run.value!.run_root;
-
-  const markerDir = path.join(runRoot, ".ultrafuzz-verification");
-  fs.mkdirSync(markerDir, { recursive: true });
-  const artifactDir = path.join(runRoot, "artifacts", "project-discovery", "properties");
-  fs.mkdirSync(artifactDir, { recursive: true });
-  const artifactPath = path.join(artifactDir, "lens.json");
-  fs.writeFileSync(artifactPath, '{"properties":[]}\n', "utf8");
-  const markerPath = path.join(markerDir, "project-discovery.json");
-  fs.writeFileSync(
-    markerPath,
-    `${JSON.stringify({
-      schema_version: "ultrafuzz.artifact-verification.v1",
-      attempt_id: "project-discovery",
-      node_id: "project-discovery",
-      artifacts: [{ path: "properties/lens.json", sha256: "0".repeat(64) }],
-      publications: [{ path: "properties/lens.json", sha256: "0".repeat(64) }]
-    })}\n`,
-    "utf8"
-  );
+  // Marker already removed by the in-flight verifier, which previously read as "still diverged".
+  writeDivergedVerification(runRoot, "project-discovery");
+  fs.rmSync(path.join(runRoot, ".ultrafuzz-verification", "project-discovery.json"));
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
   const resumed = await resumeRun({
@@ -8404,14 +8344,16 @@ test("resume restores quarantined artifacts when the dependency reset fails", as
     env
   });
 
-  assert.equal(resumed.ok, false);
-  // Rolled back: the marker and artifact are back where the workflow expects them, so the next
-  // generation can retry the same recovery instead of hitting a missing-artifact dead end.
-  assert.equal(fs.existsSync(artifactPath), true);
-  assert.equal(fs.existsSync(markerPath), true);
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.doesNotMatch(commands, /--node-id verify:project-discovery/u);
+  const declined = JSON.parse(
+    fs.readFileSync(path.join(runRoot, "smithers", "unverified-dependency-recovery.json"), "utf8")
+  ) as { dependencies?: string[] };
+  assert.deepEqual(declined.dependencies, []);
 });
 
-// An active run must not have its artifacts moved out from under a live workflow. The pre-existing
+// An active run must not have its verifier reset underneath a live workflow. The pre-existing
 // failed-task retry guards on this; the dependency recovery must too.
 test("resume skips unverified-dependency recovery while the workflow is active", async () => {
   const project = tempProject();
@@ -8420,58 +8362,19 @@ test("resume skips unverified-dependency recovery while the workflow is active",
   const runId = "active-unverified-dependency-run";
   const workflowRunId = `ultrafuzz-${runId}`;
   const env = fakeLifecycleSmithersEnv(project, {
-    inspect: {
-      ok: true,
-      data: {
-        run: {
-          id: workflowRunId,
-          status: "running",
-          error: {
-            message: "Task failed: prepare:strategy",
-            cause: {
-              message:
-                "artifact-contract failure: artifact dependency has not passed verification project-discovery for strategy"
-            }
-          }
-        },
-        runState: { runId: workflowRunId, state: "running" },
-        steps: [
-          { id: "node:project-discovery", state: "finished", attempt: 1 },
-          { id: "node:strategy", state: "running" }
-        ]
-      }
-    },
-    timeline: { timeline: { frames: [{ frameNo: 1 }] } }
+    inspect: unverifiedDependencyInspect(workflowRunId, "finished", "running")
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   const runRoot = run.value!.run_root;
-
-  const markerDir = path.join(runRoot, ".ultrafuzz-verification");
-  fs.mkdirSync(markerDir, { recursive: true });
-  const artifactDir = path.join(runRoot, "artifacts", "project-discovery", "properties");
-  fs.mkdirSync(artifactDir, { recursive: true });
-  fs.writeFileSync(path.join(artifactDir, "lens.json"), '{"properties":[]}\n', "utf8");
-  fs.writeFileSync(
-    path.join(markerDir, "project-discovery.json"),
-    `${JSON.stringify({
-      schema_version: "ultrafuzz.artifact-verification.v1",
-      attempt_id: "project-discovery",
-      node_id: "project-discovery",
-      artifacts: [{ path: "properties/lens.json", sha256: "0".repeat(64) }],
-      publications: [{ path: "properties/lens.json", sha256: "0".repeat(64) }]
-    })}\n`,
-    "utf8"
-  );
+  writeDivergedVerification(runRoot, "project-discovery");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
   await resumeRun({ projectRoot: project, runId, maxConcurrency: 8, force: true, retryFailed: true, env });
 
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.doesNotMatch(commands, /--node-id verify:project-discovery/u);
-  assert.doesNotMatch(commands, /--node-id node:project-discovery/u);
-  assert.equal(fs.existsSync(path.join(artifactDir, "lens.json")), true);
-  assert.equal(fs.existsSync(path.join(runRoot, ".ultrafuzz-quarantine")), false);
+  assert.equal(fs.existsSync(path.join(runRoot, "smithers", "unverified-dependency-recovery.json")), false);
 });
 
 test("resume retries failed tasks reported inside a successful terminal workflow", async () => {

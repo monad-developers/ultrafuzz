@@ -145,9 +145,8 @@ const SMITHERS_ACTIVE_RUN_STATES = new Set([
   "waiting-timer"
 ]);
 
-// Mirrors the generated workflow's own marker directory; quarantine sits beside it in the run root.
+// Mirrors the generated workflow's own verification-marker directory.
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
-const ARTIFACT_QUARANTINE_DIRECTORY = ".ultrafuzz-quarantine";
 const SMITHERS_UNVERIFIED_DEPENDENCY_RECOVERY_SCHEMA_VERSION = "ultrafuzz.smithers.unverified-dependency.v1";
 
 export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v1" as const;
@@ -926,81 +925,65 @@ export async function runSmithersLifecycleCommand(input: {
       preResumeStderr = resetStderr.join("\n");
     }
     // A published artifact that diverges from its verification marker fails the dependent's
-    // `prepare:` wrapper identically on every attempt (issue #275). The pre-existing retry above
-    // does reset that `prepare:` task, but re-running the wrapper re-reads the same diverged
-    // bytes, so the run never advances. Reset the DEPENDENCY so it re-runs and is genuinely
-    // re-verified, and quarantine its marker and published files so the exclusive publish has a
-    // clean path. Completing the resume still relies on the retry above to reset the dependent's
-    // `prepare:` task, because `--no-deps` here deliberately does not invalidate dependents.
+    // `prepare:` wrapper identically on every attempt, and the failure lands on the wrapper rather
+    // than a node, so nothing the retry above resets can clear it (issue #275).
     //
-    // The error text is only a hint: it persists on the run row and can outlive the failure it
-    // describes. Quarantine is irreversible, so act only on dependencies whose divergence is
-    // still real on disk.
+    // Re-running the dependency's verifier is enough and is the cheapest correct repair:
+    // `verifyArtifacts` clears its own stale marker before validating, re-reads the artifacts,
+    // re-checks every contract, republishes identical bytes as a no-op, and writes a marker that
+    // matches what is actually on disk. Verification is genuinely re-performed - nothing is waved
+    // through - and no agent re-runs, so the durable node count dips for about a second.
+    //
+    // Two guards keep this from looping. The error text persists on the run row and can outlive the
+    // failure it describes, so the divergence is re-derived from the marker and the bytes; and a
+    // dependency whose verifier is no longer `finished` has already been reset, so recovery is
+    // already in flight and must not fire again.
     const reportedUnverifiedDependencies = smithersSnapshotUnverifiedDependencies(inspection);
-    const unverifiedDependencies =
-      input.retryFailed === true && !smithersSnapshotRunStateIsActive(inspection)
-        ? reportedUnverifiedDependencies.filter((dependency) =>
-            verifiedDependencyStillDiverged(input.resumeRecovery!.runRoot, dependency)
-          )
-        : [];
-    if (unverifiedDependencies.length > 0) {
-      const quarantineRoot = createQuarantineRoot(input.resumeRecovery.runRoot);
-      const quarantined = quarantineDivergedVerifiedArtifacts(
-        input.resumeRecovery.runRoot,
-        quarantineRoot,
-        unverifiedDependencies
+    if (
+      reportedUnverifiedDependencies.length > 0 &&
+      input.retryFailed === true &&
+      !smithersSnapshotRunStateIsActive(inspection)
+    ) {
+      const runRoot = input.resumeRecovery.runRoot;
+      const unverifiedDependencies = reportedUnverifiedDependencies.filter(
+        (dependency) =>
+          smithersSnapshotTaskIsFinished(inspection, `verify:${dependency}`) &&
+          verifiedDependencyStillDiverged(runRoot, dependency)
       );
-      const dependencyStderr: string[] = [];
-      try {
-        for (const dependency of unverifiedDependencies) {
-          // `verify:` first: if the second reset fails, a pending verifier re-runs and fails
-          // loudly as a failed node the retry path can reset, rather than leaving a finished
-          // verifier that would never rewrite the marker.
-          for (const nodeId of [`verify:${dependency}`, `node:${dependency}`]) {
-            const reset = await execSmithersCli({
-              args: [
-                "timetravel",
-                input.workflowPath,
-                "--run-id",
-                input.smithersRunId,
-                "--node-id",
-                nodeId,
-                // Every generated task renders in a flat parallel with no loop construct, so the
-                // iteration is always 0. If a loop is ever introduced this must follow it.
-                "--iteration",
-                "0",
-                "--no-deps",
-                "--force",
-                "--format",
-                "json"
-              ],
-              projectRoot: input.projectRoot,
-              env: input.env,
-              environmentVariableNames: input.environmentVariableNames,
-              keepWorkspaces: input.keepWorkspaces
-            });
-            if (reset.exitCode !== 0) {
-              throw new Error(
-                `unverified dependency reset failed for ${nodeId}: ${reset.stderr.trim() || reset.stdout.trim() || `exit ${reset.exitCode}`}`
-              );
-            }
-            if (reset.stderr.length > 0) dependencyStderr.push(reset.stderr);
-          }
-        }
-      } catch (error) {
-        // Leave no half-applied state: the quarantine already moved the only copies.
-        restoreQuarantinedArtifacts(quarantined);
-        throw error;
-      }
+      // Recorded even when every reported dependency is declined, so the decision is auditable.
       writeJsonDurable(path.join(path.dirname(input.resumeRecovery.inputPath), "unverified-dependency-recovery.json"), {
         schema_version: SMITHERS_UNVERIFIED_DEPENDENCY_RECOVERY_SCHEMA_VERSION,
         smithers_run_id: input.smithersRunId,
         dependencies: [...unverifiedDependencies],
         reported_dependencies: [...reportedUnverifiedDependencies],
-        quarantine_root: quarantineRoot,
-        quarantined: quarantined.map((entry) => entry.from),
         recovered_at: new Date().toISOString()
       });
+      const dependencyStderr: string[] = [];
+      for (const dependency of unverifiedDependencies) {
+        const reset = await execSmithersCli({
+          args: [
+            "timetravel",
+            input.workflowPath,
+            "--run-id",
+            input.smithersRunId,
+            "--node-id",
+            `verify:${dependency}`,
+            // Every generated task renders in a flat parallel with no loop construct, so the
+            // iteration is always 0. If a loop is ever introduced this must follow it.
+            "--iteration",
+            "0",
+            "--no-deps",
+            "--force",
+            "--format",
+            "json"
+          ],
+          projectRoot: input.projectRoot,
+          env: input.env,
+          environmentVariableNames: input.environmentVariableNames,
+          keepWorkspaces: input.keepWorkspaces
+        });
+        if (reset.stderr.length > 0) dependencyStderr.push(reset.stderr);
+      }
       preResumeStderr = [preResumeStderr, ...dependencyStderr].filter((value) => value.length > 0).join("\n");
     }
     if (
@@ -1418,18 +1401,17 @@ function verifiedDependencyStillDiverged(runRoot: string, dependency: string): b
   if (!isSafeDependencyAttemptId(dependency)) return false;
   const markerPath = path.join(runRoot, ARTIFACT_VERIFICATION_DIRECTORY, `${dependency}.json`);
   const recorded = recordedVerifiedArtifactShas(markerPath);
-  if (recorded === undefined) return true;
-  if (recorded.size === 0) return false;
+  // A marker that cannot be read, or that attests nothing usable, is not a verification the
+  // dependent can be prepared against, and only re-running the dependency rewrites it.
+  if (recorded === undefined || recorded.size === 0) return true;
   const artifactRoot = path.join(runRoot, "artifacts", dependency);
   for (const [relativePath, expectedSha] of recorded) {
     const artifactPath = path.join(artifactRoot, relativePath);
-    try {
-      assertPathInside(artifactRoot, artifactPath, "verified dependency artifact");
-    } catch {
-      return true;
-    }
     let bytes: Buffer;
     try {
+      // Realpath-based, matching the workflow's own `resolveRegularArtifactFile`: a symlinked
+      // directory component would otherwise let a file outside the run root satisfy the check.
+      assertRegularFileInside(artifactRoot, artifactPath, "verified dependency artifact");
       bytes = fs.readFileSync(artifactPath);
     } catch {
       return true;
@@ -1439,77 +1421,46 @@ function verifiedDependencyStillDiverged(runRoot: string, dependency: string): b
   return false;
 }
 
-/**
- * Move a diverged dependency's verification marker and every file it published out of the way,
- * preserving them under a per-recovery quarantine directory rather than deleting them: the bytes
- * are the only remaining evidence of the divergence, and the re-run needs a clean path to publish
- * into. Returns the moves so a failed reset can roll them back.
- */
-function quarantineDivergedVerifiedArtifacts(
-  runRoot: string,
-  quarantineRoot: string,
-  dependencies: readonly string[]
-): Array<{ from: string; to: string }> {
-  const quarantined: Array<{ from: string; to: string }> = [];
-  for (const dependency of dependencies) {
-    if (!isSafeDependencyAttemptId(dependency)) continue;
-    const markerPath = path.join(runRoot, ARTIFACT_VERIFICATION_DIRECTORY, `${dependency}.json`);
-    const artifactRoot = path.join(runRoot, "artifacts", dependency);
-    for (const relativePath of publishedVerifiedArtifactPaths(markerPath)) {
-      const artifactPath = path.join(artifactRoot, relativePath);
-      try {
-        assertPathInside(artifactRoot, artifactPath, "diverged verified artifact");
-      } catch {
-        continue;
-      }
-      const moved = quarantinePath(runRoot, quarantineRoot, artifactPath);
-      if (moved !== undefined) quarantined.push(moved);
-    }
-    const movedMarker = quarantinePath(runRoot, quarantineRoot, markerPath);
-    if (movedMarker !== undefined) quarantined.push(movedMarker);
-  }
-  return quarantined;
-}
-
-function restoreQuarantinedArtifacts(quarantined: readonly { from: string; to: string }[]): void {
-  for (const entry of [...quarantined].reverse()) {
-    try {
-      fs.mkdirSync(path.dirname(entry.from), { recursive: true, mode: 0o700 });
-      fs.renameSync(entry.to, entry.from);
-    } catch {
-      // Best effort: the original failure is rethrown by the caller and the quarantine root is
-      // recorded in the evidence file, so a partially restored tree stays diagnosable.
-    }
-  }
-}
-
-/**
- * Every path the verifier published for this dependency. `publications` is a strict superset of the
- * declared `artifacts` — it also carries generated-test companions and invariant-suite files — and
- * the re-run republishes all of them exclusively, so anything left behind would collide.
- */
-function publishedVerifiedArtifactPaths(markerPath: string): string[] {
-  const marker = readVerificationMarker(markerPath);
-  if (marker === undefined) return [];
-  const paths = new Set<string>();
-  for (const key of ["artifacts", "publications"] as const) {
-    const entries = marker[key];
-    if (!Array.isArray(entries)) continue;
+/** True when a task is recorded as finished in the snapshot, i.e. not already reset. */
+function smithersSnapshotTaskIsFinished(snapshot: SmithersCommandSnapshot, nodeId: string): boolean {
+  const parsed = isObjectRecord(snapshot.json) ? snapshot.json : {};
+  const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
+  const finished = new Set(["finished", "succeeded", "reused-from-prior-run", "skipped"]);
+  for (const collection of [data.steps, data.nodes, parsed.steps, parsed.nodes]) {
+    const entries = Array.isArray(collection)
+      ? collection
+      : isObjectRecord(collection)
+        ? Object.entries(collection).map(([id, value]) =>
+            isObjectRecord(value) && typeof value.id !== "string" ? { ...value, id } : value
+          )
+        : [];
     for (const entry of entries) {
-      if (!isObjectRecord(entry) || typeof entry.path !== "string") continue;
-      if (isSafeVerifiedRelativePath(entry.path)) paths.add(entry.path);
+      if (!isObjectRecord(entry)) continue;
+      const entryNodeId = [entry.nodeId, entry.node_id, entry.id].find(
+        (value): value is string => typeof value === "string" && value.trim() !== ""
+      );
+      if (entryNodeId !== nodeId) continue;
+      const state = [entry.state, entry.status].find((value): value is string => typeof value === "string");
+      if (state !== undefined && finished.has(state.toLowerCase())) return true;
     }
   }
-  return [...paths].sort();
+  return false;
 }
 
 /** Recorded path to sha256 for a dependency, or undefined when the marker is missing or invalid. */
 function recordedVerifiedArtifactShas(markerPath: string): Map<string, string> | undefined {
-  const marker = readVerificationMarker(markerPath);
-  if (marker === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+  } catch {
+    return undefined;
+  }
+  if (!isObjectRecord(parsed)) return undefined;
   const shas = new Map<string, string>();
+  // `publications` is a strict superset of the declared `artifacts`: it also carries generated-test
+  // companions and invariant-suite files. Any of them drifting invalidates the verification.
   for (const key of ["artifacts", "publications"] as const) {
-    const entries = marker[key];
+    const entries = parsed[key];
     if (!Array.isArray(entries)) continue;
     for (const entry of entries) {
       if (!isObjectRecord(entry) || typeof entry.path !== "string" || typeof entry.sha256 !== "string") continue;
@@ -1520,16 +1471,6 @@ function recordedVerifiedArtifactShas(markerPath: string): Map<string, string> |
   return shas;
 }
 
-function readVerificationMarker(markerPath: string): Record<string, unknown> | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(fs.readFileSync(markerPath, "utf8"));
-  } catch {
-    return undefined;
-  }
-  return isObjectRecord(parsed) ? parsed : undefined;
-}
-
 function isSafeDependencyAttemptId(dependency: string): boolean {
   return /^[A-Za-z0-9._-]+$/u.test(dependency) && !dependency.includes("..") && dependency !== ".";
 }
@@ -1538,50 +1479,6 @@ function isSafeVerifiedRelativePath(relativePath: string): boolean {
   if (relativePath.trim() === "" || path.isAbsolute(relativePath)) return false;
   if (/^[A-Za-z]:/u.test(relativePath) || relativePath.includes("\\")) return false;
   return !relativePath.split("/").some((segment) => segment === "" || segment === "." || segment === "..");
-}
-
-/**
- * A fresh quarantine directory per recovery, hardened the way the generated workflow hardens its
- * verification-marker root: a model-controlled workspace lives inside the run root and could
- * otherwise pre-create this path as a symlink and redirect the renames outside it.
- */
-function createQuarantineRoot(runRoot: string): string {
-  const resolvedRunRoot = fs.realpathSync(runRoot);
-  const base = path.resolve(resolvedRunRoot, ARTIFACT_QUARANTINE_DIRECTORY);
-  assertPathInside(resolvedRunRoot, base, "artifact quarantine root");
-  fs.mkdirSync(base, { recursive: true, mode: 0o700 });
-  const baseStat = fs.lstatSync(base);
-  if (!baseStat.isDirectory() || baseStat.isSymbolicLink() || fs.realpathSync(base) !== base) {
-    throw new Error("artifact-contract failure: unsafe artifact quarantine root");
-  }
-  const root = path.join(base, `recovery-${crypto.randomUUID()}`);
-  fs.mkdirSync(root, { recursive: false, mode: 0o700 });
-  return root;
-}
-
-function quarantinePath(
-  runRoot: string,
-  quarantineRoot: string,
-  target: string
-): { from: string; to: string } | undefined {
-  let stat: fs.Stats;
-  try {
-    stat = fs.lstatSync(target);
-  } catch {
-    return undefined;
-  }
-  if (!stat.isFile()) return undefined;
-  const relative = path.relative(runRoot, target);
-  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
-  const destination = path.join(quarantineRoot, relative);
-  try {
-    assertPathInside(quarantineRoot, destination, "quarantined artifact");
-    fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
-    fs.renameSync(target, destination);
-  } catch {
-    return undefined;
-  }
-  return { from: target, to: destination };
 }
 
 function isCompatibleSmithersRunId(value: string): boolean {
