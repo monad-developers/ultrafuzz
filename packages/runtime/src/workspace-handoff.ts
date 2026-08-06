@@ -32,8 +32,22 @@ const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "art
  * the target and was not excluded here, so `--exclude-standard` kept it and staging swallowed roughly
  * 200 MB of untracked JSON and HTML — which `workspace.patch`, an `ultrafuzz/text@1` artifact, then has
  * to carry as unified diff text (issue #304).
+ *
+ * The names are taken from the commands the invariant prompts actually run, not guessed. Every invariant
+ * stage issues `recon fuzz . --corpus-dir echidna --recon-corpus-dir recon-corpus`, so `echidna/` is
+ * emitted on EVERY one of them — and coverage artifacts (`covered.*.html|lcov`) land inside it. An earlier
+ * draft of this list said `corpus` and `coverage` instead, which match nothing this pipeline produces
+ * while leaving the directory it produces most often unexcluded. `crytic-export/` and `medusa/` are the
+ * defaults of the other two fuzzers the harness can drive.
+ *
+ * Deliberately NOT generic names like `corpus/` or `coverage/`: a checked-in seed corpus is a real
+ * convention, and because staging runs after `read-tree <baseline>`, excluding a TRACKED path silently
+ * keeps the baseline blob — an authored edit would vanish from the patch with no error at all.
+ *
+ * The pathspecs are root-anchored, which matches where `recon fuzz .` writes. A nested
+ * `test/recon-corpus/` would not be excluded, and does not arise.
  */
-const WORKSPACE_GENERATED_ROOTS = ["recon-corpus", "crytic-export", "corpus", "coverage"] as const;
+const WORKSPACE_GENERATED_ROOTS = ["recon-corpus", "echidna", "crytic-export", "medusa"] as const;
 
 const WORKSPACE_EXCLUDED_ROOTS = [...WORKSPACE_RUNTIME_ROOTS, ...WORKSPACE_GENERATED_ROOTS] as const;
 
@@ -225,8 +239,11 @@ function stageableWorkspacePaths(workspaceRoot: string, index: string): Buffer[]
   );
   // Deliberately the RUNTIME roots only. The name check below exists to catch a top-level *file* named
   // like a root, which the `/**` pathspecs cannot match. That is right for runtime roots, which are never
-  // authored content, but a file literally named `coverage` or `corpus` plausibly is authored — and
-  // generated corpus is always a directory, so the pathspec exclusion is sufficient for it.
+  // authored content, but a file named like a fuzzer output directory plausibly is authored, and the
+  // generated roots are directories in every layout this harness produces. A top-level SYMLINK named like
+  // one is the exception: it is neither matched by `/**` nor skipped here, so it reaches
+  // `assertWorkspacePatchPath` and fails closed there as a symlink, which is pre-existing behaviour for
+  // any symlink rather than something these exclusions introduce.
   const runtimeRoots = new Set<string>(WORKSPACE_RUNTIME_ROOTS);
   const pathspecs: Buffer[] = [];
   for (const entry of splitNulBuffer(listed)) {

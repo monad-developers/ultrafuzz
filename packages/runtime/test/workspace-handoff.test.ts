@@ -76,7 +76,7 @@ test("captures a workspace without staging harness-generated corpus output", () 
 
     // Deliberately NOT gitignored, exactly as on the real target: the exclusion has to come from the
     // stager, because `--exclude-standard` will not drop these.
-    for (const generated of ["recon-corpus", "crytic-export", "corpus", "coverage"]) {
+    for (const generated of ["recon-corpus", "echidna", "crytic-export", "medusa"]) {
       mkdirSync(path.join(root, generated, "build-snapshot"), { recursive: true });
       writeFileSync(path.join(root, generated, "build-snapshot", "0b7f82b3.json"), `{"generated":"${generated}"}\n`);
       writeFileSync(path.join(root, generated, "covered.1786048318.html"), "<html>coverage</html>\n");
@@ -89,7 +89,7 @@ test("captures a workspace without staging harness-generated corpus output", () 
       ["UltrafuzzSmoke.t.sol"]
     );
     const staged = git(root, ["ls-tree", "-r", "--name-only", captured.manifest.result_tree]);
-    for (const generated of ["recon-corpus", "crytic-export", "corpus", "coverage"]) {
+    for (const generated of ["recon-corpus", "echidna", "crytic-export", "medusa"]) {
       assert.equal(
         staged.split("\n").some((entry) => entry === generated || entry.startsWith(`${generated}/`)),
         false,
@@ -112,11 +112,11 @@ test("captures an authored top-level file whose name matches a generated corpus 
     git(root, ["commit", "--quiet", "-m", "base"]);
     const baseline = captureWorkspaceTree(root);
 
-    writeFileSync(path.join(root, "coverage"), "authored, not corpus\n");
-    writeFileSync(path.join(root, "corpus"), "authored, not corpus\n");
+    writeFileSync(path.join(root, "echidna"), "authored, not corpus\n");
+    writeFileSync(path.join(root, "recon-corpus"), "authored, not corpus\n");
 
     const captured = captureWorkspacePatch(root, baseline);
-    assert.deepEqual(captured.manifest.files.map((entry) => entry.path).sort(), ["corpus", "coverage"]);
+    assert.deepEqual(captured.manifest.files.map((entry) => entry.path).sort(), ["echidna", "recon-corpus"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
