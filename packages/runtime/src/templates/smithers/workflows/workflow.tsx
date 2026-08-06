@@ -1392,6 +1392,7 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
   const onlyReachableCommit = git(["rev-list", "--all", "--max-count=1"]).toLowerCase();
   const unreachableCommitCount = Number(gitUnreachableCommitCount());
   const commitObjectCount = reachableCommitCount + unreachableCommitCount;
+  const pinnedSourceRefPresent = refs.some((ref) => ref.name === pinnedSourceRef && ref.object === pinnedCommit);
   if (
     !/^[0-9a-f]{40}$/u.test(commit) ||
     !/^[0-9a-f]{40}$/u.test(tree) ||
@@ -1403,6 +1404,7 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
     reachableCommitCount !== 1 ||
     commitObjectCount !== 1 ||
     onlyReachableCommit !== pinnedCommit ||
+    !pinnedSourceRefPresent ||
     refs.some(
       (ref) =>
         (ref.name !== pinnedSourceRef && !ref.name?.startsWith("refs/heads/ultrafuzz/")) || ref.object !== pinnedCommit
@@ -1429,7 +1431,7 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
       commit,
       tree,
       base_ref: pinnedSourceRef,
-      refs,
+      refs: [{ name: pinnedSourceRef, object: pinnedCommit }],
       remotes,
       revision_count: reachableCommitCount,
       commit_object_count: commitObjectCount
@@ -1438,7 +1440,34 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
     2
   )}\n`;
   if (existsSync(proofPath)) {
-    if (!readFileSync(proofPath).equals(Buffer.from(proofContents, "utf8"))) {
+    const previousBytes = readFileSync(proofPath);
+    let previousProof;
+    try {
+      previousProof = JSON.parse(previousBytes.toString("utf8"));
+    } catch {
+      previousProof = undefined;
+    }
+    const previousRefs = Array.isArray(previousProof?.refs) ? previousProof.refs : [];
+    const previousProofMatches =
+      previousProof?.schema_version === "ultrafuzz.agent-source-proof.v1" &&
+      previousProof.attempt_id === task.attemptId &&
+      previousProof.commit === commit &&
+      previousProof.tree === tree &&
+      previousProof.base_ref === pinnedSourceRef &&
+      Array.isArray(previousProof.remotes) &&
+      previousProof.remotes.length === 0 &&
+      previousProof.revision_count === reachableCommitCount &&
+      previousProof.commit_object_count === commitObjectCount &&
+      previousRefs.some((ref) => ref?.name === pinnedSourceRef && ref.object === pinnedCommit) &&
+      previousRefs.every(
+        (ref) =>
+          ref !== null &&
+          typeof ref === "object" &&
+          typeof ref.name === "string" &&
+          (ref.name === pinnedSourceRef || ref.name.startsWith("refs/heads/ultrafuzz/")) &&
+          ref.object === pinnedCommit
+      );
+    if (!previousProofMatches) {
       throw new Error(`source-isolation failure: pinned source proof ${task.attemptId} changed`);
     }
     return;
@@ -3461,10 +3490,6 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
     throw new Error(`artifact-contract failure: unsafe invariant source proof root ${task.attemptId}`);
   }
   writeFileDurable(proofPath, `${JSON.stringify(proof, null, 2)}\n`);
-}
-
-function normalizeInvariantSourceText(value: string): string {
-  return value.replace(/\s+/gu, " ").trim();
 }
 
 function normalizeInvariantSourceLines(lines: readonly string[]): string {
