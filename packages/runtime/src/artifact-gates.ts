@@ -1812,21 +1812,32 @@ function propertyLensOutput(node: PlannedGraphNode): PlannedGraphNode["outputs"]
  * exposure is reduced DETECTION of an odd citation, weighed against losing an entire reference lens's
  * coverage, which is what failing the node actually costs. The wider authority question is #285.
  */
-// Separator-agnostic on purpose. A prefix allowlist that only knew `:` would let
-// `scfuzzbench_aave_v4_iSpoke_supply` through as an ordinary citation, which is the same forgery with
-// different punctuation.
-const RESERVED_REFERENCE_AUTHORITY = /^(?:scfuzzbench|benchmark|ground-?truth)[:._/-]/u;
+// Separator-agnostic on purpose, both BETWEEN the namespace and the identifier and WITHIN the keyword.
+// A prefix allowlist that only knew `:` would let `scfuzzbench_aave_v4_iSpoke_supply` through as an
+// ordinary citation, and one that only allowed a hyphen inside `ground-truth` would let
+// `ground_truth.total-borrowed-v0` and `sc_fuzzbench.x` through — the same forgery with different
+// punctuation each time. A separator is still REQUIRED after the keyword, so ordinary words that merely
+// begin with one (`benchmarking`, `Benchmarks-are-fine`) are citations, not authority claims.
+const RESERVED_REFERENCE_AUTHORITY = /^(?:sc[._-]?fuzz[._-]?bench|benchmark|ground[-._]?truth)[:._/-]/u;
 
 // The strippable set is bounded POSITIVELY: a single-line token that could plausibly have been copied
 // out of a reference document. Bounding it negatively ("anything without an authority prefix") would
 // silently swallow a sentence, a whitespace-only entry, a URL or a JSON blob -- all of which are
 // authoring errors worth failing on, and none of which any prompt asks a model to put in this field.
-// `testConvertToAssetsSharesDesirable` (issue #293) and `LEND_ACC_01` (issue #283) both match, so this
-// stays as permissive as it needs to be and no more.
-const COPIED_REFERENCE_CITATION = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/u;
+//
+// Deliberately admits shapes that would otherwise be the NEXT trap in this series: a leading digit or
+// underscore (`4626-01`, `_internal`) and an interior colon (`RoundingProps.sol:88`). A colon is safe
+// here precisely because the authority check runs first and wins, so `benchmark:unexpected` still fails
+// closed. `testConvertToAssetsSharesDesirable` (issue #293) and `LEND_ACC_01` (issue #283) both match,
+// so this stays as permissive as it needs to be and no more.
+const COPIED_REFERENCE_CITATION = /^[A-Za-z0-9_][A-Za-z0-9._:-]{0,63}$/u;
 
 function claimsReservedReferenceAuthority(expectationId: string): boolean {
-  return RESERVED_REFERENCE_AUTHORITY.test(expectationId.trim().toLowerCase());
+  // Lower-cased so `Benchmark_unexpected` cannot slip past; a regression pins that. NOT trimmed: a
+  // `.trim()` here would be unreachable defensive code, because `isCopiedReferenceCitation` tests the raw
+  // string first and any leading or trailing whitespace fails it outright. Keeping it would imply a
+  // protection that no test could pin.
+  return RESERVED_REFERENCE_AUTHORITY.test(expectationId.toLowerCase());
 }
 
 function isCopiedReferenceCitation(expectationId: string): boolean {

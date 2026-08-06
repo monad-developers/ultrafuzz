@@ -1747,7 +1747,13 @@ test("property lens authority sanitizer strips dotted and mixed-separator citati
           description: "Supply completes for valid state.",
           category: "dos-liveness",
           priority: "high",
-          reference_expectations: ["properties.a16z-erc4626", "RoundingProps.sol", "total-borrowed-v0"]
+          reference_expectations: [
+            "properties.a16z-erc4626",
+            "RoundingProps.sol:88",
+            "total-borrowed-v0",
+            "4626-01",
+            "_internal"
+          ]
         }
       ]
     })
@@ -1858,13 +1864,18 @@ test("property lens authority sanitizer still fails closed on a reserved authori
     ["testConvertToAssetsSharesDesirable", "ScFuzzBench:aave-v4:iSpoke_supply"]
   );
 
+  // Every entry here matches COPIED_REFERENCE_CITATION, so each one is pinning the authority check
+  // itself rather than the implausibility bound. `Benchmark_unexpected` is the normalisation canary:
+  // drop `.toLowerCase()` and only this case fails.
   for (const forged of [
     "benchmark.unexpected",
-    "benchmark/unexpected",
     "benchmark_unexpected",
     "benchmark-unexpected",
+    "Benchmark_unexpected",
     "scfuzzbench_aave_v4_iSpoke_supply",
-    "GROUND-TRUTH:total-borrowed-v0",
+    "scfuzz-bench.total-borrowed-v0",
+    "ground_truth.total-borrowed-v0",
+    "ground.truth.total-borrowed-v0",
     "groundtruth.total-borrowed-v0"
   ]) {
     writeArtifact(
