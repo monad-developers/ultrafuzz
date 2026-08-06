@@ -423,6 +423,39 @@ test("generated Smithers pinned source proof ignores unrelated same-commit Ultra
     git(["branch", "ultrafuzz/test-run/property-specification-crytic", pinnedCommit]);
     assert.doesNotThrow(() => preservePinnedSourceProof(task));
 
+    fs.writeFileSync(
+      proofPath,
+      `${JSON.stringify(
+        {
+          ...canonicalProof,
+          refs: [
+            { name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit },
+            { name: "refs/heads/rogue", object: pinnedCommit }
+          ]
+        },
+        null,
+        2
+      )}\n`
+    );
+    assert.throws(() => preservePinnedSourceProof(task), /pinned source proof property-specification-certora changed/u);
+
+    fs.writeFileSync(
+      proofPath,
+      `${JSON.stringify(
+        {
+          ...canonicalProof,
+          refs: [
+            { name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit },
+            { name: "refs/heads/ultrafuzz/test-run/actors-flows", object: "0".repeat(40) }
+          ]
+        },
+        null,
+        2
+      )}\n`
+    );
+    assert.throws(() => preservePinnedSourceProof(task), /pinned source proof property-specification-certora changed/u);
+
+    fs.writeFileSync(proofPath, `${JSON.stringify(legacyNoisyProof, null, 2)}\n`);
     git(["branch", "rogue", pinnedCommit]);
     assert.throws(
       () => preservePinnedSourceProof(task),
