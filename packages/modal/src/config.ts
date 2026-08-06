@@ -70,6 +70,26 @@ const publicBenchmarkTargetSchema = z
   })
   .strict();
 
+const privateBenchmarkExecutionSchema = z
+  .object({
+    excluded_node_ids: z.array(safeId).max(512).default([])
+  })
+  .strict()
+  .superRefine((execution, context) => {
+    const seen = new Set<string>();
+    for (const [index, id] of execution.excluded_node_ids.entries()) {
+      if (seen.has(id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["excluded_node_ids", index],
+          message: `duplicate excluded node ID: ${id}`
+        });
+      }
+      seen.add(id);
+    }
+  })
+  .default({ excluded_node_ids: [] });
+
 const commonBenchmarkConfig = {
   schema_version: z.literal(MODAL_BENCHMARK_SCHEMA_VERSION),
   run_id: safeId,
@@ -97,6 +117,7 @@ const privateBenchmarkConfigSchema = z
   .object({
     ...commonBenchmarkConfig,
     target: z.object({ repo: gitUrl, ref: gitRef }).strict(),
+    benchmark_execution: privateBenchmarkExecutionSchema,
     ground_truth: z
       .object({
         repo: gitUrl,
