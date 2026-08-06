@@ -1286,8 +1286,9 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
   );
 });
 
-test("property lens gate requires reference expectations to appear in supplied input artifacts", () => {
+test("property lens gate strips unsupported external labels without weakening benchmark authority", () => {
   const expectationId = "scfuzzbench:aave-v4:iSpoke_supply";
+  const externalLabelId = "ERC4626-013";
   const expectationCatalog = JSON.stringify({
     schema_version: "ultrafuzz.reference-expectations.v1",
     expectations: [{ id: expectationId }]
@@ -1319,6 +1320,159 @@ test("property lens gate requires reference expectations to appear in supplied i
       }
     ]
   });
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+  const nodeWithReferenceCatalog = {
+    ...node,
+    depends_on: ["base-test-setup", "reference-properties-recon"]
+  };
+  const writeLens = (referenceExpectations: string[]) => {
+    writeArtifact(
+      layout,
+      "property-specification-recon",
+      "properties/recon.json",
+      JSON.stringify({
+        schema_version: "ultrafuzz.property-lens.v1",
+        properties: [
+          {
+            id: "iSpoke_supply",
+            description: "Supply completes for valid state.",
+            category: "dos-liveness",
+            priority: "high",
+            reference_expectations: referenceExpectations
+          }
+        ]
+      })
+    );
+  };
+  const readLensReferenceExpectations = () =>
+    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
+      .properties[0].reference_expectations;
+
+  writeLens([externalLabelId]);
+  const externalOnly = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(externalOnly.ok, true, JSON.stringify(externalOnly.diagnostics));
+  assert.ok(
+    externalOnly.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
+    JSON.stringify(externalOnly.diagnostics)
+  );
+  assert.deepEqual(readLensReferenceExpectations(), undefined);
+
+  writeLens([expectationId, externalLabelId]);
+  const forgedBenchmarkMapping = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(forgedBenchmarkMapping.ok, false);
+  assert.ok(
+    forgedBenchmarkMapping.diagnostics.some(
+      (diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"
+    ),
+    JSON.stringify(forgedBenchmarkMapping.diagnostics)
+  );
+  assert.equal(
+    forgedBenchmarkMapping.diagnostics.some(
+      (diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"
+    ),
+    false,
+    JSON.stringify(forgedBenchmarkMapping.diagnostics)
+  );
+  assert.deepEqual(readLensReferenceExpectations(), [expectationId, externalLabelId]);
+
+  writeLens([expectationId, externalLabelId]);
+  writeArtifact(layout, "reference-properties-recon", "references/expectations.json", expectationCatalog);
+  const unmanifestedCatalog = verifyRequiredArtifactsForAttempt(
+    layout,
+    nodeWithReferenceCatalog,
+    nodeWithReferenceCatalog.id
+  );
+  assert.equal(unmanifestedCatalog.ok, false);
+  assert.ok(
+    unmanifestedCatalog.diagnostics.some(
+      (diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_MANIFEST_MISMATCH"
+    ),
+    JSON.stringify(unmanifestedCatalog.diagnostics)
+  );
+
+  writeLens([expectationId, externalLabelId]);
+  writeArtifact(layout, "reference-properties-recon", "references/expectations.json", expectationCatalog);
+  writeArtifactManifest({
+    layout,
+    nodeId: "reference-properties-recon",
+    outputs: [
+      {
+        path: "references/expectations.json",
+        contract: "ultrafuzz/reference-expectations@1",
+        contract_digest: "a".repeat(64),
+        primary: false
+      }
+    ],
+    provenance: { origin: "pinned-reference" }
+  });
+  const authorized = verifyRequiredArtifactsForAttempt(layout, nodeWithReferenceCatalog, nodeWithReferenceCatalog.id);
+  assert.equal(authorized.ok, true, JSON.stringify(authorized.diagnostics));
+  assert.ok(
+    authorized.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
+    JSON.stringify(authorized.diagnostics)
+  );
+  assert.deepEqual(readLensReferenceExpectations(), [expectationId]);
+
+  writeLens([expectationId, externalLabelId]);
+  writeArtifact(
+    layout,
+    "reference-properties-recon",
+    "references/expectations.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.reference-expectations.v1",
+      expectations: [{ id: "benchmark:tampered" }]
+    })
+  );
+  const tampered = verifyRequiredArtifactsForAttempt(layout, nodeWithReferenceCatalog, nodeWithReferenceCatalog.id);
+  assert.equal(tampered.ok, false);
+  assert.ok(
+    tampered.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_TAMPERED"),
+    JSON.stringify(tampered.diagnostics)
+  );
+  assert.ok(
+    tampered.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+    JSON.stringify(tampered.diagnostics)
+  );
+});
+
+test("property lens gate rejects schema-invalid expectation catalogs even when digest-bound", () => {
+  const expectationId = "scfuzzbench:aave-v4:iSpoke_supply";
+  const malformedCatalog = JSON.stringify({
+    expectations: [{ id: expectationId }]
+  });
+  const malformedDigest = createHash("sha256").update(malformedCatalog).digest("hex");
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-properties-reference-malformed-catalog",
+    stateNodes: [
+      {
+        id: "reference-properties-recon",
+        status: "succeeded",
+        outputs: [
+          {
+            path: "references/expectations.json",
+            contract: "ultrafuzz/reference-expectations@1",
+            contract_digest: "a".repeat(64),
+            primary: false
+          }
+        ],
+        provenance: {
+          origin: "pinned-reference",
+          reference_expectations: {
+            source: "operator-supplied",
+            path: "reference-expectations.json",
+            sha256: malformedDigest
+          }
+        }
+      }
+    ]
+  });
   writeArtifact(
     layout,
     "property-specification-recon",
@@ -1336,47 +1490,7 @@ test("property lens gate requires reference expectations to appear in supplied i
       ]
     })
   );
-  writeArtifact(
-    layout,
-    "reference-properties-aviggiano",
-    "references/expectations.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.reference-expectations.v1",
-      expectations: [{ id: expectationId }]
-    })
-  );
-  const base = plannedNode(["properties/recon.json"]);
-  const node = {
-    ...base,
-    id: "property-specification-recon",
-    logical_id: "property-specification-recon",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const })),
-    depends_on: ["base-test-setup", "reference-properties-recon"]
-  };
-
-  const unauthorized = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(unauthorized.ok, false);
-  assert.ok(
-    unauthorized.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
-    JSON.stringify(unauthorized.diagnostics)
-  );
-
-  writeArtifact(
-    layout,
-    "reference-properties-recon",
-    "references/expectations.json",
-    JSON.stringify({ expectations: [{ id: expectationId }] })
-  );
-  const malformedCatalog = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(malformedCatalog.ok, false);
-  assert.ok(
-    malformedCatalog.diagnostics.some(
-      (diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"
-    ),
-    JSON.stringify(malformedCatalog.diagnostics)
-  );
-
-  writeArtifact(layout, "reference-properties-recon", "references/expectations.json", expectationCatalog);
+  writeArtifact(layout, "reference-properties-recon", "references/expectations.json", malformedCatalog);
   writeArtifactManifest({
     layout,
     nodeId: "reference-properties-recon",
@@ -1390,32 +1504,60 @@ test("property lens gate requires reference expectations to appear in supplied i
     ],
     provenance: { origin: "pinned-reference" }
   });
-  const authorized = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(authorized.ok, true, JSON.stringify(authorized.diagnostics));
-
-  writeArtifact(
-    layout,
-    "reference-properties-recon",
-    "references/expectations.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.reference-expectations.v1",
-      expectations: [{ id: "benchmark:tampered" }]
-    })
-  );
-  const tampered = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(tampered.ok, false);
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const })),
+    depends_on: ["reference-properties-recon"]
+  };
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false);
   assert.ok(
-    tampered.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_TAMPERED"),
-    JSON.stringify(tampered.diagnostics)
-  );
-  assert.ok(
-    tampered.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
-    JSON.stringify(tampered.diagnostics)
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_TAMPERED"),
+    JSON.stringify(result.diagnostics)
   );
 });
 
-test("property lens authority gate applies to custom logical lens IDs", () => {
+test("property lens authority sanitizer applies to custom logical lens IDs", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-custom-lens" });
+  writeArtifact(
+    layout,
+    "recon-properties",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: ["ERC4626-999"]
+        }
+      ]
+    })
+  );
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "recon-properties",
+    logical_id: "recon-properties",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
+    JSON.stringify(result.diagnostics)
+  );
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
+      .properties[0].reference_expectations,
+    undefined
+  );
+
   writeArtifact(
     layout,
     "recon-properties",
@@ -1433,18 +1575,50 @@ test("property lens authority gate applies to custom logical lens IDs", () => {
       ]
     })
   );
+  const benchmarkShaped = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(benchmarkShaped.ok, false);
+  assert.ok(
+    benchmarkShaped.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+    JSON.stringify(benchmarkShaped.diagnostics)
+  );
+});
+
+test("property lens authority sanitizer does not mutate non-lens JSON outputs", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-non-lens-json" });
+  writeArtifact(
+    layout,
+    "recon-properties",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: ["ERC4626-013"]
+        }
+      ]
+    })
+  );
   const base = plannedNode(["properties/recon.json"]);
   const node = {
     ...base,
     id: "recon-properties",
-    logical_id: "recon-properties",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+    logical_id: "recon-properties"
   };
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(result.ok, false);
-  assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
+    false,
     JSON.stringify(result.diagnostics)
+  );
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
+      .properties[0].reference_expectations,
+    ["ERC4626-013"]
   );
 });
 
