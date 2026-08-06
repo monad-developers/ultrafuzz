@@ -125,8 +125,9 @@ Required record shapes:
   `actor_ids`, `evidence`;
 - lifecycle transition: `id`, `name`, `from`, `to`, `trigger`, `guards`,
   `effects`, `evidence`;
-- invariant: `id`, `name`, `kind`, `statement`, `asset_ids`,
-  `capability_ids`, `evidence`;
+- invariant: `id`, `name`, `kind` (exactly one of `economic`, `accounting`,
+  `state`, `authorization`, or `integration`; no other value validates),
+  `statement`, `asset_ids`, `capability_ids`, `evidence`;
 - threat: `id`, `title`, `description`, `preconditions`, `impact`, `asset_ids`,
   `actor_ids`, `attack_surface_ids`, `capability_ids`, `trust_boundary_ids`,
   `invariant_ids`, `assumption_ids`, `unknown_ids`, `evidence`;

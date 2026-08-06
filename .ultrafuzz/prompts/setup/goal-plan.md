@@ -93,7 +93,8 @@ Include:
   `threat-model.json` file (not reserialized JSON);
 - `vulnerability_database` with explicit planner-catalog and snapshot-manifest
   schema versions, database schema version, aggregate digest, and
-  planner-catalog digest;
+  planner-catalog digest (`catalog_sha256`, computed over the exact bytes of
+  the supplied planner catalog file itself, like `threat_model_sha256`);
 - all `modeled_threat_ids`;
 - all `catalog_class_ids`;
 - `threat_goals`;
@@ -108,8 +109,14 @@ class goals may reference only those IDs.
 
 Name the two schema fields `planner_catalog_schema_version` and
 `snapshot_manifest_schema_version`. Set the latter to
-`"ultrafuzz.vulnerability-db.snapshot.v1"`; copy the former and all database
-digests from the supplied catalog. For selected records, copy
+`"ultrafuzz.vulnerability-db.snapshot.v1"`. Copy the former,
+`database_schema_version`, and `aggregate_sha256` (from
+`database_aggregate_sha256`) out of the supplied catalog document. Set
+`catalog_sha256` to the SHA-256 you compute over the exact bytes of the
+planner catalog file at the supplied read-only catalog path above, the same
+way `threat_model_sha256` hashes the upstream threat-model file. The
+catalog's embedded `upstream_catalog_sha256` names the upstream source file
+and never validates here. For selected records, copy
 `selected_artifact_path`, `source_sha256`, and `source_size_bytes` exactly into
 the plan's `path`, `sha256`, and `size_bytes` fields.
 
