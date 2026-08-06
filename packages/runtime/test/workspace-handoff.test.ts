@@ -186,7 +186,7 @@ test("attributes a capture overflow to what fed the diff, not to bulk that contr
       (error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         assert.match(message, /produced more than the \d+-byte capture buffer/u);
-        assert.match(message, /generated \(>=\d+ diff bytes in \d+ files\)/u);
+        assert.match(message, /generated \(>=\d+ diff bytes in \d+ files?\)/u);
         assert.doesNotMatch(message, /lib/u, message);
         assert.equal((error as { cause?: { code?: string } }).cause?.code, "ENOBUFS");
         return true;
@@ -218,7 +218,7 @@ test("attributes an overflow made of many small files to their root", () => {
       (error: unknown) => {
         assert.match(
           error instanceof Error ? error.message : String(error),
-          /coverage \(>=\d+ diff bytes in \d+ files\)/u
+          /coverage \(>=\d+ diff bytes in \d+ files?\)/u
         );
         return true;
       }
@@ -264,6 +264,51 @@ test("attributes quoted paths and ignores header lines inside file content", () 
   }
 });
 
+test("ranks competing roots by their span in the capture and caps the list", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "base"]);
+    const baseline = captureWorkspaceTree(root);
+
+    // Eight roots that all land inside the captured prefix, with sizes ASCENDING in path order so that
+    // reporting them in encounter order, or with the comparator reversed, gives a different answer than
+    // ranking by span. Base64 so the diff is text and each root's span is proportional to its bytes.
+    // `a1` is smallest and `a8` largest; the message must lead with `a8` and must not mention `a1`.
+    for (let index = 1; index <= 8; index += 1) {
+      mkdirSync(path.join(root, `a${index}`), { recursive: true });
+      writeFileSync(path.join(root, `a${index}`, "d.txt"), randomBytes(index * 700 * 1024).toString("base64"));
+    }
+
+    assert.throws(
+      () => captureWorkspacePatch(root, baseline),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        const ranked = [...message.matchAll(/\ba(\d) \(>=(\d+) diff bytes/gu)].map((match) => ({
+          root: match[1],
+          bytes: Number(match[2])
+        }));
+        assert.equal(ranked.length, 5, `expected the list capped at five, got ${message}`);
+        assert.equal(ranked[0]?.root, "8", message);
+        assert.deepEqual(
+          ranked.map((entry) => entry.bytes),
+          [...ranked.map((entry) => entry.bytes)].sort((left, right) => right - left),
+          `not sorted by span: ${message}`
+        );
+        // Spans must be real byte counts, not per-file constants: a8 carries ~8x what a2 does.
+        const largest = ranked[0]?.bytes ?? 0;
+        const smallestListed = ranked[ranked.length - 1]?.bytes ?? 0;
+        assert.ok(largest > smallestListed * 1.5, `spans look uniform: ${message}`);
+        assert.doesNotMatch(message, /\ba1 \(/u, message);
+        return true;
+      }
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("does not carry the multi-megabyte capture into the rethrown cause", () => {
   const root = fixture();
   try {
@@ -277,16 +322,17 @@ test("does not carry the multi-megabyte capture into the rethrown cause", () => 
     assert.throws(
       () => captureWorkspacePatch(root, baseline),
       (error: unknown) => {
-        // Node hands back the truncated capture in `stdout` AND a duplicate in `output[1]`. Error
-        // serializers walk `cause` and copy own enumerable keys, so leaving them attached makes the
-        // durable failure record tens of megabytes -- its own way to lose the error being reported.
+        // Node hands back the truncated capture in `stdout` AND a duplicate in `output[1]`. The engine's
+        // error serializer walks `cause` and copies own enumerable keys; it de-cycles, so it does not
+        // crash, but it does not truncate either. Measured against the real module, an unstripped cause
+        // serialized to 222706512 bytes versus 1277 stripped. Size is the failure mode, not a throw.
         const cause = (error as { cause?: Record<string, unknown> }).cause ?? {};
         assert.equal(cause.code, "ENOBUFS");
         for (const field of ["stdout", "stderr", "output", "error"]) {
           assert.equal(cause[field], undefined, `${field} was carried into the cause`);
         }
-        // Unstripped this throws outright ("Converting circular structure to JSON"), so a plain
-        // stringify is the assertion: it must both succeed and stay small.
+        // Naming `cause` explicitly is what a walking serializer does; `new Error(msg, { cause })` makes
+        // it non-enumerable, so a plain `JSON.stringify(error)` would pass this vacuously.
         const serialized = JSON.stringify({ message: (error as Error).message, cause });
         assert.ok(serialized.length < 64 * 1024, `serialized failure record was ${serialized.length} bytes`);
         return true;

@@ -488,50 +488,76 @@ const DISCARDED_SPAWN_FIELDS = ["stdout", "stderr", "output", "error"] as const;
  *
  * `execFileSync` raises a bare Node `SystemError` when git writes more than `maxBuffer`: message
  * `spawnSync git ENOBUFS`, with no subcommand, no size, and no indication that the workspace is at fault.
- * Six sandboxes died on it across three Aave v4 runs; several causal theories were pursued and refuted
- * before the real one was read out of a 68 MB log by hand.
+ * Six sandboxes died at one node across three Aave v4 runs; R47 is the one whose stack was captured, and
+ * it names this error. The other five recorded no cause at all, so attributing them here is inference.
+ * Several causal theories were pursued and refuted before that stack was read out of a 68 MB log by hand.
  *
  * The attribution is read out of the truncated capture the error already carries, NOT by measuring the
  * workspace. Every earlier attempt here measured a proxy and ranked the wrong thing: file size on disk is
  * not diff size (`--binary` deflates), and a listing of staged paths is mostly tracked files that were
  * never modified and contribute nothing at all — on a real target the pinned `lib/` dependencies outweigh
- * the culprit and get named first. `error.stdout` is the bytes that actually filled the buffer, so
- * counting them needs no estimate, no subprocess, and no stat: deflation is already applied, unmodified
- * files are already absent, and excluded roots are already gone.
+ * the culprit and get named first. Counting the capture needs no estimate, no subprocess and no stat:
+ * deflation is already applied, unmodified files are already absent, excluded roots are already gone.
+ *
+ * Know what this is NOT. `error.stdout` holds the first `MAX_GIT_CAPTURE_BYTES` of a diff git emits in
+ * path order, so the ranking covers a PREFIX, not the workspace. A large root sorting after the cutoff is
+ * invisible: with 34 MB in `contracts/` and 100 MB in `zzz-corpus/`, this names `contracts` and never
+ * mentions the bigger one. That is why the message says "first contributors ... in path order" rather
+ * than "largest" — it is a lead, not a ranking, and overstating it is how the previous two versions of
+ * this helper sent operators after the wrong directory. Completing it would need a second, bounded pass
+ * (`diff --raw` plus `cat-file --batch-check`); worth doing if this message ever proves insufficient.
  *
  * Scope: this improves the string. It does not prevent the failure — the run is over when it fires.
  */
 function rethrowOversizedGitOutput(args: readonly string[], error: unknown): never {
   if (!(error instanceof Error) || (error as { code?: unknown }).code !== "ENOBUFS") throw error;
   const subcommand = args.find((argument) => !argument.startsWith("-")) ?? "git";
-  const captured = (error as { stdout?: unknown }).stdout;
-  const diff = Buffer.isBuffer(captured) ? captured.toString("utf8") : typeof captured === "string" ? captured : "";
+  const asText = (value: unknown): string =>
+    Buffer.isBuffer(value) ? value.toString("utf8") : typeof value === "string" ? value : "";
+  const diff = asText((error as { stdout?: unknown }).stdout);
+  const errorOutput = asText((error as { stderr?: unknown }).stderr);
 
   const totals = new Map<string, { bytes: number; files: number }>();
   const headers = [...diff.matchAll(DIFF_HEADER)];
   headers.forEach((header, position) => {
-    // The span to the next header is what this path contributed. The final entry is truncated mid-hunk,
-    // which is fine: it is a floor, and it is the path git was writing when the buffer ran out.
+    const start = header.index ?? 0;
     const end = position + 1 < headers.length ? (headers[position + 1]?.index ?? diff.length) : diff.length;
     const root = (header[1] ?? "").split("/")[0] ?? "";
     const total = totals.get(root) ?? { bytes: 0, files: 0 };
-    totals.set(root, { bytes: total.bytes + (end - (header.index ?? 0)), files: total.files + 1 });
+    // `Buffer.byteLength`, not `end - start`: slicing a decoded string counts UTF-16 code units, which
+    // undercounts every multi-byte path or content run — measured 62% low on a CJK diff.
+    totals.set(root, {
+      bytes: total.bytes + Buffer.byteLength(diff.slice(start, end), "utf8"),
+      files: total.files + 1
+    });
   });
   const attribution = [...totals.entries()]
     .sort((left, right) => right[1].bytes - left[1].bytes)
     .slice(0, 5)
-    .map(([root, total]) => `${root} (>=${total.bytes} diff bytes in ${total.files} files)`)
+    .map(
+      ([root, total]) => `${root} (>=${total.bytes} diff bytes in ${total.files} file${total.files === 1 ? "" : "s"})`
+    )
     .join(", ");
 
-  // Drop the payload before it becomes a `cause`. Error serializers walk `cause` and copy own enumerable
-  // keys, and Node puts the capture in BOTH `stdout` and `output[1]` — so attaching this unmodified turns
-  // a durable failure record into a ~65 MB write, and the `error` self-reference makes it throw on
-  // `JSON.stringify` outright. Either way the report of the failure is lost along with the failure.
-  // Everything useful in those bytes is already in the message above; measured, this leaves ~178 bytes.
+  // ENOBUFS fires on EITHER stream. Saying "the workspace is too large" when git merely wrote a lot of
+  // stderr would be a confident lie, so only claim that when the captured stdout is what overflowed.
+  const overflowedStderr = diff === "" && errorOutput !== "";
+  const detail = overflowedStderr
+    ? `wrote more than the ${MAX_GIT_CAPTURE_BYTES}-byte capture buffer to stderr: ${errorOutput.slice(0, 400)}`
+    : // Both ceilings, because they differ and only one of them is the one being reported. An operator
+      // told about the 32 MB buffer who trims to just under it hits `workspace patch exceeds` next.
+      `produced more than the ${MAX_GIT_CAPTURE_BYTES}-byte capture buffer (a handed-off patch must also stay under ${MAX_PATCH_BYTES} bytes); the workspace is too large to hand off`;
+
+  // Drop the payload before attaching this as a `cause`. The engine's `errorToJson` walks `cause`,
+  // de-cycles with a WeakSet — so it does NOT throw, and an earlier version of this comment was wrong to
+  // say it did — but it does not TRUNCATE. Node holds the capture in both `stdout` and `output[1]`, so an
+  // unstripped cause becomes a vast durable write. Measured against the real module: 222706512 bytes
+  // unstripped versus 1277 stripped. `error` goes with them because it is a self-reference
+  // (`e.error === e`) that only a de-cycling serializer survives. Everything useful is in the message.
   for (const field of DISCARDED_SPAWN_FIELDS) delete (error as unknown as Record<string, unknown>)[field];
 
   throw new Error(
-    `git ${subcommand} produced more than the ${MAX_GIT_CAPTURE_BYTES}-byte capture buffer; the workspace is too large to hand off${attribution === "" ? "" : `. Largest contributors: ${attribution}`}`,
+    `git ${subcommand} ${detail}${attribution === "" ? "" : `. First contributors, in git's path order within the captured ${MAX_GIT_CAPTURE_BYTES}-byte prefix (anything git had not written yet is not visible here): ${attribution}`}`,
     { cause: error }
   );
 }
