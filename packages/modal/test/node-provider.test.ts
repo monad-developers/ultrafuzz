@@ -22,8 +22,10 @@ import {
   copyAttemptVerificationMarker,
   copySafeTree,
   copyPublishedEvidenceTree,
+  copyVerifiedPublishedEvidenceTree,
   initializeDurableNodeWorkspace,
   runDurableWorkflow,
+  workerResultPublicationMode,
   workflowCommandArguments
 } from "../src/node-worker.js";
 import { extractSafeTarArchive } from "../src/safe-archive.js";
@@ -256,6 +258,49 @@ describe("Modal node sandbox provider", () => {
       expect(fs.readFileSync(path.join(destination, "reports", "artifact-manifest.json"), "utf8")).toBe(
         '{"schema_version":"fixture"}\n'
       );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("stages only marker-verified cloud artifact publications", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-worker-verified-publication-"));
+    try {
+      const source = path.join(root, "artifacts");
+      const destination = path.join(root, "published");
+      const marker = path.join(root, "attempt-one.json");
+      const finding = path.join(source, "finding.json");
+      const companion = path.join(source, "generated-tests", "Property.t.sol");
+      fs.mkdirSync(path.dirname(companion), { recursive: true });
+      fs.writeFileSync(finding, '{"ok":true}\n');
+      fs.writeFileSync(companion, "contract Property {}\n");
+      fs.writeFileSync(path.join(source, "workspace-mirror-extra.txt"), "unverified\n");
+      fs.writeFileSync(
+        marker,
+        `${JSON.stringify({
+          schema_version: "ultrafuzz.artifact-verification.v1",
+          attempt_id: "attempt-one",
+          artifacts: [],
+          publications: [
+            {
+              path: "finding.json",
+              sha256: crypto.createHash("sha256").update(fs.readFileSync(finding)).digest("hex")
+            },
+            {
+              path: "generated-tests/Property.t.sol",
+              sha256: crypto.createHash("sha256").update(fs.readFileSync(companion)).digest("hex")
+            }
+          ]
+        })}\n`
+      );
+
+      copyVerifiedPublishedEvidenceTree(source, destination, marker, "attempt-one");
+
+      expect(fs.readFileSync(path.join(destination, "finding.json"), "utf8")).toBe('{"ok":true}\n');
+      expect(fs.readFileSync(path.join(destination, "generated-tests", "Property.t.sol"), "utf8")).toBe(
+        "contract Property {}\n"
+      );
+      expect(fs.existsSync(path.join(destination, "workspace-mirror-extra.txt"))).toBe(false);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -575,6 +620,39 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
       first.recordCheckpoint("completed");
       const retry = await initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input);
       expect(retry.hasCompletedCheckpoint).toBe(true);
+    } finally {
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("publishes only old markerless completed durable handoffs with the legacy result schema", async () => {
+    const fixture = createProjectFixture();
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    fixture.input.project_archive_sha256 = archive.sha256;
+    const volumeRoot = path.join(path.dirname(fixture.root), "modal-volume", "legacy-completed");
+    try {
+      const first = await initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input);
+      fs.rmSync(path.join(first.projectRoot, fixture.input.run_root, ".ultrafuzz-verification"), {
+        recursive: true,
+        force: true
+      });
+      first.recordCheckpoint("completed");
+
+      const retry = await initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input);
+
+      expect(retry.hasCompletedCheckpoint).toBe(true);
+      expect(workerResultPublicationMode(retry.projectRoot, retry.input, retry.hasCompletedCheckpoint)).toBe(
+        "legacy-markerless-v1"
+      );
+
+      fs.writeFileSync(
+        path.join(retry.projectRoot, retry.input.workflow_path),
+        'const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";\n'
+      );
+      expect(workerResultPublicationMode(retry.projectRoot, retry.input, retry.hasCompletedCheckpoint)).toBe(
+        "verified-v2"
+      );
     } finally {
       archive.cleanup();
       fixture.cleanup();
