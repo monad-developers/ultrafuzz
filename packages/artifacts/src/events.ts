@@ -160,9 +160,16 @@ export function replayEvents(layoutOrPath: RunLayout | string, limit = DEFAULT_E
       continue;
     }
     try {
-      const record = JSON.parse(line) as EventRecord;
+      const parsed = JSON.parse(line) as unknown;
+      // A line that parses to `null`, a number, a string or an array is not a record.
+      // Counting it as malformed keeps every consumer from receiving a value that has
+      // no `event_type`, which would otherwise throw far from the cause.
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        malformedRecords += 1;
+        continue;
+      }
       if (records.length < limit) {
-        records.push(record);
+        records.push(parsed as EventRecord);
       } else {
         truncatedRecords += 1;
       }
@@ -314,7 +321,12 @@ function ensureExactEventLines(filePath: string, records: readonly EventRecord[]
         parsedTail = undefined;
       }
       const nextMissing = matches.findIndex((count) => count === 0);
-      if (parsedTail !== undefined) {
+      // `JSON.parse` can return `null`, a number or a string, none of which is an
+      // event record. Only a plain object may be terminated into the log; anything
+      // else is treated as a torn fragment, because permanently committing it would
+      // make every later reader that expects a record shape fail on this run.
+      const tailIsRecord = typeof parsedTail === "object" && parsedTail !== null && !Array.isArray(parsedTail);
+      if (tailIsRecord) {
         const matchingIndex = expectations.findIndex(({ record, serialized }) =>
           assertExactEventCandidate(parsedTail, record, serialized, label)
         );
@@ -343,7 +355,7 @@ function ensureExactEventLines(filePath: string, records: readonly EventRecord[]
           // it. Discard it rather than failing: refusing here would make every
           // guarded lifecycle operation on this run — including cancel, the operator
           // escape hatch — permanently impossible with no repair path.
-          truncateDurable(filePath, complete.length);
+          truncateDurable(filePath, complete.length, { expectedSize: contents.length });
         }
       }
     }

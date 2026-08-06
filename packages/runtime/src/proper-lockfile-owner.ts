@@ -75,11 +75,89 @@ export async function withProperLockfileReclaimGuard<T>(lockPath: string, operat
     retries: 0,
     onCompromised: properLockfileCompromiseHandler(guardPath)
   });
+  // Releasing the guard must not be able to discard or mask the operation's result.
+  // A guard whose own heartbeat was lost rejects with ERELEASED, and doing this in a
+  // bare `finally` would throw that away along with a lock the operation had already
+  // acquired — leaving that lock held, heartbeat running, with no releaser — and
+  // would also turn ordinary ELOCKED contention into a fatal acquisition failure.
+  let result: T;
   try {
-    return await operation();
-  } finally {
-    await release();
+    result = await operation();
+  } catch (error) {
+    await releaseProperLockfileReclaimGuard(release, guardPath);
+    throw error;
   }
+  await releaseProperLockfileReclaimGuard(release, guardPath);
+  return result;
+}
+
+async function releaseProperLockfileReclaimGuard(release: () => Promise<void>, guardPath: string): Promise<void> {
+  try {
+    await release();
+  } catch {
+    // A guard that lost its heartbeat is already gone; its pathname is reclaimed by
+    // staleness. Nothing here may mask the caller's own outcome.
+  }
+  forgetProperLockfileCompromise(guardPath);
+}
+
+export interface OwnedProperLockfileRelease {
+  lockPath: string;
+  ownerPath: string;
+  label: string;
+  release: () => Promise<void>;
+  /** Proves the published owner marker is still exactly this hold's. */
+  ownerIsOurs: () => boolean;
+}
+
+/**
+ * Releases a lock whose ownership is published as a marker file inside the lock
+ * directory, handling the case where this process already lost the hold.
+ *
+ * proper-lockfile drops its registry entry when it reports a compromise, so its own
+ * `release()` then rejects and never removes the lock directory. Left alone the
+ * directory survives either ownerless or still carrying this process's own marker,
+ * and in both cases liveness-based reclamation refuses to touch it until the full
+ * stale window elapses — blocking every contender, including cancel. Removing it
+ * here is gated on proof that it is still ours so a replacement holder's live lock is
+ * never deleted.
+ *
+ * A compromised release is reported, never thrown: by the time a caller releases, its
+ * guarded mutations have already either committed or failed on their own, and turning
+ * a durably committed transition into a reported failure would make the evidence
+ * contradict the state.
+ */
+export async function releaseOwnedProperLockfile(input: OwnedProperLockfileRelease): Promise<{ lost: boolean }> {
+  if (!properLockfileIsCompromised(input.lockPath)) {
+    if (!input.ownerIsOurs()) throw new Error(`${input.label} ownership changed before release`);
+    fs.unlinkSync(input.ownerPath);
+    await input.release();
+    return { lost: false };
+  }
+  try {
+    await input.release();
+  } catch {
+    // Expected: proper-lockfile already discarded this hold. The identity-checked
+    // cleanup below is what actually frees the lock directory.
+  }
+  try {
+    if (input.ownerIsOurs()) {
+      // Only remove the marker when the directory holds nothing else, so a failed
+      // rmdir cannot strand an ownerless directory that reclamation must wait out.
+      const remaining = fs.readdirSync(input.lockPath);
+      if (remaining.length === 1 && remaining[0] === path.basename(input.ownerPath)) {
+        fs.unlinkSync(input.ownerPath);
+        fs.rmdirSync(input.lockPath);
+      }
+    }
+  } catch {
+    // Best effort only. Liveness-based reclamation still recovers the lock, just no
+    // sooner than the stale window.
+  }
+  // Cleared only after cleanup, so a caller that keeps running stays fail-closed
+  // against further guarded mutation for as long as the loss is unresolved.
+  forgetProperLockfileCompromise(input.lockPath);
+  return { lost: true };
 }
 
 export interface ProperLockfileDirectoryIdentity {

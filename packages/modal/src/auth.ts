@@ -24,16 +24,32 @@ import { parse, stringify } from "smol-toml";
 import type { ModalModelSpec, ModelProvider } from "./defaults.js";
 import { remoteAuthDir, remoteAuthPath } from "./layout.js";
 
+const compromisedCredentialLockPaths = new Set<string>();
+
 /**
  * proper-lockfile's default `onCompromised` rethrows from inside the heartbeat's
- * `fs.stat`/`fs.utimes` callback rather than from a promise, so leaving it unset
- * turns a lost heartbeat into an unhandled exception that aborts the process.
- * Credential lock holders here independently re-verify their own lease and fence
- * ownership before acting, so a genuinely lost lock surfaces as a normal error in
- * the caller's control flow instead of a process abort.
+ * `fs.stat`/`fs.utimes` callback rather than from a promise, so leaving it unset turns
+ * a lost heartbeat into an unhandled exception that aborts the process.
+ *
+ * Ignoring it outright is not safe either. These locks exist so that a second
+ * controller cannot reuse a credential a detached worker may still be using, so a
+ * holder that has silently lost its lock is exactly the case the lock is meant to
+ * prevent. The loss is therefore recorded and the holder fails closed before taking
+ * over another lease.
  */
-function swallowProperLockfileCompromise(): void {
-  // Intentionally empty: see the contract above.
+function credentialLockCompromiseHandler(lockPath: string): () => void {
+  const resolved = path.resolve(lockPath);
+  return () => {
+    compromisedCredentialLockPaths.add(resolved);
+  };
+}
+
+function credentialLockIsCompromised(lockPath: string): boolean {
+  return compromisedCredentialLockPaths.has(path.resolve(lockPath));
+}
+
+function forgetCredentialLockCompromise(lockPath: string): void {
+  compromisedCredentialLockPaths.delete(path.resolve(lockPath));
 }
 
 export interface SubscriptionAuthCopy {
@@ -319,6 +335,7 @@ export async function acquireKimiModalNodeExecutionLease(
     await fenceHandle.chmod(0o600);
 
     const timeoutMs = Math.max(5_000, Math.floor(options.timeoutMs ?? 120_000));
+    forgetCredentialLockCompromise(anchoredTarget);
     releaseLock = await lockfile.lock(anchoredTarget, {
       retries: {
         retries: Math.max(1, Math.ceil(timeoutMs / 500)),
@@ -331,7 +348,7 @@ export async function acquireKimiModalNodeExecutionLease(
       stale: timeoutMs + 300_000,
       ...(options.lockUpdateMs === undefined ? {} : { update: Math.max(1_000, Math.floor(options.lockUpdateMs)) }),
       realpath: false,
-      onCompromised: swallowProperLockfileCompromise
+      onCompromised: credentialLockCompromiseHandler(anchoredTarget)
     });
     const [previousTarget, previousFence] = await Promise.all([
       readBoundKimiExecutionLeaseMetadata(
@@ -355,6 +372,11 @@ export async function acquireKimiModalNodeExecutionLease(
       ]);
       assertKimiLegacyExecutionLeaseJournalsMigratable(legacyTarget, legacyFence);
     } else {
+      // Taking over another controller's lease is only safe while this process
+      // provably still holds the lock that serializes takeovers.
+      if (credentialLockIsCompromised(anchoredTarget)) {
+        throw new Error("Kimi Modal execution lease lock was lost before its lease could be acquired");
+      }
       const abandonedActive = assertKimiExecutionLeaseJournalsAcquirable(previousTarget, previousFence);
       if (abandonedActive !== undefined) {
         await writeKimiExecutionLeaseStatePair(
@@ -953,6 +975,7 @@ async function acquireKimiRefreshLockAt(oauthAnchor: string, lockName: string): 
   await targetHandle.close();
   const target = path.join(oauthAnchor, lockName);
   try {
+    forgetCredentialLockCompromise(target);
     return await lockfile.lock(target, {
       retries: {
         retries: 120,
@@ -962,7 +985,7 @@ async function acquireKimiRefreshLockAt(oauthAnchor: string, lockName: string): 
       },
       stale: 5_000,
       realpath: false,
-      onCompromised: swallowProperLockfileCompromise
+      onCompromised: credentialLockCompromiseHandler(target)
     });
   } catch (error) {
     throw new Error(
@@ -2209,6 +2232,7 @@ async function acquireKimiRefreshLock(source: string, lockName = "kimi-code"): P
   const targetHandle = await open(target, "a", 0o600);
   await targetHandle.close();
   try {
+    forgetCredentialLockCompromise(target);
     return await lockfile.lock(target, {
       retries: {
         retries: 120,
@@ -2218,7 +2242,7 @@ async function acquireKimiRefreshLock(source: string, lockName = "kimi-code"): P
       },
       stale: 5_000,
       realpath: false,
-      onCompromised: swallowProperLockfileCompromise
+      onCompromised: credentialLockCompromiseHandler(target)
     });
   } catch (error) {
     throw new Error(

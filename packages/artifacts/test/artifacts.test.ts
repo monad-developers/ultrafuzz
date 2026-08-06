@@ -632,7 +632,7 @@ test("event batch recovery repairs a torn second record in the log and every sha
   }
 });
 
-test("event recovery fails closed for unrelated, conflicting, and malformed tails", () => {
+test("event recovery fails closed on integrity violations and repairs torn tails", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-tail-rejection" });
   const record = createEventRecord(layout, {
     eventType: "node-synced",
@@ -657,27 +657,43 @@ test("event recovery fails closed for unrelated, conflicting, and malformed tail
     assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), testCase.contents, testCase.name);
   }
 
+  // A record of this batch that is already durably present AND duplicated as the
+  // unterminated tail must fail closed: terminating that tail would commit a second
+  // copy of the same event.
+  fs.writeFileSync(layout.eventsPath, `${serialized}\n${serialized}`, "utf8");
+  assert.throws(() => ensureEventRecord(layout, record), /out-of-order unterminated event record/u);
+  assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), `${serialized}\n${serialized}`);
+
   // An unterminated trailing line, by contrast, is the signature of a process that
   // died mid-append. Recovery must proceed, because refusing would make every
   // guarded lifecycle operation on the run — including cancel — impossible forever.
+  // Each case asserts exact bytes, so the restored trailing newline is covered too.
 
   // A complete record that only lost its newline is preserved and terminated.
   fs.writeFileSync(layout.eventsPath, unrelated, "utf8");
   ensureEventRecord(layout, record);
-  assert.deepEqual(fs.readFileSync(layout.eventsPath, "utf8").split("\n").filter(Boolean), [unrelated, serialized]);
+  assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), `${unrelated}\n${serialized}\n`);
 
   // A torn fragment was never a durable line, so it is discarded.
   fs.writeFileSync(layout.eventsPath, unrelated.slice(0, -7), "utf8");
   ensureEventRecord(layout, record);
-  assert.deepEqual(fs.readFileSync(layout.eventsPath, "utf8").split("\n").filter(Boolean), [serialized]);
+  assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), `${serialized}\n`);
+
+  // A tail that parses but is not a record at all is treated as a torn fragment
+  // rather than committed, so no consumer ever receives a shapeless "record".
+  for (const scalarTail of ["null", "42", '"text"', "[]"]) {
+    fs.writeFileSync(layout.eventsPath, scalarTail, "utf8");
+    ensureEventRecord(layout, record);
+    assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), `${serialized}\n`, scalarTail);
+  }
 
   // A torn fragment that is a prefix of the record being recovered is completed
   // rather than discarded, and never duplicated.
   fs.writeFileSync(layout.eventsPath, serialized.slice(0, 20), "utf8");
   ensureEventRecord(layout, record);
-  assert.deepEqual(fs.readFileSync(layout.eventsPath, "utf8").split("\n").filter(Boolean), [serialized]);
+  assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), `${serialized}\n`);
   ensureEventRecord(layout, record);
-  assert.deepEqual(fs.readFileSync(layout.eventsPath, "utf8").split("\n").filter(Boolean), [serialized]);
+  assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), `${serialized}\n`);
 });
 
 test("event indexes encode long IDs in a collision-free hash namespace", () => {

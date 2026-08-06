@@ -23,6 +23,7 @@ import {
   properLockfileCompromiseHandler,
   properLockfileContentionCode,
   properLockfileIsCompromised,
+  releaseOwnedProperLockfile,
   withProperLockfileReclaimGuard,
   writeProperLockfileOwner
 } from "./proper-lockfile-owner.js";
@@ -690,6 +691,7 @@ async function acquireOwnedRunLock(
           retries: 0,
           onCompromised: properLockfileCompromiseHandler(lockPath)
         });
+        let publishedOwner: WorkflowRunLockOwner | undefined;
         try {
           if (workflowRunLockCancelled(options.signal) || (externallyBounded && Date.now() >= deadline)) {
             throw new WorkflowMutationLockInterruptedError(
@@ -707,10 +709,14 @@ async function acquireOwnedRunLock(
             acquired_at: new Date().toISOString()
           };
           writeProperLockfileOwner(lockPath, ownerPath, acquiredOwner, options.label, acquiredIdentity);
+          publishedOwner = acquiredOwner;
           return { release: acquiredRelease, owner: acquiredOwner };
         } catch (error) {
           try {
-            await acquiredRelease();
+            // Before the marker exists there is no identity to prove, so the plain
+            // proper-lockfile release is the only correct cleanup.
+            if (publishedOwner === undefined) await acquiredRelease();
+            else await releaseOwnedRunLock(layout, lockPath, ownerPath, publishedOwner, options.label, acquiredRelease);
           } catch {
             // Preserve the acquisition/publication failure. If identity-safe
             // cleanup was impossible, retained evidence keeps reclaim fail-closed.
@@ -733,8 +739,7 @@ async function acquireOwnedRunLock(
   }
   if (owner === undefined) throw new Error(`${options.label} owner was not published`);
   if (workflowRunLockCancelled(options.signal) || (externallyBounded && Date.now() >= deadline)) {
-    fs.unlinkSync(ownerPath);
-    await release();
+    await releaseOwnedRunLock(layout, lockPath, ownerPath, owner, options.label, release);
     throw new WorkflowMutationLockInterruptedError(workflowRunLockCancelled(options.signal) ? "cancelled" : "deadline");
   }
   if (options.lockName === WORKFLOW_MUTATION_LOCK) {
@@ -742,8 +747,7 @@ async function acquireOwnedRunLock(
       recoverPreparedWorkflowSyncCommit(layout);
     } catch (error) {
       try {
-        fs.unlinkSync(ownerPath);
-        await release();
+        await releaseOwnedRunLock(layout, lockPath, ownerPath, owner, options.label, release);
       } catch {
         // Preserve the recovery failure. Identity-bound evidence remains
         // fail-closed if exact cleanup cannot be completed.
@@ -755,55 +759,40 @@ async function acquireOwnedRunLock(
   return async () => {
     if (released) return;
     released = true;
-    // A compromised hold has already lost the lock. proper-lockfile drops its
-    // registry entry when it reports the loss, so `release()` would reject
-    // ERELEASED and never remove the lock directory, leaving it present but
-    // ownerless. Reclamation only treats an ownerless directory as stale after the
-    // full stale window, so every contender — including cancel, the operator escape
-    // hatch — would be blocked for up to that long. Remove it here instead, but
-    // only on proof that it is still ours, so a replacement holder's live lock is
-    // never deleted.
-    if (properLockfileIsCompromised(lockPath)) {
-      forgetProperLockfileCompromise(lockPath);
-      try {
-        await release();
-      } catch {
-        // Expected: the hold is already gone. The identity-checked cleanup below
-        // is what actually frees the lock directory.
-      }
-      discardOwnedRunLockDirectory(layout, lockPath, ownerPath, owner, options.label);
-      throw new Error(`${options.label} hold was compromised before release`);
-    }
-    const observed = readWorkflowRunLockOwner(layout, ownerPath, options.label);
-    if (JSON.stringify(observed) !== JSON.stringify(owner)) {
-      throw new Error(`${options.label} ownership changed before release`);
-    }
-    fs.unlinkSync(ownerPath);
-    await release();
+    await releaseOwnedRunLock(layout, lockPath, ownerPath, owner, options.label, release);
   };
 }
 
 /**
- * Removes a lock directory this process can still prove it owns. Anything other
- * than an exact owner match means a contender already reclaimed the lock, in which
- * case the directory belongs to that live holder and must be left untouched.
+ * Single release path for every owned run lock, so a lost hold is cleaned up
+ * identically no matter which acquisition step is unwinding.
+ *
+ * A lost hold is deliberately not raised as an error here. By the time a lock is
+ * released its guarded mutations have already committed or failed on their own, and
+ * a durably committed transition reported as a failure would drive callers to append
+ * evidence that contradicts the state they just persisted.
  */
-function discardOwnedRunLockDirectory(
+async function releaseOwnedRunLock(
   layout: RunLayout,
   lockPath: string,
   ownerPath: string,
   owner: WorkflowRunLockOwner,
-  label: string
-): void {
-  try {
-    const observed = readWorkflowRunLockOwner(layout, ownerPath, label);
-    if (JSON.stringify(observed) !== JSON.stringify(owner)) return;
-    fs.unlinkSync(ownerPath);
-    fs.rmdirSync(lockPath);
-  } catch {
-    // Best effort only. If exact-identity cleanup is impossible, liveness-based
-    // reclamation still recovers the lock, just no sooner than the stale window.
-  }
+  label: string,
+  release: () => Promise<void>
+): Promise<void> {
+  await releaseOwnedProperLockfile({
+    lockPath,
+    ownerPath,
+    label,
+    release,
+    ownerIsOurs: () => {
+      try {
+        return JSON.stringify(readWorkflowRunLockOwner(layout, ownerPath, label)) === JSON.stringify(owner);
+      } catch {
+        return false;
+      }
+    }
+  });
 }
 
 /**

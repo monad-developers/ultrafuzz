@@ -345,15 +345,39 @@ export function appendBytesDurable(filePath: string, bytes: Uint8Array, trustedR
  * Durably drops everything past `length`. Used to discard a torn trailing record
  * left by a process that died mid-append: such a fragment was never a complete
  * line, so no reader can have treated it as durable evidence.
+ *
+ * `expectedSize` is required because callers decide the truncation length from an
+ * earlier read. Between that read and this call another writer may have appended and
+ * fsynced a genuinely durable record at exactly that offset, and truncating would
+ * destroy it. The size is re-checked under the same descriptor that performs the
+ * truncation, so the decision cannot be invalidated in between.
  */
-export function truncateDurable(filePath: string, length: number, trustedRoot?: string): void {
-  if (trustedRoot !== undefined) {
-    assertNoSymlinkComponents(trustedRoot, filePath, "truncate path");
+export function truncateDurable(
+  filePath: string,
+  length: number,
+  options: { expectedSize: number; trustedRoot?: string }
+): void {
+  if (options.trustedRoot !== undefined) {
+    assertNoSymlinkComponents(options.trustedRoot, filePath, "truncate path");
   }
-  const fd = fs.openSync(filePath, fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW);
+  const fd = fs.openSync(
+    filePath,
+    // O_NONBLOCK so a FIFO planted at this path cannot block the process forever.
+    fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+  );
   try {
-    if (!fs.fstatSync(fd).isFile()) {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
       throw new ArtifactPathError("not-file", `truncate path must be a regular file: ${filePath}`);
+    }
+    if (stat.nlink !== 1) {
+      throw new ArtifactPathError("not-file", `truncate path must not be hard-linked: ${filePath}`);
+    }
+    if (stat.size !== options.expectedSize) {
+      throw new ArtifactPathError("not-file", `truncate path changed size before truncation: ${filePath}`);
+    }
+    if (length > stat.size) {
+      throw new ArtifactPathError("not-file", `truncate length exceeds the file size: ${filePath}`);
     }
     fs.ftruncateSync(fd, length);
     fs.fsyncSync(fd);

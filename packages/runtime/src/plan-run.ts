@@ -86,6 +86,8 @@ import {
   forgetProperLockfileCompromise,
   properLockfileCompromiseHandler,
   properLockfileContentionCode,
+  properLockfileIsCompromised,
+  releaseOwnedProperLockfile,
   withProperLockfileReclaimGuard,
   writeProperLockfileOwner
 } from "./proper-lockfile-owner.js";
@@ -480,16 +482,28 @@ export async function acquireWorkflowStartPreparationLock(layout: RunLayout): Pr
     }
   }
   if (owner === undefined) throw new Error("workflow start preparation lock owner was not published");
+  const acquiredOwner = owner;
+  const acquiredRelease = release;
   let released = false;
   return async () => {
     if (released) return;
     released = true;
-    const observed = readStartPreparationLockOwner(layout, ownerPath);
-    if (sha256Stable(observed) !== sha256Stable(owner)) {
-      throw new Error("workflow start preparation lock ownership changed before release");
-    }
-    fs.unlinkSync(ownerPath);
-    await release();
+    // Shared with the workflow run locks so a lost heartbeat frees this lock
+    // directory immediately instead of stranding every `run` on the project until
+    // the 30-minute stale window elapses — acquisition only waits five minutes.
+    await releaseOwnedProperLockfile({
+      lockPath,
+      ownerPath,
+      label: "workflow start preparation lock",
+      release: acquiredRelease,
+      ownerIsOurs: () => {
+        try {
+          return sha256Stable(readStartPreparationLockOwner(layout, ownerPath)) === sha256Stable(acquiredOwner);
+        } catch {
+          return false;
+        }
+      }
+    });
   };
 }
 
@@ -1198,8 +1212,10 @@ export async function repairMissingRenderedPromptsForRun(input: {
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
     throw new Error("cannot repair rendered prompts from an unsafe run root");
   }
+  const promptRepairLockPath = path.join(layout.root, PROMPT_REPAIR_LOCK);
+  forgetProperLockfileCompromise(promptRepairLockPath);
   const release = await lockfile.lock(layout.root, {
-    lockfilePath: path.join(layout.root, PROMPT_REPAIR_LOCK),
+    lockfilePath: promptRepairLockPath,
     realpath: false,
     stale: 300_000,
     update: 60_000,
@@ -1209,12 +1225,24 @@ export async function repairMissingRenderedPromptsForRun(input: {
       minTimeout: 250,
       maxTimeout: 1_000
     },
-    onCompromised: properLockfileCompromiseHandler(path.join(layout.root, PROMPT_REPAIR_LOCK))
+    onCompromised: properLockfileCompromiseHandler(promptRepairLockPath)
   });
   try {
-    return repairRenderedPromptsForRun({ projectRoot, runId: input.runId, layout });
+    const repaired = repairRenderedPromptsForRun({ projectRoot, runId: input.runId, layout });
+    // This lock publishes no owner marker, so a lost hold cannot be cleaned up by
+    // identity. Fail closed instead of returning a count produced while another
+    // repairer may have been writing the same rendered prompts.
+    if (properLockfileIsCompromised(promptRepairLockPath)) {
+      throw new Error("rendered prompt repair lost its lock before completing");
+    }
+    return repaired;
   } finally {
-    await release();
+    try {
+      await release();
+    } catch {
+      // A compromised hold is already gone; its pathname is reclaimed by staleness.
+    }
+    forgetProperLockfileCompromise(promptRepairLockPath);
   }
 }
 
