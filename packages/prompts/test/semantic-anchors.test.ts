@@ -69,9 +69,18 @@ describe("prompt semantic anchors", () => {
     // entries are byte-checked, which is false, and that is precisely the prompt-versus-gate divergence
     // this anchor exists to prevent.
     const discovery = flat("setup/project-discovery.md");
-    expect(discovery).toContain("may name a directory you searched or a path that turned out not to exist");
-    expect(discovery).toContain("that file must be tracked and unmodified in the checkout");
+    expect(discovery).toContain("may name a real directory you searched, or a path that turned out not to exist");
+    expect(discovery).toContain("tracked at the pinned commit and unmodified");
+    // Both implementations gate on `isDirectory() && !isSymbolicLink()`, and any path reached through a
+    // symlinked parent is rejected too, so "a directory" without this caveat is over-broad.
+    expect(discovery).toContain("A symlink is not");
     expect(discovery).not.toContain("only ledger `entries` are checked byte-for-byte");
+
+    // The twin sentence four lines below the fan-in change said "render the exact ledger IDs" with no
+    // condition, contradicting it. An unconditioned instruction here is worse than an absent one: an
+    // empty rendered field is tolerated, but a placeholder such as `ledger_ids: none` is rejected as
+    // `INVARIANT_LEDGER_MARKDOWN_MAPPING_EXTRA`.
+    expect(fanin).toContain("and, when present, render the exact ledger IDs under a `ledger_ids` field");
   });
 
   it("preserves source-guided denial-of-service and liveness requirements", () => {

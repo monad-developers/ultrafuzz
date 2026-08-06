@@ -109,18 +109,23 @@ operands, comparison direction, units, denominator, and rounding terms. If a
 separate source probe finds no matching section, record that probe and its result
 rather than silently skipping it.
 
-The JSON ledger must also contain `inventory_rows`, where each row has a stable
-`inventory-` ID, a normalized description, and one or more `ledger_ids`; every
-`inventory_id` in an entry must name one of these rows. Record each negative source probe in `scan_probes` with a stable `probe-` ID,
-source path, query, and result. A probe `source_path` may name a directory you
-searched or a path that turned out not to exist; either is accepted as a
-record of where you looked. When a probe names a regular file, that file must
-be tracked and unmodified in the checkout, exactly as a ledger entry's source
-must be. What a probe does NOT need is quoted text: an entry's `verbatim` is
-compared against its source, a probe's `result` is not. Use `safety`, `risk`,
-or `interest` as the `kind` when those are the most precise classifications.
-Keep every `source_path` target-relative and use a line range or symbol that
-can be checked against the checked-out source.
+The JSON ledger must also contain `inventory_rows`, where each row has a
+stable `inventory-` ID, a normalized description, and one or more
+`ledger_ids`; every `inventory_id` in an entry must name one of these rows.
+Record each negative source probe in `scan_probes` with a stable `probe-` ID,
+source path, query, and result. A probe `source_path` may name a real
+directory you searched, or a path that turned out not to exist; neither is
+snapshotted, so either is a fine record of where you looked. A symlink is not:
+neither a symlinked directory nor any path reached through one is accepted. A
+probe that names an existing file IS snapshotted: it must be UTF-8 text,
+tracked at the pinned commit and unmodified, so prefer the directory you
+searched or the absent path itself over a generated or untracked file such as
+build output. What a probe does not need is quoted text: an entry's `verbatim`
+is compared against its source, a probe's `result` is not. Use `safety`,
+`risk`, or `interest` as the `kind` when those are the most precise
+classifications. Keep every `source_path` target-relative; for ledger
+`entries`, use a line range or symbol that can be checked against the
+checked-out source.
 If no invariant statement is found, emit `entries: []`, `inventory_rows: []`,
 and at least one non-empty `scan_probes` record explaining the searches and
 their results.

@@ -97,9 +97,10 @@ optional in the schema and cannot be empty, so there is nothing to render. Close
 the block with `### End canonical property: <property-id>`.
 Within each block, render `description`, `category`, and `priority` as named
 fields, render each source as `<source_node_id>:<source_property_id>` under a
-`sources` field (separate multiple sources with `<br>`), and render the exact
-ledger IDs under a `ledger_ids` field (separate multiple IDs with commas or
-`<br>`). When present, render the exact `reference_expectations` identifiers
+`sources` field (separate multiple sources with `<br>`), and, when present,
+render the exact ledger IDs under a `ledger_ids` field (separate multiple IDs
+with commas or `<br>`). When present, render the exact `reference_expectations`
+identifiers
 under a `reference_expectations` field (separate multiple IDs with commas or
 `<br>`). Keep these field values identical to `properties.json`.
 
