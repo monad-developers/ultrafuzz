@@ -734,6 +734,8 @@ export function reserveModalLaunchAttempt(input: {
   startReason?: ModalRecoveryStartReason;
   now?: string;
   attemptId?: string;
+  /** Exit code observed on the attempt being replaced, when the caller probed its sandbox. */
+  observedWorkerExitCode?: number | null;
 }): ModalLaunchRecord {
   const existingIndex = input.state.launches.findIndex((launch) => launch.slug === input.model.slug);
   const existing = existingIndex === -1 ? undefined : input.state.launches[existingIndex];
@@ -749,6 +751,12 @@ export function reserveModalLaunchAttempt(input: {
         attemptId: existing.attempt_id,
         terminalReason: "unknown",
         finishedAt: input.now ?? new Date().toISOString(),
+        // Forwarded when the caller observed it. This force-close used to hardcode every diagnostic to
+        // "unknown", which on unattended runs is the ONLY path that records a sandbox death -- so the exit
+        // code was computed by `probeModalSandbox` and then discarded, and three Aave v4 runs lost their
+        // sandbox at `stateful-invariant-setup` with no way to tell OOM from eviction from a clean exit
+        // (issue #302).
+        ...(input.observedWorkerExitCode === undefined ? {} : { workerExitCode: input.observedWorkerExitCode }),
         modelWorkStarted: "unknown",
         progressMade: "unknown",
         controllerRequested: "unknown"

@@ -1820,6 +1820,10 @@ async function launchModalRecoveryWorker(input: {
       modalBenchmarkSecretValues(input.config, input.model, input.env)
     );
     const attemptId = randomUUID();
+    // Probe the sandbox we are replacing before its lifecycle row is closed. On unattended runs this is
+    // the only place a sandbox death gets recorded, and without the exit code an operator cannot tell an
+    // OOM kill from an eviction from a clean exit (issue #302).
+    const outgoing = await probeModalSandbox(input.modal, input.launch.sandbox_id);
     const record = reserveModalLaunchAttempt({
       state: input.launchState,
       model: input.model,
@@ -1829,7 +1833,8 @@ async function launchModalRecoveryWorker(input: {
       workspaceMode: "resume",
       postModelRecovery: "relaunch",
       now: new Date(input.now()).toISOString(),
-      attemptId
+      attemptId,
+      ...(outgoing.exitCode === undefined ? {} : { observedWorkerExitCode: outgoing.exitCode })
     });
     await writeModalLaunchState(input.statePath, input.launchState);
     const nextGeneration = Math.max(0, ...input.row.workers.map((worker) => worker.generation)) + 1;
