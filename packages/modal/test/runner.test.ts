@@ -55,6 +55,7 @@ import {
   modalVolumeRelativeRoot,
   modalWorkerEntrypointCommand,
   publicBenchmarkCollectionSecretValues,
+  readModalCollectResultFilesWithStatusRetry,
   readOptionalModalSandboxText,
   replaceSanitizedModalCollectedFiles,
   selectModalCollectedEvidence,
@@ -632,6 +633,146 @@ describe("Modal result collection", () => {
         ["opaque-secret-that-is-not-pattern-shaped"]
       )
     ).toThrow(/unsanitized Modal worker log/u);
+  });
+
+  it("retries transient invalid live status reads before collecting", async () => {
+    const context = { generation: 1, attempt: 2 };
+    const validStatus = {
+      schema_version: "ultrafuzz.modal.worker-result.v2",
+      result_type: "partial",
+      generation: 8,
+      launch_generation: 1,
+      attempt: 2,
+      model_work_started: true,
+      counts: { succeeded: 12, failed: 0, remaining: 20 },
+      checkpoint: { age_ms: 0, digest: `sha256:${"a".repeat(64)}` },
+      exit_category: "live",
+      runtime_ms: 100,
+      usage: null,
+      diagnostic_code: "worker-live"
+    };
+    const transientStatus = {
+      schema_version: "ultrafuzz.modal.worker-status.v2",
+      updated_at: "2026-08-06T04:54:04.000Z",
+      stage: "partial",
+      category: "model-work",
+      model_work_started: true,
+      retryable: false,
+      generation: 1,
+      attempt: 2,
+      node_counts: { succeeded: 12, failed: 0, remaining: 20 },
+      error_code: "worker-live"
+    };
+    const readFiles = vi
+      .fn()
+      .mockResolvedValueOnce({
+        "status.json": `${JSON.stringify(transientStatus)}\n`,
+        "worker.log": ""
+      })
+      .mockResolvedValueOnce({
+        "status.json": `${JSON.stringify(validStatus)}\n`,
+        "worker.log": ""
+      });
+
+    const files = await readModalCollectResultFilesWithStatusRetry({
+      readFiles,
+      launch: context,
+      maxAttempts: 2,
+      retryDelayMs: 0
+    });
+
+    expect(readFiles).toHaveBeenCalledTimes(2);
+    expect(() => assertSanitizedModalCollectedFiles(files, context)).not.toThrow();
+  });
+
+  it("retries transient invalid status reads even when a terminal result is present", async () => {
+    const context = { generation: 1, attempt: 2 };
+    const partialStatus = {
+      schema_version: "ultrafuzz.modal.worker-result.v2",
+      result_type: "partial",
+      generation: 8,
+      launch_generation: 1,
+      attempt: 2,
+      model_work_started: true,
+      counts: { succeeded: 12, failed: 0, remaining: 20 },
+      checkpoint: { age_ms: 0, digest: `sha256:${"a".repeat(64)}` },
+      exit_category: "live",
+      runtime_ms: 100,
+      usage: null,
+      diagnostic_code: "worker-live"
+    };
+    const terminalResult = {
+      ...partialStatus,
+      result_type: "terminal",
+      generation: 9,
+      counts: { succeeded: 32, failed: 0, remaining: 0 },
+      exit_category: "finished",
+      diagnostic_code: "worker-finished"
+    };
+    const staleStatus = {
+      schema_version: "ultrafuzz.modal.worker-status.v2",
+      updated_at: "2026-08-06T04:54:04.000Z",
+      stage: "partial",
+      category: "model-work",
+      model_work_started: true,
+      retryable: false,
+      generation: 1,
+      attempt: 2,
+      node_counts: { succeeded: 12, failed: 0, remaining: 20 },
+      error_code: "worker-live"
+    };
+    const readFiles = vi
+      .fn()
+      .mockResolvedValueOnce({
+        "status.json": `${JSON.stringify(staleStatus)}\n`,
+        "result.json": `${JSON.stringify(terminalResult)}\n`,
+        "worker.log": ""
+      })
+      .mockResolvedValueOnce({
+        "status.json": `${JSON.stringify(partialStatus)}\n`,
+        "result.json": `${JSON.stringify(terminalResult)}\n`,
+        "worker.log": ""
+      });
+
+    const files = await readModalCollectResultFilesWithStatusRetry({
+      readFiles,
+      launch: context,
+      maxAttempts: 2,
+      retryDelayMs: 0
+    });
+
+    expect(readFiles).toHaveBeenCalledTimes(2);
+    expect(() => assertSanitizedModalCollectedFiles(files, context)).not.toThrow();
+  });
+
+  it("keeps rejecting permanently invalid collected status after bounded retries", async () => {
+    const context = { generation: 1, attempt: 2 };
+    const staleStatus = {
+      schema_version: "ultrafuzz.modal.worker-status.v2",
+      updated_at: "2026-08-06T04:54:04.000Z",
+      stage: "partial",
+      category: "model-work",
+      model_work_started: true,
+      retryable: false,
+      generation: 1,
+      attempt: 2,
+      node_counts: { succeeded: 12, failed: 0, remaining: 20 },
+      error_code: "worker-live"
+    };
+    const readFiles = vi.fn().mockResolvedValue({
+      "status.json": `${JSON.stringify(staleStatus)}\n`,
+      "worker.log": ""
+    });
+
+    const files = await readModalCollectResultFilesWithStatusRetry({
+      readFiles,
+      launch: context,
+      maxAttempts: 2,
+      retryDelayMs: 0
+    });
+
+    expect(readFiles).toHaveBeenCalledTimes(2);
+    expect(() => assertSanitizedModalCollectedFiles(files, context)).toThrow(/unsanitized Modal status/u);
   });
 
   it("collects only an exactly reconciled privacy-safe recovery lifecycle", () => {
