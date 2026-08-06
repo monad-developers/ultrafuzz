@@ -1700,14 +1700,9 @@ async function streamSmithersCommandUnanchored(input: {
   let truncated = false;
   let stderr = "";
   let stoppedByCaller = false;
-  let killTimer: NodeJS.Timeout | undefined;
-  let hardTeardownTimer: NodeJS.Timeout | undefined;
   let terminationStarted = false;
   let childClosed = false;
-  let resolveHardTeardown: ((value: { code: number | null; signal: NodeJS.Signals | null }) => void) | undefined;
-  const hardTeardown = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-    resolveHardTeardown = resolve;
-  });
+  let terminationCompletion: Promise<void> | undefined;
   const signalCommandTree = (signal: NodeJS.Signals): void => {
     if (process.platform !== "win32" && child.pid !== undefined) {
       try {
@@ -1727,15 +1722,19 @@ async function streamSmithersCommandUnanchored(input: {
     if (terminationStarted) return;
     if (childClosed) return;
     terminationStarted = true;
-    signalCommandTree("SIGTERM");
-    killTimer = setTimeout(() => signalCommandTree("SIGKILL"), STREAM_TERMINATION_GRACE_MS).unref();
-    hardTeardownTimer = setTimeout(() => {
-      signalCommandTree("SIGKILL");
-      reader.close();
-      child.stdout.destroy();
-      child.stderr.destroy();
-      resolveHardTeardown?.({ code: child.exitCode, signal: child.signalCode });
-    }, STREAM_TERMINATION_HARD_LIMIT_MS);
+    terminationCompletion = terminateSpawnedCommandTree({
+      processGroupId: child.pid,
+      directChildAlive: () => child.exitCode === null && child.signalCode === null,
+      signal: signalCommandTree,
+      graceMs: STREAM_TERMINATION_GRACE_MS,
+      hardLimitMs: STREAM_TERMINATION_HARD_LIMIT_MS,
+      hardCleanup: () => {
+        reader.close();
+        child.stdout.destroy();
+        child.stderr.destroy();
+      }
+    });
+    void terminationCompletion.catch(() => undefined);
   };
   const onAbort = (): void => {
     stopStreaming();
@@ -1791,7 +1790,8 @@ async function streamSmithersCommandUnanchored(input: {
         }
       });
     });
-    const exit = await Promise.race([closed, hardTeardown]);
+    const exit = await closed;
+    if (terminationCompletion !== undefined) await terminationCompletion;
     // Child `close` can win the race with a consumer promise that rejects on a
     // later turn. Wait until readline can emit no more lines, then settle every
     // bounded callback before deciding whether streaming succeeded.
@@ -1810,10 +1810,7 @@ async function streamSmithersCommandUnanchored(input: {
   } finally {
     input.signal?.removeEventListener("abort", onAbort);
     stopStreaming();
-    if (killTimer !== undefined) {
-      clearTimeout(killTimer);
-    }
-    if (hardTeardownTimer !== undefined) clearTimeout(hardTeardownTimer);
+    if (terminationCompletion !== undefined) await terminationCompletion;
     try {
       executableAnchor?.assertCurrent();
     } finally {
@@ -1849,6 +1846,50 @@ async function drainStreamLineCallbacks(callbacks: readonly Promise<void>[], sig
 
 function isAbortedSignal(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
+}
+
+async function terminateSpawnedCommandTree(input: {
+  processGroupId: number | undefined;
+  directChildAlive: () => boolean;
+  signal: (signal: NodeJS.Signals) => void;
+  graceMs: number;
+  hardLimitMs: number;
+  hardCleanup: () => void;
+}): Promise<void> {
+  const startedAt = Date.now();
+  input.signal("SIGTERM");
+  if (await waitForSpawnedCommandTreeExit(input, startedAt + input.graceMs)) return;
+  input.signal("SIGKILL");
+  if (await waitForSpawnedCommandTreeExit(input, startedAt + input.hardLimitMs)) return;
+  input.hardCleanup();
+  input.signal("SIGKILL");
+  if (spawnedCommandTreeIsAlive(input.processGroupId, input.directChildAlive)) {
+    throw new Error("workflow runner process group remained alive after SIGKILL");
+  }
+}
+
+async function waitForSpawnedCommandTreeExit(
+  input: Pick<Parameters<typeof terminateSpawnedCommandTree>[0], "processGroupId" | "directChildAlive">,
+  deadline: number
+): Promise<boolean> {
+  while (spawnedCommandTreeIsAlive(input.processGroupId, input.directChildAlive)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(20, remaining)));
+  }
+  return true;
+}
+
+function spawnedCommandTreeIsAlive(processGroupId: number | undefined, directChildAlive: () => boolean): boolean {
+  if (process.platform === "win32" || processGroupId === undefined) return directChildAlive();
+  try {
+    process.kill(-processGroupId, 0);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && String(error.code) === "ESRCH") return false;
+    if (error instanceof Error && "code" in error && String(error.code) === "EPERM") return true;
+    throw error;
+  }
 }
 
 /**
@@ -2943,12 +2984,7 @@ async function executeBoundedSmithersCommand(input: {
   let stdoutBytes = 0;
   let stderrBytes = 0;
   let terminationReason: SmithersTerminationReason | undefined;
-  let escalationTimer: NodeJS.Timeout | undefined;
-  let hardTeardownTimer: NodeJS.Timeout | undefined;
-  let resolveHardTeardown: ((value: { code: number | null; signal: NodeJS.Signals | null }) => void) | undefined;
-  const hardTeardown = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-    resolveHardTeardown = resolve;
-  });
+  let terminationCompletion: Promise<void> | undefined;
   let timeoutTimer: NodeJS.Timeout | undefined;
   const signalCommandTree = (signal: NodeJS.Signals): void => {
     if (process.platform !== "win32" && child.pid !== undefined) {
@@ -2967,14 +3003,18 @@ async function executeBoundedSmithersCommand(input: {
   const terminate = (reason: SmithersTerminationReason): void => {
     if (terminationReason !== undefined) return;
     terminationReason = reason;
-    signalCommandTree("SIGTERM");
-    escalationTimer = setTimeout(() => signalCommandTree("SIGKILL"), ONE_SHOT_TERMINATION_GRACE_MS).unref();
-    hardTeardownTimer = setTimeout(() => {
-      signalCommandTree("SIGKILL");
-      child.stdout.destroy();
-      child.stderr.destroy();
-      resolveHardTeardown?.({ code: child.exitCode, signal: child.signalCode });
-    }, ONE_SHOT_TERMINATION_HARD_LIMIT_MS);
+    terminationCompletion = terminateSpawnedCommandTree({
+      processGroupId: child.pid,
+      directChildAlive: () => child.exitCode === null && child.signalCode === null,
+      signal: signalCommandTree,
+      graceMs: ONE_SHOT_TERMINATION_GRACE_MS,
+      hardLimitMs: ONE_SHOT_TERMINATION_HARD_LIMIT_MS,
+      hardCleanup: () => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+      }
+    });
+    void terminationCompletion.catch(() => undefined);
   };
   const append = (target: Buffer[], chunk: Buffer | string, stream: "stdout" | "stderr"): void => {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -2996,10 +3036,11 @@ async function executeBoundedSmithersCommand(input: {
   }
   if (isAbortedSignal(input.signal)) terminate("abort");
   try {
-    const outcome = await Promise.race([closed, hardTeardown]);
+    const outcome = await closed;
     const stdout = Buffer.concat(stdoutChunks).toString("utf8");
     const stderr = Buffer.concat(stderrChunks).toString("utf8");
     if (terminationReason !== undefined) {
+      if (terminationCompletion !== undefined) await terminationCompletion;
       throw smithersCommandTerminationError(terminationReason, stdout, stderr, outcome.signal);
     }
     if (processError !== undefined) throw processError;
@@ -3007,8 +3048,7 @@ async function executeBoundedSmithersCommand(input: {
   } finally {
     input.signal?.removeEventListener("abort", onAbort);
     if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
-    if (escalationTimer !== undefined) clearTimeout(escalationTimer);
-    if (hardTeardownTimer !== undefined) clearTimeout(hardTeardownTimer);
+    if (terminationCompletion !== undefined) await terminationCompletion;
   }
 }
 

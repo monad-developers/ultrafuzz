@@ -407,7 +407,7 @@ test("stream cancellation does not wait for a never-settling line consumer", asy
 });
 
 test(
-  "stream truncation kills a signal-resistant command and descendant process group",
+  "stream truncation kills a redirected TERM-resistant descendant after its parent exits",
   { skip: process.platform === "win32" },
   async (t) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-stream-process-group-"));
@@ -419,9 +419,9 @@ test(
       runner,
       `#!/bin/sh
 printf '%s\n' "$$" > "$SMITHERS_STREAM_COMMAND_PID"
-( trap '' TERM; while :; do sleep 1; done ) &
+( trap '' TERM; exec </dev/null >/dev/null 2>&1; while :; do sleep 1; done ) &
 printf '%s\n' "$!" > "$SMITHERS_STREAM_DESCENDANT_PID"
-trap '' TERM
+trap 'exit 0' TERM
 printf '%s\n' '{"event":1}'
 while :; do sleep 1; done
 `,

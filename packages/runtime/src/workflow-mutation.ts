@@ -20,8 +20,7 @@ import lockfile from "proper-lockfile";
 import {
   captureProperLockfileDirectoryIdentity,
   withProperLockfileReclaimGuard,
-  writeProperLockfileOwner,
-  type ProperLockfileDirectoryIdentity
+  writeProperLockfileOwner
 } from "./proper-lockfile-owner.js";
 
 const WORKFLOW_MUTATION_LOCK = ".workflow-mutation";
@@ -670,27 +669,50 @@ async function acquireOwnedRunLock(
   }
   const waitMs = Math.max(0, Math.min(options.waitMs, options.timeoutMs ?? options.waitMs));
   const deadline = Date.now() + waitMs;
+  const ownerPath = path.join(lockPath, WORKFLOW_MUTATION_LOCK_OWNER);
   let release: (() => Promise<void>) | undefined;
-  let acquiredIdentity: ProperLockfileDirectoryIdentity | undefined;
+  let owner: WorkflowRunLockOwner | undefined;
   while (release === undefined) {
     try {
-      await withProperLockfileReclaimGuard(lockPath, () =>
-        reclaimTerminatedWorkflowRunLock(layout, lockPath, options.label, options.stale)
-      );
-      const acquiredRelease = await lockfile.lock(lockPath, {
-        lockfilePath: lockPath,
-        realpath: false,
-        stale: options.stale,
-        update: 30_000,
-        retries: 0
+      const acquired = await withProperLockfileReclaimGuard(lockPath, async () => {
+        reclaimTerminatedWorkflowRunLock(layout, lockPath, options.label, options.stale);
+        const acquiredRelease = await lockfile.lock(lockPath, {
+          lockfilePath: lockPath,
+          realpath: false,
+          stale: options.stale,
+          update: 30_000,
+          retries: 0
+        });
+        try {
+          if (workflowRunLockCancelled(options.signal) || (externallyBounded && Date.now() >= deadline)) {
+            throw new WorkflowMutationLockInterruptedError(
+              workflowRunLockCancelled(options.signal) ? "cancelled" : "deadline"
+            );
+          }
+          const acquiredIdentity = captureProperLockfileDirectoryIdentity(lockPath, options.label);
+          const processStart = workflowMutationProcessStartToken(process.pid);
+          if (processStart === null) {
+            throw new Error(`${options.label} cannot bind the current process start token`);
+          }
+          const acquiredOwner: WorkflowRunLockOwner = {
+            pid: process.pid,
+            process_start: processStart,
+            acquired_at: new Date().toISOString()
+          };
+          writeProperLockfileOwner(lockPath, ownerPath, acquiredOwner, options.label, acquiredIdentity);
+          return { release: acquiredRelease, owner: acquiredOwner };
+        } catch (error) {
+          try {
+            await acquiredRelease();
+          } catch {
+            // Preserve the acquisition/publication failure. If identity-safe
+            // cleanup was impossible, retained evidence keeps reclaim fail-closed.
+          }
+          throw error;
+        }
       });
-      try {
-        acquiredIdentity = captureProperLockfileDirectoryIdentity(lockPath, options.label);
-      } catch (error) {
-        await acquiredRelease().catch(() => undefined);
-        throw error;
-      }
-      release = acquiredRelease;
+      release = acquired.release;
+      owner = acquired.owner;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ELOCKED" && code !== "ENOENT") throw error;
@@ -702,32 +724,11 @@ async function acquireOwnedRunLock(
       await waitForWorkflowRunLockRetry(Math.min(250, Math.max(1, deadline - Date.now())), options.signal);
     }
   }
+  if (owner === undefined) throw new Error(`${options.label} owner was not published`);
   if (workflowRunLockCancelled(options.signal) || (externallyBounded && Date.now() >= deadline)) {
+    fs.unlinkSync(ownerPath);
     await release();
     throw new WorkflowMutationLockInterruptedError(workflowRunLockCancelled(options.signal) ? "cancelled" : "deadline");
-  }
-  const ownerPath = path.join(lockPath, WORKFLOW_MUTATION_LOCK_OWNER);
-  if (acquiredIdentity === undefined) throw new Error(`${options.label} identity was not captured`);
-  const processStart = workflowMutationProcessStartToken(process.pid);
-  if (processStart === null) {
-    await release();
-    throw new Error(`${options.label} cannot bind the current process start token`);
-  }
-  const owner: WorkflowRunLockOwner = {
-    pid: process.pid,
-    process_start: processStart,
-    acquired_at: new Date().toISOString()
-  };
-  try {
-    writeProperLockfileOwner(lockPath, ownerPath, owner, options.label, acquiredIdentity);
-  } catch (error) {
-    try {
-      await release();
-    } catch {
-      // Preserve the owner publication/restoration failure. If identity-safe
-      // cleanup was impossible, the retained owner keeps reclaim fail-closed.
-    }
-    throw error;
   }
   if (options.lockName === WORKFLOW_MUTATION_LOCK) {
     try {

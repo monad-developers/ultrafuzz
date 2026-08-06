@@ -689,6 +689,28 @@ describe("Modal result collection", () => {
         ["opaque-secret-that-is-not-pattern-shaped"]
       )
     ).toThrow(/unsanitized Modal worker log/u);
+    const encodedSecret = "credential-DWP?o";
+    for (const representation of [
+      Buffer.from(encodedSecret, "utf8").toString("base64"),
+      Buffer.from(encodedSecret, "utf8").toString("base64url"),
+      Buffer.from(encodedSecret, "utf8").toString("hex"),
+      encodeURIComponent(encodedSecret)
+    ]) {
+      const encodedSecretPayload = Buffer.from(
+        JSON.stringify([{ code: "WORKFLOW_SUBMISSION_FAILED", message: `encoded=${representation}` }]),
+        "utf8"
+      ).toString("base64url");
+      expect(() =>
+        assertSanitizedModalCollectedFiles(
+          {
+            ...files,
+            "worker.log": `2026-01-01T00:00:00.000Z eval-failure-diagnostics ${encodedSecretPayload}\n`
+          },
+          context,
+          [encodedSecret]
+        )
+      ).toThrow(/unsanitized Modal worker log/u);
+    }
   });
 
   it("collects only an exactly reconciled privacy-safe recovery lifecycle", () => {

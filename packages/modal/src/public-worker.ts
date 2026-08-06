@@ -19,7 +19,7 @@ import {
   type EvalRunRecord,
   type EvalSuiteSpec
 } from "@ultrafuzz/evals";
-import { redactSecretsInText } from "@ultrafuzz/security";
+import { redactSecretsInText, redactSecretValueRepresentations } from "@ultrafuzz/security";
 import {
   VERIFIER_PUBLIC_EVIDENCE_MAX_BYTES,
   parseVerifierReceipt,
@@ -1280,12 +1280,7 @@ export function publicEvalFailureDiagnosticLogPayload(
 }
 
 function sanitizePublicDiagnosticMessage(message: string, forbiddenSecretValues: readonly string[]): string {
-  let sanitized = message;
-  for (const secret of [...new Set(forbiddenSecretValues.filter((value) => value.length > 0))].sort(
-    (left, right) => right.length - left.length
-  )) {
-    sanitized = sanitized.split(secret).join("<redacted>");
-  }
+  let sanitized = redactSecretValueRepresentations(message, forbiddenSecretValues);
   sanitized = [...redactSecretsInText(sanitized)]
     .map((character) => {
       const codePoint = character.codePointAt(0)!;

@@ -9,6 +9,7 @@ import {
   appendUsageEvents,
   appendNodeAttempt,
   appendEvent,
+  appendBytesDurable,
   appendLineDurable,
   createEventRecord,
   createRunLayout,
@@ -541,6 +542,80 @@ test("event recovery repairs every missing index without duplicating the authori
       .split(/\r?\n/u)
       .filter((line) => (JSON.parse(line) as { event_id?: string }).event_id === record.event_id);
     assert.equal(matches.length, 1, filePath);
+  }
+});
+
+test("durable byte appends retry short writes until the complete payload is persisted", () => {
+  const root = tempProject();
+  const filePath = path.join(root, "short-writes.jsonl");
+  const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "writeSync");
+  if (originalDescriptor === undefined) throw new Error("fs.writeSync descriptor is unavailable");
+  const originalWriteSync = fs.writeSync;
+  let calls = 0;
+  Object.defineProperty(fs, "writeSync", {
+    ...originalDescriptor,
+    value(fd: number, buffer: Uint8Array, offset: number, length: number): number {
+      calls += 1;
+      return originalWriteSync(fd, buffer, offset, Math.min(length, 3));
+    }
+  });
+  try {
+    appendBytesDurable(filePath, Buffer.from("complete append despite short writes\n", "utf8"), root);
+  } finally {
+    Object.defineProperty(fs, "writeSync", originalDescriptor);
+  }
+
+  assert.equal(fs.readFileSync(filePath, "utf8"), "complete append despite short writes\n");
+  assert.ok(calls > 1);
+});
+
+test("event recovery repairs an exact truncated record in the log and every derived index", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-tail-recovery" });
+  const record = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { recovered: true }
+  });
+  ensureEventRecord(layout, record);
+  const serialized = JSON.stringify(record);
+  const recordPaths = [
+    layout.eventsPath,
+    path.join(layout.eventsIndexDir, "run", "run-event-tail-recovery.jsonl"),
+    path.join(layout.eventsIndexDir, "type", "node-synced.jsonl"),
+    path.join(layout.eventsIndexDir, "timestamp", "2026-08-05.jsonl"),
+    path.join(layout.eventsIndexDir, "node", "node-a.jsonl"),
+    path.join(layout.eventsIndexDir, "status", "succeeded.jsonl")
+  ];
+
+  for (const filePath of recordPaths) {
+    fs.writeFileSync(filePath, serialized.slice(0, -7), "utf8");
+    ensureEventRecord(layout, record);
+    assert.equal(fs.readFileSync(filePath, "utf8"), `${serialized}\n`, filePath);
+  }
+});
+
+test("event recovery fails closed for unrelated, conflicting, and malformed tails", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-tail-rejection" });
+  const record = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { recovered: true }
+  });
+  const unrelated = JSON.stringify({ ...record, event_id: "evt-unrelated" });
+  const conflicting = JSON.stringify({ ...record, payload: { recovered: false } });
+  for (const testCase of [
+    { name: "unrelated parseable", contents: unrelated, expected: /unrelated unterminated event record/u },
+    { name: "conflicting event ID", contents: conflicting, expected: /conflicting event ID/u },
+    { name: "unrelated malformed", contents: unrelated.slice(0, -7), expected: /unrepairable trailing event record/u },
+    { name: "malformed completed record", contents: "{malformed\n", expected: /malformed event record/u }
+  ]) {
+    fs.writeFileSync(layout.eventsPath, testCase.contents, "utf8");
+    assert.throws(() => ensureEventRecord(layout, record), testCase.expected, testCase.name);
+    assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), testCase.contents, testCase.name);
   }
 });
 

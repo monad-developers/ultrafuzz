@@ -104,6 +104,110 @@ test(
 );
 
 test(
+  "alive-to-dead workflow lock races serialize reclamation with primary acquisition",
+  { skip: process.platform !== "linux", concurrency: false },
+  async (t) => {
+    for (const lockKind of ["start", "mutation"] as const) {
+      const runRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), `ufz-lock-live-race-${lockKind}-`));
+      t.after(() => fs.rmSync(runRoot, { recursive: true, force: true }));
+      const lockName = lockKind === "start" ? ".start-preparation-lock" : ".workflow-mutation";
+      const lockPath = path.join(runRoot, lockName);
+      const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+        stdio: ["ignore", "ignore", "ignore"]
+      });
+      const contenders: ReturnType<typeof spawn>[] = [];
+      try {
+        await new Promise<void>((resolve, reject) => {
+          owner.once("spawn", resolve);
+          owner.once("error", reject);
+        });
+        const processStart = linuxProcessStartToken(owner.pid!);
+        if (processStart === null) throw new Error("live lock owner has no process start token");
+        fs.mkdirSync(lockPath);
+        fs.writeFileSync(
+          path.join(lockPath, "owner.json"),
+          `${JSON.stringify({ pid: owner.pid, process_start: processStart, acquired_at: new Date().toISOString() })}\n`
+        );
+
+        const childScript = path.join(runRoot, "live-race-contend.mjs");
+        const planRunModule = new URL("../src/plan-run.js", import.meta.url).href;
+        const mutationModule = new URL("../src/workflow-mutation.js", import.meta.url).href;
+        const artifactsModule = import.meta.resolve("@ultrafuzz/artifacts");
+        const properLockfileModule = import.meta.resolve("proper-lockfile");
+        fs.writeFileSync(
+          childScript,
+          `import fs from "node:fs";\n` +
+            `import path from "node:path";\n` +
+            `import lockfile from ${JSON.stringify(properLockfileModule)};\n` +
+            `import { layoutForRunRoot } from ${JSON.stringify(artifactsModule)};\n` +
+            `import { acquireWorkflowStartPreparationLock } from ${JSON.stringify(planRunModule)};\n` +
+            `import { acquireWorkflowMutationLock } from ${JSON.stringify(mutationModule)};\n` +
+            `const [root, kind, id, pause] = process.argv.slice(2);\n` +
+            `const lockName = kind === "start" ? ".start-preparation-lock" : ".workflow-mutation";\n` +
+            `const primaryPath = path.join(root, lockName);\n` +
+            `const originalLock = lockfile.lock;\n` +
+            `let announced = false;\n` +
+            `lockfile.lock = async (...args) => {\n` +
+            `  if (!announced && path.resolve(args[1]?.lockfilePath ?? "") === primaryPath) {\n` +
+            `    announced = true;\n` +
+            `    fs.writeFileSync(path.join(root, \`before-primary-\${id}\`), "ready\\n");\n` +
+            `    while (pause === "yes" && !fs.existsSync(path.join(root, \`allow-primary-\${id}\`))) {\n` +
+            `      await new Promise((resolve) => setTimeout(resolve, 10));\n` +
+            `    }\n` +
+            `  }\n` +
+            `  return originalLock(...args);\n` +
+            `};\n` +
+            `const layout = layoutForRunRoot(root, path.basename(root));\n` +
+            `const acquire = kind === "start" ? acquireWorkflowStartPreparationLock : acquireWorkflowMutationLock;\n` +
+            `const release = await acquire(layout);\n` +
+            `const active = path.join(root, "live-race-critical-section");\n` +
+            `let descriptor;\n` +
+            `try { descriptor = fs.openSync(active, "wx"); } catch { fs.writeFileSync(path.join(root, "violation"), "overlap\\n"); }\n` +
+            `fs.writeFileSync(path.join(root, \`held-\${id}\`), "held\\n");\n` +
+            `while (!fs.existsSync(path.join(root, \`release-\${id}\`))) await new Promise((resolve) => setTimeout(resolve, 10));\n` +
+            `if (descriptor !== undefined) { fs.closeSync(descriptor); fs.unlinkSync(active); }\n` +
+            `await release();\n`,
+          "utf8"
+        );
+
+        const firstContender = spawn(process.execPath, [childScript, runRoot, lockKind, "a", "yes"], {
+          cwd: runRoot,
+          stdio: ["ignore", "ignore", "pipe"]
+        });
+        contenders.push(firstContender);
+        await waitForPath(path.join(runRoot, "before-primary-a"));
+        owner.kill("SIGKILL");
+        await childExit(owner);
+
+        const secondContender = spawn(process.execPath, [childScript, runRoot, lockKind, "b", "no"], {
+          cwd: runRoot,
+          stdio: ["ignore", "ignore", "pipe"]
+        });
+        contenders.push(secondContender);
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        assert.equal(fs.existsSync(path.join(runRoot, "before-primary-b")), false, lockKind);
+
+        fs.writeFileSync(path.join(runRoot, "allow-primary-a"), "allow\n");
+        const first = await waitForOneHeldMarker(runRoot);
+        assert.equal(fs.existsSync(path.join(runRoot, "violation")), false, lockKind);
+        fs.writeFileSync(path.join(runRoot, `release-${first}`), "release\n");
+        const second = first === "a" ? "b" : "a";
+        await waitForPath(path.join(runRoot, `held-${second}`));
+        assert.equal(fs.existsSync(path.join(runRoot, "violation")), false, lockKind);
+        fs.writeFileSync(path.join(runRoot, `release-${second}`), "release\n");
+        assert.deepEqual(await Promise.all(contenders.map((child) => childExit(child))), [0, 0], lockKind);
+        assert.equal(fs.existsSync(lockPath), false, lockKind);
+      } finally {
+        if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL");
+        for (const contender of contenders) {
+          if (contender.exitCode === null && contender.signalCode === null) contender.kill("SIGKILL");
+        }
+      }
+    }
+  }
+);
+
+test(
   "owned workflow locks preserve proper-lockfile mtime through the first heartbeat",
   { skip: process.platform !== "linux", concurrency: false },
   async (t) => {
@@ -173,4 +277,20 @@ function childExit(child: ReturnType<typeof spawn>): Promise<number | null> {
     child.once("error", reject);
     child.once("exit", (code) => resolve(code));
   });
+}
+
+function linuxProcessStartToken(pid: number): string | null {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const closingParenthesis = stat.lastIndexOf(")");
+    if (closingParenthesis < 0) return null;
+    return (
+      stat
+        .slice(closingParenthesis + 2)
+        .trim()
+        .split(/\s+/u)[19] ?? null
+    );
+  } catch {
+    return null;
+  }
 }

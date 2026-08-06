@@ -375,7 +375,7 @@ it("continues only after one publishable genuine task-failure target", () => {
 });
 
 it("publishes only bounded redacted workflow-submission messages from eval JSON", () => {
-  const secret = "sk-fixture-secret-value";
+  const secret = "credential-DWP?o";
   const payload = publicEvalFailureDiagnosticLogPayload(
     JSON.stringify({
       diagnostics: [
@@ -402,6 +402,26 @@ it("publishes only bounded redacted workflow-submission messages from eval JSON"
   expect(JSON.stringify(decoded)).not.toContain(secret);
   expect(JSON.stringify(decoded)).not.toContain("details");
   expect(publicEvalFailureDiagnosticLogPayload("not json", [secret])).toBeUndefined();
+
+  const encodedRepresentations = [
+    ["base64", Buffer.from(secret, "utf8").toString("base64")],
+    ["base64url", Buffer.from(secret, "utf8").toString("base64url")],
+    ["hex", Buffer.from(secret, "utf8").toString("hex")],
+    ["percent", encodeURIComponent(secret)]
+  ] as const;
+  for (const [label, representation] of encodedRepresentations) {
+    const encodedPayload = publicEvalFailureDiagnosticLogPayload(
+      JSON.stringify({
+        diagnostics: [{ code: "WORKFLOW_SUBMISSION_FAILED", message: `${label}: ${representation}` }]
+      }),
+      [secret]
+    );
+    const encodedDecoded = JSON.parse(Buffer.from(encodedPayload!, "base64url").toString("utf8")) as Array<{
+      message: string;
+    }>;
+    expect(encodedDecoded[0]!.message).toBe(`${label}: <redacted>`);
+    expect(JSON.stringify(encodedDecoded)).not.toContain(representation);
+  }
 
   const longPayload = publicEvalFailureDiagnosticLogPayload(
     JSON.stringify({

@@ -29,7 +29,7 @@ import {
   type PublicPricingEvidence,
   type VerifiedTerminalEvidence
 } from "@ultrafuzz/evals";
-import { redactSecretsInText } from "@ultrafuzz/security";
+import { containsSecretValueRepresentation, redactSecretsInText } from "@ultrafuzz/security";
 import { z } from "zod/v4";
 
 import type { PublicModalBenchmarkConfig } from "./config.js";
@@ -500,7 +500,7 @@ export function assertPublicEvalDiagnosticsContainsNoSecrets(
   forbiddenSecretValues: readonly string[]
 ): void {
   const text = JSON.stringify(value);
-  if ([...new Set(forbiddenSecretValues)].filter(Boolean).some((secret) => text.includes(secret))) {
+  if (containsSecretValueRepresentation(text, forbiddenSecretValues)) {
     throw new Error("public eval diagnostics contains an injected secret value");
   }
   if (redactSecretsInText(text) !== text) {

@@ -22,7 +22,7 @@ import {
   type AnalysisRecoverySummary
 } from "@ultrafuzz/artifacts";
 import { boundedEvalId } from "@ultrafuzz/evals";
-import { redactSecretsInText } from "@ultrafuzz/security";
+import { containsSecretValueRepresentation, redactSecretsInText } from "@ultrafuzz/security";
 
 import {
   kimiSubscriptionCredentialFileName,
@@ -3528,9 +3528,7 @@ function isGenericWorkerLifecycleLine(line: string, forbiddenSecretValues: reado
           Buffer.byteLength((entry as Record<string, string>).message!, "utf8") <= 1_000 &&
           redactSecretsInText((entry as Record<string, string>).message!) ===
             (entry as Record<string, string>).message &&
-          !forbiddenSecretValues.some(
-            (secret) => secret.length > 0 && (entry as Record<string, string>).message!.includes(secret)
-          )
+          !containsSecretValueRepresentation((entry as Record<string, string>).message!, forbiddenSecretValues)
       )
     );
   } catch {

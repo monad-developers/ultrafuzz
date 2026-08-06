@@ -303,6 +303,10 @@ export function writeJsonDurable(filePath: string, value: unknown): void {
 }
 
 export function appendLineDurable(filePath: string, line: string, trustedRoot?: string): void {
+  appendBytesDurable(filePath, Buffer.from(line.endsWith("\n") ? line : `${line}\n`, "utf8"), trustedRoot);
+}
+
+export function appendBytesDurable(filePath: string, bytes: Uint8Array, trustedRoot?: string): void {
   const directory = path.dirname(filePath);
   if (trustedRoot !== undefined) {
     assertNoSymlinkComponents(trustedRoot, directory, "append directory");
@@ -323,7 +327,13 @@ export function appendLineDurable(filePath: string, line: string, trustedRoot?: 
     if (trustedRoot !== undefined) {
       assertNoSymlinkComponents(trustedRoot, filePath, "append path");
     }
-    fs.writeSync(fd, line.endsWith("\n") ? line : `${line}\n`);
+    const contents = Buffer.from(bytes);
+    let offset = 0;
+    while (offset < contents.length) {
+      const written = fs.writeSync(fd, contents, offset, contents.length - offset);
+      if (written <= 0) throw new Error(`append write made no progress: ${filePath}`);
+      offset += written;
+    }
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);

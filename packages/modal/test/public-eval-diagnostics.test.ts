@@ -903,6 +903,17 @@ describe("public post-eval diagnostics", () => {
     expect(() => assertPublicEvalDiagnosticsContainsNoSecrets(diagnostics, [diagnostics.rows[0]!.target_id])).toThrow(
       /injected secret/u
     );
+    const encodedSecret = "credential-DWP?o";
+    for (const representation of [
+      Buffer.from(encodedSecret, "utf8").toString("base64"),
+      Buffer.from(encodedSecret, "utf8").toString("base64url"),
+      Buffer.from(encodedSecret, "utf8").toString("hex"),
+      encodeURIComponent(encodedSecret)
+    ]) {
+      const injected = structuredClone(diagnostics);
+      injected.rows[0]!.diagnostic_codes = [representation];
+      expect(() => assertPublicEvalDiagnosticsContainsNoSecrets(injected, [encodedSecret])).toThrow(/injected secret/u);
+    }
 
     const expected = collectedLineage();
     expect(() => assertPublicEvalDiagnosticsLineage(diagnostics, expected)).not.toThrow();

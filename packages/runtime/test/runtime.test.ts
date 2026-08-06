@@ -11314,7 +11314,7 @@ test("syncRun rejects conflicting inspect, event, and state evidence before muta
   }
 });
 
-test("bounded one-shot runner commands escalate past ignored SIGTERM with stable classifications", async () => {
+test("bounded one-shot commands kill redirected TERM-resistant descendants after their parent exits", async () => {
   const project = tempProject();
   const binDir = path.join(project, "termination-bin");
   fs.mkdirSync(binDir, { recursive: true });
@@ -11325,9 +11325,9 @@ test("bounded one-shot runner commands escalate past ignored SIGTERM with stable
     smithers,
     `#!/bin/sh
 printf '%s\n' "$$" > ${shellQuote(marker)}
-( trap '' TERM; while :; do sleep 1; done ) &
+( trap '' TERM; exec </dev/null >/dev/null 2>&1; while :; do sleep 1; done ) &
 printf '%s\n' "$!" > ${shellQuote(descendantMarker)}
-trap '' TERM
+trap 'exit 0' TERM
 while :; do sleep 1; done
 `,
     "utf8"

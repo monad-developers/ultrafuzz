@@ -8,6 +8,7 @@ import { z } from "zod/v4";
 import { type RunLayout } from "./run-layout.js";
 import {
   SAFE_ID_PATTERN,
+  appendBytesDurable,
   appendLineDurable,
   prepareSafeFilePath,
   readJsonFile,
@@ -270,32 +271,84 @@ function ensureIndexLine(layout: RunLayout, segments: string[], record: EventRec
 
 function ensureExactEventLine(filePath: string, record: EventRecord, label: string): void {
   const expected = JSON.stringify({ ...record, payload: redactValue(record.payload) });
-  let matches = 0;
+  const expectedBytes = Buffer.from(expected, "utf8");
   if (fs.existsSync(filePath)) {
-    for (const line of fs.readFileSync(filePath, "utf8").split(/\r?\n/u)) {
-      if (line.trim().length === 0) continue;
-      let candidate: unknown;
+    const contents = fs.readFileSync(filePath);
+    const finalNewline = contents.lastIndexOf(0x0a);
+    const complete = contents.subarray(0, finalNewline + 1);
+    const tail = contents.subarray(finalNewline + 1);
+    inspectExactEventLines(complete.toString("utf8"), record, expected, label, false);
+    if (tail.length > 0) {
+      let parsedTail: unknown;
       try {
-        candidate = JSON.parse(line) as unknown;
+        parsedTail = JSON.parse(tail.toString("utf8")) as unknown;
       } catch {
-        continue;
+        parsedTail = undefined;
       }
-      if (
-        typeof candidate !== "object" ||
-        candidate === null ||
-        Array.isArray(candidate) ||
-        (candidate as { event_id?: unknown }).event_id !== record.event_id
-      ) {
-        continue;
+      if (parsedTail !== undefined) {
+        if (!assertExactEventCandidate(parsedTail, record, expected, label)) {
+          throw new Error(`${label} contains an unrelated unterminated event record`);
+        }
+        appendBytesDurable(filePath, Buffer.from("\n"));
+      } else if (tail.length <= expectedBytes.length && expectedBytes.subarray(0, tail.length).equals(tail)) {
+        appendBytesDurable(filePath, Buffer.concat([expectedBytes.subarray(tail.length), Buffer.from("\n")]));
+      } else {
+        throw new Error(`${label} contains an unrepairable trailing event record`);
       }
-      if (JSON.stringify(candidate) !== expected) {
-        throw new Error(`${label} contains a conflicting event ID: ${record.event_id}`);
-      }
-      matches += 1;
     }
   }
+  let matches = inspectExactEventLines(
+    fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : "",
+    record,
+    expected,
+    label,
+    true
+  );
   if (matches > 1) throw new Error(`${label} duplicates event ID: ${record.event_id}`);
-  if (matches === 0) appendLineDurable(filePath, expected);
+  if (matches === 0) {
+    appendLineDurable(filePath, expected);
+    matches = inspectExactEventLines(fs.readFileSync(filePath, "utf8"), record, expected, label, true);
+  }
+  if (matches !== 1) throw new Error(`${label} did not durably persist event ID: ${record.event_id}`);
+}
+
+function inspectExactEventLines(
+  contents: string,
+  record: EventRecord,
+  expected: string,
+  label: string,
+  requireTerminated: boolean
+): number {
+  if (requireTerminated && contents.length > 0 && !contents.endsWith("\n")) {
+    throw new Error(`${label} contains an unterminated event record`);
+  }
+  let matches = 0;
+  for (const line of contents.split(/\r?\n/u)) {
+    if (line.trim().length === 0) continue;
+    let candidate: unknown;
+    try {
+      candidate = JSON.parse(line) as unknown;
+    } catch (error) {
+      throw new Error(`${label} contains a malformed event record`, { cause: error });
+    }
+    if (assertExactEventCandidate(candidate, record, expected, label)) matches += 1;
+  }
+  return matches;
+}
+
+function assertExactEventCandidate(candidate: unknown, record: EventRecord, expected: string, label: string): boolean {
+  if (
+    typeof candidate !== "object" ||
+    candidate === null ||
+    Array.isArray(candidate) ||
+    (candidate as { event_id?: unknown }).event_id !== record.event_id
+  ) {
+    return false;
+  }
+  if (JSON.stringify(candidate) !== expected) {
+    throw new Error(`${label} contains a conflicting event ID: ${record.event_id}`);
+  }
+  return true;
 }
 
 function writeQueryFacadeInputs(layout: RunLayout): void {

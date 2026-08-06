@@ -84,8 +84,7 @@ import { forgeGuardMetadata } from "./forge-guard.js";
 import {
   captureProperLockfileDirectoryIdentity,
   withProperLockfileReclaimGuard,
-  writeProperLockfileOwner,
-  type ProperLockfileDirectoryIdentity
+  writeProperLockfileOwner
 } from "./proper-lockfile-owner.js";
 import { resolveCheckedOutCommit } from "./workspace-provenance.js";
 
@@ -431,25 +430,43 @@ export async function acquireWorkflowStartPreparationLock(layout: RunLayout): Pr
   const lockPath = path.join(layout.root, START_PREPARATION_LOCK);
   assertNoSymlinkComponents(layout.root, lockPath, "workflow start preparation lock");
   const deadline = Date.now() + 5 * 60 * 1_000;
+  const ownerPath = path.join(lockPath, START_PREPARATION_LOCK_OWNER);
   let release: (() => Promise<void>) | undefined;
-  let acquiredIdentity: ProperLockfileDirectoryIdentity | undefined;
+  let owner: StartPreparationLockOwner | undefined;
   while (release === undefined) {
     try {
-      await withProperLockfileReclaimGuard(lockPath, () => reclaimTerminatedStartPreparationLock(layout, lockPath));
-      const acquiredRelease = await lockfile.lock(layout.root, {
-        lockfilePath: lockPath,
-        realpath: false,
-        stale: START_PREPARATION_LOCK_STALE_MS,
-        update: 30_000,
-        retries: 0
+      const acquired = await withProperLockfileReclaimGuard(lockPath, async () => {
+        reclaimTerminatedStartPreparationLock(layout, lockPath);
+        const acquiredRelease = await lockfile.lock(layout.root, {
+          lockfilePath: lockPath,
+          realpath: false,
+          stale: START_PREPARATION_LOCK_STALE_MS,
+          update: 30_000,
+          retries: 0
+        });
+        const acquiredOwner = startPreparationLockOwner();
+        try {
+          const acquiredIdentity = captureProperLockfileDirectoryIdentity(lockPath, "workflow start preparation lock");
+          writeProperLockfileOwner(
+            lockPath,
+            ownerPath,
+            acquiredOwner,
+            "workflow start preparation lock",
+            acquiredIdentity
+          );
+        } catch (error) {
+          try {
+            await acquiredRelease();
+          } catch {
+            // Preserve the owner publication/restoration failure. If identity-safe
+            // cleanup was impossible, the retained owner keeps reclaim fail-closed.
+          }
+          throw error;
+        }
+        return { release: acquiredRelease, owner: acquiredOwner };
       });
-      try {
-        acquiredIdentity = captureProperLockfileDirectoryIdentity(lockPath, "workflow start preparation lock");
-      } catch (error) {
-        await acquiredRelease().catch(() => undefined);
-        throw error;
-      }
-      release = acquiredRelease;
+      release = acquired.release;
+      owner = acquired.owner;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ELOCKED" && code !== "ENOENT") throw error;
@@ -457,20 +474,7 @@ export async function acquireWorkflowStartPreparationLock(layout: RunLayout): Pr
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
-  const ownerPath = path.join(lockPath, START_PREPARATION_LOCK_OWNER);
-  const owner = startPreparationLockOwner();
-  if (acquiredIdentity === undefined) throw new Error("workflow start preparation lock identity was not captured");
-  try {
-    writeProperLockfileOwner(lockPath, ownerPath, owner, "workflow start preparation lock", acquiredIdentity);
-  } catch (error) {
-    try {
-      await release();
-    } catch {
-      // Preserve the owner publication/restoration failure. If identity-safe
-      // cleanup was impossible, the retained owner keeps reclaim fail-closed.
-    }
-    throw error;
-  }
+  if (owner === undefined) throw new Error("workflow start preparation lock owner was not published");
   let released = false;
   return async () => {
     if (released) return;
