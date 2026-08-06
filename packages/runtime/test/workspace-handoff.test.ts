@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -200,6 +200,49 @@ test("captures a tracked file inside an ignored directory", () => {
   }
 });
 
+// A listed path can vanish before it is staged, because agent subprocesses are still running during
+// capture. `git add --pathspec-from-file` fails the whole invocation when a name matches nothing, and
+// `--ignore-errors` does not suppress it, so capture must re-list and retry instead of aborting the
+// run. Simulated with a git wrapper that deletes a listed file on the first `add` only.
+test("recovers when a listed path vanishes before it is staged", () => {
+  const root = fixture();
+  const binDir = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-git-shim-"));
+  const previousPath = process.env.PATH;
+  try {
+    writeFileSync(path.join(root, "transient.tmp"), "written by a still-running subprocess\n");
+    writeFileSync(path.join(root, "UltrafuzzSmoke.t.sol"), "contract UltrafuzzSmoke {}\n");
+    const marker = path.join(binDir, "fired");
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    // Shim only the first `add`: delete the transient path so git reports it as unmatched.
+    writeFileSync(
+      path.join(binDir, "git"),
+      [
+        "#!/bin/sh",
+        'for arg in "$@"; do',
+        '  if [ "$arg" = "add" ] && [ ! -f ' + JSON.stringify(marker) + " ]; then",
+        "    : > " + JSON.stringify(marker),
+        "    rm -f " + JSON.stringify(path.join(root, "transient.tmp")),
+        "  fi",
+        "done",
+        `exec ${JSON.stringify(realGit)} "$@"`,
+        ""
+      ].join("\n"),
+      { mode: 0o755 }
+    );
+    process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ""}`;
+
+    const tree = captureWorkspaceTree(root);
+    assert.equal(fs.existsSync(marker), true, "the shim never intercepted an add");
+    const staged = git(root, ["ls-tree", "-r", "--name-only", tree]);
+    assert.match(staged, /UltrafuzzSmoke\.t\.sol/u);
+    assert.doesNotMatch(staged, /transient\.tmp/u);
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(binDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // `ls-files --others` reports an untracked nested repository as a DIRECTORY. Naming it makes `git add`
 // fail hard when it has no commit checked out — reachable whenever `forge install` or a clone is
 // interrupted, which would kill the node the same way #281 did.
@@ -257,10 +300,10 @@ test("captures a filename that is not valid UTF-8", () => {
   }
 });
 
-// gitignore does not apply to tracked paths, so a tracked file under a runtime root is still staged.
-// It must be restored to the baseline rather than dropped from the index, which would record a
-// spurious deletion. Swapping the reset for `git rm --cached` would pass the test above but fail here.
-test("restores tracked runtime-root files to the baseline instead of deleting them", () => {
+// A tracked file under a runtime root is never named for staging, so its index entry stays exactly as
+// `read-tree` left it. This pins that a worktree mutation of such a file does not leak into the
+// captured tree and, just as importantly, is not recorded as a deletion.
+test("leaves tracked runtime-root files at the baseline", () => {
   const root = fixture();
   try {
     mkdirSync(path.join(root, "artifacts"), { recursive: true });

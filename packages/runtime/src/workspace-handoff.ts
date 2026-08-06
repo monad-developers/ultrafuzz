@@ -42,7 +42,7 @@ export interface WorkspacePatchCapture {
 export function captureWorkspaceTree(workspaceRoot: string): string {
   return withTemporaryIndex(workspaceRoot, (index) => {
     runGit(workspaceRoot, ["read-tree", "HEAD"], index);
-    stageWorkspaceTree(workspaceRoot, index, "HEAD");
+    stageWorkspaceTree(workspaceRoot, index);
     return runGit(workspaceRoot, ["write-tree"], index).trim();
   });
 }
@@ -53,7 +53,7 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
   const baseCommit = runGit(workspaceRoot, ["rev-parse", "HEAD"]).trim();
   const capture = withTemporaryIndex(workspaceRoot, (index) => {
     runGit(workspaceRoot, ["read-tree", baselineTree], index);
-    stageWorkspaceTree(workspaceRoot, index, baselineTree);
+    stageWorkspaceTree(workspaceRoot, index);
     const resultTree = runGit(workspaceRoot, ["write-tree"], index).trim();
     const patch = runGit(
       workspaceRoot,
@@ -131,9 +131,9 @@ function parseChangedPaths(raw: string): WorkspacePatchFile[] {
 }
 
 /**
- * Stage every worktree change except the runtime roots, then restore those roots to `treeish`.
+ * Stage every worktree change except the runtime roots.
  *
- * Three earlier shapes were all wrong, each verified by measurement rather than argument:
+ * Three earlier shapes were all wrong, each established by measurement rather than argument:
  *
  * - `git add -A -- . :(exclude)<root>/**` — a negative pathspec makes `git add` report an ignored
  *   path as an error, so an ignored `node_modules` aborted capture (issue #281, killed a live run).
@@ -145,32 +145,53 @@ function parseChangedPaths(raw: string): WorkspacePatchFile[] {
  *   just a runtime root. Foundry ignores `cache/` and `out/`, which `forge build` creates, so that
  *   was a wider regression than the bug it fixed.
  *
- * Naming the exact paths git itself reports avoids all three. `--exclude-standard` drops ignored
- * untracked paths so none is ever named; `--cached` keeps tracked paths, including ones deleted from
- * the worktree (so deletions are captured) and ones under an ignored directory (gitignore does not
- * apply to tracked paths, so naming them is safe). Filtering on the first path segment means the
- * runtime roots are never named and therefore never descended into.
+ * Naming the exact paths git reports avoids all three. `--exclude-standard` drops ignored untracked
+ * paths so none is ever named, and `--cached` keeps tracked paths, including ones deleted from the
+ * worktree, so deletions are still captured. The roots are excluded in `ls-files` itself rather than
+ * filtered afterwards: unlike `git add`, `ls-files` tolerates negative pathspecs and prunes the
+ * traversal, which keeps a large `artifacts/` or `.smithers/` from producing path text that would
+ * overflow the output buffer.
  *
- * `--force` is required, and is safe precisely because of `--exclude-standard`: the set it enumerates
- * is exactly `tracked-in-index` plus `non-ignored-untracked`, which is what a plain `git add -A -- .`
- * would stage, so suppressing the ignored-path check cannot admit anything new. Directory entries are
- * skipped below, so every name passed is a file. Without `--force`, naming a tracked file whose parent
- * directory is ignored still trips the ignored-path error.
+ * `--force` is required, and is safe because of `--exclude-standard`: the enumerated set is exactly
+ * `tracked-in-index` plus `non-ignored-untracked`, which is what a plain `git add -A -- .` would
+ * stage, so suppressing the ignored-path check cannot admit anything new. Without it, naming a
+ * tracked file whose parent directory is ignored still trips the ignored-path error.
  *
- * Paths stay as bytes throughout: a non-UTF-8 filename decoded through a string would come back with
- * replacement characters and match nothing, aborting capture. They are fed over stdin rather than
- * argv so a wide repository cannot hit `E2BIG`, and `--literal-pathspecs` stops a name containing
- * glob or `:` magic from being reinterpreted.
+ * Paths stay as bytes: a non-UTF-8 filename decoded through a string returns replacement characters
+ * and matches nothing. They are fed over stdin so a wide repository cannot hit `E2BIG`, and
+ * `--literal-pathspecs` on the `add` stops a name containing glob or `:` magic being reinterpreted.
+ *
+ * No `reset` of the roots is needed afterwards. `read-tree <treeish>` already put exactly `treeish`
+ * in the index and nothing here ever names a root path, so their entries are `treeish` by
+ * construction.
  */
-function stageWorkspaceTree(workspaceRoot: string, index: string, treeish: string): void {
-  // Prune the runtime roots inside git rather than filtering them out afterwards. Unlike `git add`,
-  // `ls-files` tolerates a negative pathspec without erroring on ignored paths, and it skips the
-  // traversal entirely. That matters because the runtime creates these roots inside a target repo
-  // whose .gitignore does not mention them: enumerating them measured 17 MB of path text over 170k
-  // entries against a 32 MB `maxBuffer`, so a growing `.smithers/` would eventually abort capture
-  // with an opaque `spawnSync git ENOBUFS`. Pruned, the same call is ~800x faster.
-  // `--literal-pathspecs` is deliberately absent here so the exclude pathspecs are honoured; the
-  // pathspecs are ours, not caller-supplied. The `add` below must keep it.
+function stageWorkspaceTree(workspaceRoot: string, index: string): void {
+  // A listed path can vanish before it is staged — agent subprocesses are still running during
+  // capture — and `git add --pathspec-from-file` fails the whole invocation when a name matches
+  // nothing (`--ignore-errors` does not suppress it). Re-list and retry rather than aborting the
+  // run, which is the failure this whole function exists to avoid.
+  for (let attempt = 0; ; attempt += 1) {
+    const pathspecs = stageableWorkspacePaths(workspaceRoot, index);
+    if (pathspecs.length === 0) return;
+    try {
+      runGit(
+        workspaceRoot,
+        ["--literal-pathspecs", "add", "-A", "--force", "--pathspec-from-file=-", "--pathspec-file-nul"],
+        index,
+        Buffer.concat(pathspecs.flatMap((entry) => [entry, NUL]))
+      );
+      return;
+    } catch (error) {
+      const vanished = /did not match any files/u.test(error instanceof Error ? error.message : String(error));
+      if (!vanished || attempt >= WORKSPACE_STAGE_ATTEMPTS - 1) throw error;
+    }
+  }
+}
+
+const WORKSPACE_STAGE_ATTEMPTS = 3;
+
+/** Every path git would stage, minus the runtime roots and any directory entry. */
+function stageableWorkspacePaths(workspaceRoot: string, index: string): Buffer[] {
   const listed = runGitBuffer(
     workspaceRoot,
     [
@@ -188,33 +209,20 @@ function stageWorkspaceTree(workspaceRoot: string, index: string, treeish: strin
   const runtimeRoots = new Set<string>(WORKSPACE_RUNTIME_ROOTS);
   const pathspecs: Buffer[] = [];
   for (const entry of splitNulBuffer(listed)) {
-    // `ls-files --others` reports an untracked nested repository as a directory. Naming it makes
-    // `git add` fail hard when it has no commit checked out yet — reachable whenever `forge install`
-    // or a clone is interrupted — and the gitlink it would otherwise record points at an object that
-    // exists only in the nested repository, so it is unresolvable downstream either way.
+    // `ls-files --others` reports an untracked nested repository as a directory. Naming it aborts
+    // `git add` when it has no commit checked out — an interrupted `forge install` or clone produces
+    // exactly that — and when it does have one, git records a gitlink pointing at an object that
+    // lives only in the nested repository, which `assertPatchPathsMatchManifest` later refuses. So a
+    // captured baseline containing one could never yield an applicable patch.
     if (entry[entry.length - 1] === 0x2f) continue;
     const separator = entry.indexOf(0x2f);
-    // A runtime-root name is pure ASCII and Node rejects overlong encodings, so no non-UTF-8 byte
-    // sequence can decode into one; this comparison cannot drop or keep the wrong entry.
+    // Runtime-root names are ASCII and Node rejects overlong encodings, so no non-UTF-8 sequence can
+    // decode into one. Covers a top-level *file* named like a root, which the pathspecs above do not.
     const top = (separator < 0 ? entry : entry.subarray(0, separator)).toString("utf8");
-    // Defence in depth: the pathspecs above prune directories, this also covers a top-level *file*
-    // named exactly like a runtime root.
     if (top === ".git" || runtimeRoots.has(top)) continue;
     pathspecs.push(entry);
   }
-  // `git add` with an empty pathspec file stages nothing, but be explicit rather than relying on it.
-  if (pathspecs.length > 0) {
-    runGit(
-      workspaceRoot,
-      ["--literal-pathspecs", "add", "-A", "--force", "--pathspec-from-file=-", "--pathspec-file-nul"],
-      index,
-      Buffer.concat(pathspecs.flatMap((entry) => [entry, NUL]))
-    );
-  }
-  // gitignore never applies to tracked paths, so a tracked file under a runtime root is listed by
-  // `--cached` and filtered above; this restores anything already in the index from `read-tree` to
-  // `treeish` rather than leaving a stale entry or recording a spurious deletion.
-  runGit(workspaceRoot, ["--literal-pathspecs", "reset", "--quiet", treeish, "--", ...WORKSPACE_RUNTIME_ROOTS], index);
+  return pathspecs;
 }
 
 const NUL = Buffer.from([0]);
