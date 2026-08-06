@@ -3067,7 +3067,15 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
     // Scan probes may intentionally target optional files. When a probe path
     // is absent, its result text is the durable evidence of that absence.
     try {
-      lstatSync(probeCandidate);
+      const probeStat = lstatSync(probeCandidate);
+      if (probeStat.isDirectory() && !probeStat.isSymbolicLink()) {
+        if (realpathSync(probeCandidate) !== probeCandidate) {
+          throw new Error(
+            `artifact-contract failure: invariant scan probe directory is not canonical: ${probe.source_path}`
+          );
+        }
+        continue;
+      }
     } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
       throw error;

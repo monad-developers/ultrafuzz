@@ -941,10 +941,22 @@ function verifyInvariantProbePath(
   }
   try {
     const stat = fs.lstatSync(probePath);
+    if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      if (fs.realpathSync(probePath) !== probePath) {
+        diagnostics.push({
+          code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
+          message: `Invariant scan probe directory must be canonical when present: ${relativePath}`,
+          severity: "error",
+          source: "invariant-ledger",
+          path: diagnosticPath
+        });
+      }
+      return;
+    }
     if (!stat.isFile() || stat.isSymbolicLink()) {
       diagnostics.push({
         code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
-        message: `Invariant scan probe path must be a regular file when present: ${relativePath}`,
+        message: `Invariant scan probe path must be a regular file or directory when present: ${relativePath}`,
         severity: "error",
         source: "invariant-ledger",
         path: diagnosticPath

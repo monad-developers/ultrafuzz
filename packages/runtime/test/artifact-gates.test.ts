@@ -350,6 +350,39 @@ test("project discovery gate accepts a repository-root scan probe", () => {
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
+test("project discovery gate accepts a directory scan probe", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-directory-probe" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const discoveryWorkspace = path.join(layout.workspacesDir, "project-discovery");
+  fs.mkdirSync(path.join(discoveryWorkspace, "docs"), { recursive: true });
+  writeArtifact(layout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: [
+        {
+          id: "probe-docs-directory",
+          source_path: "docs",
+          query: "directory invariant inventory",
+          result: "Directory scan completed"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
 test("project discovery gate rejects root-normalizing traversal and a symlinked workspace root", () => {
   const traversalLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-root-traversal" });
   const traversalNode = {

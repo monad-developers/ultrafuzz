@@ -3013,6 +3013,8 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   assert.match(workflowSource, /candidate !== root && candidate\.startsWith/);
   assert.match(workflowSource, /isStrictlyInsideDirectory\(artifactDir, artifactPath\)/);
   assert.match(workflowSource, /probeCandidate === workspaceRoot/);
+  assert.match(workflowSource, /probeStat\.isDirectory\(\)/);
+  assert.match(workflowSource, /invariant scan probe directory is not canonical/u);
   assert.match(workflowSource, /relativePath\.split\("\/"\)\.includes\("\.\."\)/);
   assert.match(workflowSource, /relativePath\.includes\("\\u0000"\)/);
   assert.match(workflowSource, /realpathSync\(workspacePath\) !== workspacePath/);
