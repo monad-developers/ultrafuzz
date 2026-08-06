@@ -140,6 +140,12 @@ All referenced IDs must exist in their corresponding top-level collection.
 Keep IDs unique within every collection. Use empty arrays, not omitted fields,
 when no optional references exist.
 
+Every `*_ids` field, `privileges`, `entry_points`, `steps`, `guards`,
+`effects`, `preconditions`, `exclusions`, `archetypes`, and `evidence` is a
+JSON array. Every other leaf field is a single JSON string — in particular
+`value_at_risk`, `impact`, `security_impact`, and `evidence_needed` are
+strings, never arrays.
+
 ## Human artifact
 
 Write a non-empty `{{artifact_path}}/THREAT_MODEL.md` so the task handoff is

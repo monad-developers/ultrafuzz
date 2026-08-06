@@ -91,6 +91,12 @@ Use the following record fields:
   `evidence_needed`;
 - coverage gaps: `id`, `name`, `description`, `reason`.
 
+Every `*_ids` field, `privileges`, `entry_points`, `steps`, `guards`,
+`effects`, `preconditions`, `exclusions`, `archetypes`, and `evidence` is a
+JSON array. Every other leaf field is a single JSON string — in particular
+`value_at_risk`, `impact`, `security_impact`, and `evidence_needed` are
+strings, never arrays.
+
 All referenced IDs must resolve. Evidence records contain `path` and optional
 `line`, `end_line`, `symbol`, and `note`. Each `path` must be a canonical
 repository-relative POSIX path to an existing regular file in the current task

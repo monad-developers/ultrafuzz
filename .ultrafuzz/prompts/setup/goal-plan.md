@@ -47,7 +47,9 @@ inapplicable, and do not invent decisions for IDs absent from the catalog.
 For each decision, emit exactly one check for every capability named in that
 catalog record's `required`, `optional`, and `incompatible` lists, preserving
 the list name as `requirement`. If the capability exists in the threat model,
-copy its `status`, `rationale`, and complete `evidence` exactly. If it was not
+copy its `status` into `observed_status` and its `rationale` and complete
+`evidence` byte-for-byte — the same strings, every evidence field, in the same
+order; any paraphrase, summary, or reordering fails validation. If it was not
 modeled, record it as `unknown` with empty evidence and explain that it was not
 established by the upstream model. Do not infer `absent` from an omitted
 capability.
@@ -141,6 +143,10 @@ For a mapped class goal, `threat_replacement_keys` must contain exactly its
 `threat-model:coverage-gap`. Every listed key remains an MDX placeholder in
 `goal_prompt` and has a full contextual value in `replacements`.
 
+In both goal kinds, `attack_surface_ids` holds `id` values copied from the
+threat model's `attack_surfaces` records — lowercase slug IDs, never
+human-readable surface names or invented labels.
+
 Each applicability decision has `class_id`, `decision`, `checks`, and
 `rationale`. Each check has `capability_id`, `requirement`,
 `observed_status`, `evidence`, and `rationale`.
@@ -161,5 +167,8 @@ structured guidance. After the agent returns, Ultrafuzz deterministically
 materializes `{{artifact_path}}/vulnerability-db-manifest.json` and the exact
 Markdown bytes for only those selected records beneath the task artifact
 directory at `vulnerability-db/selected/`. It fails closed if the plan,
-catalog, bundled database, manifest, or selected bytes disagree. Do not copy
-the whole database or inspect package installation paths.
+catalog, bundled database, manifest, or selected bytes disagree. Write only
+`goal-plan.json` yourself: never create `vulnerability-db-manifest.json` or
+anything under `vulnerability-db/` — Ultrafuzz publishes those bytes and a
+manifest you write will conflict with them. Do not copy the whole database or
+inspect package installation paths.
