@@ -63,11 +63,19 @@ test("captures tracked and untracked setup changes relative to the dependency ba
 test("captures a workspace containing ignored runtime roots", () => {
   const root = fixture();
   try {
-    writeFileSync(path.join(root, ".gitignore"), "node_modules\ncache/\n");
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\ncache/\nout/\n");
     git(root, ["add", ".gitignore"]);
     git(root, ["commit", "--quiet", "-m", "ignore node_modules"]);
     const baseline = captureWorkspaceTree(root);
 
+    // Ignored top-level entries that are NOT runtime roots. Naming these as pathspecs aborts
+    // `git add`, and Foundry's own .gitignore lists both, so `forge build` creates them on every
+    // real target. An earlier attempt at this fix passed its tests only because the fixture never
+    // created them.
+    for (const ignoredRoot of ["cache", "out"]) {
+      mkdirSync(path.join(root, ignoredRoot), { recursive: true });
+      writeFileSync(path.join(root, ignoredRoot, "build.json"), "{}\n");
+    }
     // Every runtime root the stager is supposed to skip, present and ignored.
     for (const runtimeRoot of ["node_modules", ".ultrafuzz", ".smithers", "artifacts"]) {
       mkdirSync(path.join(root, runtimeRoot, "nested"), { recursive: true });
@@ -83,11 +91,11 @@ test("captures a workspace containing ignored runtime roots", () => {
     );
     // Assert against the captured tree rather than substring-matching the patch text.
     const staged = git(root, ["ls-tree", "-r", "--name-only", captured.manifest.result_tree]);
-    for (const runtimeRoot of ["node_modules", ".ultrafuzz", ".smithers", "artifacts"]) {
+    for (const skipped of ["node_modules", ".ultrafuzz", ".smithers", "artifacts", "cache", "out"]) {
       assert.equal(
-        staged.split("\n").some((entry) => entry === runtimeRoot || entry.startsWith(`${runtimeRoot}/`)),
+        staged.split("\n").some((entry) => entry === skipped || entry.startsWith(`${skipped}/`)),
         false,
-        `${runtimeRoot} leaked into the captured tree: ${staged}`
+        `${skipped} leaked into the captured tree: ${staged}`
       );
     }
   } finally {
@@ -160,6 +168,33 @@ test("captures deletion of a tracked top-level path", () => {
       ["Removed.t.sol"]
     );
     assert.doesNotMatch(git(root, ["ls-tree", "-r", "--name-only", captured.manifest.result_tree]), /Removed/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A tracked file whose parent directory is gitignored is still listed by `ls-files --cached`, and
+// naming it trips the ignored-path error without `--force`. It must be captured, not dropped: it is
+// not under a runtime root, so nothing else would restore it.
+test("captures a tracked file inside an ignored directory", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "out/\n");
+    mkdirSync(path.join(root, "out"), { recursive: true });
+    writeFileSync(path.join(root, "out", "kept.json"), "baseline\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["add", "--force", "out/kept.json"]);
+    git(root, ["commit", "--quiet", "-m", "force-track a file under an ignored directory"]);
+    const baseline = captureWorkspaceTree(root);
+
+    writeFileSync(path.join(root, "out", "kept.json"), "mutated\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["out/kept.json"]
+    );
+    assert.equal(git(root, ["show", `${captured.manifest.result_tree}:out/kept.json`]), "mutated\n");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

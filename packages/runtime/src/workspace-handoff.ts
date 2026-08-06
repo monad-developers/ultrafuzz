@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstatSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { lstatSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -131,38 +131,77 @@ function parseChangedPaths(raw: string): WorkspacePatchFile[] {
 }
 
 /**
- * Stage everything except the runtime roots, then restore those roots to `treeish`.
+ * Stage every worktree change except the runtime roots, then restore those roots to `treeish`.
  *
- * The roots are omitted by naming only the *other* top-level entries as positive pathspecs. Two
- * properties matter and only this shape gives both. A negative pathspec (`:(exclude)<root>`, `:!<root>`,
- * or the `/**` form — all equivalent here) makes `git add` report an ignored path as an error rather
- * than skipping it, which aborted capture whenever a worktree held an ignored `node_modules` and killed
- * R44's `property-specification-a16z` node (issue #281). A bare `git add -A -- .` avoids that error but
- * *descends* into the roots, hashing every file into unreachable objects and turning any transient
- * ENOENT or unreadable file under `artifacts/` into a fresh capture abort — the runtime writes
- * `artifacts/<attemptId>/` and `.ultrafuzz/schemas/` into the workspace, and a target repo has no reason
- * to gitignore them. `core.excludesFile` does not help either: it is the lowest-precedence ignore
- * source, so a repo `.gitignore` negation re-admits the path.
+ * Three earlier shapes were all wrong, each verified by measurement rather than argument:
  *
- * The union of worktree and tree entries is used so that deleting a tracked top-level path is still
- * captured as a deletion. The trailing reset is belt and braces: gitignore never applies to tracked
- * paths, and resetting to `treeish` restores a tracked file under a root to its baseline content
- * instead of recording a spurious deletion.
+ * - `git add -A -- . :(exclude)<root>/**` — a negative pathspec makes `git add` report an ignored
+ *   path as an error, so an ignored `node_modules` aborted capture (issue #281, killed a live run).
+ * - bare `git add -A -- .` — avoids that error but descends into the roots, hashing them into
+ *   unreachable objects and aborting on any unreadable file under `artifacts/`. `core.excludesFile`
+ *   does not prevent the descent either: it is the lowest-precedence ignore source, so a repository
+ *   `.gitignore` negation re-admits the path.
+ * - naming top-level entry names as positive pathspecs — aborts on ANY ignored top-level entry, not
+ *   just a runtime root. Foundry ignores `cache/` and `out/`, which `forge build` creates, so that
+ *   was a wider regression than the bug it fixed.
+ *
+ * Naming the exact paths git itself reports avoids all three. `--exclude-standard` drops ignored
+ * untracked paths so none is ever named; `--cached` keeps tracked paths, including ones deleted from
+ * the worktree (so deletions are captured) and ones under an ignored directory (gitignore does not
+ * apply to tracked paths, so naming them is safe). Filtering on the first path segment means the
+ * runtime roots are never named and therefore never descended into.
+ *
+ * `--force` is required, and is safe precisely because of `--exclude-standard`: every ignored untracked
+ * path has already been dropped, so the only names passed are tracked paths or untracked paths git
+ * considers stageable, and each is an exact file path rather than a directory. Without it, naming a
+ * tracked file whose parent directory is ignored still trips the ignored-path error.
+ *
+ * Paths stay as bytes throughout: a non-UTF-8 filename decoded through a string would come back with
+ * replacement characters and match nothing, aborting capture. They are fed over stdin rather than
+ * argv so a wide repository cannot hit `E2BIG`, and `--literal-pathspecs` stops a name containing
+ * glob or `:` magic from being reinterpreted.
  */
 function stageWorkspaceTree(workspaceRoot: string, index: string, treeish: string): void {
+  const listed = runGitBuffer(
+    workspaceRoot,
+    ["--literal-pathspecs", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+    index
+  );
   const runtimeRoots = new Set<string>(WORKSPACE_RUNTIME_ROOTS);
-  const names = new Set<string>();
-  for (const entry of readdirSync(workspaceRoot)) {
-    if (entry !== ".git" && !runtimeRoots.has(entry)) names.add(entry);
+  const pathspecs: Buffer[] = [];
+  for (const entry of splitNulBuffer(listed)) {
+    const separator = entry.indexOf(0x2f);
+    const top = (separator < 0 ? entry : entry.subarray(0, separator)).toString("utf8");
+    if (top === ".git" || runtimeRoots.has(top)) continue;
+    pathspecs.push(entry);
   }
-  for (const entry of runGit(workspaceRoot, ["ls-tree", "--name-only", "-z", treeish], index).split("\0")) {
-    if (entry.length > 0 && entry !== ".git" && !runtimeRoots.has(entry)) names.add(entry);
+  // `git add` with an empty pathspec file stages nothing, but be explicit rather than relying on it.
+  if (pathspecs.length > 0) {
+    runGit(
+      workspaceRoot,
+      ["--literal-pathspecs", "add", "-A", "--force", "--pathspec-from-file=-", "--pathspec-file-nul"],
+      index,
+      Buffer.concat(pathspecs.flatMap((entry) => [entry, NUL]))
+    );
   }
-  // `git add -A --` with no pathspec would stage the whole worktree, including the roots.
-  if (names.size > 0) {
-    runGit(workspaceRoot, ["add", "-A", "--", ...[...names].sort()], index);
+  // gitignore never applies to tracked paths, so a tracked file under a runtime root is listed by
+  // `--cached` and filtered above; this restores anything already in the index from `read-tree` to
+  // `treeish` rather than leaving a stale entry or recording a spurious deletion.
+  runGit(workspaceRoot, ["--literal-pathspecs", "reset", "--quiet", treeish, "--", ...WORKSPACE_RUNTIME_ROOTS], index);
+}
+
+const NUL = Buffer.from([0]);
+
+function splitNulBuffer(raw: Buffer): Buffer[] {
+  const entries: Buffer[] = [];
+  let start = 0;
+  for (let index = 0; index < raw.length; index += 1) {
+    if (raw[index] !== 0) continue;
+    if (index > start) entries.push(raw.subarray(start, index));
+    start = index + 1;
   }
-  runGit(workspaceRoot, ["reset", "--quiet", treeish, "--", ...WORKSPACE_RUNTIME_ROOTS], index);
+  if (raw.length > start) entries.push(raw.subarray(start));
+  return entries;
 }
 
 function assertPatchPathsMatchManifest(
@@ -311,7 +350,7 @@ function withTemporaryIndex<T>(workspaceRoot: string, callback: (index: string) 
   }
 }
 
-function runGit(workspaceRoot: string, args: string[], index?: string, input?: string): string {
+function runGit(workspaceRoot: string, args: string[], index?: string, input?: string | Buffer): string {
   const env = index === undefined ? undefined : { ...process.env, GIT_INDEX_FILE: index };
   return execFileSync("git", args, {
     cwd: workspaceRoot,
@@ -320,4 +359,10 @@ function runGit(workspaceRoot: string, args: string[], index?: string, input?: s
     input,
     maxBuffer: MAX_PATCH_BYTES * 2
   });
+}
+
+/** Byte-exact git output, for path lists that may not be valid UTF-8. */
+function runGitBuffer(workspaceRoot: string, args: string[], index?: string): Buffer {
+  const env = index === undefined ? undefined : { ...process.env, GIT_INDEX_FILE: index };
+  return execFileSync("git", args, { cwd: workspaceRoot, env, maxBuffer: MAX_PATCH_BYTES * 2 });
 }
