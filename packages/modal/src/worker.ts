@@ -616,7 +616,11 @@ void (
         checkpointIncompatibleError: (message) => new CheckpointIncompatibleError(message)
       })
     : main()
-).catch(() => {
-  console.error("worker terminated");
+).catch((error: unknown) => {
+  // Bind and print the reason. This handler used to discard it, so every failure that was not one of the
+  // two classes `diagnosticCodeForError` recognises produced the string "worker terminated", exit code 1,
+  // and no cause anywhere — which is how five sandboxes ended at one node across three Aave v4 runs while
+  // two separate memory theories were chased and disproven (issue #307).
+  console.error("worker terminated", error instanceof Error ? (error.stack ?? error.message) : error);
   process.exitCode = 1;
 });
