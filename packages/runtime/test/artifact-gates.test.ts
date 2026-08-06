@@ -350,6 +350,84 @@ test("project discovery gate accepts a repository-root scan probe", () => {
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
+// R45's `project-discovery` died on `artifact-contract failure: invariant scan probe tests is
+// unavailable: scan probe is not a regular file` (issue #289). A scan probe records WHERE the agent
+// searched, and a directory like `tests/` is a perfectly reasonable thing to have scanned. The
+// repository-root probe above is already accepted on exactly that reasoning; a subdirectory was not.
+test("project discovery gate accepts a directory scan probe", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-directory-probe" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const discoveryWorkspace = path.join(layout.workspacesDir, "project-discovery");
+  fs.mkdirSync(path.join(discoveryWorkspace, "tests"), { recursive: true });
+  fs.writeFileSync(path.join(discoveryWorkspace, "tests", "Base.t.sol"), "contract Base {}\n");
+  writeArtifact(layout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: [
+        {
+          id: "probe-tests-directory",
+          source_path: "tests",
+          query: "invariant harness scan",
+          result: "Scanned the tests directory"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID"),
+    false,
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+// An invariant SOURCE is different: its bytes are the evidence, so a directory must still be refused.
+test("project discovery gate still rejects a directory invariant source", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-directory-source" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const discoveryWorkspace = path.join(layout.workspacesDir, "project-discovery");
+  fs.mkdirSync(path.join(discoveryWorkspace, "src"), { recursive: true });
+  writeArtifact(layout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [
+        {
+          id: "inv-1",
+          statement: "Total borrowed must not exceed supplied",
+          source_path: "src",
+          source_location: "line 1",
+          verbatim: "contract Hub {}"
+        }
+      ],
+      inventory_rows: [],
+      scan_probes: []
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+});
+
 test("project discovery gate rejects root-normalizing traversal and a symlinked workspace root", () => {
   const traversalLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-root-traversal" });
   const traversalNode = {

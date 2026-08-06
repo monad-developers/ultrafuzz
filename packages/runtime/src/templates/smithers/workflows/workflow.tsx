@@ -3452,11 +3452,17 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
     }
     // Scan probes may intentionally target optional files. When a probe path
     // is absent, its result text is the durable evidence of that absence.
+    let probeStat: ReturnType<typeof lstatSync>;
     try {
-      lstatSync(probeCandidate);
+      probeStat = lstatSync(probeCandidate);
     } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
       throw error;
+    }
+    // A directory probe names where the agent searched, exactly like the repository-root probe
+    // above. It is valid evidence but cannot be snapshotted as a regular UTF-8 file (issue #289).
+    if (probeStat.isDirectory() && !probeStat.isSymbolicLink()) {
+      continue;
     }
     const snapshot = readInvariantSourceSnapshot(workspaceRoot, probe.source_path, "scan probe");
     sourceSnapshots.set(probe.source_path, snapshot);
