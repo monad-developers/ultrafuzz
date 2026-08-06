@@ -18,6 +18,7 @@ import {
   watchWorkflowNode,
   type WorkflowLifecycleEvent
 } from "../src/index.js";
+import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
 import { SMITHERS_ORCHESTRATOR_BIN_PATH, SMITHERS_ORCHESTRATOR_VERSION } from "../src/smithers-package.js";
 
 const WORKFLOW_RUN_ID = "ultrafuzz-inspect-run";
@@ -798,6 +799,33 @@ test("diagnoseProject reports a healthy pinned install and the latest published 
   assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-install")?.status, "ok");
   assert.equal(typeof doctor.value?.validation.policy_posture.config?.status, "string");
   assert.ok(doctor.value?.toolchain.some((entry) => entry.name === "forge"));
+});
+
+// The scheduler and engine workarounds are the two that carry durable resume
+// progress, and an unreported posture reads as healthy. Cover every tracked
+// workaround, not just the CLI pair.
+test("diagnoseProject reports a posture for every tracked compatibility patch", async () => {
+  const { project, env } = await launchedProject({});
+  writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
+  const nodeModules = path.join(project, ".smithers", "node_modules");
+  const expected: Record<string, string> = {};
+  for (const [index, patch] of SMITHERS_COMPATIBILITY_PATCHES.entries()) {
+    // Rotate through the postures so a single hard-coded verdict cannot pass.
+    const posture = index % 2 === 0 ? "applied" : "missing";
+    const source = path.join(nodeModules, ...patch.packageName.split("/"), ...patch.sourceRelativePath.split("/"));
+    fs.mkdirSync(path.dirname(source), { recursive: true });
+    fs.writeFileSync(source, `${posture === "applied" ? patch.patched : patch.patchable}\n`, "utf8");
+    expected[patch.id] = posture;
+  }
+
+  const doctor = await diagnoseProject({ projectRoot: project, env, offline: true });
+
+  const reported = doctor.value?.workflow_engine.compatibility_patches ?? {};
+  assert.deepEqual(reported, expected);
+  // Named explicitly: these two were previously omitted from the posture report.
+  assert.ok(Object.hasOwn(reported, "terminal_state_restore"));
+  assert.ok(Object.hasOwn(reported, "resume_hydration"));
+  assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-patches")?.status, "warning");
 });
 
 test("diagnoseProject reports a missing install and a version mismatch", async () => {

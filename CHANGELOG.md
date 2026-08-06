@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Upgrades the pinned workflow engine to Smithers 0.32.0, moves the generated runner workspace onto Effect 4, and migrates existing 0.31.0 manifests forward (#274).
 - Adds first-class DeepSeek V4 Pro support through DeepSeek's official Claude
   Code endpoint, including cache-aware token telemetry, first-party pricing,
   Modal benchmark plumbing, and public benchmark coverage (#163).

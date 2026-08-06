@@ -1,6 +1,14 @@
-export const SMITHERS_ORCHESTRATOR_VERSION = "0.31.0";
+export const SMITHERS_ORCHESTRATOR_VERSION = "0.32.0";
 export const SMITHERS_ORCHESTRATOR_BIN_PATH = "src/bin/smithers.js";
-export const SMITHERS_EFFECT_VERSION = "3.21.4";
+// Smithers 0.32.0 migrated its runtime from Effect 3 to Effect 4 and pins
+// `4.0.0-beta.102` across its own packages, but the `@effect/*` packages it
+// depends on ask for a newer beta. Left alone, npm installs two Effect copies
+// side by side and the engine loses the single Effect module identity its
+// services are keyed on, so the generated manifest keeps deduplicating Effect
+// onto one version. Track the version Smithers itself declares: it is also what
+// pnpm resolves for this workspace, so the repository's Smithers integration
+// test exercises the same Effect build that generated cloud runs execute.
+export const SMITHERS_EFFECT_VERSION = "4.0.0-beta.102";
 export const KIMI_CODE_VERSION = "0.29.1";
 
 const REQUIRED_SMITHERS_DEPENDENCIES = {
@@ -22,45 +30,37 @@ const UNOVERRIDDEN_SMITHERS_DEPENDENCIES = {
   devDependencies: REQUIRED_SMITHERS_DEPENDENCIES.devDependencies
 } as const;
 
-const LEGACY_SMITHERS_DEPENDENCIES = {
-  dependencies: {
-    "smithers-orchestrator": "^0.27.0",
-    zod: "^4.4.3"
-  },
-  devDependencies: {
-    typescript: "^6.0.3"
-  }
-} as const;
+interface SmithersDependencyShape {
+  readonly dependencies: Readonly<Record<string, string>>;
+  readonly devDependencies: Readonly<Record<string, string>>;
+}
 
-const PREVIOUS_SMITHERS_DEPENDENCIES = {
-  dependencies: {
-    "smithers-orchestrator": "0.29.0",
-    zod: "4.4.3"
+// Every pinned shape Ultrafuzz has shipped, newest first. A generated manifest
+// left behind by an older Ultrafuzz must migrate forward instead of failing the
+// launch, because in-flight cloud runs resume against their existing project
+// root. Add the outgoing pin here whenever the runner version changes.
+const SUPERSEDED_SMITHERS_DEPENDENCIES: readonly SmithersDependencyShape[] = [
+  {
+    dependencies: { "smithers-orchestrator": "0.31.0", zod: "4.4.3" },
+    devDependencies: { typescript: "6.0.3" }
   },
-  devDependencies: {
-    typescript: "6.0.3"
-  }
-} as const;
-
-const OLDER_EXACT_SMITHERS_DEPENDENCIES = {
-  dependencies: {
-    "smithers-orchestrator": "0.28.0",
-    zod: "4.4.3"
+  {
+    dependencies: { "smithers-orchestrator": "0.29.0", zod: "4.4.3" },
+    devDependencies: { typescript: "6.0.3" }
   },
-  devDependencies: {
-    typescript: "6.0.3"
-  }
-} as const;
-
-const OLDEST_EXACT_SMITHERS_DEPENDENCIES = {
-  dependencies: {
-    "smithers-orchestrator": "0.27.0",
-    zod: "4.4.3"
+  {
+    dependencies: { "smithers-orchestrator": "0.28.0", zod: "4.4.3" },
+    devDependencies: { typescript: "6.0.3" }
   },
-  devDependencies: {
-    typescript: "6.0.3"
+  {
+    dependencies: { "smithers-orchestrator": "0.27.0", zod: "4.4.3" },
+    devDependencies: { typescript: "6.0.3" }
+  },
+  {
+    dependencies: { "smithers-orchestrator": "^0.27.0", zod: "^4.4.3" },
+    devDependencies: { typescript: "^6.0.3" }
   }
-} as const;
+];
 
 export interface SmithersPackageMigration {
   manifest: unknown;
@@ -107,12 +107,7 @@ export function migrateLegacySmithersPackageManifest(value: unknown): SmithersPa
     value.name !== "ultrafuzz-smithers" ||
     value.private !== true ||
     value.type !== "module" ||
-    (![
-      PREVIOUS_SMITHERS_DEPENDENCIES,
-      OLDER_EXACT_SMITHERS_DEPENDENCIES,
-      OLDEST_EXACT_SMITHERS_DEPENDENCIES,
-      LEGACY_SMITHERS_DEPENDENCIES
-    ].some((dependencies) => hasRequiredVersions(value, dependencies)) &&
+    (!SUPERSEDED_SMITHERS_DEPENDENCIES.some((dependencies) => hasRequiredVersions(value, dependencies)) &&
       !missingRequiredEffectOverride)
   ) {
     return { manifest: value, migrated: false };
@@ -141,13 +136,7 @@ export function migrateLegacySmithersPackageManifest(value: unknown): SmithersPa
 
 function hasRequiredVersions(
   value: Record<string, unknown>,
-  required:
-    | typeof REQUIRED_SMITHERS_DEPENDENCIES
-    | typeof PREVIOUS_SMITHERS_DEPENDENCIES
-    | typeof OLDER_EXACT_SMITHERS_DEPENDENCIES
-    | typeof OLDEST_EXACT_SMITHERS_DEPENDENCIES
-    | typeof LEGACY_SMITHERS_DEPENDENCIES
-    | typeof UNOVERRIDDEN_SMITHERS_DEPENDENCIES
+  required: SmithersDependencyShape | typeof REQUIRED_SMITHERS_DEPENDENCIES
 ): boolean {
   for (const [section, expected] of Object.entries(required)) {
     const actual = value[section];

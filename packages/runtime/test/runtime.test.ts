@@ -1282,7 +1282,7 @@ default_effort = "high"
       cwd: "/workspace/target",
       options: {}
     });
-    assert.equal(SMITHERS_ORCHESTRATOR_VERSION, "0.31.0");
+    assert.equal(SMITHERS_ORCHESTRATOR_VERSION, "0.32.0");
     assert.ok(pinnedCommand.args.includes("--final-message-only"));
     assert.ok(pinnedCommand.args.includes("--print"));
     assert.ok(pinnedCommand.args.includes("--work-dir"));
@@ -2397,7 +2397,7 @@ test(
 );
 
 test(
-  "generated Kimi completed-event usage is what pinned Smithers 0.31.0 consumes",
+  "generated Kimi completed-event usage is what pinned Smithers 0.32.0 consumes",
   { skip: !runningUnderBun },
   async () => {
     const smithersEntry = fs.realpathSync(
@@ -4073,6 +4073,48 @@ test("startRun patches the pinned runner lifecycle and resume hydration", async 
   assert.match(fs.readFileSync(engineSource, "utf8"), /restored durable terminal tasks into resumed workflow session/u);
 });
 
+// The test above proves the patcher rewrites sources that carry the expected
+// shape, but it supplies those sources itself. This one reads the release that is
+// actually pinned, so bumping the runner cannot silently turn a durability
+// workaround into a no-op: either the anchor is still there and unfixed, or this
+// fails and the workaround has to be re-justified against the new upstream code.
+test("every runner compatibility patch still anchors in the pinned Smithers release", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const resolveFromPinnedRunner = createRequire(
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js"))
+  );
+
+  for (const patch of SMITHERS_COMPATIBILITY_PATCHES) {
+    const label = `${patch.packageName}/${patch.sourceRelativePath}`;
+    const sourceSuffix = path.join(...patch.sourceRelativePath.split("/"));
+    // Smithers' subpackages expose `./*` as `./src/*.js` and nothing else, so the
+    // export subpath is the source path without its `src/` prefix and `.js` suffix.
+    const exportSubpath = patch.sourceRelativePath.replace(/^src\//u, "").replace(/\.js$/u, "");
+    const sourcePath = resolveFromPinnedRunner.resolve(`${patch.packageName}/${exportSubpath}`);
+    assert.equal(sourcePath.endsWith(sourceSuffix), true, `${label} resolved to ${sourcePath}`);
+
+    const packageVersion = (
+      JSON.parse(fs.readFileSync(path.join(sourcePath.slice(0, -sourceSuffix.length), "package.json"), "utf8")) as {
+        version?: string;
+      }
+    ).version;
+    assert.equal(packageVersion, SMITHERS_ORCHESTRATOR_VERSION, `${label} belongs to an unpinned release`);
+
+    const contents = fs.readFileSync(sourcePath, "utf8");
+    assert.equal(
+      contents.includes(patch.patched),
+      false,
+      `${label} already carries Ultrafuzz's replacement; upstream may have adopted it, so drop the workaround`
+    );
+    assert.equal(
+      contents.split(patch.patchable).length,
+      2,
+      `${label} no longer contains exactly one copy of the patched upstream shape; ` +
+        `re-check whether Smithers ${SMITHERS_ORCHESTRATOR_VERSION} fixed this itself`
+    );
+  }
+});
+
 test("startRun accepts the published Smithers bin target with its leading dot segment", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -4242,6 +4284,46 @@ test("startRun migrates the previous exact Smithers manifest without dropping cu
   assert.equal(migrated.dependencies["custom-agent-package"], "1.2.3");
   assert.equal((migrated as { overrides?: Record<string, string> }).overrides?.effect, SMITHERS_EFFECT_VERSION);
   assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /install/u);
+});
+
+// The Smithers 0.31.0 pin shipped an Effect 3 override. Its manifest must migrate
+// onto the current runner and Effect 4 rather than being rejected as modified,
+// because in-flight cloud runs resume against the project root they were launched
+// with and would otherwise fail before the engine ever starts.
+test("startRun migrates the Smithers 0.31.0 manifest and its Effect 3 override forward", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const packageJson = path.join(project, ".smithers", "package.json");
+  const manifest = JSON.parse(fs.readFileSync(packageJson, "utf8")) as {
+    dependencies: Record<string, string>;
+    overrides?: Record<string, string>;
+  };
+  manifest.dependencies["smithers-orchestrator"] = "0.31.0";
+  manifest.dependencies["custom-agent-package"] = "1.2.3";
+  manifest.overrides = { ...manifest.overrides, effect: "3.21.4" };
+  fs.writeFileSync(packageJson, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  writeFakeInstalledSmithers(project, { version: "0.31.0" });
+  const installer = writeFakeNpmInstaller(project);
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "migrated-effect-3-manifest-run",
+    env: {
+      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_FAKE_LOG: installer.smithersLogPath
+    }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const migrated = JSON.parse(fs.readFileSync(packageJson, "utf8")) as {
+    dependencies: Record<string, string>;
+    overrides?: Record<string, string>;
+  };
+  assert.equal(migrated.dependencies["smithers-orchestrator"], SMITHERS_ORCHESTRATOR_VERSION);
+  assert.equal(migrated.dependencies["custom-agent-package"], "1.2.3");
+  assert.equal(migrated.overrides?.effect, SMITHERS_EFFECT_VERSION);
+  assert.notEqual(migrated.overrides?.effect, "3.21.4");
 });
 
 test("startRun reinstalls a stale target-local Smithers package before launch", async () => {

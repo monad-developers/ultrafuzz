@@ -88,6 +88,58 @@ const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `    if (opts.resume) {
       );
     }
     const driverRenderer = {`;
+
+export type SmithersCompatibilityPatchId =
+  "detached_admission" | "supervisor_descriptor" | "terminal_state_restore" | "resume_hydration";
+
+export interface SmithersCompatibilityPatch {
+  /** Stable name this patch is reported under by `doctor`. */
+  readonly id: SmithersCompatibilityPatchId;
+  /** Package that owns the patched source, as published on the registry. */
+  readonly packageName: string;
+  /** Source file inside that package, relative to its own root. */
+  readonly sourceRelativePath: string;
+  /** Exact upstream text the patch replaces; must occur exactly once. */
+  readonly patchable: string;
+  /** Replacement text; its presence means the patch is already applied. */
+  readonly patched: string;
+}
+
+// The durability workarounds Ultrafuzz applies to the pinned runner. Every entry
+// is still unfixed upstream as of SMITHERS_ORCHESTRATOR_VERSION, so a runner bump
+// must re-verify each anchor against the newly pinned release instead of assuming
+// the workaround still lands.
+export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch[] = [
+  {
+    id: "detached_admission",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/detached-admission.js",
+    patchable: SMITHERS_CLI_DETACHED_ADMISSION_SOURCE,
+    patched: SMITHERS_CLI_DETACHED_ADMISSION_PATCH
+  },
+  {
+    id: "supervisor_descriptor",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE,
+    patched: SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH
+  },
+  {
+    id: "terminal_state_restore",
+    packageName: "@smithers-orchestrator/scheduler",
+    sourceRelativePath: "src/makeWorkflowSession.js",
+    patchable: SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE,
+    patched: SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH
+  },
+  {
+    id: "resume_hydration",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE,
+    patched: SMITHERS_ENGINE_RESUME_HYDRATION_PATCH
+  }
+];
+
 const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
   "ALL_PROXY",
   "APPDATA",
@@ -353,10 +405,7 @@ export interface SmithersInstallationPosture {
   installed_bin_target: string | null;
   bin_path: string | null;
   layout_error: string | null;
-  compatibility_patches: {
-    detached_admission: SmithersPatchPosture;
-    supervisor_descriptor: SmithersPatchPosture;
-  };
+  compatibility_patches: Record<SmithersCompatibilityPatchId, SmithersPatchPosture>;
 }
 
 export interface SmithersCommandSnapshot {
@@ -746,30 +795,35 @@ export function inspectSmithersInstallation(projectRoot: string): SmithersInstal
   };
 }
 
+// Reports every workaround in SMITHERS_COMPATIBILITY_PATCHES, including the two
+// resume-durability patches that live in the scheduler and engine packages. A
+// posture that goes unreported reads as healthy, and these two are exactly the
+// ones whose absence silently costs durable resume progress.
 function inspectSmithersCompatibilityPatches(
   projectRoot: string
 ): SmithersInstallationPosture["compatibility_patches"] {
   const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
-  const packageRoots = [
-    path.join(nodeModules, "@smithers-orchestrator", "cli"),
-    path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "cli")
-  ].filter((candidate) => fs.existsSync(candidate));
-  if (packageRoots.length !== 1) {
-    return { detached_admission: "unknown", supervisor_descriptor: "unknown" };
+  const postures = {} as Record<SmithersCompatibilityPatchId, SmithersPatchPosture>;
+  for (const patch of SMITHERS_COMPATIBILITY_PATCHES) {
+    const packageRoot = installedSmithersDependencyRoot(nodeModules, patch.packageName);
+    postures[patch.id] =
+      packageRoot === undefined
+        ? "unknown"
+        : patchPosture(path.join(packageRoot, ...patch.sourceRelativePath.split("/")), patch.patched, patch.patchable);
   }
-  const packageRoot = packageRoots[0]!;
-  return {
-    detached_admission: patchPosture(
-      path.join(packageRoot, "src", "detached-admission.js"),
-      SMITHERS_CLI_DETACHED_ADMISSION_PATCH,
-      SMITHERS_CLI_DETACHED_ADMISSION_SOURCE
-    ),
-    supervisor_descriptor: patchPosture(
-      path.join(packageRoot, "src", "index.js"),
-      SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH,
-      SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE
-    )
-  };
+  return postures;
+}
+
+// A registry install nests the runner's own dependencies under it, while a
+// hoisted layout puts them beside it. An ambiguous or absent root is reported as
+// unknown rather than guessed at.
+function installedSmithersDependencyRoot(nodeModules: string, packageName: string): string | undefined {
+  const segments = packageName.split("/");
+  const candidates = [
+    path.join(nodeModules, ...segments),
+    path.join(nodeModules, "smithers-orchestrator", "node_modules", ...segments)
+  ].filter((candidate) => fs.existsSync(candidate));
+  return candidates.length === 1 ? candidates[0] : undefined;
 }
 
 function patchPosture(sourcePath: string, patched: string, patchable: string): SmithersPatchPosture {
@@ -788,7 +842,7 @@ function patchPosture(sourcePath: string, patched: string, patchable: string): S
   }
   // The pinned release carries the exact shape Ultrafuzz patches, so a source
   // with neither the patch nor the patchable shape has been modified or
-  // replaced. `applySmithers031CompatibilityPatches` throws in that state, so
+  // replaced. `applySmithersCompatibilityPatches` throws in that state, so
   // report it as incompatible rather than assuming an upstream fix.
   return contents.includes(patchable) ? "missing" : "incompatible";
 }
@@ -1511,7 +1565,7 @@ async function ensureSmithersDependencies(
     resolveInstalledSmithersPackageRoot(projectRoot);
   }
   if (installedSmithersValidationError(projectRoot) === undefined) {
-    applySmithers031CompatibilityPatches(projectRoot);
+    applySmithersCompatibilityPatches(projectRoot);
     return;
   }
   await execFileAsync(
@@ -1539,10 +1593,10 @@ async function ensureSmithersDependencies(
   if (validationError !== undefined) {
     throw new Error(`Smithers dependency install did not produce the pinned local workflow runner: ${validationError}`);
   }
-  applySmithers031CompatibilityPatches(projectRoot);
+  applySmithersCompatibilityPatches(projectRoot);
 }
 
-function applySmithers031CompatibilityPatches(projectRoot: string): void {
+function applySmithersCompatibilityPatches(projectRoot: string): void {
   const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
   const candidatePackageRoots = [
     path.join(nodeModules, "@smithers-orchestrator", "cli"),
@@ -1570,10 +1624,12 @@ function applySmithers031CompatibilityPatches(projectRoot: string): void {
     if (admissionContents.split(SMITHERS_CLI_DETACHED_ADMISSION_SOURCE).length !== 2) {
       throw new Error("pinned workflow runner detached admission implementation is incompatible");
     }
-    // Smithers 0.31 waits for a durable RunStarted admission marker, but its
-    // hard-coded 30-second ceiling is shorter than cold startup for the public
-    // smoke graph. Retain the stronger admission proof while allowing bounded
-    // initialization time until the dependency exposes this as configuration.
+    // Smithers waits for a durable RunStarted admission marker, but through
+    // 0.32.0 its hard-coded 30-second ceiling is shorter than cold startup for
+    // the public smoke graph. Retain the stronger admission proof while allowing
+    // bounded initialization time until the dependency exposes this as
+    // configuration; 0.33.1 adds SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS, which
+    // will retire this patch once that release is published to npm.
     writeFileDurable(
       admissionSource,
       admissionContents.replace(SMITHERS_CLI_DETACHED_ADMISSION_SOURCE, SMITHERS_CLI_DETACHED_ADMISSION_PATCH)
@@ -1584,9 +1640,10 @@ function applySmithers031CompatibilityPatches(projectRoot: string): void {
     if (cliContents.split(SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE).length !== 2) {
       throw new Error("pinned workflow runner detached supervisor implementation is incompatible");
     }
-    // Smithers 0.31 closes the detached-engine log descriptor before reusing it
-    // for the supervisor spawn. Open a dedicated descriptor so supervised public
-    // runs do not fail nondeterministically with posix_spawn EBADF.
+    // Smithers closes the detached-engine log descriptor before reusing it for
+    // the supervisor spawn, still true in 0.32.0. Open a dedicated descriptor so
+    // supervised public runs do not fail nondeterministically with posix_spawn
+    // EBADF.
     writeFileDurable(
       cliSource,
       cliContents.replace(SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE, SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH)

@@ -719,10 +719,7 @@ export interface DoctorValue {
     latest_published_version: string | "unknown";
     layout_status: DoctorCheckStatus;
     layout_detail: string | null;
-    compatibility_patches: {
-      detached_admission: string;
-      supervisor_descriptor: string;
-    };
+    compatibility_patches: Record<string, string>;
   };
 }
 
