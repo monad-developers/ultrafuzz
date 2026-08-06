@@ -268,14 +268,61 @@ test("generated Smithers worktrees fail closed on any source other than the pinn
   assert.match(source, /preservePinnedSourceProof\(task\)/u);
   assert.match(source, /git\(\["rev-parse", "HEAD"\]\)/u);
   assert.match(source, /git\(\["rev-parse", pinnedSourceRef\]\)/u);
-  assert.match(source, /git\(\["rev-list", "--all"\]\)/u);
-  assert.match(source, /git\(\["cat-file", "--batch-all-objects", "--batch-check=%\(objecttype\)"\]\)/u);
+  assert.match(source, /git\(\["rev-list", "--all", "--count"\]\)/u);
+  assert.match(source, /git\(\["rev-list", "--all", "--max-count=1"\]\)/u);
+  assert.match(source, /git fsck --connectivity-only --unreachable --no-reflogs --no-progress/u);
+  assert.doesNotMatch(source.slice(proofStart, proofEnd), /--batch-all-objects/u);
   assert.match(source, /git\(\["remote"\]\)/u);
   assert.match(source, /source-isolation failure/u);
   assert.match(source, /"source-proofs"/u);
   assert.match(source, /path\.resolve\(process\.cwd\(\), task\.metadata\.artifacts\.dir, "\.\.", "\.\."\)/u);
   assert.doesNotMatch(source.slice(proofStart, proofEnd), /task\.runRoot/u);
   assert.match(source, /ultrafuzz\.agent-source-proof\.v1/u);
+});
+
+test("generated Smithers pinned source proof counts hidden unreachable commits without batch object output", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const commandStart = source.indexOf("const unreachableCommitCountCommand");
+  const commandEnd = source.indexOf("\n\nconst { Workflow", commandStart);
+  assert.ok(commandStart >= 0, source);
+  assert.ok(commandEnd > commandStart, source);
+  const command = new Function(`${source.slice(commandStart, commandEnd)}; return unreachableCommitCountCommand;`)();
+  assert.equal(typeof command, "string");
+  assert.doesNotMatch(command, /--batch-all-objects/u);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-hidden-commit-"));
+  const git = (args: string[]): string =>
+    execFileSync("git", args, {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    }).trim();
+  const countHiddenCommits = (): string =>
+    execFileSync("bash", ["-lc", command], {
+      cwd: root,
+      encoding: "utf8",
+      maxBuffer: 1024,
+      stdio: ["ignore", "pipe", "pipe"]
+    }).trim();
+  try {
+    git(["init", "--quiet"]);
+    git(["config", "user.name", "Ultrafuzz test"]);
+    git(["config", "user.email", "test@example.invalid"]);
+    fs.writeFileSync(path.join(root, "source.txt"), "pinned\n");
+    git(["add", "source.txt"]);
+    git(["commit", "--quiet", "-m", "pinned"]);
+    assert.equal(countHiddenCommits(), "0");
+
+    git(["checkout", "--quiet", "-b", "hidden"]);
+    fs.writeFileSync(path.join(root, "source.txt"), "hidden\n");
+    git(["add", "source.txt"]);
+    git(["commit", "--quiet", "-m", "hidden"]);
+    git(["checkout", "--quiet", "master"]);
+    git(["branch", "-D", "hidden"]);
+    assert.equal(countHiddenCommits(), "1");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("generated Smithers retries reset exact task-owned artifact contents after the first attempt", () => {

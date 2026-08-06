@@ -78,6 +78,8 @@ const verificationOutput = z.object({
 
 const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
+const unreachableCommitCountCommand =
+  'set -euo pipefail; git fsck --connectivity-only --unreachable --no-reflogs --no-progress 2>&1 | awk \'$1 == "unreachable" && $2 == "commit" { count++ } END { print count + 0 }\'';
 
 const { Workflow, Task, Worktree, Parallel, Sandbox, smithers, outputs } = createSmithers({
   input: inputSchema,
@@ -1368,6 +1370,13 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"]
     }).trim();
+  const gitUnreachableCommitCount = (): string =>
+    execFileSync("bash", ["-lc", unreachableCommitCountCommand], {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+      maxBuffer: 1024,
+      stdio: ["ignore", "pipe", "pipe"]
+    }).trim();
   const commit = git(["rev-parse", "HEAD"]).toLowerCase();
   const tree = git(["rev-parse", "HEAD^{tree}"]).toLowerCase();
   const pinnedCommit = git(["rev-parse", pinnedSourceRef]).toLowerCase();
@@ -1379,18 +1388,21 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
       const [name, object] = line.split("\0");
       return { name, object: object?.toLowerCase() };
     });
-  const revisions = git(["rev-list", "--all"]).split("\n").filter(Boolean);
-  const commitObjectCount = git(["cat-file", "--batch-all-objects", "--batch-check=%(objecttype)"])
-    .split("\n")
-    .filter((type) => type === "commit").length;
+  const reachableCommitCount = Number(git(["rev-list", "--all", "--count"]));
+  const onlyReachableCommit = git(["rev-list", "--all", "--max-count=1"]).toLowerCase();
+  const unreachableCommitCount = Number(gitUnreachableCommitCount());
+  const commitObjectCount = reachableCommitCount + unreachableCommitCount;
   if (
     !/^[0-9a-f]{40}$/u.test(commit) ||
     !/^[0-9a-f]{40}$/u.test(tree) ||
     commit !== pinnedCommit ||
     remotes.length !== 0 ||
-    revisions.length !== 1 ||
+    !Number.isSafeInteger(reachableCommitCount) ||
+    !Number.isSafeInteger(unreachableCommitCount) ||
+    unreachableCommitCount < 0 ||
+    reachableCommitCount !== 1 ||
     commitObjectCount !== 1 ||
-    revisions[0]?.toLowerCase() !== pinnedCommit ||
+    onlyReachableCommit !== pinnedCommit ||
     refs.some(
       (ref) =>
         (ref.name !== pinnedSourceRef && !ref.name?.startsWith("refs/heads/ultrafuzz/")) || ref.object !== pinnedCommit
@@ -1419,7 +1431,7 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
       base_ref: pinnedSourceRef,
       refs,
       remotes,
-      revision_count: revisions.length,
+      revision_count: reachableCommitCount,
       commit_object_count: commitObjectCount
     },
     null,
