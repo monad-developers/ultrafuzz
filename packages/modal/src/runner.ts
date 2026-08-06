@@ -1387,35 +1387,57 @@ export async function overseeModalBenchmarks(input: {
     throw new Error("Modal overseer consecutive failure limit must be positive");
   }
   const overseeOnce = input.overseeOnce ?? overseeModalBenchmarkOnce;
-  let consecutiveTotalFailures = 0;
+  // Counted PER JOB. A shared counter only tripped when every job failed on the same tick, so with two
+  // or more jobs a permanently broken one — an incompatible config fingerprint, a launch state naming a
+  // different run — was absorbed forever while a healthy sibling kept resetting the count. "Loud"
+  // silently became "never" as the job count grew.
+  const consecutiveFailures = new Map<string, number>();
+  const abandoned = new Map<string, unknown>();
+  let active = [...input.jobs];
   for (;;) {
     const snapshots: ModalOverseerSnapshot[] = [];
-    const failures: { config_path: string; error: string }[] = [];
-    let lastError: unknown;
-    for (const job of input.jobs) {
+    const failures: { config_path: string; error: string; consecutive_failures: number }[] = [];
+    for (const job of active) {
       try {
         snapshots.push(await overseeOnce({ ...job, env: input.env }));
+        consecutiveFailures.set(job.configPath, 0);
       } catch (error) {
-        lastError = error;
-        failures.push({ config_path: job.configPath, error: error instanceof Error ? error.message : String(error) });
+        const count = (consecutiveFailures.get(job.configPath) ?? 0) + 1;
+        consecutiveFailures.set(job.configPath, count);
+        failures.push({
+          config_path: job.configPath,
+          error: error instanceof Error ? error.message : String(error),
+          consecutive_failures: count
+        });
+        if (count >= maxConsecutiveFailures) abandoned.set(job.configPath, error);
       }
     }
+    // A wedged job stops being polled so its healthy siblings keep being supervised, but it is never
+    // forgotten: the process still ends non-zero below, naming it.
+    active = active.filter((job) => !abandoned.has(job.configPath));
     console.log(
       JSON.stringify({
         updated_at: new Date().toISOString(),
         jobs: snapshots,
-        ...(failures.length > 0 ? { failed_jobs: failures } : {})
+        ...(failures.length > 0 ? { failed_jobs: failures } : {}),
+        ...(abandoned.size > 0 ? { abandoned_jobs: [...abandoned.keys()] } : {})
       })
     );
-    if (failures.length === input.jobs.length) {
-      consecutiveTotalFailures += 1;
-      if (consecutiveTotalFailures >= maxConsecutiveFailures) throw lastError;
-    } else {
-      consecutiveTotalFailures = 0;
+    // Guarded on length as well as completeness: a tick in which every remaining job failed leaves
+    // `snapshots` empty, and `[].every(...)` is true, so without this the overseer would report a wedged
+    // job as complete and exit 0.
+    const remainingComplete =
+      snapshots.length === active.length && snapshots.length > 0 && snapshots.every((snapshot) => snapshot.complete);
+    if (abandoned.size > 0 && (active.length === 0 || remainingComplete)) {
+      // Deliberately not a bare rethrow. The underlying message is often the very symptom this loop
+      // exists to survive (`The Sandbox is unavailable...`), so rethrowing it verbatim would read as the
+      // fix having regressed. The cause is preserved for whoever needs the original.
+      throw new Error(
+        `Modal overseer abandoned ${abandoned.size} job(s) after ${maxConsecutiveFailures} consecutive failed ticks: ${[...abandoned.keys()].join(", ")}`,
+        { cause: [...abandoned.values()].at(-1) }
+      );
     }
-    // Guarded on length as well as completeness: an all-failed tick leaves `snapshots` empty, and
-    // `[].every(...)` is true, so without this the overseer would report a wedged job as complete.
-    if (snapshots.length === input.jobs.length && snapshots.every((snapshot) => snapshot.complete)) return snapshots;
+    if (remainingComplete) return snapshots;
     await sleep(pollMs);
   }
 }

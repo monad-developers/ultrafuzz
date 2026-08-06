@@ -1630,12 +1630,75 @@ describe("Modal worker identity", () => {
     } finally {
       log.mockRestore();
     }
-    // The first tick failed for one job. Supervision must have continued, and that tick must not have
-    // been reported as complete even though its only successful snapshot said so.
+    // The first tick failed for one job, and supervision must have continued.
     expect(calls.length).toBeGreaterThan(2);
     const first = JSON.parse(logged[0]!) as { jobs: unknown[]; failed_jobs?: { config_path: string }[] };
     expect(first.jobs).toHaveLength(1);
     expect(first.failed_jobs?.[0]?.config_path).toBe("/tmp/first");
+  });
+
+  // The case the length guard actually protects, which the test above does not reach: a healthy job
+  // reports complete on the same tick a sibling throws. Without the guard the loop would return a
+  // one-entry array for a two-job overseer and silently abandon the sibling.
+  it("does not report completion while a sibling job is still failing", async () => {
+    const job = (configPath: string) => ({
+      configPath,
+      statePath: `${configPath}.state`,
+      recoveryStatePath: `${configPath}.recovery`
+    });
+    let healthyTicks = 0;
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const snapshots = await overseeModalBenchmarks({
+        jobs: [job("/tmp/healthy"), job("/tmp/flaky")],
+        pollMs: 1,
+        overseeOnce: async (current) => {
+          if (current.configPath === "/tmp/healthy") {
+            healthyTicks += 1;
+            return { logical_run_id: "run-healthy", complete: true, settled: true, rows: [] };
+          }
+          if (healthyTicks < 3) throw new Error("The Sandbox is unavailable. This Sandbox may have already shut down.");
+          return { logical_run_id: "run-flaky", complete: true, settled: true, rows: [] };
+        }
+      });
+      expect(snapshots.map((entry) => entry.logical_run_id)).toEqual(["run-healthy", "run-flaky"]);
+    } finally {
+      log.mockRestore();
+    }
+    // Completion was withheld until the failing sibling also succeeded.
+    expect(healthyTicks).toBe(3);
+  });
+
+  // A permanently broken job among healthy ones must not be absorbed forever. It stops being polled so
+  // its siblings keep being supervised, and the process still ends non-zero naming it.
+  it("abandons a persistently failing job, keeps supervising the rest, then exits naming it", async () => {
+    const job = (configPath: string) => ({
+      configPath,
+      statePath: `${configPath}.state`,
+      recoveryStatePath: `${configPath}.recovery`
+    });
+    const wedgedCause = new Error("incompatible Modal recovery configuration fingerprint");
+    const attempts = new Map<string, number>();
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      await expect(
+        overseeModalBenchmarks({
+          jobs: [job("/tmp/wedged"), job("/tmp/fine")],
+          pollMs: 1,
+          maxConsecutiveFailures: 2,
+          overseeOnce: async (current) => {
+            attempts.set(current.configPath, (attempts.get(current.configPath) ?? 0) + 1);
+            if (current.configPath === "/tmp/wedged") throw wedgedCause;
+            return { logical_run_id: "run-fine", complete: true, settled: true, rows: [] };
+          }
+        })
+      ).rejects.toThrow(/abandoned 1 job\(s\) after 2 consecutive failed ticks: \/tmp\/wedged/u);
+    } finally {
+      log.mockRestore();
+    }
+    // The wedged job stopped being polled at its limit; the healthy one was never starved.
+    expect(attempts.get("/tmp/wedged")).toBe(2);
+    expect(attempts.get("/tmp/fine")).toBe(2);
   });
 
   it("gives up loudly once every job has failed for the consecutive limit", async () => {
@@ -1653,7 +1716,7 @@ describe("Modal worker identity", () => {
             throw failure;
           }
         })
-      ).rejects.toBe(failure);
+      ).rejects.toMatchObject({ cause: failure });
     } finally {
       log.mockRestore();
     }
