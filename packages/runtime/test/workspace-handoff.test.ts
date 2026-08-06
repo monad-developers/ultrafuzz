@@ -662,3 +662,26 @@ test("rethrows a non-ENOBUFS failure completely unchanged", () => {
     }
   );
 });
+
+test("bounds the retained stderr in bytes, not UTF-16 code units", () => {
+  // A constant named `_BYTES` honoured against a decoded string is honoured at up to three times its
+  // value: `"契約".repeat(3000).slice(0, 2048)` is 6144 UTF-8 bytes. The point of keeping a head of
+  // stderr is that it stays small, so the bound has to be applied to the buffer.
+  let thrown: Error | undefined;
+  try {
+    rethrowOversizedGitOutput(["diff"], enobufs("x".repeat(50), "契約の不変条件".repeat(3000)));
+  } catch (error) {
+    thrown = error as Error;
+  }
+  const cause = (thrown as { cause?: Record<string, unknown> }).cause ?? {};
+  const retained = String(cause.stderr ?? "");
+  assert.ok(retained.length > 0, "a head of stderr should survive");
+  assert.ok(
+    Buffer.byteLength(retained, "utf8") <= 2048,
+    `retained stderr was ${Buffer.byteLength(retained, "utf8")} bytes`
+  );
+  assert.ok(
+    Buffer.byteLength((thrown as Error).message, "utf8") < 4096,
+    "the inlined stderr head should stay small too"
+  );
+});

@@ -486,6 +486,15 @@ const DISCARDED_SPAWN_FIELDS = ["stdout", "stderr", "output", "error"] as const;
 /** How much of git's own stderr to keep on the cause; enough to read, far too little to bloat a write. */
 const RETAINED_STDERR_BYTES = 2048;
 
+/** How much of it to inline in the message, which lands in logs that are read by eye. */
+const INLINED_STDERR_BYTES = 400;
+
+/** Decode at most `limit` BYTES, dropping a replacement character left by a mid-sequence cut. */
+function truncateUtf8(buffer: Buffer, limit: number): string {
+  const text = buffer.subarray(0, limit).toString("utf8");
+  return buffer.length > limit && text.endsWith("\uFFFD") ? text.slice(0, -1) : text;
+}
+
 /**
  * Rethrows an oversized-output failure as something an operator can act on.
  *
@@ -524,7 +533,16 @@ export function rethrowOversizedGitOutput(args: readonly string[], error: unknow
   const asText = (value: unknown): string =>
     Buffer.isBuffer(value) ? value.toString("utf8") : typeof value === "string" ? value : "";
   const diff = asText((error as { stdout?: unknown }).stdout);
-  const errorOutput = asText((error as { stderr?: unknown }).stderr);
+  const capturedStderr = (error as { stderr?: unknown }).stderr;
+  const errorOutput = asText(capturedStderr);
+  // Bound the BUFFER, not the decoded string: `slice` on a string counts UTF-16 code units, so a
+  // constant named `_BYTES` would be honoured at up to three times its value on multi-byte output.
+  // Cutting mid-sequence leaves a trailing replacement character which re-encodes to THREE bytes, so
+  // dropping it is what makes the retained text actually fit the bound rather than overshoot it.
+  const retainedStderr = truncateUtf8(
+    Buffer.isBuffer(capturedStderr) ? capturedStderr : Buffer.from(errorOutput, "utf8"),
+    RETAINED_STDERR_BYTES
+  );
 
   const totals = new Map<string, { bytes: number; files: number }>();
   const headers = [...diff.matchAll(DIFF_HEADER)];
@@ -554,7 +572,7 @@ export function rethrowOversizedGitOutput(args: readonly string[], error: unknow
   // tested `diff === ""`, which still told that lie whenever a little stdout accompanied the flood.
   const overflowedStderr = errorOutput.length > diff.length;
   const detail = overflowedStderr
-    ? `wrote more than the ${MAX_GIT_CAPTURE_BYTES}-byte capture buffer to stderr: ${errorOutput.slice(0, 400)}`
+    ? `wrote more than the ${MAX_GIT_CAPTURE_BYTES}-byte capture buffer to stderr: ${truncateUtf8(Buffer.from(retainedStderr, "utf8"), INLINED_STDERR_BYTES)}`
     : // Both ceilings, because they differ and only one of them is the one being reported. An operator
       // told about the 32 MB buffer who trims to just under it hits `workspace patch exceeds` next.
       `produced more than the ${MAX_GIT_CAPTURE_BYTES}-byte capture buffer (a handed-off patch must also stay under ${MAX_PATCH_BYTES} bytes); the workspace is too large to hand off`;
@@ -565,7 +583,6 @@ export function rethrowOversizedGitOutput(args: readonly string[], error: unknow
   // an unstripped cause serializes to hundreds of megabytes where a stripped one is about a kilobyte.
   // (Exact figures depend entirely on the captured content, so none are quoted here.) `error` goes too:
   // it is a self-reference, `e.error === e`, that only a de-cycling serializer survives.
-  const retainedStderr = errorOutput.slice(0, RETAINED_STDERR_BYTES);
   for (const field of DISCARDED_SPAWN_FIELDS) delete (error as unknown as Record<string, unknown>)[field];
   // A head of stderr is cheap and is the only surviving record of what git actually said, which the
   // message carries only when stderr was the stream that overflowed.
