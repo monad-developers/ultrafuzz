@@ -59,6 +59,7 @@ import {
   readModalCollectResultFilesWithStatusRetry,
   overseeModalBenchmarks,
   readOptionalModalSandboxText,
+  runningRecoverySandbox,
   replaceSanitizedModalCollectedFiles,
   selectModalCollectedEvidence,
   terminateModalBenchmarkSandboxes,
@@ -1721,6 +1722,42 @@ describe("Modal worker identity", () => {
       log.mockRestore();
     }
     expect(attempts).toHaveLength(3);
+  });
+
+  // The exit code that explains a sandbox death was polled here and dropped. On unattended runs nothing
+  // else observes these deaths, so three Aave v4 runs lost their sandbox at `stateful-invariant-setup`
+  // with no way to tell an OOM kill from an eviction from a clean exit (issue #302).
+  it("returns the exit code of a sandbox that has already exited, and the sandbox while it lives", async () => {
+    const detach = vi.fn();
+    const exited = {
+      sandboxes: { fromId: async () => ({ poll: async () => 137, detach }) }
+    } as unknown as Parameters<typeof runningRecoverySandbox>[0];
+    await expect(runningRecoverySandbox(exited, "sb-dead", "app", "name")).resolves.toEqual({ exitCode: 137 });
+    expect(detach).toHaveBeenCalledTimes(1);
+
+    // A clean exit must survive as 0 rather than being coerced away, because a clean exit at a node that
+    // was supposed to keep working is the most surprising answer of all.
+    const clean = {
+      sandboxes: { fromId: async () => ({ poll: async () => 0, detach: vi.fn() }) }
+    } as unknown as Parameters<typeof runningRecoverySandbox>[0];
+    await expect(runningRecoverySandbox(clean, "sb-clean", "app", "name")).resolves.toEqual({ exitCode: 0 });
+
+    // Still running: the caller gets the sandbox to keep using, and no exit code is invented.
+    const live = { poll: async () => null, detach: vi.fn() };
+    const alive = {
+      sandboxes: { fromId: async () => live }
+    } as unknown as Parameters<typeof runningRecoverySandbox>[0];
+    await expect(runningRecoverySandbox(alive, "sb-live", "app", "name")).resolves.toEqual({ sandbox: live });
+
+    // A vanished sandbox is an absence, not an observation.
+    const gone = {
+      sandboxes: {
+        fromId: async () => {
+          throw new NotFoundError("gone");
+        }
+      }
+    } as unknown as Parameters<typeof runningRecoverySandbox>[0];
+    await expect(runningRecoverySandbox(gone, "sb-gone", "app", "name")).resolves.toEqual({});
   });
 
   it("rejects an oversized remote public result before reading and rechecks the returned byte length", async () => {
