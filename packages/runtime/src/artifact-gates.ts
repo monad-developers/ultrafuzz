@@ -1776,21 +1776,31 @@ function propertyLensOutput(node: PlannedGraphNode): PlannedGraphNode["outputs"]
 }
 
 /**
- * True for an identifier shaped like a citation into a reference catalog we were not given.
+ * True for an identifier that cites a reference catalog we were not given, WITHOUT asserting an
+ * external namespace — a citation the lens prompt told the model to copy out of a pinned-reference
+ * document. Those are stripped with a `PROPERTY_REFERENCE_EXPECTATION_SANITIZED` diagnostic.
  *
- * Segments may be separated by `-` or `_`, in any combination, with a numeric suffix. R44's
- * `property-specification-0kn0t` node was killed by `LEND_ACC_01` (issue #283) because the original
- * pattern allowed only a single hyphen before the digits: the ID was not recognised, so the sanitizer
- * left it in place and `verifyPropertyProvenanceArtifacts` failed the node as unauthorized, while
- * `LEND-01` was stripped quietly in the same position. Multi-segment forms such as `LEND-ACC-01` and
- * `CRYTIC-ERC4626-05` are common in the catalogues these lens prompts cite, so matching only one
- * shape would leave the same trap for the next label.
+ * A namespaced identifier such as `benchmark:unexpected` or `scfuzzbench:aave-v4:iSpoke_supply` is a
+ * different animal: it asserts that some external authority blessed this property. That is the
+ * forgery this gate exists to reject, so it keeps failing the node with its bytes preserved.
  *
- * Namespaced identifiers such as `benchmark:unexpected` deliberately do NOT match: those are the
- * benchmark-mapping citations the gate exists to reject, and they must keep failing the node.
+ * This rule used to be approximated by a SHAPE pattern, and the approximation kept costing runs:
+ *
+ *   1. `LEND-01` — stripped correctly.
+ *   2. `LEND_ACC_01` — killed R44's `property-specification-0kn0t` (issue #283) because the pattern
+ *      allowed only a single hyphen before the digits, so the ID was neither authorised nor
+ *      strippable. Fixed by widening the pattern to `-`/`_` segments (PR #284).
+ *   3. `testConvertToAssetsSharesDesirable` — killed R45's `property-specification-runtime-verification`
+ *      (issue #293). It is a test-function name from that lens's own pinned reference, and no shape
+ *      pattern should be expected to anticipate it.
+ *
+ * A third widening would have accepted nearly any token and hollowed the gate out. The namespace test
+ * is what the old comment already said the rule meant, so this makes the implementation match its
+ * stated intent instead of chasing shapes. Stripping only ever REMOVES a provenance claim, so it is
+ * the safe direction; failing the node is what silently costs a whole reference lens.
  */
 function isUnsupportedExternalReferenceLabel(expectationId: string): boolean {
-  return /^[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)*[-_]\d+$/u.test(expectationId);
+  return !expectationId.includes(":");
 }
 
 function readLensSuppliedExpectationIds(

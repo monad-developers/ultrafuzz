@@ -1674,6 +1674,106 @@ test("property lens gate rejects schema-invalid expectation catalogs even when d
   );
 });
 
+// R45's `property-specification-runtime-verification` died at 2026-08-06T18:28:20Z on five camelCase
+// test-function names copied from its own pinned reference (issue #293):
+//
+//   Property lens expectation "testConvertToAssetsSharesDesirable" is not present in a supplied
+//   pinned-reference catalog
+//
+// This is the THIRD identifier shape to hit the gate: `LEND-01` was stripped, `LEND_ACC_01` killed R44
+// (#283) until the shape test was widened, and a camelCase name is not a shape any widening should
+// chase. The distinction the gate actually cares about is already stated in its own comment: a
+// NAMESPACED identifier asserts external authority and must fail closed, an unnamespaced one is a
+// citation the model copied from a document and can be stripped.
+test("property lens authority sanitizer strips an unnamespaced camelCase expectation", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-camel" });
+  writeArtifact(
+    layout,
+    "recon-properties",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: ["testConvertToAssetsSharesDesirable", "testPreviewDepositZeroAmountReturnsZero"]
+        }
+      ]
+    })
+  );
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "recon-properties",
+    logical_id: "recon-properties",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
+    JSON.stringify(result.diagnostics)
+  );
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+    false,
+    JSON.stringify(result.diagnostics)
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
+      .properties[0].reference_expectations,
+    undefined
+  );
+});
+
+// The other half of the same rule, kept explicit so a future widening cannot quietly relax it: a
+// namespaced identifier is a benchmark-mapping claim and must still fail the node, mixed in with
+// strippable citations so the all-or-nothing guard is exercised too.
+test("property lens authority sanitizer still fails closed on a namespaced expectation", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-namespaced" });
+  writeArtifact(
+    layout,
+    "recon-properties",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: ["testConvertToAssetsSharesDesirable", "scfuzzbench:aave-v4:iSpoke_supply"]
+        }
+      ]
+    })
+  );
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "recon-properties",
+    logical_id: "recon-properties",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+    JSON.stringify(result.diagnostics)
+  );
+  // The forged claim must survive byte-for-byte so the failure is diagnosable.
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
+      .properties[0].reference_expectations,
+    ["testConvertToAssetsSharesDesirable", "scfuzzbench:aave-v4:iSpoke_supply"]
+  );
+});
+
 test("property lens authority sanitizer applies to custom logical lens IDs", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-custom-lens" });
   writeArtifact(
