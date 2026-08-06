@@ -2606,10 +2606,14 @@ export async function collectModalBenchmark(input: {
       const { state, app, image } = await requiredLaunchStateForInspection(input.statePath, modal);
       for (const launch of state.launches) {
         const volume = await getOrCreateModalV2Volume(modal, launch.volume_name, { createIfMissing: false });
-        const files = await readVolumeFiles(modal, app, image, volume, launch.remote_root, [
-          ...MODAL_COLLECT_RESULT_FILES.filter((name) => name !== MODAL_RECOVERY_LIFECYCLE_FILE),
-          ...(input.includePublicResults === true ? [MODAL_PUBLIC_RESULT_FILE] : [])
-        ]);
+        const files = await readModalCollectResultFilesWithStatusRetry({
+          launch,
+          readFiles: () =>
+            readVolumeFiles(modal, app, image, volume, launch.remote_root, [
+              ...MODAL_COLLECT_RESULT_FILES.filter((name) => name !== MODAL_RECOVERY_LIFECYCLE_FILE),
+              ...(input.includePublicResults === true ? [MODAL_PUBLIC_RESULT_FILE] : [])
+            ])
+        });
         const persistedStatus = latestPersistedWorkerStatus(files, launch);
         if (
           isModalWorkerStatusTerminal(persistedStatus) &&
@@ -3286,6 +3290,38 @@ function parseJson(value: string): unknown {
   } catch {
     return {};
   }
+}
+
+export async function readModalCollectResultFilesWithStatusRetry(input: {
+  readFiles: () => Promise<Record<string, string>>;
+  launch: Pick<ModalLaunchRecord, "generation" | "attempt">;
+  maxAttempts?: number;
+  retryDelayMs?: number;
+}): Promise<Record<string, string>> {
+  const maxAttempts = input.maxAttempts ?? 3;
+  if (!Number.isSafeInteger(maxAttempts) || maxAttempts <= 0) {
+    throw new Error("Modal collection status retry attempts must be positive");
+  }
+  const retryDelayMs = input.retryDelayMs ?? 250;
+  if (!Number.isSafeInteger(retryDelayMs) || retryDelayMs < 0) {
+    throw new Error("Modal collection status retry delay must be non-negative");
+  }
+
+  let files: Record<string, string> | undefined;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    files = await input.readFiles();
+    if (!hasRetryableLiveStatusCollectionMismatch(files, input.launch)) return files;
+    if (attempt < maxAttempts && retryDelayMs > 0) await sleep(retryDelayMs);
+  }
+  return files!;
+}
+
+function hasRetryableLiveStatusCollectionMismatch(
+  files: Readonly<Record<string, string>>,
+  launch: Pick<ModalLaunchRecord, "generation" | "attempt">
+): boolean {
+  const status = files["status.json"];
+  return status !== undefined && parseModalWorkerResult(parseJson(status), launch) === undefined;
 }
 
 function latestPersistedWorkerStatus(

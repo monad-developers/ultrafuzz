@@ -1733,6 +1733,7 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
   const onlyReachableCommit = git(["rev-list", "--all", "--max-count=1"]).toLowerCase();
   const unreachableCommitCount = Number(gitUnreachableCommitCount());
   const commitObjectCount = reachableCommitCount + unreachableCommitCount;
+  const pinnedSourceRefPresent = refs.some((ref) => ref.name === pinnedSourceRef && ref.object === pinnedCommit);
   if (
     !/^[0-9a-f]{40}$/u.test(commit) ||
     !/^[0-9a-f]{40}$/u.test(tree) ||
@@ -1744,6 +1745,7 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
     reachableCommitCount !== 1 ||
     commitObjectCount !== 1 ||
     onlyReachableCommit !== pinnedCommit ||
+    !pinnedSourceRefPresent ||
     refs.some(
       (ref) =>
         (ref.name !== pinnedSourceRef && !ref.name?.startsWith("refs/heads/ultrafuzz/")) || ref.object !== pinnedCommit
@@ -1770,7 +1772,7 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
       commit,
       tree,
       base_ref: pinnedSourceRef,
-      refs,
+      refs: [{ name: pinnedSourceRef, object: pinnedCommit }],
       remotes,
       revision_count: reachableCommitCount,
       commit_object_count: commitObjectCount
@@ -1779,7 +1781,83 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
     2
   )}\n`;
   if (existsSync(proofPath)) {
-    if (!readFileSync(proofPath).equals(Buffer.from(proofContents, "utf8"))) {
+    const previousBytes = readFileSync(proofPath);
+    if (previousBytes.equals(Buffer.from(proofContents, "utf8"))) {
+      return;
+    }
+    let previousProof;
+    try {
+      previousProof = JSON.parse(previousBytes.toString("utf8"));
+    } catch {
+      previousProof = undefined;
+    }
+    const expectedProofKeys = [
+      "schema_version",
+      "attempt_id",
+      "commit",
+      "tree",
+      "base_ref",
+      "refs",
+      "remotes",
+      "revision_count",
+      "commit_object_count"
+    ];
+    const previousProofKeys =
+      previousProof !== null && typeof previousProof === "object" && !Array.isArray(previousProof)
+        ? Object.keys(previousProof)
+        : [];
+    const previousRefs = Array.isArray(previousProof?.refs) ? previousProof.refs : [];
+    const seenPreviousRefNames = new Set();
+    const previousRefsAreCanonical = previousRefs.every((ref) => {
+      if (ref === null || typeof ref !== "object" || Array.isArray(ref)) return false;
+      const refKeys = Object.keys(ref);
+      if (refKeys.length !== 2 || refKeys[0] !== "name" || refKeys[1] !== "object") return false;
+      if (typeof ref.name !== "string" || typeof ref.object !== "string") return false;
+      if (seenPreviousRefNames.has(ref.name)) return false;
+      seenPreviousRefNames.add(ref.name);
+      return (
+        (ref.name === pinnedSourceRef || ref.name.startsWith("refs/heads/ultrafuzz/")) && ref.object === pinnedCommit
+      );
+    });
+    const previousProofIsCanonicalJson = previousBytes.equals(
+      Buffer.from(`${JSON.stringify(previousProof, null, 2)}\n`)
+    );
+    const legacyRefNoisePresent = previousRefs.some(
+      (ref) => ref !== null && typeof ref === "object" && ref.name !== pinnedSourceRef
+    );
+    const canonicalizedPreviousProofContents = `${JSON.stringify(
+      {
+        schema_version: previousProof?.schema_version,
+        attempt_id: previousProof?.attempt_id,
+        commit: previousProof?.commit,
+        tree: previousProof?.tree,
+        base_ref: previousProof?.base_ref,
+        refs: [{ name: pinnedSourceRef, object: pinnedCommit }],
+        remotes: previousProof?.remotes,
+        revision_count: previousProof?.revision_count,
+        commit_object_count: previousProof?.commit_object_count
+      },
+      null,
+      2
+    )}\n`;
+    const previousProofMatches =
+      previousProofKeys.length === expectedProofKeys.length &&
+      previousProofKeys.every((key, index) => key === expectedProofKeys[index]) &&
+      previousProof?.schema_version === "ultrafuzz.agent-source-proof.v1" &&
+      previousProof.attempt_id === task.attemptId &&
+      previousProof.commit === commit &&
+      previousProof.tree === tree &&
+      previousProof.base_ref === pinnedSourceRef &&
+      Array.isArray(previousProof.remotes) &&
+      previousProof.remotes.length === 0 &&
+      previousProof.revision_count === reachableCommitCount &&
+      previousProof.commit_object_count === commitObjectCount &&
+      previousRefs.some((ref) => ref?.name === pinnedSourceRef && ref.object === pinnedCommit) &&
+      previousRefsAreCanonical &&
+      previousProofIsCanonicalJson &&
+      legacyRefNoisePresent &&
+      canonicalizedPreviousProofContents === proofContents;
+    if (!previousProofMatches) {
       throw new Error(`source-isolation failure: pinned source proof ${task.attemptId} changed`);
     }
     return;
