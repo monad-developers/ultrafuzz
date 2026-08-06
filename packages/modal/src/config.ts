@@ -90,6 +90,13 @@ const privateBenchmarkExecutionSchema = z
   })
   .default({ excluded_node_ids: [] });
 
+const privateEvalReportingSchema = z
+  .object({
+    provider: z.enum(["braintrust", "none"]).default("braintrust")
+  })
+  .strict()
+  .default({ provider: "braintrust" });
+
 const commonBenchmarkConfig = {
   schema_version: z.literal(MODAL_BENCHMARK_SCHEMA_VERSION),
   run_id: safeId,
@@ -118,6 +125,7 @@ const privateBenchmarkConfigSchema = z
     ...commonBenchmarkConfig,
     target: z.object({ repo: gitUrl, ref: gitRef }).strict(),
     benchmark_execution: privateBenchmarkExecutionSchema,
+    eval_reporting: privateEvalReportingSchema,
     ground_truth: z
       .object({
         repo: gitUrl,

@@ -9,6 +9,7 @@ import {
   modalDurableResumeCommand,
   modalDurableRunAdvanced,
   modalDurableRunNeedsResume,
+  modalEvalRunCommand,
   NonResumableTerminalRunError,
   repairModalEvalRunRecord
 } from "../src/resume.js";
@@ -50,6 +51,34 @@ describe("Modal durable evaluation resume", () => {
       "/workspace/target",
       "--force",
       "--retry-failed",
+      "--json"
+    ]);
+  });
+
+  it("allows private eval runs to disable provider reporting", () => {
+    expect(
+      modalEvalRunCommand({
+        cliPath: "/opt/tool/cli.js",
+        controlRoot: "/workspace/control",
+        suitePath: "/workspace/control/modal-suite.yml",
+        evalRunId: "eval-one",
+        provider: "none"
+      })
+    ).toEqual([
+      "node",
+      "/opt/tool/cli.js",
+      "eval",
+      "run",
+      "--project",
+      "/workspace/control",
+      "--suite",
+      "/workspace/control/modal-suite.yml",
+      "--provider",
+      "none",
+      "--eval-run-id",
+      "eval-one",
+      "--watch-timeout-seconds",
+      "79200",
       "--json"
     ]);
   });
