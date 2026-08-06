@@ -1716,13 +1716,14 @@ function sanitizeLensReferenceExpectationAuthority(
   const properties = lens.value.properties.map((property) => {
     const expectationIds = property.reference_expectations ?? [];
     if (expectationIds.length === 0) return property;
-    // Judged per property, not per ID, and deliberately so: when any unauthorized ID is not
-    // catalogue-label shaped the lens is left byte-unchanged. Such an ID is a forged namespaced
-    // mapping, and the artifact as the model wrote it is the evidence of that, so rewriting it would
-    // destroy what the authority check exists to surface. `verifyPropertyProvenanceArtifacts` reports
-    // it and the node fails with the citation intact.
+    // Judged per property, not per ID, and deliberately so: unless EVERY unauthorized ID is a plausible
+    // copied citation, the lens is left byte-unchanged. An ID claiming a reserved authority namespace is
+    // a forged benchmark mapping, and free text or a URL is an authoring error,
+    // and the artifact as the model wrote it is the evidence of that, so rewriting it would destroy
+    // what the authority check exists to surface. `verifyPropertyProvenanceArtifacts` reports it and
+    // the node fails with the citation intact.
     const unauthorized = expectationIds.filter((expectationId) => !supplied.ids.has(expectationId));
-    if (unauthorized.some((expectationId) => !isUnsupportedExternalReferenceLabel(expectationId))) return property;
+    if (!unauthorized.every((expectationId) => isCopiedReferenceCitation(expectationId))) return property;
     const authorized = expectationIds.filter((expectationId) => supplied.ids.has(expectationId));
     if (authorized.length === expectationIds.length) return property;
     removed += expectationIds.length - authorized.length;
@@ -1776,31 +1777,60 @@ function propertyLensOutput(node: PlannedGraphNode): PlannedGraphNode["outputs"]
 }
 
 /**
- * True for an identifier that cites a reference catalog we were not given, WITHOUT asserting an
- * external namespace — a citation the lens prompt told the model to copy out of a pinned-reference
- * document. Those are stripped with a `PROPERTY_REFERENCE_EXPECTATION_SANITIZED` diagnostic.
+ * Namespaces that assert an external authority blessed a property. An identifier under one of these is
+ * a benchmark-mapping claim: the gate exists to reject it, so it fails the node with its bytes intact.
  *
- * A namespaced identifier such as `benchmark:unexpected` or `scfuzzbench:aave-v4:iSpoke_supply` is a
- * different animal: it asserts that some external authority blessed this property. That is the
- * forgery this gate exists to reject, so it keeps failing the node with its bytes preserved.
+ * Everything else is a citation the lens prompt told the model to copy out of a pinned-reference
+ * document, and is stripped with a `PROPERTY_REFERENCE_EXPECTATION_SANITIZED` diagnostic.
  *
- * This rule used to be approximated by a SHAPE pattern, and the approximation kept costing runs:
+ * This rule was previously approximated by a SHAPE pattern, and the approximation kept costing runs:
  *
  *   1. `LEND-01` — stripped correctly.
  *   2. `LEND_ACC_01` — killed R44's `property-specification-0kn0t` (issue #283) because the pattern
  *      allowed only a single hyphen before the digits, so the ID was neither authorised nor
  *      strippable. Fixed by widening the pattern to `-`/`_` segments (PR #284).
  *   3. `testConvertToAssetsSharesDesirable` — killed R45's `property-specification-runtime-verification`
- *      (issue #293). It is a test-function name from that lens's own pinned reference, and no shape
- *      pattern should be expected to anticipate it.
+ *      (issue #293). A test-function name from that lens's own pinned reference, which no shape pattern
+ *      should be expected to anticipate.
  *
- * A third widening would have accepted nearly any token and hollowed the gate out. The namespace test
- * is what the old comment already said the rule meant, so this makes the implementation match its
- * stated intent instead of chasing shapes. Stripping only ever REMOVES a provenance claim, so it is
- * the safe direction; failing the node is what silently costs a whole reference lens.
+ * An allowlist of authority prefixes is used rather than "does it contain a colon", because a colon
+ * test fails in both directions. Real catalogue identifiers are not colon-namespaced: the ScFuzzBench
+ * ground truth uses bare labels such as `total-borrowed-v0`, `reference-expectations.schema.json` puts
+ * no namespace requirement on `id`, and `.ultrafuzz/references.yml` namespaces with dots
+ * (`properties.crytic`). Meanwhile a colon appears in perfectly ordinary citations — a source URL, a
+ * `RoundingProps.sol:88` line reference, or `ERC4626-01: totalAssets never reverts` — and hard-failing
+ * a whole lens on one punctuation character in model-authored text is the same trap in a new costume.
+ *
+ * Matching is prefix-anchored and case-insensitive so `Benchmark:` cannot slip past.
+ *
+ * Stripping is not free, and the cost is worth stating rather than assuming. `reference_expectations`
+ * forces a property into the implementation selection regardless of the priority threshold
+ * (`report-artifacts.ts`), and every fan-in `PROPERTY_REFERENCE_EXPECTATION_DROPPED` check skips a row
+ * whose expectation list is empty — so a stripped property can quietly fall out of implementation and
+ * out of those checks, with only a `warning` to show for it. What stripping cannot do is manufacture
+ * provenance: `reference_expectation_ids` is report-only and no grading path reads it. So the residual
+ * exposure is reduced DETECTION of an odd citation, weighed against losing an entire reference lens's
+ * coverage, which is what failing the node actually costs. The wider authority question is #285.
  */
-function isUnsupportedExternalReferenceLabel(expectationId: string): boolean {
-  return !expectationId.includes(":");
+// Separator-agnostic on purpose. A prefix allowlist that only knew `:` would let
+// `scfuzzbench_aave_v4_iSpoke_supply` through as an ordinary citation, which is the same forgery with
+// different punctuation.
+const RESERVED_REFERENCE_AUTHORITY = /^(?:scfuzzbench|benchmark|ground-?truth)[:._/-]/u;
+
+// The strippable set is bounded POSITIVELY: a single-line token that could plausibly have been copied
+// out of a reference document. Bounding it negatively ("anything without an authority prefix") would
+// silently swallow a sentence, a whitespace-only entry, a URL or a JSON blob -- all of which are
+// authoring errors worth failing on, and none of which any prompt asks a model to put in this field.
+// `testConvertToAssetsSharesDesirable` (issue #293) and `LEND_ACC_01` (issue #283) both match, so this
+// stays as permissive as it needs to be and no more.
+const COPIED_REFERENCE_CITATION = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/u;
+
+function claimsReservedReferenceAuthority(expectationId: string): boolean {
+  return RESERVED_REFERENCE_AUTHORITY.test(expectationId.trim().toLowerCase());
+}
+
+function isCopiedReferenceCitation(expectationId: string): boolean {
+  return COPIED_REFERENCE_CITATION.test(expectationId) && !claimsReservedReferenceAuthority(expectationId);
 }
 
 function readLensSuppliedExpectationIds(
