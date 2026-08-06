@@ -97,6 +97,59 @@ function loadSafeInvariantSuiteDirectory(): (root: string, candidate: string) =>
   ) as (root: string, candidate: string) => string;
 }
 
+function loadPreservePinnedSourceProof(): (task: {
+  attemptId: string;
+  workspacePath: string;
+  metadata: { artifacts: { dir: string } };
+}) => void {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const commandStart = source.indexOf("const unreachableCommitCountCommand");
+  const commandEnd = source.indexOf("\n\nconst { Workflow", commandStart);
+  const helperStart = source.indexOf("function preservePinnedSourceProof");
+  const helperEnd = source.indexOf("\n\nfunction canonicalEmptyArtifact", helperStart);
+  assert.ok(commandStart >= 0, source);
+  assert.ok(commandEnd > commandStart, source);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+
+  const command = new Function(`${source.slice(commandStart, commandEnd)}; return unreachableCommitCountCommand;`)();
+  const helper = source
+    .slice(helperStart, helperEnd)
+    .replace("task: (typeof taskSpecs)[number]", "task")
+    .replace("): void {", ") {")
+    .replace("const git = (args: string[]): string =>", "const git = (args) =>")
+    .replace("const gitUnreachableCommitCount = (): string =>", "const gitUnreachableCommitCount = () =>");
+
+  return new Function(
+    "path",
+    "execFileSync",
+    "realpathSync",
+    "mkdirSync",
+    "existsSync",
+    "readFileSync",
+    "Buffer",
+    "writeFileDurable",
+    "isStrictlyInsideDirectory",
+    "usesPinnedSource",
+    "pinnedSourceRef",
+    "unreachableCommitCountCommand",
+    `${helper}; return preservePinnedSourceProof;`
+  )(
+    path,
+    execFileSync,
+    fs.realpathSync,
+    fs.mkdirSync,
+    fs.existsSync,
+    fs.readFileSync,
+    Buffer,
+    writeFileDurable,
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    true,
+    "refs/heads/ultrafuzz-pinned",
+    command
+  ) as (task: { attemptId: string; workspacePath: string; metadata: { artifacts: { dir: string } } }) => void;
+}
+
 test("safe invariant-suite directory permits nested paths under a symlinked root alias", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-invariant-directory-"));
   const realRoot = path.join(root, "files");
@@ -320,6 +373,150 @@ test("generated Smithers pinned source proof counts hidden unreachable commits w
     git(["checkout", "--quiet", "master"]);
     git(["branch", "-D", "hidden"]);
     assert.equal(countHiddenCommits(), "1");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers pinned source proof ignores unrelated same-commit Ultrafuzz refs", () => {
+  const preservePinnedSourceProof = loadPreservePinnedSourceProof();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-source-proof-"));
+  const workspace = path.join(root, "workspace");
+  const artifactDir = path.join(root, "artifacts", "property-specification-certora");
+  const proofPath = path.join(root, "source-proofs", "property-specification-certora.json");
+  const git = (args: string[]): string =>
+    execFileSync("git", args, {
+      cwd: workspace,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    }).trim();
+  const task = {
+    attemptId: "property-specification-certora",
+    workspacePath: workspace,
+    metadata: { artifacts: { dir: artifactDir } }
+  };
+
+  try {
+    fs.mkdirSync(artifactDir, { recursive: true });
+    fs.mkdirSync(workspace);
+    git(["init", "--quiet", "--initial-branch=ultrafuzz-pinned"]);
+    git(["config", "user.name", "Ultrafuzz test"]);
+    git(["config", "user.email", "test@example.invalid"]);
+    fs.writeFileSync(path.join(workspace, "source.txt"), "pinned\n");
+    git(["add", "source.txt"]);
+    git(["commit", "--quiet", "-m", "pinned"]);
+    const pinnedCommit = git(["rev-parse", "HEAD"]);
+    git(["branch", "ultrafuzz/test-run/actors-flows", pinnedCommit]);
+
+    preservePinnedSourceProof(task);
+    const canonicalProof = JSON.parse(fs.readFileSync(proofPath, "utf8")) as { refs: unknown[] };
+    assert.deepEqual(canonicalProof.refs, [{ name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit }]);
+
+    fs.writeFileSync(proofPath, JSON.stringify(canonicalProof));
+    assert.throws(() => preservePinnedSourceProof(task), /pinned source proof property-specification-certora changed/u);
+
+    const legacyNoisyProof = {
+      ...canonicalProof,
+      refs: [
+        { name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit },
+        { name: "refs/heads/ultrafuzz/test-run/actors-flows", object: pinnedCommit }
+      ]
+    };
+    fs.writeFileSync(proofPath, `${JSON.stringify(legacyNoisyProof, null, 2)}\n`);
+    git(["branch", "ultrafuzz/test-run/property-specification-crytic", pinnedCommit]);
+    assert.doesNotThrow(() => preservePinnedSourceProof(task));
+
+    fs.writeFileSync(
+      proofPath,
+      `${JSON.stringify(
+        {
+          ...legacyNoisyProof,
+          injected: "metadata"
+        },
+        null,
+        2
+      )}\n`
+    );
+    assert.throws(() => preservePinnedSourceProof(task), /pinned source proof property-specification-certora changed/u);
+
+    fs.writeFileSync(
+      proofPath,
+      `${JSON.stringify(
+        {
+          ...canonicalProof,
+          refs: [{ name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit, injected: "metadata" }]
+        },
+        null,
+        2
+      )}\n`
+    );
+    assert.throws(() => preservePinnedSourceProof(task), /pinned source proof property-specification-certora changed/u);
+
+    fs.writeFileSync(
+      proofPath,
+      `${JSON.stringify(
+        {
+          ...canonicalProof,
+          refs: [
+            { name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit },
+            { name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit }
+          ]
+        },
+        null,
+        2
+      )}\n`
+    );
+    assert.throws(() => preservePinnedSourceProof(task), /pinned source proof property-specification-certora changed/u);
+
+    fs.writeFileSync(
+      proofPath,
+      `${JSON.stringify(
+        {
+          ...canonicalProof,
+          refs: [
+            { name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit },
+            { name: "refs/heads/rogue", object: pinnedCommit }
+          ]
+        },
+        null,
+        2
+      )}\n`
+    );
+    assert.throws(() => preservePinnedSourceProof(task), /pinned source proof property-specification-certora changed/u);
+
+    fs.writeFileSync(
+      proofPath,
+      `${JSON.stringify(
+        {
+          ...canonicalProof,
+          refs: [
+            { name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit },
+            { name: "refs/heads/ultrafuzz/test-run/actors-flows", object: "0".repeat(40) }
+          ]
+        },
+        null,
+        2
+      )}\n`
+    );
+    assert.throws(() => preservePinnedSourceProof(task), /pinned source proof property-specification-certora changed/u);
+
+    fs.writeFileSync(proofPath, `${JSON.stringify(legacyNoisyProof, null, 2)}\n`);
+    git(["branch", "rogue", pinnedCommit]);
+    assert.throws(
+      () => preservePinnedSourceProof(task),
+      /final worktree property-specification-certora is not pinned/u
+    );
+    git(["branch", "-D", "rogue"]);
+
+    git(["checkout", "--quiet", "-b", "ultrafuzz/test-run/bad-ref"]);
+    fs.writeFileSync(path.join(workspace, "source.txt"), "changed\n");
+    git(["add", "source.txt"]);
+    git(["commit", "--quiet", "-m", "bad ref"]);
+    git(["checkout", "--quiet", "ultrafuzz-pinned"]);
+    assert.throws(
+      () => preservePinnedSourceProof(task),
+      /final worktree property-specification-certora is not pinned/u
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
