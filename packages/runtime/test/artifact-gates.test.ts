@@ -1191,6 +1191,179 @@ test("property fan-in gate rejects Markdown that omits source-only canonical row
   assert.ok(headingParity.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING"));
 });
 
+// R45 and R46 both lost a full `property-specification-fanin` attempt to this (issue #297). Read from
+// R46's own artifacts: 219 canonical properties, 78 with a non-empty `ledger_ids`, and the markdown
+// renders the field exactly 78 times. The model did what the prompt asks -- "add a `ledger_ids` array to
+// every canonical property THAT REPRESENTS one or more ledger entries" -- and what the schema allows,
+// since `ledger_ids` is `.optional()`. Only the gate demanded the field unconditionally.
+test("property fan-in gate does not demand a ledger_ids field from a property that has none", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-ledger-optional" });
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [
+        {
+          id: "evidence-supply",
+          source_path: "docs/overview.md",
+          source_location: "line 1",
+          kind: "invariant",
+          verbatim: "Supply accounting remains consistent.",
+          inventory_ids: ["inventory-supply"]
+        }
+      ],
+      inventory_rows: [
+        {
+          id: "inventory-supply",
+          description: "Supply accounting remains consistent.",
+          ledger_ids: ["evidence-supply"]
+        }
+      ],
+      scan_probes: []
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-from-lens-only",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-supply" }]
+        },
+        {
+          id: "property-from-ledger",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-accounting" }],
+          ledger_ids: ["evidence-supply"]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    [
+      "### Canonical property: property-from-lens-only",
+      "- description: Supply completes for valid state.",
+      "- category: dos-liveness",
+      "- priority: high",
+      "- sources: property-specification-recon:recon-supply",
+      "### End canonical property: property-from-lens-only",
+      "### Canonical property: property-from-ledger",
+      "- description: Supply accounting remains consistent.",
+      "- category: accounting",
+      "- priority: high",
+      "- sources: property-specification-recon:recon-accounting",
+      "- ledger_ids: evidence-supply",
+      "### End canonical property: property-from-ledger"
+    ].join("\n")
+  );
+  const node = {
+    ...plannedNode(["properties.json", "properties.md"]),
+    id: "property-specification-fanin",
+    logical_id: "property-specification-fanin"
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING" && diagnostic.message.includes('"ledger_ids"')
+    ),
+    false,
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+// The other half: a property that DOES have ledger IDs must still render them, so this cannot be read
+// as dropping ledger parity altogether.
+test("property fan-in gate still requires the ledger_ids field when the property has ledger IDs", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-ledger-required" });
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [
+        {
+          id: "evidence-supply",
+          source_path: "docs/overview.md",
+          source_location: "line 1",
+          kind: "invariant",
+          verbatim: "Supply accounting remains consistent.",
+          inventory_ids: ["inventory-supply"]
+        }
+      ],
+      inventory_rows: [
+        {
+          id: "inventory-supply",
+          description: "Supply accounting remains consistent.",
+          ledger_ids: ["evidence-supply"]
+        }
+      ],
+      scan_probes: []
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-from-ledger",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-accounting" }],
+          ledger_ids: ["evidence-supply"]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    [
+      "### Canonical property: property-from-ledger",
+      "- description: Supply accounting remains consistent.",
+      "- category: accounting",
+      "- priority: high",
+      "- sources: property-specification-recon:recon-accounting",
+      "### End canonical property: property-from-ledger"
+    ].join("\n")
+  );
+  const node = {
+    ...plannedNode(["properties.json", "properties.md"]),
+    id: "property-specification-fanin",
+    logical_id: "property-specification-fanin"
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING" && diagnostic.message.includes('"ledger_ids"')
+    ),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
 test("property fan-in gate ignores optional ledger evidence when checking ledger ID parity", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-ledger-evidence" });
   writeArtifact(
