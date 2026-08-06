@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -55,10 +55,11 @@ test("captures tracked and untracked setup changes relative to the dependency ba
   }
 });
 
-// R44's `property-specification-a16z` node died here (issue #281). `:(exclude)node_modules/**`
-// excludes paths UNDER the directory but not the directory entry itself, so `git add -A -- .` still
-// named the ignored `node_modules` and git exited non-zero, aborting capture. It only reproduces
-// when the agent actually installed dependencies in that worktree, which is why most nodes survive.
+// R44's `property-specification-a16z` node died here (issue #281). Any negative pathspec makes
+// `git add` report an ignored path as an error instead of skipping it, so an ignored `node_modules`
+// aborted capture outright — `:(exclude)node_modules`, `:!node_modules` and the `/**` form all fail
+// identically, and the glob is irrelevant. It only reproduces when the agent actually installed
+// dependencies in that worktree, which is why most nodes survive.
 test("captures a workspace containing ignored runtime roots", () => {
   const root = fixture();
   try {
@@ -80,9 +81,113 @@ test("captures a workspace containing ignored runtime roots", () => {
       captured.manifest.files.map((entry) => entry.path),
       ["UltrafuzzSmoke.t.sol"]
     );
+    // Assert against the captured tree rather than substring-matching the patch text.
+    const staged = git(root, ["ls-tree", "-r", "--name-only", captured.manifest.result_tree]);
     for (const runtimeRoot of ["node_modules", ".ultrafuzz", ".smithers", "artifacts"]) {
-      assert.doesNotMatch(captured.patch, new RegExp(runtimeRoot.replace(".", "\\."), "u"));
+      assert.equal(
+        staged.split("\n").some((entry) => entry === runtimeRoot || entry.startsWith(`${runtimeRoot}/`)),
+        false,
+        `${runtimeRoot} leaked into the captured tree: ${staged}`
+      );
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A bare `git add -A -- .` avoids the ignored-path error but descends into the runtime roots, so any
+// unreadable file under `artifacts/` aborts capture instead — trading #281 for the same failure class.
+// The runtime writes `artifacts/<attemptId>/` into the workspace while agent subprocesses are still
+// running, so this is reachable. Skipped as root, which can read a 0000-mode file regardless.
+test("captures a workspace with an unreadable file under a runtime root", { skip: process.getuid?.() === 0 }, () => {
+  const root = fixture();
+  const unreadable = path.join(root, "artifacts", "attempt", "opaque.json");
+  try {
+    mkdirSync(path.dirname(unreadable), { recursive: true });
+    writeFileSync(unreadable, "agent output\n");
+    chmodSync(unreadable, 0o000);
+    writeFileSync(path.join(root, "UltrafuzzSmoke.t.sol"), "contract UltrafuzzSmoke {}\n");
+
+    const tree = captureWorkspaceTree(root);
+    const staged = git(root, ["ls-tree", "-r", "--name-only", tree]);
+    assert.doesNotMatch(staged, /artifacts/u);
+    assert.match(staged, /UltrafuzzSmoke\.t\.sol/u);
+  } finally {
+    try {
+      chmodSync(unreadable, 0o644);
+    } catch {
+      // best effort so the fixture can be removed
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// `core.excludesFile` is the lowest-precedence ignore source, so a repo .gitignore negation re-admits
+// the path. Naming only the other top-level entries as positive pathspecs is immune to that.
+test("keeps runtime roots out even when the repository un-ignores them", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "!artifacts/\n!artifacts/**\n!node_modules\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "un-ignore runtime roots"]);
+    mkdirSync(path.join(root, "artifacts", "attempt"), { recursive: true });
+    writeFileSync(path.join(root, "artifacts", "attempt", "output.json"), "agent output\n");
+    writeFileSync(path.join(root, "UltrafuzzSmoke.t.sol"), "contract UltrafuzzSmoke {}\n");
+
+    const tree = captureWorkspaceTree(root);
+    const staged = git(root, ["ls-tree", "-r", "--name-only", tree]);
+    assert.doesNotMatch(staged, /artifacts/u);
+    assert.match(staged, /UltrafuzzSmoke\.t\.sol/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Staging names an explicit entry list, so it must include tracked paths that no longer exist in the
+// worktree or a deletion would silently go uncaptured.
+test("captures deletion of a tracked top-level path", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, "Removed.t.sol"), "contract Removed {}\n");
+    git(root, ["add", "Removed.t.sol"]);
+    git(root, ["commit", "--quiet", "-m", "add a file to remove"]);
+    const baseline = captureWorkspaceTree(root);
+    rmSync(path.join(root, "Removed.t.sol"));
+
+    const captured = captureWorkspacePatch(root, baseline);
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["Removed.t.sol"]
+    );
+    assert.doesNotMatch(git(root, ["ls-tree", "-r", "--name-only", captured.manifest.result_tree]), /Removed/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// gitignore does not apply to tracked paths, so a tracked file under a runtime root is still staged.
+// It must be restored to the baseline rather than dropped from the index, which would record a
+// spurious deletion. Swapping the reset for `git rm --cached` would pass the test above but fail here.
+test("restores tracked runtime-root files to the baseline instead of deleting them", () => {
+  const root = fixture();
+  try {
+    mkdirSync(path.join(root, "artifacts"), { recursive: true });
+    writeFileSync(path.join(root, "artifacts", "keep.txt"), "baseline\n");
+    git(root, ["add", "artifacts/keep.txt"]);
+    git(root, ["commit", "--quiet", "-m", "track a runtime-root file"]);
+    const baseline = captureWorkspaceTree(root);
+
+    writeFileSync(path.join(root, "artifacts", "keep.txt"), "mutated by the agent\n");
+    writeFileSync(path.join(root, "UltrafuzzSmoke.t.sol"), "contract UltrafuzzSmoke {}\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["UltrafuzzSmoke.t.sol"]
+    );
+    // The tracked file is still present in the captured tree, holding its baseline content.
+    const blob = git(root, ["show", `${captured.manifest.result_tree}:artifacts/keep.txt`]);
+    assert.equal(blob, "baseline\n");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

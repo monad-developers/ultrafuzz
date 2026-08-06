@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstatSync, mkdtempSync, rmSync } from "node:fs";
+import { lstatSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -131,20 +131,37 @@ function parseChangedPaths(raw: string): WorkspacePatchFile[] {
 }
 
 /**
- * Stage the whole worktree, then restore the runtime roots to `treeish` so they contribute nothing.
+ * Stage everything except the runtime roots, then restore those roots to `treeish`.
  *
- * The runtime roots deliberately are NOT excluded with `:(exclude)` pathspecs. Any negative pathspec
- * makes `git add` report ignored paths as an error instead of skipping them, so a worktree holding an
- * ignored `node_modules` aborted capture outright — which killed R44's `property-specification-a16z`
- * node (issue #281). A plain `git add -A -- .` skips ignored paths quietly, and resetting the roots
- * afterwards keeps them out of the tree without ever naming them to `add`.
+ * The roots are omitted by naming only the *other* top-level entries as positive pathspecs. Two
+ * properties matter and only this shape gives both. A negative pathspec (`:(exclude)<root>`, `:!<root>`,
+ * or the `/**` form — all equivalent here) makes `git add` report an ignored path as an error rather
+ * than skipping it, which aborted capture whenever a worktree held an ignored `node_modules` and killed
+ * R44's `property-specification-a16z` node (issue #281). A bare `git add -A -- .` avoids that error but
+ * *descends* into the roots, hashing every file into unreachable objects and turning any transient
+ * ENOENT or unreadable file under `artifacts/` into a fresh capture abort — the runtime writes
+ * `artifacts/<attemptId>/` and `.ultrafuzz/schemas/` into the workspace, and a target repo has no reason
+ * to gitignore them. `core.excludesFile` does not help either: it is the lowest-precedence ignore
+ * source, so a repo `.gitignore` negation re-admits the path.
  *
- * Resetting to `treeish` rather than removing from the index matters when a runtime root is tracked:
- * a tracked file under one of these roots is restored to its baseline content instead of being
- * recorded as a deletion.
+ * The union of worktree and tree entries is used so that deleting a tracked top-level path is still
+ * captured as a deletion. The trailing reset is belt and braces: gitignore never applies to tracked
+ * paths, and resetting to `treeish` restores a tracked file under a root to its baseline content
+ * instead of recording a spurious deletion.
  */
 function stageWorkspaceTree(workspaceRoot: string, index: string, treeish: string): void {
-  runGit(workspaceRoot, ["add", "-A", "--", "."], index);
+  const runtimeRoots = new Set<string>(WORKSPACE_RUNTIME_ROOTS);
+  const names = new Set<string>();
+  for (const entry of readdirSync(workspaceRoot)) {
+    if (entry !== ".git" && !runtimeRoots.has(entry)) names.add(entry);
+  }
+  for (const entry of runGit(workspaceRoot, ["ls-tree", "--name-only", "-z", treeish], index).split("\0")) {
+    if (entry.length > 0 && entry !== ".git" && !runtimeRoots.has(entry)) names.add(entry);
+  }
+  // `git add -A --` with no pathspec would stage the whole worktree, including the roots.
+  if (names.size > 0) {
+    runGit(workspaceRoot, ["add", "-A", "--", ...[...names].sort()], index);
+  }
   runGit(workspaceRoot, ["reset", "--quiet", treeish, "--", ...WORKSPACE_RUNTIME_ROOTS], index);
 }
 
