@@ -36,14 +36,23 @@ const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "art
  * safe because targets gitignore `out/`; `recon-corpus/` is not gitignored by this target, so
  * `--exclude-standard` kept it and staging enumerated all of it (issue #304).
  *
- * On the cost of staging that, be careful about which step is expensive. It is NOT the diff: `runGit`
- * caps output at `MAX_PATCH_BYTES * 2` and `captureWorkspacePatch` refuses anything over
- * `MAX_PATCH_BYTES`, so an oversized patch surfaces as a loud, catchable `ENOBUFS` — a failure this repo
- * has already seen and fixed once. The unbounded step is `git add`, which hashes and zlib-compresses every
- * enumerated blob inside the git subprocess before any of those ceilings apply. Four sandboxes died at
- * this node with an empty `last_error` and only heartbeats in `worker.log`, which is what a cgroup OOM
- * kill looks like from outside — but that attribution is reasoned, not measured, and no exit code has
- * been captured yet.
+ * This exclusion is worth having on its own terms — generated corpus is not authored content, nothing
+ * downstream consumes it from a patch, and `MAX_PATCH_BYTES` meant no corpus above 16 MB ever survived a
+ * handoff. It is NOT, however, an explanation for the four sandboxes that died at this node with an empty
+ * `last_error`. An earlier version of this comment blamed a `git add` OOM. That is measurably wrong:
+ *
+ *   $ head -c 155000000 /dev/zero > big{1,2,3,4}.bin   # 620 MB across four blobs
+ *   $ /usr/bin/time -v git add -A   →   Maximum resident set size: 155812 kbytes
+ *
+ * `git add` peak RSS is per-file, not cumulative, and a single blob above `core.bigFileThreshold` streams
+ * at a few megabytes. Against `memoryMiB: 32_768` / `memoryLimitMiB: 65_536` in
+ * `packages/modal/src/defaults.ts`, staging this workspace costs well under one percent of the memory
+ * request. The diff is bounded too: `runGit` caps output at `MAX_PATCH_BYTES * 2`, so an oversized patch
+ * is a loud, catchable `ENOBUFS` — a failure this repo has already seen and fixed once.
+ *
+ * So the cause of those deaths remains unidentified, and a 575 MB workspace at a long-running invariant
+ * node is at least as plausibly a symptom of a long campaign as a cause of anything. Do not let this
+ * comment be read as a diagnosis.
  *
  * Exclusions are applied to the UNTRACKED listing only. Generated corpus is untracked by definition, and
  * excluding a tracked path would be silent data loss: staging runs after `read-tree <baseline>`, so the
