@@ -242,6 +242,10 @@ describe("Modal recovery lifecycle", () => {
       [...Buffer.from(encodedSecret, "utf8")]
         .map((byte) => `%${byte.toString(16).padStart(2, "0").toUpperCase()}`)
         .join(""),
+      Buffer.from(encodedSecret, "utf8")
+        .toString("hex")
+        .replace(/[a-f]/gu, (digit, offset) => (offset % 2 === 0 ? digit.toUpperCase() : digit)),
+      "recovery+secret%2fwith%2Bsymbols%0a",
       encodedSecret
     ];
     for (const representation of encodedRepresentations) {

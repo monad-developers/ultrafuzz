@@ -695,7 +695,11 @@ describe("Modal result collection", () => {
       Buffer.from(encodedSecret, "utf8").toString("base64"),
       Buffer.from(encodedSecret, "utf8").toString("base64url"),
       Buffer.from(encodedSecret, "utf8").toString("hex"),
-      encodeURIComponent(encodedSecret)
+      Buffer.from(encodedSecret, "utf8")
+        .toString("hex")
+        .replace(/[a-f]/gu, (digit, offset) => (offset % 2 === 0 ? digit.toUpperCase() : digit)),
+      encodeURIComponent(encodedSecret),
+      "credential%2dDWP%3Fo"
     ]) {
       const encodedSecretPayload = Buffer.from(
         JSON.stringify([{ code: "WORKFLOW_SUBMISSION_FAILED", message: `encoded=${representation}` }]),

@@ -12,6 +12,7 @@ import {
   kimiSubscriptionAuthSecretValues,
   kimiSubscriptionAuthSecretValuesFromRoots,
   kimiSubscriptionCredentialFileName,
+  kimiRuntimeScopedIdentity,
   localSubscriptionAuthPath,
   prepareSubscriptionAuthCopy,
   reconcileKimiSubscriptionAuthCredential,
@@ -21,6 +22,16 @@ import {
 } from "../src/auth.js";
 
 describe("runtime-only subscription auth", () => {
+  it("derives replica-scoped Kimi identity without depending on an image machine-id", () => {
+    const identity = kimiRuntimeScopedIdentity("modal-replica-a", "boot-a", "pid:[101]");
+    expect(identity).toMatch(/^[0-9a-f]{64}$/u);
+    expect(kimiRuntimeScopedIdentity("modal-replica-a", "boot-a", "pid:[101]")).toBe(identity);
+    expect(kimiRuntimeScopedIdentity("modal-replica-b", "boot-a", "pid:[101]")).not.toBe(identity);
+    expect(kimiRuntimeScopedIdentity("modal-replica-a", "boot-b", "pid:[101]")).not.toBe(identity);
+    expect(kimiRuntimeScopedIdentity("modal-replica-a", "boot-a", "pid:[202]")).not.toBe(identity);
+    expect(() => kimiRuntimeScopedIdentity("", "boot-a", "pid:[101]")).toThrow(/must be nonempty/u);
+  });
+
   it("uses the standard Codex and Claude credential files", () => {
     expect(localSubscriptionAuthPath("openai", {}, "/home/example")).toBe(
       path.join("/home/example", ".codex", "auth.json")
@@ -282,6 +293,7 @@ describe("runtime-only subscription auth", () => {
 
     for (const [name, identityPatch] of [
       ["foreign-host", { owner_host_id: `${currentIdentity.owner_host_id}-replacement` }],
+      ["foreign-boot", { owner_boot_id: `${currentIdentity.owner_boot_id}-replacement` }],
       ["foreign-namespace", { owner_pid_namespace: `${currentIdentity.owner_pid_namespace}-replacement` }]
     ] as const) {
       const source = kimiAuthFixture({ fresh: true });
@@ -1947,11 +1959,13 @@ function testProcessIdentity(pid: number): {
     .trim()
     .split(/\s+/u)[19];
   if (startToken === undefined) throw new Error("test process stat has no start token");
+  const bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  const pidNamespace = fs.readlinkSync(`/proc/${pid}/ns/pid`);
   return {
     owner_process_start: startToken,
-    owner_host_id: fs.readFileSync("/etc/machine-id", "utf8").trim(),
-    owner_boot_id: fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(),
-    owner_pid_namespace: fs.readlinkSync(`/proc/${pid}/ns/pid`)
+    owner_host_id: kimiRuntimeScopedIdentity(os.hostname(), bootId, pidNamespace),
+    owner_boot_id: bootId,
+    owner_pid_namespace: pidNamespace
   };
 }
 

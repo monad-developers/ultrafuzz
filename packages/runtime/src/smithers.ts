@@ -43,6 +43,168 @@ const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
 const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
 const STREAM_TERMINATION_GRACE_MS = 500;
 const STREAM_TERMINATION_HARD_LIMIT_MS = 1_500;
+const WINDOWS_JOB_PAYLOAD_ENV = "ULTRAFUZZ_WINDOWS_JOB_PAYLOAD";
+const WINDOWS_JOB_WORKER_ENV = "ULTRAFUZZ_WINDOWS_JOB_WORKER";
+const WINDOWS_JOB_BARRIER_ENV = "ULTRAFUZZ_WINDOWS_JOB_BARRIER";
+const WINDOWS_JOB_PRESERVE_SUCCESS_ENV = "ULTRAFUZZ_WINDOWS_JOB_PRESERVE_SUCCESS";
+const WINDOWS_JOB_OBJECT_WORKER_SOURCE = String.raw`
+$ErrorActionPreference = "Stop"
+$payloadVariable = "ULTRAFUZZ_WINDOWS_JOB_PAYLOAD"
+$workerVariable = "ULTRAFUZZ_WINDOWS_JOB_WORKER"
+$barrierVariable = "ULTRAFUZZ_WINDOWS_JOB_BARRIER"
+$preserveSuccessVariable = "ULTRAFUZZ_WINDOWS_JOB_PRESERVE_SUCCESS"
+
+$barrier = $null
+$exitCode = 1
+try {
+  $barrierName = [Environment]::GetEnvironmentVariable($barrierVariable, "Process")
+  if ([String]::IsNullOrWhiteSpace($barrierName)) { throw "Windows Job Object barrier is missing" }
+  $barrier = [Threading.EventWaitHandle]::OpenExisting($barrierName)
+  if (-not $barrier.WaitOne(10000)) { throw "Windows Job Object assignment barrier timed out" }
+
+  $encodedPayload = [Environment]::GetEnvironmentVariable($payloadVariable, "Process")
+  if ([String]::IsNullOrWhiteSpace($encodedPayload)) { throw "Windows Job Object payload is missing" }
+  $payloadJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encodedPayload))
+  $payload = ConvertFrom-Json -InputObject $payloadJson
+  $runnerExecutable = [string]$payload.executable
+  $runnerArguments = @($payload.arguments | ForEach-Object { [string]$_ })
+  if ([String]::IsNullOrWhiteSpace($runnerExecutable)) { throw "Windows Job Object executable is missing" }
+
+  [Environment]::SetEnvironmentVariable($payloadVariable, $null, "Process")
+  [Environment]::SetEnvironmentVariable($workerVariable, $null, "Process")
+  [Environment]::SetEnvironmentVariable($barrierVariable, $null, "Process")
+  [Environment]::SetEnvironmentVariable($preserveSuccessVariable, $null, "Process")
+  & $runnerExecutable @runnerArguments
+  if ($null -eq $LASTEXITCODE) { $exitCode = 0 } else { $exitCode = [int]$LASTEXITCODE }
+} catch {
+  [Console]::Error.WriteLine("Windows Job Object runner failed: " + $_.Exception.Message)
+} finally {
+  if ($null -ne $barrier) { $barrier.Dispose() }
+}
+exit $exitCode
+`;
+const WINDOWS_JOB_OBJECT_WORKER_COMMAND = Buffer.from(WINDOWS_JOB_OBJECT_WORKER_SOURCE, "utf16le").toString("base64");
+const WINDOWS_JOB_OBJECT_HELPER_SOURCE = String.raw`
+$ErrorActionPreference = "Stop"
+$workerVariable = "ULTRAFUZZ_WINDOWS_JOB_WORKER"
+$barrierVariable = "ULTRAFUZZ_WINDOWS_JOB_BARRIER"
+$preserveSuccessVariable = "ULTRAFUZZ_WINDOWS_JOB_PRESERVE_SUCCESS"
+
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class UltrafuzzWindowsJobObject {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct BasicLimitInformation {
+    public long PerProcessUserTimeLimit;
+    public long PerJobUserTimeLimit;
+    public uint LimitFlags;
+    public UIntPtr MinimumWorkingSetSize;
+    public UIntPtr MaximumWorkingSetSize;
+    public uint ActiveProcessLimit;
+    public UIntPtr Affinity;
+    public uint PriorityClass;
+    public uint SchedulingClass;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct IoCounters {
+    public ulong ReadOperationCount;
+    public ulong WriteOperationCount;
+    public ulong OtherOperationCount;
+    public ulong ReadTransferCount;
+    public ulong WriteTransferCount;
+    public ulong OtherTransferCount;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct ExtendedLimitInformation {
+    public BasicLimitInformation BasicLimitInformation;
+    public IoCounters IoInfo;
+    public UIntPtr ProcessMemoryLimit;
+    public UIntPtr JobMemoryLimit;
+    public UIntPtr PeakProcessMemoryUsed;
+    public UIntPtr PeakJobMemoryUsed;
+  }
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  public static extern IntPtr CreateJobObject(IntPtr jobAttributes, string name);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  public static extern bool SetInformationJobObject(
+    IntPtr job,
+    int informationClass,
+    ref ExtendedLimitInformation information,
+    uint informationLength
+  );
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  public static extern bool CloseHandle(IntPtr handle);
+}
+'@
+
+$job = [IntPtr]::Zero
+$barrier = $null
+$worker = $null
+$workerExitCode = 1
+try {
+  $job = [UltrafuzzWindowsJobObject]::CreateJobObject([IntPtr]::Zero, $null)
+  if ($job -eq [IntPtr]::Zero) {
+    throw "CreateJobObject failed with Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+  }
+  $limits = New-Object UltrafuzzWindowsJobObject+ExtendedLimitInformation
+  $limits.BasicLimitInformation.LimitFlags = 0x00002000
+  $limitSize = [Runtime.InteropServices.Marshal]::SizeOf($limits)
+  if (-not [UltrafuzzWindowsJobObject]::SetInformationJobObject($job, 9, [ref]$limits, $limitSize)) {
+    throw "SetInformationJobObject failed with Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+  }
+
+  $barrierName = "Local\UltrafuzzJob-" + [Guid]::NewGuid().ToString("N")
+  $barrier = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $barrierName)
+  $workerInfo = New-Object Diagnostics.ProcessStartInfo
+  $workerInfo.FileName = (Get-Process -Id $PID).Path
+  $workerInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${WINDOWS_JOB_OBJECT_WORKER_COMMAND}"
+  $workerInfo.UseShellExecute = $false
+  $workerInfo.CreateNoWindow = $true
+  $workerInfo.EnvironmentVariables[$workerVariable] = "1"
+  $workerInfo.EnvironmentVariables[$barrierVariable] = $barrierName
+  $worker = [Diagnostics.Process]::Start($workerInfo)
+  if ($null -eq $worker) { throw "Windows Job Object worker did not start" }
+  if (-not [UltrafuzzWindowsJobObject]::AssignProcessToJobObject($job, $worker.Handle)) {
+    $worker.Kill()
+    $worker.WaitForExit()
+    throw "AssignProcessToJobObject failed with Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+  }
+  [void]$barrier.Set()
+  $worker.WaitForExit()
+  $workerExitCode = $worker.ExitCode
+  if (
+    $workerExitCode -eq 0 -and
+    [Environment]::GetEnvironmentVariable($preserveSuccessVariable, "Process") -eq "1"
+  ) {
+    $limits.BasicLimitInformation.LimitFlags = 0
+    if (-not [UltrafuzzWindowsJobObject]::SetInformationJobObject($job, 9, [ref]$limits, $limitSize)) {
+      throw "clearing Windows Job Object kill-on-close failed with Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
+  }
+} catch {
+  $workerExitCode = 1
+  [Console]::Error.WriteLine("Windows Job Object supervisor failed: " + $_.Exception.Message)
+} finally {
+  if ($null -ne $barrier) { $barrier.Dispose() }
+  if ($null -ne $worker -and -not $worker.HasExited) {
+    $worker.Kill()
+    $worker.WaitForExit()
+  }
+  if ($job -ne [IntPtr]::Zero) { [void][UltrafuzzWindowsJobObject]::CloseHandle($job) }
+}
+exit $workerExitCode
+`;
+const WINDOWS_JOB_OBJECT_HELPER_COMMAND = Buffer.from(WINDOWS_JOB_OBJECT_HELPER_SOURCE, "utf16le").toString("base64");
 const ONE_SHOT_TERMINATION_GRACE_MS = 500;
 const ONE_SHOT_TERMINATION_HARD_LIMIT_MS = 1_500;
 const STREAM_CALLBACK_DRAIN_TIMEOUT_MS = 1_000;
@@ -1623,6 +1785,43 @@ function isConfirmedCancelStatus(value: string | undefined): boolean {
   return value === "cancelled" || value === "canceled";
 }
 
+function workflowRunnerLaunch(
+  executable: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  preserveDescendantsOnSuccess = false
+): { executable: string; args: string[]; env: NodeJS.ProcessEnv; detached: boolean } {
+  if (process.platform !== "win32") {
+    return { executable, args: [...args], env, detached: true };
+  }
+  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? env.SystemRoot ?? env.SYSTEMROOT;
+  if (systemRoot === undefined || systemRoot.trim().length === 0) {
+    throw new Error("Windows workflow runner requires SystemRoot to locate PowerShell");
+  }
+  const powershell = path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const payload = Buffer.from(JSON.stringify({ executable, arguments: [...args] }), "utf8").toString("base64");
+  return {
+    executable: powershell,
+    args: [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-EncodedCommand",
+      WINDOWS_JOB_OBJECT_HELPER_COMMAND
+    ],
+    env: {
+      ...env,
+      [WINDOWS_JOB_PAYLOAD_ENV]: payload,
+      [WINDOWS_JOB_WORKER_ENV]: "0",
+      [WINDOWS_JOB_BARRIER_ENV]: "",
+      [WINDOWS_JOB_PRESERVE_SUCCESS_ENV]: preserveDescendantsOnSuccess ? "1" : "0"
+    },
+    detached: false
+  };
+}
+
 /**
  * Streams a bounded number of stdout lines from an inspection command instead
  * of buffering the whole run through `execFile`. Watch surfaces need
@@ -1679,17 +1878,18 @@ async function streamSmithersCommandUnanchored(input: {
   let child;
   try {
     const commandEnvironment = smithersCommandEnv(input.projectRoot, input.env);
-    input.snapshotAnchor?.assertCurrent();
-    child = spawn(
+    const launch = workflowRunnerLaunch(
       executableAnchor?.executable ?? smithersExecutable(input.projectRoot, input.env),
       [...(executableAnchor?.argumentPrefix ?? []), ...command],
-      {
-        cwd: input.projectRoot,
-        env: commandEnvironment,
-        stdio: ["ignore", "pipe", "pipe"],
-        detached: process.platform !== "win32"
-      }
+      commandEnvironment
     );
+    input.snapshotAnchor?.assertCurrent();
+    child = spawn(launch.executable, launch.args, {
+      cwd: input.projectRoot,
+      env: launch.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: launch.detached
+    });
   } catch (error) {
     executableAnchor?.close();
     throw error;
@@ -2909,7 +3109,8 @@ async function execSmithersCliUnanchored(input: {
       env: commandEnvironment,
       signal: input.signal,
       timeoutMs: commandTimeoutMs,
-      onSpawn: input.onSpawn
+      onSpawn: input.onSpawn,
+      preserveWindowsDescendantsOnSuccess: command[0] === "up" && command.includes("--detach")
     });
     executableAnchor?.assertCurrent();
     if (result.exitCode === 0) {
@@ -2954,15 +3155,22 @@ async function executeBoundedSmithersCommand(input: {
   signal?: AbortSignal;
   timeoutMs?: number;
   onSpawn?: () => void;
+  preserveWindowsDescendantsOnSuccess?: boolean;
 }): Promise<BoundedSmithersCommandResult> {
   if (isAbortedSignal(input.signal)) {
     throw smithersCommandTerminationError("abort", "", "", null);
   }
-  const child = spawn(input.executable, [...input.args], {
+  const launch = workflowRunnerLaunch(
+    input.executable,
+    input.args,
+    input.env,
+    input.preserveWindowsDescendantsOnSuccess
+  );
+  const child = spawn(launch.executable, launch.args, {
     cwd: input.cwd,
-    env: input.env,
+    env: launch.env,
     stdio: ["ignore", "pipe", "pipe"],
-    detached: process.platform !== "win32"
+    detached: launch.detached
   });
   child.once("spawn", () => input.onSpawn?.());
   let processError: Error | undefined;

@@ -31,6 +31,7 @@ const WORKFLOW_SYNC_COMMIT_JOURNAL = "workflow-sync-commit-journal.json";
 const WORKFLOW_MUTATION_LOCK_STALE_MS = 30 * 60 * 1_000;
 const WORKFLOW_LIFECYCLE_ACTION_LOCK_STALE_MS = 10 * 60 * 1_000;
 const WORKFLOW_MUTATION_LOCK_OWNER = "owner.json";
+const WORKFLOW_MUTATION_PROCESS_NONCE = crypto.randomBytes(32).toString("hex");
 const WORKFLOW_LIFECYCLE_ACTION_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-lifecycle-action-journal.v1" as const;
 const WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-run-link-journal.v1" as const;
 const WORKFLOW_SYNC_COMMIT_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-sync-commit-journal.v1" as const;
@@ -692,7 +693,7 @@ async function acquireOwnedRunLock(
           const acquiredIdentity = captureProperLockfileDirectoryIdentity(lockPath, options.label);
           const processStart = workflowMutationProcessStartToken(process.pid);
           if (processStart === null) {
-            throw new Error(`${options.label} cannot bind the current process start token`);
+            throw new Error(`${options.label} cannot bind the current process identity`);
           }
           const acquiredOwner: WorkflowRunLockOwner = {
             pid: process.pid,
@@ -932,11 +933,43 @@ function workflowMutationLockOwnerIsAlive(owner: WorkflowRunLockOwner): boolean 
     if (code === "EPERM") return true;
     throw error;
   }
-  const observedStart = workflowMutationProcessStartToken(owner.pid);
+  if (owner.process_start.startsWith("process-nonce:")) {
+    // A module nonce is comparable only inside the process that created it.
+    // For another live PID it remains deliberately unknown and therefore
+    // fail-closed; for this process it detects forged or superseded evidence.
+    return (
+      owner.pid !== process.pid ||
+      owner.process_start ===
+        selectWorkflowMutationProcessIdentityToken({
+          observedStartToken: null,
+          isCurrentProcess: true,
+          processNonce: WORKFLOW_MUTATION_PROCESS_NONCE
+        })
+    );
+  }
+  const observedStart = workflowMutationLinuxProcessStartToken(owner.pid);
   return observedStart === null || owner.process_start === observedStart;
 }
 
 function workflowMutationProcessStartToken(pid: number): string | null {
+  return selectWorkflowMutationProcessIdentityToken({
+    observedStartToken: workflowMutationLinuxProcessStartToken(pid),
+    isCurrentProcess: pid === process.pid,
+    processNonce: WORKFLOW_MUTATION_PROCESS_NONCE
+  });
+}
+
+export function selectWorkflowMutationProcessIdentityToken(input: {
+  observedStartToken: string | null;
+  isCurrentProcess: boolean;
+  processNonce: string;
+}): string | null {
+  if (input.observedStartToken !== null && input.observedStartToken.length > 0) return input.observedStartToken;
+  if (!input.isCurrentProcess || input.processNonce.length === 0) return null;
+  return `process-nonce:${input.processNonce}`;
+}
+
+function workflowMutationLinuxProcessStartToken(pid: number): string | null {
   try {
     const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
     const closingParenthesis = stat.lastIndexOf(")");

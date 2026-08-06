@@ -1342,7 +1342,14 @@ describe("Modal node sandbox provider", () => {
         ["base64", Buffer.from(encodedCredential).toString("base64")],
         ["base64url", Buffer.from(encodedCredential).toString("base64url")],
         ["hex", Buffer.from(encodedCredential).toString("hex")],
-        ["percent", encodeURIComponent(encodedCredential)]
+        [
+          "mixed-hex",
+          Buffer.from(encodedCredential)
+            .toString("hex")
+            .replace(/[a-f]/gu, (digit, offset) => (offset % 2 === 0 ? digit.toUpperCase() : digit))
+        ],
+        ["percent", encodeURIComponent(encodedCredential)],
+        ["partial-percent", "agent+key%2fvalue%2Bwith%3dencoding"]
       ]) {
         const leak = path.join(root, `${name}.txt`);
         fs.writeFileSync(leak, `${encoded}\n`);

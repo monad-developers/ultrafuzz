@@ -27,7 +27,6 @@ import {
   safeResolveInside,
   stableUsageDimension,
   sha256File,
-  updateNodeState,
   validateSafeId,
   verifyArtifactManifestPrerequisites,
   writeFileDurable,
@@ -3093,6 +3092,9 @@ async function synchronizeTasks(input: {
     syncedNodes += 1;
   }
 
+  let aggregateState = readRunState(input.layout);
+  const aggregateEvents: EventRecord[] = [];
+  let aggregateChanged = false;
   for (const [concreteNodeId, statuses] of taskStatusesByConcreteNode) {
     assertSynchronizationBudget(input.control);
     if (statuses.length === 0) {
@@ -3104,7 +3106,7 @@ async function synchronizeTasks(input: {
     }
     const aggregateStatus = aggregateAttemptStatuses(statuses);
     nodeStatuses.set(concreteNodeId, aggregateStatus);
-    const previous = readRunState(input.layout).nodes[concreteNodeId];
+    const previous = aggregateState.nodes[concreteNodeId];
     const patch = {
       status: aggregateStatus,
       timed_out: aggregateStatus === "timed-out",
@@ -3120,9 +3122,33 @@ async function synchronizeTasks(input: {
     };
     if (nodePatchChanges(previous, patch)) {
       assertSynchronizationBudget(input.control);
-      updateNodeState(input.layout, concreteNodeId, patch);
-      changed = true;
+      const commitTimestamp = new Date(synchronizationClock(input.control)).toISOString();
+      aggregateState = projectNodeState(aggregateState, concreteNodeId, patch, commitTimestamp);
+      aggregateEvents.push(
+        createEventRecord(input.layout, {
+          eventType: "node-synced",
+          nodeId: concreteNodeId,
+          status: aggregateStatus,
+          timestamp: commitTimestamp,
+          payload: {
+            workflow_run_id: input.workflowRunId,
+            previous_status: previous?.status,
+            aggregate_attempt_ids: attemptIds,
+            aggregate_attempt_statuses: statuses
+          }
+        })
+      );
+      aggregateChanged = true;
     }
+  }
+  if (aggregateChanged) {
+    assertSynchronizationBudget(input.control);
+    await commitWorkflowSynchronizationState(
+      input.layout,
+      { state: aggregateState, events: aggregateEvents },
+      workflowSyncCommitControl(input.control)
+    );
+    changed = true;
   }
 
   return { diagnostics, nodeStatuses, workflowStates, syncedNodes, changed };

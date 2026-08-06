@@ -30,3 +30,27 @@ test("exact secret representation redaction removes every known encoding", () =>
     assert.equal(containsSecretValueRepresentation(redacted, [secret]), false);
   }
 });
+
+test("secret representation policy rejects mixed-case hex and partial percent encodings", () => {
+  const secret = "Credential value/+";
+  const mixedCaseHex = Buffer.from(secret)
+    .toString("hex")
+    .split("")
+    .map((character, index) => (index % 2 === 0 ? character.toUpperCase() : character.toLowerCase()))
+    .join("");
+  const partialPercent = "Cred%65ntial+value%2f%2B";
+
+  for (const representation of [mixedCaseHex, partialPercent]) {
+    assert.equal(containsSecretValueRepresentation(`prefix ${representation} suffix`, [secret]), true);
+    const redacted = redactSecretValueRepresentations(`prefix ${representation} suffix`, [secret], "[credential]");
+    assert.equal(redacted, "prefix [credential] suffix");
+    assert.equal(containsSecretValueRepresentation(redacted, [secret]), false);
+  }
+});
+
+test("partial percent matching compares UTF-8 bytes and does not accept near misses", () => {
+  const secret = "café space";
+  assert.equal(containsSecretValueRepresentation("caf%C3%a9+space", [secret]), true);
+  assert.equal(containsSecretValueRepresentation("caf%C3%a8+space", [secret]), false);
+  assert.equal(containsSecretValueRepresentation("cafe+space", [secret]), false);
+});

@@ -507,6 +507,124 @@ exit 0
   }
 );
 
+test(
+  "Windows Job Object teardown kills a descendant after the direct runner exits",
+  { skip: process.platform !== "win32" },
+  async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-stream-windows-job-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const runner = path.join(root, "smithers.mjs");
+    const commandPidPath = path.join(root, "command.pid");
+    const descendantPidPath = path.join(root, "descendant.pid");
+    fs.writeFileSync(
+      runner,
+      [
+        "#!/usr/bin/env node",
+        'import { spawn } from "node:child_process";',
+        'import fs from "node:fs";',
+        'for (const name of ["ULTRAFUZZ_WINDOWS_JOB_PAYLOAD", "ULTRAFUZZ_WINDOWS_JOB_WORKER", "ULTRAFUZZ_WINDOWS_JOB_BARRIER", "ULTRAFUZZ_WINDOWS_JOB_HELPER_COMMAND", "ULTRAFUZZ_WINDOWS_JOB_PRESERVE_SUCCESS"]) {',
+        "  if (process.env[name] !== undefined) throw new Error(`helper environment leaked: ${name}`);",
+        "}",
+        "fs.writeFileSync(process.env.SMITHERS_WINDOWS_COMMAND_PID, `${process.pid}\\n`);",
+        'const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {',
+        '  detached: true, stdio: "ignore", windowsHide: true',
+        "});",
+        "descendant.unref();",
+        "fs.writeFileSync(process.env.SMITHERS_WINDOWS_DESCENDANT_PID, `${descendant.pid}\\n`);",
+        'process.stdout.write("{\\"event\\":1}\\n");',
+        "process.exit(0);",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    const env = createSmithersTestEnvironment(runner, {
+      PATH: process.env.PATH,
+      SMITHERS_WINDOWS_COMMAND_PID: commandPidPath,
+      SMITHERS_WINDOWS_DESCENDANT_PID: descendantPidPath
+    });
+    t.after(() => {
+      if (!fs.existsSync(descendantPidPath)) return;
+      const pid = Number(fs.readFileSync(descendantPidPath, "utf8").trim());
+      if (!Number.isSafeInteger(pid) || pid <= 0) return;
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    });
+
+    await assert.rejects(
+      streamSmithersCommand({
+        args: ["events", "run-id", "--follow", "--json"],
+        projectRoot: root,
+        env,
+        maxLines: 10,
+        onLine: async () => {
+          await assertProcessGone(Number(fs.readFileSync(commandPidPath, "utf8").trim()));
+          throw new Error("late Windows stream consumer failure");
+        }
+      }),
+      /late Windows stream consumer failure/u
+    );
+
+    await assertProcessGone(Number(fs.readFileSync(descendantPidPath, "utf8").trim()));
+  }
+);
+
+test(
+  "successful Windows detached lifecycle submission preserves its admitted supervisor",
+  { skip: process.platform !== "win32" },
+  async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-lifecycle-windows-detached-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const runner = path.join(root, "smithers.mjs");
+    const descendantPidPath = path.join(root, "descendant.pid");
+    fs.writeFileSync(
+      runner,
+      [
+        "#!/usr/bin/env node",
+        'import { spawn } from "node:child_process";',
+        'import fs from "node:fs";',
+        'const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {',
+        '  detached: true, stdio: "ignore", windowsHide: true',
+        "});",
+        "descendant.unref();",
+        "fs.writeFileSync(process.env.SMITHERS_WINDOWS_DESCENDANT_PID, `${descendant.pid}\\n`);",
+        'process.stdout.write("{\\"ok\\":true,\\"data\\":{\\"status\\":\\"running\\"}}\\n");',
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    const env = createSmithersTestEnvironment(runner, {
+      PATH: process.env.PATH,
+      SMITHERS_WINDOWS_DESCENDANT_PID: descendantPidPath
+    });
+    t.after(() => {
+      if (!fs.existsSync(descendantPidPath)) return;
+      const pid = Number(fs.readFileSync(descendantPidPath, "utf8").trim());
+      if (!Number.isSafeInteger(pid) || pid <= 0) return;
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    });
+
+    const result = await runSmithersLifecycleCommand({
+      action: "resume",
+      smithersRunId: "windows-detached-run",
+      workflowPath: path.join(root, "workflow.tsx"),
+      projectRoot: root,
+      keepWorkspaces: false,
+      controllerLeaseSeconds: 30,
+      env
+    });
+    assert.equal(result.command[1], "up");
+    const descendantPid = Number(fs.readFileSync(descendantPidPath, "utf8").trim());
+    assert.doesNotThrow(() => process.kill(descendantPid, 0));
+  }
+);
+
 test("stream callback drain has an absolute deadline after the runner exits", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-stream-callback-deadline-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

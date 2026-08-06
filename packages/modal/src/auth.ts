@@ -1325,12 +1325,16 @@ function kimiExecutionLeaseProcessIsAlive(owner: KimiLeaseOwnerProcessRecord): b
   if (!isCompleteKimiLeaseOwnerProcess(owner)) return true;
   const current = observedKimiLeaseOwnerProcessIdentity(process.pid);
   if (current === undefined) return true;
-  // A local PID is meaningful only after stable host and PID-namespace
-  // locality have been established. A different boot on the same stable host
-  // proves that the recorded process generation cannot still be alive.
-  if (owner.hostId !== current.hostId) return true;
-  if (owner.bootId !== current.bootId) return false;
-  if (owner.pidNamespace !== current.pidNamespace) return true;
+  // A PID and its generation token are meaningful only inside the exact same
+  // runtime locality. Any mismatch is unknown rather than evidence of death:
+  // a foreign replica must never reclaim another replica's credential fence.
+  if (
+    owner.hostId !== current.hostId ||
+    owner.bootId !== current.bootId ||
+    owner.pidNamespace !== current.pidNamespace
+  ) {
+    return true;
+  }
   try {
     process.kill(owner.pid, 0);
   } catch (error) {
@@ -1410,23 +1414,40 @@ function observedKimiLeaseOwnerProcessIdentity(pid: number): KimiLeaseOwnerProce
       .trim()
       .split(/\s+/u);
     const startToken = fields[19];
-    const hostId = readFileSync("/etc/machine-id", "utf8").trim();
     const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
     const pidNamespace = readlinkSync(`/proc/${pid}/ns/pid`);
+    const hostname = os.hostname();
     if (
       startToken === undefined ||
       startToken.length === 0 ||
-      hostId.length === 0 ||
-      hostId.length > 256 ||
+      hostname.length === 0 ||
       bootId.length === 0 ||
       pidNamespace.length === 0
     ) {
       return undefined;
     }
+    const hostId = kimiRuntimeScopedIdentity(hostname, bootId, pidNamespace);
     return { pid, startToken, hostId, bootId, pidNamespace };
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Binds a lease to one live container/runtime locality without relying on a
+ * baked image machine-id, which may be empty or shared by every replica.
+ */
+export function kimiRuntimeScopedIdentity(hostname: string, bootId: string, pidNamespace: string): string {
+  if (hostname.length === 0 || bootId.length === 0 || pidNamespace.length === 0) {
+    throw new Error("Kimi runtime identity components must be nonempty");
+  }
+  const hash = createHash("sha256").update("ultrafuzz.kimi-runtime-identity.v1\0", "utf8");
+  for (const component of [hostname, bootId, pidNamespace]) {
+    hash.update(`${Buffer.byteLength(component, "utf8")}:`, "utf8");
+    hash.update(component, "utf8");
+    hash.update("\0", "utf8");
+  }
+  return hash.digest("hex");
 }
 
 interface OptionalKimiExecutionLeaseJournal {

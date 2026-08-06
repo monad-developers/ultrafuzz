@@ -2123,9 +2123,13 @@ describe("public Modal benchmark bundles", () => {
       Buffer.from(injectedSecret, "utf8").toString("base64"),
       Buffer.from(injectedSecret, "utf8").toString("base64url"),
       Buffer.from(injectedSecret, "utf8").toString("hex"),
+      Buffer.from(injectedSecret, "utf8")
+        .toString("hex")
+        .replace(/[a-f]/gu, (digit, offset) => (offset % 2 === 0 ? digit.toUpperCase() : digit)),
       [...Buffer.from(injectedSecret, "utf8")]
         .map((byte) => `%${byte.toString(16).padStart(2, "0").toUpperCase()}`)
-        .join("")
+        .join(""),
+      "opaque-provider%2dcredential-value"
     ];
     for (const representation of encoded) {
       fs.writeFileSync(source, `encoded leak ${representation}\n`);

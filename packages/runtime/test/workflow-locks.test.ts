@@ -8,7 +8,34 @@ import test from "node:test";
 import { layoutForRunRoot } from "@ultrafuzz/artifacts";
 
 import { acquireWorkflowStartPreparationLock } from "../src/plan-run.js";
-import { acquireWorkflowMutationLock } from "../src/workflow-mutation.js";
+import { acquireWorkflowMutationLock, selectWorkflowMutationProcessIdentityToken } from "../src/workflow-mutation.js";
+
+test("workflow mutation identity selection remains usable without Linux procfs", () => {
+  assert.equal(
+    selectWorkflowMutationProcessIdentityToken({
+      observedStartToken: "linux-start-token",
+      isCurrentProcess: true,
+      processNonce: "module-nonce"
+    }),
+    "linux-start-token"
+  );
+  assert.equal(
+    selectWorkflowMutationProcessIdentityToken({
+      observedStartToken: null,
+      isCurrentProcess: true,
+      processNonce: "module-nonce"
+    }),
+    "process-nonce:module-nonce"
+  );
+  assert.equal(
+    selectWorkflowMutationProcessIdentityToken({
+      observedStartToken: null,
+      isCurrentProcess: false,
+      processNonce: "module-nonce"
+    }),
+    null
+  );
+});
 
 test(
   "owned workflow locks clean their exact owner after timestamp restoration fails",

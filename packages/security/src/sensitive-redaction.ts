@@ -121,9 +121,20 @@ export function containsSecretValueRepresentation(
   secretValues: readonly string[]
 ): boolean {
   const contents = typeof value === "string" ? Buffer.from(value, "utf8") : Buffer.from(value);
-  return uniqueSecretRepresentations(secretValues).some((representation) =>
-    contents.includes(Buffer.from(representation, "utf8"))
-  );
+  if (
+    uniqueSecretRepresentations(secretValues).some((representation) =>
+      contents.includes(Buffer.from(representation, "utf8"))
+    )
+  ) {
+    return true;
+  }
+  return uniqueSecretValues(secretValues).some((secret) => {
+    const secretBytes = Buffer.from(secret, "utf8");
+    return (
+      findEncodedSecretSpan(contents, secretBytes, 0, "hex") !== undefined ||
+      findEncodedSecretSpan(contents, secretBytes, 0, "percent") !== undefined
+    );
+  });
 }
 
 export function redactSecretValueRepresentations(
@@ -135,7 +146,100 @@ export function redactSecretValueRepresentations(
   for (const representation of uniqueSecretRepresentations(secretValues)) {
     redacted = redacted.replaceAll(representation, placeholder);
   }
+  for (const secret of uniqueSecretValues(secretValues)) {
+    redacted = redactEncodedSecretSpans(redacted, Buffer.from(secret, "utf8"), placeholder, "hex");
+    redacted = redactEncodedSecretSpans(redacted, Buffer.from(secret, "utf8"), placeholder, "percent");
+  }
   return redacted;
+}
+
+type EncodedSecretKind = "hex" | "percent";
+
+function redactEncodedSecretSpans(
+  value: string,
+  secretBytes: Buffer,
+  placeholder: string,
+  kind: EncodedSecretKind
+): string {
+  const contents = Buffer.from(value, "utf8");
+  const chunks: Buffer[] = [];
+  let copiedThrough = 0;
+  let searchFrom = 0;
+  while (searchFrom < contents.length) {
+    const span = findEncodedSecretSpan(contents, secretBytes, searchFrom, kind);
+    if (span === undefined) break;
+    chunks.push(contents.subarray(copiedThrough, span.start), Buffer.from(placeholder, "utf8"));
+    copiedThrough = span.end;
+    searchFrom = span.end;
+  }
+  if (chunks.length === 0) return value;
+  chunks.push(contents.subarray(copiedThrough));
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function findEncodedSecretSpan(
+  contents: Buffer,
+  secretBytes: Buffer,
+  searchFrom: number,
+  kind: EncodedSecretKind
+): { start: number; end: number } | undefined {
+  if (secretBytes.length === 0) return undefined;
+  for (let start = searchFrom; start < contents.length; start += 1) {
+    const end =
+      kind === "hex"
+        ? mixedCaseHexMatchEnd(contents, start, secretBytes)
+        : partialPercentEncodingMatchEnd(contents, start, secretBytes);
+    if (end !== undefined) return { start, end };
+  }
+  return undefined;
+}
+
+function mixedCaseHexMatchEnd(contents: Buffer, start: number, secretBytes: Buffer): number | undefined {
+  if (start + secretBytes.length * 2 > contents.length) return undefined;
+  for (let index = 0; index < secretBytes.length; index += 1) {
+    const byte = secretBytes[index]!;
+    if (
+      asciiHexNibble(contents[start + index * 2]!) !== byte >>> 4 ||
+      asciiHexNibble(contents[start + index * 2 + 1]!) !== (byte & 0x0f)
+    ) {
+      return undefined;
+    }
+  }
+  return start + secretBytes.length * 2;
+}
+
+function partialPercentEncodingMatchEnd(contents: Buffer, start: number, secretBytes: Buffer): number | undefined {
+  let cursor = start;
+  let transformed = false;
+  for (const secretByte of secretBytes) {
+    if (contents[cursor] === secretByte) {
+      cursor += 1;
+      continue;
+    }
+    if (secretByte === 0x20 && contents[cursor] === 0x2b) {
+      cursor += 1;
+      transformed = true;
+      continue;
+    }
+    if (
+      contents[cursor] === 0x25 &&
+      asciiHexNibble(contents[cursor + 1] ?? -1) === secretByte >>> 4 &&
+      asciiHexNibble(contents[cursor + 2] ?? -1) === (secretByte & 0x0f)
+    ) {
+      cursor += 3;
+      transformed = true;
+      continue;
+    }
+    return undefined;
+  }
+  return transformed ? cursor : undefined;
+}
+
+function asciiHexNibble(byte: number): number {
+  if (byte >= 0x30 && byte <= 0x39) return byte - 0x30;
+  if (byte >= 0x41 && byte <= 0x46) return byte - 0x41 + 10;
+  if (byte >= 0x61 && byte <= 0x66) return byte - 0x61 + 10;
+  return -1;
 }
 
 function uniqueSecretRepresentations(secretValues: readonly string[]): string[] {
@@ -144,6 +248,10 @@ function uniqueSecretRepresentations(secretValues: readonly string[]): string[] 
     for (const representation of secretValueRepresentations(secret)) representations.add(representation);
   }
   return [...representations].sort((left, right) => right.length - left.length || left.localeCompare(right));
+}
+
+function uniqueSecretValues(secretValues: readonly string[]): string[] {
+  return [...new Set(secretValues.filter((value) => value.length > 0))];
 }
 
 export function redactSecretsInValue(value: unknown, placeholder = SENSITIVE_REDACTION_PLACEHOLDER): unknown {

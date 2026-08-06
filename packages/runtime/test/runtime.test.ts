@@ -14149,6 +14149,16 @@ test("syncRun records model fan-out attempts independently", async () => {
     dependent_task_ids: ["node:signal-analysis__model_1__attempt_1"]
   });
   assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
+  const aggregateEvents = replayEvents(layoutForRunRoot(run.value!.run_root), Number.MAX_SAFE_INTEGER).records.filter(
+    (event) => event.node_id === "project-discovery" && event.event_type === "node-synced"
+  );
+  assert.equal(aggregateEvents.length, 1);
+  assert.deepEqual(aggregateEvents[0]?.payload, {
+    workflow_run_id: workflowRunId,
+    previous_status: "pending",
+    aggregate_attempt_ids: ["project-discovery__model_0__attempt_0", "project-discovery__model_1__attempt_1"],
+    aggregate_attempt_statuses: ["succeeded", "failed"]
+  });
   assert.equal(
     fs.existsSync(
       path.join(run.value!.run_root, "artifacts", "project-discovery__model_0__attempt_0", "artifact-manifest.json")
@@ -14166,6 +14176,99 @@ test("syncRun records model fan-out attempts independently", async () => {
     "project-discovery__model_0__attempt_0",
     "project-discovery__model_1__attempt_1"
   ]);
+});
+
+test("syncRun crash-recovers aggregate fan-out state and evidence exactly once", async () => {
+  for (const fault of ["after-events", "after-state"] as const) {
+    const project = tempProject();
+    writeFanoutProject(project);
+    const runId = `sync-fanout-aggregate-${fault}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "failed",
+        state: "failed",
+        steps: [
+          { id: "node:project-discovery__model_0__attempt_0", state: "finished", attempt: 1 },
+          { id: "node:project-discovery__model_1__attempt_1", state: "failed", attempt: 1 },
+          { id: "node:signal-analysis__model_0__attempt_0", state: "in-progress", attempt: 1 },
+          { id: "node:signal-analysis__model_1__attempt_1", state: "skipped", attempt: 1 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeFinished", nodeId: "node:project-discovery__model_0__attempt_0", attempt: 1 },
+        {
+          type: "NodeFailed",
+          nodeId: "node:project-discovery__model_1__attempt_1",
+          attempt: 1,
+          error: { message: "model failed" }
+        },
+        { type: "NodeStarted", nodeId: "node:signal-analysis__model_0__attempt_0", attempt: 1 },
+        { type: "NodeSkipped", nodeId: "node:signal-analysis__model_1__attempt_1", attempt: 1 }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, `${fault}: ${JSON.stringify(run.diagnostics)}`);
+    writeRequiredArtifactSet(run.value!.run_root, "project-discovery__model_0__attempt_0", [
+      "setup/project-discovery.md",
+      "findings.json"
+    ]);
+    const layout = layoutForRunRoot(run.value!.run_root);
+    const aggregateIndex = path.join(layout.eventsIndexDir, "node", "project-discovery.jsonl");
+    let aggregateEventId: string | undefined;
+    let statusInFaultWindow: string | undefined;
+    let injected = false;
+    const inject = () => {
+      if (injected) return;
+      const prepared = JSON.parse(fs.readFileSync(workflowSyncCommitJournalPath(layout), "utf8")) as {
+        phase?: string;
+        events?: Array<{ event_id?: string; event_type?: string; node_id?: string }>;
+      };
+      const aggregateEvent = prepared.events?.find(
+        (event) => event.event_type === "node-synced" && event.node_id === "project-discovery"
+      );
+      if (aggregateEvent === undefined) return;
+      injected = true;
+      aggregateEventId = aggregateEvent.event_id;
+      assert.equal(prepared.phase, "prepared", fault);
+      statusInFaultWindow = readRunState(layout).nodes["project-discovery"]?.status;
+      fs.rmSync(aggregateIndex);
+      throw new Error(`injected aggregate ${fault} synchronization fault`);
+    };
+
+    await assert.rejects(
+      syncRun(
+        { projectRoot: project, runId, env },
+        fault === "after-events" ? { afterEventsPersisted: inject } : { afterStatePersisted: inject }
+      ),
+      new RegExp(`injected aggregate ${fault} synchronization fault`, "u")
+    );
+    assert.equal(injected, true, fault);
+    assert.equal(statusInFaultWindow, fault === "after-state" ? "failed" : "pending", fault);
+    assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "failed", fault);
+    const eventId = aggregateEventId;
+    if (eventId === undefined) throw new Error(`${fault}: aggregate node-synced event was not prepared`);
+
+    const release = await acquireWorkflowMutationLock(layout);
+    await release();
+    assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "failed", fault);
+    for (const eventPath of [layout.eventsPath, aggregateIndex]) {
+      const occurrences: number = fs
+        .readFileSync(eventPath, "utf8")
+        .split(/\r?\n/u)
+        .filter((line) => line.includes(eventId)).length;
+      assert.equal(occurrences, 1, `${fault}: ${eventPath}`);
+    }
+
+    const secondRelease = await acquireWorkflowMutationLock(layout);
+    await secondRelease();
+    assert.equal(
+      replayEvents(layout, Number.MAX_SAFE_INTEGER).records.filter((event) => event.event_id === eventId).length,
+      1,
+      fault
+    );
+  }
 });
 
 test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs", async () => {
