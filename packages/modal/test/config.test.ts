@@ -240,6 +240,29 @@ describe("Modal benchmark config", () => {
     ).toThrow();
   });
 
+  it("accepts private eval reporting provider controls", () => {
+    const config = parseModalBenchmarkConfig({
+      ...minimalConfig(),
+      eval_reporting: { provider: "none" }
+    });
+
+    expect("target" in config && config.eval_reporting).toEqual({ provider: "none" });
+
+    expect(() =>
+      parseModalBenchmarkConfig({
+        ...minimalConfig(),
+        eval_reporting: { provider: "openai" }
+      })
+    ).toThrow();
+
+    expect(() =>
+      parseModalBenchmarkConfig({
+        ...minimalConfig(),
+        eval_reporting: { provider: "none", unexpected: true }
+      })
+    ).toThrow();
+  });
+
   it("accepts only the strict public benchmark shape and its one-hour default", () => {
     const config = parseModalBenchmarkConfig({
       schema_version: MODAL_BENCHMARK_SCHEMA_VERSION,

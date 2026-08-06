@@ -43,6 +43,7 @@ import {
   type ModalBenchmarkConfig,
   type PublicModalBenchmarkConfig
 } from "./config.js";
+import { privateEvalProvider, privateJudgeApiKeyEnv } from "./private-reporting.js";
 import {
   DEFAULT_MODAL_APP,
   DEFAULT_MODAL_IMAGE,
@@ -3049,8 +3050,8 @@ function secretEnvNames(config: ModalBenchmarkConfig, model: ModalModelSpec): Se
   if (isPublicModalBenchmarkConfig(config)) {
     names.add(config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY");
   } else {
-    names.add(config.braintrust.api_key_env);
-    if (config.braintrust.judge_api_key_env !== undefined) names.add(config.braintrust.judge_api_key_env);
+    if (privateEvalProvider(config) === "braintrust") names.add(config.braintrust.api_key_env);
+    names.add(privateJudgeApiKeyEnv(config));
   }
   if (model.auth_mode === "api-key") names.add(runnerApiKeyEnv(model.provider));
   return names;

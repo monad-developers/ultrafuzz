@@ -31,6 +31,13 @@ import {
   type ModalResumeWorkspace
 } from "./resume.js";
 import { materializePinnedSource } from "./pinned-source.js";
+import {
+  privateEvalProvider,
+  privateEvalPublishCommand,
+  privateEvalScoreEnv,
+  privateJudgeApiKeyEnv,
+  renderPrivateEvalConfigSection
+} from "./private-reporting.js";
 import { renderPrivateEvalSuite } from "./private-suite.js";
 import {
   canScoreBenchmarkRow,
@@ -156,7 +163,8 @@ async function main(): Promise<void> {
                 cliPath: CLI,
                 controlRoot: control,
                 suitePath: prepared.suitePath,
-                evalRunId
+                evalRunId,
+                provider: privateEvalProvider(privateConfig())
               }),
               target!,
               writer
@@ -178,36 +186,23 @@ async function main(): Promise<void> {
       }
 
       await writer.writePartial(await readWorkerCheckpoint(target));
-      const judgeKeyEnv = CONFIG.braintrust.judge_api_key_env ?? CONFIG.braintrust.api_key_env;
+      const judgeKeyEnv = privateJudgeApiKeyEnv(privateConfig());
       const judgeCredential = await ephemeralJudgeCredential(requiredEnv(judgeKeyEnv, "authentication-failure"));
       await runChecked(["node", CLI, "eval", "score", evalRunId, "--project", control, "--llm-judge", "--json"], {
         label: "eval score",
         failureCategory: "unreachable",
-        env: {
-          ULTRAFUZZ_EVAL_JUDGE_API_KEY: judgeCredential,
-          ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true",
-          ...(CONFIG.braintrust.judge_url === undefined
-            ? {}
-            : { ULTRAFUZZ_EVAL_JUDGE_URL: CONFIG.braintrust.judge_url })
-        }
+        env: privateEvalScoreEnv(privateConfig(), judgeCredential)
       });
       await writer.writePartial(await readWorkerCheckpoint(target));
-      await runChecked(
-        [
-          "node",
-          CLI,
-          "eval",
-          "publish",
-          evalRunId,
-          "--project",
-          control,
-          "--provider",
-          "braintrust",
-          "--resume",
-          "--json"
-        ],
-        { label: "eval publish", failureCategory: "unreachable" }
-      );
+      const publishCommand = privateEvalPublishCommand({
+        cliPath: CLI,
+        controlRoot: control,
+        evalRunId,
+        provider: privateEvalProvider(privateConfig())
+      });
+      if (publishCommand !== undefined) {
+        await runChecked(publishCommand, { label: "eval publish", failureCategory: "unreachable" });
+      }
       await runChecked(["node", CLI, "eval", "report", evalRunId, "--project", control, "--json"], {
         label: "eval report",
         failureCategory: "unreachable"
@@ -464,9 +459,7 @@ async function configureControl(control: string, target: string, groundTruth: st
   let config = await readFile(configPath, "utf8");
   config = config.replace(
     /\[eval\][\s\S]*?(?=\n\[[^\n]+\]|$)/u,
-    `[eval]\neval_config = ".ultrafuzz/evals/bug-finding.yml"\nground_truth_root = ${tomlString(
-      groundTruth
-    )}\nprovider = "braintrust"\n`
+    renderPrivateEvalConfigSection(privateBenchmarkConfig, groundTruth)
   );
   config = config.replace(
     /(\[eval\.providers\.braintrust\][\s\S]*?api_key_env\s*=\s*)"[^"]+"/u,

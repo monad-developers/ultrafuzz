@@ -12,6 +12,7 @@ import {
   modalDurableResumeCommand,
   modalDurableRunAdvanced,
   modalDurableRunNeedsResume,
+  modalEvalRunCommand,
   NonResumableTerminalRunError,
   repairModalEvalRunRecord,
   runModalDurableResumeIfNeeded,
@@ -131,6 +132,34 @@ describe("Modal durable evaluation resume", () => {
       })
     ).resolves.toBeUndefined();
     expect(resume).not.toHaveBeenCalled();
+  });
+
+  it("allows private eval runs to disable provider reporting", () => {
+    expect(
+      modalEvalRunCommand({
+        cliPath: "/opt/tool/cli.js",
+        controlRoot: "/workspace/control",
+        suitePath: "/workspace/control/modal-suite.yml",
+        evalRunId: "eval-one",
+        provider: "none"
+      })
+    ).toEqual([
+      "node",
+      "/opt/tool/cli.js",
+      "eval",
+      "run",
+      "--project",
+      "/workspace/control",
+      "--suite",
+      "/workspace/control/modal-suite.yml",
+      "--provider",
+      "none",
+      "--eval-run-id",
+      "eval-one",
+      "--watch-timeout-seconds",
+      "79200",
+      "--json"
+    ]);
   });
 
   it("resumes terminal checkpoints that still have failed or unfinished logical rows", () => {
