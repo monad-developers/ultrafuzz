@@ -20,6 +20,23 @@ const SENSITIVE_SEGMENTS = new Set([
 ]);
 const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "artifacts"] as const;
 
+/**
+ * Harness-generated output that must never enter a workspace patch.
+ *
+ * These are produced by the invariant campaign, not authored by the model, so no downstream node needs
+ * them — and they are enormous. Measured on Aave v4 run R46 while `stateful-invariant-setup` was running:
+ * a 575 MB workspace whose largest entries were `recon-corpus/build-snapshot/<hash>.json` at 155 MB and
+ * 33 MB, byte-for-byte duplicates of Foundry's `out/build-info/`, plus several 5 MB coverage HTML files.
+ *
+ * Foundry's own copy is safe because the target gitignores `out/`. `recon-corpus/` is not gitignored by
+ * the target and was not excluded here, so `--exclude-standard` kept it and staging swallowed roughly
+ * 200 MB of untracked JSON and HTML — which `workspace.patch`, an `ultrafuzz/text@1` artifact, then has
+ * to carry as unified diff text (issue #304).
+ */
+const WORKSPACE_GENERATED_ROOTS = ["recon-corpus", "crytic-export", "corpus", "coverage"] as const;
+
+const WORKSPACE_EXCLUDED_ROOTS = [...WORKSPACE_RUNTIME_ROOTS, ...WORKSPACE_GENERATED_ROOTS] as const;
+
 export interface WorkspacePatchFile {
   path: string;
 }
@@ -202,10 +219,14 @@ function stageableWorkspacePaths(workspaceRoot: string, index: string): Buffer[]
       "--exclude-standard",
       "--",
       ".",
-      ...WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}/**`)
+      ...WORKSPACE_EXCLUDED_ROOTS.map((root) => `:(exclude)${root}/**`)
     ],
     index
   );
+  // Deliberately the RUNTIME roots only. The name check below exists to catch a top-level *file* named
+  // like a root, which the `/**` pathspecs cannot match. That is right for runtime roots, which are never
+  // authored content, but a file literally named `coverage` or `corpus` plausibly is authored — and
+  // generated corpus is always a directory, so the pathspec exclusion is sufficient for it.
   const runtimeRoots = new Set<string>(WORKSPACE_RUNTIME_ROOTS);
   const pathspecs: Buffer[] = [];
   for (const entry of splitNulBuffer(listed)) {
