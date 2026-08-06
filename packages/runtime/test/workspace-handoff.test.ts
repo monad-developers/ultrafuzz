@@ -77,6 +77,11 @@ test("applies a validated setup patch and rejects a base-tree mismatch", () => {
     );
     writeFileSync(path.join(source, "UltrafuzzSmoke.t.sol"), "contract UltrafuzzSmoke {}\n");
     const captured = captureWorkspacePatch(source, baseline);
+    git(downstream, ["config", "user.name", "Ultrafuzz test"]);
+    git(downstream, ["config", "user.email", "ultrafuzz@example.invalid"]);
+    git(downstream, ["commit", "--quiet", "--allow-empty", "-m", "same tree marker"]);
+    assert.notEqual(git(downstream, ["rev-parse", "HEAD"]).trim(), captured.manifest.base_commit);
+    assert.equal(captureWorkspaceTree(downstream), captured.manifest.base_tree);
     assert.throws(
       () => applyWorkspacePatch(downstream, { ...captured, manifest: { ...captured.manifest, files: [] } }),
       /manifest files do not match/u

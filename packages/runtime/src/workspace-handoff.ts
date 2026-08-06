@@ -91,10 +91,6 @@ export function applyWorkspacePatch(workspaceRoot: string, capture: WorkspacePat
   if (sha256(capture.patch) !== capture.manifest.patch_sha256) {
     throw new Error("workspace patch digest mismatch");
   }
-  const head = runGit(workspaceRoot, ["rev-parse", "HEAD"]).trim();
-  if (head !== capture.manifest.base_commit) {
-    throw new Error(`workspace patch base commit mismatch: expected ${capture.manifest.base_commit}, got ${head}`);
-  }
   const currentTree = captureWorkspaceTree(workspaceRoot);
   if (currentTree === capture.manifest.result_tree) return;
   if (currentTree !== capture.manifest.base_tree) {
