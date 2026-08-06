@@ -83,8 +83,9 @@ import { checkDependencyLegality } from "./artifact-gates.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
 import {
   captureProperLockfileDirectoryIdentity,
+  forgetProperLockfileCompromise,
+  properLockfileCompromiseHandler,
   properLockfileContentionCode,
-  swallowProperLockfileCompromise,
   withProperLockfileReclaimGuard,
   writeProperLockfileOwner
 } from "./proper-lockfile-owner.js";
@@ -439,13 +440,14 @@ export async function acquireWorkflowStartPreparationLock(layout: RunLayout): Pr
     try {
       const acquired = await withProperLockfileReclaimGuard(lockPath, async () => {
         reclaimTerminatedStartPreparationLock(layout, lockPath);
+        forgetProperLockfileCompromise(lockPath);
         const acquiredRelease = await lockfile.lock(layout.root, {
           lockfilePath: lockPath,
           realpath: false,
           stale: START_PREPARATION_LOCK_STALE_MS,
           update: 30_000,
           retries: 0,
-          onCompromised: swallowProperLockfileCompromise
+          onCompromised: properLockfileCompromiseHandler(lockPath)
         });
         const acquiredOwner = startPreparationLockOwner();
         try {
@@ -1207,7 +1209,7 @@ export async function repairMissingRenderedPromptsForRun(input: {
       minTimeout: 250,
       maxTimeout: 1_000
     },
-    onCompromised: swallowProperLockfileCompromise
+    onCompromised: properLockfileCompromiseHandler(path.join(layout.root, PROMPT_REPAIR_LOCK))
   });
   try {
     return repairRenderedPromptsForRun({ projectRoot, runId: input.runId, layout });

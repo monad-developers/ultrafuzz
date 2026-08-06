@@ -643,16 +643,41 @@ test("event recovery fails closed for unrelated, conflicting, and malformed tail
   });
   const unrelated = JSON.stringify({ ...record, event_id: "evt-unrelated" });
   const conflicting = JSON.stringify({ ...record, payload: { recovered: false } });
+  const serialized = JSON.stringify(record);
+
+  // A completed line that cannot be parsed, and a record whose ID is already
+  // present with different content, are genuine integrity violations: fail closed
+  // and leave the log byte-identical.
   for (const testCase of [
-    { name: "unrelated parseable", contents: unrelated, expected: /unrelated unterminated event record/u },
     { name: "conflicting event ID", contents: conflicting, expected: /conflicting event ID/u },
-    { name: "unrelated malformed", contents: unrelated.slice(0, -7), expected: /unrepairable trailing event record/u },
     { name: "malformed completed record", contents: "{malformed\n", expected: /malformed event record/u }
   ]) {
     fs.writeFileSync(layout.eventsPath, testCase.contents, "utf8");
     assert.throws(() => ensureEventRecord(layout, record), testCase.expected, testCase.name);
     assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), testCase.contents, testCase.name);
   }
+
+  // An unterminated trailing line, by contrast, is the signature of a process that
+  // died mid-append. Recovery must proceed, because refusing would make every
+  // guarded lifecycle operation on the run — including cancel — impossible forever.
+
+  // A complete record that only lost its newline is preserved and terminated.
+  fs.writeFileSync(layout.eventsPath, unrelated, "utf8");
+  ensureEventRecord(layout, record);
+  assert.deepEqual(fs.readFileSync(layout.eventsPath, "utf8").split("\n").filter(Boolean), [unrelated, serialized]);
+
+  // A torn fragment was never a durable line, so it is discarded.
+  fs.writeFileSync(layout.eventsPath, unrelated.slice(0, -7), "utf8");
+  ensureEventRecord(layout, record);
+  assert.deepEqual(fs.readFileSync(layout.eventsPath, "utf8").split("\n").filter(Boolean), [serialized]);
+
+  // A torn fragment that is a prefix of the record being recovered is completed
+  // rather than discarded, and never duplicated.
+  fs.writeFileSync(layout.eventsPath, serialized.slice(0, 20), "utf8");
+  ensureEventRecord(layout, record);
+  assert.deepEqual(fs.readFileSync(layout.eventsPath, "utf8").split("\n").filter(Boolean), [serialized]);
+  ensureEventRecord(layout, record);
+  assert.deepEqual(fs.readFileSync(layout.eventsPath, "utf8").split("\n").filter(Boolean), [serialized]);
 });
 
 test("event indexes encode long IDs in a collision-free hash namespace", () => {

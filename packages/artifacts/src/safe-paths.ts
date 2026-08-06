@@ -341,6 +341,28 @@ export function appendBytesDurable(filePath: string, bytes: Uint8Array, trustedR
   fsyncDirectory(directory);
 }
 
+/**
+ * Durably drops everything past `length`. Used to discard a torn trailing record
+ * left by a process that died mid-append: such a fragment was never a complete
+ * line, so no reader can have treated it as durable evidence.
+ */
+export function truncateDurable(filePath: string, length: number, trustedRoot?: string): void {
+  if (trustedRoot !== undefined) {
+    assertNoSymlinkComponents(trustedRoot, filePath, "truncate path");
+  }
+  const fd = fs.openSync(filePath, fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW);
+  try {
+    if (!fs.fstatSync(fd).isFile()) {
+      throw new ArtifactPathError("not-file", `truncate path must be a regular file: ${filePath}`);
+    }
+    fs.ftruncateSync(fd, length);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fsyncDirectory(path.dirname(filePath));
+}
+
 export function readJsonFile<T = unknown>(filePath: string): T {
   return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
 }

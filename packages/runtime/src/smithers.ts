@@ -2101,32 +2101,52 @@ function spawnedCommandTreeIsAlive(processGroupId: number | undefined, directChi
   // for an unrelated group that reused the pid. Only a surviving non-leader member
   // proves the group is still the one this process created, and those members are
   // exactly the descendants that must still be torn down.
-  return spawnedCommandTreeHasSurvivingMember(processGroupId);
+  const membership = spawnedCommandTreeGroupMembership(processGroupId);
+  if (membership !== "unknown") return membership === "ours";
+  // Group membership is unreadable on this platform, so neither answer can be
+  // proven. Fall back to the plain group probe: orphaning live agent processes that
+  // hold pipes and keep consuming provider quota is the worse of the two failures,
+  // and it is the behaviour every non-Linux platform already had.
+  try {
+    process.kill(-processGroupId, 0);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && String(error.code) === "ESRCH") return false;
+    if (error instanceof Error && "code" in error && String(error.code) === "EPERM") return true;
+    throw error;
+  }
 }
 
 /**
- * Reports whether any live process other than the (already reaped) group leader is
- * still a member of the group. Membership is read from procfs, which is the only
- * way to distinguish surviving descendants from a recycled process id. Platforms
- * without procfs answer `false`, which is the fail-safe direction: a descendant may
- * linger, but no unrelated process group is ever signalled.
+ * Classifies a process group whose leader has already been reaped.
+ *
+ * `ours` means a live non-leader member remains, which proves the group is still the
+ * one this process created — those members are exactly the descendants that must be
+ * torn down. `gone` means no member remains. `unknown` means membership could not be
+ * read at all, which is the case on any platform without procfs; the caller decides
+ * the fallback rather than having one silently imposed here.
  */
-function spawnedCommandTreeHasSurvivingMember(processGroupId: number): boolean {
+function spawnedCommandTreeGroupMembership(processGroupId: number): "ours" | "gone" | "unknown" {
   let entries: string[];
   try {
     entries = fs.readdirSync("/proc");
   } catch {
-    return false;
+    return "unknown";
   }
+  let readAnyGroup = false;
   for (const entry of entries) {
     if (!/^\d+$/u.test(entry)) continue;
     const pid = Number(entry);
     // A live process whose pid equals the group id is a reuse of the reaped
     // leader's pid, never evidence that the original group survives.
     if (pid === processGroupId) continue;
-    if (readProcessGroupId(pid) === processGroupId) return true;
+    const group = readProcessGroupId(pid);
+    if (group === undefined) continue;
+    readAnyGroup = true;
+    if (group === processGroupId) return "ours";
   }
-  return false;
+  // A readable /proc that yielded no group at all is not evidence of absence.
+  return readAnyGroup ? "gone" : "unknown";
 }
 
 function readProcessGroupId(pid: number): number | undefined {

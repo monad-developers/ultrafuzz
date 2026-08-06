@@ -696,24 +696,34 @@ describe("longitudinal eval history", () => {
       })
     ).toMatchObject([{ status: "genuine-task-failures", target_publication: { status: "genuine-task-failures" } }]);
     const failedDatapointDiagnostics = publicDiagnostics([first, second], new Set(), new Set([second.id]));
-    expect(() =>
-      createEvalHistoryObservations({
-        benchmark: "evmbench",
-        lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
-        candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
-        sourceArtifact: "artifact-1",
-        publicationUrl: PUBLICATION_URL,
-        suite,
-        matrix: [first, second],
-        summary: summary(rows),
-        matchedGroundTruthByRow: new Map([
-          [first.id, new Set(["bug-a"])],
-          [second.id, new Set<string>()]
-        ]),
-        publicEvalDiagnostics: failedDatapointDiagnostics
+    expect(
+      () =>
+        createEvalHistoryObservations({
+          benchmark: "evmbench",
+          lane: "smoke",
+          runTimestamp: "2026-07-19T00:00:00Z",
+          candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
+          sourceArtifact: "artifact-1",
+          publicationUrl: PUBLICATION_URL,
+          suite,
+          matrix: [first, second],
+          summary: summary(rows),
+          matchedGroundTruthByRow: new Map([
+            [first.id, new Set(["bug-a"])],
+            [second.id, new Set<string>()]
+          ]),
+          publicEvalDiagnostics: failedDatapointDiagnostics
+        })
+      // The message matters as much as the code here: every diagnostics parse
+      // failure is wrapped into this same code, so asserting the code alone would
+      // stay green even if the v2 document stopped parsing altogether. This must
+      // fail because the outcome is not publishable, not because it is unreadable.
+    ).toThrowError(
+      expect.objectContaining({
+        code: "EVAL_HISTORY_GENERATION_INCOMPLETE",
+        message: expect.stringContaining("outcome is not publishable")
       })
-    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_GENERATION_INCOMPLETE" }));
+    );
     expect(() =>
       createEvalHistoryObservations({
         benchmark: "evmbench",

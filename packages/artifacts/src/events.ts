@@ -13,6 +13,7 @@ import {
   prepareSafeFilePath,
   readJsonFile,
   safeResolveInside,
+  truncateDurable,
   validateSafeId,
   writeJsonDurable
 } from "./safe-paths.js";
@@ -317,21 +318,33 @@ function ensureExactEventLines(filePath: string, records: readonly EventRecord[]
         const matchingIndex = expectations.findIndex(({ record, serialized }) =>
           assertExactEventCandidate(parsedTail, record, serialized, label)
         );
-        if (matchingIndex < 0 || matchingIndex !== nextMissing) {
-          throw new Error(`${label} contains an unrelated unterminated event record`);
+        // An unterminated line that still parses is a complete record that only
+        // lost its newline. Terminate it whether or not it belongs to this batch:
+        // discarding an unrelated but complete record would lose evidence, and
+        // refusing to proceed would strand the run — `replayEvents` already
+        // tolerates such a line, so no reader depends on it being rejected.
+        if (matchingIndex >= 0 && matchingIndex !== nextMissing) {
+          throw new Error(`${label} contains an out-of-order unterminated event record`);
         }
         appendBytesDurable(filePath, Buffer.from("\n"));
       } else {
         const next = expectations[nextMissing];
         const expectedBytes = next === undefined ? undefined : Buffer.from(next.serialized, "utf8");
         if (
-          expectedBytes === undefined ||
-          tail.length > expectedBytes.length ||
-          !expectedBytes.subarray(0, tail.length).equals(tail)
+          expectedBytes !== undefined &&
+          tail.length <= expectedBytes.length &&
+          expectedBytes.subarray(0, tail.length).equals(tail)
         ) {
-          throw new Error(`${label} contains an unrepairable trailing event record`);
+          appendBytesDurable(filePath, Buffer.concat([expectedBytes.subarray(tail.length), Buffer.from("\n")]));
+        } else {
+          // A trailing fragment that does not parse and is not a prefix of the next
+          // record is a torn write from a process that died mid-append. It was never
+          // a complete line, so it is not durable evidence and `replayEvents` skips
+          // it. Discard it rather than failing: refusing here would make every
+          // guarded lifecycle operation on this run — including cancel, the operator
+          // escape hatch — permanently impossible with no repair path.
+          truncateDurable(filePath, complete.length);
         }
-        appendBytesDurable(filePath, Buffer.concat([expectedBytes.subarray(tail.length), Buffer.from("\n")]));
       }
     }
   }

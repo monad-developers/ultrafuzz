@@ -235,10 +235,17 @@ these USD-per-million rates, resolved from the `models.dev` catalog:
 Because DeepSeek publishes no cache-write rate, DeepSeek cache-creation tokens are
 accounted as the ordinary cache-miss input tokens they are billed as rather than as
 a separate cache-write component; a cache-write component is never priced against a
-missing rate. If the upstream catalog stops publishing a reasoning rate, or any
-pinned rate changes, publication fails closed with `pricing-evidence-missing`
-rather than publishing a cost computed from unverified rates. Updating the pinned
-table is a deliberate code change.
+missing rate. Updating the pinned table is a deliberate code change.
+
+Every one of these conditions fails closed rather than publishing a cost computed
+from unverified rates, but each surfaces differently, so automation should not
+expect a single signal:
+
+| Condition                                   | How it surfaces                                                                                            |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Catalog stops publishing a reasoning rate   | The diagnostics build aborts with `public eval run metadata contains incomplete or mixed pricing evidence` |
+| A pinned rate no longer matches the catalog | Parsing rejects the row with `public eval diagnostics row has invalid DeepSeek V4 Flash pricing`           |
+| A row carries no pricing evidence at all    | The row gains the `pricing-evidence-missing` reason code and is not scoreable                              |
 
 The latest-result summary sums target cost and uses the slowest target as the
 parallel run's wall clock. If any target lacks complete cost or runtime

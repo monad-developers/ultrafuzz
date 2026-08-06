@@ -19,8 +19,10 @@ import lockfile from "proper-lockfile";
 
 import {
   captureProperLockfileDirectoryIdentity,
+  forgetProperLockfileCompromise,
+  properLockfileCompromiseHandler,
   properLockfileContentionCode,
-  swallowProperLockfileCompromise,
+  properLockfileIsCompromised,
   withProperLockfileReclaimGuard,
   writeProperLockfileOwner
 } from "./proper-lockfile-owner.js";
@@ -679,13 +681,14 @@ async function acquireOwnedRunLock(
     try {
       const acquired = await withProperLockfileReclaimGuard(lockPath, async () => {
         reclaimTerminatedWorkflowRunLock(layout, lockPath, options.label, options.stale);
+        forgetProperLockfileCompromise(lockPath);
         const acquiredRelease = await lockfile.lock(lockPath, {
           lockfilePath: lockPath,
           realpath: false,
           stale: options.stale,
           update: 30_000,
           retries: 0,
-          onCompromised: swallowProperLockfileCompromise
+          onCompromised: properLockfileCompromiseHandler(lockPath)
         });
         try {
           if (workflowRunLockCancelled(options.signal) || (externallyBounded && Date.now() >= deadline)) {
@@ -752,6 +755,25 @@ async function acquireOwnedRunLock(
   return async () => {
     if (released) return;
     released = true;
+    // A compromised hold has already lost the lock. proper-lockfile drops its
+    // registry entry when it reports the loss, so `release()` would reject
+    // ERELEASED and never remove the lock directory, leaving it present but
+    // ownerless. Reclamation only treats an ownerless directory as stale after the
+    // full stale window, so every contender — including cancel, the operator escape
+    // hatch — would be blocked for up to that long. Remove it here instead, but
+    // only on proof that it is still ours, so a replacement holder's live lock is
+    // never deleted.
+    if (properLockfileIsCompromised(lockPath)) {
+      forgetProperLockfileCompromise(lockPath);
+      try {
+        await release();
+      } catch {
+        // Expected: the hold is already gone. The identity-checked cleanup below
+        // is what actually frees the lock directory.
+      }
+      discardOwnedRunLockDirectory(layout, lockPath, ownerPath, owner, options.label);
+      throw new Error(`${options.label} hold was compromised before release`);
+    }
     const observed = readWorkflowRunLockOwner(layout, ownerPath, options.label);
     if (JSON.stringify(observed) !== JSON.stringify(owner)) {
       throw new Error(`${options.label} ownership changed before release`);
@@ -759,6 +781,45 @@ async function acquireOwnedRunLock(
     fs.unlinkSync(ownerPath);
     await release();
   };
+}
+
+/**
+ * Removes a lock directory this process can still prove it owns. Anything other
+ * than an exact owner match means a contender already reclaimed the lock, in which
+ * case the directory belongs to that live holder and must be left untouched.
+ */
+function discardOwnedRunLockDirectory(
+  layout: RunLayout,
+  lockPath: string,
+  ownerPath: string,
+  owner: WorkflowRunLockOwner,
+  label: string
+): void {
+  try {
+    const observed = readWorkflowRunLockOwner(layout, ownerPath, label);
+    if (JSON.stringify(observed) !== JSON.stringify(owner)) return;
+    fs.unlinkSync(ownerPath);
+    fs.rmdirSync(lockPath);
+  } catch {
+    // Best effort only. If exact-identity cleanup is impossible, liveness-based
+    // reclamation still recovers the lock, just no sooner than the stale window.
+  }
+}
+
+/**
+ * Fails closed when this process has lost a hold that guards the run's journals.
+ * The guard is deliberately lock-agnostic: both the mutation lock and the
+ * lifecycle-action lock protect journal writes depending on the caller, so a loss
+ * of either must stop further guarded mutation rather than let a reclaiming
+ * contender and this process write concurrently.
+ */
+function assertWorkflowRunHoldsAreIntact(layout: RunLayout, label: string): void {
+  const root = anchoredRunRoot(layout);
+  for (const lockName of [WORKFLOW_MUTATION_LOCK, WORKFLOW_LIFECYCLE_ACTION_LOCK]) {
+    if (properLockfileIsCompromised(path.join(root, lockName))) {
+      throw new Error(`${label} cannot proceed because this process lost its ${lockName} hold on run ${layout.runId}`);
+    }
+  }
 }
 
 function recoverPreparedWorkflowSyncCommit(layout: RunLayout): void {
@@ -846,6 +907,7 @@ function validateWorkflowSyncEventRecord(layout: RunLayout, value: unknown): Eve
 }
 
 function writeWorkflowSyncCommitJournal(layout: RunLayout, journal: WorkflowSyncCommitJournal): void {
+  assertWorkflowRunHoldsAreIntact(layout, "workflow synchronization commit journal write");
   const journalPath = workflowSyncCommitJournalPath(layout);
   if (fs.existsSync(journalPath)) {
     assertSafeJournalFile(layout, journalPath, "workflow synchronization commit journal");
@@ -855,6 +917,7 @@ function writeWorkflowSyncCommitJournal(layout: RunLayout, journal: WorkflowSync
 }
 
 function assertCurrentWorkflowMutationLockOwner(layout: RunLayout): void {
+  assertWorkflowRunHoldsAreIntact(layout, "workflow synchronization commit");
   const lockPath = path.join(anchoredRunRoot(layout), WORKFLOW_MUTATION_LOCK);
   const owner = readWorkflowRunLockOwner(
     layout,
@@ -1109,6 +1172,7 @@ function readWorkflowRunLinkJournal(layout: RunLayout): WorkflowRunLinkJournal {
 }
 
 function writeWorkflowLifecycleActionJournal(layout: RunLayout, journal: WorkflowLifecycleActionJournal): void {
+  assertWorkflowRunHoldsAreIntact(layout, "workflow lifecycle action journal write");
   const journalPath = workflowLifecycleActionJournalPath(layout);
   const directory = path.dirname(journalPath);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -1129,6 +1193,7 @@ function writeWorkflowLifecycleActionJournal(layout: RunLayout, journal: Workflo
 }
 
 function writeWorkflowRunLinkJournal(layout: RunLayout, journal: WorkflowRunLinkJournal): void {
+  assertWorkflowRunHoldsAreIntact(layout, "workflow run link journal write");
   const journalPath = workflowRunLinkJournalPath(layout);
   const directory = path.dirname(journalPath);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });

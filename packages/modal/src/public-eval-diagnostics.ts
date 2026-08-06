@@ -704,7 +704,10 @@ function publicEvalRecordModelEvidence(
     event_count: cumulative.event_count,
     priced_event_count: cumulative.priced_event_count,
     unpriced_event_count: 0,
-    thinking_tokens_included_in_output: expectedConfiguredModel.startsWith("deepseek-")
+    // Compared case-insensitively for the same reason rate resolution is: the model
+    // name reaches here as configured, and a differing capitalization must not
+    // change how the provider's billing is described.
+    thinking_tokens_included_in_output: expectedConfiguredModel.trim().toLowerCase().startsWith("deepseek-")
   };
   return { modelIdentity, pricing };
 }

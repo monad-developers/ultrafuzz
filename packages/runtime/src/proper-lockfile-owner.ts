@@ -6,17 +6,37 @@ import lockfile from "proper-lockfile";
 
 const RECLAIM_GUARD_STALE_MS = 30_000;
 
+const compromisedLockPaths = new Set<string>();
+
 /**
- * proper-lockfile's default `onCompromised` rethrows, and it is invoked from
- * inside the heartbeat's `fs.stat`/`fs.utimes` callback rather than from a
- * promise, so the default turns a lost heartbeat into an unhandled exception that
- * aborts the whole runtime process. Every lock this repository takes instead
- * swallows the compromise notification: each holder independently re-verifies its
- * own exact owner marker before releasing, so a genuinely lost lock surfaces as a
- * normal error in the caller's control flow instead of a process abort.
+ * proper-lockfile's default `onCompromised` rethrows, and it is invoked from inside
+ * the heartbeat's `fs.stat`/`fs.utimes` callback rather than from a promise, so the
+ * default turns a lost heartbeat into an unhandled exception that aborts the whole
+ * runtime process.
+ *
+ * Simply ignoring the notification is not safe either: the holder would keep
+ * believing it owns the lock while a contender that proved the owner dead reclaims
+ * it, producing two concurrent writers. Instead the loss is recorded here, and
+ * callers fail closed on it before performing any further guarded mutation and
+ * again when releasing.
  */
-export function swallowProperLockfileCompromise(): void {
-  // Intentionally empty: see the contract above.
+export function properLockfileCompromiseHandler(lockPath: string): () => void {
+  const resolved = path.resolve(lockPath);
+  return () => {
+    compromisedLockPaths.add(resolved);
+  };
+}
+
+export function properLockfileIsCompromised(lockPath: string): boolean {
+  return compromisedLockPaths.has(path.resolve(lockPath));
+}
+
+/**
+ * Clears a recorded loss so a later, genuinely held acquisition of the same
+ * pathname in this process is not judged by a previous holder's failure.
+ */
+export function forgetProperLockfileCompromise(lockPath: string): void {
+  compromisedLockPaths.delete(path.resolve(lockPath));
 }
 
 /**
@@ -46,13 +66,14 @@ export async function withProperLockfileReclaimGuard<T>(lockPath: string, operat
   // Use the guard pathname as proper-lockfile's in-process ownership key too.
   // Reusing the run root would collide with a concurrently held start lock
   // even though the two lockfilePath values are different.
+  forgetProperLockfileCompromise(guardPath);
   const release = await lockfile.lock(guardPath, {
     lockfilePath: guardPath,
     realpath: false,
     stale: RECLAIM_GUARD_STALE_MS,
     update: 10_000,
     retries: 0,
-    onCompromised: swallowProperLockfileCompromise
+    onCompromised: properLockfileCompromiseHandler(guardPath)
   });
   try {
     return await operation();

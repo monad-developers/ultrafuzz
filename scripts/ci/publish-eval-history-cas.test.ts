@@ -253,36 +253,33 @@ describe("eval history Git CAS publisher", () => {
     );
   });
 
-  it("publishes a first publication whose deterministic chart rendering leaves one chart unchanged", () => {
-    // Chart rendering is deterministic, so a chart whose own inputs did not change
-    // is legitimately byte-identical. `latest-summary.svg` in particular renders only
-    // the newest observation by run timestamp. Requiring an exact staged path set
-    // would permanently reject a fully scored result, because the rejection escapes
-    // the compare-and-swap retry loop. The semantic delta is asserted separately.
+  it("publishes a first publication in which deterministically rendered charts stay byte-identical", () => {
+    // Chart rendering is deterministic, so a chart whose own inputs did not change is
+    // legitimately byte-identical. Here the three overview charts render only
+    // UltrafuzzBench observations while the generation is an EVMBench one, so they are
+    // unchanged while history and the six metric charts change. Requiring an exact
+    // staged path set would reject this permanently, because the rejection escapes the
+    // compare-and-swap retry loop. Chart/history consistency is still fully enforced by
+    // the publisher's own `eval history --check` invocation, which validates all nine.
     const fixture = createRepositoryFixture();
     const inputRoot = path.join(fixture.root, "inputs");
     const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
-    writeEvalRun(inputRoot, "run-subset", ["observation-a", "observation-b", "observation-c"], candidateCommit);
-    const generation = writeGeneration(fixture.root, "generation-subset.json", ["run-subset"], candidateCommit);
-    const previous = process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS;
-    process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS = "1";
-    let result;
-    try {
-      result = publishEvalHistoryGeneration(publisherInput(fixture.checkoutA, generation, inputRoot));
-    } finally {
-      if (previous === undefined) delete process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS;
-      else process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS = previous;
-    }
+    writeEvalRun(inputRoot, "run-stable", ["observation-a", "observation-b", "observation-c"], candidateCommit);
+    const generation = writeGeneration(fixture.root, "generation-stable.json", ["run-stable"], candidateCommit);
+
+    const result = publishEvalHistoryGeneration(publisherInput(fixture.checkoutA, generation, inputRoot));
+
     expect(result.published).toBe(true);
-    expect(result.eval_run_ids).toEqual(["run-subset"]);
     const changed = git(fixture.bare, ["show", "--name-only", "--format=", TARGET_REF])
       .split("\n")
       .filter((line) => line.length > 0)
       .sort();
-    // History must still be recorded, and the unchanged chart must simply be absent
-    // rather than causing a rejection.
-    expect(changed).toContain("benchmarks/history.json");
-    expect(changed).not.toContain("docs/assets/eval-history/cost.svg");
+    expect(changed).toEqual(
+      ["benchmarks/history.json", ...METRIC_CHARTS.map((chart) => `docs/assets/eval-history/${chart}`)].sort()
+    );
+    for (const chart of OVERVIEW_CHARTS) {
+      expect(git(fixture.bare, ["show", `${TARGET_REF}:docs/assets/eval-history/${chart}`])).toBe(`${chart}:\n`);
+    }
     const history = JSON.parse(git(fixture.bare, ["show", `${TARGET_REF}:benchmarks/history.json`])) as {
       observations: Array<{ id: string }>;
     };
@@ -291,6 +288,29 @@ describe("eval history Git CAS publisher", () => {
       "observation-b",
       "observation-c"
     ]);
+  });
+
+  it("rejects a publication whose charts do not render the history being published", () => {
+    // Proves the publisher's `eval history --check` step is load-bearing. It is the
+    // only remaining guarantee that the nine charts match the history they claim to
+    // render, so a chart left stale must abort the publication and leave main alone.
+    const fixture = createRepositoryFixture();
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-stale", ["observation-a", "observation-b", "observation-c"], candidateCommit);
+    const generation = writeGeneration(fixture.root, "generation-stale.json", ["run-stale"], candidateCommit);
+    const mainBefore = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
+    const previous = process.env.ULTRAFUZZ_HISTORY_CAS_TEST_STALE_CHART;
+    process.env.ULTRAFUZZ_HISTORY_CAS_TEST_STALE_CHART = "1";
+    try {
+      expect(() => publishEvalHistoryGeneration(publisherInput(fixture.checkoutA, generation, inputRoot))).toThrow(
+        /stale fixture chart cost\.svg/u
+      );
+    } finally {
+      if (previous === undefined) delete process.env.ULTRAFUZZ_HISTORY_CAS_TEST_STALE_CHART;
+      else process.env.ULTRAFUZZ_HISTORY_CAS_TEST_STALE_CHART = previous;
+    }
+    expect(git(fixture.bare, ["rev-parse", TARGET_REF]).trim()).toBe(mainBefore);
   });
 
   it("rejects a coherently parseable publication tree substituted after generation preparation", () => {
@@ -949,10 +969,13 @@ function expectedCharts(history) {
   ]);
 }
 
-function selectedCharts(history) {
-  const expected = expectedCharts(history);
-  if (process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS === "1") expected.delete("cost.svg");
-  return expected;
+// Charts the fake CLI actually writes. The stale hook makes it emit a chart that
+// does not render the history it just wrote, which is what proves the publisher's
+// own \`eval history --check\` invocation is load-bearing.
+function renderedCharts(history) {
+  const rendered = expectedCharts(history);
+  if (process.env.ULTRAFUZZ_HISTORY_CAS_TEST_STALE_CHART === "1") rendered.set("cost.svg", "cost.svg:stale\n");
+  return rendered;
 }
 
 if (runId !== undefined) {
@@ -982,18 +1005,18 @@ if (runId !== undefined) {
   history.observations.sort((left, right) => left.id.localeCompare(right.id));
   fs.writeFileSync(historyPath, JSON.stringify(history, null, 2) + "\n");
   fs.mkdirSync(chartsRoot, { recursive: true });
-  for (const [file, contents] of selectedCharts(history)) fs.writeFileSync(path.join(chartsRoot, file), contents);
+  for (const [file, contents] of renderedCharts(history)) fs.writeFileSync(path.join(chartsRoot, file), contents);
   process.exit(0);
 }
 
 const history = JSON.parse(fs.readFileSync(historyPath, "utf8"));
 if (args.includes("--check")) {
-  for (const [file, contents] of selectedCharts(history)) {
+  for (const [file, contents] of expectedCharts(history)) {
     if (fs.readFileSync(path.join(chartsRoot, file), "utf8") !== contents) throw new Error("stale fixture chart " + file);
   }
 } else {
   fs.mkdirSync(chartsRoot, { recursive: true });
-  for (const [file, contents] of selectedCharts(history)) fs.writeFileSync(path.join(chartsRoot, file), contents);
+  for (const [file, contents] of renderedCharts(history)) fs.writeFileSync(path.join(chartsRoot, file), contents);
 }
 `
   );

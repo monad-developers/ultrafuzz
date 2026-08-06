@@ -129,13 +129,17 @@ export function secretValueRepresentations(secret: string): string[] {
  */
 function embeddedBase64Representations(bytes: Buffer): string[] {
   const representations: string[] = [];
-  for (const phase of [1, 2]) {
+  // Phase 0 needs its own entry rather than relying on the standalone encoding:
+  // when the credential's length is not a multiple of three, the standalone
+  // encoding's trailing group encodes padding bytes that an embedded credential
+  // does not have, so it matches nothing.
+  for (const phase of [0, 1, 2]) {
     // Only whole 3-byte groups encode to characters determined solely by the
     // credential, so drop the leading group (shared with the prefix) and any
     // trailing partial group (shared with whatever follows).
-    const padded = Buffer.concat([Buffer.alloc(phase), bytes]);
+    const padded = phase === 0 ? bytes : Buffer.concat([Buffer.alloc(phase), bytes]);
     const encoded = padded.toString("base64");
-    const start = 4;
+    const start = phase === 0 ? 0 : 4;
     const end = encoded.length - (padded.length % 3 === 0 ? 0 : 4);
     if (end - start < 8) continue;
     const aligned = encoded.slice(start, end);

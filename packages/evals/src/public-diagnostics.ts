@@ -620,7 +620,7 @@ function assertPublicPricingArithmetic(pricing: PublicPricingEvidence, rowId: st
 function assertDeepSeekV4FlashPricing(pricing: PublicPricingEvidence, rowId: string): void {
   const expectedRates = DEEPSEEK_V4_FLASH_RATES_USD_PER_MILLION;
   if (
-    pricing.provider_reported_model !== DEEPSEEK_V4_FLASH_MODEL ||
+    normalizedPublicModelName(pricing.provider_reported_model) !== DEEPSEEK_V4_FLASH_MODEL ||
     pricing.catalog.source !== "models.dev" ||
     JSON.stringify(pricing.rates_usd_per_million) !== JSON.stringify(expectedRates) ||
     pricing.usage.cache_write_tokens !== 0 ||
