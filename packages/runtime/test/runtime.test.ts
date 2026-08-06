@@ -15,6 +15,7 @@ import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/ref
 import {
   assertSmithersPackageManifest,
   KIMI_CODE_VERSION,
+  renderSmithersPackageJson,
   SMITHERS_EFFECT_VERSION,
   SMITHERS_ORCHESTRATOR_BIN_PATH,
   SMITHERS_ORCHESTRATOR_VERSION
@@ -3989,73 +3990,29 @@ test("startRun resolves the target-local Smithers binary when it is not on PATH"
   assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-local-smithers-run\.tsx/);
 });
 
-test("startRun patches the pinned runner lifecycle and resume hydration", async () => {
+test("startRun patches every described runner compatibility workaround", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
 
   const logPath = path.join(project, "patched-admission-smithers.log");
   writeFakeInstalledSmithers(project);
-  const cliRoot = path.join(project, ".smithers", "node_modules", "@smithers-orchestrator", "cli");
-  const admissionSource = path.join(cliRoot, "src", "detached-admission.js");
-  const cliSource = path.join(cliRoot, "src", "index.js");
-  const schedulerRoot = path.join(project, ".smithers", "node_modules", "@smithers-orchestrator", "scheduler");
-  const engineRoot = path.join(project, ".smithers", "node_modules", "@smithers-orchestrator", "engine");
-  const schedulerSource = path.join(schedulerRoot, "src", "makeWorkflowSession.js");
-  const engineSource = path.join(engineRoot, "src", "engine.js");
-  fs.mkdirSync(path.dirname(admissionSource), { recursive: true });
-  fs.writeFileSync(
-    path.join(cliRoot, "package.json"),
-    `${JSON.stringify({ name: "@smithers-orchestrator/cli", version: SMITHERS_ORCHESTRATOR_VERSION })}\n`,
-    "utf8"
-  );
-  fs.writeFileSync(
-    cliSource,
-    [
-      '        const supervisor = spawn("bun", supervisorArgs, {',
-      "          detached: true,",
-      '          stdio: ["ignore", fd, fd],',
-      "          env: process.env,",
-      "        });",
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-  fs.writeFileSync(
-    admissionSource,
-    [
-      'export const DETACHED_ADMISSION_NONCE_ENV = "SMITHERS_DETACHED_ADMISSION_NONCE";',
-      "export const DETACHED_ADMISSION_TIMEOUT_MS = 30_000;",
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-  for (const dependencyRoot of [schedulerRoot, engineRoot]) {
-    fs.mkdirSync(path.join(dependencyRoot, "src"), { recursive: true });
+  const nodeModules = path.join(project, ".smithers", "node_modules");
+  // Seeded from the descriptions themselves, so a newly described workaround is
+  // covered here without a second edit and cannot land reported-but-never-applied.
+  const sources = SMITHERS_COMPATIBILITY_PATCHES.map((patch) => {
+    const packageRoot = path.join(nodeModules, ...patch.packageName.split("/"));
+    const source = path.join(packageRoot, ...patch.sourceRelativePath.split("/"));
+    fs.mkdirSync(path.dirname(source), { recursive: true });
     fs.writeFileSync(
-      path.join(dependencyRoot, "package.json"),
-      `${JSON.stringify({ version: SMITHERS_ORCHESTRATOR_VERSION })}\n`,
+      path.join(packageRoot, "package.json"),
+      `${JSON.stringify({ name: patch.packageName, version: SMITHERS_ORCHESTRATOR_VERSION })}\n`,
       "utf8"
     );
-  }
-  fs.writeFileSync(
-    schedulerSource,
-    [
-      "export function makeWorkflowSession() {",
-      "  const state = { states: new Map() };",
-      "  return {",
-      "    getTaskStates: () => Effect.sync(() => cloneTaskStateMap(state.states)),",
-      "  };",
-      "}",
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-  fs.writeFileSync(
-    engineSource,
-    ["async function run() {", "    const driverRenderer = {", "}", ""].join("\n"),
-    "utf8"
-  );
+    fs.writeFileSync(source, `${patch.patchable}\n`, "utf8");
+    return { patch, source };
+  });
 
   const run = await startRun({
     projectRoot: project,
@@ -4064,31 +4021,40 @@ test("startRun patches the pinned runner lifecycle and resume hydration", async 
   });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.match(fs.readFileSync(admissionSource, "utf8"), /DETACHED_ADMISSION_TIMEOUT_MS = 300_000/u);
-  assert.doesNotMatch(fs.readFileSync(admissionSource, "utf8"), /DETACHED_ADMISSION_TIMEOUT_MS = 30_000;/u);
-  assert.match(fs.readFileSync(cliSource, "utf8"), /const supervisorFd = openSync\(logFile, "a"\)/u);
-  assert.match(fs.readFileSync(cliSource, "utf8"), /stdio: \["ignore", supervisorFd, supervisorFd\]/u);
-  assert.doesNotMatch(fs.readFileSync(cliSource, "utf8"), /stdio: \["ignore", fd, fd\]/u);
-  assert.match(fs.readFileSync(schedulerSource, "utf8"), /restoreTerminalTaskStates/u);
-  assert.match(fs.readFileSync(engineSource, "utf8"), /restored durable terminal tasks into resumed workflow session/u);
+  assert.equal(sources.length, SMITHERS_COMPATIBILITY_PATCHES.length);
+  for (const { patch, source } of sources) {
+    // `patched` is the whole replacement text, so its presence is exactly the
+    // statement "this workaround landed in the installed source".
+    assert.equal(
+      fs.readFileSync(source, "utf8").includes(patch.patched),
+      true,
+      `${patch.id} is described but was never applied to ${source}`
+    );
+  }
 });
 
 // The test above proves the patcher rewrites sources that carry the expected
-// shape, but it supplies those sources itself. This one reads the release that is
-// actually pinned, so bumping the runner cannot silently turn a durability
-// workaround into a no-op: either the anchor is still there and unfixed, or this
-// fails and the workaround has to be re-justified against the new upstream code.
+// shape, but it supplies those sources itself, so it cannot notice upstream
+// changing underneath us. This one reads the release that is actually pinned and
+// asserts, per workaround, that the anchor is still unique, that upstream has not
+// adopted the replacement, and that the specific upstream evidence justifying the
+// workaround still holds. An anchor alone is a weak signal: `resume_hydration`
+// used to anchor on a single generic line that survived a 0.31 to 0.32 refactor of
+// the very ordering it depends on, which is why the ordering is asserted directly.
 test("every runner compatibility patch still anchors in the pinned Smithers release", async () => {
-  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const { SMITHERS_COMPATIBILITY_PATCHES, SMITHERS_ENGINE_RESUME_RESET_ORDERING } = await import("../src/smithers.js");
   const resolveFromPinnedRunner = createRequire(
     fs.realpathSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js"))
   );
+  const sourceByPatchId = new Map<string, string>();
 
+  assert.ok(SMITHERS_COMPATIBILITY_PATCHES.length > 0, "no compatibility patches were described");
   for (const patch of SMITHERS_COMPATIBILITY_PATCHES) {
     const label = `${patch.packageName}/${patch.sourceRelativePath}`;
     const sourceSuffix = path.join(...patch.sourceRelativePath.split("/"));
-    // Smithers' subpackages expose `./*` as `./src/*.js` and nothing else, so the
-    // export subpath is the source path without its `src/` prefix and `.js` suffix.
+    // Each patched subpackage maps the export subpath `./<name>` onto
+    // `./src/<name>.js`, so drop the `src/` prefix and the `.js` suffix. The
+    // assertion below re-checks that mapping instead of trusting it.
     const exportSubpath = patch.sourceRelativePath.replace(/^src\//u, "").replace(/\.js$/u, "");
     const sourcePath = resolveFromPinnedRunner.resolve(`${patch.packageName}/${exportSubpath}`);
     assert.equal(sourcePath.endsWith(sourceSuffix), true, `${label} resolved to ${sourcePath}`);
@@ -4101,6 +4067,7 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
     assert.equal(packageVersion, SMITHERS_ORCHESTRATOR_VERSION, `${label} belongs to an unpinned release`);
 
     const contents = fs.readFileSync(sourcePath, "utf8");
+    sourceByPatchId.set(patch.id, contents);
     assert.equal(
       contents.includes(patch.patched),
       false,
@@ -4112,7 +4079,46 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
       `${label} no longer contains exactly one copy of the patched upstream shape; ` +
         `re-check whether Smithers ${SMITHERS_ORCHESTRATOR_VERSION} fixed this itself`
     );
+    for (const absent of patch.upstreamAbsent) {
+      assert.equal(
+        contents.includes(absent),
+        false,
+        `${label} now contains ${JSON.stringify(absent)}, so Smithers ${SMITHERS_ORCHESTRATOR_VERSION} may have ` +
+          `addressed this itself; re-justify or retire the ${patch.id} workaround`
+      );
+    }
   }
+
+  // Ordering, not just presence: the stale-attempt reset must still run inside the
+  // deferred run-startup closure, which is what puts it ahead of the hydration the
+  // anchor appends. If upstream moves the reset after the first render again, the
+  // hydration would restore a node as finished and the reset would then rewrite the
+  // durable row to pending, splitting session state from the database.
+  const engineSource = sourceByPatchId.get("resume_hydration");
+  assert.ok(engineSource !== undefined, "resume_hydration patch was not described");
+  const closureStart = engineSource.indexOf(SMITHERS_ENGINE_RESUME_RESET_ORDERING.closureStart);
+  const resetCall = engineSource.indexOf(SMITHERS_ENGINE_RESUME_RESET_ORDERING.resetCall);
+  const anchor = engineSource.indexOf(SMITHERS_ENGINE_RESUME_RESET_ORDERING.anchor);
+  assert.notEqual(closureStart, -1, "deferred run-startup closure is gone from the pinned engine");
+  assert.notEqual(resetCall, -1, "stale-attempt reset call is gone from the pinned engine");
+  assert.notEqual(anchor, -1, "resume-hydration anchor is gone from the pinned engine");
+  assert.ok(
+    closureStart < resetCall && resetCall < anchor,
+    "the pinned engine no longer resets stale attempts inside the deferred startup closure before the " +
+      "resume-hydration anchor; re-derive the anchor before trusting the resume workaround"
+  );
+
+  // The Effect override only dedupes correctly while it tracks what the pinned
+  // runner declares, and nothing else in the tree enforces that.
+  const runnerManifest = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "package.json"), "utf8")
+  ) as { dependencies?: Record<string, string> };
+  assert.equal(
+    runnerManifest.dependencies?.effect,
+    SMITHERS_EFFECT_VERSION,
+    `the pinned runner declares Effect ${runnerManifest.dependencies?.effect}, but the generated manifest overrides ` +
+      `Effect to ${SMITHERS_EFFECT_VERSION}`
+  );
 });
 
 test("startRun accepts the published Smithers bin target with its leading dot segment", async () => {
@@ -4398,16 +4404,37 @@ test("generated workflow dependencies require exact runner versions while allowi
       }),
     /must retain Ultrafuzz's exact runner versions/u
   );
+  // Pinning Effect itself but leaving the `@effect/*` packages layered on it
+  // floating is what lets two cloud containers install different Effect trees for
+  // the same run, so an incomplete override block must be rejected too.
+  assert.throws(
+    () =>
+      assertSmithersPackageManifest({
+        dependencies: {
+          "@moonshot-ai/kimi-code": KIMI_CODE_VERSION,
+          "smithers-orchestrator": SMITHERS_ORCHESTRATOR_VERSION,
+          zod: "4.4.3"
+        },
+        devDependencies: { typescript: "6.0.3" },
+        overrides: { effect: SMITHERS_EFFECT_VERSION }
+      }),
+    /must retain Ultrafuzz's exact runner versions/u
+  );
+  // Derived from the canonical manifest so the accepted shape cannot drift from
+  // what Ultrafuzz actually generates.
+  const rendered = JSON.parse(renderSmithersPackageJson()) as {
+    dependencies: Record<string, string>;
+    overrides: Record<string, string>;
+  };
+  assert.equal(rendered.overrides.effect, SMITHERS_EFFECT_VERSION);
+  assert.ok(
+    Object.keys(rendered.overrides).some((name) => name.startsWith("@effect/")),
+    "the generated manifest must pin the @effect packages alongside Effect itself"
+  );
   assert.doesNotThrow(() =>
     assertSmithersPackageManifest({
-      dependencies: {
-        "@moonshot-ai/kimi-code": KIMI_CODE_VERSION,
-        "smithers-orchestrator": SMITHERS_ORCHESTRATOR_VERSION,
-        zod: "4.4.3",
-        "custom-agent-package": "1.2.3"
-      },
-      devDependencies: { typescript: "6.0.3" },
-      overrides: { effect: SMITHERS_EFFECT_VERSION }
+      ...rendered,
+      dependencies: { ...rendered.dependencies, "custom-agent-package": "1.2.3" }
     })
   );
 });

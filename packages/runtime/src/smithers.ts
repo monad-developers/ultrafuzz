@@ -60,34 +60,45 @@ const SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH = `    restoreTerminalTaskStates
         }
       }),
     getTaskStates: () => Effect.sync(() => cloneTaskStateMap(state.states)),`;
-const SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE = "    const driverRenderer = {";
-const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `    if (opts.resume) {
-      const durableOutputs = await loadOutputs(db, schema, runId);
-      const durableNodes = await Effect.runPromise(adapter.listNodes(runId));
-      const terminalTaskStates = durableNodes.flatMap((node) => {
-        if (node.state === "skipped") {
-          return [{ nodeId: node.nodeId, iteration: node.iteration ?? 0, state: "skipped" }];
-        }
-        if (node.state !== "finished" || typeof node.outputTable !== "string") return [];
-        const rows = durableOutputs[node.outputTable];
-        const hasOutput =
-          Array.isArray(rows) &&
-          rows.some((row) => {
-            const rowNodeId = row.nodeId ?? row.node_id;
-            return rowNodeId === node.nodeId && Number(row.iteration ?? 0) === Number(node.iteration ?? 0);
+// Anchored immediately after the resume path's `startRunRuntime()`, which is
+// where Smithers cancels stale in-progress attempts and rewrites their nodes back
+// to `pending`. Hydrating before that reset would restore a node as finished and
+// then let the reset flip the durable row to pending, leaving the in-memory
+// session and the database disagreeing for the whole resume. Smithers 0.31 ran
+// that reset eagerly, before the renderer existed; 0.32.0 deferred it into the
+// first render of a resume, so the anchor has to follow it. The enclosing
+// `resumeWorkflowNameValidated` guard also makes this run exactly once, still
+// before the rendered graph reaches the scheduler.
+const SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE = `          resumeWorkflowNameValidated = true;
+          await startRunRuntime();
+        }`;
+const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `          resumeWorkflowNameValidated = true;
+          await startRunRuntime();
+          const durableOutputs = await loadOutputs(db, schema, runId);
+          const durableNodes = await Effect.runPromise(adapter.listNodes(runId));
+          const terminalTaskStates = durableNodes.flatMap((node) => {
+            if (node.state === "skipped") {
+              return [{ nodeId: node.nodeId, iteration: node.iteration ?? 0, state: "skipped" }];
+            }
+            if (node.state !== "finished" || typeof node.outputTable !== "string") return [];
+            const rows = durableOutputs[node.outputTable];
+            const hasOutput =
+              Array.isArray(rows) &&
+              rows.some((row) => {
+                const rowNodeId = row.nodeId ?? row.node_id;
+                return rowNodeId === node.nodeId && Number(row.iteration ?? 0) === Number(node.iteration ?? 0);
+              });
+            return hasOutput
+              ? [{ nodeId: node.nodeId, iteration: node.iteration ?? 0, state: "finished" }]
+              : [];
           });
-        return hasOutput
-          ? [{ nodeId: node.nodeId, iteration: node.iteration ?? 0, state: "finished" }]
-          : [];
-      });
-      await Effect.runPromise(workflowSession.restoreTerminalTaskStates(terminalTaskStates));
-      logInfo(
-        "restored durable terminal tasks into resumed workflow session",
-        { runId, restoredTaskCount: terminalTaskStates.length },
-        "engine:run",
-      );
-    }
-    const driverRenderer = {`;
+          await Effect.runPromise(workflowSession.restoreTerminalTaskStates(terminalTaskStates));
+          logInfo(
+            "restored durable terminal tasks into resumed workflow session",
+            { runId, restoredTaskCount: terminalTaskStates.length },
+            "engine:run",
+          );
+        }`;
 
 export type SmithersCompatibilityPatchId =
   "detached_admission" | "supervisor_descriptor" | "terminal_state_restore" | "resume_hydration";
@@ -103,6 +114,14 @@ export interface SmithersCompatibilityPatch {
   readonly patchable: string;
   /** Replacement text; its presence means the patch is already applied. */
   readonly patched: string;
+  /**
+   * Text that must be ABSENT from the pinned source for the workaround to still
+   * be warranted. An anchor alone is a weak signal: it can be one generic line
+   * that survives a refactor of the very behaviour the patch depends on, or
+   * upstream can add a supported alternative while leaving the anchor intact.
+   * These encode the evidence that upstream has not addressed the problem.
+   */
+  readonly upstreamAbsent: readonly string[];
 }
 
 // The durability workarounds Ultrafuzz applies to the pinned runner. Every entry
@@ -115,30 +134,51 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     packageName: "@smithers-orchestrator/cli",
     sourceRelativePath: "src/detached-admission.js",
     patchable: SMITHERS_CLI_DETACHED_ADMISSION_SOURCE,
-    patched: SMITHERS_CLI_DETACHED_ADMISSION_PATCH
+    patched: SMITHERS_CLI_DETACHED_ADMISSION_PATCH,
+    // A configurable ceiling retires this patch instead of raising it by hand.
+    upstreamAbsent: ["SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS"]
   },
   {
     id: "supervisor_descriptor",
     packageName: "@smithers-orchestrator/cli",
     sourceRelativePath: "src/index.js",
     patchable: SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE,
-    patched: SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH
+    patched: SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH,
+    upstreamAbsent: []
   },
   {
     id: "terminal_state_restore",
     packageName: "@smithers-orchestrator/scheduler",
     sourceRelativePath: "src/makeWorkflowSession.js",
     patchable: SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE,
-    patched: SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH
+    patched: SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH,
+    // Upstream growing its own terminal-state restoration retires this patch.
+    upstreamAbsent: ["restoreTerminalTaskStates"]
   },
   {
     id: "resume_hydration",
     packageName: "@smithers-orchestrator/engine",
     sourceRelativePath: "src/engine.js",
     patchable: SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE,
-    patched: SMITHERS_ENGINE_RESUME_HYDRATION_PATCH
+    patched: SMITHERS_ENGINE_RESUME_HYDRATION_PATCH,
+    // `restoreTerminalTaskStates` would mean upstream hydrates on its own.
+    upstreamAbsent: ["restoreTerminalTaskStates"]
   }
 ];
+
+/**
+ * Text that must appear between the start of the deferred run-startup closure and
+ * the resume-hydration anchor. The anchor places our hydration immediately after
+ * `startRunRuntime()`, which is only ordered after the stale-attempt reset while
+ * that reset lives inside the closure. Hydrating before the reset would restore a
+ * node as finished and then let the reset rewrite the durable row to pending, so
+ * this ordering is load-bearing and is asserted against the pinned release.
+ */
+export const SMITHERS_ENGINE_RESUME_RESET_ORDERING = {
+  closureStart: "const startRunRuntime = async () => {",
+  resetCall: "await cancelStaleAttempts(adapter, runId);",
+  anchor: SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE
+} as const;
 
 const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
   "ALL_PROXY",
@@ -805,25 +845,29 @@ function inspectSmithersCompatibilityPatches(
   const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
   const postures = {} as Record<SmithersCompatibilityPatchId, SmithersPatchPosture>;
   for (const patch of SMITHERS_COMPATIBILITY_PATCHES) {
-    const packageRoot = installedSmithersDependencyRoot(nodeModules, patch.packageName);
-    postures[patch.id] =
-      packageRoot === undefined
-        ? "unknown"
-        : patchPosture(path.join(packageRoot, ...patch.sourceRelativePath.split("/")), patch.patched, patch.patchable);
+    const candidateRoots = smithersDependencyRootCandidates(nodeModules, patch.packageName);
+    if (candidateRoots.length === 1) {
+      const source = path.join(candidateRoots[0]!, ...patch.sourceRelativePath.split("/"));
+      postures[patch.id] = patchPosture(source, patch.patched, patch.patchable);
+      continue;
+    }
+    // Two roots make the next run hard-fail in `applySmithersCompatibilityPatches`,
+    // so this must not read as merely unavailable. No root at all genuinely leaves
+    // the posture unknown.
+    postures[patch.id] = candidateRoots.length > 1 ? "incompatible" : "unknown";
   }
   return postures;
 }
 
 // A registry install nests the runner's own dependencies under it, while a
-// hoisted layout puts them beside it. An ambiguous or absent root is reported as
-// unknown rather than guessed at.
-function installedSmithersDependencyRoot(nodeModules: string, packageName: string): string | undefined {
+// hoisted layout puts them beside it. Both are legitimate, so resolve either and
+// let callers decide what an absent or ambiguous result means.
+function smithersDependencyRootCandidates(nodeModules: string, packageName: string): string[] {
   const segments = packageName.split("/");
-  const candidates = [
+  return [
     path.join(nodeModules, ...segments),
     path.join(nodeModules, "smithers-orchestrator", "node_modules", ...segments)
   ].filter((candidate) => fs.existsSync(candidate));
-  return candidates.length === 1 ? candidates[0] : undefined;
 }
 
 function patchPosture(sourcePath: string, patched: string, patchable: string): SmithersPatchPosture {
@@ -1565,8 +1609,19 @@ async function ensureSmithersDependencies(
     resolveInstalledSmithersPackageRoot(projectRoot);
   }
   if (installedSmithersValidationError(projectRoot) === undefined) {
-    applySmithersCompatibilityPatches(projectRoot);
-    return;
+    try {
+      applySmithersCompatibilityPatches(projectRoot);
+      return;
+    } catch {
+      // `installedSmithersValidationError` only inspects the top-level runner, so
+      // a half-reified tree passes it and then fails to patch: an interrupted
+      // upgrade install can leave the new top-level runner beside stale or
+      // missing `@smithers-orchestrator/*` packages. Fall through and reinstall
+      // instead of returning, because returning would make every later resume of
+      // a durable run fail identically with no way back short of deleting
+      // `.smithers/node_modules` by hand. A genuine incompatibility still throws
+      // from the post-install attempt below.
+    }
   }
   await execFileAsync(
     "npm",
@@ -1598,17 +1653,22 @@ async function ensureSmithersDependencies(
 
 function applySmithersCompatibilityPatches(projectRoot: string): void {
   const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
-  const candidatePackageRoots = [
-    path.join(nodeModules, "@smithers-orchestrator", "cli"),
-    path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "cli")
-  ].filter((candidate) => fs.existsSync(candidate));
-  // Unit-test installers intentionally provide only the public runner shim.
-  // A registry installation of the pinned runner always carries its CLI package.
-  if (candidatePackageRoots.length === 0) return;
-  if (candidatePackageRoots.length !== 1) {
-    throw new Error("pinned workflow runner resolved multiple CLI package roots");
+  const cliRoots = smithersDependencyRootCandidates(nodeModules, "@smithers-orchestrator/cli");
+  const schedulerRoots = smithersDependencyRootCandidates(nodeModules, "@smithers-orchestrator/scheduler");
+  const engineRoots = smithersDependencyRootCandidates(nodeModules, "@smithers-orchestrator/engine");
+  // Unit-test installers intentionally provide only the public runner shim, so a
+  // tree with none of these packages is tolerated. A registry installation always
+  // carries all three, so a tree holding some but not all of them is a broken
+  // install: fail instead of silently skipping the resume-durability patches and
+  // letting the run proceed unpatched. The caller repairs this by reinstalling.
+  if (cliRoots.length === 0 && schedulerRoots.length === 0 && engineRoots.length === 0) return;
+  if (cliRoots.length !== 1) {
+    throw new Error("pinned workflow runner resolved an incomplete CLI implementation");
   }
-  const packageRoot = candidatePackageRoots[0]!;
+  if (schedulerRoots.length !== 1 || engineRoots.length !== 1) {
+    throw new Error("pinned workflow runner resolved an incomplete resume implementation");
+  }
+  const packageRoot = cliRoots[0]!;
   const packageJson = path.join(packageRoot, "package.json");
   const admissionSource = path.join(packageRoot, "src", "detached-admission.js");
   const cliSource = path.join(packageRoot, "src", "index.js");
@@ -1626,10 +1686,13 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
     }
     // Smithers waits for a durable RunStarted admission marker, but through
     // 0.32.0 its hard-coded 30-second ceiling is shorter than cold startup for
-    // the public smoke graph. Retain the stronger admission proof while allowing
-    // bounded initialization time until the dependency exposes this as
-    // configuration; 0.33.1 adds SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS, which
-    // will retire this patch once that release is published to npm.
+    // the public smoke graph. On a resume the marker now also waits on the
+    // workflow transpile and first render, because 0.32.0 defers RunStarted into
+    // the renderer, so the raised ceiling covers more than engine boot. Retain the
+    // stronger admission proof while allowing bounded initialization time. The
+    // successor `smthrs` package adds SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS in
+    // 0.33.1, so this patch can retire when we migrate to that package name; it
+    // will never appear under `smithers-orchestrator`.
     writeFileDurable(
       admissionSource,
       admissionContents.replace(SMITHERS_CLI_DETACHED_ADMISSION_SOURCE, SMITHERS_CLI_DETACHED_ADMISSION_PATCH)
@@ -1648,20 +1711,6 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
       cliSource,
       cliContents.replace(SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE, SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH)
     );
-  }
-
-  const schedulerRoots = [
-    path.join(nodeModules, "@smithers-orchestrator", "scheduler"),
-    path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "scheduler")
-  ].filter((candidate) => fs.existsSync(candidate));
-  const engineRoots = [
-    path.join(nodeModules, "@smithers-orchestrator", "engine"),
-    path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "engine")
-  ].filter((candidate) => fs.existsSync(candidate));
-  // Unit-test installers may provide only the public runner and CLI shims.
-  if (schedulerRoots.length === 0 && engineRoots.length === 0) return;
-  if (schedulerRoots.length !== 1 || engineRoots.length !== 1) {
-    throw new Error("pinned workflow runner resolved an incomplete resume implementation");
   }
 
   const schedulerRoot = schedulerRoots[0]!;

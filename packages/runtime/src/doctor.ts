@@ -5,7 +5,11 @@ import { promisify } from "node:util";
 
 import { referencesStatus } from "./references.js";
 import { inspectSmithersInstallation, type SmithersInstallationPosture } from "./smithers.js";
-import { SMITHERS_ORCHESTRATOR_VERSION } from "./smithers-package.js";
+import {
+  SMITHERS_ORCHESTRATOR_PACKAGE_NAME,
+  SMITHERS_ORCHESTRATOR_VERSION,
+  SMITHERS_SUCCESSOR_PACKAGE_NAME
+} from "./smithers-package.js";
 import type {
   DoctorCheck,
   DoctorCheckStatus,
@@ -272,7 +276,7 @@ function compatibilityPatchCheck(installation: SmithersInstallationPosture): {
   };
 }
 
-function registryCheck(latest: { version: string } | { error: string } | undefined): {
+function registryCheck(latest: { version: string; packageName: string } | { error: string } | undefined): {
   check: DoctorCheck;
   diagnostics: RuntimeDiagnostic[];
 } {
@@ -304,7 +308,7 @@ function registryCheck(latest: { version: string } | { error: string } | undefin
       ]
     };
   }
-  if (latest.version === SMITHERS_ORCHESTRATOR_VERSION) {
+  if (latest.version === SMITHERS_ORCHESTRATOR_VERSION && latest.packageName === SMITHERS_ORCHESTRATOR_PACKAGE_NAME) {
     return {
       check: {
         name: "workflow-engine-registry",
@@ -314,16 +318,22 @@ function registryCheck(latest: { version: string } | { error: string } | undefin
       diagnostics: []
     };
   }
+  const renamed = latest.packageName !== SMITHERS_ORCHESTRATOR_PACKAGE_NAME;
+  const newest = `${latest.version}${renamed ? ` (published as ${latest.packageName})` : ""}`;
   return {
     check: {
       name: "workflow-engine-registry",
       status: "warning",
-      summary: `a newer stable workflow engine is published: ${latest.version} (Ultrafuzz pins ${SMITHERS_ORCHESTRATOR_VERSION})`
+      summary: `a newer stable workflow engine is published: ${newest} (Ultrafuzz pins ${SMITHERS_ORCHESTRATOR_VERSION})`
     },
     diagnostics: [
       {
         code: "DOCTOR_WORKFLOW_ENGINE_OUTDATED",
-        message: `Ultrafuzz pins workflow engine ${SMITHERS_ORCHESTRATOR_VERSION}; ${latest.version} is the latest published stable release`,
+        message:
+          `Ultrafuzz pins workflow engine ${SMITHERS_ORCHESTRATOR_VERSION}; ${newest} is the latest published stable release` +
+          (renamed
+            ? `; upgrading past ${SMITHERS_ORCHESTRATOR_VERSION} requires migrating to ${latest.packageName}`
+            : ""),
         severity: "warning",
         source: "doctor"
       }
@@ -331,12 +341,39 @@ function registryCheck(latest: { version: string } | { error: string } | undefin
   };
 }
 
+// Upstream renamed the package after the version Ultrafuzz pins, so the old name
+// is frozen forever and asking only about it would silently report "you are on the
+// latest release" for every future release. Report the newer of the two names so
+// the upgrade signal survives the rename.
 async function latestPublishedSmithersVersion(
+  projectRoot: string,
+  env: Record<string, string | undefined>
+): Promise<{ version: string; packageName: string } | { error: string }> {
+  const results = await Promise.all(
+    [SMITHERS_ORCHESTRATOR_PACKAGE_NAME, SMITHERS_SUCCESSOR_PACKAGE_NAME].map(async (packageName) => ({
+      packageName,
+      result: await latestPublishedVersionOf(packageName, projectRoot, env)
+    }))
+  );
+  const published = results.flatMap(({ packageName, result }) =>
+    "version" in result ? [{ packageName, version: result.version }] : []
+  );
+  if (published.length === 0) {
+    const firstError = results.find(({ result }) => "error" in result)?.result;
+    return { error: firstError !== undefined && "error" in firstError ? firstError.error : "registry lookup failed" };
+  }
+  return published.reduce((newest, candidate) =>
+    compareSemanticVersions(candidate.version, newest.version) > 0 ? candidate : newest
+  );
+}
+
+async function latestPublishedVersionOf(
+  packageName: string,
   projectRoot: string,
   env: Record<string, string | undefined>
 ): Promise<{ version: string } | { error: string }> {
   try {
-    const { stdout } = await execFileAsync("npm", ["view", "smithers-orchestrator", "dist-tags.latest"], {
+    const { stdout } = await execFileAsync("npm", ["view", packageName, "dist-tags.latest"], {
       cwd: projectRoot,
       env: { ...process.env, ...env },
       timeout: REGISTRY_LOOKUP_TIMEOUT_MS
@@ -346,6 +383,16 @@ async function latestPublishedSmithersVersion(
   } catch (error) {
     return { error: error instanceof Error ? error.message.split("\n")[0]! : String(error) };
   }
+}
+
+function compareSemanticVersions(left: string, right: string): number {
+  const leftParts = left.split(".").map(Number);
+  const rightParts = right.split(".").map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
 }
 
 function configuredAgentRefs(profiles: Record<string, { agent: string }> | undefined): string[] {

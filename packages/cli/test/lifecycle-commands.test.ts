@@ -478,6 +478,12 @@ test("doctor reports install posture in human and JSON output", async () => {
   assert.match(human.stdout + human.stderr, /- bundled: \d+\.\d+\.\d+/u);
   assert.match(human.stdout + human.stderr, /- latest published stable: /u);
   assert.match(human.stdout + human.stderr, /- compatibility patches: detached admission /u);
+  // Every tracked workaround has to reach the operator, not just the first one.
+  // The two resume-durability patches are the ones whose absence silently costs
+  // durable resume progress, so assert them by name.
+  assert.match(human.stdout + human.stderr, /- compatibility patches: .*supervisor descriptor /u);
+  assert.match(human.stdout + human.stderr, /- compatibility patches: .*terminal state restore /u);
+  assert.match(human.stdout + human.stderr, /- compatibility patches: .*resume hydration /u);
   assert.doesNotMatch(human.stdout + human.stderr, /smithers-orchestrator/u);
 
   const json = await cli(project, ["doctor", "--json"], env);

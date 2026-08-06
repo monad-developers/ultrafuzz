@@ -808,13 +808,23 @@ test("diagnoseProject reports a posture for every tracked compatibility patch", 
   const { project, env } = await launchedProject({});
   writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
   const nodeModules = path.join(project, ".smithers", "node_modules");
+  // A distinct posture per patch, so a swapped id-to-source mapping cannot pass and
+  // every branch of `patchPosture` is exercised rather than just applied/missing.
+  const postures = ["applied", "missing", "incompatible", "unknown"] as const;
+  assert.ok(
+    SMITHERS_COMPATIBILITY_PATCHES.length <= postures.length,
+    "extend the posture rotation to cover every described patch"
+  );
   const expected: Record<string, string> = {};
   for (const [index, patch] of SMITHERS_COMPATIBILITY_PATCHES.entries()) {
-    // Rotate through the postures so a single hard-coded verdict cannot pass.
-    const posture = index % 2 === 0 ? "applied" : "missing";
+    const posture = postures[index]!;
     const source = path.join(nodeModules, ...patch.packageName.split("/"), ...patch.sourceRelativePath.split("/"));
     fs.mkdirSync(path.dirname(source), { recursive: true });
-    fs.writeFileSync(source, `${posture === "applied" ? patch.patched : patch.patchable}\n`, "utf8");
+    if (posture === "applied") fs.writeFileSync(source, `${patch.patched}\n`, "utf8");
+    if (posture === "missing") fs.writeFileSync(source, `${patch.patchable}\n`, "utf8");
+    // Neither the patch nor the shape Ultrafuzz patches: the next run hard-fails.
+    if (posture === "incompatible") fs.writeFileSync(source, "export const unrelated = 1;\n", "utf8");
+    // `unknown` leaves the source absent while its package directory exists.
     expected[patch.id] = posture;
   }
 
@@ -825,7 +835,10 @@ test("diagnoseProject reports a posture for every tracked compatibility patch", 
   // Named explicitly: these two were previously omitted from the posture report.
   assert.ok(Object.hasOwn(reported, "terminal_state_restore"));
   assert.ok(Object.hasOwn(reported, "resume_hydration"));
-  assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-patches")?.status, "warning");
+  // An incompatible source means the next run throws, so doctor must not pass it.
+  assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-patches")?.status, "error");
+  assert.equal(doctor.ok, false);
+  assert.ok(doctor.diagnostics.some((entry) => entry.code === "DOCTOR_WORKFLOW_ENGINE_PATCHES_INCOMPATIBLE"));
 });
 
 test("diagnoseProject reports a missing install and a version mismatch", async () => {

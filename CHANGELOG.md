@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Upgrades the pinned workflow engine to Smithers 0.32.0, moves the generated runner workspace onto Effect 4, and migrates existing 0.31.0 manifests forward (#274).
+- Upgrades the pinned workflow engine to Smithers 0.32.0, moves the generated runner workspace onto a pinned Effect 4 tree, and migrates existing 0.31.0 manifests forward (#274).
+- `ultrafuzz doctor` now reports a posture for every workflow-engine compatibility patch instead of only the two CLI patches, and its registry check follows the upstream package rename so the upgrade signal survives it (#274).
 - Adds first-class DeepSeek V4 Pro support through DeepSeek's official Claude
   Code endpoint, including cache-aware token telemetry, first-party pricing,
   Modal benchmark plumbing, and public benchmark coverage (#163).
