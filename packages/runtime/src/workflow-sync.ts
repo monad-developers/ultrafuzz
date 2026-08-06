@@ -309,7 +309,24 @@ const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
 // carried by the agent task it gates, so only genuine wrapper failures are
 // attributed back to the durable node here.
 const PREPARATION_FAILURE_STATUSES = new Set<NodeStatus>(["failed", "timed-out"]);
+// `statusFromWorkflowState` collapses `cancelled`/`canceled`/`stuck` onto
+// `failed`, so the raw workflow state is the only thing that separates a genuine
+// preparation failure from a run the operator — or the deadline path's own
+// `requestSmithersCancel` — cancelled while the wrapper was in flight, and from
+// a controller-loss stall. Attributing either to the node would durably record
+// an artifact-contract violation the run never committed, and publish it.
+const PREPARATION_FAILURE_WORKFLOW_STATES = new Set([
+  "failed",
+  "error",
+  "timeout",
+  "timed-out",
+  "timedout",
+  "heartbeat-timeout"
+]);
 const TERMINAL_FAILED_WORKFLOW_STATES = new Set(["failed", "error", "timeout", "timed-out", "timedout"]);
+// A node that reached one of these did not fail, so a failure attribution from
+// an earlier attempt must not survive on it.
+const NODE_RECOVERED_STATUSES = new Set<NodeStatus>(["succeeded", "reused-from-prior-run"]);
 const ACCOUNTING_SCHEMA_VERSION = "2.0";
 const ACCOUNTING_CHECKPOINT_SCHEMA_VERSION = "1.0";
 const ACCOUNTING_USD_PRECISION = 12;
@@ -442,7 +459,16 @@ export async function synchronizeLinkedWorkflowRun(
       source: "workflow"
     });
   }
-  const unattributedFailure = unattributedTerminalWorkflowFailure(inspect, syncResult.nodeStatuses);
+  // `syncResult.nodeStatuses` only holds the tasks that reached the bottom of
+  // the synchronization loop; a task whose graph node or evidence was missing
+  // this pass is absent from it even when state.json already records it failed.
+  // The durable statuses are the source of truth for "is this failure already
+  // attributed", so union the two before deciding.
+  const attributionStatuses = new Map<string, NodeStatus>(
+    Object.entries(readRunState(layout).nodes).map(([nodeId, node]) => [nodeId, node.status])
+  );
+  for (const [nodeId, status] of syncResult.nodeStatuses) attributionStatuses.set(nodeId, status);
+  const unattributedFailure = unattributedTerminalWorkflowFailure(inspect, attributionStatuses);
   if (unattributedFailure !== undefined) {
     diagnostics.push(unattributedFailure);
   }
@@ -547,6 +573,31 @@ export async function synchronizeLinkedWorkflowRun(
         deadline_exceeded: deadlineApplied
       }
     });
+  }
+  // Persist the backstop. Returning it in `diagnostics` alone is not enough: the
+  // eval runner drops `result.diagnostics` whenever `result.ok`, and the Modal
+  // worker drains the CLI child's stdout without persisting it, so for the
+  // residual class this exists to cover the archived run root would still look
+  // byte-identical to the black hole #272 describes. Ids only — no error text.
+  if (unattributedFailure !== undefined) {
+    const payload = {
+      workflow_run_id: evidence.smithersRunId,
+      ...unattributedFailure.details
+    };
+    if (!unattributedTerminalFailureRecorded(layout, payload)) {
+      const preUnattributedWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(
+        control,
+        synchronizationClock(control)
+      );
+      if (preUnattributedWriteBudgetDiagnostic !== undefined) {
+        return { ok: false, diagnostics: [preUnattributedWriteBudgetDiagnostic] };
+      }
+      appendEvent(layout, {
+        eventType: "workflow-failure-unattributed",
+        status: deadlineApplied ? "timed-out" : finalStatus,
+        payload
+      });
+    }
   }
 
   return {
@@ -1783,7 +1834,7 @@ async function synchronizeTasks(input: {
       finished_at: finishedAtForStatus(patchStatus, previous, evidence.finishedAt),
       last_error: finalization.lastError,
       provenance: {
-        ...withoutTerminalDisposition(previous?.provenance),
+        ...withoutSupersededFailure(withoutTerminalDisposition(previous?.provenance), patchStatus, finalization),
         workflow: {
           run_id: input.workflowRunId,
           task_id: attemptEvidence.taskId,
@@ -2815,6 +2866,7 @@ function completionEvidenceForTask(
   if (
     preparationEvidence !== undefined &&
     PREPARATION_FAILURE_STATUSES.has(preparationEvidence.status) &&
+    preparationWorkflowStateIsFailure(preparationEvidence.workflowState) &&
     (agentEvidence === undefined || !terminalStatus(agentEvidence.status))
   ) {
     return {
@@ -3061,6 +3113,23 @@ function unattributedTerminalWorkflowFailure(
   };
 }
 
+// The backstop is re-derived on every synchronization pass, and sync runs on
+// every `status`/`inspect`. Compare against what is already durable so a
+// repeatedly re-observed terminal failure records one event, not one per pass.
+function unattributedTerminalFailureRecorded(layout: RunLayout, payload: Record<string, unknown>): boolean {
+  const key = unattributedTerminalFailureKey(payload);
+  for (const record of replayEvents(layout).records) {
+    if (record.event_type !== "workflow-failure-unattributed") continue;
+    if (unattributedTerminalFailureKey(record.payload) === key) return true;
+  }
+  return false;
+}
+
+function unattributedTerminalFailureKey(payload: unknown): string {
+  const source: Record<string, unknown> = isRecord(payload) ? payload : {};
+  return JSON.stringify([source.workflow_run_id, source.workflow_state, source.failed_workflow_tasks]);
+}
+
 function workflowSucceeded(inspect: WorkflowInspect): boolean {
   return ["succeeded", "finished", "continued", "success", "complete", "completed"].includes(
     (inspect.runState ?? inspect.runStatus ?? "").toLowerCase()
@@ -3095,6 +3164,14 @@ function terminalStatus(status: NodeStatus): boolean {
 // change still attribute their preparation failures on resume.
 function preparationSmithersNodeIdForAttempt(attemptId: string): string {
   return `prepare:${attemptId}`;
+}
+
+function preparationWorkflowStateIsFailure(workflowState: string | undefined): boolean {
+  // Every shape `evidenceFromStep` and `evidenceFromEvents` produce carries a
+  // raw state. If a future one does not, trust the collapsed status rather than
+  // losing the attribution this whole branch exists to provide.
+  if (workflowState === undefined) return true;
+  return PREPARATION_FAILURE_WORKFLOW_STATES.has(workflowState.toLowerCase());
 }
 
 function finishedAtForStatus(
@@ -3135,6 +3212,25 @@ function withoutTerminalDisposition(provenance: Record<string, unknown> | undefi
   if (provenance === undefined) return {};
   const result = { ...provenance };
   delete result.terminal_disposition;
+  return result;
+}
+
+// Drop a failure attribution the node has outlived. `--retry-failed` resets a
+// failed `prepare:` wrapper off `failedChildKeys`, so "recorded failed, then
+// retried and succeeded" is the intended recovery for a preparation failure —
+// and `dependencyCascadeFailure` returns the FIRST dependency carrying a
+// `failure` record, so a stale one silently re-attributes every later skipped
+// dependent to `prepare:<attemptId>` / `artifact-contract` and ships that
+// category in the public eval row. Never clears a failure the current
+// finalization recorded.
+function withoutSupersededFailure(
+  provenance: Record<string, unknown>,
+  status: NodeStatus,
+  finalization: NodeFinalization
+): Record<string, unknown> {
+  if (!NODE_RECOVERED_STATUSES.has(status) || finalization.provenance.failure !== undefined) return provenance;
+  const result = { ...provenance };
+  delete result.failure;
   return result;
 }
 
