@@ -755,7 +755,9 @@ function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspa
       "--",
       ...invariantSuiteGitPathspecs(["test", "tests"])
     ]).split(/\r?\n/u)) {
-      if (value.length === 0 || (!value.startsWith("test/") && !value.startsWith("tests/"))) continue;
+      if (shouldIgnoreInvariantSuiteGitPath(value) || (!value.startsWith("test/") && !value.startsWith("tests/"))) {
+        continue;
+      }
       const relativePath = assertSafeInvariantSuiteTestPath(value);
       const sourcePath = path.resolve(workspaceRoot, relativePath);
       const source = resolveRegularArtifactFile(
@@ -829,10 +831,11 @@ function invariantWorkspaceSourcePaths(workspaceRoot: string): string[] {
   ]).split(/\r?\n/u);
   return values.filter(
     (value) =>
-      value.startsWith("src/") ||
-      value.startsWith("contracts/") ||
-      value.startsWith("test/") ||
-      value.startsWith("tests/")
+      !shouldIgnoreInvariantSuiteGitPath(value) &&
+      (value.startsWith("src/") ||
+        value.startsWith("contracts/") ||
+        value.startsWith("test/") ||
+        value.startsWith("tests/"))
   );
 }
 
@@ -2332,6 +2335,8 @@ const INVARIANT_SUITE_GIT_EXCLUDE_PATHS = [
   ":(exclude,glob)**/.git/**",
   ":(exclude,glob)**/.ultrafuzz/**",
   ":(exclude,glob)**/.smithers/**",
+  ":(exclude,glob)**/.*/**",
+  ":(exclude,glob)**/.*",
   ":(exclude,glob)**/artifacts/**",
   ":(exclude,glob)**/node_modules/**",
   ":(exclude,glob)**/.env/**",
@@ -2374,6 +2379,10 @@ function gitInvariantSuitePaths(workspaceRoot: string, args: readonly string[]):
   });
 }
 
+function shouldIgnoreInvariantSuiteGitPath(value: string): boolean {
+  return value.length === 0 || value.split("/").some((segment) => segment.startsWith("."));
+}
+
 /**
  * Validate an explicit repository-relative path from implementation/test
  * provenance. Implementation sources commonly live under src/contracts, so
@@ -2399,7 +2408,8 @@ function assertSafeInvariantSuitePath(value: string): string {
         segment === ".envrc" ||
         segment === ".gitignore" ||
         segment === ".npmrc" ||
-        segment.startsWith(".env.")
+        segment.startsWith(".env.") ||
+        segment.startsWith(".")
     ) ||
     /^[A-Za-z]:/u.test(value)
   ) {
@@ -2532,6 +2542,7 @@ function changedTestTreePaths(workspaceRoot: string, baselinePath?: string, prot
       ["ls-files", "--others", "--", ...invariantSuiteGitPathspecs(["test", "tests"])]
     ]) {
       for (const value of gitInvariantSuitePaths(workspaceRoot, args).split(/\r?\n/u)) {
+        if (shouldIgnoreInvariantSuiteGitPath(value)) continue;
         if (value.startsWith("test/") || value.startsWith("tests/")) {
           const candidate = path.resolve(workspaceRoot, value);
           if (!existsSync(candidate)) {
@@ -2568,7 +2579,9 @@ function changedInvariantSourcePaths(workspaceRoot: string): string[] {
       ["ls-files", "--others", "--", ...invariantSuiteGitPathspecs(["src", "contracts"])]
     ]) {
       for (const value of gitInvariantSuitePaths(workspaceRoot, args).split(/\r?\n/u)) {
-        if (!value.startsWith("src/") && !value.startsWith("contracts/")) continue;
+        if (shouldIgnoreInvariantSuiteGitPath(value) || (!value.startsWith("src/") && !value.startsWith("contracts/"))) {
+          continue;
+        }
         const relativePath = assertSafeInvariantSuitePath(value);
         const candidate = path.resolve(workspaceRoot, relativePath);
         if (!existsSync(candidate)) {
@@ -2600,6 +2613,7 @@ function gitTestTreePaths(workspaceRoot: string): string[] {
     "--",
     ...invariantSuiteGitPathspecs(["test", "tests"])
   ]).split(/\r?\n/u)) {
+    if (shouldIgnoreInvariantSuiteGitPath(value)) continue;
     if (value.startsWith("test/") || value.startsWith("tests/")) {
       const source = resolveRegularArtifactFile(
         workspaceRoot,

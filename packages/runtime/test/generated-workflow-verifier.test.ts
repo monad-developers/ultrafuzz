@@ -674,6 +674,9 @@ test("generated Smithers invariant discovery uses a Git-compatible ls-files invo
   assert.match(source, /INVARIANT_SUITE_GIT_MAX_BUFFER_BYTES/u);
   assert.match(source, /":\(exclude,glob\)\*\*\/node_modules\/\*\*"/u);
   assert.match(source, /":\(exclude,glob\)\*\*\/artifacts\/\*\*"/u);
+  assert.match(source, /":\(exclude,glob\)\*\*\/\.\*\/\*\*"/u);
+  assert.match(source, /":\(exclude,glob\)\*\*\/\.\*"/u);
+  assert.match(source, /shouldIgnoreInvariantSuiteGitPath/u);
   assert.match(source, /gitInvariantSuitePaths\(workspaceRoot, \[\s*"ls-files",\s*"--cached",\s*"--others"/u);
   assert.match(source, /gitInvariantSuitePaths\(workspaceRoot, args\)/u);
 });
@@ -688,13 +691,15 @@ test("invariant git discovery includes tracked, untracked, and ignored sources w
       "test/ignored.sol",
       "tests/visible.sol",
       "contracts/node_modules/pkg/ignored.sol",
-      "contracts/artifacts/generated.sol"
+      "contracts/artifacts/generated.sol",
+      "contracts/.recon/out/generated.sol",
+      "test/.cache/generated.t.sol"
     ]) {
       const filePath = path.join(workspace, relativePath);
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, "contract Source {}\n");
     }
-    fs.writeFileSync(path.join(workspace, ".gitignore"), "test/ignored.sol\ncontracts/node_modules/\n");
+    fs.writeFileSync(path.join(workspace, ".gitignore"), "test/ignored.sol\ncontracts/node_modules/\ncontracts/.recon/\n");
     execFileSync("git", ["add", "--", ".gitignore", "src/tracked.sol", "tests/visible.sol"], { cwd: workspace });
 
     const sourcePaths = execFileSync(
@@ -709,7 +714,9 @@ test("invariant git discovery includes tracked, untracked, and ignored sources w
         "test",
         "tests",
         ":(exclude,glob)**/node_modules/**",
-        ":(exclude,glob)**/artifacts/**"
+        ":(exclude,glob)**/artifacts/**",
+        ":(exclude,glob)**/.*/**",
+        ":(exclude,glob)**/.*"
       ],
       { cwd: workspace, encoding: "utf8" }
     )
@@ -737,6 +744,7 @@ test("generated Smithers invariant provenance accepts only supported source root
   assert.match(validator, /unsupported invariant suite source root/u);
   assert.doesNotMatch(validator, /artifacts/u);
   assert.match(validator, /segment === "\.envrc"/u);
+  assert.match(validator, /segment\.startsWith\("\."\)/u);
 });
 
 test("generated Smithers verifier rejects in-root leaf and parent symlinks", () => {
