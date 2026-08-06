@@ -4,11 +4,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { parse as parseYaml } from "yaml";
 import { describe, expect, it } from "vitest";
 
 import {
   adaptBenchmarkManifestToEvalSuite,
   benchmarkLaneTopologyExclusions,
+  BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS,
   BENCHMARK_SMOKE_EXCLUDED_NODE_IDS,
   BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES,
   BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS,
@@ -74,13 +76,13 @@ describe("public benchmark manifests", () => {
         workflow_profile: BENCHMARK_SMOKE_WORKFLOW_PROFILE,
         selected_strategy_ids: [...BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS],
         strategy_loops: 1,
-        excluded_node_ids: []
+        excluded_node_ids: [...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS]
       }
     });
     expect(benchmarkTopologyTransform({ workflow_input: suite.variants[0]?.workflow_input })).toMatchObject({
       topologyTransform: {
         strategyLoops: 1,
-        excludedNodeIds: []
+        excludedNodeIds: [...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS]
       }
     });
     expect(
@@ -336,6 +338,31 @@ describe("public benchmark manifests", () => {
       excluded_strategy_families: [],
       excluded_node_ids: []
     });
+  });
+
+  it("prunes every dynamic node the smoke graph actually declares", () => {
+    // #277 requires the smoke lane to run no invariant, differential or dynamic
+    // work. Invariant and differential nodes are absent from the smoke graph by
+    // construction, but dynamic goal fanout is declared there, so the lane must
+    // prune it explicitly or the guarantee is silently false.
+    const smokeTopology = parseYaml(fs.readFileSync(path.join(REPOSITORY_ROOT, BENCHMARK_SMOKE_WORKFLOW_PATH), "utf8"));
+    const nodes = (smokeTopology as { nodes: { id: string; dynamic?: unknown }[] }).nodes;
+    const declaredDynamicNodeIds = nodes.filter((node) => node.dynamic !== undefined).map((node) => node.id).sort();
+    expect(declaredDynamicNodeIds).toEqual([...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS].sort());
+
+    const suite = adaptBenchmarkManifestToEvalSuite({
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      cohort: loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json")),
+      lanes: loadBenchmarkLanesManifest(LANES_PATH)
+    });
+    const transform = benchmarkTopologyTransform({ workflow_input: suite.variants[0]?.workflow_input });
+    const excluded = transform.topologyTransform?.excludedNodeIds ?? [];
+    for (const id of declaredDynamicNodeIds) expect(excluded).toContain(id);
+
+    // Every pruned ID must exist in the graph, or planning throws "unknown node".
+    const smokeNodeIds = new Set(nodes.map((node) => node.id));
+    for (const id of excluded) expect(smokeNodeIds.has(id)).toBe(true);
   });
 
   it("keeps the canonical Ultrafuzz cohort immutable without a fallback target", () => {

@@ -37,7 +37,16 @@ export const BENCHMARK_DIFFERENTIAL_EXCLUDED_NODE_IDS = [
   "differential-red-triage",
   "differential-repair-and-report-review"
 ] as const;
-export const BENCHMARK_DYNAMIC_EXCLUDED_NODE_IDS = ["dynamic-strategy-generator"] as const;
+/**
+ * Dynamic goal fanout expands one child per planned threat and per applicable
+ * vulnerability class, so its cost is unbounded by the static graph. These IDs
+ * exist in both the production topology and the dedicated smoke graph.
+ */
+export const BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS = ["threat-goals", "class-goals"] as const;
+export const BENCHMARK_DYNAMIC_EXCLUDED_NODE_IDS = [
+  "dynamic-strategy-generator",
+  ...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS
+] as const;
 export const BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES = [
   "stateful-invariant",
   "differential",
@@ -433,9 +442,17 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
               }
             : {}),
           strategy_loops: lane.strategy_loops,
-          // The dedicated smoke graph contains only its selected nodes, so
-          // production-topology exclusions would be unknown-node errors.
-          excluded_node_ids: input.lane === "smoke" ? [] : topologyExclusions.excluded_node_ids
+          // The dedicated smoke graph omits the invariant, differential and
+          // dynamic-strategy nodes outright, so those production-topology
+          // exclusions would be unknown-node errors here. It does carry the
+          // dynamic goal-fanout nodes, so those must be pruned explicitly for
+          // `disable_dynamic_strategies` to actually hold on the smoke lane.
+          excluded_node_ids:
+            input.lane === "smoke"
+              ? lane.disable_dynamic_strategies
+                ? [...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS]
+                : []
+              : topologyExclusions.excluded_node_ids
         }
       }
     })),
