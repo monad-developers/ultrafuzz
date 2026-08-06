@@ -2976,7 +2976,15 @@ export async function readOptionalModalSandboxText(
     }
     return contents;
   } catch (error) {
-    if (error instanceof SandboxFilesystemNotFoundError) return undefined;
+    // Two conditions mean the same thing for an OPTIONAL read: the file is not there, or the sandbox
+    // holding it is gone. A shut-down sandbox definitively has no readable file.
+    //
+    // Only the first was handled, and the omission cost R45 its supervision (issue #295): the overseer
+    // died here with `NotFoundError: The Sandbox is unavailable. This Sandbox may have already shut
+    // down.`, and the run it was watching later hit a transient agent failure with nothing alive to
+    // retry it. An overseer that dies because a sandbox died inverts its own purpose. This matches the
+    // sibling sandbox lookup above, which already treats NotFoundError as absence.
+    if (error instanceof SandboxFilesystemNotFoundError || error instanceof NotFoundError) return undefined;
     throw error;
   }
 }

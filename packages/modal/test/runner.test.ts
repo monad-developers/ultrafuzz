@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
+  NotFoundError,
   SandboxFilesystemNotFoundError,
   type App,
   type FileInfo,
@@ -1552,12 +1553,27 @@ describe("Modal worker identity", () => {
     expect(sandbox.detach).toHaveBeenCalledTimes(1);
   });
 
-  it("treats only an explicit remote not-found as an absent persisted file", async () => {
+  // R45's overseer died at 2026-08-06T18:24:54Z with `NotFoundError: The Sandbox is unavailable. This
+  // Sandbox may have already shut down.` raised from this helper, and the run it was supervising then
+  // sat terminal on a transient agent failure that nothing was left alive to retry (issue #295). For an
+  // OPTIONAL read the two not-found conditions are one answer: a dead sandbox has no readable file.
+  it("treats a missing file and a shut-down sandbox alike as an absent persisted file", async () => {
     await expect(
       readOptionalModalSandboxText(
         {
           readText: async () => {
             throw new SandboxFilesystemNotFoundError("missing");
+          }
+        },
+        "/data/status.json"
+      )
+    ).resolves.toBeUndefined();
+
+    await expect(
+      readOptionalModalSandboxText(
+        {
+          readText: async () => {
+            throw new NotFoundError("The Sandbox is unavailable. This Sandbox may have already shut down.");
           }
         },
         "/data/status.json"
