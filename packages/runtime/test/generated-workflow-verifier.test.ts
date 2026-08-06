@@ -640,6 +640,9 @@ test("generated Smithers workflow preserves the complete invariant suite across 
   assert.match(source, /\$\{baseRef\}\.\.\.HEAD/u);
   assert.match(source, /implemented properties JSON is malformed/u);
   assert.match(source, /selectedSources/u);
+  assert.match(source, /invariantSuiteProducerDependsOnAttemptId/u);
+  assert.match(source, /currentDescendsPrevious/u);
+  assert.match(source, /previousDescendsCurrent/u);
   assert.match(source, /ancestor invariant suite sources conflict/u);
   assert.match(source, /src\/contracts/u);
   assert.match(source, /invariant suite source is hard-linked/u);

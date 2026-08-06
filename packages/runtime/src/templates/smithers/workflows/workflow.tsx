@@ -2132,6 +2132,23 @@ function invariantSuiteProducerTask(dependencyArtifactDir: string): (typeof task
   return producer;
 }
 
+function invariantSuiteProducerDependsOnAttemptId(
+  producer: (typeof taskSpecs)[number],
+  ancestorAttemptId: string,
+  seen = new Set<string>()
+): boolean {
+  if (seen.has(producer.attemptId)) return false;
+  seen.add(producer.attemptId);
+  for (const dependencyAttemptId of producer.metadata.dependencies.attemptIds) {
+    if (dependencyAttemptId === ancestorAttemptId) return true;
+    const dependency = taskSpecs.find((candidate) => candidate.attemptId === dependencyAttemptId);
+    if (dependency !== undefined && invariantSuiteProducerDependsOnAttemptId(dependency, ancestorAttemptId, seen)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
   if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) return;
   const previousSnapshot = invariantSuiteDependencySnapshots.get(task.attemptId);
@@ -2153,7 +2170,7 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
     if (leftDirect !== rightDirect) return leftDirect ? 1 : -1;
     return left.localeCompare(right);
   });
-  const selectedSources = new Map<string, { dependency: string; bytes: Buffer; direct: boolean }>();
+  const selectedSources = new Map<string, { dependency: string; bytes: Buffer; direct: boolean; producerAttemptId: string }>();
   let selectedBytes = 0;
   const suitePathsByDependency = new Map<string, string[]>();
   for (const dependency of dependencies) {
@@ -2198,17 +2215,23 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
       const bytes = readInvariantSuiteSourceBytes(suiteRoot, relativePath, "artifact handoff invariant suite");
       const previous = selectedSources.get(relativePath);
       if (previous !== undefined && !previous.bytes.equals(bytes)) {
-        if (previous.direct === isDirect || (!previous.direct && !isDirect)) {
+        const previousProducer = taskSpecs.find((candidate) => candidate.attemptId === previous.producerAttemptId);
+        const currentDescendsPrevious = invariantSuiteProducerDependsOnAttemptId(producer, previous.producerAttemptId);
+        const previousDescendsCurrent =
+          previousProducer !== undefined &&
+          invariantSuiteProducerDependsOnAttemptId(previousProducer, dependencyAttemptId);
+        if (previousDescendsCurrent) continue;
+        if (!currentDescendsPrevious && (previous.direct === isDirect || (!previous.direct && !isDirect))) {
           throw new Error(
             `artifact handoff ancestor invariant suite sources conflict for ${relativePath}: ${previous.dependency} vs ${dependency}`
           );
         }
-        if (!isDirect) continue;
+        if (!currentDescendsPrevious && !isDirect) continue;
       }
       const prior = selectedSources.get(relativePath);
       if (prior === undefined) selectedBytes += bytes.length;
       else selectedBytes += bytes.length - prior.bytes.length;
-      selectedSources.set(relativePath, { dependency, bytes, direct: isDirect });
+      selectedSources.set(relativePath, { dependency, bytes, direct: isDirect, producerAttemptId: dependencyAttemptId });
       assertInvariantSuiteSourceBudget(selectedSources.size, selectedBytes);
     }
   }
@@ -2303,7 +2326,7 @@ const invariantSuiteProtectedBaselineSnapshots = new Map<string, { contents: str
 const invariantSuiteTombstones = new Map<string, Set<string>>();
 const invariantSuiteDependencySnapshots = new Map<
   string,
-  Map<string, { dependency: string; bytes: Buffer; direct: boolean }>
+  Map<string, { dependency: string; bytes: Buffer; direct: boolean; producerAttemptId: string }>
 >();
 const invariantSuitePublicationSnapshots = new Map<string, Map<string, Buffer>>();
 const invariantSuiteWorkspaceSnapshots = new Map<string, Map<string, Buffer>>();
