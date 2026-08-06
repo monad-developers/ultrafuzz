@@ -159,40 +159,35 @@ test("captures an authored top-level file whose name matches a generated corpus 
 // Six sandboxes died across three Aave v4 runs on a bare `spawnSync git ENOBUFS` with no subcommand, no
 // size, and no path — the only surviving copy in a 68 MB workflow log nothing surfaces. ENOBUFS was even
 // ruled OUT during the investigation on the grounds that it would have been loud. It was not (issue #310).
-test("attributes a git capture overflow to the root that actually fed the diff", () => {
+test("attributes a capture overflow to what fed the diff, not to bulk that contributed nothing", () => {
   const root = fixture();
   try {
     writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
-    git(root, ["add", ".gitignore"]);
+    // Tracked, committed, and never touched again -- exactly what `lib/` is on a real Aave v4 checkout,
+    // where the pinned dependencies dwarf anything an agent writes. These contribute ZERO diff bytes.
+    // Every earlier form of this diagnostic measured the workspace instead of the diff and ranked this
+    // first, sending the operator after content that cannot be the cause. That is the defect that
+    // sank the earlier size-ceiling attempt, and it came back here.
+    mkdirSync(path.join(root, "lib"), { recursive: true });
+    for (let file = 0; file < 12; file += 1) {
+      writeFileSync(path.join(root, "lib", `${file}.bin`), randomBytes(5 * 1024 * 1024));
+    }
+    git(root, ["add", "."]);
     git(root, ["commit", "--quiet", "-m", "base"]);
     const baseline = captureWorkspaceTree(root);
 
-    // Comfortably past the 32 MB capture buffer, and under no excluded root, so only the ENOBUFS path can
-    // report it. Written as incompressible bytes because `git diff --binary` deflates the payload.
+    // The only new content, and so the only possible source of diff bytes. Incompressible, because
+    // `git diff --binary` deflates the payload.
     mkdirSync(path.join(root, "generated"), { recursive: true });
     writeFileSync(path.join(root, "generated", "huge.bin"), randomBytes(40 * 1024 * 1024));
-
-    // The decoy, and the whole reason this test exists. `echidna/` is a generated root: it is excluded from
-    // staging, so it contributes ZERO bytes to the diff no matter how large it is. It is also, on a real
-    // Aave v4 workspace, by far the biggest thing present. An enumeration that forgets the exclusions ranks
-    // it first and hands the operator a top-5 made entirely of paths that are already fixed.
-    mkdirSync(path.join(root, "echidna", "coverage"), { recursive: true });
-    // 60 MB total against the culprit's 40 MB: enough that a forgotten exclusion ranks echidna first,
-    // without writing a quarter of a gigabyte of incompressible bytes on every CI run.
-    for (let file = 0; file < 3; file += 1) {
-      writeFileSync(path.join(root, "echidna", "coverage", `${file}.bin`), randomBytes(20 * 1024 * 1024));
-    }
 
     assert.throws(
       () => captureWorkspacePatch(root, baseline),
       (error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         assert.match(message, /produced more than the \d+-byte capture buffer/u);
-        // An operator must learn WHICH root to look at, not merely that something burst.
-        assert.match(message, /generated \(\d+ bytes in \d+ files\)/u);
-        // ...and must not be sent after a root that cannot have contributed, despite being 4.5x larger.
-        assert.doesNotMatch(message, /echidna/u);
-        // The original is preserved for anyone who needs the raw failure.
+        assert.match(message, /generated \(>=\d+ diff bytes in \d+ files\)/u);
+        assert.doesNotMatch(message, /lib/u, message);
         assert.equal((error as { cause?: { code?: string } }).cause?.code, "ENOBUFS");
         return true;
       }
@@ -210,9 +205,9 @@ test("attributes an overflow made of many small files to their root", () => {
     git(root, ["commit", "--quiet", "-m", "base"]);
     const baseline = captureWorkspaceTree(root);
 
-    // The recorded Aave v4 stack burst inside `echidna/coverage/<digits>.txt` — a directory of SMALL files
-    // whose aggregate crossed the buffer. A largest-single-file ranking is blind to this shape: here the
-    // biggest file in the workspace is 1 MB and the cause is 40 MB spread over 40 of them.
+    // The recorded Aave v4 stack burst inside `echidna/coverage/<digits>.txt` -- a directory of SMALL
+    // files whose aggregate crossed the buffer. Ranking by largest single file is blind to this shape:
+    // the biggest file here is 1 MB and the cause is 40 MB spread across forty of them.
     mkdirSync(path.join(root, "coverage"), { recursive: true });
     for (let file = 0; file < 40; file += 1) {
       writeFileSync(path.join(root, "coverage", `${file}.txt`), randomBytes(1024 * 1024));
@@ -221,8 +216,43 @@ test("attributes an overflow made of many small files to their root", () => {
     assert.throws(
       () => captureWorkspacePatch(root, baseline),
       (error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        assert.match(message, /coverage \(\d+ bytes in 40 files\)/u);
+        assert.match(
+          error instanceof Error ? error.message : String(error),
+          /coverage \(>=\d+ diff bytes in \d+ files\)/u
+        );
+        return true;
+      }
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("does not carry the multi-megabyte capture into the rethrown cause", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "base"]);
+    const baseline = captureWorkspaceTree(root);
+    mkdirSync(path.join(root, "generated"), { recursive: true });
+    writeFileSync(path.join(root, "generated", "huge.bin"), randomBytes(40 * 1024 * 1024));
+
+    assert.throws(
+      () => captureWorkspacePatch(root, baseline),
+      (error: unknown) => {
+        // Node hands back the truncated capture in `stdout` AND a duplicate in `output[1]`. Error
+        // serializers walk `cause` and copy own enumerable keys, so leaving them attached makes the
+        // durable failure record tens of megabytes -- its own way to lose the error being reported.
+        const cause = (error as { cause?: Record<string, unknown> }).cause ?? {};
+        assert.equal(cause.code, "ENOBUFS");
+        for (const field of ["stdout", "stderr", "output", "error"]) {
+          assert.equal(cause[field], undefined, `${field} was carried into the cause`);
+        }
+        // Unstripped this throws outright ("Converting circular structure to JSON"), so a plain
+        // stringify is the assertion: it must both succeed and stay small.
+        const serialized = JSON.stringify({ message: (error as Error).message, cause });
+        assert.ok(serialized.length < 64 * 1024, `serialized failure record was ${serialized.length} bytes`);
         return true;
       }
     );

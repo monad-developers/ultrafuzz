@@ -44,7 +44,7 @@ const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "art
  *   output[3]: "diff --git a/echidna/coverage/4247432111492442234.txt ..."
  *
  * `captureWorkspacePatch` runs `git diff --cached --binary` over the staged tree, and with corpus
- * enumerated that diff exceeded `runGit`'s `maxBuffer` of `MAX_PATCH_BYTES * 2`. Note the ordering: above
+ * enumerated that diff exceeded `runGit`'s `maxBuffer` of `MAX_GIT_CAPTURE_BYTES`. Note the ordering: above
  * 32 MB the ENOBUFS fires inside `runGit` BEFORE the `MAX_PATCH_BYTES` check below can produce a clean
  * error, so the clean-error window is only 16-32 MB. Excluding these roots keeps the diff under it.
  *
@@ -461,66 +461,70 @@ function withTemporaryIndex<T>(workspaceRoot: string, callback: (index: string) 
 }
 
 /**
+ * Ceiling on any single git capture. Named because the reported number and the enforced number must be
+ * the same thing: an operator who is told the buffer is N bytes will size the workspace against N.
+ */
+const MAX_GIT_CAPTURE_BYTES = MAX_PATCH_BYTES * 2;
+
+/** `diff --git a/<path> b/<path>`, on its own line, which is how every hunk in the capture begins. */
+const DIFF_HEADER = /^diff --git a\/(.+?) b\//gmu;
+
+/**
+ * Own keys Node hangs off a `spawnSync` error that must not reach a durable failure record: the captured
+ * payload in `stdout`, the duplicate of it in `output`, and `error`, which is a self-reference (`e.error
+ * === e`) carrying no information but making the object impossible to `JSON.stringify` at all.
+ */
+const DISCARDED_SPAWN_FIELDS = ["stdout", "stderr", "output", "error"] as const;
+
+/**
  * Rethrows an oversized-output failure as something an operator can act on.
  *
  * `execFileSync` raises a bare Node `SystemError` when git writes more than `maxBuffer`: message
  * `spawnSync git ENOBUFS`, with no subcommand, no size, and no indication that the workspace is at fault.
- * Six sandboxes died on it across three Aave v4 runs, two wrong causal theories were pursued in the gap,
- * and ENOBUFS was actively ruled OUT on the grounds that it would have been loud.
+ * Six sandboxes died on it across three Aave v4 runs; several causal theories were pursued and refuted
+ * before the real one was read out of a 68 MB log by hand.
  *
- * Scope, precisely: this improves the string in the workflow log. It does NOT reach `last_error` — those
- * six deaths recorded `exit_category: sandbox-exited` with no `NodeFailed` event, and `last_error` is fed
- * only from a `NodeFailed`, so no amount of catching here changes it. Propagation is #307, still open. It
- * does not prevent the failure either; the run is over when it fires.
+ * The attribution is read out of the truncated capture the error already carries, NOT by measuring the
+ * workspace. Every earlier attempt here measured a proxy and ranked the wrong thing: file size on disk is
+ * not diff size (`--binary` deflates), and a listing of staged paths is mostly tracked files that were
+ * never modified and contribute nothing at all — on a real target the pinned `lib/` dependencies outweigh
+ * the culprit and get named first. `error.stdout` is the bytes that actually filled the buffer, so
+ * counting them needs no estimate, no subprocess, and no stat: deflation is already applied, unmodified
+ * files are already absent, and excluded roots are already gone.
+ *
+ * Scope: this improves the string. It does not prevent the failure — the run is over when it fires.
  */
-function rethrowOversizedGitOutput(
-  workspaceRoot: string,
-  args: readonly string[],
-  index: string | undefined,
-  error: unknown
-): never {
+function rethrowOversizedGitOutput(args: readonly string[], error: unknown): never {
   if (!(error instanceof Error) || (error as { code?: unknown }).code !== "ENOBUFS") throw error;
-  const subcommand = args[0] ?? "git";
-  let attribution: string;
-  try {
-    // Per-ROOT totals, not the largest single files. What overflows is the aggregate diff, and a workspace
-    // reaches 32 MB just as easily through ten thousand 4 KB coverage files as through one big blob — the
-    // recorded Aave v4 stack broke inside `echidna/coverage/<digits>.txt`, a directory of small files. A
-    // largest-file ranking answers a question nobody asked and, when the big blobs sit under a root that is
-    // already excluded, names paths contributing ZERO bytes while the real cause never appears.
-    //
-    // Enumerated via the same helper staging uses, under the same exclusions and the same GIT_INDEX_FILE,
-    // so the set priced here is the set that fed the diff.
-    const totals = new Map<string, { bytes: number; files: number }>();
-    for (const entry of index === undefined ? [] : stageableWorkspacePaths(workspaceRoot, index)) {
-      const relativePath = entry.toString("utf8");
-      const root = relativePath.split("/")[0] ?? relativePath;
-      let bytes = 0;
-      try {
-        bytes = lstatSync(path.resolve(workspaceRoot, relativePath)).size;
-      } catch {
-        // Raced away between listing and stat; count the file, price it at zero.
-      }
-      const total = totals.get(root) ?? { bytes: 0, files: 0 };
-      totals.set(root, { bytes: total.bytes + bytes, files: total.files + 1 });
-    }
-    attribution = [...totals.entries()]
-      .sort((left, right) => right[1].bytes - left[1].bytes)
-      .filter(([, total]) => total.bytes > 0)
-      .slice(0, 5)
-      .map(([root, total]) => `${root} (${total.bytes} bytes in ${total.files} files)`)
-      .join(", ");
-  } catch (enumerationError) {
-    // `stageableWorkspacePaths` calls `runGitBuffer`, which is deliberately left unwrapped: wrapping it
-    // would let this helper recurse into itself. So its own ENOBUFS lands here, and it must NOT degrade to
-    // the same empty string a genuinely small workspace produces.
-    attribution =
-      (enumerationError as { code?: unknown })?.code === "ENOBUFS"
-        ? "unavailable (the path enumeration overflowed too)"
-        : "unavailable";
-  }
+  const subcommand = args.find((argument) => !argument.startsWith("-")) ?? "git";
+  const captured = (error as { stdout?: unknown }).stdout;
+  const diff = Buffer.isBuffer(captured) ? captured.toString("utf8") : typeof captured === "string" ? captured : "";
+
+  const totals = new Map<string, { bytes: number; files: number }>();
+  const headers = [...diff.matchAll(DIFF_HEADER)];
+  headers.forEach((header, position) => {
+    // The span to the next header is what this path contributed. The final entry is truncated mid-hunk,
+    // which is fine: it is a floor, and it is the path git was writing when the buffer ran out.
+    const end = position + 1 < headers.length ? (headers[position + 1]?.index ?? diff.length) : diff.length;
+    const root = (header[1] ?? "").split("/")[0] ?? "";
+    const total = totals.get(root) ?? { bytes: 0, files: 0 };
+    totals.set(root, { bytes: total.bytes + (end - (header.index ?? 0)), files: total.files + 1 });
+  });
+  const attribution = [...totals.entries()]
+    .sort((left, right) => right[1].bytes - left[1].bytes)
+    .slice(0, 5)
+    .map(([root, total]) => `${root} (>=${total.bytes} diff bytes in ${total.files} files)`)
+    .join(", ");
+
+  // Drop the payload before it becomes a `cause`. Error serializers walk `cause` and copy own enumerable
+  // keys, and Node puts the capture in BOTH `stdout` and `output[1]` — so attaching this unmodified turns
+  // a durable failure record into a ~65 MB write, and the `error` self-reference makes it throw on
+  // `JSON.stringify` outright. Either way the report of the failure is lost along with the failure.
+  // Everything useful in those bytes is already in the message above; measured, this leaves ~178 bytes.
+  for (const field of DISCARDED_SPAWN_FIELDS) delete (error as unknown as Record<string, unknown>)[field];
+
   throw new Error(
-    `git ${subcommand} produced more than the ${MAX_PATCH_BYTES * 2}-byte capture buffer; the workspace is too large to hand off${attribution === "" ? "" : `. Largest staged roots: ${attribution}`}`,
+    `git ${subcommand} produced more than the ${MAX_GIT_CAPTURE_BYTES}-byte capture buffer; the workspace is too large to hand off${attribution === "" ? "" : `. Largest contributors: ${attribution}`}`,
     { cause: error }
   );
 }
@@ -533,23 +537,22 @@ function runGit(workspaceRoot: string, args: string[], index?: string, input?: s
       encoding: "utf8",
       env,
       input,
-      maxBuffer: MAX_PATCH_BYTES * 2
+      maxBuffer: MAX_GIT_CAPTURE_BYTES
     });
   } catch (error) {
-    return rethrowOversizedGitOutput(workspaceRoot, args, index, error);
+    return rethrowOversizedGitOutput(args, error);
   }
 }
 
-/**
- * Byte-exact git output, for path lists that may not be valid UTF-8.
- *
- * Deliberately NOT wrapped by `rethrowOversizedGitOutput`: that helper calls this one to build its path
- * list, so wrapping would recurse. Overflowing here needs a NUL-joined path list above 32 MB — hundreds of
- * thousands of entries — which is far less likely than the `git diff` overflow that actually killed six
- * sandboxes. If it ever happens it surfaces as a bare ENOBUFS, and closing that needs a re-entrancy guard
- * rather than another wrap.
- */
+/** Byte-exact git output, for path lists that may not be valid UTF-8. */
 function runGitBuffer(workspaceRoot: string, args: string[], index?: string): Buffer {
   const env = index === undefined ? undefined : { ...process.env, GIT_INDEX_FILE: index };
-  return execFileSync("git", args, { cwd: workspaceRoot, env, maxBuffer: MAX_PATCH_BYTES * 2 });
+  try {
+    return execFileSync("git", args, { cwd: workspaceRoot, env, maxBuffer: MAX_GIT_CAPTURE_BYTES });
+  } catch (error) {
+    // Safe to wrap now that the diagnostic reads the error instead of re-running git: it cannot recurse
+    // back into here. A path listing this large has no diff headers to attribute, so it degrades to the
+    // sized message, which still beats a bare `spawnSync git ENOBUFS`.
+    return rethrowOversizedGitOutput(args, error);
+  }
 }
