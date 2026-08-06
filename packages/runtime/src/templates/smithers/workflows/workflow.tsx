@@ -2325,6 +2325,12 @@ function canonicalEmptyArtifact(
   if (output.path === "workspace.patch" || output.path === "workspace-patch.json") {
     return undefined;
   }
+  // The vulnerability-db snapshot manifest is likewise materialized by the
+  // runtime after the agent returns. A pre-created empty placeholder would
+  // conflict with the exclusive canonical bytes the snapshot publishes.
+  if (output.path === "vulnerability-db-manifest.json") {
+    return undefined;
+  }
   // These artifacts carry source-completeness and provenance joins. An empty
   // sidecar would make an omitted agent output look successful, so they must
   // always be produced by the agent and rejected by the strict verifier.

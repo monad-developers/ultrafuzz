@@ -392,6 +392,19 @@ test("generated Smithers workflow leaves runtime-owned workspace patch outputs u
   assert.match(helper, /runtime-owned workspace patch outputs/u);
 });
 
+test("generated Smithers workflow leaves the runtime-owned vulnerability-db snapshot manifest unmaterialized", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function canonicalEmptyArtifact");
+  const helperEnd = source.indexOf("\n\nfunction materializeMissingMarkdownArtifacts", helperStart);
+
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+
+  const helper = source.slice(helperStart, helperEnd);
+  assert.match(helper, /output\.path === "vulnerability-db-manifest\.json"/u);
+  assert.match(helper, /conflict with the exclusive canonical bytes the snapshot publishes/u);
+});
+
 test("generated Smithers workflow guards runtime-owned workspace patch publication", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function writeWorkspacePatchArtifact");
