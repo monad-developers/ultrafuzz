@@ -8406,6 +8406,185 @@ test("resume detects terminal pending work from task phase snapshots", async () 
   assert.doesNotMatch(commands, /timetravel/u);
 });
 
+test("resume detects terminal pending work from top-level inspect run states", async () => {
+  for (const runStateField of ["state", "status"] as const) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeOutOfOrderTopology(project);
+    const runId = `terminal-top-level-${runStateField}-recovery-run`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: {
+        ok: true,
+        data: {
+          [runStateField]: "failed",
+          tasks: [
+            { taskId: "node:project-discovery", phase: "finished" },
+            { taskId: "node:actors-flows", phase: "ready" }
+          ]
+        }
+      },
+      timeline: { timeline: { frames: [{ frameNo: 2 }, { frameNo: 8 }] } }
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+    const resumed = await resumeRun({
+      projectRoot: project,
+      runId,
+      maxConcurrency: 8,
+      force: true,
+      retryFailed: true,
+      env
+    });
+
+    assert.equal(resumed.ok, true, `${runStateField}: ${JSON.stringify(resumed.diagnostics)}`);
+    assert.equal(resumed.value?.submitted, true);
+    const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+    assert.match(commands, new RegExp(`timeline ${workflowRunId} --json`, "u"));
+    assert.match(commands, new RegExp(`rewind ${workflowRunId} 2 --yes --json`, "u"));
+    assert.match(
+      commands,
+      new RegExp(
+        `up .*${runId}\\.tsx --resume ${workflowRunId} --run-id ${workflowRunId} --force --detach --max-concurrency 8 --format json`,
+        "u"
+      )
+    );
+    assert.doesNotMatch(commands, /timetravel/u);
+  }
+});
+
+test("resume transfers a single-frame terminal pending workflow to a valid durable lineage", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const runId = "terminal-pending-single-frame-recovery-run";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "node:actors-flows", state: "pending", attempt: 0 }
+      ]
+    }),
+    timeline: { timeline: { frames: [{ frameNo: 11 }] } }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    maxConcurrency: 8,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  assert.match(resumed.value?.workflow_run_id ?? "", /^ufz-recovery-[a-f0-9]{32}$/u);
+  const replacementRunId = resumed.value!.workflow_run_id;
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, new RegExp(`inspect ${workflowRunId} --format json`, "u"));
+  assert.match(commands, new RegExp(`timeline ${workflowRunId} --json`, "u"));
+  assert.match(commands, new RegExp(`up .* --detach --run-id ${replacementRunId}`, "u"));
+  assert.doesNotMatch(commands, /rewind|timetravel/u);
+  assert.doesNotMatch(commands, new RegExp(`--resume ${workflowRunId}`, "u"));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    workflow?: { run_id?: string };
+  };
+  assert.equal(metadata.workflow?.run_id, replacementRunId);
+  const recovery = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "recovery-submission.json"), "utf8")
+  ) as { recovery?: string; smithers_run_id?: string };
+  assert.equal(recovery.recovery, "terminal-pending-non-rewindable");
+  assert.equal(recovery.smithers_run_id, replacementRunId);
+});
+
+test("resume transfers an empty-timeline terminal pending workflow to a valid durable lineage", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const runId = "terminal-pending-empty-timeline-recovery-run";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "node:actors-flows", state: "pending", attempt: 0 }
+      ]
+    }),
+    timeline: { timeline: { frames: [] } }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    maxConcurrency: 8,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  assert.match(resumed.value?.workflow_run_id ?? "", /^ufz-recovery-[a-f0-9]{32}$/u);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.doesNotMatch(commands, /rewind|timetravel/u);
+  assert.doesNotMatch(commands, new RegExp(`--resume ${workflowRunId}`, "u"));
+});
+
+test("resume still rewinds a render-failed workflow to the latest timeline frame", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const runId = "render-failed-latest-frame-recovery-run";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { code: "WORKFLOW_RENDER_FAILED" },
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "node:actors-flows", state: "pending", attempt: 0 }
+      ]
+    }),
+    timeline: { timeline: { frames: [{ frameNo: 3 }, { frameNo: 9 }] } }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    maxConcurrency: 8,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.workflow_run_id, workflowRunId);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, new RegExp(`rewind ${workflowRunId} 9 --yes --json`, "u"));
+  assert.match(commands, new RegExp(`--resume ${workflowRunId}`, "u"));
+});
+
 test("resume transfers an incompatible legacy workflow ID to a valid durable lineage", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

@@ -929,21 +929,14 @@ export async function runSmithersLifecycleCommand(input: {
       const terminalPendingWork =
         smithersSnapshotRunStateIsFailed(inspection) && smithersSnapshotHasPendingWorkflowTasks(inspection);
       if (input.resetNode === undefined && (renderFailed || terminalPendingWork)) {
-        if (!isCompatibleSmithersRunId(input.smithersRunId)) {
-          assertRegularFileInside(
-            input.resumeRecovery.runRoot,
-            input.resumeRecovery.inputPath,
-            "persisted workflow input"
-          );
-          assertPathInside(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
-          fs.mkdirSync(input.resumeRecovery.logsDir, { recursive: true });
-          assertNoSymlinkComponents(
-            input.resumeRecovery.runRoot,
-            input.resumeRecovery.logsDir,
-            "workflow log directory"
-          );
+        const recovery = input.resumeRecovery;
+        const submitReplacementLineage = async (reason: string) => {
+          assertRegularFileInside(recovery.runRoot, recovery.inputPath, "persisted workflow input");
+          assertPathInside(recovery.runRoot, recovery.logsDir, "workflow log directory");
+          fs.mkdirSync(recovery.logsDir, { recursive: true });
+          assertNoSymlinkComponents(recovery.runRoot, recovery.logsDir, "workflow log directory");
           const replacementRunId = compatibleRecoveryRunId(input.smithersRunId);
-          const recovery = await execSmithersCli({
+          const submission = await execSmithersCli({
             args: [
               "up",
               input.workflowPath,
@@ -954,9 +947,9 @@ export async function runSmithersLifecycleCommand(input: {
               "--root",
               input.projectRoot,
               "--log-dir",
-              input.resumeRecovery.logsDir,
+              recovery.logsDir,
               "--input",
-              fs.readFileSync(input.resumeRecovery.inputPath, "utf8"),
+              fs.readFileSync(recovery.inputPath, "utf8"),
               "--format",
               "json",
               ...supervisorCommandArgs(input.controllerLeaseSeconds)
@@ -966,16 +959,19 @@ export async function runSmithersLifecycleCommand(input: {
             environmentVariableNames: input.environmentVariableNames,
             keepWorkspaces: input.keepWorkspaces
           });
-          writeJsonDurable(path.join(path.dirname(input.resumeRecovery.inputPath), "recovery-submission.json"), {
+          writeJsonDurable(path.join(path.dirname(recovery.inputPath), "recovery-submission.json"), {
             schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
             smithers_run_id: replacementRunId,
-            recovery: "incompatible-workflow-run-id",
-            command: recovery.command,
-            stdout: redactedEvidenceText(recovery.stdout),
-            stderr: redactedEvidenceText(recovery.stderr),
+            recovery: reason,
+            command: submission.command,
+            stdout: redactedEvidenceText(submission.stdout),
+            stderr: redactedEvidenceText(submission.stderr),
             submitted_at: new Date().toISOString()
           });
-          return { ...recovery, workflowRunId: replacementRunId };
+          return { ...submission, workflowRunId: replacementRunId };
+        };
+        if (!isCompatibleSmithersRunId(input.smithersRunId)) {
+          return await submitReplacementLineage("incompatible-workflow-run-id");
         }
         const timeline = await execSmithersCli({
           args: ["timeline", input.smithersRunId, "--json"],
@@ -994,6 +990,11 @@ export async function runSmithersLifecycleCommand(input: {
             env: input.env
           });
           preResumeStderr = [timeline.stderr, rewind.stderr].filter((value) => value.length > 0).join("\n");
+        } else if (terminalPendingWork && !renderFailed) {
+          // A terminal failed run with pending ready work and no earlier frame to rewind to
+          // cannot be resumed in place: the backend re-finalizes it as failed without
+          // dispatching. Transfer the durable run to a fresh workflow lineage instead.
+          return await submitReplacementLineage("terminal-pending-non-rewindable");
         }
       }
     }
@@ -1231,7 +1232,10 @@ function smithersSnapshotRunState(snapshot: SmithersCommandSnapshot): string | u
     return runState;
   }
   const runStatus = isObjectRecord(data.run) ? data.run.status : undefined;
-  return typeof runStatus === "string" ? runStatus : undefined;
+  if (typeof runStatus === "string") {
+    return runStatus;
+  }
+  return [data.state, data.status].find((value): value is string => typeof value === "string");
 }
 
 function smithersSnapshotRunStateIsActive(snapshot: SmithersCommandSnapshot): boolean {
