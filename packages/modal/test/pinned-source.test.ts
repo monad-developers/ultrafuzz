@@ -20,6 +20,15 @@ afterEach(() => {
 });
 
 describe("pinned benchmark source", () => {
+  it("uses bounded git revision queries for source proof inspection", () => {
+    const source = fs.readFileSync(new URL("../src/pinned-source.ts", import.meta.url), "utf8");
+
+    expect(source).toContain('["rev-list", "--all", "--count"]');
+    expect(source).toContain('["rev-list", "--all", "--max-count=1"]');
+    expect(source).toContain("git fsck --connectivity-only --unreachable --no-reflogs --no-progress");
+    expect(source).not.toContain("--batch-all-objects");
+  });
+
   it("materializes only the requested commit without the remote default branch or later objects", async () => {
     const fixture = sourceRepository();
     const destination = path.join(fixture.root, "sanitized");
@@ -56,6 +65,27 @@ describe("pinned benchmark source", () => {
         allowUltrafuzzWorktreeRefs: true
       })
     ).resolves.toMatchObject({ commit: fixture.pinned, revision_count: 1 });
+  });
+
+  it("rejects a pinned checkout with hidden unreachable commit objects", async () => {
+    const fixture = sourceRepository();
+    const destination = path.join(fixture.root, "hidden-commit");
+    await materializePinnedSource({
+      repository: fixture.repository,
+      revision: fixture.pinned,
+      destination
+    });
+
+    git(destination, ["config", "user.name", "Ultrafuzz test"]);
+    git(destination, ["config", "user.email", "test@example.invalid"]);
+    git(destination, ["checkout", "--quiet", "-b", "hidden"]);
+    fs.writeFileSync(path.join(destination, "source.txt"), "hidden commit\n");
+    git(destination, ["add", "source.txt"]);
+    git(destination, ["commit", "--quiet", "-m", "hidden"]);
+    git(destination, ["checkout", "--quiet", PINNED_SOURCE_BRANCH]);
+    git(destination, ["branch", "-D", "hidden"]);
+
+    await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(/isolation verification/u);
   });
 
   it("hydrates submodules at the gitlink revisions recorded by the pinned commit", async () => {
