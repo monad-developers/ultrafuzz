@@ -1,0 +1,114 @@
+source:
+  name: ScFuzzBench Aave v4 expected invariants
+  benchmark_id: a0a57a3e0b5b533094f20079e9a9b7ef
+  ultrafuzz_target_repo: https://github.com/aave/aave-v4
+  scfuzzbench_target_commit: edd6c82721512540c8c90e7a36a4a8e19fd7bdf3
+  scfuzzbench_target_repo: https://github.com/scfuzzbench/aave-v4-scfuzzbench
+  ultrafuzz_target_commit: 6959e3219b5506bf2acae18551cbb2a68a5b8fba
+  note: Canaries are retained below for traceability but are not scorer ground-truth bugs.
+canaries:
+  - id: canary-assertion
+    benchmark_name: assert_canary
+    title: Harness canary assertion expected to fail
+  - id: canary-invariant
+    benchmark_name: invariant_canary
+    title: Harness canary invariant expected to fail
+bugs:
+  - id: total-borrowed-v0
+    severity: high
+    title: Total borrowed assets must not exceed supplied assets under the auditor definition
+    root_cause_keywords: ["total borrowed", "total supplied", "borrowed less than supplied", "Hub accounting"]
+    affected_files: ["src/hub/Hub.sol", "src/hub/libraries/AssetLogic.sol"]
+    affected_functions: ["invariant_totalBorrowedLessThanSupplied_v0", "getAssetTotalOwed", "totalAddedAssets"]
+    impact_keywords: ["insolvency", "accounting deficit", "borrowed assets exceed supplied assets"]
+    evidence_keywords: ["invariant_totalBorrowedLessThanSupplied_v0", "total-borrowed-v0"]
+  - id: total-borrowed-v1
+    severity: high
+    title: Total borrowed assets must not exceed previewed supplied assets plus accrued fees
+    root_cause_keywords: ["total borrowed", "previewed supplied", "accrued fees", "Hub accounting"]
+    affected_files: ["src/hub/Hub.sol", "src/hub/libraries/AssetLogic.sol"]
+    affected_functions: ["invariant_totalBorrowedLessThanSupplied_v1", "getAssetTotalOwed", "totalAddedAssets"]
+    impact_keywords: ["insolvency", "accounting deficit", "borrowed assets exceed supplied assets"]
+    evidence_keywords: ["invariant_totalBorrowedLessThanSupplied_v1", "total-borrowed-v1"]
+  - id: total-borrowed-v2
+    severity: high
+    title: Total borrowed assets must not exceed Hub added assets plus accrued fees
+    root_cause_keywords: ["total borrowed", "Hub added assets", "accrued fees", "Hub accounting"]
+    affected_files: ["src/hub/Hub.sol", "src/hub/libraries/AssetLogic.sol"]
+    affected_functions: ["invariant_totalBorrowedLessThanSupplied_v2", "getAssetTotalOwed", "totalAddedAssets"]
+    impact_keywords: ["insolvency", "accounting deficit", "borrowed assets exceed Hub added assets"]
+    evidence_keywords: ["invariant_totalBorrowedLessThanSupplied_v2", "total-borrowed-v2"]
+  - id: borrowed-shares-sum
+    severity: medium
+    title: Hub drawn shares must equal the sum of registered Spoke drawn shares
+    root_cause_keywords: ["drawn shares", "Spoke sum", "Hub accounting", "borrowed shares"]
+    affected_files: ["src/hub/Hub.sol", "src/spoke/Spoke.sol"]
+    affected_functions: ["invariant_totalBorrowedSharesMatchesSpokeSum", "draw", "restore", "reportDeficit"]
+    impact_keywords: ["cross-spoke accounting drift", "debt share mismatch", "Hub accounting mismatch"]
+    evidence_keywords: ["invariant_totalBorrowedSharesMatchesSpokeSum", "borrowed-shares-sum"]
+  - id: added-assets-spoke-sum
+    severity: medium
+    title: Hub added assets must cover the sum of Spoke added assets
+    root_cause_keywords: ["added assets", "Spoke sum", "Hub accounting", "supply assets"]
+    affected_files: ["src/hub/Hub.sol", "src/hub/libraries/AssetLogic.sol", "src/spoke/Spoke.sol"]
+    affected_functions: ["invariant_hubAddedAssetsGreaterThanSpokeSum", "add", "remove", "totalAddedAssets"]
+    impact_keywords: ["asset accounting drift", "supply accounting mismatch", "Hub added assets deficit"]
+    evidence_keywords: ["invariant_hubAddedAssetsGreaterThanSpokeSum", "added-assets-spoke-sum"]
+  - id: added-shares-spoke-sum
+    severity: medium
+    title: Hub added shares must equal the sum of registered Spoke added shares
+    root_cause_keywords: ["added shares", "Spoke sum", "Hub accounting", "supply shares"]
+    affected_files: ["src/hub/Hub.sol", "src/spoke/Spoke.sol"]
+    affected_functions: ["invariant_hubAddedSharesMatchesSpokeSum", "add", "remove", "transferShares"]
+    impact_keywords: ["share accounting drift", "supply share mismatch", "Hub added shares mismatch"]
+    evidence_keywords: ["invariant_hubAddedSharesMatchesSpokeSum", "added-shares-spoke-sum"]
+  - id: monotonic-index-price
+    severity: medium
+    title: Supply share price and drawn index must not decrease across operations
+    root_cause_keywords: ["share price", "drawn index", "monotonic", "rounding"]
+    affected_files: ["src/hub/Hub.sol", "src/hub/libraries/AssetLogic.sol", "src/hub/libraries/SharesMath.sol"]
+    affected_functions: ["invariant_supplySharePriceAndDrawnIndexMonotonic", "getDrawnIndex", "totalAddedAssets"]
+    impact_keywords: ["price per share decrease", "index decrease", "monotonicity violation"]
+    evidence_keywords: ["invariant_supplySharePriceAndDrawnIndexMonotonic", "monotonic-index-price"]
+  - id: liquidation-liveness
+    severity: medium
+    title: Liquidation must not unexpectedly revert outside documented validation and liquidity errors
+    root_cause_keywords: ["liquidation", "unexpected revert", "liveness", "DoS"]
+    affected_files:
+      ["src/spoke/Spoke.sol", "src/spoke/libraries/LiquidationLogic.sol", "src/spoke/interfaces/ISpokeBase.sol"]
+    affected_functions: ["iSpoke_liquidationCall", "liquidationCall"]
+    impact_keywords: ["liquidation blocked", "denial of service", "bad debt", "position cannot be liquidated"]
+    evidence_keywords: ["iSpoke_liquidationCall", "liquidation-liveness"]
+  - id: repay-liveness
+    severity: medium
+    title: Repay must not unexpectedly revert outside documented validation and balance errors
+    root_cause_keywords: ["repay", "unexpected revert", "liveness", "DoS"]
+    affected_files:
+      ["src/spoke/Spoke.sol", "src/spoke/interfaces/ISpokeBase.sol", "src/spoke/libraries/UserPositionDebt.sol"]
+    affected_functions: ["iSpoke_repay", "repay"]
+    impact_keywords: ["repayment blocked", "denial of service", "debt cannot be repaid"]
+    evidence_keywords: ["iSpoke_repay", "repay-liveness"]
+  - id: supply-liveness
+    severity: medium
+    title: Supply must not unexpectedly revert outside documented validation and cap errors
+    root_cause_keywords: ["supply", "unexpected revert", "liveness", "DoS"]
+    affected_files: ["src/spoke/Spoke.sol", "src/spoke/interfaces/ISpokeBase.sol", "src/hub/Hub.sol"]
+    affected_functions: ["iSpoke_supply", "supply", "add"]
+    impact_keywords: ["supply blocked", "denial of service", "user cannot supply"]
+    evidence_keywords: ["iSpoke_supply", "supply-liveness"]
+  - id: withdraw-liveness
+    severity: medium
+    title: Withdraw must not unexpectedly revert outside documented validation and liquidity errors
+    root_cause_keywords: ["withdraw", "unexpected revert", "liveness", "DoS"]
+    affected_files: ["src/spoke/Spoke.sol", "src/spoke/interfaces/ISpokeBase.sol", "src/hub/Hub.sol"]
+    affected_functions: ["iSpoke_withdraw", "withdraw", "remove"]
+    impact_keywords: ["withdrawal blocked", "denial of service", "user cannot withdraw"]
+    evidence_keywords: ["iSpoke_withdraw", "withdraw-liveness"]
+  - id: fee-share-pps
+    severity: medium
+    title: Minting fee shares must not unexpectedly change supply share price
+    root_cause_keywords: ["fee shares", "price per share", "mintFeeShares", "monotonic"]
+    affected_files: ["src/hub/Hub.sol", "src/hub/libraries/AssetLogic.sol"]
+    affected_functions: ["iHub_mintFeeShares", "mintFeeShares", "_mintFeeShares"]
+    impact_keywords: ["fee share accounting", "price per share change", "share price manipulation"]
+    evidence_keywords: ["iHub_mintFeeShares", "fee-share-pps"]
