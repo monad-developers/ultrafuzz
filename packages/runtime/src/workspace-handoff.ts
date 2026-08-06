@@ -42,7 +42,7 @@ export interface WorkspacePatchCapture {
 export function captureWorkspaceTree(workspaceRoot: string): string {
   return withTemporaryIndex(workspaceRoot, (index) => {
     runGit(workspaceRoot, ["read-tree", "HEAD"], index);
-    stageWorkspaceTree(workspaceRoot, index);
+    stageWorkspaceTree(workspaceRoot, index, "HEAD");
     return runGit(workspaceRoot, ["write-tree"], index).trim();
   });
 }
@@ -53,7 +53,7 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
   const baseCommit = runGit(workspaceRoot, ["rev-parse", "HEAD"]).trim();
   const capture = withTemporaryIndex(workspaceRoot, (index) => {
     runGit(workspaceRoot, ["read-tree", baselineTree], index);
-    stageWorkspaceTree(workspaceRoot, index);
+    stageWorkspaceTree(workspaceRoot, index, baselineTree);
     const resultTree = runGit(workspaceRoot, ["write-tree"], index).trim();
     const patch = runGit(
       workspaceRoot,
@@ -130,12 +130,22 @@ function parseChangedPaths(raw: string): WorkspacePatchFile[] {
   return [...unique.values()].sort((left, right) => left.path.localeCompare(right.path));
 }
 
-function stageWorkspaceTree(workspaceRoot: string, index: string): void {
-  runGit(
-    workspaceRoot,
-    ["add", "-A", "--", ".", ...WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}/**`)],
-    index
-  );
+/**
+ * Stage the whole worktree, then restore the runtime roots to `treeish` so they contribute nothing.
+ *
+ * The runtime roots deliberately are NOT excluded with `:(exclude)` pathspecs. Any negative pathspec
+ * makes `git add` report ignored paths as an error instead of skipping them, so a worktree holding an
+ * ignored `node_modules` aborted capture outright — which killed R44's `property-specification-a16z`
+ * node (issue #281). A plain `git add -A -- .` skips ignored paths quietly, and resetting the roots
+ * afterwards keeps them out of the tree without ever naming them to `add`.
+ *
+ * Resetting to `treeish` rather than removing from the index matters when a runtime root is tracked:
+ * a tracked file under one of these roots is restored to its baseline content instead of being
+ * recorded as a deletion.
+ */
+function stageWorkspaceTree(workspaceRoot: string, index: string, treeish: string): void {
+  runGit(workspaceRoot, ["add", "-A", "--", "."], index);
+  runGit(workspaceRoot, ["reset", "--quiet", treeish, "--", ...WORKSPACE_RUNTIME_ROOTS], index);
 }
 
 function assertPatchPathsMatchManifest(

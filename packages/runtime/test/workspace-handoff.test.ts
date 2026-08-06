@@ -55,6 +55,39 @@ test("captures tracked and untracked setup changes relative to the dependency ba
   }
 });
 
+// R44's `property-specification-a16z` node died here (issue #281). `:(exclude)node_modules/**`
+// excludes paths UNDER the directory but not the directory entry itself, so `git add -A -- .` still
+// named the ignored `node_modules` and git exited non-zero, aborting capture. It only reproduces
+// when the agent actually installed dependencies in that worktree, which is why most nodes survive.
+test("captures a workspace containing ignored runtime roots", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\ncache/\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "ignore node_modules"]);
+    const baseline = captureWorkspaceTree(root);
+
+    // Every runtime root the stager is supposed to skip, present and ignored.
+    for (const runtimeRoot of ["node_modules", ".ultrafuzz", ".smithers", "artifacts"]) {
+      mkdirSync(path.join(root, runtimeRoot, "nested"), { recursive: true });
+      writeFileSync(path.join(root, runtimeRoot, "nested", "payload.json"), "runtime\n");
+    }
+    writeFileSync(path.join(root, "UltrafuzzSmoke.t.sol"), "contract UltrafuzzSmoke {}\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+    // The real setup change is captured and no runtime root leaks into the patch.
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["UltrafuzzSmoke.t.sol"]
+    );
+    for (const runtimeRoot of ["node_modules", ".ultrafuzz", ".smithers", "artifacts"]) {
+      assert.doesNotMatch(captured.patch, new RegExp(runtimeRoot.replace(".", "\\."), "u"));
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("applies a validated setup patch and rejects a base-tree mismatch", () => {
   const source = fixture();
   // The patch contract is keyed to the exact Git tree.  Build the downstream
