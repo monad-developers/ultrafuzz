@@ -524,8 +524,9 @@ function rethrowOversizedGitOutput(args: readonly string[], error: unknown): nev
     const end = position + 1 < headers.length ? (headers[position + 1]?.index ?? diff.length) : diff.length;
     const root = (header[1] ?? "").split("/")[0] ?? "";
     const total = totals.get(root) ?? { bytes: 0, files: 0 };
-    // `Buffer.byteLength`, not `end - start`: slicing a decoded string counts UTF-16 code units, which
-    // undercounts every multi-byte path or content run — measured 62% low on a CJK diff.
+    // `Buffer.byteLength`, not `end - start`: a decoded string is measured in UTF-16 code units, so a
+    // 3-byte UTF-8 character counts as 1. Any multi-byte path or content run is undercounted against the
+    // byte budget the message is reporting, by an amount that depends entirely on the content.
     totals.set(root, {
       bytes: total.bytes + Buffer.byteLength(diff.slice(start, end), "utf8"),
       files: total.files + 1
