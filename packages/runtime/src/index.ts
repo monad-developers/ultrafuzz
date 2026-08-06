@@ -31,4 +31,7 @@ export * from "./workspace-provenance.js";
 export * from "./workflow-control.js";
 export * from "./workflow-integrity.js";
 export { WORKFLOW_CHECKPOINT_FRAME_MAX } from "./workflow-mutation.js";
+// Exported so consumers and tests derive the pinned runner version instead of
+// duplicating a literal that silently stops matching on the next upgrade.
+export { SMITHERS_ORCHESTRATOR_BIN_PATH, SMITHERS_ORCHESTRATOR_VERSION } from "./smithers-package.js";
 export * from "./workspace-handoff.js";

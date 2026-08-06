@@ -108,7 +108,15 @@ test("the compatibility adapter patches the exact pinned fork and replay sources
     /getRunDurabilityMetadata\([\s\S]*resolvedWorkflowPath,[\s\S]*rootDir,[\s\S]*persistedWorkflowPath/u
   );
   assert.match(engine, /workflowPath: persistedWorkflowPath \?\? opts\.workflowPath \?\? null/u);
-  assert.match(engine, /runMetadata,[\s\S]*persistedWorkflowPath,[\s\S]*\);/u);
+  // Anchored to the resume-activation call by name, not by an unbounded wildcard: a
+  // loose match could be satisfied by any other `runMetadata,` call site and would not
+  // notice that the resume path still persists the descriptor-anchored `/proc` value,
+  // which corrupts the durable run row and makes the second resume impossible.
+  assert.match(
+    engine,
+    /await activateRunForResume\(\s+adapter,\s+existingRun,\s+opts,\s+runtimeOwnerId,\s+runConfigJson,\s+runMetadata,\s+persistedWorkflowPath,\s+\);/u
+  );
+  assert.doesNotMatch(engine, /await activateRunForResume\([\s\S]{0,200}?resolvedWorkflowPath,\s+\);/u);
   assert.match(engine, /workflowPath: resolvedWorkflowPath,[\s\S]*runtimeAdapter: createNodeRuntime/u);
   assert.match(engine, /workflowPath: resolvedWorkflowPath \?\? opts\.workflowPath,[\s\S]*auth: runAuth/u);
   assert.doesNotMatch(engine, /resolve\(persistedWorkflowPath \|\| opts\.workflowPath\)/u);

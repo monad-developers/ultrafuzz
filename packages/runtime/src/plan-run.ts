@@ -445,7 +445,10 @@ export async function acquireWorkflowStartPreparationLock(layout: RunLayout): Pr
       const acquired = await withProperLockfileReclaimGuard(lockPath, async () => {
         reclaimTerminatedStartPreparationLock(layout, lockPath);
         forgetProperLockfileCompromise(lockPath);
-        const acquiredRelease = await lockfile.lock(layout.root, {
+        // Keyed on the lock pathname, not the run root: proper-lockfile's in-process
+        // registry is keyed by this first argument, so two different locks under one
+        // run root would overwrite each other's entry and cross their releases.
+        const acquiredRelease = await lockfile.lock(lockPath, {
           lockfilePath: lockPath,
           realpath: false,
           stale: START_PREPARATION_LOCK_STALE_MS,
@@ -1217,7 +1220,7 @@ export async function repairMissingRenderedPromptsForRun(input: {
   }
   const promptRepairLockPath = path.join(layout.root, PROMPT_REPAIR_LOCK);
   forgetProperLockfileCompromise(promptRepairLockPath);
-  const release = await lockfile.lock(layout.root, {
+  const release = await lockfile.lock(promptRepairLockPath, {
     lockfilePath: promptRepairLockPath,
     realpath: false,
     stale: 300_000,

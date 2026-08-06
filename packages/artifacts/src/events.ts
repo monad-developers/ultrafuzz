@@ -335,15 +335,18 @@ function ensureExactEventLines(filePath: string, records: readonly EventRecord[]
         // discarding an unrelated but complete record would lose evidence, and
         // refusing to proceed would strand the run — `replayEvents` already
         // tolerates such a line, so no reader depends on it being rejected.
-        if (matchingIndex >= 0 && nextMissing < 0) {
-          // Every record of this batch is already durable, so terminating this tail
-          // would commit a second copy of one of them.
-          throw new Error(`${label} duplicates an already durable event record as its unterminated tail`);
-        }
         if (matchingIndex >= 0 && matchingIndex !== nextMissing) {
-          throw new Error(`${label} contains an out-of-order unterminated event record`);
+          // The tail is one of this batch's records, but not the one that is missing
+          // next: either every record is already durable, so terminating this tail
+          // would commit a second copy, or the batch would be committed out of order.
+          // The tail is unterminated, so it was never a durable line and discarding it
+          // loses nothing; the loop below then appends the batch in order. Refusing
+          // instead would make every guarded lifecycle operation on this run —
+          // including cancel, the operator escape hatch — permanently impossible.
+          truncateDurable(filePath, complete.length, { expectedSize: contents.length });
+        } else {
+          appendBytesDurableAt(filePath, Buffer.from("\n"), { expectedSize: contents.length });
         }
-        appendBytesDurableAt(filePath, Buffer.from("\n"), { expectedSize: contents.length });
       } else {
         const next = expectations[nextMissing];
         const expectedBytes = next === undefined ? undefined : Buffer.from(next.serialized, "utf8");

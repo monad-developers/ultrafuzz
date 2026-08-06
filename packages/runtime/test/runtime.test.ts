@@ -6926,6 +6926,17 @@ test("startRun migrates the Smithers 0.31.0 manifest and its Effect 3 override f
   fs.writeFileSync(packageJson, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   writeFakeInstalledSmithers(project, { version: "0.31.0" });
   const installer = writeFakeNpmInstaller(project);
+  // A real install materializes an operator-declared dependency, while the fake
+  // installer only writes the runner itself. Compiling a workflow package snapshots
+  // its dependency closure, which requires every declared root dependency to be
+  // resolvable on disk, so materialize this one the way npm would.
+  const customAgentRoot = path.join(project, ".smithers", "node_modules", "custom-agent-package");
+  fs.mkdirSync(customAgentRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(customAgentRoot, "package.json"),
+    `${JSON.stringify({ name: "custom-agent-package", version: "1.2.3" })}\n`,
+    "utf8"
+  );
 
   const run = await startRun({
     projectRoot: project,

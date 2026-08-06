@@ -30,6 +30,9 @@ import {
 } from "./proper-lockfile-owner.js";
 
 const WORKFLOW_MUTATION_LOCK = ".workflow-mutation";
+// Owned by plan-run, read here so a lost start-preparation hold also stops guarded
+// journal mutation rather than only being reported when that lock is released.
+const WORKFLOW_START_PREPARATION_LOCK = ".start-preparation-lock";
 const WORKFLOW_LIFECYCLE_ACTION_LOCK = ".workflow-lifecycle-action";
 const WORKFLOW_LIFECYCLE_ACTION_JOURNAL = "lifecycle-action-journal.json";
 const WORKFLOW_RUN_LINK_JOURNAL = "workflow-run-link-journal.json";
@@ -806,7 +809,7 @@ async function releaseOwnedRunLock(
  */
 function assertWorkflowRunHoldsAreIntact(layout: RunLayout, label: string): void {
   const root = anchoredRunRoot(layout);
-  for (const lockName of [WORKFLOW_MUTATION_LOCK, WORKFLOW_LIFECYCLE_ACTION_LOCK]) {
+  for (const lockName of [WORKFLOW_MUTATION_LOCK, WORKFLOW_LIFECYCLE_ACTION_LOCK, WORKFLOW_START_PREPARATION_LOCK]) {
     if (properLockfileIsCompromised(path.join(root, lockName))) {
       throw new Error(`${label} cannot proceed because this process lost its ${lockName} hold on run ${layout.runId}`);
     }

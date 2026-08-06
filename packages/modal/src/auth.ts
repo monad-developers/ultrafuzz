@@ -48,8 +48,31 @@ function credentialLockIsCompromised(lockPath: string): boolean {
   return compromisedCredentialLockPaths.has(path.resolve(lockPath));
 }
 
+const outstandingCredentialLockHolds = new Map<string, number>();
+
+/**
+ * Clears a recorded loss only while no hold for that pathname is still outstanding.
+ * The record is process-global and keyed by pathname, so clearing it unconditionally
+ * before an acquisition attempt would let a waiting contender re-open the fail-closed
+ * guards of a holder in the same process that has already lost its lock — and the
+ * consequence here is clobbering a single-use refresh token.
+ */
 function forgetCredentialLockCompromise(lockPath: string): void {
-  compromisedCredentialLockPaths.delete(path.resolve(lockPath));
+  const resolved = path.resolve(lockPath);
+  if ((outstandingCredentialLockHolds.get(resolved) ?? 0) > 0) return;
+  compromisedCredentialLockPaths.delete(resolved);
+}
+
+function beginCredentialLockHold(lockPath: string): void {
+  const resolved = path.resolve(lockPath);
+  outstandingCredentialLockHolds.set(resolved, (outstandingCredentialLockHolds.get(resolved) ?? 0) + 1);
+}
+
+function endCredentialLockHold(lockPath: string): void {
+  const resolved = path.resolve(lockPath);
+  const remaining = (outstandingCredentialLockHolds.get(resolved) ?? 1) - 1;
+  if (remaining <= 0) outstandingCredentialLockHolds.delete(resolved);
+  else outstandingCredentialLockHolds.set(resolved, remaining);
 }
 
 export interface SubscriptionAuthCopy {
@@ -342,7 +365,8 @@ export async function acquireKimiModalNodeExecutionLease(
 
     const timeoutMs = Math.max(5_000, Math.floor(options.timeoutMs ?? 120_000));
     forgetCredentialLockCompromise(anchoredTarget);
-    releaseLock = await lockfile.lock(anchoredTarget, {
+    beginCredentialLockHold(anchoredTarget);
+    const acquiredLeaseLock = await lockfile.lock(anchoredTarget, {
       retries: {
         retries: Math.max(1, Math.ceil(timeoutMs / 500)),
         factor: 1,
@@ -356,6 +380,10 @@ export async function acquireKimiModalNodeExecutionLease(
       realpath: false,
       onCompromised: credentialLockCompromiseHandler(anchoredTarget)
     });
+    releaseLock = async () => {
+      endCredentialLockHold(anchoredTarget);
+      await acquiredLeaseLock();
+    };
     const [previousTarget, previousFence] = await Promise.all([
       readBoundKimiExecutionLeaseMetadata(
         credentialsAnchor,
@@ -1000,18 +1028,23 @@ async function acquireKimiRefreshLockAt(
   const target = path.join(oauthAnchor, lockName);
   try {
     forgetCredentialLockCompromise(target);
+    const acquired = await lockfile.lock(target, {
+      retries: {
+        retries: 120,
+        factor: 1,
+        minTimeout: 500,
+        maxTimeout: 1_000
+      },
+      stale: 5_000,
+      realpath: false,
+      onCompromised: credentialLockCompromiseHandler(target)
+    });
+    beginCredentialLockHold(target);
     return {
-      release: await lockfile.lock(target, {
-        retries: {
-          retries: 120,
-          factor: 1,
-          minTimeout: 500,
-          maxTimeout: 1_000
-        },
-        stale: 5_000,
-        realpath: false,
-        onCompromised: credentialLockCompromiseHandler(target)
-      }),
+      release: async () => {
+        endCredentialLockHold(target);
+        await acquired();
+      },
       lockPath: target
     };
   } catch (error) {
@@ -2266,18 +2299,23 @@ async function acquireKimiRefreshLock(
   await targetHandle.close();
   try {
     forgetCredentialLockCompromise(target);
+    const acquired = await lockfile.lock(target, {
+      retries: {
+        retries: 120,
+        factor: 1,
+        minTimeout: 500,
+        maxTimeout: 1_000
+      },
+      stale: 5_000,
+      realpath: false,
+      onCompromised: credentialLockCompromiseHandler(target)
+    });
+    beginCredentialLockHold(target);
     return {
-      release: await lockfile.lock(target, {
-        retries: {
-          retries: 120,
-          factor: 1,
-          minTimeout: 500,
-          maxTimeout: 1_000
-        },
-        stale: 5_000,
-        realpath: false,
-        onCompromised: credentialLockCompromiseHandler(target)
-      }),
+      release: async () => {
+        endCredentialLockHold(target);
+        await acquired();
+      },
       lockPath: target
     };
   } catch (error) {

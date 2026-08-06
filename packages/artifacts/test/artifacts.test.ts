@@ -660,18 +660,16 @@ test("event recovery fails closed on integrity violations and repairs torn tails
     assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), testCase.contents, testCase.name);
   }
 
-  // A record of this batch that is already durably present AND duplicated as the
-  // unterminated tail must fail closed: terminating that tail would commit a second
-  // copy of the same event. This is a duplicate, not an ordering fault, and says so.
+  // A record already durably present AND duplicated as the unterminated tail: the tail
+  // was never a durable line, so it is discarded rather than committed a second time.
+  // Refusing instead would wedge every later guarded operation on the run.
   fs.writeFileSync(layout.eventsPath, `${serialized}\n${serialized}`, "utf8");
-  assert.throws(
-    () => ensureEventRecord(layout, record),
-    /duplicates an already durable event record as its unterminated tail/u
-  );
-  assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), `${serialized}\n${serialized}`);
+  ensureEventRecord(layout, record);
+  assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), `${serialized}\n`);
 
-  // A genuine ordering fault: a two-record batch with neither durable, where the tail
-  // is the SECOND record. Completing it would commit the batch out of order.
+  // An ordering fault recovers the same way: a two-record batch with neither durable,
+  // where the tail is the SECOND record. The torn copy is dropped and the batch is
+  // appended in order.
   const laterRecord = createEventRecord(layout, {
     eventType: "node-synced",
     nodeId: "node-b",
@@ -681,8 +679,8 @@ test("event recovery fails closed on integrity violations and repairs torn tails
   });
   const laterSerialized = JSON.stringify(laterRecord);
   fs.writeFileSync(layout.eventsPath, laterSerialized, "utf8");
-  assert.throws(() => ensureEventRecords(layout, [record, laterRecord]), /out-of-order unterminated event record/u);
-  assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), laterSerialized);
+  ensureEventRecords(layout, [record, laterRecord]);
+  assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), `${serialized}\n${laterSerialized}\n`);
 
   // An unterminated trailing line, by contrast, is the signature of a process that
   // died mid-append. Recovery must proceed, because refusing would make every

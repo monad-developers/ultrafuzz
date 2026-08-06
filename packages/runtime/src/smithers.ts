@@ -355,6 +355,26 @@ const SMITHERS_CLI_FORK_PREPARE_SOURCE = "            autoRun: c.options.run,";
 const SMITHERS_CLI_FORK_PREPARE_PATCH = "            autoRun: c.options.run || c.options.ultrafuzzPrepareOnly,";
 const SMITHERS_CLI_FORK_FOREGROUND_SOURCE = "          if (c.options.run) {";
 const SMITHERS_CLI_FORK_FOREGROUND_PATCH = "          if (c.options.run && !c.options.ultrafuzzPrepareOnly) {";
+// Invariants rather than rewrites: the descriptor-anchored execution paths must
+// remain exactly as upstream publishes them. Describing them as patches whose
+// patchable and patched text are identical keeps them verified by the same registry
+// that reports and applies every other workaround, so neither can silently vanish.
+// `activateRunForResume` writes the durable run row on the RESUME path. Upstream
+// passes it `resolvedWorkflowPath`, which is the descriptor-anchored argument — a
+// per-process `/proc/<pid>/fd/...` path. Persisting that would rewrite the row on the
+// first resume, and the second resume would then fail "workflow path changed", which
+// `--accept-workflow-change` cannot waive. Persist the lexical path instead, which is
+// the whole point of this patch family.
+const SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_SOURCE = `          runConfigJson,
+          runMetadata,
+          resolvedWorkflowPath,
+        );`;
+const SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_PATCH = `          runConfigJson,
+          runMetadata,
+          persistedWorkflowPath,
+        );`;
+const SMITHERS_ENGINE_DESCRIPTOR_EXECUTION_PATH_ANCHOR = "workflowPath: resolvedWorkflowPath ?? opts.workflowPath,";
+const SMITHERS_ENGINE_DESCRIPTOR_DRIVER_PATH_ANCHOR = "workflowPath: resolvedWorkflowPath,";
 const SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE =
   "  const resolvedWorkflowPath = opts.workflowPath ? resolve(opts.workflowPath) : null;";
 const SMITHERS_ENGINE_UNSAFE_WORKFLOW_PATH_PATCH = `  const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
@@ -540,7 +560,22 @@ export type SmithersCompatibilityPatchId =
   | "replay_workflow_metadata"
   | "fork_workflow_path"
   | "fork_workflow_metadata"
-  | "fork_foreground";
+  | "fork_foreground"
+  | "engine_workflow_path"
+  | "engine_durability_metadata"
+  | "engine_run_metadata"
+  | "engine_resume_identity"
+  | "engine_insert_workflow_path"
+  | "engine_update_workflow_path"
+  | "engine_continuation_workflow_path"
+  | "workflow_hash_import"
+  | "workflow_hash_collect"
+  | "workflow_hash_entry"
+  | "workflow_hash_recursion"
+  | "workflow_hash_public"
+  | "engine_activate_workflow_path"
+  | "engine_descriptor_execution_path"
+  | "engine_descriptor_driver_path";
 
 export interface SmithersCompatibilityPatch {
   /** Stable name this patch is reported under by `doctor`. */
@@ -704,6 +739,132 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     sourceRelativePath: "src/index.js",
     patchable: SMITHERS_CLI_FORK_FOREGROUND_SOURCE,
     patched: SMITHERS_CLI_FORK_FOREGROUND_PATCH,
+    upstreamAbsent: []
+  },
+  // Durable run identity and workflow-graph hashing. Every one of these is applied
+  // below, so each must also be described here: an applied-but-undescribed workaround
+  // is invisible to `doctor` and to the fixture that proves patching still lands.
+  {
+    id: "engine_workflow_path",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_ENGINE_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_durability_metadata",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_DURABILITY_METADATA_SOURCE,
+    patched: SMITHERS_ENGINE_DURABILITY_METADATA_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_run_metadata",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_RUN_METADATA_SOURCE,
+    patched: SMITHERS_ENGINE_RUN_METADATA_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_resume_identity",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_RESUME_IDENTITY_SOURCE,
+    patched: SMITHERS_ENGINE_RESUME_IDENTITY_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_insert_workflow_path",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_activate_workflow_path",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_update_workflow_path",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_continuation_workflow_path",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "workflow_hash_import",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/workflow-hash.js",
+    patchable: SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_SOURCE,
+    patched: SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "workflow_hash_collect",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/workflow-hash.js",
+    patchable: SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_SOURCE,
+    patched: SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "workflow_hash_entry",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/workflow-hash.js",
+    patchable: SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_SOURCE,
+    patched: SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "workflow_hash_recursion",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/workflow-hash.js",
+    patchable: SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_SOURCE,
+    patched: SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "workflow_hash_public",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/workflow-hash.js",
+    patchable: SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_SOURCE,
+    patched: SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_PATCH,
+    upstreamAbsent: []
+  },
+  // Presence invariants: identical patchable and patched text, so a posture of
+  // `applied` means the descriptor anchor is intact and `incompatible` means upstream
+  // moved it.
+  {
+    id: "engine_descriptor_execution_path",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_DESCRIPTOR_EXECUTION_PATH_ANCHOR,
+    patched: SMITHERS_ENGINE_DESCRIPTOR_EXECUTION_PATH_ANCHOR,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_descriptor_driver_path",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_DESCRIPTOR_DRIVER_PATH_ANCHOR,
+    patched: SMITHERS_ENGINE_DESCRIPTOR_DRIVER_PATH_ANCHOR,
     upstreamAbsent: []
   }
 ];
@@ -3861,6 +4022,11 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
     [SMITHERS_ENGINE_RUN_METADATA_SOURCE, SMITHERS_ENGINE_RUN_METADATA_PATCH, "workflow durability metadata"],
     [SMITHERS_ENGINE_RESUME_IDENTITY_SOURCE, SMITHERS_ENGINE_RESUME_IDENTITY_PATCH, "resume workflow identity"],
     [SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE, SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH, "inserted workflow path"],
+    [
+      SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_SOURCE,
+      SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_PATCH,
+      "resumed workflow path"
+    ],
     [SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_SOURCE, SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_PATCH, "updated workflow path"],
     [
       SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_SOURCE,
@@ -3870,13 +4036,17 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
   ] as const) {
     engineContents = applyRequiredSmithersPatch(engineContents, source, patch, label);
   }
-  // The execution path stays descriptor-anchored. Only the five durable path
-  // fields above receive the lexical identity that survives controller exit.
-  if (!engineContents.includes("workflowPath: resolvedWorkflowPath ?? opts.workflowPath,")) {
-    throw new Error("pinned workflow runner descriptor execution paths are incompatible");
-  }
-  if (!engineContents.includes("workflowPath: resolvedWorkflowPath,")) {
-    throw new Error("pinned workflow runner descriptor driver path is incompatible");
+  // The execution path stays descriptor-anchored. Only the five durable path fields
+  // above
+  // receive the lexical identity that survives controller exit. These two assert
+  // presence rather than rewrite, so their patchable and patched text are identical.
+  for (const [anchor, label] of [
+    [SMITHERS_ENGINE_DESCRIPTOR_EXECUTION_PATH_ANCHOR, "descriptor execution paths"],
+    [SMITHERS_ENGINE_DESCRIPTOR_DRIVER_PATH_ANCHOR, "descriptor driver path"]
+  ] as const) {
+    if (!engineContents.includes(anchor)) {
+      throw new Error(`pinned workflow runner ${label} are incompatible`);
+    }
   }
   // The scheduler session is in-memory. Restore only durable skipped tasks and
   // finished tasks whose output row still exists; genuinely pending work then

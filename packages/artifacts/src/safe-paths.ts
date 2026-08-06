@@ -410,8 +410,10 @@ export function appendBytesDurableAt(
  * `expectedSize` is required because callers decide the truncation length from an
  * earlier read. Between that read and this call another writer may have appended and
  * fsynced a genuinely durable record at exactly that offset, and truncating would
- * destroy it. The size is re-checked under the same descriptor that performs the
- * truncation, so the decision cannot be invalidated in between.
+ * destroy it. Re-checking the size under the same descriptor that performs the
+ * truncation narrows that window from many syscalls to the gap between this `fstat`
+ * and the `ftruncate`; closing it entirely would require advisory locking, which this
+ * design does not use.
  */
 export function truncateDurable(
   filePath: string,

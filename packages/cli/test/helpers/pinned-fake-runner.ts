@@ -1,7 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const PINNED_RUNNER_VERSION = "0.31.0";
+import { SMITHERS_ORCHESTRATOR_VERSION } from "@ultrafuzz/runtime";
+
+// Derived, never a literal: a duplicated version literal silently stops matching the
+// pinned runner on the next upgrade, and every CLI test built on this helper then
+// presents an invalid install and falls through to a real network install.
+const PINNED_RUNNER_VERSION = SMITHERS_ORCHESTRATOR_VERSION;
 const PINNED_RUNNER_BIN = "src/bin/smithers.js";
 
 /**

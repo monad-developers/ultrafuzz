@@ -1213,7 +1213,10 @@ test("diagnoseProject reports a posture for every tracked compatibility patch", 
     }
     const lines: string[] = [];
     for (const [index, patch] of patches.entries()) {
-      const posture = index % 2 === 0 ? "applied" : "missing";
+      // A presence invariant has identical patchable and patched text, so writing its
+      // anchor always reads as `applied`; it has no distinguishable `missing` state.
+      const invariant = patch.patchable === patch.patched;
+      const posture = invariant || index % 2 === 0 ? "applied" : "missing";
       lines.push(posture === "applied" ? patch.patched : patch.patchable);
       expected[patch.id] = posture;
     }

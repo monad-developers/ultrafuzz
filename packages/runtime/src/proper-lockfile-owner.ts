@@ -173,8 +173,21 @@ export async function releaseOwnedProperLockfile(input: OwnedProperLockfileRelea
       }
       throw new Error(`${input.label} ownership changed before release`);
     }
-    fs.unlinkSync(input.ownerPath);
-    await input.release();
+    // Release on every exit, for the same reason the mismatch branch above does: a
+    // throw here would leave the hold and its heartbeat alive, refreshing the lock
+    // directory's mtime so staleness never reclaims it, and the returned closure has
+    // already latched so release can never be retried.
+    try {
+      fs.unlinkSync(input.ownerPath);
+    } catch {
+      // The marker may already be gone. Releasing the hold still matters.
+    }
+    try {
+      await input.release();
+    } catch {
+      // Nothing further can be done, and this must not replace the caller's own
+      // outcome: every caller releases from a `finally`.
+    }
     return { lost: false };
   }
   try {
