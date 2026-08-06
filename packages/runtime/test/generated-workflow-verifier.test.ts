@@ -670,12 +670,15 @@ test("generated Smithers invariant discovery uses a Git-compatible ls-files invo
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
 
   assert.doesNotMatch(source, /--no-exclude-standard/u);
-  assert.match(source, /\["ls-files", "--cached", "--others", "--", "src", "contracts", "test", "tests"\]/u);
-  assert.match(source, /\["ls-files", "--others", "--", "src", "contracts"\]/u);
-  assert.match(source, /\["ls-files", "--others", "--", "test", "tests"\]/u);
+  assert.match(source, /function invariantSuiteGitPathspecs/u);
+  assert.match(source, /INVARIANT_SUITE_GIT_MAX_BUFFER_BYTES/u);
+  assert.match(source, /":\(exclude,glob\)\*\*\/node_modules\/\*\*"/u);
+  assert.match(source, /":\(exclude,glob\)\*\*\/artifacts\/\*\*"/u);
+  assert.match(source, /gitInvariantSuitePaths\(workspaceRoot, \[\s*"ls-files",\s*"--cached",\s*"--others"/u);
+  assert.match(source, /gitInvariantSuitePaths\(workspaceRoot, args\)/u);
 });
 
-test("invariant git discovery includes tracked, untracked, and ignored sources", () => {
+test("invariant git discovery includes tracked, untracked, and ignored sources without dependency roots", () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-git-discovery-"));
   try {
     execFileSync("git", ["init", "--quiet", workspace]);
@@ -683,18 +686,31 @@ test("invariant git discovery includes tracked, untracked, and ignored sources",
       "src/tracked.sol",
       "contracts/untracked.sol",
       "test/ignored.sol",
-      "tests/visible.sol"
+      "tests/visible.sol",
+      "contracts/node_modules/pkg/ignored.sol",
+      "contracts/artifacts/generated.sol"
     ]) {
       const filePath = path.join(workspace, relativePath);
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, "contract Source {}\n");
     }
-    fs.writeFileSync(path.join(workspace, ".gitignore"), "test/ignored.sol\n");
+    fs.writeFileSync(path.join(workspace, ".gitignore"), "test/ignored.sol\ncontracts/node_modules/\n");
     execFileSync("git", ["add", "--", ".gitignore", "src/tracked.sol", "tests/visible.sol"], { cwd: workspace });
 
     const sourcePaths = execFileSync(
       "git",
-      ["ls-files", "--cached", "--others", "--", "src", "contracts", "test", "tests"],
+      [
+        "ls-files",
+        "--cached",
+        "--others",
+        "--",
+        "src",
+        "contracts",
+        "test",
+        "tests",
+        ":(exclude,glob)**/node_modules/**",
+        ":(exclude,glob)**/artifacts/**"
+      ],
       { cwd: workspace, encoding: "utf8" }
     )
       .split(/\r?\n/u)
