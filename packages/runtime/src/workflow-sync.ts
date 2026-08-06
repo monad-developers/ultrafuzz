@@ -117,6 +117,7 @@ interface WorkflowInspect {
   startedAt?: string;
   finishedAt?: string;
   steps: WorkflowStep[];
+  failedWorkflowTaskIds: string[];
 }
 
 interface WorkflowEvent {
@@ -263,7 +264,7 @@ interface NodeWorkflowEvidence {
 
 interface AttemptWorkflowEvidence {
   evidence: NodeWorkflowEvidence;
-  source: "agent" | "verifier";
+  source: "agent" | "verifier" | "preparation";
   taskId: string;
 }
 
@@ -304,6 +305,11 @@ const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
   "reused-from-prior-run",
   "invalidated"
 ]);
+// A preparation wrapper that ends `skipped` is a dependency cascade already
+// carried by the agent task it gates, so only genuine wrapper failures are
+// attributed back to the durable node here.
+const PREPARATION_FAILURE_STATUSES = new Set<NodeStatus>(["failed", "timed-out"]);
+const TERMINAL_FAILED_WORKFLOW_STATES = new Set(["failed", "error", "timeout", "timed-out", "timedout"]);
 const ACCOUNTING_SCHEMA_VERSION = "2.0";
 const ACCOUNTING_CHECKPOINT_SCHEMA_VERSION = "1.0";
 const ACCOUNTING_USD_PRECISION = 12;
@@ -435,6 +441,10 @@ export async function synchronizeLinkedWorkflowRun(
       severity: "error",
       source: "workflow"
     });
+  }
+  const unattributedFailure = unattributedTerminalWorkflowFailure(inspect, syncResult.nodeStatuses);
+  if (unattributedFailure !== undefined) {
+    diagnostics.push(unattributedFailure);
   }
 
   const preAccountingBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
@@ -1686,7 +1696,12 @@ async function synchronizeTasks(input: {
         steps.get(task.verifierSmithersNodeId),
         eventsByNode.get(task.verifierSmithersNodeId) ?? []
       );
-      const evidence = completionEvidenceForTask(task, agentEvidence, verifierEvidence);
+      const preparationTaskId = preparationSmithersNodeIdForAttempt(task.attemptId);
+      const preparationEvidence = mergeNodeWorkflowEvidence(
+        steps.get(preparationTaskId),
+        eventsByNode.get(preparationTaskId) ?? []
+      );
+      const evidence = completionEvidenceForTask(task, agentEvidence, verifierEvidence, preparationEvidence);
       return evidence === undefined ? [] : [[task.attemptId, evidence] as const];
     })
   );
@@ -1957,7 +1972,7 @@ async function finalizeTerminalTask(input: {
   task: StoredWorkflowTask;
   workflowRunId: string;
   evidence: NodeWorkflowEvidence;
-  evidenceSource: "agent" | "verifier";
+  evidenceSource: "agent" | "verifier" | "preparation";
   tasksByAttempt: Map<string, StoredWorkflowTask>;
   force: boolean;
   previous: NodeState | undefined;
@@ -1965,32 +1980,40 @@ async function finalizeTerminalTask(input: {
   control: WorkflowSynchronizationControl;
 }): Promise<NodeFinalization> {
   if (input.evidence.status !== "succeeded") {
+    // Preparation and verification wrappers both enforce the artifact contract
+    // around the agent task, so a wrapper failure is reported as one.
+    const wrapperSource = input.evidenceSource === "verifier" || input.evidenceSource === "preparation";
     const category =
       input.evidence.status === "skipped"
         ? "dependency-cascade"
-        : input.evidenceSource === "verifier"
+        : wrapperSource
           ? "artifact-contract"
           : input.evidence.status === "timed-out"
             ? "provider-interruption"
             : "agent-failure";
-    const verifierFailure = input.evidenceSource === "verifier" && category === "artifact-contract";
+    const wrapperFailure = wrapperSource && category === "artifact-contract";
+    const preparationFailure = wrapperFailure && input.evidenceSource === "preparation";
+    const wrapperTaskId = preparationFailure
+      ? preparationSmithersNodeIdForAttempt(input.task.attemptId)
+      : input.task.verifierSmithersNodeId;
+    const wrapperLabel = preparationFailure ? "artifact preparation" : "artifact verifier";
     return {
       status: input.evidence.status,
-      diagnostics: verifierFailure
+      diagnostics: wrapperFailure
         ? [
             {
-              code: "ARTIFACT_VERIFIER_FAILED",
-              message: `artifact verifier did not complete successfully for ${input.task.attemptId}`,
+              code: preparationFailure ? "ARTIFACT_PREPARATION_FAILED" : "ARTIFACT_VERIFIER_FAILED",
+              message: `${wrapperLabel} did not complete successfully for ${input.task.attemptId}`,
               severity: "error",
               source: "artifact-contracts",
-              path: input.task.verifierSmithersNodeId
+              path: wrapperTaskId
             }
           ]
         : [],
       ...(input.evidence.error
         ? { lastError: input.evidence.error }
-        : verifierFailure
-          ? { lastError: `artifact verifier ended with status ${input.evidence.status}` }
+        : wrapperFailure
+          ? { lastError: `${wrapperLabel} ended with status ${input.evidence.status}` }
           : {}),
       provenance: {
         failure:
@@ -1998,7 +2021,7 @@ async function finalizeTerminalTask(input: {
             ? dependencyCascadeFailure(input.layout, input.task, input.tasksByAttempt)
             : {
                 category,
-                causal_task_id: verifierFailure ? input.task.verifierSmithersNodeId : input.task.smithersNodeId,
+                causal_task_id: wrapperFailure ? wrapperTaskId : input.task.smithersNodeId,
                 causal_failure_category: category,
                 dependent_task_ids: []
               }
@@ -2782,8 +2805,24 @@ function mergeNodeWorkflowEvidence(
 function completionEvidenceForTask(
   task: StoredWorkflowTask,
   agentEvidence: NodeWorkflowEvidence | undefined,
-  verifierEvidence: NodeWorkflowEvidence | undefined
+  verifierEvidence: NodeWorkflowEvidence | undefined,
+  preparationEvidence: NodeWorkflowEvidence | undefined
 ): AttemptWorkflowEvidence | undefined {
+  // The preparation wrapper runs before the agent task and carries no durable
+  // node of its own. When it fails terminally the agent task never runs, so
+  // without this branch the attempt stays `pending` with no recorded error and
+  // a terminal failed workflow reports zero failed nodes.
+  if (
+    preparationEvidence !== undefined &&
+    PREPARATION_FAILURE_STATUSES.has(preparationEvidence.status) &&
+    (agentEvidence === undefined || !terminalStatus(agentEvidence.status))
+  ) {
+    return {
+      evidence: preparationEvidence,
+      source: "preparation",
+      taskId: preparationSmithersNodeIdForAttempt(task.attemptId)
+    };
+  }
   if (agentEvidence === undefined) {
     return undefined;
   }
@@ -2990,6 +3029,38 @@ function finalRunStatus(
   return currentStatus === "pending" ? "running" : currentStatus;
 }
 
+// A workflow that ends terminally failed while every durable node is still
+// non-terminal is unrecoverable by node-level retry: there is nothing to reset
+// and the next resume re-finalizes identically. That is a defect in failure
+// attribution, so name the workflow tasks the failure was charged to instead of
+// leaving the run indistinguishable from an idle one.
+function unattributedTerminalWorkflowFailure(
+  inspect: WorkflowInspect,
+  nodeStatuses: Map<string, NodeStatus>
+): RuntimeDiagnostic | undefined {
+  const workflowState = (inspect.runState ?? inspect.runStatus ?? "").toLowerCase();
+  if (!TERMINAL_FAILED_WORKFLOW_STATES.has(workflowState)) {
+    return undefined;
+  }
+  if ([...nodeStatuses.values()].some((status) => ["failed", "timed-out", "skipped", "invalidated"].includes(status))) {
+    return undefined;
+  }
+  const failedWorkflowTasks = inspect.failedWorkflowTaskIds;
+  return {
+    code: "WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE",
+    message: `workflow run ended ${workflowState} with no failed durable node; failing workflow task(s): ${
+      failedWorkflowTasks.length === 0 ? "unreported" : failedWorkflowTasks.join(", ")
+    }`,
+    severity: "error",
+    source: "workflow",
+    details: {
+      workflow_state: workflowState,
+      failed_workflow_tasks: failedWorkflowTasks,
+      durable_node_statuses: [...new Set(nodeStatuses.values())].sort()
+    }
+  };
+}
+
 function workflowSucceeded(inspect: WorkflowInspect): boolean {
   return ["succeeded", "finished", "continued", "success", "complete", "completed"].includes(
     (inspect.runState ?? inspect.runStatus ?? "").toLowerCase()
@@ -3017,6 +3088,13 @@ function aggregateAttemptStatuses(statuses: NodeStatus[]): NodeStatus {
 
 function terminalStatus(status: NodeStatus): boolean {
   return NODE_TERMINAL_STATUSES.has(status);
+}
+
+// Mirrors the `prepare:` wrapper id compiled in smithers.ts. It is derived from
+// the attempt id rather than read from tasks.json so runs compiled before this
+// change still attribute their preparation failures on resume.
+function preparationSmithersNodeIdForAttempt(attemptId: string): string {
+  return `prepare:${attemptId}`;
 }
 
 function finishedAtForStatus(
@@ -3099,8 +3177,26 @@ function parseInspectSnapshot(value: unknown): WorkflowInspect {
     runState: stringField(runState, "state") ?? stringField(data, "state"),
     startedAt: stringField(run, "started") ?? stringField(run, "startedAt"),
     finishedAt: stringField(run, "finished") ?? stringField(run, "finishedAt"),
-    steps
+    steps,
+    failedWorkflowTaskIds: failedWorkflowTaskIds(data, steps)
   };
+}
+
+// The workflow task keys a terminal failure is attributed to. Wrapper tasks
+// (`prepare:`/`verify:`) appear here even though they own no durable node, so a
+// failure that cannot be attributed to a node is still nameable.
+function failedWorkflowTaskIds(data: Record<string, unknown> | undefined, steps: WorkflowStep[]): string[] {
+  const ids = new Set<string>();
+  for (const key of firstArrayField(data, ["failedChildKeys"])) {
+    if (typeof key !== "string") continue;
+    const separator = key.lastIndexOf("::");
+    const id = (separator < 0 ? key : key.slice(0, separator)).trim();
+    if (id !== "") ids.add(id);
+  }
+  for (const step of steps) {
+    if (TERMINAL_FAILED_WORKFLOW_STATES.has(step.state.toLowerCase())) ids.add(step.id);
+  }
+  return [...ids].sort();
 }
 
 function parseWorkflowEvents(stdout: string): WorkflowEvent[] {
