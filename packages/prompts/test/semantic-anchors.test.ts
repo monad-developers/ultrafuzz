@@ -47,6 +47,24 @@ describe("prompt semantic anchors", () => {
     expect(prompt("strategies/invariants/implement-properties.md")).not.toContain("scfuzzbench:aave-v4:iSpoke_supply");
   });
 
+  // Two prompts told the model to do something the gates then rejected, and each cost a live Aave run a
+  // full agentic node attempt before being found (#291, #297, #299). The gate halves are fixed; these
+  // anchors keep the prompt halves from drifting back, since a prompt that contradicts its gate is only
+  // discoverable by burning a node.
+  it("states that optional evidence fields are optional", () => {
+    const fanin = prompt("properties/property-specification-fanin.md");
+    // `canonical_property.ledger_ids` is `.optional()` with `minItems: 1`, so a property that maps to no
+    // ledger entry has nothing to render and must not be asked for an empty field.
+    expect(fanin).toContain("when that property has ledger\nIDs");
+    expect(fanin).toContain("Omit the `ledger_ids`\nfield entirely for a property that maps to no ledger entry");
+
+    const discovery = prompt("setup/project-discovery.md");
+    // A scan probe records WHERE the agent searched. A directory and an absent path are both valid, and
+    // only ledger entries are byte-checked against the pinned commit.
+    expect(discovery).toContain("may name a directory you searched or a path that");
+    expect(discovery).toContain("only ledger `entries` are checked byte-for-byte");
+  });
+
   it("preserves source-guided denial-of-service and liveness requirements", () => {
     const lensPrompts = loadBuiltInPromptAssets().filter(
       (asset) =>

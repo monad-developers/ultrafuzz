@@ -113,7 +113,9 @@ The JSON ledger must also contain `inventory_rows`, where each row has a stable
 `inventory-` ID, a normalized description, and one or more `ledger_ids`; every
 `inventory_id` in an entry must name one of these rows. Record each negative
 source probe in `scan_probes` with a stable `probe-` ID, source path, query, and
-result. Use `safety`, `risk`, or `interest` as the `kind` when those are the
+result. A probe `source_path` may name a directory you searched or a path that
+turned out not to exist; only ledger `entries` are checked byte-for-byte against
+the checked-out source. Use `safety`, `risk`, or `interest` as the `kind` when those are the
 most precise classifications. Keep every `source_path` target-relative and
 use a line range or symbol that can be checked against the checked-out source.
 If no invariant statement is found, emit `entries: []`, `inventory_rows: []`,
