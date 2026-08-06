@@ -228,6 +228,42 @@ test("attributes an overflow made of many small files to their root", () => {
   }
 });
 
+test("attributes quoted paths and ignores header lines inside file content", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "base"]);
+    const baseline = captureWorkspaceTree(root);
+
+    // git renders a non-ASCII path as `"a/caf\303\251.txt" "b/..."`, which moves the separator from
+    // ` b/` to `" "b/`. A pattern written only for the unquoted form drops these silently -- the file
+    // contributes bytes to the overflow and never appears in the attribution.
+    mkdirSync(path.join(root, "quoted"), { recursive: true });
+    writeFileSync(path.join(root, "quoted", "café.txt"), randomBytes(20 * 1024 * 1024).toString("base64"));
+
+    // A file whose own CONTENT is a diff header. In a unified diff these arrive prefixed with `+`, so
+    // anchoring to line start is what keeps them from inventing a root that does not exist.
+    mkdirSync(path.join(root, "authored"), { recursive: true });
+    writeFileSync(
+      path.join(root, "authored", "notes.md"),
+      `diff --git a/fabricated b/fabricated\n${randomBytes(20 * 1024 * 1024).toString("base64")}\n`
+    );
+
+    assert.throws(
+      () => captureWorkspacePatch(root, baseline),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.match(message, /quoted \(>=\d+ diff bytes/u, message);
+        assert.doesNotMatch(message, /fabricated/u, message);
+        return true;
+      }
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("does not carry the multi-megabyte capture into the rethrown cause", () => {
   const root = fixture();
   try {

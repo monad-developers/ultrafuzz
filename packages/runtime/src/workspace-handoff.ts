@@ -466,8 +466,15 @@ function withTemporaryIndex<T>(workspaceRoot: string, callback: (index: string) 
  */
 const MAX_GIT_CAPTURE_BYTES = MAX_PATCH_BYTES * 2;
 
-/** `diff --git a/<path> b/<path>`, on its own line, which is how every hunk in the capture begins. */
-const DIFF_HEADER = /^diff --git a\/(.+?) b\//gmu;
+/**
+ * `diff --git a/<path> b/<path>`, on its own line, which is how every hunk in the capture begins.
+ *
+ * The optional quotes matter: git renders a path with non-ASCII bytes as `"a/caf\303\251.txt"
+ * "b/caf\303\251.txt"`, changing the separator from ` b/` to `" "b/`. Without them such a file is
+ * silently missing from the attribution. Anchoring to line start is what makes this safe against a file
+ * whose own CONTENT contains a header line — in a unified diff those arrive prefixed with `+`.
+ */
+const DIFF_HEADER = /^diff --git "?a\/(.+?)"? "?b\//gmu;
 
 /**
  * Own keys Node hangs off a `spawnSync` error that must not reach a durable failure record: the captured
