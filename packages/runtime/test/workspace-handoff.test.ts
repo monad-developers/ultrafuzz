@@ -200,6 +200,63 @@ test("captures a tracked file inside an ignored directory", () => {
   }
 });
 
+// `ls-files --others` reports an untracked nested repository as a DIRECTORY. Naming it makes `git add`
+// fail hard when it has no commit checked out — reachable whenever `forge install` or a clone is
+// interrupted, which would kill the node the same way #281 did.
+test("captures a workspace containing an untracked nested repository", () => {
+  const root = fixture();
+  try {
+    // No commit checked out: the interrupted-clone shape.
+    mkdirSync(path.join(root, "lib", "dep"), { recursive: true });
+    git(path.join(root, "lib", "dep"), ["init", "--quiet"]);
+    writeFileSync(path.join(root, "UltrafuzzSmoke.t.sol"), "contract UltrafuzzSmoke {}\n");
+
+    const tree = captureWorkspaceTree(root);
+    const staged = git(root, ["ls-tree", "-r", "--name-only", tree]);
+    assert.match(staged, /UltrafuzzSmoke\.t\.sol/u);
+    assert.doesNotMatch(staged, /lib\/dep/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// `--literal-pathspecs` on the `add` is load-bearing: without it a filename that looks like pathspec
+// magic is reinterpreted and `git add` dies with "did not match any files".
+test("captures filenames that look like pathspec magic or globs", () => {
+  const root = fixture();
+  try {
+    const names = [":(icase)magic.sol", "[abc].sol", "star*.sol", "q?b.sol", "-dash.sol"];
+    for (const name of names) writeFileSync(path.join(root, name), "contract C {}\n");
+
+    const tree = captureWorkspaceTree(root);
+    const staged = git(root, ["ls-tree", "-r", "--name-only", tree]);
+    for (const name of names) {
+      assert.equal(staged.split("\n").includes(name), true, `${name} missing from ${staged}`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Paths are carried as bytes end to end. Decoding through a string would return replacement
+// characters, and the resulting pathspec would match nothing.
+test("captures a filename that is not valid UTF-8", () => {
+  const root = fixture();
+  try {
+    const raw = Buffer.concat([Buffer.from(`${root}/caf`), Buffer.from([0xe9]), Buffer.from(".sol")]);
+    writeFileSync(raw, "contract C {}\n");
+    writeFileSync(path.join(root, "Ok.sol"), "contract Ok {}\n");
+
+    const tree = captureWorkspaceTree(root);
+    const staged = git(root, ["ls-tree", "-r", "--name-only", "-z", tree]).split("\0").filter(Boolean);
+    assert.equal(staged.includes("Ok.sol"), true, JSON.stringify(staged));
+    // Three entries: foundry.toml, Ok.sol, and the non-UTF-8 name git reports with an escape.
+    assert.equal(staged.length, 3, JSON.stringify(staged));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // gitignore does not apply to tracked paths, so a tracked file under a runtime root is still staged.
 // It must be restored to the baseline rather than dropped from the index, which would record a
 // spurious deletion. Swapping the reset for `git rm --cached` would pass the test above but fail here.
