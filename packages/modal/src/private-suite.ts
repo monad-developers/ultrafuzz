@@ -1,3 +1,5 @@
+import { THREAT_MODEL_GOAL_FANOUT_NODE_IDS } from "@ultrafuzz/evals";
+
 import type { PrivateModalBenchmarkConfig } from "./config.js";
 import type { ModalModelSpec } from "./defaults.js";
 
@@ -11,9 +13,18 @@ export function privateBenchmarkExecutionControls(config: PrivateModalBenchmarkC
   strategy_loops: number;
   excluded_node_ids: string[];
 } {
+  const curated = config.benchmark_execution.excluded_node_ids;
+  // An empty list means "run the whole production topology", so leave it alone.
+  // A non-empty list is a curated lane: keep the operator's own ordering, then
+  // append the threat-model and goal fanout nodes they could not have named,
+  // skipping any they already list.
+  const implied =
+    curated.length === 0 || config.benchmark_execution.include_threat_model_goal_fanout
+      ? []
+      : THREAT_MODEL_GOAL_FANOUT_NODE_IDS.filter((id) => !curated.includes(id));
   return {
     strategy_loops: config.loops,
-    excluded_node_ids: [...config.benchmark_execution.excluded_node_ids]
+    excluded_node_ids: [...curated, ...implied]
   };
 }
 

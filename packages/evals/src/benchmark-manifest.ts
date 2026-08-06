@@ -43,6 +43,36 @@ export const BENCHMARK_DIFFERENTIAL_EXCLUDED_NODE_IDS = [
  * exist in both the production topology and the dedicated smoke graph.
  */
 export const BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS = ["threat-goals", "class-goals"] as const;
+
+/**
+ * Every default-on node the threat-model workstream adds to the production
+ * topology. Curated lanes that prune by an explicit node-ID list cannot name
+ * these, because their lists were written before the IDs existed, so the list
+ * is published here and kept honest by a topology-derived test.
+ *
+ * `threat-model` and `goal-plan` join the pre-existing `setup` group and
+ * `reference-vulnerability-database` the `references` group, so no group-level
+ * filter catches them either.
+ */
+/**
+ * What the smoke lane prunes to honour `disable_dynamic_strategies`. `goal-plan`
+ * exists only to drive the fanout, and it is the sole producer the smoke report
+ * prompt cites via `artifact_path`, so pruning the fanout without it would leave
+ * that citation without an ancestor and fail topology validation. Excluding it
+ * also strips the citation from the rendered prompt.
+ */
+export const BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS = [
+  ...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS,
+  "goal-plan"
+] as const;
+
+export const THREAT_MODEL_GOAL_FANOUT_NODE_IDS = [
+  "reference-vulnerability-database",
+  "threat-model",
+  "goal-plan",
+  "goal-roaming",
+  ...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS
+] as const;
 export const BENCHMARK_DYNAMIC_EXCLUDED_NODE_IDS = [
   "dynamic-strategy-generator",
   ...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS
@@ -450,7 +480,7 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
           excluded_node_ids:
             input.lane === "smoke"
               ? lane.disable_dynamic_strategies
-                ? [...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS]
+                ? [...BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS]
                 : []
               : topologyExclusions.excluded_node_ids
         }

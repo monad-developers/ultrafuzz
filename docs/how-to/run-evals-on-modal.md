@@ -105,6 +105,21 @@ For judges that require short-lived credentials, configure an HTTPS
 `braintrust.judge_credential_endpoint`. The worker requests a model-scoped
 credential in memory immediately before scoring and never persists it.
 
+### Curated private lanes
+
+`benchmark_execution.excluded_node_ids` prunes named nodes from the production
+topology, which is how a lane isolates one part of it, such as an
+invariant-only comparison. An empty or omitted list runs the whole topology.
+
+A non-empty list is treated as a curated lane, so the threat-model and goal
+fanout nodes are pruned with it: `reference-vulnerability-database`,
+`threat-model`, `goal-plan`, `goal-roaming`, `threat-goals`, and `class-goals`.
+Curated lists were written before those IDs existed and cannot name them, so
+without this a curated lane would silently widen, run a threat model and
+unbounded goal hunters, and stop being comparable with its earlier runs. Set
+`benchmark_execution.include_threat_model_goal_fanout` to `true` to measure
+them deliberately.
+
 ## Run the public benchmark workflow
 
 The checked-in GitHub workflow uses Actions only to build the candidate and as a
@@ -130,9 +145,13 @@ The smoke has exactly three targets: one Foundry target, one Hardhat target, and
 one Vyper target. It defaults to GPT-5.6 Luna at `high`, uses one strategy loop,
 and uses the dedicated `benchmarks/smoke-benchmark.yml` graph. One
 medium-reasoning context node feeds four high-reasoning bug-finding strategies
-in parallel; medium-reasoning dedupe and report nodes finish the row. Invariant,
-differential, dynamic, and production-only review stages are absent from this
-graph. Repository variable `BENCHMARK_SMOKE_OPENAI_MODEL` can override the
+in parallel; a medium-reasoning threat model adds one high-reasoning roaming
+goal, and medium-reasoning dedupe and report nodes finish the row. Invariant,
+differential, dynamic-strategy, and production-only review stages are absent
+from this graph. The graph does declare the dynamic goal fanout, but the lane
+sets `disable_dynamic_strategies`, which prunes `threat-goals`, `class-goals`,
+and the `goal-plan` node that feeds them, so the row stays bounded and no
+dynamic expansion runs. Repository variable `BENCHMARK_SMOKE_OPENAI_MODEL` can override the
 smoke model without changing its single OpenAI/Codex provider, fixed
 high/medium reasoning split, or target and topology limits.
 

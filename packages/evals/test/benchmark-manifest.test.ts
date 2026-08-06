@@ -11,12 +11,14 @@ import {
   adaptBenchmarkManifestToEvalSuite,
   benchmarkLaneTopologyExclusions,
   BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS,
+  BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS,
   BENCHMARK_SMOKE_EXCLUDED_NODE_IDS,
   BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES,
   BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS,
   BENCHMARK_SMOKE_WORKFLOW_PATH,
   BENCHMARK_SMOKE_WORKFLOW_PROFILE,
   DEFAULT_BENCHMARK_TRIALS_PER_VARIANT,
+  THREAT_MODEL_GOAL_FANOUT_NODE_IDS,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest
 } from "../src/benchmark-manifest.js";
@@ -76,13 +78,13 @@ describe("public benchmark manifests", () => {
         workflow_profile: BENCHMARK_SMOKE_WORKFLOW_PROFILE,
         selected_strategy_ids: [...BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS],
         strategy_loops: 1,
-        excluded_node_ids: [...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS]
+        excluded_node_ids: [...BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS]
       }
     });
     expect(benchmarkTopologyTransform({ workflow_input: suite.variants[0]?.workflow_input })).toMatchObject({
       topologyTransform: {
         strategyLoops: 1,
-        excludedNodeIds: [...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS]
+        excludedNodeIds: [...BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS]
       }
     });
     expect(
@@ -340,6 +342,23 @@ describe("public benchmark manifests", () => {
     });
   });
 
+  it("names every default-on threat-model node the production topology declares", () => {
+    // Curated lanes prune by explicit node ID, so this constant is the only
+    // place that knows which nodes the threat-model workstream turned on. If a
+    // later change adds another one, this fails instead of silently widening
+    // every curated lane.
+    const topology = parseYaml(
+      fs.readFileSync(path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"), "utf8")
+    ) as { nodes: { id: string; group?: string }[] };
+    const goalGroupNodeIds = topology.nodes.filter((node) => node.group === "goals").map((node) => node.id);
+    const declared = [...goalGroupNodeIds, "threat-model", "goal-plan", "reference-vulnerability-database"].sort();
+    expect([...THREAT_MODEL_GOAL_FANOUT_NODE_IDS].sort()).toEqual(declared);
+
+    // Each one must really exist, or a curated lane fails planning outright.
+    const topologyNodeIds = new Set(topology.nodes.map((node) => node.id));
+    for (const id of THREAT_MODEL_GOAL_FANOUT_NODE_IDS) expect(topologyNodeIds.has(id)).toBe(true);
+  });
+
   it("prunes every dynamic node the smoke graph actually declares", () => {
     // #277 requires the smoke lane to run no invariant, differential or dynamic
     // work. Invariant and differential nodes are absent from the smoke graph by
@@ -363,6 +382,17 @@ describe("public benchmark manifests", () => {
     // Every pruned ID must exist in the graph, or planning throws "unknown node".
     const smokeNodeIds = new Set(nodes.map((node) => node.id));
     for (const id of excluded) expect(smokeNodeIds.has(id)).toBe(true);
+  });
+
+  it("prunes goal-plan alongside the fanout it feeds", () => {
+    // `artifact_path` requires the cited producer to be an ancestor, and the
+    // smoke report prompt cites goal-plan. Once the fanout goes, goal-plan is no
+    // longer an ancestor of final-report, so it has to go too or expansion
+    // fails. packages/topology asserts the pruned graph really does expand.
+    expect(BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS).toContain("goal-plan");
+    for (const id of BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS) {
+      expect(BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS).toContain(id);
+    }
   });
 
   it("keeps the canonical Ultrafuzz cohort immutable without a fallback target", () => {
