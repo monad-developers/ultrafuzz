@@ -36,14 +36,33 @@ const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "art
  * safe because targets gitignore `out/`; `recon-corpus/` is not gitignored by this target, so
  * `--exclude-standard` kept it and staging enumerated all of it (issue #304).
  *
- * On the cost of staging that, be careful about which step is expensive. It is NOT the diff: `runGit`
- * caps output at `MAX_PATCH_BYTES * 2` and `captureWorkspacePatch` refuses anything over
- * `MAX_PATCH_BYTES`, so an oversized patch surfaces as a loud, catchable `ENOBUFS` — a failure this repo
- * has already seen and fixed once. The unbounded step is `git add`, which hashes and zlib-compresses every
- * enumerated blob inside the git subprocess before any of those ceilings apply. Four sandboxes died at
- * this node with an empty `last_error` and only heartbeats in `worker.log`, which is what a cgroup OOM
- * kill looks like from outside — but that attribution is reasoned, not measured, and no exit code has
- * been captured yet.
+ * This exclusion is NOT hygiene. It is the fix for the six sandboxes that died at this node across three
+ * Aave v4 runs with an empty `last_error`. From R47's workflow log:
+ *
+ *   SystemError: spawnSync git ENOBUFS (stdout or stderr buffer reached maxBuffer size limit)
+ *       at runGit → withTemporaryIndex → captureWorkspacePatch
+ *   output[3]: "diff --git a/echidna/coverage/4247432111492442234.txt ..."
+ *
+ * `captureWorkspacePatch` runs `git diff --cached --binary` over the staged tree, and with corpus
+ * enumerated that diff exceeded `runGit`'s `maxBuffer` of `MAX_PATCH_BYTES * 2`. Note the ordering: above
+ * 32 MB the ENOBUFS fires inside `runGit` BEFORE the `MAX_PATCH_BYTES` check below can produce a clean
+ * error, so the clean-error window is only 16-32 MB. Excluding these roots keeps the diff under it.
+ *
+ * Do not relax this list on tidiness grounds; it is load-bearing.
+ *
+ * The ENOBUFS was thrown but was not heard: nothing caught it (now #310), and the worker's top-level
+ * handler discarded the reason (#307), so the durable record showed only `exit_category: sandbox-exited`.
+ * Being throw-able is not the same as being visible, and assuming otherwise is what made this expensive —
+ * ENOBUFS was actively ruled OUT during the investigation on the grounds that it would have been loud.
+ *
+ * It was NOT a `git add` OOM, which an earlier version of this comment claimed. Measured:
+ *
+ *   $ for i in 1 2 3 4; do head -c 155000000 /dev/zero > "big$i.bin"; done   # 620 MB across four blobs
+ *   $ /usr/bin/time -v git add -A   →   Maximum resident set size: 155788 kbytes
+ *
+ * `git add` peak RSS is per-file, not cumulative, and a blob above `core.bigFileThreshold` streams at a
+ * few megabytes. Against `memoryMiB: 32_768` / `memoryLimitMiB: 65_536` in `packages/modal/src/defaults.ts`
+ * that is well under one percent of the memory request.
  *
  * Exclusions are applied to the UNTRACKED listing only. Generated corpus is untracked by definition, and
  * excluding a tracked path would be silent data loss: staging runs after `read-tree <baseline>`, so the
