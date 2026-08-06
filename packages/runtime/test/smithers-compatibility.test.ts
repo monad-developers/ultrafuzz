@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 
-import { applySmithers031CompatibilityPatches } from "../src/smithers.js";
+import { applySmithersCompatibilityPatches } from "../src/smithers.js";
 import { SMITHERS_ORCHESTRATOR_VERSION } from "../src/smithers-package.js";
 
 const requireFromRuntime = createRequire(import.meta.url);
@@ -52,7 +52,7 @@ function copyPinnedPatchInput(
   }
 }
 
-test("the compatibility adapter patches the exact pinned 0.31 fork and replay sources", (t) => {
+test("the compatibility adapter patches the exact pinned fork and replay sources", (t) => {
   const roots = pinnedSmithersPackageRoots();
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-smithers-compatibility-"));
   t.after(() => fs.rmSync(projectRoot, { recursive: true, force: true }));
@@ -74,7 +74,7 @@ test("the compatibility adapter patches the exact pinned 0.31 fork and replay so
   assert.match(originalCli, /const resolvedForkWorkflowPath = resolve\(c\.args\.workflow\);/u);
   assert.match(originalCli, /autoRun: c\.options\.run,/u);
 
-  applySmithers031CompatibilityPatches(projectRoot);
+  applySmithersCompatibilityPatches(projectRoot);
 
   const cli = fs.readFileSync(installedCliSource, "utf8");
   assert.match(cli, /loadWorkflowDb\(c\.args\.workflow\)/u, "descriptor path still drives preparation reads");
@@ -153,8 +153,8 @@ test("the compatibility adapter upgrades the prior canonical-current engine path
   fs.chmodSync(engineSource, 0o600);
   fs.writeFileSync(engineSource, original.replace(upstreamDeclaration, priorUnsafePatch), "utf8");
 
-  applySmithers031CompatibilityPatches(projectRoot);
-  assert.doesNotThrow(() => applySmithers031CompatibilityPatches(projectRoot), "patching remains idempotent");
+  applySmithersCompatibilityPatches(projectRoot);
+  assert.doesNotThrow(() => applySmithersCompatibilityPatches(projectRoot), "patching remains idempotent");
 
   const upgraded = fs.readFileSync(engineSource, "utf8");
   assert.match(upgraded, /const resolvedWorkflowPath = opts\.workflowPath \? resolve\(opts\.workflowPath\) : null;/u);
@@ -174,7 +174,7 @@ test(
     copyPinnedPatchInput(projectRoot, "scheduler", roots.scheduler);
     const errorsDestination = path.join(projectRoot, ".smithers", "node_modules", "@smithers-orchestrator", "errors");
     fs.symlinkSync(fs.realpathSync(path.join(path.dirname(roots.engine), "errors")), errorsDestination, "dir");
-    applySmithers031CompatibilityPatches(projectRoot);
+    applySmithersCompatibilityPatches(projectRoot);
 
     const workflowHashModule = (await import(
       `${

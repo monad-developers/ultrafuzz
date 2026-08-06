@@ -414,14 +414,6 @@ const SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE = `          workflowName: "wo
 const SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH = `          workflowName: "workflow",
           workflowPath: persistedWorkflowPath ?? opts.workflowPath ?? null,
           workflowHash: runMetadata.workflowHash,`;
-const SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_SOURCE = `        runConfigJson,
-        runMetadata,
-        resolvedWorkflowPath,
-      );`;
-const SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_PATCH = `        runConfigJson,
-        runMetadata,
-        persistedWorkflowPath,
-      );`;
 const SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_SOURCE =
   "          workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? existingRun.workflowPath ?? null,";
 const SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_PATCH =
@@ -492,34 +484,253 @@ const SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH = `    restoreTerminalTaskStates
         }
       }),
     getTaskStates: () => Effect.sync(() => cloneTaskStateMap(state.states)),`;
-const SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE = "    const driverRenderer = {";
-const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `    if (opts.resume) {
-      const durableOutputs = await loadOutputs(db, schema, runId);
-      const durableNodes = await Effect.runPromise(adapter.listNodes(runId));
-      const terminalTaskStates = durableNodes.flatMap((node) => {
-        if (node.state === "skipped") {
-          return [{ nodeId: node.nodeId, iteration: node.iteration ?? 0, state: "skipped" }];
-        }
-        if (node.state !== "finished" || typeof node.outputTable !== "string") return [];
-        const rows = durableOutputs[node.outputTable];
-        const hasOutput =
-          Array.isArray(rows) &&
-          rows.some((row) => {
-            const rowNodeId = row.nodeId ?? row.node_id;
-            return rowNodeId === node.nodeId && Number(row.iteration ?? 0) === Number(node.iteration ?? 0);
+// Anchored immediately after the resume path's `startRunRuntime()`, which is
+// where Smithers cancels stale in-progress attempts and rewrites their nodes back
+// to `pending`. Hydrating before that reset would restore a node as finished and
+// then let the reset flip the durable row to pending, leaving the in-memory
+// session and the database disagreeing for the whole resume. Smithers 0.31 ran
+// that reset eagerly, before the renderer existed; 0.32.0 deferred it into the
+// first render of a resume, so the anchor has to follow it. The enclosing
+// `resumeWorkflowNameValidated` guard also makes this run exactly once, still
+// before the rendered graph reaches the scheduler.
+const SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE = `          resumeWorkflowNameValidated = true;
+          await startRunRuntime();
+        }`;
+const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `          resumeWorkflowNameValidated = true;
+          await startRunRuntime();
+          const durableOutputs = await loadOutputs(db, schema, runId);
+          const durableNodes = await Effect.runPromise(adapter.listNodes(runId));
+          const terminalTaskStates = durableNodes.flatMap((node) => {
+            if (node.state === "skipped") {
+              return [{ nodeId: node.nodeId, iteration: node.iteration ?? 0, state: "skipped" }];
+            }
+            if (node.state !== "finished" || typeof node.outputTable !== "string") return [];
+            const rows = durableOutputs[node.outputTable];
+            const hasOutput =
+              Array.isArray(rows) &&
+              rows.some((row) => {
+                const rowNodeId = row.nodeId ?? row.node_id;
+                return rowNodeId === node.nodeId && Number(row.iteration ?? 0) === Number(node.iteration ?? 0);
+              });
+            return hasOutput
+              ? [{ nodeId: node.nodeId, iteration: node.iteration ?? 0, state: "finished" }]
+              : [];
           });
-        return hasOutput
-          ? [{ nodeId: node.nodeId, iteration: node.iteration ?? 0, state: "finished" }]
-          : [];
-      });
-      await Effect.runPromise(workflowSession.restoreTerminalTaskStates(terminalTaskStates));
-      logInfo(
-        "restored durable terminal tasks into resumed workflow session",
-        { runId, restoredTaskCount: terminalTaskStates.length },
-        "engine:run",
-      );
-    }
-    const driverRenderer = {`;
+          await Effect.runPromise(workflowSession.restoreTerminalTaskStates(terminalTaskStates));
+          logInfo(
+            "restored durable terminal tasks into resumed workflow session",
+            { runId, restoredTaskCount: terminalTaskStates.length },
+            "engine:run",
+          );
+        }`;
+
+export type SmithersCompatibilityPatchId =
+  | "detached_admission"
+  | "supervisor_descriptor"
+  | "terminal_state_restore"
+  | "resume_hydration"
+  | "replay_prepare_option"
+  | "replay_prepare"
+  | "fork_prepare_option"
+  | "fork_prepare"
+  | "workflow_path_import"
+  | "workflow_path_persistence"
+  | "post_failure_workflow_path"
+  | "replay_workflow_path"
+  | "replay_workflow_metadata"
+  | "fork_workflow_path"
+  | "fork_workflow_metadata"
+  | "fork_foreground";
+
+export interface SmithersCompatibilityPatch {
+  /** Stable name this patch is reported under by `doctor`. */
+  readonly id: SmithersCompatibilityPatchId;
+  /** Package that owns the patched source, as published on the registry. */
+  readonly packageName: string;
+  /** Source file inside that package, relative to its own root. */
+  readonly sourceRelativePath: string;
+  /** Exact upstream text the patch replaces; must occur exactly once. */
+  readonly patchable: string;
+  /** Replacement text; its presence means the patch is already applied. */
+  readonly patched: string;
+  /**
+   * Text that must be ABSENT from the pinned source for the workaround to still
+   * be warranted. An anchor alone is a weak signal: it can be one generic line
+   * that survives a refactor of the very behaviour the patch depends on, or
+   * upstream can add a supported alternative while leaving the anchor intact.
+   * These encode the evidence that upstream has not addressed the problem.
+   */
+  readonly upstreamAbsent: readonly string[];
+}
+
+// The durability workarounds Ultrafuzz applies to the pinned runner. Every entry
+// is still unfixed upstream as of SMITHERS_ORCHESTRATOR_VERSION, so a runner bump
+// must re-verify each anchor against the newly pinned release instead of assuming
+// the workaround still lands.
+export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch[] = [
+  {
+    id: "detached_admission",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/detached-admission.js",
+    patchable: SMITHERS_CLI_DETACHED_ADMISSION_SOURCE,
+    patched: SMITHERS_CLI_DETACHED_ADMISSION_PATCH,
+    // A configurable ceiling retires this patch instead of raising it by hand.
+    upstreamAbsent: ["SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS"]
+  },
+  {
+    id: "supervisor_descriptor",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE,
+    patched: SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "terminal_state_restore",
+    packageName: "@smithers-orchestrator/scheduler",
+    sourceRelativePath: "src/makeWorkflowSession.js",
+    patchable: SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE,
+    patched: SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH,
+    // Upstream growing its own terminal-state restoration retires this patch.
+    upstreamAbsent: ["restoreTerminalTaskStates"]
+  },
+  {
+    id: "resume_hydration",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE,
+    patched: SMITHERS_ENGINE_RESUME_HYDRATION_PATCH,
+    // `restoreTerminalTaskStates` would mean upstream hydrates on its own.
+    upstreamAbsent: ["restoreTerminalTaskStates"]
+  },
+  // `fork` and `replay` are driven as prepare-only invocations so Ultrafuzz links
+  // the new run durably before any work starts. Upstream still runs them straight
+  // through, so the option and its early return are both added here. Each anchor
+  // was re-verified against the pinned runner release.
+  {
+    id: "replay_prepare_option",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_REPLAY_PREPARE_OPTION_SOURCE,
+    patched: SMITHERS_CLI_REPLAY_PREPARE_OPTION_PATCH,
+    upstreamAbsent: ["ultrafuzz-prepare-only"]
+  },
+  {
+    id: "replay_prepare",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_REPLAY_PREPARE_SOURCE,
+    patched: SMITHERS_CLI_REPLAY_PREPARE_PATCH,
+    upstreamAbsent: ["ultrafuzz-prepare-only"]
+  },
+  {
+    id: "fork_prepare_option",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_FORK_PREPARE_OPTION_SOURCE,
+    patched: SMITHERS_CLI_FORK_PREPARE_OPTION_PATCH,
+    upstreamAbsent: ["ultrafuzz-prepare-only"]
+  },
+  {
+    id: "fork_prepare",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_FORK_PREPARE_SOURCE,
+    patched: SMITHERS_CLI_FORK_PREPARE_PATCH,
+    upstreamAbsent: ["ultrafuzz-prepare-only"]
+  },
+  // Resume, replay and fork all need the workflow path and its graph hashes to be
+  // persisted with the run, which upstream still does not do. Each anchor was
+  // re-verified against the pinned runner release.
+  {
+    id: "workflow_path_import",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE,
+    patched: SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "workflow_path_persistence",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_CLI_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "post_failure_workflow_path",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_POST_FAILURE_PATH_SOURCE,
+    patched: SMITHERS_CLI_POST_FAILURE_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "replay_workflow_path",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_REPLAY_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_CLI_REPLAY_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "replay_workflow_metadata",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_SOURCE,
+    patched: SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "fork_workflow_path",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_FORK_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_CLI_FORK_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "fork_workflow_metadata",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_FORK_WORKFLOW_METADATA_SOURCE,
+    patched: SMITHERS_CLI_FORK_WORKFLOW_METADATA_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "fork_foreground",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_FORK_FOREGROUND_SOURCE,
+    patched: SMITHERS_CLI_FORK_FOREGROUND_PATCH,
+    upstreamAbsent: []
+  }
+];
+
+/**
+ * Markers that must sit between the start of the deferred run-startup closure and
+ * the resume-hydration anchor. The anchor places our hydration immediately after
+ * `startRunRuntime()`, which is only ordered after the attempt resets while those
+ * resets live inside the closure. Hydrating first would restore a node as finished
+ * and then let a reset rewrite the durable row to pending, so this ordering is
+ * load-bearing and is asserted against the pinned release.
+ *
+ * Both resets are pinned. `cancelStaleAttempts` only rewrites attempts older than
+ * the staleness window, so on its own it is the weaker signal; the transaction
+ * named below is the unconditional resume reset that rewrites *every* in-progress
+ * attempt, and it is the one whose ordering actually matters.
+ *
+ * This is a textual proxy for execution order, not a proof of it. A failure means
+ * "re-derive the anchor against the new upstream code", not necessarily "upstream
+ * broke something".
+ */
+export const SMITHERS_ENGINE_RESUME_RESET_ORDERING = {
+  closureStart: "const startRunRuntime = async () => {",
+  resetCalls: ["await cancelStaleAttempts(adapter, runId);", '"resume-cancel-stale-attempt"'],
+  anchor: SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE
+} as const;
+
 const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
   "ALL_PROXY",
   "APPDATA",
@@ -899,12 +1110,7 @@ export interface SmithersInstallationPosture {
   installed_bin_target: string | null;
   bin_path: string | null;
   layout_error: string | null;
-  compatibility_patches: {
-    detached_admission: SmithersPatchPosture;
-    replay_prepare_only: SmithersPatchPosture;
-    supervisor_descriptor: SmithersPatchPosture;
-    workflow_path_persistence: SmithersPatchPosture;
-  };
+  compatibility_patches: Record<SmithersCompatibilityPatchId, SmithersPatchPosture>;
 }
 
 export interface SmithersCommandSnapshot {
@@ -2200,180 +2406,39 @@ export function inspectSmithersInstallation(projectRoot: string): SmithersInstal
   };
 }
 
+// Reports every workaround in SMITHERS_COMPATIBILITY_PATCHES, including the two
+// resume-durability patches that live in the scheduler and engine packages. A
+// posture that goes unreported reads as healthy, and these two are exactly the
+// ones whose absence silently costs durable resume progress.
 function inspectSmithersCompatibilityPatches(
   projectRoot: string
 ): SmithersInstallationPosture["compatibility_patches"] {
   const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
-  const packageRoots = [
-    path.join(nodeModules, "@smithers-orchestrator", "cli"),
-    path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "cli")
-  ].filter((candidate) => fs.existsSync(candidate));
-  if (packageRoots.length !== 1) {
-    return {
-      detached_admission: "unknown",
-      replay_prepare_only: "unknown",
-      supervisor_descriptor: "unknown",
-      workflow_path_persistence: "unknown"
-    };
+  const postures = {} as Record<SmithersCompatibilityPatchId, SmithersPatchPosture>;
+  for (const patch of SMITHERS_COMPATIBILITY_PATCHES) {
+    const candidateRoots = smithersDependencyRootCandidates(nodeModules, patch.packageName);
+    if (candidateRoots.length === 1) {
+      const source = path.join(candidateRoots[0]!, ...patch.sourceRelativePath.split("/"));
+      postures[patch.id] = patchPosture(source, patch.patched, patch.patchable);
+      continue;
+    }
+    // Two roots make the next run hard-fail in `applySmithersCompatibilityPatches`,
+    // so this must not read as merely unavailable. No root at all genuinely leaves
+    // the posture unknown.
+    postures[patch.id] = candidateRoots.length > 1 ? "incompatible" : "unknown";
   }
-  const packageRoot = packageRoots[0]!;
-  const engineRoots = [
-    path.join(nodeModules, "@smithers-orchestrator", "engine"),
-    path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "engine")
-  ].filter((candidate) => fs.existsSync(candidate));
-  return {
-    detached_admission: patchPosture(
-      path.join(packageRoot, "src", "detached-admission.js"),
-      SMITHERS_CLI_DETACHED_ADMISSION_PATCH,
-      SMITHERS_CLI_DETACHED_ADMISSION_SOURCE
-    ),
-    replay_prepare_only: combinedPatchPosture(
-      patchPosture(
-        path.join(packageRoot, "src", "index.js"),
-        SMITHERS_CLI_REPLAY_PREPARE_OPTION_PATCH,
-        SMITHERS_CLI_REPLAY_PREPARE_OPTION_SOURCE
-      ),
-      patchPosture(
-        path.join(packageRoot, "src", "index.js"),
-        SMITHERS_CLI_REPLAY_PREPARE_PATCH,
-        SMITHERS_CLI_REPLAY_PREPARE_SOURCE
-      ),
-      patchPosture(
-        path.join(packageRoot, "src", "index.js"),
-        SMITHERS_CLI_FORK_PREPARE_OPTION_PATCH,
-        SMITHERS_CLI_FORK_PREPARE_OPTION_SOURCE
-      ),
-      patchPosture(
-        path.join(packageRoot, "src", "index.js"),
-        SMITHERS_CLI_FORK_PREPARE_PATCH,
-        SMITHERS_CLI_FORK_PREPARE_SOURCE
-      ),
-      patchPosture(
-        path.join(packageRoot, "src", "index.js"),
-        SMITHERS_CLI_FORK_FOREGROUND_PATCH,
-        SMITHERS_CLI_FORK_FOREGROUND_SOURCE
-      )
-    ),
-    supervisor_descriptor: patchPosture(
-      path.join(packageRoot, "src", "index.js"),
-      SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH,
-      SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE
-    ),
-    workflow_path_persistence: combinedPatchPosture(
-      patchPosture(
-        path.join(packageRoot, "src", "index.js"),
-        SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH,
-        SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE
-      ),
-      patchPosture(
-        path.join(packageRoot, "src", "index.js"),
-        SMITHERS_CLI_WORKFLOW_PATH_PATCH,
-        SMITHERS_CLI_WORKFLOW_PATH_SOURCE
-      ),
-      patchPosture(
-        path.join(packageRoot, "src", "index.js"),
-        SMITHERS_CLI_POST_FAILURE_PATH_PATCH,
-        SMITHERS_CLI_POST_FAILURE_PATH_SOURCE
-      ),
-      patchPosture(
-        path.join(packageRoot, "src", "index.js"),
-        SMITHERS_CLI_REPLAY_WORKFLOW_PATH_PATCH,
-        SMITHERS_CLI_REPLAY_WORKFLOW_PATH_SOURCE
-      ),
-      patchPosture(
-        path.join(packageRoot, "src", "index.js"),
-        SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_PATCH,
-        SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_SOURCE
-      ),
-      patchPosture(
-        path.join(packageRoot, "src", "index.js"),
-        SMITHERS_CLI_FORK_WORKFLOW_PATH_PATCH,
-        SMITHERS_CLI_FORK_WORKFLOW_PATH_SOURCE
-      ),
-      patchPosture(
-        path.join(packageRoot, "src", "index.js"),
-        SMITHERS_CLI_FORK_WORKFLOW_METADATA_PATCH,
-        SMITHERS_CLI_FORK_WORKFLOW_METADATA_SOURCE
-      ),
-      engineRoots.length !== 1
-        ? "unknown"
-        : combinedPatchPosture(
-            patchPosture(
-              path.join(engineRoots[0]!, "src", "engine.js"),
-              SMITHERS_ENGINE_WORKFLOW_PATH_PATCH,
-              SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE
-            ),
-            patchPosture(
-              path.join(engineRoots[0]!, "src", "engine.js"),
-              SMITHERS_ENGINE_DURABILITY_METADATA_PATCH,
-              SMITHERS_ENGINE_DURABILITY_METADATA_SOURCE
-            ),
-            patchPosture(
-              path.join(engineRoots[0]!, "src", "engine.js"),
-              SMITHERS_ENGINE_RUN_METADATA_PATCH,
-              SMITHERS_ENGINE_RUN_METADATA_SOURCE
-            ),
-            patchPosture(
-              path.join(engineRoots[0]!, "src", "engine.js"),
-              SMITHERS_ENGINE_RESUME_IDENTITY_PATCH,
-              SMITHERS_ENGINE_RESUME_IDENTITY_SOURCE
-            ),
-            patchPosture(
-              path.join(engineRoots[0]!, "src", "engine.js"),
-              SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH,
-              SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE
-            ),
-            patchPosture(
-              path.join(engineRoots[0]!, "src", "engine.js"),
-              SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_PATCH,
-              SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_SOURCE
-            ),
-            patchPosture(
-              path.join(engineRoots[0]!, "src", "engine.js"),
-              SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_PATCH,
-              SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_SOURCE
-            ),
-            patchPosture(
-              path.join(engineRoots[0]!, "src", "engine.js"),
-              SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_PATCH,
-              SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_SOURCE
-            ),
-            patchPosture(
-              path.join(engineRoots[0]!, "src", "workflow-hash.js"),
-              SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_PATCH,
-              SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_SOURCE
-            ),
-            patchPosture(
-              path.join(engineRoots[0]!, "src", "workflow-hash.js"),
-              SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_PATCH,
-              SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_SOURCE
-            ),
-            patchPosture(
-              path.join(engineRoots[0]!, "src", "workflow-hash.js"),
-              SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_PATCH,
-              SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_SOURCE
-            ),
-            patchPosture(
-              path.join(engineRoots[0]!, "src", "workflow-hash.js"),
-              SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_PATCH,
-              SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_SOURCE
-            ),
-            patchPosture(
-              path.join(engineRoots[0]!, "src", "workflow-hash.js"),
-              SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_PATCH,
-              SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_SOURCE
-            )
-          )
-    )
-  };
+  return postures;
 }
 
-function combinedPatchPosture(...postures: SmithersPatchPosture[]): SmithersPatchPosture {
-  if (postures.includes("unknown")) return "unknown";
-  if (postures.includes("incompatible")) return "incompatible";
-  if (postures.includes("missing")) return "missing";
-  if (postures.every((posture) => posture === "applied")) return "applied";
-  return "upstream";
+// A registry install nests the runner's own dependencies under it, while a
+// hoisted layout puts them beside it. Both are legitimate, so resolve either and
+// let callers decide what an absent or ambiguous result means.
+function smithersDependencyRootCandidates(nodeModules: string, packageName: string): string[] {
+  const segments = packageName.split("/");
+  return [
+    path.join(nodeModules, ...segments),
+    path.join(nodeModules, "smithers-orchestrator", "node_modules", ...segments)
+  ].filter((candidate) => fs.existsSync(candidate));
 }
 
 function patchPosture(sourcePath: string, patched: string, patchable: string): SmithersPatchPosture {
@@ -2392,7 +2457,7 @@ function patchPosture(sourcePath: string, patched: string, patchable: string): S
   }
   // The pinned release carries the exact shape Ultrafuzz patches, so a source
   // with neither the patch nor the patchable shape has been modified or
-  // replaced. `applySmithers031CompatibilityPatches` throws in that state, so
+  // replaced. `applySmithersCompatibilityPatches` throws in that state, so
   // report it as incompatible rather than assuming an upstream fix.
   return contents.includes(patchable) ? "missing" : "incompatible";
 }
@@ -3553,9 +3618,28 @@ async function ensureSmithersDependencies(
   if (fs.existsSync(installedPackageRoot)) {
     resolveInstalledSmithersPackageRoot(projectRoot);
   }
+  let repairCause: unknown;
   if (installedSmithersValidationError(projectRoot) === undefined) {
-    applySmithers031CompatibilityPatches(projectRoot);
-    return;
+    try {
+      applySmithersCompatibilityPatches(projectRoot);
+      return;
+    } catch (error) {
+      // `installedSmithersValidationError` only inspects the top-level runner, so
+      // a half-reified tree passes it and then fails to patch: an interrupted
+      // upgrade install can leave the new top-level runner beside stale or
+      // missing `@smithers-orchestrator/*` packages. Reinstalling repairs that;
+      // returning here would make every later resume of a durable run fail
+      // identically with no way back short of deleting `.smithers/node_modules`
+      // by hand. Repair once per project root per process: when the source shape
+      // genuinely no longer matches, reinstalling cannot help, and every
+      // subsequent engine command would otherwise pay a full install before
+      // failing the same way.
+      if (repairedSmithersInstalls.has(packageRoot)) {
+        throw error;
+      }
+      repairedSmithersInstalls.add(packageRoot);
+      repairCause = error;
+    }
   }
   await execFileAsync(
     "npm",
@@ -3580,24 +3664,48 @@ async function ensureSmithersDependencies(
   );
   const validationError = installedSmithersValidationError(projectRoot);
   if (validationError !== undefined) {
-    throw new Error(`Smithers dependency install did not produce the pinned local workflow runner: ${validationError}`);
+    throw new Error(
+      `Smithers dependency install did not produce the pinned local workflow runner: ${validationError}`,
+      {
+        ...(repairCause === undefined ? {} : { cause: repairCause })
+      }
+    );
   }
-  applySmithers031CompatibilityPatches(projectRoot);
+  try {
+    applySmithersCompatibilityPatches(projectRoot);
+  } catch (error) {
+    // Surface what the pre-install attempt saw. Without it a reinstall that cannot
+    // fix the tree reports only its second-hand symptom, losing the specific reason
+    // the seeded dependencies were unusable.
+    if (repairCause !== undefined && error instanceof Error && error.cause === undefined) {
+      error.cause = repairCause;
+    }
+    throw error;
+  }
 }
 
-export function applySmithers031CompatibilityPatches(projectRoot: string): void {
+// Project roots this process has already tried to repair by reinstalling, so a
+// permanently unpatchable tree fails fast instead of reinstalling on every command.
+const repairedSmithersInstalls = new Set<string>();
+
+export function applySmithersCompatibilityPatches(projectRoot: string): void {
   const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
-  const candidatePackageRoots = [
-    path.join(nodeModules, "@smithers-orchestrator", "cli"),
-    path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "cli")
-  ].filter((candidate) => fs.existsSync(candidate));
-  // Unit-test installers intentionally provide only the public runner shim.
-  // A registry installation of the pinned runner always carries its CLI package.
-  if (candidatePackageRoots.length === 0) return;
-  if (candidatePackageRoots.length !== 1) {
-    throw new Error("pinned workflow runner resolved multiple CLI package roots");
+  const cliRoots = smithersDependencyRootCandidates(nodeModules, "@smithers-orchestrator/cli");
+  const schedulerRoots = smithersDependencyRootCandidates(nodeModules, "@smithers-orchestrator/scheduler");
+  const engineRoots = smithersDependencyRootCandidates(nodeModules, "@smithers-orchestrator/engine");
+  // Unit-test installers intentionally provide only the public runner shim, so a
+  // tree with none of these packages is tolerated. A registry installation always
+  // carries all three, so a tree holding some but not all of them is a broken
+  // install: fail instead of silently skipping the resume-durability patches and
+  // letting the run proceed unpatched. The caller repairs this by reinstalling.
+  if (cliRoots.length === 0 && schedulerRoots.length === 0 && engineRoots.length === 0) return;
+  if (cliRoots.length !== 1) {
+    throw new Error("pinned workflow runner resolved an incomplete CLI implementation");
   }
-  const packageRoot = candidatePackageRoots[0]!;
+  if (schedulerRoots.length !== 1 || engineRoots.length !== 1) {
+    throw new Error("pinned workflow runner resolved an incomplete resume implementation");
+  }
+  const packageRoot = cliRoots[0]!;
   const packageJson = path.join(packageRoot, "package.json");
   const admissionSource = path.join(packageRoot, "src", "detached-admission.js");
   const cliSource = path.join(packageRoot, "src", "index.js");
@@ -3613,112 +3721,62 @@ export function applySmithers031CompatibilityPatches(projectRoot: string): void 
     if (admissionContents.split(SMITHERS_CLI_DETACHED_ADMISSION_SOURCE).length !== 2) {
       throw new Error("pinned workflow runner detached admission implementation is incompatible");
     }
-    // Smithers 0.31 waits for a durable RunStarted admission marker, but its
-    // hard-coded 30-second ceiling is shorter than cold startup for the public
-    // smoke graph. Retain the stronger admission proof while allowing bounded
-    // initialization time until the dependency exposes this as configuration.
+    // Smithers waits for a durable RunStarted admission marker, but through
+    // 0.32.0 its hard-coded 30-second ceiling is shorter than cold startup for
+    // the public smoke graph. On a resume the marker now also waits on the
+    // workflow transpile and first render, because 0.32.0 defers RunStarted into
+    // the renderer, so the raised ceiling covers more than engine boot. Retain the
+    // stronger admission proof while allowing bounded initialization time. The
+    // successor `smthrs` package adds SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS in
+    // 0.33.1, so this patch can retire when we migrate to that package name; it
+    // will never appear under `smithers-orchestrator`.
     writeFileDurable(
       admissionSource,
       admissionContents.replace(SMITHERS_CLI_DETACHED_ADMISSION_SOURCE, SMITHERS_CLI_DETACHED_ADMISSION_PATCH)
     );
   }
   let cliContents = fs.readFileSync(cliSource, "utf8");
-  // Smithers 0.31 closes the detached-engine log descriptor before reusing it
-  // for the supervisor spawn. Open a dedicated descriptor so supervised public
-  // runs do not fail nondeterministically with posix_spawn EBADF.
+  // Smithers closes the detached-engine log descriptor before reusing it for the
+  // supervisor spawn, still true in 0.32.0. Open a dedicated descriptor so
+  // supervised public runs do not fail nondeterministically with posix_spawn EBADF.
   cliContents = applyRequiredSmithersPatch(
     cliContents,
     SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE,
     SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH,
     "detached supervisor implementation"
   );
-  cliContents = applyRequiredSmithersPatch(
-    cliContents,
-    SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE,
-    SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH,
-    "workflow path import"
-  );
-  cliContents = applyRequiredSmithersPatch(
-    cliContents,
-    SMITHERS_CLI_WORKFLOW_PATH_SOURCE,
-    SMITHERS_CLI_WORKFLOW_PATH_PATCH,
-    "workflow path validation"
-  );
-  cliContents = applyRequiredSmithersPatch(
-    cliContents,
-    SMITHERS_CLI_POST_FAILURE_PATH_SOURCE,
-    SMITHERS_CLI_POST_FAILURE_PATH_PATCH,
-    "post-failure workflow path"
-  );
-  cliContents = applyRequiredSmithersPatch(
-    cliContents,
-    SMITHERS_CLI_REPLAY_PREPARE_OPTION_SOURCE,
-    SMITHERS_CLI_REPLAY_PREPARE_OPTION_PATCH,
-    "replay prepare-only option"
-  );
-  cliContents = applyRequiredSmithersPatch(
-    cliContents,
-    SMITHERS_CLI_REPLAY_PREPARE_SOURCE,
-    SMITHERS_CLI_REPLAY_PREPARE_PATCH,
-    "replay prepare-only implementation"
-  );
-  cliContents = applyRequiredSmithersPatch(
-    cliContents,
-    SMITHERS_CLI_REPLAY_WORKFLOW_PATH_SOURCE,
-    SMITHERS_CLI_REPLAY_WORKFLOW_PATH_PATCH,
-    "replay workflow path persistence"
-  );
-  cliContents = applyRequiredSmithersPatch(
-    cliContents,
-    SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_SOURCE,
-    SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_PATCH,
-    "replay workflow metadata persistence"
-  );
-  cliContents = applyRequiredSmithersPatch(
-    cliContents,
-    SMITHERS_CLI_FORK_WORKFLOW_PATH_SOURCE,
-    SMITHERS_CLI_FORK_WORKFLOW_PATH_PATCH,
-    "fork workflow path persistence"
-  );
-  cliContents = applyRequiredSmithersPatch(
-    cliContents,
-    SMITHERS_CLI_FORK_WORKFLOW_METADATA_SOURCE,
-    SMITHERS_CLI_FORK_WORKFLOW_METADATA_PATCH,
-    "fork workflow metadata persistence"
-  );
-  cliContents = applyRequiredSmithersPatch(
-    cliContents,
-    SMITHERS_CLI_FORK_PREPARE_OPTION_SOURCE,
-    SMITHERS_CLI_FORK_PREPARE_OPTION_PATCH,
-    "fork prepare-only option"
-  );
-  cliContents = applyRequiredSmithersPatch(
-    cliContents,
-    SMITHERS_CLI_FORK_PREPARE_SOURCE,
-    SMITHERS_CLI_FORK_PREPARE_PATCH,
-    "fork prepare-only implementation"
-  );
-  cliContents = applyRequiredSmithersPatch(
-    cliContents,
-    SMITHERS_CLI_FORK_FOREGROUND_SOURCE,
-    SMITHERS_CLI_FORK_FOREGROUND_PATCH,
-    "fork prepare-only foreground guard"
-  );
-  writeFileDurable(cliSource, cliContents);
-
-  const schedulerRoots = [
-    path.join(nodeModules, "@smithers-orchestrator", "scheduler"),
-    path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "scheduler")
-  ].filter((candidate) => fs.existsSync(candidate));
-  const engineRoots = [
-    path.join(nodeModules, "@smithers-orchestrator", "engine"),
-    path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "engine")
-  ].filter((candidate) => fs.existsSync(candidate));
-  // Unit-test installers may provide only the public runner and CLI shims.
-  if (schedulerRoots.length === 0 && engineRoots.length === 0) return;
-  if (schedulerRoots.length !== 1 || engineRoots.length !== 1) {
-    throw new Error("pinned workflow runner resolved an incomplete resume implementation");
+  // Ultrafuzz persists the workflow path and its graph hashes with the run, and
+  // drives fork and replay as prepare-only invocations so the new run is linked
+  // durably before any work starts. Upstream does neither as of the pinned release.
+  for (const [source, patch, label] of [
+    [SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE, SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH, "workflow path import"],
+    [SMITHERS_CLI_WORKFLOW_PATH_SOURCE, SMITHERS_CLI_WORKFLOW_PATH_PATCH, "workflow path validation"],
+    [SMITHERS_CLI_POST_FAILURE_PATH_SOURCE, SMITHERS_CLI_POST_FAILURE_PATH_PATCH, "post-failure workflow path"],
+    [SMITHERS_CLI_REPLAY_PREPARE_OPTION_SOURCE, SMITHERS_CLI_REPLAY_PREPARE_OPTION_PATCH, "replay prepare-only option"],
+    [SMITHERS_CLI_REPLAY_PREPARE_SOURCE, SMITHERS_CLI_REPLAY_PREPARE_PATCH, "replay prepare-only implementation"],
+    [
+      SMITHERS_CLI_REPLAY_WORKFLOW_PATH_SOURCE,
+      SMITHERS_CLI_REPLAY_WORKFLOW_PATH_PATCH,
+      "replay workflow path persistence"
+    ],
+    [
+      SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_SOURCE,
+      SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_PATCH,
+      "replay workflow metadata persistence"
+    ],
+    [SMITHERS_CLI_FORK_WORKFLOW_PATH_SOURCE, SMITHERS_CLI_FORK_WORKFLOW_PATH_PATCH, "fork workflow path persistence"],
+    [
+      SMITHERS_CLI_FORK_WORKFLOW_METADATA_SOURCE,
+      SMITHERS_CLI_FORK_WORKFLOW_METADATA_PATCH,
+      "fork workflow metadata persistence"
+    ],
+    [SMITHERS_CLI_FORK_PREPARE_OPTION_SOURCE, SMITHERS_CLI_FORK_PREPARE_OPTION_PATCH, "fork prepare-only option"],
+    [SMITHERS_CLI_FORK_PREPARE_SOURCE, SMITHERS_CLI_FORK_PREPARE_PATCH, "fork prepare-only implementation"],
+    [SMITHERS_CLI_FORK_FOREGROUND_SOURCE, SMITHERS_CLI_FORK_FOREGROUND_PATCH, "fork prepare-only foreground guard"]
+  ] as const) {
+    cliContents = applyRequiredSmithersPatch(cliContents, source, patch, label);
   }
+  writeFileDurable(cliSource, cliContents);
 
   const schedulerRoot = schedulerRoots[0]!;
   const engineRoot = engineRoots[0]!;
@@ -3791,6 +3849,9 @@ export function applySmithers031CompatibilityPatches(projectRoot: string): void 
     SMITHERS_ENGINE_WORKFLOW_PATH_PATCH,
     "anchored and durable workflow paths"
   );
+  // The resume-activation call already receives the resolved workflow path as of the
+  // pinned runner release, and the persisted-path patch above requires the resolved
+  // and persisted paths to name the same file, so no separate patch is needed there.
   for (const [source, patch, label] of [
     [
       SMITHERS_ENGINE_DURABILITY_METADATA_SOURCE,
@@ -3800,11 +3861,6 @@ export function applySmithers031CompatibilityPatches(projectRoot: string): void 
     [SMITHERS_ENGINE_RUN_METADATA_SOURCE, SMITHERS_ENGINE_RUN_METADATA_PATCH, "workflow durability metadata"],
     [SMITHERS_ENGINE_RESUME_IDENTITY_SOURCE, SMITHERS_ENGINE_RESUME_IDENTITY_PATCH, "resume workflow identity"],
     [SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE, SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH, "inserted workflow path"],
-    [
-      SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_SOURCE,
-      SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_PATCH,
-      "resumed workflow path"
-    ],
     [SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_SOURCE, SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_PATCH, "updated workflow path"],
     [
       SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_SOURCE,

@@ -25,6 +25,7 @@ import {
   watchWorkflowNode,
   type WorkflowLifecycleEvent
 } from "../src/index.js";
+import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
 import {
   KIMI_CODE_VERSION,
   SMITHERS_ORCHESTRATOR_BIN_PATH,
@@ -1169,6 +1170,71 @@ test("diagnoseProject reports a healthy pinned install and the latest published 
   assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-install")?.status, "ok");
   assert.equal(typeof doctor.value?.validation.policy_posture.config?.status, "string");
   assert.ok(doctor.value?.toolchain.some((entry) => entry.name === "forge"));
+});
+
+// The scheduler and engine workarounds are the two that carry durable resume
+// progress, and an unreported posture reads as healthy. Cover every tracked
+// workaround, not just the CLI pair.
+test("diagnoseProject reports a posture for every tracked compatibility patch", async () => {
+  const { project, env } = await launchedProject({});
+  writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
+  const nodeModules = path.join(project, ".smithers", "node_modules");
+  // Grouped by source, because several workarounds patch the same file. Within a
+  // shared file the postures still differ per patch — one anchor written as its
+  // patched text and the next as its unpatched text — so a swapped id-to-source
+  // mapping cannot pass. `incompatible` and `unknown` are whole-file states, so they
+  // are assigned to files carrying a single workaround, which keeps every branch of
+  // `patchPosture` exercised.
+  const bySource = new Map<string, typeof SMITHERS_COMPATIBILITY_PATCHES>();
+  for (const patch of SMITHERS_COMPATIBILITY_PATCHES) {
+    const source = path.join(nodeModules, ...patch.packageName.split("/"), ...patch.sourceRelativePath.split("/"));
+    bySource.set(source, [...(bySource.get(source) ?? []), patch]);
+  }
+  const wholeFilePostures = ["incompatible", "unknown", "applied"] as const;
+  const singleSources = [...bySource.entries()].filter(([, patches]) => patches.length === 1);
+  assert.ok(
+    singleSources.length <= wholeFilePostures.length,
+    "extend the whole-file posture rotation to cover every single-workaround source"
+  );
+  const expected: Record<string, string> = {};
+  let singleIndex = 0;
+  for (const [source, patches] of bySource) {
+    fs.mkdirSync(path.dirname(source), { recursive: true });
+    if (patches.length === 1) {
+      const patch = patches[0]!;
+      const posture = wholeFilePostures[singleIndex]!;
+      singleIndex += 1;
+      if (posture === "applied") fs.writeFileSync(source, `${patch.patched}\n`, "utf8");
+      // Neither the patch nor the shape Ultrafuzz patches: the next run hard-fails.
+      if (posture === "incompatible") fs.writeFileSync(source, "export const unrelated = 1;\n", "utf8");
+      // `unknown` leaves the source absent while its package directory exists.
+      expected[patch.id] = posture;
+      continue;
+    }
+    const lines: string[] = [];
+    for (const [index, patch] of patches.entries()) {
+      const posture = index % 2 === 0 ? "applied" : "missing";
+      lines.push(posture === "applied" ? patch.patched : patch.patchable);
+      expected[patch.id] = posture;
+    }
+    fs.writeFileSync(source, `${lines.join("\n")}\n`, "utf8");
+  }
+
+  const doctor = await diagnoseProject({ projectRoot: project, env, offline: true });
+
+  const reported = doctor.value?.workflow_engine.compatibility_patches ?? {};
+  assert.deepEqual(reported, expected);
+  // Named explicitly: these two were previously omitted from the posture report.
+  assert.ok(Object.hasOwn(reported, "terminal_state_restore"));
+  assert.ok(Object.hasOwn(reported, "resume_hydration"));
+  // Ultrafuzz's own prepare-only and workflow-path workarounds must be reported too.
+  assert.ok(Object.hasOwn(reported, "replay_prepare"));
+  assert.ok(Object.hasOwn(reported, "fork_prepare"));
+  assert.ok(Object.hasOwn(reported, "workflow_path_persistence"));
+  // An incompatible source means the next run throws, so doctor must not pass it.
+  assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-patches")?.status, "error");
+  assert.equal(doctor.ok, false);
+  assert.ok(doctor.diagnostics.some((entry) => entry.code === "DOCTOR_WORKFLOW_ENGINE_PATCHES_INCOMPATIBLE"));
 });
 
 test("diagnoseProject reports a missing install and a version mismatch", async () => {

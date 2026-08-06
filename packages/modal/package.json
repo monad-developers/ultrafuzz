@@ -25,7 +25,7 @@
     "typecheck": "pnpm --filter @ultrafuzz/modal^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
-    "@smithers-orchestrator/tool-context": "0.31.0",
+    "@smithers-orchestrator/tool-context": "0.32.0",
     "@ultrafuzz/artifacts": "workspace:*",
     "@ultrafuzz/evals": "workspace:*",
     "@ultrafuzz/runtime": "workspace:*",

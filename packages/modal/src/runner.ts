@@ -148,9 +148,10 @@ import {
 import { getOrCreateModalV2Volume } from "./volume.js";
 
 const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
-// Smithers 0.31.0 supplies Codex prompts over stdin and uses the `-` stdin
-// sentinel. Codex CLI 0.144.3 rejects that form; keep the image pin explicit
-// so the runner and standalone Dockerfile cannot silently drift back to it.
+// The pinned Smithers release supplies Codex prompts over stdin and uses the `-`
+// stdin sentinel, still true in 0.32.0. Codex CLI 0.144.3 rejects that form; keep
+// the image pin explicit so the runner and standalone Dockerfile cannot silently
+// drift back to it.
 export const CODEX_CLI_VERSION = "0.146.0";
 const MODAL_RUNTIME_USER = "root";
 const MODAL_RUNTIME_HOME = "/root";
