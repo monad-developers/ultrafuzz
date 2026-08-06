@@ -925,7 +925,10 @@ export async function runSmithersLifecycleCommand(input: {
       input.retryFailed === true &&
       (smithersSnapshotRunStateIsFailed(inspection) || smithersSnapshotRunStateIsStale(inspection))
     ) {
-      if (input.resetNode === undefined && smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED")) {
+      const renderFailed = smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED");
+      const terminalPendingWork =
+        smithersSnapshotRunStateIsFailed(inspection) && smithersSnapshotHasPendingWorkflowTasks(inspection);
+      if (input.resetNode === undefined && (renderFailed || terminalPendingWork)) {
         if (!isCompatibleSmithersRunId(input.smithersRunId)) {
           assertRegularFileInside(
             input.resumeRecovery.runRoot,
@@ -979,10 +982,14 @@ export async function runSmithersLifecycleCommand(input: {
           projectRoot: input.projectRoot,
           env: input.env
         });
-        const latestFrame = latestSmithersTimelineFrame(jsonField(timeline.stdout).json);
-        if (latestFrame !== undefined) {
+        const timelineJson = jsonField(timeline.stdout).json;
+        const rewindFrame =
+          terminalPendingWork && !renderFailed
+            ? previousSmithersTimelineFrame(timelineJson)
+            : latestSmithersTimelineFrame(timelineJson);
+        if (rewindFrame !== undefined) {
           const rewind = await execSmithersCli({
-            args: ["rewind", input.smithersRunId, String(latestFrame), "--yes", "--json"],
+            args: ["rewind", input.smithersRunId, String(rewindFrame), "--yes", "--json"],
             projectRoot: input.projectRoot,
             env: input.env
           });
@@ -1255,26 +1262,13 @@ function smithersSnapshotFailedTasks(snapshot: SmithersCommandSnapshot): Array<{
     failedTasks.set(`${nodeId}::${iteration}`, { nodeId, iteration });
   }
   if (failedTasks.size > 0) return [...failedTasks.values()];
-  const collections = [data.steps, data.nodes, parsed.steps, parsed.nodes];
+  const collections = smithersSnapshotTaskCollections(parsed, data);
   const failedStates = new Set(["failed", "error", "timed-out", "timeout", "canceled", "cancelled"]);
   for (const collection of collections) {
-    const entries = Array.isArray(collection)
-      ? collection
-      : isObjectRecord(collection)
-        ? Object.entries(collection).map(([id, value]) =>
-            isObjectRecord(value) && typeof value.id !== "string" ? { ...value, id } : value
-          )
-        : [];
-    for (const entry of entries) {
-      if (!isObjectRecord(entry)) continue;
-      const state = [entry.state, entry.status].find((value): value is string => typeof value === "string");
-      const nodeId = [entry.nodeId, entry.node_id, entry.id].find(
-        (value): value is string => typeof value === "string" && value.trim() !== ""
-      );
-      const iteration =
-        typeof entry.iteration === "number" && Number.isSafeInteger(entry.iteration) && entry.iteration >= 0
-          ? entry.iteration
-          : 0;
+    for (const entry of smithersSnapshotTaskEntries(collection)) {
+      const state = smithersSnapshotTaskState(entry);
+      const nodeId = smithersSnapshotTaskNodeId(entry);
+      const iteration = smithersSnapshotTaskIteration(entry);
       if (state !== undefined && nodeId !== undefined && failedStates.has(state.toLowerCase())) {
         const key = `${nodeId}::${iteration}`;
         if (!failedTasks.has(key)) failedTasks.set(key, { nodeId, iteration });
@@ -1284,7 +1278,64 @@ function smithersSnapshotFailedTasks(snapshot: SmithersCommandSnapshot): Array<{
   return [...failedTasks.values()];
 }
 
+function smithersSnapshotHasPendingWorkflowTasks(snapshot: SmithersCommandSnapshot): boolean {
+  const parsed = isObjectRecord(snapshot.json) ? snapshot.json : {};
+  const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
+  const collections = smithersSnapshotTaskCollections(parsed, data);
+  const pendingStates = new Set(["pending", "ready", "runnable", "queued", "waiting-quota"]);
+  for (const collection of collections) {
+    for (const entry of smithersSnapshotTaskEntries(collection)) {
+      const state = smithersSnapshotTaskState(entry);
+      if (state !== undefined && pendingStates.has(state.toLowerCase())) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function smithersSnapshotTaskCollections(parsed: Record<string, unknown>, data: Record<string, unknown>): unknown[] {
+  return [data.steps, data.nodes, data.tasks, parsed.steps, parsed.nodes, parsed.tasks];
+}
+
+function smithersSnapshotTaskEntries(collection: unknown): Record<string, unknown>[] {
+  if (Array.isArray(collection)) return collection.filter(isObjectRecord);
+  if (!isObjectRecord(collection)) return [];
+  return Object.entries(collection).flatMap(([id, value]) => {
+    if (!isObjectRecord(value)) return [];
+    const hasId = [value.id, value.nodeId, value.node_id, value.taskId, value.name].some(
+      (field) => typeof field === "string" && field.trim() !== ""
+    );
+    return hasId ? [value] : [{ ...value, id }];
+  });
+}
+
+function smithersSnapshotTaskState(entry: Record<string, unknown>): string | undefined {
+  return [entry.state, entry.status, entry.phase].find((value): value is string => typeof value === "string");
+}
+
+function smithersSnapshotTaskNodeId(entry: Record<string, unknown>): string | undefined {
+  return [entry.id, entry.nodeId, entry.node_id, entry.taskId, entry.name].find(
+    (value): value is string => typeof value === "string" && value.trim() !== ""
+  );
+}
+
+function smithersSnapshotTaskIteration(entry: Record<string, unknown>): number {
+  return typeof entry.iteration === "number" && Number.isSafeInteger(entry.iteration) && entry.iteration >= 0
+    ? entry.iteration
+    : 0;
+}
+
 function latestSmithersTimelineFrame(value: unknown): number | undefined {
+  return smithersTimelineFrameNumbers(value).at(-1);
+}
+
+function previousSmithersTimelineFrame(value: unknown): number | undefined {
+  const frameNumbers = smithersTimelineFrameNumbers(value);
+  return frameNumbers.length < 2 ? undefined : frameNumbers[frameNumbers.length - 2];
+}
+
+function smithersTimelineFrameNumbers(value: unknown): number[] {
   const parsed = isObjectRecord(value) ? value : {};
   const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
   const timeline = isObjectRecord(data.timeline) ? data.timeline : data;
@@ -1296,7 +1347,7 @@ function latestSmithersTimelineFrame(value: unknown): number | undefined {
       ? [frameNumber]
       : [];
   });
-  return frameNumbers.length === 0 ? undefined : Math.max(...frameNumbers);
+  return [...new Set(frameNumbers)].sort((left, right) => left - right);
 }
 
 function isCompatibleSmithersRunId(value: string): boolean {
