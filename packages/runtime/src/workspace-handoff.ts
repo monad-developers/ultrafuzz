@@ -460,15 +460,63 @@ function withTemporaryIndex<T>(workspaceRoot: string, callback: (index: string) 
   }
 }
 
+/**
+ * Rethrows an oversized-output failure as something an operator can act on.
+ *
+ * `execFileSync` raises a bare Node `SystemError` when git writes more than `maxBuffer`: message
+ * `spawnSync git ENOBUFS`, with no subcommand, no size, and no indication that the workspace is at fault.
+ * Nothing in the codebase caught it, so six sandboxes died across three Aave v4 runs with an empty
+ * `last_error` and the only surviving copy of the reason in a 68 MB workflow log that nothing surfaces
+ * (issues #304, #310). Two wrong causal theories were pursued in that gap, and ENOBUFS was actively ruled
+ * OUT on the grounds that it would have been loud.
+ *
+ * This does not prevent the failure — the run is already over when it fires. It makes the next one legible
+ * in one line instead of costing hours.
+ */
+function rethrowOversizedGitOutput(workspaceRoot: string, args: readonly string[], error: unknown): never {
+  if (!(error instanceof Error) || (error as { code?: unknown }).code !== "ENOBUFS") throw error;
+  const subcommand = args.find((arg) => !arg.startsWith("-")) ?? "git";
+  let widest: string;
+  try {
+    // Best effort, and only on the error path: the run is already failing, so a problem here must not
+    // replace the diagnosis with a second, worse one.
+    widest = runGitBuffer(workspaceRoot, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+      .toString("utf8")
+      .split("\0")
+      .filter((entry) => entry !== "")
+      .map((entry) => {
+        try {
+          return { path: entry, bytes: lstatSync(path.resolve(workspaceRoot, entry)).size };
+        } catch {
+          return { path: entry, bytes: 0 };
+        }
+      })
+      .sort((left, right) => right.bytes - left.bytes)
+      .slice(0, 5)
+      .map((entry) => `${entry.path} (${Math.round(entry.bytes / 1_000_000)} MB)`)
+      .join(", ");
+  } catch {
+    widest = "";
+  }
+  throw new Error(
+    `git ${subcommand} produced more than the ${MAX_PATCH_BYTES * 2}-byte capture buffer; the workspace is too large to hand off${widest === "" ? "" : `. Largest paths: ${widest}`}`,
+    { cause: error }
+  );
+}
+
 function runGit(workspaceRoot: string, args: string[], index?: string, input?: string | Buffer): string {
   const env = index === undefined ? undefined : { ...process.env, GIT_INDEX_FILE: index };
-  return execFileSync("git", args, {
-    cwd: workspaceRoot,
-    encoding: "utf8",
-    env,
-    input,
-    maxBuffer: MAX_PATCH_BYTES * 2
-  });
+  try {
+    return execFileSync("git", args, {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+      env,
+      input,
+      maxBuffer: MAX_PATCH_BYTES * 2
+    });
+  } catch (error) {
+    return rethrowOversizedGitOutput(workspaceRoot, args, error);
+  }
 }
 
 /** Byte-exact git output, for path lists that may not be valid UTF-8. */

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fs, { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -150,6 +151,39 @@ test("captures an authored top-level file whose name matches a generated corpus 
 
     const captured = captureWorkspacePatch(root, baseline);
     assert.deepEqual(captured.manifest.files.map((entry) => entry.path).sort(), ["echidna", "recon-corpus"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Six sandboxes died across three Aave v4 runs on a bare `spawnSync git ENOBUFS` with no subcommand, no
+// size, and no path — the only surviving copy in a 68 MB workflow log nothing surfaces. ENOBUFS was even
+// ruled OUT during the investigation on the grounds that it would have been loud. It was not (issue #310).
+test("names the largest paths when a git capture overflows its buffer", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "base"]);
+    const baseline = captureWorkspaceTree(root);
+
+    // Comfortably past the 32 MB capture buffer, and under no excluded root, so only the ENOBUFS path can
+    // report it. Written as incompressible bytes because `git diff --binary` deflates the payload.
+    mkdirSync(path.join(root, "generated"), { recursive: true });
+    writeFileSync(path.join(root, "generated", "huge.bin"), randomBytes(40 * 1024 * 1024));
+
+    assert.throws(
+      () => captureWorkspacePatch(root, baseline),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.match(message, /produced more than the \d+-byte capture buffer/u);
+        // The whole point: an operator must learn WHICH path to look at, not merely that something burst.
+        assert.match(message, /generated\/huge\.bin \(\d+ MB\)/u);
+        // The original is preserved for anyone who needs the raw failure.
+        assert.equal((error as { cause?: { code?: string } }).cause?.code, "ENOBUFS");
+        return true;
+      }
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
