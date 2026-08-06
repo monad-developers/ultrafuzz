@@ -171,9 +171,9 @@ export class KimiCode029Agent extends SmithersKimiAgent {
     // error classifiers remain intact, then narrow the obsolete argv and
     // synthetic session surface for Kimi Code 0.29.1.
     // Subscription credentials are deliberately withheld until after Smithers
-    // builds argv because Smithers 0.29.0 refreshes OAuth files without Kimi
-    // Code's cross-process lock. The executed CLI receives the real shared
-    // auth home below, where Kimi Code coordinates refreshes itself.
+    // builds argv because the pinned Smithers release refreshes OAuth files
+    // without Kimi Code's cross-process lock. The executed CLI receives the real
+    // shared auth home below, where Kimi Code coordinates refreshes itself.
     let command: KimiCommand;
     try {
       command = await super.buildCommand(params);

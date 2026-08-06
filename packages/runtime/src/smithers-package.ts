@@ -28,7 +28,7 @@ const SMITHERS_EFFECT_PACKAGE_NAMES = [
   "@effect/sql-sqlite-bun"
 ] as const;
 
-const REQUIRED_SMITHERS_OVERRIDES: Readonly<Record<string, string>> = {
+export const REQUIRED_SMITHERS_OVERRIDES: Readonly<Record<string, string>> = {
   effect: SMITHERS_EFFECT_VERSION,
   ...Object.fromEntries(SMITHERS_EFFECT_PACKAGE_NAMES.map((name) => [name, SMITHERS_EFFECT_VERSION]))
 };

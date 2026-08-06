@@ -31,7 +31,9 @@ function renderDoctor(value: DoctorValue): string {
     `- installed: ${engine.installed_version ?? "not installed"}`,
     `- installed bin target: ${engine.installed_bin_target ?? "unknown"}`,
     `- local binary: ${engine.bin_path ?? "not present"}`,
-    `- latest published stable: ${engine.latest_published_version}`,
+    `- latest published stable: ${engine.latest_published_version}${
+      engine.latest_published_is_renamed_package ? " (renamed upstream package)" : ""
+    }`,
     `- dependency layout: ${engine.layout_status}${engine.layout_detail === null ? "" : ` - ${engine.layout_detail}`}`,
     `- compatibility patches: ${renderCompatibilityPatches(engine.compatibility_patches)}`
   ];

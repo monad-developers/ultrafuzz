@@ -167,16 +167,25 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
 ];
 
 /**
- * Text that must appear between the start of the deferred run-startup closure and
+ * Markers that must sit between the start of the deferred run-startup closure and
  * the resume-hydration anchor. The anchor places our hydration immediately after
- * `startRunRuntime()`, which is only ordered after the stale-attempt reset while
- * that reset lives inside the closure. Hydrating before the reset would restore a
- * node as finished and then let the reset rewrite the durable row to pending, so
- * this ordering is load-bearing and is asserted against the pinned release.
+ * `startRunRuntime()`, which is only ordered after the attempt resets while those
+ * resets live inside the closure. Hydrating first would restore a node as finished
+ * and then let a reset rewrite the durable row to pending, so this ordering is
+ * load-bearing and is asserted against the pinned release.
+ *
+ * Both resets are pinned. `cancelStaleAttempts` only rewrites attempts older than
+ * the staleness window, so on its own it is the weaker signal; the transaction
+ * named below is the unconditional resume reset that rewrites *every* in-progress
+ * attempt, and it is the one whose ordering actually matters.
+ *
+ * This is a textual proxy for execution order, not a proof of it. A failure means
+ * "re-derive the anchor against the new upstream code", not necessarily "upstream
+ * broke something".
  */
 export const SMITHERS_ENGINE_RESUME_RESET_ORDERING = {
   closureStart: "const startRunRuntime = async () => {",
-  resetCall: "await cancelStaleAttempts(adapter, runId);",
+  resetCalls: ["await cancelStaleAttempts(adapter, runId);", '"resume-cancel-stale-attempt"'],
   anchor: SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE
 } as const;
 
@@ -1608,19 +1617,27 @@ async function ensureSmithersDependencies(
   if (fs.existsSync(installedPackageRoot)) {
     resolveInstalledSmithersPackageRoot(projectRoot);
   }
+  let repairCause: unknown;
   if (installedSmithersValidationError(projectRoot) === undefined) {
     try {
       applySmithersCompatibilityPatches(projectRoot);
       return;
-    } catch {
+    } catch (error) {
       // `installedSmithersValidationError` only inspects the top-level runner, so
       // a half-reified tree passes it and then fails to patch: an interrupted
       // upgrade install can leave the new top-level runner beside stale or
-      // missing `@smithers-orchestrator/*` packages. Fall through and reinstall
-      // instead of returning, because returning would make every later resume of
-      // a durable run fail identically with no way back short of deleting
-      // `.smithers/node_modules` by hand. A genuine incompatibility still throws
-      // from the post-install attempt below.
+      // missing `@smithers-orchestrator/*` packages. Reinstalling repairs that;
+      // returning here would make every later resume of a durable run fail
+      // identically with no way back short of deleting `.smithers/node_modules`
+      // by hand. Repair once per project root per process: when the source shape
+      // genuinely no longer matches, reinstalling cannot help, and every
+      // subsequent engine command would otherwise pay a full install before
+      // failing the same way.
+      if (repairedSmithersInstalls.has(packageRoot)) {
+        throw error;
+      }
+      repairedSmithersInstalls.add(packageRoot);
+      repairCause = error;
     }
   }
   await execFileAsync(
@@ -1646,10 +1663,29 @@ async function ensureSmithersDependencies(
   );
   const validationError = installedSmithersValidationError(projectRoot);
   if (validationError !== undefined) {
-    throw new Error(`Smithers dependency install did not produce the pinned local workflow runner: ${validationError}`);
+    throw new Error(
+      `Smithers dependency install did not produce the pinned local workflow runner: ${validationError}`,
+      {
+        ...(repairCause === undefined ? {} : { cause: repairCause })
+      }
+    );
   }
-  applySmithersCompatibilityPatches(projectRoot);
+  try {
+    applySmithersCompatibilityPatches(projectRoot);
+  } catch (error) {
+    // Surface what the pre-install attempt saw. Without it a reinstall that cannot
+    // fix the tree reports only its second-hand symptom, losing the specific reason
+    // the seeded dependencies were unusable.
+    if (repairCause !== undefined && error instanceof Error && error.cause === undefined) {
+      error.cause = repairCause;
+    }
+    throw error;
+  }
 }
+
+// Project roots this process has already tried to repair by reinstalling, so a
+// permanently unpatchable tree fails fast instead of reinstalling on every command.
+const repairedSmithersInstalls = new Set<string>();
 
 function applySmithersCompatibilityPatches(projectRoot: string): void {
   const nodeModules = path.join(projectRoot, ".smithers", "node_modules");

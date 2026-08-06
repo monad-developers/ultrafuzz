@@ -4,6 +4,13 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  effect: 4.0.0-beta.102
+  '@effect/opentelemetry': 4.0.0-beta.102
+  '@effect/platform-bun': 4.0.0-beta.102
+  '@effect/platform-node-shared': 4.0.0-beta.102
+  '@effect/sql-sqlite-bun': 4.0.0-beta.102
+
 importers:
 
   .:
@@ -551,7 +558,7 @@ packages:
       '@opentelemetry/sdk-trace-node': ^2.0.0
       '@opentelemetry/sdk-trace-web': ^2.0.0
       '@opentelemetry/semantic-conventions': ^1.33.0
-      effect: ^4.0.0-beta.102
+      effect: 4.0.0-beta.102
     peerDependenciesMeta:
       '@opentelemetry/api':
         optional: true
@@ -573,18 +580,18 @@ packages:
   '@effect/platform-bun@4.0.0-beta.102':
     resolution: {integrity: sha512-hTIb0jjTfXhNgnDq2OX5wrigc0OSvTT0VWWb1PLpMM395RJPu8rCIbTlGhy0NS7kZOd8FfgNi9e0sDhgyu+5Ag==}
     peerDependencies:
-      effect: ^4.0.0-beta.102
+      effect: 4.0.0-beta.102
 
-  '@effect/platform-node-shared@4.0.0-beta.103':
-    resolution: {integrity: sha512-0aCZMBid5ifqmY55TkfCDLaGTIM8qu3bNFUW7qL9vh/7jFOkaIAMX2MA8muG4deqW17XWxawddWu4v0fK+UW3g==}
+  '@effect/platform-node-shared@4.0.0-beta.102':
+    resolution: {integrity: sha512-gVd793I72MrkX4dXo7eYtRKfNj0RW4eMRfVEKEJI16h2+mBDCzQ+gqMrog2hSTHQnaIbvbYShNQ4TVGuRCYZeQ==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
-      effect: ^4.0.0-beta.103
+      effect: 4.0.0-beta.102
 
   '@effect/sql-sqlite-bun@4.0.0-beta.102':
     resolution: {integrity: sha512-pBO6FBJ+a21j2qHmzJDK1DeJsxm7HpUQBgucw6prHQXLMUBkhOsfZofhw1FKEdGRDEhO0sGTjffa2KP7iOuDIg==}
     peerDependencies:
-      effect: ^4.0.0-beta.102
+      effect: 4.0.0-beta.102
 
   '@electric-sql/client@1.5.24':
     resolution: {integrity: sha512-ItOjBFTfiZvYosglF9Dn4TSqE59yL/psoemHJ7vX8gvEUmElHB2QdP5eQC6q9/lswyv7oqhkZT0Kk8kuq2P5vA==}
@@ -5765,13 +5772,13 @@ snapshots:
 
   '@effect/platform-bun@4.0.0-beta.102(effect@4.0.0-beta.102)':
     dependencies:
-      '@effect/platform-node-shared': 4.0.0-beta.103(effect@4.0.0-beta.102)
+      '@effect/platform-node-shared': 4.0.0-beta.102(effect@4.0.0-beta.102)
       effect: 4.0.0-beta.102
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  '@effect/platform-node-shared@4.0.0-beta.103(effect@4.0.0-beta.102)':
+  '@effect/platform-node-shared@4.0.0-beta.102(effect@4.0.0-beta.102)':
     dependencies:
       '@types/ws': 8.18.1
       effect: 4.0.0-beta.102

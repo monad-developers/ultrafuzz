@@ -11,6 +11,18 @@ packages:
   - "packages/evmbench"
   - "packages/modal"
   - "packages/cli"
+# Mirrors REQUIRED_SMITHERS_OVERRIDES in packages/runtime/src/smithers-package.ts.
+# The generated runner workspace pins these so a cloud run cannot install two
+# Effect builds; pinning them here too means the repository's real Smithers
+# integration test exercises the same Effect tree production installs, instead of
+# whatever the open caret on @effect/platform-node-shared happens to resolve to.
+# A runtime test asserts the two lists stay identical.
+overrides:
+  effect: "4.0.0-beta.102"
+  "@effect/opentelemetry": "4.0.0-beta.102"
+  "@effect/platform-bun": "4.0.0-beta.102"
+  "@effect/platform-node-shared": "4.0.0-beta.102"
+  "@effect/sql-sqlite-bun": "4.0.0-beta.102"
 allowBuilds:
   "@moonshot-ai/kimi-code": false
   "@parcel/watcher": false

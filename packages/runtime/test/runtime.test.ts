@@ -16,6 +16,7 @@ import {
   assertSmithersPackageManifest,
   KIMI_CODE_VERSION,
   renderSmithersPackageJson,
+  REQUIRED_SMITHERS_OVERRIDES,
   SMITHERS_EFFECT_VERSION,
   SMITHERS_ORCHESTRATOR_BIN_PATH,
   SMITHERS_ORCHESTRATOR_VERSION
@@ -3999,20 +4000,31 @@ test("startRun patches every described runner compatibility workaround", async (
   const logPath = path.join(project, "patched-admission-smithers.log");
   writeFakeInstalledSmithers(project);
   const nodeModules = path.join(project, ".smithers", "node_modules");
+  assert.ok(SMITHERS_COMPATIBILITY_PATCHES.length > 0, "no compatibility patches were described");
   // Seeded from the descriptions themselves, so a newly described workaround is
   // covered here without a second edit and cannot land reported-but-never-applied.
-  const sources = SMITHERS_COMPATIBILITY_PATCHES.map((patch) => {
+  const sources = SMITHERS_COMPATIBILITY_PATCHES.map((patch) => ({
+    patch,
+    source: path.join(nodeModules, ...patch.packageName.split("/"), ...patch.sourceRelativePath.split("/"))
+  }));
+  // Grouped by file: two workarounds can target the same source, and writing per
+  // descriptor would let the second write clobber the first anchor.
+  const bySource = new Map<string, string[]>();
+  for (const { patch, source } of sources) {
+    bySource.set(source, [...(bySource.get(source) ?? []), patch.patchable]);
+  }
+  for (const { patch, source } of sources) {
     const packageRoot = path.join(nodeModules, ...patch.packageName.split("/"));
-    const source = path.join(packageRoot, ...patch.sourceRelativePath.split("/"));
     fs.mkdirSync(path.dirname(source), { recursive: true });
     fs.writeFileSync(
       path.join(packageRoot, "package.json"),
       `${JSON.stringify({ name: patch.packageName, version: SMITHERS_ORCHESTRATOR_VERSION })}\n`,
       "utf8"
     );
-    fs.writeFileSync(source, `${patch.patchable}\n`, "utf8");
-    return { patch, source };
-  });
+  }
+  for (const [source, anchors] of bySource) {
+    fs.writeFileSync(source, `${anchors.join("\n")}\n`, "utf8");
+  }
 
   const run = await startRun({
     projectRoot: project,
@@ -4021,7 +4033,6 @@ test("startRun patches every described runner compatibility workaround", async (
   });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.equal(sources.length, SMITHERS_COMPATIBILITY_PATCHES.length);
   for (const { patch, source } of sources) {
     // `patched` is the whole replacement text, so its presence is exactly the
     // statement "this workaround landed in the installed source".
@@ -4089,24 +4100,30 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
     }
   }
 
-  // Ordering, not just presence: the stale-attempt reset must still run inside the
-  // deferred run-startup closure, which is what puts it ahead of the hydration the
-  // anchor appends. If upstream moves the reset after the first render again, the
+  // Ordering, not just presence: both attempt resets must still run inside the
+  // deferred run-startup closure, which is what puts them ahead of the hydration the
+  // anchor appends. If upstream moves a reset after the first render again, the
   // hydration would restore a node as finished and the reset would then rewrite the
-  // durable row to pending, splitting session state from the database.
+  // durable row to pending, splitting session state from the database. Every marker
+  // is asserted unique first, so a second occurrence elsewhere cannot let `indexOf`
+  // latch onto the wrong one and hide a real inversion.
   const engineSource = sourceByPatchId.get("resume_hydration");
   assert.ok(engineSource !== undefined, "resume_hydration patch was not described");
-  const closureStart = engineSource.indexOf(SMITHERS_ENGINE_RESUME_RESET_ORDERING.closureStart);
-  const resetCall = engineSource.indexOf(SMITHERS_ENGINE_RESUME_RESET_ORDERING.resetCall);
-  const anchor = engineSource.indexOf(SMITHERS_ENGINE_RESUME_RESET_ORDERING.anchor);
-  assert.notEqual(closureStart, -1, "deferred run-startup closure is gone from the pinned engine");
-  assert.notEqual(resetCall, -1, "stale-attempt reset call is gone from the pinned engine");
-  assert.notEqual(anchor, -1, "resume-hydration anchor is gone from the pinned engine");
-  assert.ok(
-    closureStart < resetCall && resetCall < anchor,
-    "the pinned engine no longer resets stale attempts inside the deferred startup closure before the " +
-      "resume-hydration anchor; re-derive the anchor before trusting the resume workaround"
-  );
+  const uniqueIndexOf = (marker: string, label: string): number => {
+    assert.equal(engineSource.split(marker).length, 2, `${label} does not occur exactly once in the pinned engine`);
+    return engineSource.indexOf(marker);
+  };
+  const closureStart = uniqueIndexOf(SMITHERS_ENGINE_RESUME_RESET_ORDERING.closureStart, "startup closure");
+  const anchor = uniqueIndexOf(SMITHERS_ENGINE_RESUME_RESET_ORDERING.anchor, "resume-hydration anchor");
+  assert.ok(SMITHERS_ENGINE_RESUME_RESET_ORDERING.resetCalls.length > 0, "no resume resets were pinned");
+  for (const marker of SMITHERS_ENGINE_RESUME_RESET_ORDERING.resetCalls) {
+    const resetCall = uniqueIndexOf(marker, `resume reset ${JSON.stringify(marker)}`);
+    assert.ok(
+      closureStart < resetCall && resetCall < anchor,
+      `the pinned engine no longer runs ${JSON.stringify(marker)} inside the deferred startup closure before the ` +
+        "resume-hydration anchor; re-derive the anchor before trusting the resume workaround"
+    );
+  }
 
   // The Effect override only dedupes correctly while it tracks what the pinned
   // runner declares, and nothing else in the tree enforces that.
@@ -4119,6 +4136,11 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
     `the pinned runner declares Effect ${runnerManifest.dependencies?.effect}, but the generated manifest overrides ` +
       `Effect to ${SMITHERS_EFFECT_VERSION}`
   );
+  // Every override must land on one Effect version, or the pinned set is not
+  // internally consistent and npm reintroduces a second copy.
+  for (const [name, version] of Object.entries(REQUIRED_SMITHERS_OVERRIDES)) {
+    assert.equal(version, SMITHERS_EFFECT_VERSION, `override ${name} must track Effect ${SMITHERS_EFFECT_VERSION}`);
+  }
 });
 
 test("startRun accepts the published Smithers bin target with its leading dot segment", async () => {
@@ -4426,11 +4448,15 @@ test("generated workflow dependencies require exact runner versions while allowi
     dependencies: Record<string, string>;
     overrides: Record<string, string>;
   };
+  assert.deepEqual(rendered.overrides, REQUIRED_SMITHERS_OVERRIDES);
   assert.equal(rendered.overrides.effect, SMITHERS_EFFECT_VERSION);
-  assert.ok(
-    Object.keys(rendered.overrides).some((name) => name.startsWith("@effect/")),
-    "the generated manifest must pin the @effect packages alongside Effect itself"
-  );
+  // The whole `@effect/*` set must be pinned, and pinned onto the same version, or
+  // npm reintroduces a second Effect copy through an unpinned caret.
+  const effectOverrides = Object.entries(rendered.overrides).filter(([name]) => name.startsWith("@effect/"));
+  assert.ok(effectOverrides.length > 0, "the generated manifest must pin the @effect packages alongside Effect itself");
+  for (const [name, version] of effectOverrides) {
+    assert.equal(version, SMITHERS_EFFECT_VERSION, `${name} must be pinned to Effect ${SMITHERS_EFFECT_VERSION}`);
+  }
   assert.doesNotThrow(() =>
     assertSmithersPackageManifest({
       ...rendered,
