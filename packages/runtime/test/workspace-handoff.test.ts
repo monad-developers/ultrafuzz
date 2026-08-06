@@ -159,7 +159,7 @@ test("captures an authored top-level file whose name matches a generated corpus 
 // Six sandboxes died across three Aave v4 runs on a bare `spawnSync git ENOBUFS` with no subcommand, no
 // size, and no path — the only surviving copy in a 68 MB workflow log nothing surfaces. ENOBUFS was even
 // ruled OUT during the investigation on the grounds that it would have been loud. It was not (issue #310).
-test("names the largest paths when a git capture overflows its buffer", () => {
+test("attributes a git capture overflow to the root that actually fed the diff", () => {
   const root = fixture();
   try {
     writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
@@ -172,15 +172,55 @@ test("names the largest paths when a git capture overflows its buffer", () => {
     mkdirSync(path.join(root, "generated"), { recursive: true });
     writeFileSync(path.join(root, "generated", "huge.bin"), randomBytes(40 * 1024 * 1024));
 
+    // The decoy, and the whole reason this test exists. `echidna/` is a generated root: it is excluded from
+    // staging, so it contributes ZERO bytes to the diff no matter how large it is. It is also, on a real
+    // Aave v4 workspace, by far the biggest thing present. An enumeration that forgets the exclusions ranks
+    // it first and hands the operator a top-5 made entirely of paths that are already fixed.
+    mkdirSync(path.join(root, "echidna", "coverage"), { recursive: true });
+    for (let file = 0; file < 3; file += 1) {
+      writeFileSync(path.join(root, "echidna", "coverage", `${file}.bin`), randomBytes(60 * 1024 * 1024));
+    }
+
     assert.throws(
       () => captureWorkspacePatch(root, baseline),
       (error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         assert.match(message, /produced more than the \d+-byte capture buffer/u);
-        // The whole point: an operator must learn WHICH path to look at, not merely that something burst.
-        assert.match(message, /generated\/huge\.bin \(\d+ MB\)/u);
+        // An operator must learn WHICH root to look at, not merely that something burst.
+        assert.match(message, /generated \(\d+ bytes in \d+ files\)/u);
+        // ...and must not be sent after a root that cannot have contributed, despite being 4.5x larger.
+        assert.doesNotMatch(message, /echidna/u);
         // The original is preserved for anyone who needs the raw failure.
         assert.equal((error as { cause?: { code?: string } }).cause?.code, "ENOBUFS");
+        return true;
+      }
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("attributes an overflow made of many small files to their root", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "base"]);
+    const baseline = captureWorkspaceTree(root);
+
+    // The recorded Aave v4 stack burst inside `echidna/coverage/<digits>.txt` — a directory of SMALL files
+    // whose aggregate crossed the buffer. A largest-single-file ranking is blind to this shape: here the
+    // biggest file in the workspace is 1 MB and the cause is 40 MB spread over 40 of them.
+    mkdirSync(path.join(root, "coverage"), { recursive: true });
+    for (let file = 0; file < 40; file += 1) {
+      writeFileSync(path.join(root, "coverage", `${file}.txt`), randomBytes(1024 * 1024));
+    }
+
+    assert.throws(
+      () => captureWorkspacePatch(root, baseline),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.match(message, /coverage \(\d+ bytes in 40 files\)/u);
         return true;
       }
     );

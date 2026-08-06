@@ -465,41 +465,62 @@ function withTemporaryIndex<T>(workspaceRoot: string, callback: (index: string) 
  *
  * `execFileSync` raises a bare Node `SystemError` when git writes more than `maxBuffer`: message
  * `spawnSync git ENOBUFS`, with no subcommand, no size, and no indication that the workspace is at fault.
- * Nothing in the codebase caught it, so six sandboxes died across three Aave v4 runs with an empty
- * `last_error` and the only surviving copy of the reason in a 68 MB workflow log that nothing surfaces
- * (issues #304, #310). Two wrong causal theories were pursued in that gap, and ENOBUFS was actively ruled
- * OUT on the grounds that it would have been loud.
+ * Six sandboxes died on it across three Aave v4 runs, two wrong causal theories were pursued in the gap,
+ * and ENOBUFS was actively ruled OUT on the grounds that it would have been loud.
  *
- * This does not prevent the failure — the run is already over when it fires. It makes the next one legible
- * in one line instead of costing hours.
+ * Scope, precisely: this improves the string in the workflow log. It does NOT reach `last_error` — those
+ * six deaths recorded `exit_category: sandbox-exited` with no `NodeFailed` event, and `last_error` is fed
+ * only from a `NodeFailed`, so no amount of catching here changes it. Propagation is #307, still open. It
+ * does not prevent the failure either; the run is over when it fires.
  */
-function rethrowOversizedGitOutput(workspaceRoot: string, args: readonly string[], error: unknown): never {
+function rethrowOversizedGitOutput(
+  workspaceRoot: string,
+  args: readonly string[],
+  index: string | undefined,
+  error: unknown
+): never {
   if (!(error instanceof Error) || (error as { code?: unknown }).code !== "ENOBUFS") throw error;
-  const subcommand = args.find((arg) => !arg.startsWith("-")) ?? "git";
-  let widest: string;
+  const subcommand = args[0] ?? "git";
+  let attribution: string;
   try {
-    // Best effort, and only on the error path: the run is already failing, so a problem here must not
-    // replace the diagnosis with a second, worse one.
-    widest = runGitBuffer(workspaceRoot, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
-      .toString("utf8")
-      .split("\0")
-      .filter((entry) => entry !== "")
-      .map((entry) => {
-        try {
-          return { path: entry, bytes: lstatSync(path.resolve(workspaceRoot, entry)).size };
-        } catch {
-          return { path: entry, bytes: 0 };
-        }
-      })
-      .sort((left, right) => right.bytes - left.bytes)
+    // Per-ROOT totals, not the largest single files. What overflows is the aggregate diff, and a workspace
+    // reaches 32 MB just as easily through ten thousand 4 KB coverage files as through one big blob — the
+    // recorded Aave v4 stack broke inside `echidna/coverage/<digits>.txt`, a directory of small files. A
+    // largest-file ranking answers a question nobody asked and, when the big blobs sit under a root that is
+    // already excluded, names paths contributing ZERO bytes while the real cause never appears.
+    //
+    // Enumerated via the same helper staging uses, under the same exclusions and the same GIT_INDEX_FILE,
+    // so the set priced here is the set that fed the diff.
+    const totals = new Map<string, { bytes: number; files: number }>();
+    for (const entry of index === undefined ? [] : stageableWorkspacePaths(workspaceRoot, index)) {
+      const relativePath = entry.toString("utf8");
+      const root = relativePath.split("/")[0] ?? relativePath;
+      let bytes = 0;
+      try {
+        bytes = lstatSync(path.resolve(workspaceRoot, relativePath)).size;
+      } catch {
+        // Raced away between listing and stat; count the file, price it at zero.
+      }
+      const total = totals.get(root) ?? { bytes: 0, files: 0 };
+      totals.set(root, { bytes: total.bytes + bytes, files: total.files + 1 });
+    }
+    attribution = [...totals.entries()]
+      .sort((left, right) => right[1].bytes - left[1].bytes)
+      .filter(([, total]) => total.bytes > 0)
       .slice(0, 5)
-      .map((entry) => `${entry.path} (${Math.round(entry.bytes / 1_000_000)} MB)`)
+      .map(([root, total]) => `${root} (${total.bytes} bytes in ${total.files} files)`)
       .join(", ");
-  } catch {
-    widest = "";
+  } catch (enumerationError) {
+    // `stageableWorkspacePaths` calls `runGitBuffer`, which is deliberately left unwrapped: wrapping it
+    // would let this helper recurse into itself. So its own ENOBUFS lands here, and it must NOT degrade to
+    // the same empty string a genuinely small workspace produces.
+    attribution =
+      (enumerationError as { code?: unknown })?.code === "ENOBUFS"
+        ? "unavailable (the path enumeration overflowed too)"
+        : "unavailable";
   }
   throw new Error(
-    `git ${subcommand} produced more than the ${MAX_PATCH_BYTES * 2}-byte capture buffer; the workspace is too large to hand off${widest === "" ? "" : `. Largest paths: ${widest}`}`,
+    `git ${subcommand} produced more than the ${MAX_PATCH_BYTES * 2}-byte capture buffer; the workspace is too large to hand off${attribution === "" ? "" : `. Largest staged roots: ${attribution}`}`,
     { cause: error }
   );
 }
@@ -515,11 +536,19 @@ function runGit(workspaceRoot: string, args: string[], index?: string, input?: s
       maxBuffer: MAX_PATCH_BYTES * 2
     });
   } catch (error) {
-    return rethrowOversizedGitOutput(workspaceRoot, args, error);
+    return rethrowOversizedGitOutput(workspaceRoot, args, index, error);
   }
 }
 
-/** Byte-exact git output, for path lists that may not be valid UTF-8. */
+/**
+ * Byte-exact git output, for path lists that may not be valid UTF-8.
+ *
+ * Deliberately NOT wrapped by `rethrowOversizedGitOutput`: that helper calls this one to build its path
+ * list, so wrapping would recurse. Overflowing here needs a NUL-joined path list above 32 MB — hundreds of
+ * thousands of entries — which is far less likely than the `git diff` overflow that actually killed six
+ * sandboxes. If it ever happens it surfaces as a bare ENOBUFS, and closing that needs a re-entrancy guard
+ * rather than another wrap.
+ */
 function runGitBuffer(workspaceRoot: string, args: string[], index?: string): Buffer {
   const env = index === undefined ? undefined : { ...process.env, GIT_INDEX_FILE: index };
   return execFileSync("git", args, { cwd: workspaceRoot, env, maxBuffer: MAX_PATCH_BYTES * 2 });
