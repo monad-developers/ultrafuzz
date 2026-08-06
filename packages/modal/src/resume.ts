@@ -71,6 +71,7 @@ export function modalEvalRunCommand(input: {
   controlRoot: string;
   suitePath: string;
   evalRunId: string;
+  provider?: "braintrust" | "none";
 }): string[] {
   return [
     "node",
@@ -82,7 +83,7 @@ export function modalEvalRunCommand(input: {
     "--suite",
     input.suitePath,
     "--provider",
-    "braintrust",
+    input.provider ?? "braintrust",
     "--eval-run-id",
     input.evalRunId,
     "--watch-timeout-seconds",
