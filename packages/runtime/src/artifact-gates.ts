@@ -1592,6 +1592,7 @@ function refreshVerifiedArtifactDigest(
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return [];
   const marker = parsed as Record<string, unknown>;
   const digest = crypto.createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex");
+  const previous = new Set<string>();
   let updated = false;
   for (const key of ["artifacts", "publications"] as const) {
     const entries = marker[key];
@@ -1601,6 +1602,7 @@ function refreshVerifiedArtifactDigest(
       const record = entry as Record<string, unknown>;
       if (record.path !== relativePath || typeof record.sha256 !== "string") continue;
       if (record.sha256 === digest) continue;
+      previous.add(record.sha256);
       record.sha256 = digest;
       updated = true;
     }
@@ -1614,9 +1616,76 @@ function refreshVerifiedArtifactDigest(
       severity: "warning",
       source: "property-provenance",
       path: markerPath,
-      details: { attempt_id: attemptId, artifact_path: relativePath, sha256: digest }
+      details: {
+        attempt_id: attemptId,
+        artifact_path: relativePath,
+        sha256: digest,
+        // Both sides recorded: this rewrites a security-relevant attestation.
+        previous_sha256: [...previous].sort()
+      }
     }
   ];
+}
+
+/**
+ * Report a verification marker that disagrees with the bytes on disk for one artifact, without
+ * touching either. Used where the runtime did not itself rewrite the artifact, so re-sealing would
+ * be indistinguishable from laundering an unexplained change past verification.
+ */
+function reportVerifiedArtifactDigestDrift(
+  layout: RunLayout,
+  attemptId: string,
+  relativePath: string,
+  absolutePath: string
+): RuntimeDiagnostic[] {
+  const markerPath = path.join(layout.root, ARTIFACT_VERIFICATION_DIRECTORY, `${attemptId}.json`);
+  const recorded = recordedMarkerDigests(markerPath, relativePath);
+  if (recorded === undefined || recorded.size === 0) return [];
+  let digest: string;
+  try {
+    digest = crypto.createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex");
+  } catch {
+    return [];
+  }
+  if (recorded.size === 1 && recorded.has(digest)) return [];
+  return [
+    {
+      code: "ARTIFACT_VERIFICATION_DIGEST_DRIFTED",
+      message: `Verification marker digest for ${relativePath} does not match the published artifact`,
+      severity: "error",
+      source: "property-provenance",
+      path: markerPath,
+      details: {
+        attempt_id: attemptId,
+        artifact_path: relativePath,
+        sha256: digest,
+        marker_sha256: [...recorded].sort()
+      }
+    }
+  ];
+}
+
+/** Digests recorded for one artifact path across the marker's artifact and publication sets. */
+function recordedMarkerDigests(markerPath: string, relativePath: string): Set<string> | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+  const marker = parsed as Record<string, unknown>;
+  const digests = new Set<string>();
+  for (const key of ["artifacts", "publications"] as const) {
+    const entries = marker[key];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+      const record = entry as Record<string, unknown>;
+      if (record.path === relativePath && typeof record.sha256 === "string") digests.add(record.sha256);
+    }
+  }
+  return digests;
 }
 
 function sanitizeLensReferenceExpectationAuthority(
@@ -1657,7 +1726,14 @@ function sanitizeLensReferenceExpectationAuthority(
     }
     return sanitized;
   });
-  if (removed === 0) return [];
+  if (removed === 0) {
+    // Nothing to sanitize now, but the marker can still disagree with disk: the verifier may have
+    // hashed the lens and published its marker while an earlier pass was mid-rewrite. That leftover
+    // never repairs itself here, and downstream it surfaces only on a `prepare:` wrapper, which
+    // records no failed node and so cannot be retried. Report it as an error instead, so the node
+    // fails visibly and `--retry-failed` can act on it (issue #275).
+    return reportVerifiedArtifactDigestDrift(layout, attemptId, lensOutput.path, lensPath);
+  }
 
   writeJsonDurable(lensPath, {
     ...lens.value,

@@ -1625,8 +1625,20 @@ test("property lens authority sanitizer keeps the verification marker digest con
       attempt_id: node.id,
       node_id: node.id,
       artifacts: [
-        { path: "properties/recon.json", sha256: sealed, primary: true },
-        { path: "findings.json", sha256: "0".repeat(64), primary: false }
+        {
+          path: "properties/recon.json",
+          contract: "ultrafuzz/property-lens@1",
+          contract_digest: "a".repeat(64),
+          sha256: sealed,
+          primary: true
+        },
+        {
+          path: "findings.json",
+          contract: "ultrafuzz/findings@1",
+          contract_digest: "b".repeat(64),
+          sha256: "0".repeat(64),
+          primary: false
+        }
       ],
       publications: [
         { path: "properties/recon.json", sha256: sealed },
@@ -1650,7 +1662,13 @@ test("property lens authority sanitizer keeps the verification marker digest con
   const sanitizedSha = createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex");
   assert.notEqual(sanitizedSha, sealed, "sanitizer did not actually rewrite the artifact");
   const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as {
-    artifacts: Array<{ path: string; sha256: string; primary?: boolean }>;
+    artifacts: Array<{
+      path: string;
+      sha256: string;
+      primary?: boolean;
+      contract?: string;
+      contract_digest?: string;
+    }>;
     publications: Array<{ path: string; sha256: string }>;
   };
   // The rewritten path now matches disk in both sets, and nothing else was touched.
@@ -1660,7 +1678,15 @@ test("property lens authority sanitizer keeps the verification marker digest con
     const untouched = entries.find((entry) => entry.path === "findings.json");
     assert.equal(untouched?.sha256, "0".repeat(64));
   }
-  assert.equal(marker.artifacts.find((entry) => entry.path === "properties/recon.json")?.primary, true);
+  const lensArtifact = marker.artifacts.find((entry) => entry.path === "properties/recon.json");
+  assert.equal(lensArtifact?.primary, true);
+  // Only the digest changes: the contract identity a dependent re-checks must survive untouched.
+  assert.equal(lensArtifact?.contract, "ultrafuzz/property-lens@1");
+  assert.equal(lensArtifact?.contract_digest, "a".repeat(64));
+  const refreshed = result.diagnostics.find(
+    (diagnostic) => diagnostic.code === "ARTIFACT_VERIFICATION_DIGEST_REFRESHED"
+  );
+  assert.deepEqual((refreshed?.details as { previous_sha256?: string[] } | undefined)?.previous_sha256, [sealed]);
 
   // Idempotent: a second pass removes nothing, so it must not rewrite or re-report anything.
   const second = verifyRequiredArtifactsForAttempt(layout, node, node.id);
@@ -1671,6 +1697,107 @@ test("property lens authority sanitizer keeps the verification marker digest con
     JSON.stringify(second.diagnostics)
   );
   assert.equal(createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex"), sanitizedSha);
+});
+
+// A marker can end up describing stale bytes without this gate having rewritten anything - the
+// verifier may have sealed the lens while an earlier pass was mid-rewrite. Re-sealing an
+// unexplained change would be indistinguishable from laundering it past verification, so the gate
+// reports an error instead. That turns an invisible `prepare:` strand into a retryable failed node.
+test("property lens authority gate reports a marker digest that drifted from disk", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-drift" });
+  writeArtifact(
+    layout,
+    "recon-properties",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high"
+        }
+      ]
+    })
+  );
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "recon-properties",
+    logical_id: "recon-properties",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+  const markerDir = path.join(layout.root, ".ultrafuzz-verification");
+  fs.mkdirSync(markerDir, { recursive: true });
+  const markerPath = path.join(markerDir, `${node.id}.json`);
+  const stale = `${JSON.stringify({
+    schema_version: "ultrafuzz.artifact-verification.v1",
+    attempt_id: node.id,
+    node_id: node.id,
+    artifacts: [{ path: "properties/recon.json", sha256: "0".repeat(64), primary: true }],
+    publications: [{ path: "properties/recon.json", sha256: "0".repeat(64) }]
+  })}\n`;
+  fs.writeFileSync(markerPath, stale, "utf8");
+
+  // There is nothing to sanitize, so the gate takes the no-write path.
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
+    false
+  );
+  const drifted = result.diagnostics.find((diagnostic) => diagnostic.code === "ARTIFACT_VERIFICATION_DIGEST_DRIFTED");
+  assert.ok(drifted, JSON.stringify(result.diagnostics));
+  assert.equal(drifted?.severity, "error");
+  assert.equal(result.ok, false);
+  // Neither side is touched: the drift is reported, not papered over.
+  assert.equal(fs.readFileSync(markerPath, "utf8"), stale);
+});
+
+test("property lens authority gate accepts a marker digest that matches disk", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-match" });
+  const lens = JSON.stringify({
+    schema_version: "ultrafuzz.property-lens.v1",
+    properties: [
+      {
+        id: "iSpoke_supply",
+        description: "Supply completes for valid state.",
+        category: "dos-liveness",
+        priority: "high"
+      }
+    ]
+  });
+  writeArtifact(layout, "recon-properties", "properties/recon.json", lens);
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "recon-properties",
+    logical_id: "recon-properties",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+  const artifactPath = path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json");
+  const sha = createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex");
+  const markerDir = path.join(layout.root, ".ultrafuzz-verification");
+  fs.mkdirSync(markerDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(markerDir, `${node.id}.json`),
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.artifact-verification.v1",
+      attempt_id: node.id,
+      node_id: node.id,
+      artifacts: [{ path: "properties/recon.json", sha256: sha, primary: true }],
+      publications: [{ path: "properties/recon.json", sha256: sha }]
+    })}\n`,
+    "utf8"
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_VERIFICATION_DIGEST_DRIFTED"),
+    false,
+    JSON.stringify(result.diagnostics)
+  );
 });
 
 test("property lens authority sanitizer does not mutate non-lens JSON outputs", () => {
