@@ -1800,6 +1800,57 @@ test("property lens authority gate accepts a marker digest that matches disk", (
   );
 });
 
+// R44's `property-specification-0kn0t` node was killed by `LEND_ACC_01` (issue #283). The matcher
+// only allowed a hyphen before the digits, so an underscore-separated catalog ID was not recognized as
+// an unsupported external label, survived sanitization, and was then reported as an unauthorized
+// expectation — failing the node. `LEND-01` was stripped in the same position, so the outcome turned
+// on punctuation rather than on anything meaningful.
+test("property lens authority sanitizer strips underscore-separated catalog labels", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-underscore" });
+  writeArtifact(
+    layout,
+    "recon-properties",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: ["LEND_ACC_01", "LEND_ACC_02", "ERC4626-999"]
+        }
+      ]
+    })
+  );
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "recon-properties",
+    logical_id: "recon-properties",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
+    JSON.stringify(result.diagnostics)
+  );
+  // The node must not fail: an unauthorized citation is stripped, not treated as a fatal artifact.
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+    false,
+    JSON.stringify(result.diagnostics)
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
+      .properties[0].reference_expectations,
+    undefined
+  );
+});
+
 test("property lens authority sanitizer does not mutate non-lens JSON outputs", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-non-lens-json" });
   writeArtifact(

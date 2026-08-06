@@ -1764,8 +1764,17 @@ function propertyLensOutput(node: PlannedGraphNode): PlannedGraphNode["outputs"]
   return node.outputs.find((output) => output.contract === "ultrafuzz/property-lens@1");
 }
 
+/**
+ * True for an identifier shaped like a citation into a reference catalog we were not given.
+ *
+ * The separator deliberately allows `_` as well as `-`. R44's `property-specification-0kn0t` node was
+ * killed by `LEND_ACC_01` (issue #283): the hyphen-only form did not match, so the sanitizer left the
+ * ID in place and `verifyPropertyProvenanceArtifacts` then failed the node as unauthorized. `LEND-01`
+ * was quietly stripped in the same position, so the outcome turned on the model's choice of
+ * punctuation rather than on anything meaningful.
+ */
 function isUnsupportedExternalReferenceLabel(expectationId: string): boolean {
-  return /^[A-Z][A-Z0-9]*-\d+$/u.test(expectationId);
+  return /^[A-Z][A-Z0-9_]*[-_]\d+$/u.test(expectationId);
 }
 
 function readLensSuppliedExpectationIds(
