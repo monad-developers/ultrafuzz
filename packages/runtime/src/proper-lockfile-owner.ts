@@ -177,18 +177,23 @@ export async function releaseOwnedProperLockfile(input: OwnedProperLockfileRelea
     // throw here would leave the hold and its heartbeat alive, refreshing the lock
     // directory's mtime so staleness never reclaims it, and the returned closure has
     // already latched so release can never be retried.
+    let lost = false;
     try {
       fs.unlinkSync(input.ownerPath);
-    } catch {
-      // The marker may already be gone. Releasing the hold still matters.
+    } catch (error) {
+      // A marker that is already gone is benign. Anything else means the marker
+      // survives with a live owner, which reclamation refuses to touch, so report the
+      // hold as lost rather than claiming a clean release.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") lost = true;
     }
     try {
       await input.release();
     } catch {
       // Nothing further can be done, and this must not replace the caller's own
       // outcome: every caller releases from a `finally`.
+      lost = true;
     }
-    return { lost: false };
+    return { lost };
   }
   try {
     await input.release();

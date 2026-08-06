@@ -573,9 +573,7 @@ export type SmithersCompatibilityPatchId =
   | "workflow_hash_entry"
   | "workflow_hash_recursion"
   | "workflow_hash_public"
-  | "engine_activate_workflow_path"
-  | "engine_descriptor_execution_path"
-  | "engine_descriptor_driver_path";
+  | "engine_activate_workflow_path";
 
 export interface SmithersCompatibilityPatch {
   /** Stable name this patch is reported under by `doctor`. */
@@ -847,25 +845,33 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patchable: SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_SOURCE,
     patched: SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_PATCH,
     upstreamAbsent: []
-  },
-  // Presence invariants: identical patchable and patched text, so a posture of
-  // `applied` means the descriptor anchor is intact and `incompatible` means upstream
-  // moved it.
+  }
+];
+
+/**
+ * Upstream shapes Ultrafuzz depends on but never rewrites. They are deliberately not
+ * compatibility patches: a patch is described by the upstream text it replaces, and
+ * the retirement check requires the replacement to be absent upstream, which can never
+ * hold for text that must already be present. Applying asserts presence; nothing here
+ * is ever written.
+ */
+export const SMITHERS_REQUIRED_ENGINE_ANCHORS: readonly {
+  readonly id: string;
+  readonly packageName: string;
+  readonly sourceRelativePath: string;
+  readonly anchor: string;
+}[] = [
   {
     id: "engine_descriptor_execution_path",
     packageName: "@smithers-orchestrator/engine",
     sourceRelativePath: "src/engine.js",
-    patchable: SMITHERS_ENGINE_DESCRIPTOR_EXECUTION_PATH_ANCHOR,
-    patched: SMITHERS_ENGINE_DESCRIPTOR_EXECUTION_PATH_ANCHOR,
-    upstreamAbsent: []
+    anchor: SMITHERS_ENGINE_DESCRIPTOR_EXECUTION_PATH_ANCHOR
   },
   {
     id: "engine_descriptor_driver_path",
     packageName: "@smithers-orchestrator/engine",
     sourceRelativePath: "src/engine.js",
-    patchable: SMITHERS_ENGINE_DESCRIPTOR_DRIVER_PATH_ANCHOR,
-    patched: SMITHERS_ENGINE_DESCRIPTOR_DRIVER_PATH_ANCHOR,
-    upstreamAbsent: []
+    anchor: SMITHERS_ENGINE_DESCRIPTOR_DRIVER_PATH_ANCHOR
   }
 ];
 
@@ -4010,9 +4016,10 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
     SMITHERS_ENGINE_WORKFLOW_PATH_PATCH,
     "anchored and durable workflow paths"
   );
-  // The resume-activation call already receives the resolved workflow path as of the
-  // pinned runner release, and the persisted-path patch above requires the resolved
-  // and persisted paths to name the same file, so no separate patch is needed there.
+  // Every durable path write is redirected to the lexical path, including the
+  // resume-activation call. Upstream does pass that call a workflow path, but it passes
+  // the descriptor-anchored argument, so leaving it unpatched would persist a
+  // per-process path and make the second resume of a run impossible.
   for (const [source, patch, label] of [
     [
       SMITHERS_ENGINE_DURABILITY_METADATA_SOURCE,
@@ -4036,16 +4043,12 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
   ] as const) {
     engineContents = applyRequiredSmithersPatch(engineContents, source, patch, label);
   }
-  // The execution path stays descriptor-anchored. Only the five durable path fields
-  // above
-  // receive the lexical identity that survives controller exit. These two assert
-  // presence rather than rewrite, so their patchable and patched text are identical.
-  for (const [anchor, label] of [
-    [SMITHERS_ENGINE_DESCRIPTOR_EXECUTION_PATH_ANCHOR, "descriptor execution paths"],
-    [SMITHERS_ENGINE_DESCRIPTOR_DRIVER_PATH_ANCHOR, "descriptor driver path"]
-  ] as const) {
-    if (!engineContents.includes(anchor)) {
-      throw new Error(`pinned workflow runner ${label} are incompatible`);
+  // The execution path stays descriptor-anchored: only the durable path fields patched
+  // above receive the lexical identity that survives controller exit. The anchors below
+  // are asserted for presence and never rewritten.
+  for (const required of SMITHERS_REQUIRED_ENGINE_ANCHORS) {
+    if (!engineContents.includes(required.anchor)) {
+      throw new Error(`pinned workflow runner ${required.id.replaceAll("_", " ")} is incompatible`);
     }
   }
   // The scheduler session is in-memory. Restore only durable skipped tasks and

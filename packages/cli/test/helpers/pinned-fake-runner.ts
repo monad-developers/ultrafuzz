@@ -1,13 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { SMITHERS_ORCHESTRATOR_VERSION } from "@ultrafuzz/runtime";
+import { SMITHERS_ORCHESTRATOR_BIN_PATH, SMITHERS_ORCHESTRATOR_VERSION } from "@ultrafuzz/runtime";
 
 // Derived, never a literal: a duplicated version literal silently stops matching the
 // pinned runner on the next upgrade, and every CLI test built on this helper then
 // presents an invalid install and falls through to a real network install.
 const PINNED_RUNNER_VERSION = SMITHERS_ORCHESTRATOR_VERSION;
-const PINNED_RUNNER_BIN = "src/bin/smithers.js";
+const PINNED_RUNNER_BIN = SMITHERS_ORCHESTRATOR_BIN_PATH;
 
 /**
  * Installs a minimal physical copy of the pinned workflow runner dependency.

@@ -244,8 +244,8 @@ workflow is still in an active state (running, in-progress, started, queued,
 retrying, or waiting). `resume --reset-node` retries one failed workflow node and
 its dependents in the same linked run; the applied reset is recorded so retrying
 the command after a failed continuation resumes the already-reset run instead of
-repeating the reset. `fork` may start from a checkpoint frame and may reset one
-workflow node before starting the fork.
+repeating the reset. `replay` and `fork` both require a checkpoint frame; `fork`
+may also reset one workflow node before starting the fork.
 
 Every command in this section takes an Ultrafuzz run ID and resolves the linked
 workflow run from existing product evidence; none of them require the

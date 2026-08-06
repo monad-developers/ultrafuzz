@@ -365,7 +365,6 @@ export async function acquireKimiModalNodeExecutionLease(
 
     const timeoutMs = Math.max(5_000, Math.floor(options.timeoutMs ?? 120_000));
     forgetCredentialLockCompromise(anchoredTarget);
-    beginCredentialLockHold(anchoredTarget);
     const acquiredLeaseLock = await lockfile.lock(anchoredTarget, {
       retries: {
         retries: Math.max(1, Math.ceil(timeoutMs / 500)),
@@ -380,6 +379,10 @@ export async function acquireKimiModalNodeExecutionLease(
       realpath: false,
       onCompromised: credentialLockCompromiseHandler(anchoredTarget)
     });
+    // Only after the lock is actually held: incrementing before the await would leak
+    // the count on any rejected acquisition, and `forgetCredentialLockCompromise` would
+    // then be a permanent no-op for this pathname for the life of the process.
+    beginCredentialLockHold(anchoredTarget);
     releaseLock = async () => {
       endCredentialLockHold(anchoredTarget);
       await acquiredLeaseLock();

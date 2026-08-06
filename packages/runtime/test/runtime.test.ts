@@ -6613,7 +6613,19 @@ test("startRun patches every described runner compatibility workaround", async (
       "utf8"
     );
   }
+  // Upstream shapes Ultrafuzz depends on but never rewrites are asserted at apply time,
+  // so the fabricated tree has to carry them too.
+  const { SMITHERS_REQUIRED_ENGINE_ANCHORS } = await import("../src/smithers.js");
+  for (const required of SMITHERS_REQUIRED_ENGINE_ANCHORS) {
+    const source = path.join(
+      nodeModules,
+      ...required.packageName.split("/"),
+      ...required.sourceRelativePath.split("/")
+    );
+    bySource.set(source, [...(bySource.get(source) ?? []), required.anchor]);
+  }
   for (const [source, anchors] of bySource) {
+    fs.mkdirSync(path.dirname(source), { recursive: true });
     fs.writeFileSync(source, `${anchors.join("\n")}\n`, "utf8");
   }
 
@@ -6706,6 +6718,20 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
   };
   const closureStart = uniqueIndexOf(SMITHERS_ENGINE_RESUME_RESET_ORDERING.closureStart, "startup closure");
   const anchor = uniqueIndexOf(SMITHERS_ENGINE_RESUME_RESET_ORDERING.anchor, "resume-hydration anchor");
+  const { SMITHERS_REQUIRED_ENGINE_ANCHORS: requiredAnchors } = await import("../src/smithers.js");
+  assert.ok(requiredAnchors.length > 0, "no required upstream anchors were described");
+  for (const required of requiredAnchors) {
+    const exportSubpath = required.sourceRelativePath.replace(/^src\//u, "").replace(/\.js$/u, "");
+    const contents = fs.readFileSync(
+      resolveFromPinnedRunner.resolve(`${required.packageName}/${exportSubpath}`),
+      "utf8"
+    );
+    // Never rewritten, so this asserts presence rather than absence, and presence
+    // rather than uniqueness: these shapes legitimately recur. If upstream moves one,
+    // applying must fail loudly instead of silently losing the dependency.
+    assert.equal(contents.includes(required.anchor), true, `${required.id} no longer appears in the pinned release`);
+  }
+
   assert.ok(SMITHERS_ENGINE_RESUME_RESET_ORDERING.resetCalls.length > 0, "no resume resets were pinned");
   for (const marker of SMITHERS_ENGINE_RESUME_RESET_ORDERING.resetCalls) {
     const resetCall = uniqueIndexOf(marker, `resume reset ${JSON.stringify(marker)}`);

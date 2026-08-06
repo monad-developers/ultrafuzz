@@ -102,6 +102,10 @@ const START_PREPARATION_FILE = "start-preparation.json";
 const START_PREPARATION_INTENT_SCHEMA_VERSION = "ultrafuzz.start-preparation-intent.v1" as const;
 const START_PREPARATION_INTENT_FILE = "start-preparation-intent.json";
 const START_PREPARATION_LOCK = ".start-preparation-lock";
+// `withProperLockfileReclaimGuard` serializes reclamation on a sibling pathname, so a
+// contender's guard can exist in the run root at any moment. Both closure checks below
+// must tolerate it or a concurrent acquisition attempt fails an unrelated run.
+const START_PREPARATION_RECLAIM_GUARD = `${START_PREPARATION_LOCK}.reclaim-guard`;
 const START_PREPARATION_LOCK_OWNER = "owner.json";
 const START_PREPARATION_LOCK_STALE_MS = 30 * 60 * 1_000;
 
@@ -607,7 +611,9 @@ function ensureStartPreparationIntent(input: {
 }): StartPreparationIntentDocument {
   const intentPath = startPreparationIntentPath(input.layout);
   if (!pathEntryExists(intentPath)) {
-    const unexpected = fs.readdirSync(input.layout.root).filter((entry) => entry !== START_PREPARATION_LOCK);
+    const unexpected = fs
+      .readdirSync(input.layout.root)
+      .filter((entry) => entry !== START_PREPARATION_LOCK && entry !== START_PREPARATION_RECLAIM_GUARD);
     if (unexpected.length > 0) {
       throw new Error("existing workflow run root has no durable start intent and is not empty");
     }
@@ -847,6 +853,7 @@ function assertIncompletePreparationRootClosure(layout: RunLayout): void {
   const allowed = new Set([
     START_PREPARATION_INTENT_FILE,
     START_PREPARATION_LOCK,
+    START_PREPARATION_RECLAIM_GUARD,
     path.basename(layout.artifactsDir),
     path.basename(layout.workspacesDir),
     path.basename(layout.eventsIndexDir),

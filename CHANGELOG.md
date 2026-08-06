@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Publishes a three-target `deepseek / deepseek-v4-flash / max` UltrafuzzBench smoke benchmark judged by `gpt-5.6-sol / xhigh`, with provider-reported-alias identity, an unverified provider version, and the pinned DeepSeek V4 Flash rates (#165).
+- `ultrafuzz replay` and `ultrafuzz fork` now require `--frame`, and both report a missing or invalid frame as a typed diagnostic instead of a parser error (#165).
+- `ultrafuzz run` now requires a Git repository with a committed `HEAD`, so every benchmark task is pinned to, executes from, and attests one exact revision (#165).
+- Hardens workflow-run locking and event-log recovery: a lost lock heartbeat no longer aborts the process or strands a lock directory, terminal lifecycle transitions commit their state and evidence together, and a torn trailing event record is repaired instead of wedging the run (#165).
+- Detects and redacts a credential embedded in a base64 body at any byte alignment, so an encoded copy cannot cross the Modal boundary (#165).
 - Upgrades the pinned workflow engine to Smithers 0.32.0, moves both the workspace and the generated runner workspace onto one pinned Effect 4 tree, and migrates existing 0.31.0 manifests forward (#274).
 - Fixes durable resume hydration so it runs after the engine resets stale in-progress attempts; upgrading alone would have restored a task as finished while the durable record said pending (#274).
 - A partially installed workflow-runner dependency tree now reinstalls itself instead of failing every later resume of a durable run (#274).
