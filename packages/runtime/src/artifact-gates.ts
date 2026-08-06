@@ -548,7 +548,16 @@ function verifyInvariantEvidenceArtifacts(
         const renderedSourcePairs =
           block === undefined ? [] : markdownFieldEntries(block, "sources", normalizeSourcePair);
         const ledgerFieldValues = block === undefined ? [] : markdownFieldValues(block, "ledger_ids");
-        const missingLedgerField = block !== undefined && ledgerFieldValues.length !== 1;
+        // Only required when the property actually has ledger IDs to render. Demanding the field
+        // unconditionally contradicted both the schema, where `canonical_property.ledger_ids` is
+        // `.optional()`, and the fan-in prompt, which asks for it on "every canonical property THAT
+        // REPRESENTS one or more ledger entries". R45 and R46 each lost a full fan-in attempt to that
+        // (issue #297): R46 emitted 219 properties, 78 with ledger IDs, and rendered the field exactly
+        // 78 times — correct by both other definitions, rejected by this one. The parity checks below
+        // still enforce everything that matters once a property does have IDs: each must be rendered,
+        // the right number of times, with no extras.
+        const expectsLedgerField = (property.ledger_ids ?? []).length > 0;
+        const missingLedgerField = block !== undefined && expectsLedgerField && ledgerFieldValues.length !== 1;
         const expectedReferenceExpectations = property.reference_expectations ?? [];
         const renderedReferenceExpectations =
           block === undefined ? [] : markdownFieldEntries(block, "reference_expectations", normalizeLedgerId);
