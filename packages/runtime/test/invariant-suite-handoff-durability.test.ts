@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -59,6 +60,8 @@ type WorkflowHelpers = {
     publications: Map<string, Buffer>,
     artifactRoots: readonly string[]
   ) => void;
+  resetTaskArtifactsForRetry?: (task: TaskSpecLike) => void;
+  changedTestTreePaths?: (workspaceRoot: string, baselinePath?: string, protectedBaselinePath?: string) => string[];
 };
 
 /** Slice a top-level `function name(...)` declaration out of the template. */
@@ -74,6 +77,9 @@ type HarnessState = {
   tombstones: Map<string, Set<string>>;
   dependencySnapshots: Map<string, Map<string, SuiteEntry>>;
   publicationSnapshots: Map<string, Map<string, Buffer>>;
+  workspaceSnapshots: Map<string, Map<string, Buffer>>;
+  baselineSnapshots: Map<string, { contents: string; sha256: string }>;
+  protectedBaselineSnapshots: Map<string, { contents: string; sha256: string }>;
   taskSpecs: TaskSpecLike[];
   changedTestTreePaths: string[];
   changedInvariantSourcePaths: string[];
@@ -170,7 +176,11 @@ function copyInvariantSuiteSource(workspaceRoot: string, artifactRoot: string, r
  * names that do not exist yet resolve to nothing, so a test can express the
  * behavior a fix must deliver before the fix introduces its helpers.
  */
-function loadWorkflowHelpers(names: readonly string[], state: HarnessState): WorkflowHelpers {
+function loadWorkflowHelpers(
+  names: readonly string[],
+  state: HarnessState,
+  overrides: Record<string, unknown> = {}
+): WorkflowHelpers {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const declarations = names.map((name) => sliceTopLevelFunction(source, name)).join("\n");
   const emitted = ts.transpileModule(declarations, {
@@ -182,6 +192,7 @@ function loadWorkflowHelpers(names: readonly string[], state: HarnessState): Wor
     path,
     Buffer,
     createHash,
+    execFileSync,
     existsSync: fs.existsSync,
     readFileSync: fs.readFileSync,
     realpathSync: fs.realpathSync,
@@ -198,9 +209,15 @@ function loadWorkflowHelpers(names: readonly string[], state: HarnessState): Wor
     invariantSuiteTombstones: state.tombstones,
     invariantSuiteDependencySnapshots: state.dependencySnapshots,
     invariantSuitePublicationSnapshots: state.publicationSnapshots,
+    invariantSuiteWorkspaceSnapshots: state.workspaceSnapshots,
+    invariantSuiteBaselineSnapshots: state.baselineSnapshots,
+    invariantSuiteProtectedBaselineSnapshots: state.protectedBaselineSnapshots,
+    loadInvariantSuiteWorkspaceSnapshot: (task: TaskSpecLike) => state.workspaceSnapshots.get(task.attemptId),
     taskSpecs: state.taskSpecs,
+    pinnedSourceRef: "refs/heads/ultrafuzz/pinned-source",
     INVARIANT_SUITE_MANIFEST_FILE: "invariant-suite-manifest.json",
     INVARIANT_SUITE_BASELINE_FILE: "invariant-suite-baseline.json",
+    INVARIANT_SUITE_HANDOFF_DIR: "invariant-suite-handoffs",
     INVARIANT_SUITE_HANDOFF_FILE: "handoff.json",
     INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION: "ultrafuzz.invariant-suite-handoff.v1",
     MAX_INVARIANT_SUITE_FILES: 512,
@@ -238,9 +255,28 @@ function loadWorkflowHelpers(names: readonly string[], state: HarnessState): Wor
       const root = path.join(task.runRoot, "invariant-suite-handoffs", task.attemptId);
       fs.mkdirSync(root, { recursive: true, mode: 0o700 });
       return fs.realpathSync(root);
-    }
+    },
+    invariantSuiteHandoffRecordPath: (task: TaskSpecLike) =>
+      path.join(task.runRoot, "invariant-suite-handoffs", task.attemptId, "handoff.json"),
+    // Collaborators of resetTaskArtifactsForRetry that are out of scope here.
+    resetTaskArtifactContents: () => undefined,
+    restoreInvariantSuiteWorkspaceSnapshot: () => undefined,
+    restoreWorkspacePatchPreparation: () => undefined,
+    prepareArtifactMirror: () => undefined,
+    invariantTestRoots: () => [] as readonly string[],
+    gitTestTreePaths: (workspaceRoot: string) =>
+      execFileSync("git", ["ls-files", "--cached", "--others", "--", "test", "tests"], {
+        cwd: workspaceRoot,
+        encoding: "utf8"
+      })
+        .split(/\r?\n/u)
+        .filter((value) => value.startsWith("test/") || value.startsWith("tests/"))
+        .filter((value) => fs.existsSync(path.resolve(workspaceRoot, value)))
+        .filter((value) => fs.statSync(path.resolve(workspaceRoot, value)).size > 0)
+        .sort()
   };
 
+  Object.assign(bag, overrides);
   // Never shadow a helper the template actually defines.
   for (const name of present) delete bag[name];
 
@@ -256,21 +292,35 @@ function createHarnessState(taskSpecs: TaskSpecLike[]): HarnessState {
     tombstones: new Map(),
     dependencySnapshots: new Map(),
     publicationSnapshots: new Map(),
+    workspaceSnapshots: new Map(),
+    baselineSnapshots: new Map(),
+    protectedBaselineSnapshots: new Map(),
     taskSpecs,
     changedTestTreePaths: [],
     changedInvariantSourcePaths: []
   };
 }
 
-const MATERIALIZATION_HELPERS = [
+const HANDOFF_RECORD_HELPERS = [
   "assertInvariantSuiteTombstoneBudget",
   "parseInvariantSuiteManifestRecord",
   "readInvariantSuiteManifestRecord",
   "invariantSuiteProducerTask",
   "inheritedInvariantSuiteTombstones",
+  "invariantSuiteDependencyFingerprints",
+  "invariantSuiteFingerprintKey",
   "writeInvariantSuiteDependencyHandoff",
   "loadInvariantSuiteDependencyHandoff",
   "resolveInvariantSuiteDependencySnapshot",
+  "resolveInheritedInvariantSuiteTombstones"
+] as const;
+
+const MATERIALIZATION_HELPERS = [
+  ...HANDOFF_RECORD_HELPERS,
+  "orderedInvariantSuiteDependencies",
+  "invariantSuiteDependencySuitePaths",
+  "assertInvariantSuiteDependencyExpectations",
+  "reconcileInvariantSuiteWorkspace",
   "materializeInvariantSuiteFromDependencies"
 ] as const;
 
@@ -284,18 +334,15 @@ const PUBLICATION_HELPERS = [
 ] as const;
 
 const COMPANION_HELPERS = [
-  "assertInvariantSuiteTombstoneBudget",
-  "parseInvariantSuiteManifestRecord",
-  "readInvariantSuiteManifestRecord",
-  "invariantSuiteProducerTask",
-  "inheritedInvariantSuiteTombstones",
-  "writeInvariantSuiteDependencyHandoff",
-  "loadInvariantSuiteDependencyHandoff",
-  "resolveInvariantSuiteDependencySnapshot",
+  ...HANDOFF_RECORD_HELPERS,
   "resetInvariantSuiteArtifactRoot",
   "copyDependencyInvariantSuiteToArtifact",
   "materializeInvariantSuiteCompanions"
 ] as const;
+
+const RETRY_HELPERS = ["resetTaskArtifactsForRetry"] as const;
+
+const DISCOVERY_HELPERS = ["gitTestTreePaths", "recordInvariantSuiteTombstone", "changedTestTreePaths"] as const;
 
 function writeSuiteSource(artifactDir: string, relativePath: string, contents: string): void {
   const target = path.join(artifactDir, "invariant-suite", relativePath);
@@ -424,7 +471,7 @@ test("#217 a source deleted at an invariant stage is not resurrected from an ind
   }
 });
 
-test("#217 a source an ancestor deleted and a later stage re-added stays alive", () => {
+test("#217 a declared predecessor that still carries a tombstoned path outranks the tombstone", () => {
   const { runRoot, setup, handlers, coverage, state } = createInvariantChain();
   try {
     writeSuiteSource(setup.artifactDir, "test/recon/TargetFunctions.sol", "contract TargetFunctions { /* v1 */ }\n");
@@ -436,12 +483,19 @@ test("#217 a source an ancestor deleted and a later stage re-added stays alive",
       ["test/recon/Properties.sol"]
     );
 
+    // handlers is coverage's DIRECT dependency and it both re-added
+    // Properties.sol and still carries the inherited tombstone for it. Only a
+    // direct predecessor reaches the "still present" subtraction, so this is
+    // the shape that pins the rule.
     writeSuiteSource(handlers.artifactDir, "test/recon/TargetFunctions.sol", "contract TargetFunctions { /* v2 */ }\n");
     writeSuiteSource(handlers.artifactDir, "test/recon/Properties.sol", "contract Properties { /* re-added */ }\n");
-    writeSuiteManifest(handlers.artifactDir, "stateful-invariant-handlers", "handlers", [
-      "test/recon/Properties.sol",
-      "test/recon/TargetFunctions.sol"
-    ]);
+    writeSuiteManifest(
+      handlers.artifactDir,
+      "stateful-invariant-handlers",
+      "handlers",
+      ["test/recon/Properties.sol", "test/recon/TargetFunctions.sol"],
+      ["test/recon/Properties.sol"]
+    );
 
     const helpers = loadWorkflowHelpers([...MATERIALIZATION_HELPERS], state);
     assert.ok(helpers.materializeInvariantSuiteFromDependencies);
@@ -449,9 +503,46 @@ test("#217 a source an ancestor deleted and a later stage re-added stays alive",
 
     assert.equal(
       fs.readFileSync(path.join(coverage.workspacePath, "test/recon/Properties.sol"), "utf8"),
-      "contract Properties { /* re-added */ }\n"
+      "contract Properties { /* re-added */ }\n",
+      "a path a declared predecessor still publishes must not be suppressed by its own inherited tombstone"
     );
     assert.equal(setup.attemptId, "setup");
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#217 a path this stage deletes and re-creates in the same attempt is not published as a tombstone", () => {
+  const { runRoot, setup, handlers, state } = createInvariantChain();
+  try {
+    writeSuiteSource(setup.artifactDir, "test/recon/Properties.sol", "contract Properties { /* v1 */ }\n");
+    writeSuiteManifest(setup.artifactDir, "stateful-invariant-setup", "setup", ["test/recon/Properties.sol"]);
+
+    // The agent removed Properties.sol and then wrote it again in the same
+    // attempt, so the deletion is recorded but the file is published.
+    const authored = path.join(handlers.workspacePath, "test/recon/Properties.sol");
+    fs.mkdirSync(path.dirname(authored), { recursive: true });
+    fs.writeFileSync(authored, "contract Properties { /* rewritten */ }\n", "utf8");
+    state.changedTestTreePaths = ["test/recon/Properties.sol"];
+    state.tombstones.set(fs.realpathSync(handlers.workspacePath), new Set(["test/recon/Properties.sol"]));
+    state.dependencySnapshots.set("handlers", new Map<string, SuiteEntry>());
+
+    const helpers = loadWorkflowHelpers([...COMPANION_HELPERS], state);
+    assert.ok(helpers.materializeInvariantSuiteCompanions);
+    helpers.materializeInvariantSuiteCompanions(handlers);
+
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(handlers.artifactDir, "invariant-suite-manifest.json"), "utf8")
+    ) as { files: Array<{ path: string }>; tombstones?: string[] };
+    assert.deepEqual(
+      manifest.files.map((file) => file.path),
+      ["test/recon/Properties.sol"]
+    );
+    assert.deepEqual(
+      manifest.tombstones,
+      [],
+      "a path this stage still publishes must clear its own tombstone, or descendants suppress a live source"
+    );
   } finally {
     fs.rmSync(runRoot, { recursive: true, force: true });
   }
@@ -654,6 +745,280 @@ test("#219 the durable handoff record fails closed when a recorded dependency no
     assert.throws(
       () => materializeInvariantSuiteFromDependencies(handlers, handlers.workspacePath),
       /invariant suite dependency changed test\/recon\/TargetFunctions\.sol/u
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#219 a legitimately republished ancestor supersedes the record instead of failing the stage closed", () => {
+  const { runRoot, setup, handlers, state } = createInvariantChain();
+  try {
+    writeSuiteSource(setup.artifactDir, "test/recon/TargetFunctions.sol", "contract TargetFunctions { /* v1 */ }\n");
+    writeSuiteManifest(setup.artifactDir, "stateful-invariant-setup", "setup", ["test/recon/TargetFunctions.sol"]);
+
+    const helpers = loadWorkflowHelpers([...MATERIALIZATION_HELPERS], state);
+    const materialize = helpers.materializeInvariantSuiteFromDependencies;
+    assert.ok(materialize);
+    materialize(handlers, handlers.workspacePath);
+
+    // An operator retries the ancestor (retry-task / timetravel / a new Modal
+    // execution generation republishing the directory). It publishes different
+    // bytes with a fresh, internally consistent manifest.
+    writeSuiteSource(setup.artifactDir, "test/recon/TargetFunctions.sol", "contract TargetFunctions { /* v2 */ }\n");
+    writeSuiteManifest(setup.artifactDir, "stateful-invariant-setup", "setup", ["test/recon/TargetFunctions.sol"]);
+    state.dependencySnapshots.clear();
+
+    materialize(handlers, handlers.workspacePath);
+    assert.equal(
+      state.dependencySnapshots.get("handlers")?.get("test/recon/TargetFunctions.sol")?.bytes.toString("utf8"),
+      "contract TargetFunctions { /* v2 */ }\n",
+      "a superseded handoff record must be re-derived against the ancestor's new bytes"
+    );
+    const record = JSON.parse(
+      fs.readFileSync(path.join(runRoot, "invariant-suite-handoffs", "handlers", "handoff.json"), "utf8")
+    ) as { dependencies: Array<{ sha256: string }>; producers: Array<{ attempt_id: string }> };
+    assert.deepEqual(
+      record.producers.map((entry) => entry.attempt_id),
+      ["setup"],
+      "the record must bind itself to the ancestor manifests it was derived from"
+    );
+    assert.equal(
+      record.dependencies[0]?.sha256,
+      createHash("sha256").update("contract TargetFunctions { /* v2 */ }\n").digest("hex")
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#219 a worktree lost before the durable workspace snapshot exists is repopulated from the record", () => {
+  const { runRoot, setup, handlers, state } = createInvariantChain();
+  try {
+    writeSuiteSource(setup.artifactDir, "test/recon/TargetFunctions.sol", "contract TargetFunctions { /* v1 */ }\n");
+    writeSuiteManifest(setup.artifactDir, "stateful-invariant-setup", "setup", ["test/recon/TargetFunctions.sol"]);
+
+    const helpers = loadWorkflowHelpers([...MATERIALIZATION_HELPERS], state);
+    const materialize = helpers.materializeInvariantSuiteFromDependencies;
+    assert.ok(materialize);
+    materialize(handlers, handlers.workspacePath);
+
+    // The process died between writing the handoff record and capturing the
+    // workspace snapshot, and the worktree was reclaimed. Nothing else can
+    // restore the inherited suite here.
+    fs.rmSync(handlers.workspacePath, { recursive: true, force: true });
+    fs.mkdirSync(handlers.workspacePath, { recursive: true });
+    state.dependencySnapshots.clear();
+    assert.equal(state.workspaceSnapshots.size, 0);
+
+    materialize(handlers, handlers.workspacePath);
+    assert.equal(
+      fs.readFileSync(path.join(handlers.workspacePath, "test/recon/TargetFunctions.sol"), "utf8"),
+      "contract TargetFunctions { /* v1 */ }\n",
+      "the recorded handoff must be re-materialized rather than silently skipped"
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#219 the record never resurrects a source the agent deleted once the workspace snapshot is durable", () => {
+  const { runRoot, setup, handlers, state } = createInvariantChain();
+  try {
+    writeSuiteSource(setup.artifactDir, "test/recon/Properties.sol", "contract Properties { /* v1 */ }\n");
+    writeSuiteSource(setup.artifactDir, "test/recon/TargetFunctions.sol", "contract TargetFunctions { /* v1 */ }\n");
+    writeSuiteManifest(setup.artifactDir, "stateful-invariant-setup", "setup", [
+      "test/recon/Properties.sol",
+      "test/recon/TargetFunctions.sol"
+    ]);
+
+    const helpers = loadWorkflowHelpers([...MATERIALIZATION_HELPERS], state);
+    const materialize = helpers.materializeInvariantSuiteFromDependencies;
+    assert.ok(materialize);
+    materialize(handlers, handlers.workspacePath);
+    // The first preparation captured its durable workspace snapshot.
+    state.workspaceSnapshots.set("handlers", new Map());
+
+    // The agent deletes one inherited source and rewrites the other, then the
+    // controller restarts and the post-agent preparation pass runs.
+    fs.rmSync(path.join(handlers.workspacePath, "test/recon/Properties.sol"));
+    fs.writeFileSync(
+      path.join(handlers.workspacePath, "test/recon/TargetFunctions.sol"),
+      "contract TargetFunctions { /* authored */ }\n",
+      "utf8"
+    );
+    state.dependencySnapshots.clear();
+
+    materialize(handlers, handlers.workspacePath);
+    assert.equal(
+      fs.existsSync(path.join(handlers.workspacePath, "test/recon/Properties.sol")),
+      false,
+      "reconciliation must never resurrect a source this attempt deleted"
+    );
+    assert.equal(
+      fs.readFileSync(path.join(handlers.workspacePath, "test/recon/TargetFunctions.sol"), "utf8"),
+      "contract TargetFunctions { /* authored */ }\n",
+      "reconciliation must never overwrite a source this attempt authored"
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#219 the recovered path still fails closed on an ancestor property with no published suite source", () => {
+  const { runRoot, setup, handlers, state } = createInvariantChain();
+  try {
+    writeSuiteSource(setup.artifactDir, "test/recon/TargetFunctions.sol", "contract TargetFunctions { /* v1 */ }\n");
+    writeSuiteManifest(setup.artifactDir, "stateful-invariant-setup", "setup", ["test/recon/TargetFunctions.sol"]);
+
+    const helpers = loadWorkflowHelpers([...MATERIALIZATION_HELPERS], state, {
+      validateImplementedPropertiesSchema: () => ({
+        ok: true,
+        value: {
+          properties: [
+            {
+              status: "implemented",
+              implementation_paths: [] as string[],
+              test_paths: ["test/recon/Missing.sol"]
+            }
+          ]
+        }
+      })
+    });
+    const materialize = helpers.materializeInvariantSuiteFromDependencies;
+    assert.ok(materialize);
+
+    // Record a handoff while the ancestor makes no implemented-property claim.
+    materialize(handlers, handlers.workspacePath);
+    assert.equal(fs.existsSync(path.join(runRoot, "invariant-suite-handoffs", "handlers", "handoff.json")), true);
+
+    // The ancestor now claims a property implemented by a source it never
+    // published. The suite manifest is untouched, so the record is still
+    // current and the recovered path must re-check the expectation itself.
+    fs.writeFileSync(path.join(setup.artifactDir, "implemented-properties.json"), "{}\n", "utf8");
+    state.dependencySnapshots.clear();
+    assert.throws(
+      () => materialize(handlers, handlers.workspacePath),
+      /artifact handoff is missing invariant suite source test\/recon\/Missing\.sol/u
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#219 the durable record's tombstones drive the deletion channel this stage publishes", () => {
+  const { runRoot, setup, handlers, state } = createInvariantChain();
+  try {
+    writeSuiteSource(setup.artifactDir, "test/recon/TargetFunctions.sol", "contract TargetFunctions { /* v1 */ }\n");
+    writeSuiteManifest(setup.artifactDir, "stateful-invariant-setup", "setup", ["test/recon/TargetFunctions.sol"]);
+
+    const materializationHelpers = loadWorkflowHelpers([...MATERIALIZATION_HELPERS], state);
+    assert.ok(materializationHelpers.materializeInvariantSuiteFromDependencies);
+    materializationHelpers.materializeInvariantSuiteFromDependencies(handlers, handlers.workspacePath);
+
+    // Rewrite only the record's deletion channel, leaving its ancestor
+    // fingerprints intact. The ancestor manifest carries no tombstone, so the
+    // published deletion channel can only come from the durable record.
+    const recordPath = path.join(runRoot, "invariant-suite-handoffs", "handlers", "handoff.json");
+    const record = JSON.parse(fs.readFileSync(recordPath, "utf8")) as { tombstones: string[] };
+    record.tombstones = ["src/Legacy.sol"];
+    fs.writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+    state.dependencySnapshots.clear();
+    state.tombstones.clear();
+
+    const companionHelpers = loadWorkflowHelpers([...COMPANION_HELPERS], state);
+    assert.ok(companionHelpers.materializeInvariantSuiteCompanions);
+    companionHelpers.materializeInvariantSuiteCompanions(handlers);
+
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(handlers.artifactDir, "invariant-suite-manifest.json"), "utf8")
+    ) as { tombstones?: string[] };
+    assert.deepEqual(
+      manifest.tombstones,
+      ["src/Legacy.sol"],
+      "the record is the durable statement of what the handoff suppressed and must be honoured"
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#217 a retry drops the previous attempt's tombstones so a restored source is not suppressed", () => {
+  const { runRoot, handlers, state } = createInvariantChain();
+  try {
+    const workspaceRoot = fs.realpathSync(handlers.workspacePath);
+    state.tombstones.set(workspaceRoot, new Set(["test/recon/Properties.sol"]));
+
+    const helpers = loadWorkflowHelpers([...RETRY_HELPERS], state);
+    assert.ok(helpers.resetTaskArtifactsForRetry);
+    helpers.resetTaskArtifactsForRetry(handlers);
+
+    assert.equal(
+      state.tombstones.get(workspaceRoot),
+      undefined,
+      "the restored workspace snapshot puts the deleted source back, so its tombstone must not survive the retry"
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#217 an emptied test-tree source is tombstoned on both discovery paths", () => {
+  const runRoot = fs.mkdtempSync(path.join(process.cwd(), "ultrafuzz-invariant-discovery-"));
+  try {
+    const workspaceRoot = fs.realpathSync(runRoot);
+    const git = (...args: string[]): void => {
+      execFileSync("git", args, { cwd: workspaceRoot, stdio: "ignore" });
+    };
+    git("init", "--quiet");
+    git("config", "user.email", "ultrafuzz@example.com");
+    git("config", "user.name", "ultrafuzz");
+    const relativePath = "test/recon/Properties.sol";
+    const sourcePath = path.join(workspaceRoot, relativePath);
+    fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+    const contents = "contract Properties { /* v1 */ }\n";
+    fs.writeFileSync(sourcePath, contents, "utf8");
+    git("add", "--all");
+    git("commit", "--quiet", "-m", "baseline");
+
+    const state = createHarnessState([]);
+    const helpers = loadWorkflowHelpers([...DISCOVERY_HELPERS], state);
+    const changedTestTreePaths = helpers.changedTestTreePaths;
+    assert.ok(changedTestTreePaths);
+
+    // The agent expressed a deletion by truncating the file to zero bytes.
+    fs.writeFileSync(sourcePath, "", "utf8");
+
+    // Git-fallback discovery: no baseline is available at all.
+    assert.deepEqual(changedTestTreePaths(workspaceRoot), []);
+    assert.deepEqual(
+      [...(state.tombstones.get(workspaceRoot) ?? new Set<string>())],
+      [relativePath],
+      "the Git-fallback branch must record the truncation as a deletion, not skip it"
+    );
+
+    // Baseline discovery: the protected baseline still lists the source.
+    state.tombstones.clear();
+    const baselinePath = path.join(runRoot, "invariant-suite-baseline.json");
+    fs.writeFileSync(
+      baselinePath,
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.invariant-suite-baseline.v1",
+        files: [
+          {
+            path: relativePath,
+            size: Buffer.byteLength(contents),
+            sha256: createHash("sha256").update(contents).digest("hex")
+          }
+        ]
+      })}\n`,
+      "utf8"
+    );
+    assert.deepEqual(changedTestTreePaths(workspaceRoot, baselinePath), []);
+    assert.deepEqual(
+      [...(state.tombstones.get(workspaceRoot) ?? new Set<string>())],
+      [relativePath],
+      "the baseline branch must record the truncation as a deletion"
     );
   } finally {
     fs.rmSync(runRoot, { recursive: true, force: true });

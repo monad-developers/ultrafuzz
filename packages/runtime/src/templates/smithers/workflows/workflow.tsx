@@ -256,6 +256,13 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
   if (baselineSnapshot !== undefined) {
     writeFileDurable(baselinePath, baselineSnapshot.contents);
   }
+  // Tombstones are re-derived from the protected baseline on every companions
+  // pass, so the previous attempt's deletions must not survive into this one.
+  // The restored workspace snapshot puts a deleted source physically back, and
+  // a stale tombstone would then suppress it durably for the whole invariant
+  // chain: this stage would publish it as deleted and every descendant would
+  // honour that in `inheritedInvariantSuiteTombstones`.
+  invariantSuiteTombstones.delete(realpathSync(task.workspacePath));
   restoreInvariantSuiteWorkspaceSnapshot(task);
 
   const workspaceRoot = realpathSync(task.workspacePath);
@@ -2415,7 +2422,7 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
   // Publish the deletion channel alongside the surviving files. Tombstones
   // accumulate down the chain and a path this stage still publishes clears its
   // own tombstone, so a deleted-then-re-added source is not suppressed.
-  const manifestTombstones = [...new Set([...inheritedInvariantSuiteTombstones(task), ...tombstones])]
+  const manifestTombstones = [...new Set([...resolveInheritedInvariantSuiteTombstones(task), ...tombstones])]
     .filter((relativePath) => !publicationSnapshot.has(relativePath))
     .sort();
   assertInvariantSuiteTombstoneBudget(manifestTombstones.length, task.attemptId);
@@ -2600,6 +2607,68 @@ function invariantSuiteHandoffRoot(task: (typeof taskSpecs)[number]): string {
 }
 
 /**
+ * Path of the durable handoff record, computed without touching the
+ * filesystem. Diagnostics must be able to name the record even when the run
+ * state directory itself is in an unexpected state, which is exactly when
+ * `invariantSuiteHandoffRoot` would throw a different, less useful error.
+ */
+function invariantSuiteHandoffRecordPath(task: (typeof taskSpecs)[number]): string {
+  return path.join(
+    path.resolve(process.cwd(), task.runRoot),
+    INVARIANT_SUITE_HANDOFF_DIR,
+    task.attemptId,
+    INVARIANT_SUITE_HANDOFF_FILE
+  );
+}
+
+/**
+ * Fingerprint every ancestor artifact this stage may select from, by the digest
+ * of its published invariant-suite manifest. The handoff record binds itself to
+ * these, so a legitimately re-executed ancestor (operator `retry-task`,
+ * `timetravel`, or a new Modal execution generation republishing the directory)
+ * is recognisable as "this record describes a superseded handoff" rather than
+ * as tampering. Without this the record could never go stale, and a `retries=0`
+ * preparation node would fail closed forever on a recovery flow.
+ */
+function invariantSuiteDependencyFingerprints(
+  task: (typeof taskSpecs)[number]
+): Array<{ attempt_id: string; manifest_sha256: string | null }> {
+  const fingerprints: Array<{ attempt_id: string; manifest_sha256: string | null }> = [];
+  for (const dependency of task.dependencyArtifactDirs) {
+    if (invariantSuiteProducerTask(dependency) === undefined) continue;
+    let digest: string | null = null;
+    try {
+      const dependencyRoot = realpathSync(dependency);
+      const manifestPath = path.join(dependencyRoot, INVARIANT_SUITE_MANIFEST_FILE);
+      if (existsSync(manifestPath)) {
+        digest = createHash("sha256")
+          .update(
+            readFileSync(
+              resolveRegularArtifactFile(
+                dependencyRoot,
+                manifestPath,
+                "artifact-contract failure: invariant suite manifest is not a regular file"
+              )
+            )
+          )
+          .digest("hex");
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("artifact-contract failure:")) throw error;
+      digest = null;
+    }
+    fingerprints.push({ attempt_id: path.basename(dependency), manifest_sha256: digest });
+  }
+  return fingerprints.sort((left, right) => left.attempt_id.localeCompare(right.attempt_id));
+}
+
+function invariantSuiteFingerprintKey(
+  fingerprints: readonly { attempt_id: string; manifest_sha256: string | null }[]
+): string {
+  return fingerprints.map((entry) => `${entry.attempt_id}:${entry.manifest_sha256 ?? "-"}`).join("\n");
+}
+
+/**
  * Record the exact dependency handoff this attempt materialized under durable
  * run state, so recovery never has to re-derive it from the mutable dependency
  * artifact directories.
@@ -2626,6 +2695,7 @@ function writeInvariantSuiteDependencyHandoff(
         schema_version: INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION,
         producer_node_id: task.metadata.node.logicalNodeId,
         producer_attempt_id: task.attemptId,
+        producers: invariantSuiteDependencyFingerprints(task),
         dependencies,
         tombstones: [...tombstones].sort()
       },
@@ -2641,6 +2711,12 @@ function writeInvariantSuiteDependencyHandoff(
  * module-level Map: after a controller restart the in-process selection is
  * gone, and re-deriving a fresh selection would copy ancestor bytes over the
  * harness this attempt already authored.
+ *
+ * A record whose ancestor fingerprints no longer match describes a superseded
+ * handoff: an ancestor was legitimately re-executed and republished, so the
+ * record is discarded and the caller re-derives. Only a record whose ancestors
+ * are byte-identical yet whose recorded suite bytes are not fails closed, which
+ * is the actual tampering case.
  */
 function loadInvariantSuiteDependencyHandoff(task: (typeof taskSpecs)[number]):
   | {
@@ -2674,6 +2750,29 @@ function loadInvariantSuiteDependencyHandoff(task: (typeof taskSpecs)[number]):
     !Array.isArray(parsed.tombstones)
   ) {
     throw new Error(`artifact-contract failure: invariant suite handoff record is invalid ${handoffPath}`);
+  }
+  // A record that predates the ancestor fingerprint, or whose ancestors have
+  // since republished, describes a handoff that no longer exists. Discard it
+  // and let the caller re-derive rather than failing a retries=0 node closed on
+  // a legitimate recovery flow.
+  const recordedProducers: Array<{ attempt_id: string; manifest_sha256: string | null }> = [];
+  if (!Array.isArray(parsed.producers)) return undefined;
+  for (const entry of parsed.producers) {
+    if (
+      !isPlainRecord(entry) ||
+      typeof entry.attempt_id !== "string" ||
+      (entry.manifest_sha256 !== null &&
+        (typeof entry.manifest_sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(entry.manifest_sha256)))
+    ) {
+      throw new Error(`artifact-contract failure: invariant suite handoff producer entry is invalid ${handoffPath}`);
+    }
+    recordedProducers.push({ attempt_id: entry.attempt_id, manifest_sha256: entry.manifest_sha256 });
+  }
+  if (
+    invariantSuiteFingerprintKey(recordedProducers) !==
+    invariantSuiteFingerprintKey(invariantSuiteDependencyFingerprints(task))
+  ) {
+    return undefined;
   }
   const dependencyRoots = new Map<string, string>(
     [...task.dependencyArtifactDirs].map((dependency) => [path.basename(dependency), dependency])
@@ -2740,52 +2839,50 @@ function resolveInvariantSuiteDependencySnapshot(
     invariantSuiteDependencySnapshots.get(task.attemptId) ?? loadInvariantSuiteDependencyHandoff(task)?.selected;
   if (selected === undefined) {
     throw new Error(
-      `artifact-contract failure: invariant suite dependency handoff record is unavailable ${path.join(
-        invariantSuiteHandoffRoot(task),
-        INVARIANT_SUITE_HANDOFF_FILE
+      `artifact-contract failure: invariant suite dependency handoff record is unavailable ${invariantSuiteHandoffRecordPath(
+        task
       )}`
     );
   }
   return selected;
 }
 
-function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
-  if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) return;
-  const previousSnapshot = invariantSuiteDependencySnapshots.get(task.attemptId);
-  if (previousSnapshot !== undefined) {
-    for (const [relativePath, entry] of previousSnapshot) {
-      const sourceRoot = path.join(realpathSync(entry.dependency), "invariant-suite");
-      const current = readInvariantSuiteSourceBytes(sourceRoot, relativePath, "artifact handoff invariant suite");
-      if (!current.equals(entry.bytes)) {
-        throw new Error(`artifact-contract failure: invariant suite dependency changed ${relativePath}`);
-      }
-    }
-    return;
-  }
-  // A durable record means an earlier pass of this same attempt already
-  // materialized the handoff. loadInvariantSuiteDependencyHandoff re-verifies
-  // every recorded byte, so the attempt keeps the exact handoff it used before
-  // the restart instead of reverting sources it has since authored.
-  if (loadInvariantSuiteDependencyHandoff(task) !== undefined) return;
-  const tombstones = new Set([
-    ...(invariantSuiteTombstones.get(realpathSync(workspaceRoot)) ?? []),
-    ...inheritedInvariantSuiteTombstones(task)
-  ]);
+/**
+ * Resolve the deletion channel this stage inherits, preferring the durable
+ * handoff record. The record is the statement of what was actually suppressed
+ * when the handoff was materialized; recomputing from the ancestor manifests is
+ * the fallback for an absent or superseded record, where re-derivation is the
+ * correct answer anyway.
+ */
+function resolveInheritedInvariantSuiteTombstones(task: (typeof taskSpecs)[number]): Set<string> {
+  return loadInvariantSuiteDependencyHandoff(task)?.tombstones ?? inheritedInvariantSuiteTombstones(task);
+}
+
+/**
+ * Order the ancestor closure so indirect ancestors are visited before declared
+ * dependencies. A declared dependency therefore always wins a byte conflict.
+ */
+function orderedInvariantSuiteDependencies(task: (typeof taskSpecs)[number]): string[] {
   const directDependencies = new Set(task.metadata.dependencies.attemptIds);
-  const dependencies = [...task.dependencyArtifactDirs].sort((left, right) => {
+  return [...task.dependencyArtifactDirs].sort((left, right) => {
     const leftDirect = directDependencies.has(left) || directDependencies.has(path.basename(left));
     const rightDirect = directDependencies.has(right) || directDependencies.has(path.basename(right));
     if (leftDirect !== rightDirect) return leftDirect ? 1 : -1;
     return left.localeCompare(right);
   });
-  const selectedSources = new Map<string, { dependency: string; bytes: Buffer; direct: boolean }>();
-  let selectedBytes = 0;
+}
+
+/**
+ * List the published suite sources of every dependency whose invariant-suite
+ * manifest validates against its producer. A dependency with no manifest, or
+ * one that does not identify its own producer, contributes nothing.
+ */
+function invariantSuiteDependencySuitePaths(dependencies: readonly string[]): Map<string, string[]> {
   const suitePathsByDependency = new Map<string, string[]>();
   for (const dependency of dependencies) {
     const producer = invariantSuiteProducerTask(dependency);
     if (producer === undefined) continue;
     const dependencyAttemptId = path.basename(dependency);
-    const isDirect = directDependencies.has(dependency) || directDependencies.has(path.basename(dependency));
     const dependencyRoot = realpathSync(dependency);
     const suiteRoot = path.join(dependencyRoot, "invariant-suite");
     if (!existsSync(suiteRoot)) continue;
@@ -2813,39 +2910,26 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
       typeof manifest.producer_node_id !== "string" ||
       !invariantSuiteNodeIds.has(manifest.producer_node_id) ||
       manifest.producer_attempt_id !== dependencyAttemptId ||
-      (producer !== undefined && manifest.producer_node_id !== producer.metadata.node.logicalNodeId)
+      manifest.producer_node_id !== producer.metadata.node.logicalNodeId
     ) {
       continue;
     }
-    const suitePaths = listInvariantSuiteSources(suiteRoot);
-    suitePathsByDependency.set(dependency, suitePaths);
-    for (const relativePath of suitePaths) {
-      // A deleted source must never re-enter the selection, otherwise it is
-      // republished to this stage's own artifact and copied into every
-      // descendant workspace.
-      if (tombstones.has(relativePath)) continue;
-      const bytes = readInvariantSuiteSourceBytes(suiteRoot, relativePath, "artifact handoff invariant suite");
-      const previous = selectedSources.get(relativePath);
-      if (previous !== undefined && !previous.bytes.equals(bytes)) {
-        if (previous.direct === isDirect || (!previous.direct && !isDirect)) {
-          throw new Error(
-            `artifact handoff ancestor invariant suite sources conflict for ${relativePath}: ${previous.dependency} vs ${dependency}`
-          );
-        }
-        if (!isDirect) continue;
-      }
-      const prior = selectedSources.get(relativePath);
-      if (prior === undefined) selectedBytes += bytes.length;
-      else selectedBytes += bytes.length - prior.bytes.length;
-      selectedSources.set(relativePath, { dependency, bytes, direct: isDirect });
-      assertInvariantSuiteSourceBudget(selectedSources.size, selectedBytes);
-    }
+    suitePathsByDependency.set(dependency, listInvariantSuiteSources(suiteRoot));
   }
-  assertInvariantSuiteSourceBudget(
-    selectedSources.size,
-    [...selectedSources.values()].reduce((total, entry) => total + entry.bytes.length, 0)
-  );
-  invariantSuiteDependencySnapshots.set(task.attemptId, selectedSources);
+  return suitePathsByDependency;
+}
+
+/**
+ * Fail closed when an ancestor claims a property is implemented by a suite
+ * source it did not publish. This runs on the recovered path too: a durable
+ * handoff record binds the suite bytes, not the ancestors' implemented-property
+ * ledgers, so the expectation still has to be re-checked on every preparation.
+ */
+function assertInvariantSuiteDependencyExpectations(
+  task: (typeof taskSpecs)[number],
+  dependencies: readonly string[],
+  suitePathsByDependency: ReadonlyMap<string, string[]>
+): void {
   for (const dependency of dependencies) {
     const dependencyRoot = realpathSync(dependency);
     const implementationCandidate = path.join(dependencyRoot, "implemented-properties.json");
@@ -2892,6 +2976,116 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
       }
     }
   }
+}
+
+/**
+ * Repopulate a worktree that lost its inherited suite before the durable
+ * workspace snapshot existed, which is the only window in which no other
+ * durable record can restore it. Gated on the absence of that snapshot and on
+ * the absence of each individual path, so the post-agent pass never overwrites
+ * a source this attempt authored and never resurrects one it deleted.
+ */
+function reconcileInvariantSuiteWorkspace(
+  task: (typeof taskSpecs)[number],
+  workspaceRoot: string,
+  selected: ReadonlyMap<string, { dependency: string; bytes: Buffer; direct: boolean }>,
+  tombstones: ReadonlySet<string>
+): void {
+  if ((invariantSuiteWorkspaceSnapshots.get(task.attemptId) ?? loadInvariantSuiteWorkspaceSnapshot(task)) !== undefined)
+    return;
+  for (const [relativePath, entry] of selected) {
+    if (tombstones.has(relativePath)) continue;
+    const destination = path.resolve(workspaceRoot, relativePath);
+    if (!isStrictlyInsideDirectory(workspaceRoot, destination)) {
+      throw new Error(`artifact-contract failure: unsafe invariant suite workspace path ${relativePath}`);
+    }
+    try {
+      lstatSync(destination);
+      continue;
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+    }
+    copyInvariantSuiteIntoWorkspace(
+      workspaceRoot,
+      path.join(realpathSync(entry.dependency), "invariant-suite"),
+      relativePath
+    );
+  }
+}
+
+function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
+  if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) return;
+  const dependencies = orderedInvariantSuiteDependencies(task);
+  const previousSnapshot = invariantSuiteDependencySnapshots.get(task.attemptId);
+  if (previousSnapshot !== undefined) {
+    for (const [relativePath, entry] of previousSnapshot) {
+      const sourceRoot = path.join(realpathSync(entry.dependency), "invariant-suite");
+      const current = readInvariantSuiteSourceBytes(sourceRoot, relativePath, "artifact handoff invariant suite");
+      if (!current.equals(entry.bytes)) {
+        throw new Error(`artifact-contract failure: invariant suite dependency changed ${relativePath}`);
+      }
+    }
+    reconcileInvariantSuiteWorkspace(task, workspaceRoot, previousSnapshot, new Set());
+    return;
+  }
+  // A durable record means an earlier pass of this same attempt already
+  // materialized the handoff. loadInvariantSuiteDependencyHandoff re-verifies
+  // every recorded byte, so the attempt keeps the exact handoff it used before
+  // the restart instead of reverting sources it has since authored. It returns
+  // nothing when an ancestor has since republished, and materialization then
+  // re-derives against the new ancestor bytes rather than failing closed.
+  const recorded = loadInvariantSuiteDependencyHandoff(task);
+  if (recorded !== undefined) {
+    for (const relativePath of recorded.tombstones) {
+      if (recorded.selected.has(relativePath)) {
+        throw new Error(`artifact-contract failure: invariant suite handoff record is inconsistent ${relativePath}`);
+      }
+    }
+    assertInvariantSuiteDependencyExpectations(task, dependencies, invariantSuiteDependencySuitePaths(dependencies));
+    reconcileInvariantSuiteWorkspace(task, workspaceRoot, recorded.selected, recorded.tombstones);
+    return;
+  }
+  const tombstones = new Set([
+    ...(invariantSuiteTombstones.get(realpathSync(workspaceRoot)) ?? []),
+    ...inheritedInvariantSuiteTombstones(task)
+  ]);
+  const directDependencies = new Set(task.metadata.dependencies.attemptIds);
+  const selectedSources = new Map<string, { dependency: string; bytes: Buffer; direct: boolean }>();
+  let selectedBytes = 0;
+  const suitePathsByDependency = invariantSuiteDependencySuitePaths(dependencies);
+  for (const dependency of dependencies) {
+    const suitePaths = suitePathsByDependency.get(dependency);
+    if (suitePaths === undefined) continue;
+    const isDirect = directDependencies.has(dependency) || directDependencies.has(path.basename(dependency));
+    const suiteRoot = path.join(realpathSync(dependency), "invariant-suite");
+    for (const relativePath of suitePaths) {
+      // A deleted source must never re-enter the selection, otherwise it is
+      // republished to this stage's own artifact and copied into every
+      // descendant workspace.
+      if (tombstones.has(relativePath)) continue;
+      const bytes = readInvariantSuiteSourceBytes(suiteRoot, relativePath, "artifact handoff invariant suite");
+      const previous = selectedSources.get(relativePath);
+      if (previous !== undefined && !previous.bytes.equals(bytes)) {
+        if (previous.direct === isDirect || (!previous.direct && !isDirect)) {
+          throw new Error(
+            `artifact handoff ancestor invariant suite sources conflict for ${relativePath}: ${previous.dependency} vs ${dependency}`
+          );
+        }
+        if (!isDirect) continue;
+      }
+      const prior = selectedSources.get(relativePath);
+      if (prior === undefined) selectedBytes += bytes.length;
+      else selectedBytes += bytes.length - prior.bytes.length;
+      selectedSources.set(relativePath, { dependency, bytes, direct: isDirect });
+      assertInvariantSuiteSourceBudget(selectedSources.size, selectedBytes);
+    }
+  }
+  assertInvariantSuiteSourceBudget(
+    selectedSources.size,
+    [...selectedSources.values()].reduce((total, entry) => total + entry.bytes.length, 0)
+  );
+  invariantSuiteDependencySnapshots.set(task.attemptId, selectedSources);
+  assertInvariantSuiteDependencyExpectations(task, dependencies, suitePathsByDependency);
   for (const [relativePath, entry] of selectedSources) {
     if (tombstones.has(relativePath)) continue;
     copyInvariantSuiteIntoWorkspace(
