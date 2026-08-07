@@ -797,9 +797,64 @@ function materializeWorkspacePatch(task: (typeof taskSpecs)[number]): void {
   const captured = captureWorkspacePatch(realpathSync(task.workspacePath), baselineTree);
   const manifest = `${JSON.stringify(captured.manifest, null, 2)}\n`;
   for (const artifactRoot of taskArtifactRoots(task, realpathSync(task.metadata.artifacts.dir))) {
+    // Decide about the surviving pair BEFORE writing either half of the new one: once the patch is
+    // replaced, the manifest beside it no longer describes it, and the pair could not be recognised.
+    discardSupersededWorkspacePatchArtifacts(artifactRoot);
     writeWorkspacePatchArtifact(artifactRoot, "workspace.patch", captured.patch);
     writeWorkspacePatchArtifact(artifactRoot, "workspace-patch.json", manifest);
   }
+}
+
+/**
+ * Remove a workspace patch pair this node itself published in an EARLIER recovery generation (#357).
+ *
+ * A re-executed node's fresh capture legitimately differs from the one still on the durable volume --
+ * its agent ran again -- so `writeWorkspacePatchArtifact` read the survivor as tampering and killed
+ * the run. Nothing else clears it: these nodes run with `maxAttempts` of 1, so
+ * `resetTaskArtifactsForRetry` never fires, and the pair is not in the set that reset preserves.
+ *
+ * The guard below must keep rejecting agent-authored patches, so content equality cannot be the
+ * discriminator -- it is exactly what conflates the two cases. The manifest is: a runtime capture
+ * records `patch_sha256` over the patch it was taken with, so only a pair the runtime published is
+ * self-consistent. Anything else -- a lone patch, a mismatched digest, an unreadable or foreign
+ * manifest -- is left in place for `writeWorkspacePatchArtifact` to reject exactly as before.
+ *
+ * An agent that forged a self-consistent pair would have it discarded here and overwritten by this
+ * node's own capture, so forging one gains nothing: the runtime's bytes still win.
+ */
+function discardSupersededWorkspacePatchArtifacts(artifactRoot: string): void {
+  const patchPath = path.resolve(artifactRoot, "workspace.patch");
+  const manifestPath = path.resolve(artifactRoot, "workspace-patch.json");
+  if (!isStrictlyInsideDirectory(artifactRoot, patchPath) || !isStrictlyInsideDirectory(artifactRoot, manifestPath)) {
+    return;
+  }
+  if (!existsSync(patchPath) || !existsSync(manifestPath)) return;
+  const patch = readFileSync(
+    resolveRegularArtifactFile(artifactRoot, patchPath, "artifact-contract failure: workspace patch artifact is unsafe"),
+    "utf8"
+  );
+  const manifestText = readFileSync(
+    resolveRegularArtifactFile(
+      artifactRoot,
+      manifestPath,
+      "artifact-contract failure: workspace patch artifact is unsafe"
+    ),
+    "utf8"
+  );
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(manifestText) as unknown;
+  } catch {
+    return;
+  }
+  if (typeof manifest !== "object" || manifest === null) return;
+  const record = manifest as Record<string, unknown>;
+  if (record.schema_version !== "ultrafuzz.workspace-patch.v1") return;
+  const declared = record.patch_sha256;
+  if (typeof declared !== "string" || !/^[0-9a-f]{64}$/u.test(declared)) return;
+  if (createHash("sha256").update(patch, "utf8").digest("hex") !== declared) return;
+  rmSync(patchPath, { force: true });
+  rmSync(manifestPath, { force: true });
 }
 
 function writeWorkspacePatchArtifact(root: string, relativePath: string, contents: string): void {
