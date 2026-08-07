@@ -806,7 +806,7 @@ it("tells every findings@1 review producer which fields the contract requires", 
   // ultrafuzz/findings@1, which subjects them to the full normalized-finding
   // field check. A prompt that never names a required field lets a model emit
   // an object without it and fails the node on every attempt.
-  const required = ["title", "status", "severity_guess", "confidence", "summary"];
+  const required = ["schema_version", "id", "title", "status", "severity_guess", "confidence", "summary"];
   for (const relativePath of ["review/dedupe-findings.md", "review/triage.md", "review/severity-classification.md"]) {
     const body = prompt(relativePath);
     for (const field of required) {
