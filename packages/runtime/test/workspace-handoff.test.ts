@@ -685,3 +685,19 @@ test("bounds the retained stderr in bytes, not UTF-16 code units", () => {
     "the inlined stderr head should stay small too"
   );
 });
+
+test("picks the overflowing stream by bytes, not by UTF-16 code units", () => {
+  // Denser encoding on the smaller-looking stream: stdout is ASCII so its code-unit count is its byte
+  // count, while the CJK stderr carries three bytes per unit. By code units stdout looks larger; by
+  // bytes -- which is what the buffer limit counts -- stderr is the stream that overflowed.
+  const stdout = "x".repeat(9000);
+  const stderr = "契".repeat(5000);
+  assert.ok(stdout.length > stderr.length, "fixture must look stdout-dominant by code units");
+  assert.ok(
+    Buffer.byteLength(stderr, "utf8") > Buffer.byteLength(stdout, "utf8"),
+    "fixture must be stderr-dominant by bytes"
+  );
+  const message = messageOf(stdout, stderr);
+  assert.match(message, /to stderr/u, message);
+  assert.doesNotMatch(message, /workspace is too large/u, message);
+});

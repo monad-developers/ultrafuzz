@@ -570,7 +570,10 @@ export function rethrowOversizedGitOutput(args: readonly string[], error: unknow
   // ENOBUFS fires on EITHER stream. Saying "the workspace is too large" when git merely wrote a lot of
   // stderr would be a confident lie, so claim it only when stdout is the larger capture. An earlier form
   // tested `diff === ""`, which still told that lie whenever a little stdout accompanied the flood.
-  const overflowedStderr = errorOutput.length > diff.length;
+  // Byte lengths, not string lengths: the buffer that overflowed is measured in bytes, so comparing
+  // UTF-16 code units can pick the wrong stream whenever the two differ in encoding density — 30 MB of
+  // ASCII stdout has more code units than 12 M CJK characters of stderr worth 36 MB.
+  const overflowedStderr = Buffer.byteLength(errorOutput, "utf8") > Buffer.byteLength(diff, "utf8");
   const detail = overflowedStderr
     ? `wrote more than the ${MAX_GIT_CAPTURE_BYTES}-byte capture buffer to stderr: ${truncateUtf8(Buffer.from(retainedStderr, "utf8"), INLINED_STDERR_BYTES)}`
     : // Both ceilings, because they differ and only one of them is the one being reported. An operator
