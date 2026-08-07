@@ -1252,3 +1252,39 @@ test("#315 a DIRECT publisher still outranks an unordered indirect one", () => {
     fs.rmSync(runRoot, { recursive: true, force: true });
   }
 });
+
+test("#315 a cyclic dependency graph fails closed instead of silently dropping the path", () => {
+  // If every publisher is superseded by another -- which only a CYCLE can produce -- the unsuperseded set
+  // is empty. Falling through on an empty set would drop the file from the harness with no error at all,
+  // which is precisely the class of failure this change exists to remove, so the conflict check gets the
+  // whole set instead. The topology validator rejects cycles, so this should be unreachable; "unreachable"
+  // is a property of today's validator, not of this function.
+  const runRoot = fs.mkdtempSync(path.join(process.cwd(), "ultrafuzz-invariant-315-cycle-"));
+  try {
+    const left = makeTaskSpec(runRoot, "left", "stateful-invariant-setup", ["right"], ["right"]);
+    const right = makeTaskSpec(runRoot, "right", "stateful-invariant-handlers", ["left"], ["left"]);
+    const downstream = makeTaskSpec(
+      runRoot,
+      "downstream",
+      "stateful-invariant-implement-properties",
+      ["left", "right"],
+      []
+    );
+    const state = createHarnessState([left, right, downstream]);
+
+    writeSuiteSource(left.artifactDir, "test/recon/Properties.sol", "contract Properties { /* left */ }\n");
+    writeSuiteManifest(left.artifactDir, "stateful-invariant-setup", "left", ["test/recon/Properties.sol"]);
+    writeSuiteSource(right.artifactDir, "test/recon/Properties.sol", "contract Properties { /* right */ }\n");
+    writeSuiteManifest(right.artifactDir, "stateful-invariant-handlers", "right", ["test/recon/Properties.sol"]);
+
+    const helpers = loadWorkflowHelpers([...MATERIALIZATION_HELPERS], state);
+    assert.ok(helpers.materializeInvariantSuiteFromDependencies);
+    assert.throws(
+      () => helpers.materializeInvariantSuiteFromDependencies?.(downstream, downstream.workspacePath),
+      /ancestor invariant suite sources conflict for test\/recon\/Properties\.sol/u,
+      "a cycle must surface as a conflict, never as a missing file"
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});

@@ -3241,18 +3241,25 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
     // on has been superseded: its bytes are simply older, not a competing claim. Doing this first also
     // settles the case where a DIRECT ancestor is stale and an INDIRECT descendant rewrote it -- the old
     // rule handed that to the direct one, silently selecting the older Solidity.
-    const maximal = publishers.filter(
+    const unsuperseded = publishers.filter(
       (candidate) =>
         !publishers.some(
           (other) => other !== candidate && invariantSuiteAncestorSupersedes(other.attemptId, candidate.attemptId)
         )
     );
+    // A cycle would leave every publisher superseded by another and the set empty. The topology validator
+    // rejects cycles, so this should be unreachable — but falling through with an empty set would drop the
+    // path SILENTLY, which is the failure mode this whole change exists to remove. Keeping every publisher
+    // instead hands the decision to the conflict check below, which fails closed.
+    const maximal = unsuperseded.length > 0 ? unsuperseded : publishers;
     // Among publishers that nothing supersedes, a DIRECT dependency still outranks an indirect one, which
     // is long-standing behaviour the #217 tombstone tests depend on.
     const preferred = maximal.some((candidate) => candidate.direct)
       ? maximal.filter((candidate) => candidate.direct)
       : maximal;
     const first = preferred[0];
+    // `publishers` is never empty — a path only enters the map when some dependency published it — so this
+    // is unreachable, and `continue` rather than a throw keeps an impossible case from inventing an error.
     if (first === undefined) continue;
     const conflicting = preferred.find((candidate) => !candidate.bytes.equals(first.bytes));
     if (conflicting !== undefined) {
