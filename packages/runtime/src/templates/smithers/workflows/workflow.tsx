@@ -2974,6 +2974,23 @@ function resolveInheritedInvariantSuiteTombstones(task: (typeof taskSpecs)[numbe
  * Terminates on a malformed cyclic graph. The topology validator rejects cycles, so that should be
  * unreachable, but a helper that hangs on bad input converts a validation bug into a run that never fails
  * and never finishes — worse than an error.
+ *
+ * Two limitations, both measured rather than assumed, neither fixed here:
+ *
+ *   1. The caller folds over ancestors in sort order, so on a FAN-IN MERGE shape the outcome depends on
+ *      node naming. With unordered siblings `L` and `N` plus a merge node `M` that depends on both and
+ *      republished the merged file, visiting `M` first resolves cleanly, while visiting `L` then `N`
+ *      throws before `M` is ever reached — same graph, same bytes, opposite outcomes decided by
+ *      `localeCompare`. The failing direction is fail-closed and identical to the behaviour before this
+ *      change, and the shipped invariant topology is a pure chain, so it does not arise today. Making it
+ *      order-independent means reducing the publishers of each path to their maximal elements before
+ *      comparing, which is a restructure rather than a guard (#317).
+ *   2. Attempt ids are stable across re-runs, so a node re-run OUT OF ORDER loses loudness: retrying
+ *      `stateful-invariant-setup` after `stateful-invariant-handlers` has already succeeded leaves setup's
+ *      content newer in wall-clock time while `supersedes(handlers, setup)` is still true, so the retried
+ *      bytes are silently discarded where the old code raised a conflict. That is the deliberate trade —
+ *      always throwing is what killed R50 — but it is a real loss and is recorded so it is not rediscovered
+ *      as a surprise.
  */
 function invariantSuiteAncestorSupersedes(later: string, earlier: string): boolean {
   if (later === earlier) return false;
