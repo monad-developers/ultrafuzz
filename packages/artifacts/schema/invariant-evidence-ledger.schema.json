@@ -85,7 +85,10 @@
   "allOf": [
     {
       "if": { "properties": { "entries": { "minItems": 1 } } },
-      "then": { "properties": { "inventory_rows": { "minItems": 1 } } }
+      "then": {
+        "not": { "required": ["no_invariants_justification"] },
+        "properties": { "inventory_rows": { "minItems": 1 } }
+      }
     },
     {
       "if": { "properties": { "entries": { "maxItems": 0 } } },

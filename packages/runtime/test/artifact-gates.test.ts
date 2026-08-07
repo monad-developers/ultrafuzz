@@ -1048,6 +1048,27 @@ test("fanin gate checks scan probe containment against the discovery workspace",
     escaping.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID"),
     JSON.stringify(escaping.diagnostics)
   );
+
+  // Fan-in is the second gate that reads this artifact, and issue #292's whole point is that the
+  // ledger must have ONE reading at both of them. Discovery's copy of this rule was covered; this
+  // one was not, so deleting the fan-in call broke nothing.
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: [{ id: "probe-1", source_path: ".", query: "invariant", result: "nothing found" }]
+    })
+  );
+  const unjustified = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(unjustified.ok, false, JSON.stringify(unjustified.diagnostics));
+  assert.ok(
+    unjustified.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_NO_INVARIANTS_UNJUSTIFIED"),
+    JSON.stringify(unjustified.diagnostics)
+  );
 });
 
 test("fanin gate requires every invariant ledger entry to map to a canonical property", () => {
