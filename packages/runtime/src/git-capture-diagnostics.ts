@@ -30,8 +30,11 @@ export const MAX_GIT_CAPTURE_BYTES = MAX_PATCH_BYTES * 2;
  * capture with no newline for tens of megabytes it overflows the stack and throws `RangeError: Maximum
  * call stack size exceeded` OUT of the handler, destroying the ENOBUFS it exists to explain and
  * replacing it with something less actionable than the bare error. Measured at 10 MB: throws in 64 ms.
- * 4096 is `PATH_MAX` on Linux, so no path git can hand back is excluded, and the bounded form is also
- * substantially faster (measured 14.7x on the 10 MB case).
+ * 4096 is `PATH_MAX` on Linux and the bounded form is also faster (11.6-14.7x on the 10 MB case across
+ * runs). It is a bound on the RENDERED header path, not on the filesystem path: git C-quotes a non-ASCII
+ * byte as `\303\251`, four characters per byte, so a path approaching 1 KB of non-ASCII can render past
+ * 4096 and go unmatched, and its bytes are then attributed to the preceding root. That is a wrong
+ * attribution for a pathological path, traded against a `RangeError` that destroys the whole diagnostic.
  *
  * This bound and the latin1 view below are REDUNDANT: the overflow needs a two-byte string, and either
  * one alone prevents it. The regression test pins the property — that no `RangeError` escapes — and
@@ -82,16 +85,13 @@ const MAX_RANKED_ROOTS = 4096;
  * thing is worse here than naming nothing, because the entire complaint this diagnostic answers is that
  * the original error named no subcommand at all. The `--opt=value` forms need no entry — they start with
  * `-` and are skipped anyway.
+ *
+ * Deliberately absent: `--exec-path`, which takes a value only in its `=` form and otherwise prints and
+ * exits, so listing it would make this skip a real subcommand; and `--super-prefix`, which git 2.43 no
+ * longer accepts. An entry that is wrong costs more than an entry that is missing, because it consumes
+ * the argument the caller is looking for.
  */
-const GIT_OPTIONS_TAKING_A_VALUE = new Set([
-  "-c",
-  "-C",
-  "--git-dir",
-  "--work-tree",
-  "--namespace",
-  "--exec-path",
-  "--super-prefix"
-]);
+const GIT_OPTIONS_TAKING_A_VALUE = new Set(["-c", "--config-env", "-C", "--git-dir", "--work-tree", "--namespace"]);
 
 /** The subcommand in a `git` argument list, skipping global options and their values. */
 function gitSubcommand(args: readonly string[]): string {
@@ -120,10 +120,12 @@ function truncateUtf8(buffer: Buffer, limit: number): string {
   let text = buffer.subarray(0, take).toString("utf8");
   for (let encoded = Buffer.byteLength(text, "utf8"); take > 0 && encoded > limit;) {
     // Scale by the observed ratio, and cut by at least one byte so `take` strictly decreases: that, with
-    // the `take > 0` guard, is the whole termination argument. Iteration count is NOT bounded by two --
-    // the ratio applies to the whole prefix while the excess may sit in one region of it. Fuzzed over
-    // 200,000 random buffers of mixed valid and invalid UTF-8: 6 iterations worst case, and zero cases
-    // where the returned text exceeded the limit.
+    // the `take > 0` guard, is the whole termination argument, and it is the only claim made here.
+    // Iteration count is NOT small by construction -- the ratio applies to the whole prefix while the
+    // excess may sit in one region of it. A DIRECTED sweep (a run of invalid bytes followed by ASCII,
+    // run length 0..2000, both real limits) peaks at 14 iterations, at a 679-byte run. Random fuzzing
+    // over 200,000 buffers only ever reached 6, which is why the sampled figure is not quoted as a
+    // bound: it is not one. Neither search produced a single case exceeding the byte limit.
     take = Math.max(0, Math.min(take - 1, Math.floor((take * limit) / encoded)));
     text = buffer.subarray(0, take).toString("utf8");
     encoded = Buffer.byteLength(text, "utf8");

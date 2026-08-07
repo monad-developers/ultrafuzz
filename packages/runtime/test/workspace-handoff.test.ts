@@ -143,6 +143,12 @@ test("captures an authored top-level file whose name matches a generated corpus 
   const root = fixture();
   try {
     writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
+    // This test needs git to emit 42 MB of RAW TEXT to reach the capture buffer. An inherited
+    // `core.bigFileThreshold` below 12 MB -- plausible in a system or user config, and exactly the class
+    // of setting this file argues cannot be assumed unset -- would make both blobs binary-and-deflated,
+    // the capture would never overflow, and the test would fail as "expected to throw". Local config
+    // wins over global, so pinning it here removes the dependency.
+    git(root, ["config", "core.bigFileThreshold", "512m"]);
     git(root, ["add", ".gitignore"]);
     git(root, ["commit", "--quiet", "-m", "base"]);
     const baseline = captureWorkspaceTree(root);
@@ -925,9 +931,11 @@ test("pins the diff format against inherited git config", () => {
       const capture = captureWorkspacePatch(root, baseline);
       assert.match(capture.patch, /^diff --git a\/Setup\.sol b\/Setup\.sol$/mu, `${setting}: ${capture.patch}`);
 
-      // And it still round-trips: a patch that cannot be applied is worse than one that is unreadable,
-      // and a patch that applies while carrying the WRONG CONTENT is worse than either -- textconv does
-      // exactly that, surfacing downstream as a result-tree mismatch with nothing pointing back here.
+      // And it still round-trips. A patch that cannot be applied is worse than one that is unreadable,
+      // and a patch that APPLIES while carrying the wrong content is worse than either. `Setup.sol` is
+      // an ADDED file, which is the shape where textconv does exactly that: without `--no-textconv` its
+      // body becomes the driver's output and lands as the file's content, with every check still green.
+      // The modified file below covers the other shape, where textconv instead fails to apply.
       applyWorkspacePatch(downstream, capture);
       assert.equal(readFileSync(path.join(downstream, "Setup.sol"), "utf8"), "contract Setup {}\n");
       assert.equal(
@@ -955,8 +963,16 @@ test("bounds the root table and says so instead of truncating silently", () => {
   const message = messageOf(syntheticDiff(entries), "");
   // The genuine largest still leads: it is seen before the table fills.
   assert.match(message, /culprit \(>=\d+ diff bytes in 1 file\)/u, message);
-  // And the shortfall is stated rather than left to look like a complete survey.
-  assert.match(message, /further files under roots past the 4096-root table, not counted above/u, message);
+  // And the shortfall is stated rather than left to look like a complete survey -- including its SIZE.
+  // Asserting only the prose let `unrankedBytes += 0` pass, which would tell an operator that something
+  // was excluded while implying it was nothing.
+  const excluded = /\(and (\d+) diff bytes in (\d+) further files under roots past the 4096-root table/u.exec(message);
+  assert.ok(excluded !== null, message);
+  assert.ok(Number(excluded?.[2] ?? 0) > 0, message);
+  assert.ok(
+    Number(excluded?.[1] ?? 0) >= Number(excluded?.[2] ?? 0),
+    `excluded bytes (${excluded?.[1]}) should be at least one per excluded file (${excluded?.[2]}): ${message}`
+  );
 });
 
 // The end-to-end pin for the whole diagnostic: real git, real `runGit`, a real oversized capture.
@@ -970,6 +986,12 @@ test("ranks the real capture by real bytes, through git and the code that runs i
   const root = fixture();
   try {
     writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
+    // This test needs git to emit 42 MB of RAW TEXT to reach the capture buffer. An inherited
+    // `core.bigFileThreshold` below 12 MB -- plausible in a system or user config, and exactly the class
+    // of setting this file argues cannot be assumed unset -- would make both blobs binary-and-deflated,
+    // the capture would never overflow, and the test would fail as "expected to throw". Local config
+    // wins over global, so pinning it here removes the dependency.
+    git(root, ["config", "core.bigFileThreshold", "512m"]);
     git(root, ["add", ".gitignore"]);
     git(root, ["commit", "--quiet", "-m", "base"]);
     const baseline = captureWorkspaceTree(root);
@@ -1051,13 +1073,65 @@ test("finds the subcommand past a leading global flag", () => {
   // `git -c foo=bar diff ...` is a shape this repo already uses elsewhere, and taking args[0] would name
   // `-c` as the subcommand in a message whose entire complaint is that the original named none.
   assert.match(messageOf("", ""), /^git diff /u);
-  const message = ((): string => {
+  const subcommandOf = (args: string[]): string => {
     try {
-      rethrowOversizedGitOutput(["-c", "core.quotepath=false", "diff", "--cached"], enobufs("", ""));
+      rethrowOversizedGitOutput(args, enobufs("", ""));
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
     }
     throw new Error("expected rethrowOversizedGitOutput to throw");
-  })();
-  assert.match(message, /^git diff /u, message);
+  };
+  for (const args of [
+    ["-c", "core.quotepath=false", "diff", "--cached"],
+    // `--config-env` is the detached form git 2.43 also accepts; its VALUE looks like a subcommand to a
+    // scan that only skips things starting with `-`.
+    ["--config-env", "user.name=FOO", "diff"],
+    ["-C", "/somewhere", "-c", "a=b", "diff"],
+    ["--git-dir", "/somewhere/.git", "diff"],
+    ["--git-dir=/somewhere/.git", "diff"]
+  ]) {
+    assert.match(subcommandOf(args), /^git diff /u, args.join(" "));
+  }
+  // Degenerate shapes must not read past the end or invent a subcommand.
+  assert.match(subcommandOf([]), /^git git /u);
+  assert.match(subcommandOf(["-c"]), /^git git /u);
+});
+
+test("leaves an ordinary git failure's captures as strings", () => {
+  // `runGit` omits `encoding` so the ENOBUFS handler gets the bytes git wrote. That is the only caller
+  // that benefits, and every other failure pays for it: these errors become durable failure records, and
+  // `errorToJson` expands a Buffer into one JSON key per byte -- measured 704 chars against 1458 for 51
+  // bytes of stderr, scaling linearly. A megabyte of git warnings would serialize to tens of megabytes,
+  // which is the blow-up this whole change set exists to stop.
+  const root = fixture();
+  try {
+    // A WELL-FORMED object id that does not exist, so `git read-tree` runs and exits non-zero. An
+    // obviously invalid string would be rejected by `assertObjectId` before git is ever spawned, and the
+    // error would carry no captures at all -- which is how the first version of this test passed with
+    // the fix removed.
+    const missingTree = "dead".repeat(10);
+    assert.throws(
+      () => captureWorkspacePatch(root, missingTree),
+      (error: unknown) => {
+        const record = error as Record<string, unknown>;
+        assert.match(String((error as Error).message), /Command failed: git read-tree/u);
+        assert.ok(record.stderr !== undefined, "the failure should carry git's stderr");
+        for (const field of ["stdout", "stderr"]) {
+          assert.equal(
+            Buffer.isBuffer(record[field]),
+            false,
+            `${field} reached the failure record as a Buffer: ${String(record[field]).slice(0, 80)}`
+          );
+        }
+        if (Array.isArray(record.output)) {
+          for (const entry of record.output) {
+            assert.equal(Buffer.isBuffer(entry), false, "output[] still holds a Buffer");
+          }
+        }
+        return true;
+      }
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

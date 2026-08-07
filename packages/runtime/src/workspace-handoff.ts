@@ -129,9 +129,14 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
       //                                  the patch BODY with the driver's output.
       //
       // None of these is only an attribution problem. `git apply` defaults to `-p1` and rejects a
-      // coloured header outright (`No valid patches in input`), zero-context hunks fail to apply, and a
-      // textconv body applies CLEANLY while carrying the wrong content -- surfacing downstream as a
-      // result-tree mismatch with nothing pointing at the cause.
+      // coloured header outright (`No valid patches in input`), and zero-context hunks fail to apply.
+      //
+      // textconv splits by change shape, and the split matters. For a MODIFIED tracked file the patch
+      // simply fails to apply (`error: middle.txt: patch does not apply`) -- loud, and caught here. For
+      // an ADDED file it applies cleanly and installs the driver's output as the file's content, which
+      // is the dangerous half: it surfaces downstream as a result-tree mismatch with nothing pointing
+      // back at this line. An earlier version of this comment claimed the second behaviour for both
+      // cases; only the added-file half was measured, and only that half is true.
       [
         "diff",
         "--cached",
@@ -507,7 +512,33 @@ function runGit(workspaceRoot: string, args: string[], index?: string, input?: s
       maxBuffer: MAX_GIT_CAPTURE_BYTES
     }).toString("utf8");
   } catch (error) {
+    // Only the ENOBUFS path wants raw bytes. Every OTHER git failure becomes a durable failure record,
+    // and `errorToJson` expands a Buffer into one JSON key per byte: measured 704 chars with `encoding`
+    // set against 1458 without, for 51 bytes of stderr, scaling linearly from there. A megabyte of git
+    // warnings would serialize to tens of megabytes — the exact class of blow-up this change set exists
+    // to stop, so dropping `encoding` must not reintroduce it through the back door.
+    if ((error as { code?: unknown }).code !== "ENOBUFS") decodeSpawnCaptures(error);
     return rethrowOversizedGitOutput(args, error);
+  }
+}
+
+/**
+ * Puts a `spawnSync` failure's captures back into the string form `encoding: "utf8"` would have produced.
+ *
+ * `runGit` deliberately omits `encoding` so the ENOBUFS handler receives the bytes git actually wrote.
+ * That is the only caller that benefits, and the cost is paid by every other failure, so it is undone
+ * here for all of them. `error.message` is unaffected either way — Node interpolates stderr into it
+ * before throwing, and a Buffer stringifies identically (verified).
+ */
+function decodeSpawnCaptures(error: unknown): void {
+  if (!(error instanceof Error)) return;
+  const record = error as unknown as Record<string, unknown>;
+  for (const field of ["stdout", "stderr"]) {
+    const value = record[field];
+    if (Buffer.isBuffer(value)) record[field] = value.toString("utf8");
+  }
+  if (Array.isArray(record.output)) {
+    record.output = record.output.map((entry) => (Buffer.isBuffer(entry) ? entry.toString("utf8") : entry));
   }
 }
 
