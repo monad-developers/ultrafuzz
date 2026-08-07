@@ -3263,8 +3263,13 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
     if (first === undefined) continue;
     const conflicting = preferred.find((candidate) => !candidate.bytes.equals(first.bytes));
     if (conflicting !== undefined) {
-      // Genuinely unordered publishers disagreeing about the same file. Selecting either would drop the
-      // other's work with no error, so this stays fail-closed in every visit order.
+      // Unordered publishers disagreeing about the same file, where nothing can say which is newer.
+      //
+      // The guarantee is fail-closed WITHIN `preferred`, and not before it: the directness filter above
+      // can already have dropped an unordered INDIRECT publisher whose bytes differ, silently, in favour
+      // of a direct one. That arm is pre-existing behaviour the #217 tombstone tests depend on and is
+      // deliberately preserved — but it is not fail-closed, and an earlier version of this comment
+      // claimed a blanket guarantee that the directness filter contradicts.
       throw new Error(
         `artifact handoff ancestor invariant suite sources conflict for ${relativePath}: ${first.dependency} vs ${conflicting.dependency}`
       );
