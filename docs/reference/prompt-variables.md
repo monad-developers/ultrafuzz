@@ -19,6 +19,13 @@ prompt.rendered.md
 
 Unknown template variables fail validation.
 
+Runtime-generated topology nodes additionally receive item-scoped variables.
+Scalar planner fields render as `{{item.<field>}}`; namespaced replacement keys
+such as `{{liquidation:overdue}}` come from the item's `replacements` object.
+Replacement values may reference other item-scoped variables recursively, with
+cycle and depth checks. They cannot override built-in variables. See
+[Runtime Dynamic Expansion](topology-yaml.md#runtime-dynamic-expansion).
+
 ## Frontmatter
 
 Prompt frontmatter may contain only:
@@ -41,21 +48,23 @@ timeouts, backend settings, or artifact requirements.
 
 ## Core Variables
 
-| Variable                    | Meaning                                                                |
-| --------------------------- | ---------------------------------------------------------------------- |
-| `repo_path`                 | Absolute path to the target repository being fuzzed.                   |
-| `workspace_path`            | Absolute path to this node attempt workspace.                          |
-| `schema_path`               | Absolute path to the task-local checked-in JSON schema bundle.         |
-| `artifact_path`             | Absolute path to this node attempt artifact directory.                 |
-| `artifact_dir`              | Alias for `artifact_path`.                                             |
-| `run_metadata_path`         | Absolute path to this run's `run.json`.                                |
-| `output_findings_path`      | Absolute path where the agent should write `findings.json`.            |
-| `output_patch_path`         | Absolute path reserved for a patch evidence file.                      |
-| `strategy`                  | Current logical topology node ID.                                      |
-| `attempt_index`             | Zero-based attempt index for this concrete attempt.                    |
-| `strategy_loop_index`       | Zero-based loop index for this logical node.                           |
-| `strategy_loop_count`       | Total loop count for this logical node.                                |
-| `strategy_attempt_test_dir` | Absolute workspace path for generated Foundry tests from this attempt. |
+| Variable                      | Meaning                                                                   |
+| ----------------------------- | ------------------------------------------------------------------------- |
+| `repo_path`                   | Absolute path to the target repository being fuzzed.                      |
+| `workspace_path`              | Absolute path to this node attempt workspace.                             |
+| `schema_path`                 | Absolute path to the task-local checked-in JSON schema bundle.            |
+| `artifact_path`               | Absolute path to this node attempt artifact directory.                    |
+| `artifact_dir`                | Alias for `artifact_path`.                                                |
+| `run_metadata_path`           | Absolute path to this run's `run.json`.                                   |
+| `output_findings_path`        | Absolute path where the agent should write `findings.json`.               |
+| `output_patch_path`           | Absolute path reserved for a patch evidence file.                         |
+| `strategy`                    | Current logical topology node ID.                                         |
+| `attempt_index`               | Zero-based attempt index for this concrete attempt.                       |
+| `strategy_loop_index`         | Zero-based loop index for this logical node.                              |
+| `strategy_loop_count`         | Total loop count for this logical node.                                   |
+| `strategy_attempt_test_dir`   | Absolute workspace path for generated Foundry tests from this attempt.    |
+| `vulnerability_database_path` | Absolute path to the immutable current-run vulnerability planner catalog. |
+| `artifact_schema_dir`         | Absolute path to the scaffolded canonical artifact JSON Schema directory. |
 
 ## Triage And Invariant Variables
 
@@ -98,6 +107,13 @@ Use deterministic split-work assignment for looped strategies:
 ```text
 n % {{strategy_loop_count}} == {{strategy_loop_index}}
 ```
+
+Dynamic topology items additionally expose scalar `item.*` values and a
+bounded, item-scoped `replacements` map. Namespaced keys such as
+`{{class:liquidation:fixed-term-before-overdue}}` and
+`{{liquidation:overdue}}` resolve only from that item. A value such as
+`{{item.goal_prompt}}` may retain those placeholders for the bounded nested
+replacement pass; unresolved, cyclic, non-scalar, or non-item references fail.
 
 ## Output Contract
 

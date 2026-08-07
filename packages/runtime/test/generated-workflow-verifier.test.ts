@@ -432,6 +432,19 @@ test("generated Smithers workflow leaves runtime-owned workspace patch outputs u
   assert.match(helper, /runtime-owned workspace patch outputs/u);
 });
 
+test("generated Smithers workflow leaves the runtime-owned vulnerability-db snapshot manifest unmaterialized", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function canonicalEmptyArtifact");
+  const helperEnd = source.indexOf("\n\nfunction materializeMissingMarkdownArtifacts", helperStart);
+
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+
+  const helper = source.slice(helperStart, helperEnd);
+  assert.match(helper, /output\.path === "vulnerability-db-manifest\.json"/u);
+  assert.match(helper, /conflict with the exclusive canonical bytes the snapshot publishes/u);
+});
+
 test("generated Smithers workflow guards runtime-owned workspace patch publication", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function writeWorkspacePatchArtifact");
@@ -501,6 +514,19 @@ test("runtime workspace patch publication replaces empty placeholders but reject
 test("generated Smithers workflow prefers its relocatable task prompt path", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.match(source, /const promptPath = task\.promptPath \?\? inputTask\?\.prompt_path/u);
+});
+
+test("generated Smithers input avoids runner-reserved persistence fields", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const schemaStart = source.indexOf("const inputSchema = z.strictObject");
+  const schemaEnd = source.indexOf("const taskOutput", schemaStart);
+
+  assert.ok(schemaStart >= 0, source);
+  assert.ok(schemaEnd > schemaStart, source);
+  assert.doesNotMatch(source.slice(schemaStart, schemaEnd), /\brun_id\s*:/u);
+  assert.match(source, /Smithers reserves `run_id`/u);
+  assert.match(source, /Smithers 0\.31 persists absent top-level workflow inputs as null/u);
+  assert.match(source.slice(schemaStart, schemaEnd), /\.nullish\(\)[\s\S]*?value \?\? undefined/u);
 });
 
 test("generated Smithers verifier explains byte-preserving invariant evidence", () => {
@@ -881,13 +907,79 @@ test("generated Smithers agent preserves its final response as missing non-repor
   assert.match(agent, /const result = await agent\.generate\(args\)/u);
   assert.match(agent, /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\)/u);
   assert.match(agent, /materializeMissingMarkdownArtifacts\(task, result\)/u);
+  assert.match(agent, /materializeCanonicalThreatModelArtifact\(task\)/u);
   assert.match(agent, /materializeMissingFinalReportArtifacts\(task\)/u);
+  assert.match(agent, /normalizeFindingProvenance\(task\)/u);
   assert.match(agent, /normalizeLegacyReportProvenance\(task\)/u);
   assert.match(agent, /normalizeLegacyGeneratedTestManifests\(task\)/u);
   assert.match(agent, /materializeGeneratedTestCompanions\(task\)/u);
   assert.match(agent, /verifyArtifacts\(task\)/u);
   assert.match(source, /output\.contract !== "ultrafuzz\/nonempty-markdown@1"/u);
   assert.match(source, /const fallback = `# \$\{title\}\\n\\n\$\{summary\}\\n`/u);
+});
+
+test("generated Smithers verifier serializes human producer IDs and preserves review source unions", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const agentStart = source.indexOf("function artifactAwareAgent");
+  const resetStart = source.indexOf("function resetTaskArtifactsForRetry");
+  const provenanceStart = source.indexOf("function normalizeFindingProvenance");
+  const legacyArrayStart = source.indexOf("function normalizeLegacyFindingArray");
+  assert.ok(agentStart >= 0 && resetStart > agentStart, source);
+  assert.ok(provenanceStart > agentStart && legacyArrayStart > provenanceStart, source);
+  const agent = source.slice(agentStart, resetStart);
+  assert.ok(agent.indexOf("normalizeFindingProvenance(task)") < agent.indexOf("verifyArtifacts(task)"), agent);
+  const provenance = source.slice(provenanceStart, legacyArrayStart);
+  assert.match(provenance, /producerNodeId = task\.metadata\.node\.producerNodeId \?\? task\.attemptId/u);
+  assert.match(provenance, /relativePath: output\.path/u);
+  assert.match(provenance, /preserveSourceNodes/u);
+  assert.match(provenance, /requireSourceNodes: preserveSourceNodes/u);
+  assert.match(provenance, /buildFindingSourceExpectations/u);
+  assert.match(provenance, /requireLifecycleCoverage/u);
+  assert.match(provenance, /sourceExpectations: sourceProvenance\?\.expectations/u);
+  assert.match(provenance, /requireSourceExpectation: preserveSourceNodes/u);
+  assert.match(provenance, /"dedupe-findings", "triage", "severity-classification", "final-report"/u);
+  assert.match(source, /normalizeReportFindingSourceNodes/u);
+  assert.match(source, /report finding does not match dependency provenance/u);
+});
+
+test("generated Smithers verifier canonicalizes threat Markdown and materializes verified selected database records before sealing outputs", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const agentStart = source.indexOf("function artifactAwareAgent");
+  const resetStart = source.indexOf("function resetTaskArtifactsForRetry");
+  const canonicalStart = source.indexOf("function materializeCanonicalThreatModelArtifact");
+  const verifierStart = source.indexOf("function verifyArtifacts");
+  const workflowStart = source.indexOf("export default smithers");
+
+  assert.ok(agentStart >= 0 && resetStart > agentStart, source);
+  assert.ok(canonicalStart > agentStart && canonicalStart < verifierStart, source);
+  assert.ok(workflowStart > verifierStart, source);
+
+  const agent = source.slice(agentStart, resetStart);
+  assert.ok(
+    agent.indexOf("materializeCanonicalThreatModelArtifact(task)") < agent.indexOf("verifyArtifacts(task)"),
+    agent
+  );
+  assert.ok(
+    agent.indexOf("materializeGoalPlanDatabaseArtifacts(task)") < agent.indexOf("verifyArtifacts(task)"),
+    agent
+  );
+  const canonical = source.slice(canonicalStart, verifierStart);
+  assert.match(canonical, /logicalNodeId !== "threat-model"/u);
+  assert.match(canonical, /const runRoot = realpathSync\(path\.resolve\(artifactDir, "\.\.", "\.\."\)\)/u);
+  assert.match(canonical, /const workspaceRoot = realpathSync\(task\.workspacePath\)/u);
+  assert.match(canonical, /verifyThreatModelVulnerabilityDatabaseCapabilities\(artifactRoot, runRoot\)/u);
+  assert.match(canonical, /verifyThreatModelEvidenceFiles\(model, workspaceRoot\)/u);
+  assert.match(canonical, /materializeCanonicalThreatModelMarkdown\(artifactRoot\)/u);
+  assert.match(canonical, /logicalNodeId !== "goal-plan"/u);
+  assert.match(
+    canonical,
+    /materializeGoalPlanVulnerabilityDatabaseSnapshots\(artifactRoot, \{ threatModelArtifactDirs, runRoot \}\)/u
+  );
+
+  const verifier = source.slice(verifierStart, workflowStart);
+  assert.match(verifier, /output\.contract === "ultrafuzz\/goal-plan@1"/u);
+  assert.match(verifier, /verifyGoalPlanSelectedRecordSnapshots\(artifactRoot, validation\.value\)/u);
+  assert.match(verifier, /rememberVerifiedPublication\(publications, selected\.path, selected\.contents\)/u);
 });
 
 test("generated Smithers agent retains validated strategy findings when dedupe output is missing", () => {

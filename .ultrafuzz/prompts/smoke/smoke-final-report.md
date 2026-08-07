@@ -31,13 +31,17 @@ likelihood is Medium and otherwise High. Set both `severity` and
 include at least:
 
 - `schema_version: "1.0"`, stable `id`, concise `title`, `status`,
-  `severity_guess`, `confidence`, and `summary`;
+  `severity_guess`, `confidence`, and `summary`. Carry each issue's `id` and
+  `dedupe_key` through unchanged from its deduped finding; provenance is matched
+  on that identity, so renumbering issues fails the node;
 - `strategy` as one originating strategy string, affected files/functions, and
   concrete evidence;
 - `severity`, `impact`, `likelihood`, `description`, and a reproducible
   `proof_of_concept` or precise execution trace; and
 - structured `strategy_provenance` and its matching lifecycle record when
-available.
+  available; and
+- the complete non-empty `source_nodes` discovery union with compatibility
+  `source_node_id` equal to its first entry.
 
 Write every issue's `confidence` as one of the strings `high`, `medium`, or
 `low`; never use a numeric confidence in the normalized report.
@@ -55,7 +59,9 @@ artifact and must never contain synthetic findings.
 
 Write `{{artifact_path}}/report.md` beginning with `# Ultrafuzz report`. Include
 a concise run summary, an issue index, and for each production issue its
-severity reasoning, evidence/PoC, affected code, and strategy detections. Add a
-short non-production outcomes table when needed. State `No issues reported.`
+severity reasoning, evidence/PoC, affected code, strategy detections, and a
+`- **Source nodes**:` bullet listing the finding's `source_nodes` union as
+comma-separated backticked IDs. Add a short
+non-production outcomes table when needed. State `No issues reported.`
 only when the evidence supports no production issue. Validate all three
 required files against their output contracts, then stop.

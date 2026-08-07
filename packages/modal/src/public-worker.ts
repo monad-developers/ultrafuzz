@@ -21,6 +21,7 @@ import {
   type EvalRunRecord,
   type EvalSuiteSpec
 } from "@ultrafuzz/evals";
+import { REFERENCE_GITHUB_TOKEN_ENV } from "@ultrafuzz/references";
 import { stringify } from "yaml";
 
 import { kimiSubscriptionAuthSecretValuesFromRoots, runnerApiKeyEnv } from "./auth.js";
@@ -563,8 +564,16 @@ export async function publicBenchmarkWorkerSecretValues(
           remoteAuthDir("kimi"),
           path.join(dataRoot, "kimi-code-auth")
         );
+  const referenceToken = env[REFERENCE_GITHUB_TOKEN_ENV]?.trim();
   return [
-    ...new Set([...runnerSecretValues, requiredEnv(config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY", env)])
+    ...new Set([
+      ...runnerSecretValues,
+      requiredEnv(config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY", env),
+      // The reference token shares the sandbox secret channel with model credentials. Include its
+      // exact value in every worker-side diagnostic and bundle scan; generic token-pattern redaction
+      // remains only a backstop.
+      ...(referenceToken === undefined || referenceToken === "" ? [] : [referenceToken])
+    ])
   ];
 }
 

@@ -101,6 +101,71 @@ describe("prompt rendering", () => {
     expect(() => validatePromptVariables("hello {{unknown_value}}")).toThrow(PromptError);
   });
 
+  it("renders item-scoped and recursively resolved namespaced dynamic variables", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const result = renderPrompt({
+      ...baseRenderInput(tmp),
+      prompt: "Your /goal is {{item.goal_prompt}} using {{liquidation:overdue}}.",
+      dynamicVariables: {
+        "item.goal_prompt": "find overdue liquidation via {{liquidation:overdue}}",
+        "liquidation:overdue": "the evidence-backed overdue state"
+      }
+    });
+    expect(result.renderedMarkdown).toContain(
+      "Your /goal is find overdue liquidation via the evidence-backed overdue state using the evidence-backed overdue state."
+    );
+    expect(result.variablesUsed).toEqual(["item.goal_prompt", "liquidation:overdue"]);
+  });
+
+  it("preserves escaped replacement placeholders as literals for downstream MDX prompts", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = "Emit \\{{class:liquidation:fixed-term-before-overdue}} exactly.";
+
+    expect(() => validatePromptVariables(input.prompt)).not.toThrow();
+    const result = renderPrompt(input);
+    expect(result.renderedMarkdown).toContain("Emit {{class:liquidation:fixed-term-before-overdue}} exactly.");
+    expect(result.variablesUsed).toEqual([]);
+  });
+
+  it("accepts dotted vulnerability IDs in namespaced dynamic variables", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const result = renderPrompt({
+      ...baseRenderInput(tmp),
+      prompt: "Inspect {{oracle:price.v2}} and {{oracle.v2:stale-price}}.",
+      dynamicVariables: {
+        "oracle:price.v2": "price v2",
+        "oracle.v2:stale-price": "stale prices"
+      }
+    });
+    expect(result.renderedMarkdown).toContain("Inspect price v2 and stale prices.");
+  });
+
+  it("rejects missing, cyclic, and built-in dynamic-variable references", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    expect(() =>
+      renderPrompt({ ...baseRenderInput(tmp), prompt: "{{item.goal}}", dynamicVariables: { "item.other": "x" } })
+    ).toThrow(/missing dynamic item template variable/u);
+    expect(() =>
+      renderPrompt({
+        ...baseRenderInput(tmp),
+        prompt: "{{item.goal}}",
+        dynamicVariables: { "item.goal": "{{context:loop}}", "context:loop": "{{item.goal}}" }
+      })
+    ).toThrow(/cyclic/u);
+    expect(() =>
+      renderPrompt({
+        ...baseRenderInput(tmp),
+        prompt: "{{item.goal}}",
+        dynamicVariables: { "item.goal": "{{repo_path}}" }
+      })
+    ).toThrow(/non-item variable/u);
+  });
+
   it("rejects unsafe artifact suffixes and render outputs", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);

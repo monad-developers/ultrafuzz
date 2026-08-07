@@ -9,8 +9,19 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import * as ts from "typescript";
 
-import type { RunState } from "@ultrafuzz/artifacts";
-import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
+import {
+  GOAL_PLAN_JSON_SCHEMA_ID,
+  THREAT_MODEL_JSON_SCHEMA_ID,
+  goalPlanJsonSchema,
+  threatModelJsonSchema,
+  type RunState
+} from "@ultrafuzz/artifacts";
+import {
+  CACHE_MANIFEST_FILE,
+  RUN_REFERENCE_MANIFEST_FILE,
+  loadReferenceCatalog,
+  parseReferenceCatalog
+} from "@ultrafuzz/references";
 
 import {
   assertSmithersPackageManifest,
@@ -41,6 +52,12 @@ import {
   syncRun,
   validateProject
 } from "../src/index.js";
+import { projectArtifactSchemaDir, projectArtifactSchemaJson } from "../src/init.js";
+import {
+  shippedReferenceCatalog,
+  writeShippedDocumentReferenceCaches,
+  writeShippedVulnerabilityDatabaseCache
+} from "./reference-fixtures.js";
 
 const runningUnderBun = typeof process.versions.bun === "string";
 
@@ -2797,6 +2814,161 @@ test("plan uses an eval topology override without replacing the project topology
   assert.equal(fs.readFileSync(canonicalTopology, "utf8"), "not: [valid\n");
 });
 
+test("a clean scaffold pins the reviewed vulnerability database verbatim", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+
+  // The scaffolded catalog is the shipped catalog, byte for byte: no test mutates it into passing.
+  const scaffoldedYaml = fs.readFileSync(path.join(project, ".ultrafuzz", "references.yml"), "utf8");
+  assert.deepEqual(parseReferenceCatalog(scaffoldedYaml), shippedReferenceCatalog());
+
+  const pinned = loadReferenceCatalog(project).references["vulnerability-database.web3"];
+  assert.ok(pinned, "the shipped scaffold must define vulnerability-database.web3");
+  assert.equal(pinned.kind, "vulnerability-database");
+  assert.equal(pinned.provider, "github");
+  assert.equal(pinned.repo, "aviggiano/web3-vulnerability-database");
+  assert.equal(pinned.commit, "e46c0e472c28596f30decbb08549c9d9630f47cb");
+  assert.deepEqual([...pinned.paths], ["database.yml", "capabilities.yml", "catalog.json"]);
+  assert.equal(pinned.resolved_at, "2026-08-06T23:31:09Z");
+});
+
+test("a clean scaffold publishes the canonical artifact schema files the prompts reference", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+
+  for (const [relativePath, schema, id] of [
+    [".ultrafuzz/schema/threat-model.schema.json", threatModelJsonSchema, THREAT_MODEL_JSON_SCHEMA_ID],
+    [".ultrafuzz/schema/goal-plan.schema.json", goalPlanJsonSchema, GOAL_PLAN_JSON_SCHEMA_ID]
+  ] as const) {
+    const filePath = path.join(project, ...relativePath.split("/"));
+    assert.equal(fs.statSync(filePath).isFile(), true, `${relativePath} must exist in a clean scaffold`);
+    fs.accessSync(filePath, fs.constants.R_OK);
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+    // Generated from the one runtime validator, so the file an agent reads and the gate it must
+    // pass can never disagree.
+    assert.deepEqual(parsed, schema);
+    assert.equal(parsed.$id, id);
+    // The published bytes are the digest-stable canonical form.
+    assert.equal(
+      crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex"),
+      crypto.createHash("sha256").update(projectArtifactSchemaJson(schema)).digest("hex")
+    );
+  }
+
+  // Every prompt names its canonical schema through the rendered `artifact_schema_dir` variable,
+  // so the agent resolves an absolute path rather than a literal that only works from the project
+  // root. Each referenced file must be one the scaffold actually publishes.
+  const promptRoot = path.join(project, ".ultrafuzz", "prompts");
+  const referenced = new Set<string>();
+  for (const promptPath of listFilesRecursively(promptRoot)) {
+    const body = fs.readFileSync(promptPath, "utf8");
+    assert.equal(
+      /`\.ultrafuzz\/schema\//u.test(body),
+      false,
+      `${promptPath} must not hardcode a project-relative schema path`
+    );
+    for (const match of body.matchAll(/\{\{artifact_schema_dir\}\}\/([A-Za-z0-9._-]+\.schema\.json)/gu)) {
+      referenced.add(match[1]!);
+    }
+  }
+  assert.deepEqual([...referenced].sort(), ["goal-plan.schema.json", "threat-model.schema.json"]);
+  for (const fileName of referenced) {
+    const filePath = path.join(projectArtifactSchemaDir(project), fileName);
+    assert.equal(fs.statSync(filePath).isFile(), true, fileName);
+    fs.accessSync(filePath, fs.constants.R_OK);
+  }
+});
+
+function listFilesRecursively(root: string): string[] {
+  return fs
+    .readdirSync(root, { withFileTypes: true })
+    .flatMap((entry) =>
+      entry.isDirectory() ? listFilesRecursively(path.join(root, entry.name)) : [path.join(root, entry.name)]
+    );
+}
+
+test("the shipped default topology expands against the shipped reference catalog", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+
+  const shipped = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(shipped.ok, true, JSON.stringify(shipped.diagnostics));
+  assert.ok((shipped.value!.topology?.expanded_nodes ?? 0) > 0);
+});
+
+test("a clean scaffold plans the threat-model, goal-plan, and dynamic fanout nodes", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  // Populate the normal reference cache with a valid local representation of every shipped pinned
+  // reference. The shipped catalog itself is untouched, so this only removes network dependence.
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeShippedDocumentReferenceCaches(xdgCacheHome, loadReferenceCatalog(project));
+  writeShippedVulnerabilityDatabaseCache(xdgCacheHome);
+
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  let plan;
+  try {
+    const validation = await validateProject({ projectRoot: project, env: {} });
+    assert.equal(validation.ok, true, JSON.stringify(validation.diagnostics));
+    plan = await planRun({ projectRoot: project, runId: "clean-scaffold", env: {} });
+  } finally {
+    if (previousXdgCacheHome === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+    }
+  }
+
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const logicalIds = new Set(plan.value!.graph.nodes.map((node) => node.logical_id));
+  for (const required of [
+    "reference-vulnerability-database",
+    "threat-model",
+    "goal-plan",
+    "goal-roaming",
+    "threat-goals",
+    "class-goals",
+    "dedupe-findings",
+    "final-report"
+  ]) {
+    assert.equal(logicalIds.has(required), true, `${required} must be planned by a clean scaffold`);
+  }
+  // The dynamic goal groups stay dynamic declarations rather than being silently flattened away.
+  const dynamicIds = plan
+    .value!.graph.nodes.filter((node) => node.dynamic !== undefined)
+    .map((node) => node.logical_id)
+    .sort();
+  assert.deepEqual(dynamicIds, ["class-goals", "threat-goals"]);
+
+  // The digest-bound planner catalog is materialized under the run root for the compiled tasks.
+  const catalogPath = path.join(plan.value!.run_root, "vulnerability-db", "catalog.json");
+  assert.equal(fs.existsSync(catalogPath), true);
+  assert.equal(plan.value!.vulnerability_database?.relative_path, "vulnerability-db/catalog.json");
+  assert.equal(
+    plan.value!.vulnerability_database?.sha256,
+    crypto.createHash("sha256").update(fs.readFileSync(catalogPath)).digest("hex")
+  );
+
+  // The threat-model and goal-plan prompts must render an absolute, readable canonical schema path
+  // rather than an unresolved placeholder or a literal that only resolves from the project root.
+  for (const [logicalId, fileName] of [
+    ["threat-model", "threat-model.schema.json"],
+    ["goal-plan", "goal-plan.schema.json"]
+  ] as const) {
+    const renderedPath: string[] = plan
+      .value!.rendered_prompts.filter((entry) => entry.logical_node_id === logicalId)
+      .map((entry) => entry.rendered_prompt_path);
+    assert.equal(renderedPath.length > 0, true, `${logicalId} must render a prompt`);
+    const body = fs.readFileSync(renderedPath[0]!, "utf8");
+    const expected = path.join(projectArtifactSchemaDir(project), fileName);
+    assert.equal(body.includes(expected), true, `${logicalId} must reference ${expected}`);
+    assert.equal(body.includes("{{artifact_schema_dir}}"), false);
+    assert.equal(body.includes("unavailable/"), false);
+    fs.accessSync(expected, fs.constants.R_OK);
+  }
+});
+
 test("plan applies smoke eval model profiles to a normally initialized target", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -3158,16 +3330,16 @@ test("compileSmithersWorkflow preserves Kimi cloud API-key binding for Modal fal
 });
 
 test("compileSmithersWorkflow escapes the evidence workflow import", async () => {
-  const project = tempProject();
+  const parent = tempProject();
+  const project = path.join(parent, 'checkout"quoted');
+  fs.mkdirSync(project);
   writeFanoutProject(project);
 
   const plan = await planRun({ projectRoot: project, runId: "escaped-import", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
-  const quotedProjectRoot = path.join(project, 'checkout"quoted');
-  fs.mkdirSync(quotedProjectRoot);
   const compiled = compileSmithersWorkflow({
-    projectRoot: quotedProjectRoot,
+    projectRoot: project,
     config: plan.value!.resolved_config,
     graph: plan.value!.expanded_graph,
     runLayout: plan.value!.layout,
@@ -3972,7 +4144,8 @@ ${`${marker} `.repeat(2000)}
 
   const smithersInput = JSON.parse(
     fs.readFileSync(path.join(run.value!.run_root, "smithers", "input.json"), "utf8")
-  ) as { tasks?: Array<{ prompt?: string; prompt_path?: string }> };
+  ) as { run_id?: unknown; tasks?: Array<{ prompt?: string; prompt_path?: string }> };
+  assert.equal(smithersInput.run_id, undefined);
   assert.equal(smithersInput.tasks?.[0]?.prompt, undefined);
   const promptPath = smithersInput.tasks?.[0]?.prompt_path ?? "";
   assert.match(promptPath, /prompt\.rendered\.md$/);

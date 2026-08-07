@@ -11,11 +11,12 @@ import {
   assertRegularFileInside,
   getNodeArtifactDir,
   getNodeWorkspaceDir,
+  safeResolveInside,
   writeFileDurable,
   writeJsonDurable,
   type RunLayout
 } from "@ultrafuzz/artifacts";
-import { resolveExecutionResources, type ResolvedConfig } from "@ultrafuzz/config";
+import { invariantPropertyPrioritySelection, resolveExecutionResources, type ResolvedConfig } from "@ultrafuzz/config";
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
@@ -27,6 +28,7 @@ import {
   SMITHERS_ORCHESTRATOR_VERSION
 } from "./smithers-package.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
+import { DEFERRED_PROMPT_TEMPLATE_DIR, sha256Stable } from "./utils.js";
 
 const execFileAsync = promisify(execFile);
 const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
@@ -263,6 +265,8 @@ export interface SmithersCompileInput {
   renderedPrompts: readonly RenderedPromptPlan[];
   operatorPrompt?: string;
   operatorInput?: unknown;
+  /** Run-root-relative materialized vulnerability-database planner catalog, when the run has one. */
+  vulnerabilityDatabase?: { relative_path: string; sha256: string };
 }
 
 export interface NodeAttemptProvenance {
@@ -296,7 +300,23 @@ export interface CompiledSmithersTask {
   workspacePath: string;
   artifactDir: string;
   dependencyArtifactDirs: readonly string[];
+  /**
+   * Pinned-reference artifact trees this attempt depends on. Reference nodes are not agentic
+   * attempts, so their materialized trees would otherwise never reach a cloud worker even though
+   * postprocessors require them.
+   */
+  referenceArtifactDirs: readonly string[];
+  /** Digest-bound materialized planner catalog required by threat-model/goal-plan postprocessors. */
+  vulnerabilityDatabaseCatalog?: { path: string; sha256: string };
   renderedPromptPath?: string;
+  /** Immutable raw prompt snapshot used only when runtime topology expansion delays rendering. */
+  promptTemplatePath?: string;
+  /** Direct dynamic group dependencies which must lower to generated verifier tasks at runtime. */
+  dynamicDependencies?: readonly string[];
+  /** Dynamic groups in this task's ancestry; all must expand before its prompt can be rendered. */
+  deferredPromptGroups?: readonly string[];
+  /** Per-item values available only to a runtime-generated task prompt. */
+  dynamicVariables?: Readonly<Record<string, string | number | boolean>>;
   execution: {
     mode: "local" | "cloud";
     provider?: "modal";
@@ -333,6 +353,18 @@ export interface SmithersTaskMetadata {
     role?: string;
     promptPath?: string;
     group?: string;
+    /** Human generated node identity used in artifacts/findings; never used as a path segment. */
+    producerNodeId?: string;
+    storageId?: string;
+    dynamic?: {
+      groupNodeId: string;
+      sourceNodeId: string;
+      sourceAttemptId: string;
+      sourceDigest: string;
+      expansionKey: string;
+      itemDigest: string;
+      manifestPath: string;
+    };
   };
   dependencies: {
     concreteNodeIds: readonly string[];
@@ -384,13 +416,57 @@ export interface SmithersTaskMetadata {
   };
 }
 
+export interface DynamicPromptRuntimeContext {
+  projectRoot: string;
+  repoPath: string;
+  artifactsDir: string;
+  runMetadataPath: string;
+  resolvedConfig: {
+    triage: { quorum: number; panelSize: number };
+    dynamicStrategiesEnumerator: number;
+    invariantPropertyPriorityThreshold: string;
+    invariantPropertyPriorityFilter: string;
+    invariantPropertyPriorities: string[];
+    invariantTestingFuzzerTimeout: number;
+    /**
+     * Run-root-relative path to the digest-bound materialized planner catalog. Deferred and dynamic
+     * rendering resolves it against the actual run root so a relocated or cloud root stays correct.
+     */
+    vulnerabilityDatabaseRelativePath?: string;
+    vulnerabilityDatabaseSha256?: string;
+  };
+}
+
+export interface CompiledSmithersDynamicGroup {
+  groupNodeId: string;
+  logicalNodeId: string;
+  source: {
+    concreteNodeId: string;
+    attemptId: string;
+    verifierSmithersNodeId?: string;
+    artifactPath: string;
+  };
+  sourcePath: string;
+  keyPath: string;
+  nodeIdTemplate: string;
+  templatePath: string;
+  templateDigest: string;
+  templateFingerprint: string;
+  maxDynamicNodes: number;
+  reservedNodeIds: readonly string[];
+  taskTemplates: readonly CompiledSmithersTask[];
+  promptContext: DynamicPromptRuntimeContext;
+}
+
 export interface CompiledSmithersWorkflow {
   schemaVersion: typeof SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION;
   runId: string;
   smithersRunId: string;
   workflowName: string;
   tasks: readonly CompiledSmithersTask[];
+  dynamicGroups: readonly CompiledSmithersDynamicGroup[];
   projectRoot: string;
+  runRoot: string;
   workflowPath: string;
   evidenceWorkflowPath: string;
   inputPath: string;
@@ -487,12 +563,23 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
       nodeAttemptsFor(node).map((attempt) => attempt.attemptId)
     );
   }
+  const referenceAttemptsByNodeId = new Map<string, string[]>();
+  for (const node of input.graph.nodes.filter((candidate) => candidate.kind === "reference")) {
+    referenceAttemptsByNodeId.set(
+      node.id,
+      nodeAttemptsFor(node).map((attempt) => attempt.attemptId)
+    );
+  }
   const renderedByAttempt = new Map(
     input.renderedPrompts.map((prompt) => [prompt.attempt_id ?? prompt.node_id, prompt.rendered_prompt_path])
   );
+  const nodeById = new Map(input.graph.nodes.map((node) => [node.id, node]));
+  const dynamicNodeIds = new Set(
+    input.graph.nodes.filter((candidate) => candidate.dynamic !== undefined).map((candidate) => candidate.id)
+  );
   const tasks = input.graph.nodes.flatMap((node) =>
     nodeAttemptsFor(node)
-      .filter(() => node.kind === "agentic")
+      .filter(() => node.kind === "agentic" && node.dynamic === undefined)
       .map((attempt) =>
         compileTask({
           config: input.config,
@@ -502,16 +589,48 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
           runLayout: input.runLayout,
           workflowName,
           renderedPromptPath: renderedByAttempt.get(attempt.attemptId) ?? renderedByAttempt.get(node.id),
-          dependencyAttemptIds: node.dependsOn.flatMap((dependency) => attemptsByNodeId.get(dependency) ?? []),
-          dependencyAgenticAttemptIds: node.dependsOn.flatMap(
-            (dependency) => agenticAttemptsByNodeId.get(dependency) ?? []
+          promptTemplatePath:
+            dynamicAncestorGroupsForNode(node, nodeById).length === 0
+              ? undefined
+              : snapshotPromptTemplate(input.runLayout, input.graph, node),
+          dynamicDependencies: node.dependsOn.filter((dependency) => dynamicNodeIds.has(dependency)),
+          deferredPromptGroups: dynamicAncestorGroupsForNode(node, nodeById),
+          dependencyAttemptIds: node.dependsOn.flatMap((dependency) =>
+            dynamicNodeIds.has(dependency) ? [] : (attemptsByNodeId.get(dependency) ?? [])
           ),
-          artifactDependencyAttemptIds: artifactAncestorNodeIds(node.id, input.graph.nodes).flatMap(
-            (ancestor) => attemptsByNodeId.get(ancestor) ?? []
-          )
+          dependencyAgenticAttemptIds: node.dependsOn.flatMap((dependency) =>
+            dynamicNodeIds.has(dependency) ? [] : (agenticAttemptsByNodeId.get(dependency) ?? [])
+          ),
+          // Artifact ancestry is transitive, so a node reads through non-agentic hops. Dynamic groups
+          // are excluded here for the same reason as the direct dependencies above: their children only
+          // exist after the controller expands them, so the runtime -- not the compiler -- supplies
+          // those artifact directories.
+          artifactDependencyAttemptIds: artifactAncestorNodeIds(node.id, input.graph.nodes).flatMap((ancestor) =>
+            dynamicNodeIds.has(ancestor) ? [] : (attemptsByNodeId.get(ancestor) ?? [])
+          ),
+          dependencyReferenceAttemptIds: node.dependsOn.flatMap(
+            (dependency) => referenceAttemptsByNodeId.get(dependency) ?? []
+          ),
+          ...(input.vulnerabilityDatabase === undefined ? {} : { vulnerabilityDatabase: input.vulnerabilityDatabase })
         })
       )
   );
+  const dynamicGroups = input.graph.nodes
+    .filter(
+      (node): node is ExpandedNode & { dynamic: NonNullable<ExpandedNode["dynamic"]> } => node.dynamic !== undefined
+    )
+    .map((node) =>
+      compileDynamicGroup({
+        input,
+        node,
+        nodeById,
+        attemptsByNodeId,
+        agenticAttemptsByNodeId,
+        referenceAttemptsByNodeId,
+        projectRoot,
+        workflowName
+      })
+    );
   const smithersDir = path.join(input.runLayout.root, "smithers");
   fs.mkdirSync(smithersDir, { recursive: true });
   const evidenceWorkflowPath = path.join(smithersDir, "workflow.tsx");
@@ -530,7 +649,9 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     smithersRunId,
     workflowName,
     tasks,
+    dynamicGroups,
     projectRoot,
+    runRoot: input.runLayout.root,
     workflowPath,
     evidenceWorkflowPath,
     inputPath,
@@ -542,7 +663,8 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     run_id: input.runLayout.runId,
     smithers_run_id: smithersRunId,
     workflow_name: workflowName,
-    tasks
+    tasks,
+    dynamic_groups: dynamicGroups
   });
   writeJsonDurable(
     inputPath,
@@ -560,7 +682,6 @@ function smithersInputDocument(
 ): Record<string, unknown> {
   return {
     schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
-    run_id: compiled.runId,
     ...(operatorPrompt ? { operator_prompt: operatorPrompt } : {}),
     ...(operatorInput !== undefined ? { operator_input: operatorInput } : {}),
     tasks: compiled.tasks.map((task) => ({
@@ -1967,6 +2088,169 @@ function smithersBinaryName(): string {
   return process.platform === "win32" ? "smithers.cmd" : "smithers";
 }
 
+function dynamicAncestorGroupsForNode(node: ExpandedNode, nodeById: ReadonlyMap<string, ExpandedNode>): string[] {
+  const discovered = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (nodeId: string): void => {
+    if (visited.has(nodeId)) return;
+    visited.add(nodeId);
+    const candidate = nodeById.get(nodeId);
+    if (candidate === undefined) return;
+    if (candidate.dynamic !== undefined) discovered.add(candidate.id);
+    for (const dependency of candidate.dependsOn) visit(dependency);
+  };
+  visit(node.id);
+  return [...discovered].sort();
+}
+
+/**
+ * Resolves the immutable transformed prompt body that planning hashed and validated.
+ *
+ * The project file is deliberately never reread: a run-scoped prompt transform makes the on-disk
+ * bytes differ from the bytes the plan is bound to, which would either fail compilation for dynamic
+ * templates or leave a deferred static descendant rendering stale artifact references.
+ */
+function snapshotPromptTemplate(runLayout: RunLayout, graph: ExpandedGraph, node: ExpandedNode): string {
+  if (node.promptPath === undefined) {
+    throw new Error(`runtime-rendered node ${node.id} is missing a prompt path`);
+  }
+  const digest = graph.fingerprintInputs?.promptDigests?.[node.promptPath] ?? node.dynamic?.templateDigest;
+  if (digest === undefined) {
+    throw new Error(`deferred prompt template digest is unavailable for ${node.id}`);
+  }
+  if (node.dynamic?.templateDigest !== undefined && node.dynamic.templateDigest !== digest) {
+    throw new Error(`dynamic prompt template digest changed for ${node.id}`);
+  }
+  const snapshotPath = safeResolveInside(
+    runLayout.root,
+    `${DEFERRED_PROMPT_TEMPLATE_DIR}/${digest}.md`,
+    `deferred prompt template for ${node.id}`
+  );
+  assertRegularFileInside(runLayout.root, snapshotPath, `deferred prompt template for ${node.id}`);
+  const actual = crypto.createHash("sha256").update(fs.readFileSync(snapshotPath, "utf8")).digest("hex");
+  if (actual !== digest) {
+    throw new Error(`deferred prompt template snapshot digest changed for ${node.id}`);
+  }
+  return snapshotPath;
+}
+
+function compileDynamicGroup(input: {
+  input: SmithersCompileInput;
+  node: ExpandedNode & { dynamic: NonNullable<ExpandedNode["dynamic"]> };
+  nodeById: ReadonlyMap<string, ExpandedNode>;
+  attemptsByNodeId: ReadonlyMap<string, string[]>;
+  agenticAttemptsByNodeId: ReadonlyMap<string, string[]>;
+  referenceAttemptsByNodeId: ReadonlyMap<string, string[]>;
+  projectRoot: string;
+  workflowName: string;
+}): CompiledSmithersDynamicGroup {
+  const sourceNodes = input.node.dependsOn
+    .map((dependency) => input.nodeById.get(dependency))
+    .filter(
+      (candidate): candidate is ExpandedNode =>
+        candidate !== undefined && candidate.logicalId === input.node.dynamic.from.node
+    );
+  const sourceAttempts = sourceNodes.flatMap((source) => input.attemptsByNodeId.get(source.id) ?? []);
+  if (sourceNodes.length !== 1 || sourceAttempts.length !== 1) {
+    throw new Error(
+      `dynamic group ${input.node.id} requires exactly one concrete source attempt; found ${sourceAttempts.length}`
+    );
+  }
+  const sourceNode = sourceNodes[0]!;
+  const sourceAttemptId = sourceAttempts[0]!;
+  const sourcePrimary = sourceNode.outputs.find((output) => output.primary);
+  if (sourcePrimary === undefined) {
+    throw new Error(`dynamic group ${input.node.id} source has no primary output`);
+  }
+  const templatePath = snapshotPromptTemplate(input.input.runLayout, input.input.graph, input.node);
+  const templateDigest = crypto.createHash("sha256").update(fs.readFileSync(templatePath)).digest("hex");
+  const dependencyAttemptIds = input.node.dependsOn.flatMap(
+    (dependency) => input.attemptsByNodeId.get(dependency) ?? []
+  );
+  const dependencyAgenticAttemptIds = input.node.dependsOn.flatMap(
+    (dependency) => input.agenticAttemptsByNodeId.get(dependency) ?? []
+  );
+  // Generated children inherit the group's compiled artifact ancestry; their own sibling artifact
+  // directories are added when the controller materializes them.
+  const artifactDependencyAttemptIds = artifactAncestorNodeIds(input.node.id, input.input.graph.nodes).flatMap(
+    (ancestor) =>
+      input.nodeById.get(ancestor)?.dynamic === undefined ? (input.attemptsByNodeId.get(ancestor) ?? []) : []
+  );
+  const taskTemplates = nodeAttemptsFor(input.node).map((attempt) =>
+    compileTask({
+      config: input.input.config,
+      graph: input.input.graph,
+      node: input.node,
+      attempt,
+      runLayout: input.input.runLayout,
+      workflowName: input.workflowName,
+      promptTemplatePath: templatePath,
+      deferredPromptGroups: [input.node.id],
+      dependencyAttemptIds,
+      dependencyAgenticAttemptIds,
+      artifactDependencyAttemptIds,
+      dependencyReferenceAttemptIds: input.node.dependsOn.flatMap(
+        (dependency) => input.referenceAttemptsByNodeId.get(dependency) ?? []
+      ),
+      ...(input.input.vulnerabilityDatabase === undefined
+        ? {}
+        : { vulnerabilityDatabase: input.input.vulnerabilityDatabase })
+    })
+  );
+  const priorities = invariantPropertyPrioritySelection(input.input.config.invariants.propertyPriorityThreshold);
+  return {
+    groupNodeId: input.node.id,
+    logicalNodeId: input.node.logicalId,
+    source: {
+      concreteNodeId: sourceNode.id,
+      attemptId: sourceAttemptId,
+      ...(sourceNode.kind === "agentic"
+        ? { verifierSmithersNodeId: verifierSmithersNodeIdForAttempt(sourceAttemptId) }
+        : {}),
+      artifactPath: path.join(
+        getNodeArtifactDir(input.input.runLayout, sourceAttemptId, { create: true }),
+        sourcePrimary.path
+      )
+    },
+    sourcePath: input.node.dynamic.from.path,
+    keyPath: input.node.dynamic.key,
+    nodeIdTemplate: input.node.dynamic.nodeIdTemplate,
+    templatePath,
+    templateDigest,
+    templateFingerprint: sha256Stable({
+      graph_version: input.input.graph.graphVersion,
+      node: input.node,
+      template_digest: templateDigest
+    }),
+    maxDynamicNodes: input.input.config.run.maxDynamicNodes,
+    reservedNodeIds: input.input.graph.nodes.map((node) => node.id).sort(),
+    taskTemplates,
+    promptContext: {
+      projectRoot: input.projectRoot,
+      repoPath: path.resolve(input.projectRoot, input.input.config.project.repo),
+      artifactsDir: input.input.runLayout.artifactsDir,
+      runMetadataPath: input.input.runLayout.runMetadataPath,
+      resolvedConfig: {
+        triage: {
+          quorum: input.input.config.triage.quorum,
+          panelSize: input.input.config.triage.panelSize
+        },
+        dynamicStrategiesEnumerator: input.input.config.dynamicStrategiesEnumerator,
+        invariantPropertyPriorityThreshold: input.input.config.invariants.propertyPriorityThreshold,
+        invariantPropertyPriorityFilter: priorities.filter,
+        invariantPropertyPriorities: priorities.priorities,
+        invariantTestingFuzzerTimeout: input.input.config.invariants.invariantTestingFuzzerTimeoutSeconds,
+        ...(input.input.vulnerabilityDatabase === undefined
+          ? {}
+          : {
+              vulnerabilityDatabaseRelativePath: input.input.vulnerabilityDatabase.relative_path,
+              vulnerabilityDatabaseSha256: input.input.vulnerabilityDatabase.sha256
+            })
+      }
+    }
+  };
+}
+
 function compileTask(input: {
   config: ResolvedConfig;
   graph: ExpandedGraph;
@@ -1975,9 +2259,14 @@ function compileTask(input: {
   runLayout: RunLayout;
   workflowName: string;
   renderedPromptPath?: string;
+  promptTemplatePath?: string;
+  dynamicDependencies?: readonly string[];
+  deferredPromptGroups?: readonly string[];
   dependencyAttemptIds: readonly string[];
   dependencyAgenticAttemptIds: readonly string[];
   artifactDependencyAttemptIds: readonly string[];
+  dependencyReferenceAttemptIds?: readonly string[];
+  vulnerabilityDatabase?: { relative_path: string; sha256: string };
 }): CompiledSmithersTask {
   const profile = modelProfileFor(input.config, input.attempt);
   const timeoutMs =
@@ -1993,6 +2282,20 @@ function compileTask(input: {
   const dependencyArtifactDirs = input.artifactDependencyAttemptIds.map((attemptId) =>
     getNodeArtifactDir(input.runLayout, attemptId, { create: true })
   );
+  const referenceArtifactDirs = (input.dependencyReferenceAttemptIds ?? []).map((attemptId) =>
+    getNodeArtifactDir(input.runLayout, attemptId, { create: true })
+  );
+  const vulnerabilityDatabaseCatalog =
+    input.vulnerabilityDatabase === undefined
+      ? undefined
+      : {
+          path: safeResolveInside(
+            input.runLayout.root,
+            input.vulnerabilityDatabase.relative_path,
+            "materialized vulnerability database catalog"
+          ),
+          sha256: input.vulnerabilityDatabase.sha256
+        };
   const dependencySmithersNodeIds = input.dependencyAgenticAttemptIds.map(verifierSmithersNodeIdForAttempt);
   const executionResources = resolveExecutionResources(input.config, input.node.logicalId);
   const agent = input.config.agents[profile.agent];
@@ -2092,7 +2395,16 @@ function compileTask(input: {
     workspacePath,
     artifactDir,
     dependencyArtifactDirs,
+    referenceArtifactDirs,
+    ...(vulnerabilityDatabaseCatalog === undefined ? {} : { vulnerabilityDatabaseCatalog }),
     ...(input.renderedPromptPath ? { renderedPromptPath: input.renderedPromptPath } : {}),
+    ...(input.promptTemplatePath ? { promptTemplatePath: input.promptTemplatePath } : {}),
+    ...(input.dynamicDependencies && input.dynamicDependencies.length > 0
+      ? { dynamicDependencies: [...input.dynamicDependencies] }
+      : {}),
+    ...(input.deferredPromptGroups && input.deferredPromptGroups.length > 0
+      ? { deferredPromptGroups: [...input.deferredPromptGroups] }
+      : {}),
     execution,
     metadata
   };
@@ -2246,6 +2558,8 @@ export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
 }
 
 function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
+  const compiledTasks = JSON.stringify(compiled.tasks, null, 2);
+  const dynamicGroups = JSON.stringify(compiled.dynamicGroups, null, 2);
   const taskSpecs = JSON.stringify(
     compiled.tasks.map((task) => ({
       id: task.smithersNodeId,
@@ -2266,6 +2580,22 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) =>
         executionPath(compiled.projectRoot, task, directory, "dependency artifact directory")
       ),
+      referenceArtifactDirs: task.referenceArtifactDirs.map((directory) =>
+        executionPath(compiled.projectRoot, task, directory, "reference artifact directory")
+      ),
+      ...(task.vulnerabilityDatabaseCatalog === undefined
+        ? {}
+        : {
+            vulnerabilityDatabase: {
+              catalogPath: executionPath(
+                compiled.projectRoot,
+                task,
+                task.vulnerabilityDatabaseCatalog.path,
+                "vulnerability database catalog"
+              ),
+              catalogSha256: task.vulnerabilityDatabaseCatalog.sha256
+            }
+          }),
       runRoot: executionPath(compiled.projectRoot, task, path.resolve(task.artifactDir, "..", ".."), "run root"),
       workflowPath: executionPath(compiled.projectRoot, task, compiled.workflowPath, "workflow path"),
       sourceProjectRoot: compiled.projectRoot,
@@ -2285,6 +2615,15 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
   return renderRuntimeTemplate("smithers/workflows/workflow.tsx", {
     __ULTRAFUZZ_RUN_ID__: compiled.runId,
     __ULTRAFUZZ_RUN_ID_LITERAL__: JSON.stringify(compiled.runId),
+    __ULTRAFUZZ_SOURCE_PROJECT_ROOT__: JSON.stringify(compiled.projectRoot),
+    __ULTRAFUZZ_RUN_ROOT_RELATIVE__: JSON.stringify(
+      relativeProjectPath(compiled.projectRoot, compiled.runRoot, "run root")
+    ),
+    __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__: JSON.stringify(
+      relativeProjectPath(compiled.projectRoot, compiled.workflowPath, "workflow path")
+    ),
+    __ULTRAFUZZ_COMPILED_TASKS__: compiledTasks,
+    __ULTRAFUZZ_DYNAMIC_GROUPS__: dynamicGroups,
     __ULTRAFUZZ_TASK_SPECS__: taskSpecs,
     __ULTRAFUZZ_WORKFLOW_NAME__: JSON.stringify(compiled.workflowName),
     __ULTRAFUZZ_ARTIFACTS_MODULE__: JSON.stringify(import.meta.resolve("@ultrafuzz/artifacts")),

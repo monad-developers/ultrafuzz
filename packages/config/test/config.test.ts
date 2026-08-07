@@ -261,6 +261,7 @@ dynamic_strategies_enumerator = 5
 
 [run]
 max_parallel_agents = 2
+max_dynamic_nodes = 50
 forge_guard_enabled = false
 forge_vmem_limit_kb = 16777216
 forge_rayon_threads = 3
@@ -295,10 +296,12 @@ config_dir = ".codex/team"
       },
       projectConfig: project.value,
       env: {
-        ULTRAFUZZ_MAX_PARALLEL_AGENTS: "7"
+        ULTRAFUZZ_MAX_PARALLEL_AGENTS: "7",
+        ULTRAFUZZ_MAX_DYNAMIC_NODES: "75"
       },
       runtimeOverrides: {
         maxParallelAgents: 11,
+        maxDynamicNodes: 125,
         triageQuorum: 2,
         triagePanelSize: 4
       }
@@ -308,6 +311,7 @@ config_dir = ".codex/team"
     if (!resolved.ok) throw new Error(JSON.stringify(resolved.diagnostics, null, 2));
     expect(resolved.value.run.defaultTimeoutSeconds).toBe(1200);
     expect(resolved.value.run.maxParallelAgents).toBe(11);
+    expect(resolved.value.run.maxDynamicNodes).toBe(125);
     expect(resolved.value.run.workflowDeadlineSeconds).toBe(7200);
     expect(resolved.value.run.controllerLeaseSeconds).toBe(45);
     expect(resolved.value.run.forgeGuardEnabled).toBe(false);

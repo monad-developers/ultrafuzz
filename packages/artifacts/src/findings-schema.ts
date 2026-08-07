@@ -1,14 +1,22 @@
 import { z } from "zod/v4";
 
 import { FINDINGS_SCHEMA_VERSION, TRIAGE_CLASSIFICATIONS, type NormalizedFinding } from "./findings.js";
+import { NODE_REFERENCE_PATTERN } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 export const FINDING_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/finding" as const;
 export const FINDINGS_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/findings" as const;
 
 const nonEmptyString = z.string().min(1);
+const nodeReference = z.string().regex(NODE_REFERENCE_PATTERN);
 const nonNegativeInteger = z.number().int().nonnegative();
 const stringArray = z.array(nonEmptyString);
+const sourceNodesSchema = z
+  .array(nodeReference)
+  .min(1)
+  .refine((sourceNodes) => new Set(sourceNodes).size === sourceNodes.length, {
+    message: "Source node IDs must be unique"
+  });
 const propertyIdsSchema = stringArray.min(1).superRefine((propertyIds, context) => {
   const seen = new Set<string>();
   for (const [propertyIndex, propertyId] of propertyIds.entries()) {
@@ -39,7 +47,10 @@ export const findingSchema = z.looseObject({
   confidence: nonEmptyString,
   summary: nonEmptyString,
   triage_classification: z.enum(TRIAGE_CLASSIFICATIONS).optional(),
-  source_node_id: nonEmptyString.optional(),
+  producer_node_id: nodeReference.optional(),
+  producer_attempt_id: nodeReference.optional(),
+  source_node_id: nodeReference.optional(),
+  source_nodes: sourceNodesSchema.optional(),
   strategy: nonEmptyString.optional(),
   attempt_index: nonNegativeInteger.optional(),
   model_id: nonEmptyString.optional(),
@@ -72,7 +83,15 @@ export const findingJsonSchema = {
     confidence: { type: "string", minLength: 1 },
     summary: { type: "string", minLength: 1 },
     triage_classification: { enum: TRIAGE_CLASSIFICATIONS },
-    source_node_id: { type: "string", minLength: 1 },
+    producer_node_id: { type: "string", pattern: NODE_REFERENCE_PATTERN.source },
+    producer_attempt_id: { type: "string", pattern: NODE_REFERENCE_PATTERN.source },
+    source_node_id: { type: "string", pattern: NODE_REFERENCE_PATTERN.source },
+    source_nodes: {
+      type: "array",
+      minItems: 1,
+      uniqueItems: true,
+      items: { type: "string", pattern: NODE_REFERENCE_PATTERN.source }
+    },
     strategy: { type: "string", minLength: 1 },
     attempt_index: { type: "integer", minimum: 0 },
     model_id: { type: "string", minLength: 1 },

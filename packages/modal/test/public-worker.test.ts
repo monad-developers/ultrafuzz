@@ -33,6 +33,7 @@ import {
   PUBLIC_FULL_BENCHMARK_MAX_PARALLEL_EVAL_ROWS,
   PublicEvalDiagnosticsBuildError,
   publicBenchmarkMaxParallelEvalRows,
+  publicBenchmarkWorkerSecretValues,
   publicBenchmarkWorkRoot,
   publicBundleSources,
   publicEvalCommandTimeoutSeconds,
@@ -258,6 +259,41 @@ it("allows only API-key public workers plus Kimi subscription workers", () => {
       )
     ).toThrow(/Kimi subscription/u);
   }
+});
+
+it("treats the private reference token as an exact worker-side forbidden secret", async () => {
+  const model: ModalModelSpec = {
+    slug: "benchmark-smoke-gpt-5-6-luna-high",
+    model: "gpt-5.6-luna",
+    provider: "openai",
+    agent: "CodexAgent",
+    reasoning: "high",
+    auth_mode: "api-key"
+  };
+  const config = {
+    schema_version: "ultrafuzz.modal.benchmark.v1",
+    run_id: "public-reference-secret",
+    app_name: "ultrafuzz-benchmarks",
+    image_name: "fixture-image",
+    braintrust: { project: "fixture", api_key_env: "BRAINTRUST_API_KEY", judge_credential_ttl_seconds: 57_600 },
+    node_timeout_seconds: 1800,
+    loops: 1,
+    models: [model],
+    public_benchmark: {
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      runner_model_profile: model.slug,
+      candidate_repository: "https://github.com/monad-developers/ultrafuzz",
+      candidate_commit: "a".repeat(40),
+      max_runtime_seconds: 3_600
+    }
+  } satisfies PublicModalBenchmarkConfig;
+
+  const values = await publicBenchmarkWorkerSecretValues(config, model, "/data/unused", {
+    OPENAI_API_KEY: "model-and-judge-secret",
+    ULTRAFUZZ_REFERENCE_GITHUB_TOKEN: "short-reference-token-fixture"
+  });
+  expect(values).toEqual(["model-and-judge-secret", "short-reference-token-fixture"]);
 });
 
 it("durably checkpoints the transition to paid model work before launch", async () => {

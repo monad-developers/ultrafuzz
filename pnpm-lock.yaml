@@ -51,6 +51,9 @@ importers:
 
   packages/artifacts:
     dependencies:
+      '@ultrafuzz/prompts':
+        specifier: workspace:*
+        version: link:../prompts
       '@ultrafuzz/security':
         specifier: workspace:*
         version: link:../security
@@ -191,6 +194,9 @@ importers:
       '@ultrafuzz/evals':
         specifier: workspace:*
         version: link:../evals
+      '@ultrafuzz/references':
+        specifier: workspace:*
+        version: link:../references
       '@ultrafuzz/runtime':
         specifier: workspace:*
         version: link:../runtime

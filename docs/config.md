@@ -222,8 +222,9 @@ stay in root `ultrafuzz.toml` and editable product surfaces under
 `.ultrafuzz/**`.
 
 `ultrafuzz init` also writes `.ultrafuzz/references.yml`. That catalog pins
-property reference material to full GitHub commit SHAs and traversal-free
-relative paths. It is not configured through `ultrafuzz.toml`; use
+property and specialized vulnerability-database reference material to full
+GitHub commit SHAs and traversal-free relative paths. It is not configured
+through `ultrafuzz.toml`; use
 `ultrafuzz references status`, `ultrafuzz references sync`, and guarded
 `ultrafuzz references update --latest` for the reference cache flow.
 
@@ -267,6 +268,7 @@ for prompt analysis today.
 | ------------------------------- | ---------------------------------------------------------------- |
 | `ULTRAFUZZ_MAX_PARALLEL_AGENTS` | Positive integer run parallelism.                                |
 | `ULTRAFUZZ_MAX_PARALLEL_NODES`  | Positive integer graph planning parallelism.                     |
+| `ULTRAFUZZ_MAX_DYNAMIC_NODES`   | Positive integer cap on generated dynamic nodes per run.         |
 | `ULTRAFUZZ_OUTPUT_DIR`          | Project-local output directory.                                  |
 | `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean workspace retention.                                     |
 | `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` | Comma-separated extra variables forwarded to workflow processes. |

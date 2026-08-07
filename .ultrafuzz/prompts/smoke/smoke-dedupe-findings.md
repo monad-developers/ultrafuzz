@@ -23,6 +23,10 @@ of strategies and provenance, and retain distinct symptoms when common cause is
 not established. Do not promote speculation and do not discard a concrete
 source-backed finding merely because native execution was blocked.
 
+For every retained root, write the stable first-seen union of all contributing
+runtime `source_nodes` values, falling back to legacy `source_node_id`. Keep
+`source_node_id` equal to the union's first entry.
+
 Write the retained normalized finding array to
 `{{artifact_path}}/deduped-findings.json`. Never add a synthetic finding when
 all inputs are empty.
@@ -34,5 +38,22 @@ records its strategy and any available attempt/model/loop provenance.
 Write `{{artifact_path}}/finding-lifecycle-ledger.json` as an object with
 `schema_version: "1.0"` and `records`. Each record includes `dedupe_key`,
 `source_artifacts`, `strategy_hits`, and `stages` containing raw and deduped
-stages. Validate only JSON shape and required normalized-finding fields, then
-stop.
+stages.
+
+Every `source_artifacts` entry must carry `path`, `node_id`, and `finding_id`,
+where `node_id` is the producing node exactly as the upstream finding reports
+it and `finding_id` is that finding's own ID. Every upstream finding you read
+must appear exactly once across all records, including the ones you discarded
+as duplicates or speculation; the ledger is checked for exact coverage and a
+missing or doubly-claimed source fails the node. Give a finding you discarded as
+unsupported its own record with no retained finding rather than attaching it to
+an unrelated root, so no retained root names a node that did not contribute to
+it. Every record carries its own `dedupe_key`, and no two records may share one.
+
+Write each record's `dedupe_key` onto its retained finding in
+`deduped-findings.json` as that finding's own `dedupe_key` field, byte-for-byte
+identical, and make the finding's `source_nodes` exactly the set of `node_id`
+values in that record's `source_artifacts`. Provenance is matched on finding
+identity, so a root that merged more than one upstream node resolves to its
+record only through that shared key. Validate only JSON shape and required
+normalized-finding fields, then stop.

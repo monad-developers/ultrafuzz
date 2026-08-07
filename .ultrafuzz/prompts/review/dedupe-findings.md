@@ -9,9 +9,14 @@ Your job is to collapse duplicate findings that describe the same root behavior 
 
 Restart handling: if {{artifact_path}}/deduped-findings.json,
 {{artifact_path}}/findings.json, {{artifact_path}}/strategy-detections.json,
-and {{artifact_path}}/duplicates.json already exist, first validate their
+{{artifact_path}}/finding-lifecycle-ledger.json, and
+{{artifact_path}}/duplicates.json already exist, first validate their
 required JSON shapes (`deduped-findings.json`, `findings.json`, and
-`strategy-detections.json` are arrays; `duplicates.json` is an object or array).
+`strategy-detections.json` are arrays; `duplicates.json` is an object or array;
+`finding-lifecycle-ledger.json` is an object whose `records` array covers every
+upstream finding exactly once). Rebuild rather than finish if the ledger is
+truncated, has an empty `records` array while upstream findings exist, or leaves
+any upstream finding unaccounted for.
 If those shapes are valid and the files do not clearly contradict the required
 schema, treat them as the materialized dedupe result for this node, refresh only
 missing required files, and finish. Do not rebuild the dedupe from scratch,
@@ -85,6 +90,36 @@ or inline environment-assignment prefixes. Preserve the original command's
 environment, selectors, and test-root semantics, count actual failing tests,
 and keep framework-specific blocked and failing results distinct.
 
+Read the findings of every strategy lane below. Ledger coverage is checked
+against every dependency findings artifact the run produced, not against the
+lanes you chose to inspect, so none of these may be skipped. A lane pruned
+from this run has its line removed and produces nothing to account for.
+
+Boundary tests findings: {{artifact_path:boundary-tests}}/findings.json
+Encode decode findings: {{artifact_path:encode-decode}}/findings.json
+Differential library tests findings: {{artifact_path:differential-library-tests}}/findings.json
+Round trip findings: {{artifact_path:round-trip}}/findings.json
+Workflow property based tests findings: {{artifact_path:workflow-property-based-tests}}/findings.json
+Time warp sequences findings: {{artifact_path:time-warp-sequences}}/findings.json
+Expand coverage findings: {{artifact_path:expand-coverage}}/findings.json
+External dependency boundaries findings: {{artifact_path:external-dependency-boundaries}}/findings.json
+Externalized state accounting findings: {{artifact_path:externalized-state-accounting}}/findings.json
+Amm boundary liquidity findings: {{artifact_path:amm-boundary-liquidity}}/findings.json
+Payable fallback accounting findings: {{artifact_path:payable-fallback-accounting}}/findings.json
+Packed action parity findings: {{artifact_path:packed-action-parity}}/findings.json
+Batch atomicity unsupported actions findings: {{artifact_path:batch-atomicity-unsupported-actions}}/findings.json
+Router exact accounting findings: {{artifact_path:router-exact-accounting}}/findings.json
+Rounding direction audit findings: {{artifact_path:rounding-direction-audit}}/findings.json
+Market exhaustion boundaries findings: {{artifact_path:market-exhaustion-boundaries}}/findings.json
+Order replacement collateral findings: {{artifact_path:order-replacement-collateral}}/findings.json
+State machine boundaries findings: {{artifact_path:state-machine-boundaries}}/findings.json
+Lifecycle view boundaries findings: {{artifact_path:lifecycle-view-boundaries}}/findings.json
+Stateful invariant coverage findings: {{artifact_path:stateful-invariant-coverage}}/findings.json
+Stateful invariant implement properties findings: {{artifact_path:stateful-invariant-implement-properties}}/findings.json
+Stateful invariant campaign findings: {{artifact_path:stateful-invariant-campaign}}/findings.json
+Differential lane author findings: {{artifact_path:differential-lane-author}}/findings.json
+Differential repair and report review findings: {{artifact_path:differential-repair-and-report-review}}/findings.json
+
 Also inspect the Dynamic strategy generator outputs before deduping:
 
 Dynamic strategy plan:
@@ -98,6 +133,29 @@ Dynamic findings:
 
 Dynamic generated-test manifest:
 {{artifact_path:dynamic-strategy-generator}}/generated-tests.json
+
+Also consume every runtime-generated child of the threat/class goal groups plus
+the fixed roaming goal. Ultrafuzz renders one exact artifact path per generated
+node below, so read the enumerated paths and never guess a filesystem location,
+a group directory, or a node-ID pattern. A group pruned from this run has its
+line removed and produces nothing to account for:
+
+Threat-goal findings: {{artifact_path:threat-goals}}/findings.json
+
+Threat-goal generated tests: {{artifact_path:threat-goals}}/generated-tests.json
+
+Class-goal findings: {{artifact_path:class-goals}}/findings.json
+
+Class-goal generated tests: {{artifact_path:class-goals}}/generated-tests.json
+
+Roaming-goal findings: {{artifact_path:goal-roaming}}/findings.json
+
+Roaming-goal generated tests: {{artifact_path:goal-roaming}}/generated-tests.json
+
+A dynamic group renders as a bulleted list with one line per generated node, so
+the same instruction covers a group with one child and a group with hundreds.
+Dynamic children are ordinary finding producers; never inspect only a fixed
+prefix of the enumerated list.
 
 Admin/config boundary findings: {{artifact_path:admin-config-boundaries}}/findings.json
 
@@ -125,6 +183,10 @@ the broader state space.
 
 Save the full deduplicated finding array, including candidates that may later
 triage as non-production outcomes, to {{artifact_path}}/deduped-findings.json.
+This file is validated as a normalized finding array, so every retained object
+must carry `schema_version`, `id`, `title`, `status`, `severity_guess`,
+`confidence`, and `summary`, plus its `source_nodes` union. Carry each through
+from the finding you kept rather than inventing a new value.
 Also save the same array to {{artifact_path}}/findings.json when a generic
 findings handoff is useful. Save duplicate and family audit details to a
 separate {{artifact_path}}/duplicates.json object or array; do not replace
@@ -148,6 +210,22 @@ several records into one root or family, use the stable union of their canonical
 property IDs on the kept record and relevant family variants; do not discard a
 property reference during deduplication.
 
+Treat each input finding's runtime-normalized `producer_node_id`,
+`source_nodes`, and compatibility `source_node_id` as provenance, not agent
+commentary. For every retained root, form a stable first-seen union of every
+contributing finding's `source_nodes` (or legacy `source_node_id`). Write the
+union to `source_nodes` and its first entry to `source_node_id`; never replace
+the discovery sources with `dedupe-findings` or a dynamic group ID. Record each
+nested family variant's and duplicate audit record's own source union on that
+nested object, which never narrows the root's own `source_nodes`.
+
+A retained root's `source_nodes` must be exactly the set of `node_id` values in
+its own ledger record's `source_artifacts` — no more and no less. That includes
+the node of every family variant nested inside it, because those artifacts
+belong to the root's record. Do not add the node of a `related_findings` entry
+you deliberately did not merge, and do not add a corroborating node that has no
+`source_artifacts` entry in that record.
+
 For every deduped finding, preserve the strategy and loop-attempt provenance of
 the kept finding plus every matching duplicate or family variant for the same
 production root cause. Save
@@ -167,7 +245,8 @@ rename this metric Temperature.
 
 Also save {{artifact_path}}/finding-lifecycle-ledger.json. It must be a JSON
 object with `schema_version: "1.0"` and a `records` array keyed by
-`dedupe_key`. For each deduped root/family, record:
+`dedupe_key`. Every record carries a `dedupe_key`, including the
+coverage-only ones described below. For each deduped root/family, record:
 
 - `source_artifacts`: every raw finding artifact that contributed to the kept
   root, duplicate, or family variant, with `path`, `node_id`, `finding_id`,
@@ -177,6 +256,32 @@ object with `schema_version: "1.0"` and a `records` array keyed by
 - `duplicate_finding_ids` and `family_variant_keys` when applicable.
 - `stages`: at least one `raw` stage for each source artifact plus one
   `deduped` stage for the kept record.
+
+Write the record's `dedupe_key` onto the kept finding in
+`deduped-findings.json` as its own `dedupe_key` field, byte-for-byte identical.
+Provenance is matched on finding identity, so a root whose `source_nodes` spans
+more than one upstream node resolves to its ledger record only through that
+shared key; without it the merge is rejected as not preserving the exact
+discovery-source union.
+
+Every finding in every dependency `findings.json` enumerated above must appear
+exactly once across all `source_artifacts` in the ledger, including the ones you
+recorded only as a duplicate or family variant and the ones you judged
+unsupported. Coverage is checked against what the runtime read, not against the
+lanes you chose to inspect, so a missing or doubly-claimed source fails the node.
+
+Write `node_id` by copying the producing node out of the finding itself, from
+its own `source_nodes` entry or `producer_node_id`. Never write the group
+template ID, and never write a directory name taken from the artifact path; for
+a generated child those differ from the ID the finding reports. Write
+`finding_id` as that finding's own `id`.
+
+A finding you judged unsupported still needs coverage. Give it its own ledger
+record with no retained finding rather than attaching it to an unrelated root,
+so no retained root's `source_artifacts` names a node that did not contribute
+to it. That record still needs its own `dedupe_key`, and every `dedupe_key` in
+the ledger must be unique: two records sharing one are read as a single
+provenance claim and fail the node.
 
 After writing the required artifacts, run only a small number of direct JSON
 shape checks, then stop. Do not spend the finalization reserve on broad

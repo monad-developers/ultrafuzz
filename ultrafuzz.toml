@@ -8,6 +8,7 @@ repo = "."
 output_dir = ".ultrafuzz/runs"
 max_parallel_agents = 4
 max_parallel_nodes = 8
+max_dynamic_nodes = 2048
 keep_workspaces = false
 forge_guard_enabled = true
 forge_vmem_limit_kb = 12582912

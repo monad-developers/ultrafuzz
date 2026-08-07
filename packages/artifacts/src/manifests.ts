@@ -10,6 +10,7 @@ import {
   readJsonFile,
   safeResolveInside,
   sha256File,
+  validateNodeReference,
   validateSafeId,
   writeFileDurable,
   writeJsonDurable
@@ -239,7 +240,7 @@ export function normalizeArtifactProvenance(
   provenance: Partial<ArtifactProvenance> | undefined
 ): ArtifactProvenance {
   const normalized: ArtifactProvenance = {
-    producer_node_id: validateSafeId(provenance?.producer_node_id ?? nodeId, "producer node ID"),
+    producer_node_id: validateNodeReference(provenance?.producer_node_id ?? nodeId, "producer node ID"),
     run_id: provenance?.run_id ?? layout.runId
   };
   assignOptional(normalized, "logical_node_id", provenance?.logical_node_id);

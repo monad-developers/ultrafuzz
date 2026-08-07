@@ -25,6 +25,7 @@ events.jsonl
 usage.jsonl
 attempts.jsonl
 plan.json
+dynamic-expansions/
 artifacts/
 review/
 events.index/
@@ -56,6 +57,16 @@ values are redacted before persistence, and restore metadata is written to
 concrete IDs, group, prompt path, dependencies, artifact directory, contracted
 outputs, primary output marker, loop metadata, reference revisions, and model
 fan-out provenance.
+
+For a dynamic topology, `graph.json` and the runtime task projection are
+atomically republished as groups expand. Generated graph entries retain the
+human `id`, their template group, source node/attempt and digest, expansion key
+and item digest, path-safe `storage_id`, and expansion-manifest path.
+
+`dynamic-expansions/<group-id>.json` is the immutable expansion decision. It
+records canonical ordered items, generated IDs, source and template digests,
+and the run-wide limit. Recovery validates and reuses it; incompatible or
+tampered manifests fail rather than causing replanning or duplicate attempts.
 
 `plan.json` records the run plan, graph/config fingerprints, topology summary,
 rendered prompt paths and digests, immutable prompt snapshot paths, and
@@ -106,6 +117,10 @@ Node state can also record logical node ID, artifact directory, contracted
 outputs, attempt index, loop index, model profile ID, model name, model index,
 timestamps, last error, and provenance.
 
+For generated nodes, `producer_node_id` is the human runtime node ID while
+`storage_id` is the safe state/artifact identity. Reports and findings should
+display the producer ID; storage IDs are retained for exact operational lookup.
+
 ## Attempt Ledger
 
 `attempts.jsonl` is the append-only source of truth for completed node attempts.
@@ -141,6 +156,33 @@ generated-tests/
 generated-tests.json
 references/manifest.json
 ```
+
+Threat-model-driven runs add these durable artifacts:
+
+```text
+artifacts/threat-model/THREAT_MODEL.md
+artifacts/threat-model/threat-model.json
+artifacts/goal-plan/goal-plan.json
+artifacts/goal-plan/vulnerability-db-manifest.json
+artifacts/goal-plan/vulnerability-db/selected/**/*.md
+vulnerability-db/catalog.json
+```
+
+`threat-model.json` is canonical; Ultrafuzz renders `THREAT_MODEL.md`
+deterministically before the node manifest is sealed. Evidence paths are
+bounded canonical repository-relative POSIX paths, and publication verifies
+that each one is a regular file inside the threat-model task's exact workspace;
+URLs, absolute and Windows paths, backslashes, control characters, and
+dot/traversal segments are rejected. Optional line and symbol metadata does not
+bind the artifact to file bytes.
+The same path schema applies to applicability evidence copied into
+`goal-plan.json`. The plan records one goal per modeled threat, one per
+applicable database class, and the fixed
+roaming goal. Its `threat_model_sha256` binds the exact upstream JSON bytes,
+and its catalog class IDs and applicability decisions cover the planner catalog
+exactly once. Only selected vulnerability-class Markdown is snapshotted. Its
+exact path, byte size, and SHA-256 must agree across the plan, database snapshot
+manifest, artifact manifest, and bundled bytes.
 
 The default `stateful-invariant-campaign` runs one final recon-fuzzer backend
 and writes backend-neutral `campaign-plan.json`, `campaign-summary.json`, and
@@ -205,6 +247,13 @@ When present, `triage_classification` must be one of:
 Findings may also preserve source node, strategy, attempt index, model profile,
 model name, model index, loop index, affected files, affected functions,
 evidence, patch references, notes, dedupe metadata, and family metadata.
+`producer_node_id` is the runtime-controlled node that serialized the current
+record. `source_nodes` is the stable union of discovery nodes that found or
+corroborated the root cause; `source_node_id` remains its first-entry
+compatibility alias. Dynamic source IDs remain human-readable (for example,
+`dynamic:threat:liquidation:overdue`) even though filesystem storage uses a
+separate safe alias. Review stages preserve and union discovery sources rather
+than replacing them with the review node.
 `evidence` entries may be non-empty string references or objects. Object
 entries may include `kind`, `path`, and additional metadata; `kind` and `path`
 must be non-empty strings when present. Relative `path` values must stay inside
@@ -302,6 +351,12 @@ artifacts/final-report/report.json
 ```
 
 If final report artifacts are missing, `ultrafuzz report <run-id>` fails.
+
+Current-run `report.md` contains concise links to `THREAT_MODEL.md`,
+`threat-model.json`, and `goal-plan.json`, plus source-node provenance for each
+production issue. Detailed threat analysis stays in the dedicated threat-model
+artifacts and is not duplicated into the report. `report.json` preserves the
+same `source_nodes` arrays.
 
 When workflow usage data is available, run metadata includes
 `accounting.cumulative.tokens_used` and

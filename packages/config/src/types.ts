@@ -71,6 +71,7 @@ export interface RunConfig {
   outputDir: string;
   maxParallelAgents: number;
   maxParallelNodes: number;
+  maxDynamicNodes: number;
   keepWorkspaces: boolean;
   forgeGuardEnabled: boolean;
   forgeVmemLimitKb: number;
@@ -242,6 +243,7 @@ export interface RuntimeConfigOverrides extends ProjectConfigInput {
   triagePanelSize?: number;
   maxParallelAgents?: number;
   maxParallelNodes?: number;
+  maxDynamicNodes?: number;
   outputDir?: string;
   keepWorkspaces?: boolean;
 }

@@ -219,6 +219,26 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
   assert.equal(fs.readFileSync(layout.attemptLedgerPath, "utf8").trim().split("\n").length, 3);
 });
 
+test("node attempt ledger preserves human dynamic producer IDs", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "dynamic-attempt-ledger" });
+  const result = appendNodeAttempt(layout, {
+    nodeId: "dynamic:threat:liquidation.overdue",
+    strategyAttemptId: "dynamic-threat-safe-attempt",
+    executorRetryId: "executor-retry-1",
+    checkpointGenerationId: "checkpoint-1",
+    workflowExecutionId: "execution-1",
+    controllerInvocationId: "controller-1",
+    startedAt: "2026-08-04T10:00:00.000Z",
+    finishedAt: "2026-08-04T10:01:00.000Z",
+    outcome: "failed",
+    inputManifestDigest: manifestDigest("dynamic input manifest"),
+    failureCategory: "executor-error"
+  });
+
+  assert.equal(result.entry.node_id, "dynamic:threat:liquidation.overdue");
+  assert.equal(queryNodeAttempts(layout)[0]?.node_id, "dynamic:threat:liquidation.overdue");
+});
+
 test("createRunLayout rejects symlinked run roots before creating outside writes", () => {
   const project = tempProject();
   const outside = tempProject();
@@ -428,6 +448,18 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
   assert.equal(manifest.files[0]!.provenance.workflow_task_id, "node:node-a");
   assert.equal(manifest.output_contracts[0]!.contract, "ultrafuzz/nonempty-markdown@1");
   assert.deepEqual(manifest.prerequisite_manifests, []);
+});
+
+test("artifact provenance keeps uppercase-compatible historical static node IDs", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-uppercase-producer" });
+  writeArtifact(layout, "StrategyA", "result.md", "historical static strategy\n");
+  const manifest = writeArtifactManifest({
+    layout,
+    nodeId: "StrategyA",
+    provenance: { producer_node_id: "StrategyA" }
+  });
+
+  assert.equal(manifest.files[0]!.provenance.producer_node_id, "StrategyA");
 });
 
 test("artifact manifests preserve causal prerequisite digests for safe reuse", () => {
@@ -697,6 +729,9 @@ test("findings normalize schema-versioned findings arrays", () => {
   assert.equal(report.findings[0]!.schema_version, "1.0");
   assert.equal(report.findings[0]!.id, "strategy-a-0");
   assert.equal(report.findings[0]!.strategy, "strategy-a");
+  assert.equal(report.findings[0]!.source_node_id, "strategy-a");
+  assert.equal(report.findings[0]!.producer_node_id, "strategy-a");
+  assert.deepEqual(report.findings[0]!.source_nodes, ["strategy-a"]);
   assert.equal(report.findings[0]!.model_index, 1);
   assert.deepEqual(report.findings[0]!.affected_files, [
     ".ultrafuzz/runs/run-1/artifacts/strategy-a/generated-tests/Invariant.t.sol"
@@ -704,6 +739,137 @@ test("findings normalize schema-versioned findings arrays", () => {
   assert.deepEqual(report.findings[0]!.evidence, [
     { kind: "test", path: ".ultrafuzz/runs/run-1/artifacts/strategy-a/generated-tests/Invariant.t.sol" }
   ]);
+});
+
+test("findings overwrite spoofed producer provenance with the runtime-owned human node reference", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-provenance" });
+  const nodeDir = getNodeArtifactDir(layout, "dynamic-safe-attempt", { create: true });
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Spoofed producer",
+        status: "candidate",
+        severity_guess: "high",
+        confidence: "high",
+        summary: "The runtime must own attribution.",
+        producer_node_id: "dynamic:spoofed"
+      }
+    ])
+  );
+
+  const report = normalizeFindings({
+    artifactDir: nodeDir,
+    nodeId: "dynamic-safe-attempt",
+    provenance: { producerNodeId: "dynamic:threat:liquidation.overdue" }
+  });
+
+  // The compatibility alias must equal source_nodes[0] for initial findings too, otherwise the
+  // downstream dedupe gate rejects canonical upstream data. The storage/attempt identity is kept
+  // in the explicit producer_attempt_id field instead of being smuggled through the alias.
+  assert.deepEqual(report.findings[0]!.source_nodes, ["dynamic:threat:liquidation.overdue"]);
+  assert.equal(report.findings[0]!.source_node_id, "dynamic:threat:liquidation.overdue");
+  assert.equal(report.findings[0]!.producer_node_id, "dynamic:threat:liquidation.overdue");
+  assert.equal(report.findings[0]!.producer_attempt_id, "dynamic-safe-attempt");
+});
+
+test("findings scrub a model-supplied producer_attempt_id on non-aliased producers", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-attempt-scrub" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Spoofed attempt identity",
+        status: "candidate",
+        severity_guess: "high",
+        confidence: "high",
+        summary: "The runtime must own the attempt identity.",
+        producer_attempt_id: "SPOOFED-!!bad id!!"
+      }
+    ])
+  );
+
+  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  // producer_attempt_id is runtime-assigned; a static node has no alias so the field must vanish.
+  assert.equal(report.findings[0]!.producer_attempt_id, undefined);
+  assert.equal(report.findings[0]!.source_node_id, "strategy-a");
+});
+
+test("dedupe normalization rejects an invalid preserved producer_attempt_id", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-attempt-preserve" });
+  const dedupeDir = getNodeArtifactDir(layout, "dedupe-findings", { create: true });
+  fs.writeFileSync(
+    path.join(dedupeDir, "deduped-findings.json"),
+    JSON.stringify([
+      {
+        id: "finding-1",
+        title: "Preserved attempt identity must stay a node reference",
+        status: "candidate",
+        severity_guess: "high",
+        confidence: "high",
+        summary: "Preserve mode validates the carried attempt identity.",
+        source_nodes: ["dynamic:threat:liquidation:overdue"],
+        source_node_id: "dynamic:threat:liquidation:overdue",
+        producer_attempt_id: "!!not a node reference!!"
+      }
+    ])
+  );
+
+  assert.throws(
+    () =>
+      normalizeFindings({
+        artifactDir: dedupeDir,
+        relativePath: "deduped-findings.json",
+        nodeId: "dedupe-findings",
+        provenance: { producerNodeId: "dedupe-findings" },
+        preserveSourceNodes: true,
+        requireSourceNodes: true,
+        allowedSourceNodes: ["dynamic:threat:liquidation:overdue"]
+      }),
+    /producer attempt ID/iu
+  );
+});
+
+test("initial dynamic findings round-trip through the downstream dedupe provenance gate", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-dedupe-round-trip" });
+  const hunterDir = getNodeArtifactDir(layout, "dynamic-threat-attempt", { create: true });
+  fs.writeFileSync(
+    path.join(hunterDir, "findings.json"),
+    JSON.stringify([
+      {
+        id: "finding-threat-1",
+        title: "Overdue liquidation is reachable",
+        status: "candidate",
+        severity_guess: "high",
+        confidence: "high",
+        summary: "A fixed-term position liquidates before it is overdue."
+      }
+    ])
+  );
+  const hunter = normalizeFindings({
+    artifactDir: hunterDir,
+    nodeId: "dynamic-threat-attempt",
+    provenance: { producerNodeId: "dynamic:threat:liquidation:overdue" }
+  });
+  const upstream = hunter.findings[0]!;
+
+  const dedupeDir = getNodeArtifactDir(layout, "dedupe-findings", { create: true });
+  fs.writeFileSync(path.join(dedupeDir, "deduped-findings.json"), JSON.stringify([upstream]));
+
+  const deduped = normalizeFindings({
+    artifactDir: dedupeDir,
+    relativePath: "deduped-findings.json",
+    nodeId: "dedupe-findings",
+    provenance: { producerNodeId: "dedupe-findings" },
+    preserveSourceNodes: true,
+    requireSourceNodes: true,
+    allowedSourceNodes: upstream.source_nodes as string[]
+  });
+
+  assert.deepEqual(deduped.findings[0]!.source_nodes, ["dynamic:threat:liquidation:overdue"]);
+  assert.equal(deduped.findings[0]!.source_node_id, "dynamic:threat:liquidation:overdue");
 });
 
 test("findings normalize bounded numeric confidence to its canonical string representation", () => {

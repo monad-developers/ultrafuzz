@@ -4,6 +4,7 @@ import { z } from "zod/v4";
 
 import { validateFindingsSchema } from "./findings-schema.js";
 import { validateGeneratedTestManifestSchema } from "./generated-tests.js";
+import { validateGoalPlan } from "./goal-plan.js";
 import { validateInvariantLedgerSchema } from "./invariant-ledger.js";
 import { validateWorkspacePatchSchema } from "./workspace-patch.js";
 import {
@@ -13,10 +14,12 @@ import {
   validatePropertiesSchema,
   validatePropertyCampaignSchema
 } from "./property-provenance.js";
+import { validateThreatModel } from "./threat-model.js";
 
 export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/findings@1",
   "ultrafuzz/generated-tests@1",
+  "ultrafuzz/goal-plan@1",
   "ultrafuzz/implemented-properties@1",
   "ultrafuzz/implemented-properties@2",
   "ultrafuzz/invariant-ledger@1",
@@ -29,6 +32,7 @@ export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/property-campaign@1",
   "ultrafuzz/report@1",
   "ultrafuzz/text@1",
+  "ultrafuzz/threat-model@1",
   "ultrafuzz/workspace-patch@1"
 ] as const;
 
@@ -154,6 +158,12 @@ const definitions = defineContracts([
     validEmptyExample: '{"schema_version":"1.0","run_id":"<run-id>","node_id":"<node-id>","generated_tests":[]}'
   },
   {
+    id: "ultrafuzz/goal-plan@1",
+    format: "json",
+    description:
+      "A validated additive goal plan with one item per modeled threat, one item per applicable vulnerability class, item-scoped MDX replacements, and one fixed roaming goal."
+  },
+  {
     id: "ultrafuzz/invariant-ledger@1",
     format: "json",
     description:
@@ -234,6 +244,12 @@ const definitions = defineContracts([
     validEmptyExample: ""
   },
   {
+    id: "ultrafuzz/threat-model@1",
+    format: "json",
+    description:
+      "A canonical Web3 threat model with evidence-backed capabilities, assets, actors, trust boundaries, attack surfaces, invariants, threats, assumptions, unknowns, and coverage gaps."
+  },
+  {
     id: "ultrafuzz/workspace-patch@1",
     format: "json",
     description:
@@ -300,8 +316,24 @@ export function validateArtifactContract(
       ...(result.value === undefined ? {} : { value: result.value })
     };
   }
+  if (contract === "ultrafuzz/goal-plan@1") {
+    const result = validateGoalPlan(parsed, artifactPath);
+    return {
+      ok: result.ok,
+      issues: result.issues,
+      ...(result.value === undefined ? {} : { value: result.value })
+    };
+  }
   if (contract === "ultrafuzz/invariant-ledger@1") {
     const result = validateInvariantLedgerSchema(parsed, artifactPath);
+    return {
+      ok: result.ok,
+      issues: result.issues,
+      ...(result.value === undefined ? {} : { value: result.value })
+    };
+  }
+  if (contract === "ultrafuzz/threat-model@1") {
+    const result = validateThreatModel(parsed, artifactPath);
     return {
       ok: result.ok,
       issues: result.issues,

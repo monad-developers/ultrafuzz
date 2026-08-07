@@ -37,8 +37,11 @@ Review-stage artifacts may include:
 ```text
 artifacts/dedupe-findings/deduped-findings.json
 artifacts/dedupe-findings/strategy-detections.json
+artifacts/dedupe-findings/finding-lifecycle-ledger.json
 artifacts/triage/triaged-findings.json
+artifacts/triage/finding-lifecycle-ledger.json
 artifacts/severity-classification/severity-classified-findings.json
+artifacts/severity-classification/finding-lifecycle-ledger.json
 artifacts/aggregate-test-files/aggregation.json
 artifacts/final-report/report.md
 artifacts/final-report/report.json
@@ -47,6 +50,15 @@ artifacts/final-report/report.json
 Use them to understand how raw strategy output became deduplicated candidates,
 triage classifications, severity guesses, generated-test selections, and final
 report entries.
+
+`finding-lifecycle-ledger.json` is the provenance record binding each retained
+finding to the exact upstream findings it merged. Each of the three review
+stages emits its own. It is a required output:
+dedupe fails with `dedupe provenance requires finding-lifecycle-ledger.json` if
+it is missing, and with `finding lifecycle ledger omitted dependency findings`
+if any upstream finding is unaccounted for. Every finding a run produced appears
+in it exactly once, so it is the artifact to read when a finding's recorded
+`source_nodes` looks wrong.
 
 ## Confirm Evidence
 

@@ -63,6 +63,7 @@ function expandNode(
       ? [expansion.get(node.id)![loopIndex - 1]!]
       : lowerDependencies(node, expansion, nodeById);
   const promptPath = node.kind === "agentic" ? resolvedPromptPath(node) : undefined;
+  const promptText = promptPath === undefined ? undefined : promptTextFor(node.id, promptPath, options);
   const referenceRevision =
     node.kind === "reference" && node.reference !== undefined
       ? referenceRevisionFor(node, referenceCatalog)
@@ -91,7 +92,17 @@ function expandNode(
       ...output,
       contractDigest: artifactContractDefinition(output.contract).digest
     })),
-    modelFanout: modelFanoutFor(node, topology, loopIndex, options)
+    modelFanout: modelFanoutFor(node, topology, loopIndex, options),
+    ...(node.dynamic === undefined
+      ? {}
+      : {
+          dynamic: {
+            from: { ...node.dynamic.from },
+            key: node.dynamic.key,
+            nodeIdTemplate: node.dynamic.node_id,
+            ...(promptText === undefined ? {} : { templateDigest: sha256(promptText) })
+          }
+        })
   };
 }
 
@@ -137,6 +148,7 @@ function referenceRevisionFor(
 
 function referenceRevision(entry: ReferenceEntry): ReferenceRevision {
   return {
+    kind: entry.kind ?? "document",
     provider: entry.provider,
     repo: entry.repo,
     commit: entry.commit,

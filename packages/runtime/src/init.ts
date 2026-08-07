@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { assertNoSymlinkComponents } from "@ultrafuzz/artifacts";
+import { assertNoSymlinkComponents, goalPlanJsonSchema, threatModelJsonSchema } from "@ultrafuzz/artifacts";
 import { redactResolvedConfig, resolveConfig, serializeRedactedResolvedConfigToml } from "@ultrafuzz/config";
 import { builtInPromptRelativePaths, scaffoldPrompts } from "@ultrafuzz/prompts";
 import { defaultReferenceCatalogYaml } from "@ultrafuzz/references";
@@ -14,12 +14,36 @@ import { configDiagnostics, runtimeFailure, runtimeResult, toProjectRelative } f
 const DEFAULT_TOPOLOGY = loadDefaultTopology();
 
 const AGENT_REGISTRY_FILE = ".smithers/agents/index.ts";
+
 const AGENT_TEMPLATES = [
   { file: "claude.ts", template: "smithers/agents/claude.tsx", ref: "ClaudeAgent" },
   { file: "codex.ts", template: "smithers/agents/codex.tsx", ref: "CodexAgent" },
   { file: "deepseek.ts", template: "smithers/agents/deepseek.tsx", ref: "DeepSeekAgent" },
   { file: "kimi.ts", template: "smithers/agents/kimi.tsx", ref: "KimiAgent" }
 ] as const;
+
+/**
+ * Canonical artifact JSON Schemas scaffolded into the project.
+ *
+ * The threat-model and goal-plan prompts point the agent at these files, so they must exist in
+ * every initialized project -- not only in this monorepo -- and they must be generated from the
+ * same runtime validators that gate the nodes. `schema/*.schema.json` in `@ultrafuzz/artifacts` is
+ * the parity-checked snapshot of the identical documents.
+ */
+const PROJECT_ARTIFACT_SCHEMA_DIR = ".ultrafuzz/schema";
+const PROJECT_ARTIFACT_SCHEMA_FILES = [
+  { relativePath: `${PROJECT_ARTIFACT_SCHEMA_DIR}/threat-model.schema.json`, schema: threatModelJsonSchema },
+  { relativePath: `${PROJECT_ARTIFACT_SCHEMA_DIR}/goal-plan.schema.json`, schema: goalPlanJsonSchema }
+] as const;
+
+/** The absolute scaffolded schema directory backing the `artifact_schema_dir` prompt variable. */
+export function projectArtifactSchemaDir(projectRoot: string): string {
+  return path.join(projectRoot, PROJECT_ARTIFACT_SCHEMA_DIR);
+}
+
+export function projectArtifactSchemaJson(schema: Record<string, unknown>): string {
+  return `${JSON.stringify(schema, null, 2)}\n`;
+}
 
 export function initProject(input: InitProjectInput) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -47,6 +71,7 @@ export function initProject(input: InitProjectInput) {
     ".ultrafuzz/workspaces",
     ".ultrafuzz/cache",
     ".ultrafuzz/prompts",
+    PROJECT_ARTIFACT_SCHEMA_DIR,
     ".smithers",
     ".smithers/agents",
     ".smithers/workflows"
@@ -92,6 +117,17 @@ export function initProject(input: InitProjectInput) {
       preserved,
       overwritten
     );
+    for (const { relativePath, schema } of PROJECT_ARTIFACT_SCHEMA_FILES) {
+      writeProjectFile(
+        projectRoot,
+        relativePath,
+        projectArtifactSchemaJson(schema),
+        input.force === true,
+        created,
+        preserved,
+        overwritten
+      );
+    }
     writeProjectFile(
       projectRoot,
       ".smithers/package.json",

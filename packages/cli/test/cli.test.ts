@@ -254,6 +254,11 @@ test("init and validate emit schema-versioned launch JSON", async () => {
   assertNoSmithersSurface(initBody);
   assert.equal((initBody.data as { preserved: string[] }).preserved.includes("ultrafuzz.toml"), true);
 
+  // A clean shipped scaffold validates with no fixture mutation whatsoever: the pinned
+  // vulnerability-database reference is part of the scaffolded catalog.
+  const shippedReferences = fs.readFileSync(path.join(project, ".ultrafuzz", "references.yml"), "utf8");
+  assert.match(shippedReferences, /^ {2}vulnerability-database\.web3:$/mu);
+  assert.match(shippedReferences, /^ {4}commit: e46c0e472c28596f30decbb08549c9d9630f47cb$/mu);
   const validate = await cli(project, ["validate", "--json"]);
   const body = parseJson(validate);
   assert.equal(validate.code, 0, validate.stderr);
@@ -264,6 +269,20 @@ test("init and validate emit schema-versioned launch JSON", async () => {
     assert.equal(Boolean(posture[key]), true, `${key} posture missing`);
   }
   assert.equal("repository_mutation" in posture, false);
+
+  // Repointing the pinned reference at an unknown ID is a topology error, so the shipped catalog
+  // entry is load-bearing rather than decorative.
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs
+      .readFileSync(topologyPath, "utf8")
+      .replace("reference: vulnerability-database.web3", "reference: absent.database"),
+    "utf8"
+  );
+  const tampered = await cli(project, ["validate", "--json"]);
+  assert.notEqual(tampered.code, 0);
+  assert.match(tampered.stdout + tampered.stderr, /absent\.database/u);
 });
 
 test("run exposes the trusted reference expectation catalog option", async () => {
@@ -660,9 +679,13 @@ test("references status is restored and reports offline cache state", async () =
     assert.equal(body.command, "references status");
     assert.equal(body.ok, false);
     const data = body.data as { references?: Array<{ id: string; ok: boolean }> };
-    assert.equal(data.references?.length, 9);
+    assert.equal(data.references?.length, 10);
     assert.equal(
       data.references?.some((reference) => reference.id === "properties.certora-thinking"),
+      true
+    );
+    assert.equal(
+      data.references?.some((reference) => reference.id === "vulnerability-database.web3"),
       true
     );
     assert.equal(
@@ -1169,6 +1192,80 @@ test("report reconciliation normalizes alternate severities, recovers source run
   assert.equal(report.run_metadata.source_run_id, "source-from-state");
 });
 
+test("report reconciliation links dedicated audit context and preserves dynamic discovery provenance", async () => {
+  const project = tempProject();
+  const runData = await createReportRun(project, "report-threat-provenance");
+  const artifactsRoot = path.join(runData.run_root, "artifacts");
+  const threatDir = path.join(artifactsRoot, "threat-model");
+  const goalPlanDir = path.join(artifactsRoot, "goal-plan");
+  const severityDir = path.join(artifactsRoot, "severity-classification");
+  const reportDir = path.join(artifactsRoot, "final-report");
+  for (const directory of [threatDir, goalPlanDir, severityDir, reportDir])
+    fs.mkdirSync(directory, { recursive: true });
+
+  fs.writeFileSync(path.join(threatDir, "THREAT_MODEL.md"), "# Threat model\n\nDETAIL-MUST-STAY-DEDICATED\n", "utf8");
+  writeJsonRecord(path.join(threatDir, "threat-model.json"), { schema_version: "test" });
+  writeJsonRecord(path.join(goalPlanDir, "goal-plan.json"), { schema_version: "test" });
+  const sourceNodes = ["dynamic:threat:liquidation:overdue", "dynamic:class:liquidation:fixed-term-before-overdue"];
+  fs.writeFileSync(
+    path.join(severityDir, "severity-classified-findings.json"),
+    `${JSON.stringify([
+      {
+        id: "finding-overdue",
+        source_node_id: sourceNodes[0],
+        source_nodes: sourceNodes
+      }
+    ])}\n`,
+    "utf8"
+  );
+  writeJsonRecord(path.join(reportDir, "report.json"), {
+    schema_version: "1.0",
+    run_metadata: {},
+    issues: [
+      {
+        schema_version: "1.0",
+        id: "finding-overdue",
+        title: "Fixed-term liquidation before overdue",
+        status: "confirmed",
+        severity: "High",
+        severity_guess: "High",
+        confidence: "high",
+        summary: "A fixed-term position can be liquidated before its overdue boundary.",
+        description: "A liquidator can seize collateral before the documented lifecycle boundary.",
+        impact: "High",
+        impact_rationale: "Borrower collateral can be seized prematurely.",
+        likelihood: "Medium",
+        likelihood_rationale: "The path is permissionless when a fixed-term position exists.",
+        proof_of_concept: { scenario: ["Open a fixed-term position.", "Liquidate it before it is overdue."] },
+        strategy: "goal-hunter",
+        strategy_provenance: {
+          detection_rates: [{ strategy: "goal-hunter", detections: 2, configured_loops: 2 }]
+        }
+      }
+    ],
+    non_production_outcomes: [],
+    property_provenance: []
+  });
+
+  const rendered = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(rendered.code, 0, rendered.stderr);
+  const markdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
+  assert.match(
+    markdown,
+    /## Audit context\n\n- Threat model: \[THREAT_MODEL\.md\]\(\.\.\/threat-model\/THREAT_MODEL\.md\); \[threat-model\.json\]\(\.\.\/threat-model\/threat-model\.json\)\n- Goal plan: \[goal-plan\.json\]\(\.\.\/goal-plan\/goal-plan\.json\)/u
+  );
+  assert.match(
+    markdown,
+    /- \*\*Source nodes\*\*: `dynamic:threat:liquidation:overdue`, `dynamic:class:liquidation:fixed-term-before-overdue`/u
+  );
+  assert.doesNotMatch(markdown, /DETAIL-MUST-STAY-DEDICATED/u);
+  const report = JSON.parse(fs.readFileSync(path.join(reportDir, "report.json"), "utf8")) as {
+    issues: Array<{ source_node_id?: string; source_nodes?: string[] }>;
+  };
+  assert.equal(report.issues[0]?.source_node_id, sourceNodes[0]);
+  assert.deepEqual(report.issues[0]?.source_nodes, sourceNodes);
+});
+
 test("canonical report Markdown neutralizes injected markup and redacts secrets and internal paths", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-public-prose");
@@ -1406,6 +1503,29 @@ test("historical loose reports preserve conforming Markdown and reject missing o
   assert.equal(nonconforming.code, 1);
   assert.match(JSON.stringify(parseJson(nonconforming).diagnostics), /historical|Markdown|final-review/iu);
 
+  // A preserved agent report is only gated by the directive shape check, so its links must be
+  // restricted to in-document anchors and safe report-relative audit-context artifacts.
+  const withLink = (link: string): string =>
+    historicalMarkdown.replace("Historical public summary.", `Historical public summary. [context](${link})`);
+  for (const rejected of [
+    "https://example.invalid",
+    "mailto:someone@example.invalid",
+    "javascript:alert(1)",
+    "/etc/passwd",
+    "../../../../etc/passwd",
+    "../threat-model/../../../escape.md"
+  ]) {
+    fs.writeFileSync(markdownPath, withLink(rejected), "utf8");
+    const result = await cli(project, ["report", runData.run_id, "--json"]);
+    assert.equal(result.code, 1, `link ${rejected} must be rejected`);
+    assert.match(JSON.stringify(parseJson(result).diagnostics), /historical|Markdown|final-review/iu);
+  }
+  for (const accepted of ["#m-01---historical-issue", "../threat-model/THREAT_MODEL.md"]) {
+    fs.writeFileSync(markdownPath, withLink(accepted), "utf8");
+    const result = await cli(project, ["report", runData.run_id, "--json"]);
+    assert.equal(result.code, 0, `link ${accepted} must be accepted: ${result.stderr}${result.stdout}`);
+  }
+
   fs.unlinkSync(markdownPath);
   const missing = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(missing.code, 1);
@@ -1426,6 +1546,17 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   fs.mkdirSync(artifactDir, { recursive: true });
   fs.writeFileSync(path.join(artifactDir, "stdout.txt"), "generated stdout\n", "utf8");
   fs.writeFileSync(path.join(artifactDir, "bad\\name.txt"), "unsafe archive path\n", "utf8");
+  const goalPlanDir = path.join(runData.run_root, "artifacts", "goal-plan");
+  const selectedClassPath = "vulnerability-db/selected/liquidation/fixed-term-before-overdue.md";
+  fs.mkdirSync(path.dirname(path.join(goalPlanDir, selectedClassPath)), { recursive: true });
+  fs.writeFileSync(path.join(goalPlanDir, "goal-plan.json"), "{}\n", "utf8");
+  fs.writeFileSync(path.join(goalPlanDir, "vulnerability-db-manifest.json"), "{}\n", "utf8");
+  fs.writeFileSync(path.join(goalPlanDir, selectedClassPath), "# Fixed-term liquidation before overdue\n", "utf8");
+  writeArtifactManifest({
+    layout: layoutForRunRoot(runData.run_root, runData.run_id),
+    nodeId: "goal-plan",
+    include: ["goal-plan.json", "vulnerability-db-manifest.json", selectedClassPath]
+  });
   const reportDir = writeFinalReportAccounting(runData.run_root, {
     tokensUsed: "123",
     estimatedSpend: "$0.46",
@@ -1477,6 +1608,7 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   assert.equal(entries.includes("artifacts/final-report/report.md"), true);
   assert.equal(entries.includes("artifacts/final-report/report.json"), true);
   assert.equal(entries.includes("artifacts/project-discovery/stdout.txt"), true);
+  assert.equal(entries.includes(`artifacts/goal-plan/${selectedClassPath}`), true);
   assert.equal(entries.includes("run.json"), true);
   assert.equal(entries.includes("state.json"), true);
   assert.equal(
@@ -1492,6 +1624,13 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   assert.doesNotMatch(bundledMarkdown, /Placeholder/iu);
   assert.match(bundledMarkdown, /- Tokens used: `123`/u);
   assert.match(bundledMarkdown, /- Estimated spend: `\$0\.46`/u);
+  const goalPlanManifest = JSON.parse(zip.readAsText("artifacts/goal-plan/artifact-manifest.json")) as {
+    files: Array<{ path: string }>;
+  };
+  assert.equal(
+    goalPlanManifest.files.some((entry) => entry.path === selectedClassPath),
+    true
+  );
   const finalReportManifest = JSON.parse(zip.readAsText("artifacts/final-report/artifact-manifest.json")) as {
     files: Array<{ path: string; size_bytes: number; sha256: string }>;
   };

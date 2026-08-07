@@ -12,6 +12,55 @@ describe("validateTopology", () => {
     expect(result.effectiveLoopCounts.strategy).toBe(2);
   });
 
+  it("accepts one-level data-driven agent nodes and validates their static expansion contract", () => {
+    const topology = dynamicTopology();
+    const result = validateTopology(topology);
+    expect(result.effectiveLoopCounts.fanout).toBe(1);
+
+    const missingDirectSource = dynamicTopology();
+    missingDirectSource.nodes[3] = { ...missingDirectSource.nodes[3]!, depends_on: ["__start__"] };
+    expect(() => validateTopology(missingDirectSource)).toThrow(
+      expect.objectContaining({ code: "INVALID_DYNAMIC_SOURCE" })
+    );
+
+    const invalidPath = dynamicTopology();
+    invalidPath.nodes[3] = {
+      ...invalidPath.nodes[3]!,
+      dynamic: { ...invalidPath.nodes[3]!.dynamic!, from: { node: "strategy", path: "$[0]" } }
+    };
+    expect(() => validateTopology(invalidPath)).toThrow(expect.objectContaining({ code: "INVALID_DYNAMIC_PATH" }));
+
+    const missingKeyPlaceholder = dynamicTopology();
+    missingKeyPlaceholder.nodes[3] = {
+      ...missingKeyPlaceholder.nodes[3]!,
+      dynamic: { ...missingKeyPlaceholder.nodes[3]!.dynamic!, node_id: "dynamic:item:{{ item.name }}" }
+    };
+    expect(() => validateTopology(missingKeyPlaceholder)).toThrow(
+      expect.objectContaining({ code: "INVALID_DYNAMIC_NODE_ID_TEMPLATE" })
+    );
+
+    const explicitLoops = dynamicTopology();
+    explicitLoops.nodes[3] = { ...explicitLoops.nodes[3]!, loops: 2 };
+    expect(() => validateTopology(explicitLoops)).toThrow(expect.objectContaining({ code: "INVALID_DYNAMIC_NODE" }));
+  });
+
+  it("rejects nested dynamic expansion", () => {
+    const topology = dynamicTopology();
+    topology.nodes.splice(4, 0, {
+      id: "nested",
+      prompt: "strategies/nested.md",
+      depends_on: ["fanout"],
+      dynamic: {
+        from: { node: "fanout", path: "$.more" },
+        key: "id",
+        node_id: "dynamic:nested:{{ item.id }}"
+      },
+      outputs: [{ path: "nested.json", contract: "ultrafuzz/json-object@1", primary: true }]
+    });
+    topology.nodes[5] = { ...topology.nodes[5]!, depends_on: ["nested"] };
+    expect(() => validateTopology(topology)).toThrow(expect.objectContaining({ code: "NESTED_DYNAMIC_NODE" }));
+  });
+
   it("resolves group loop defaults with node overrides", () => {
     const topology = validTopology({
       defaults: { strategy_loops: 1 },
@@ -169,5 +218,82 @@ describe("validateTopology", () => {
     expect(() => validateTopology(missingManifest)).toThrow(
       expect.objectContaining({ code: "INVALID_REFERENCE_NODE" })
     );
+  });
+});
+
+function dynamicTopology() {
+  const topology = validTopology({ defaults: { strategy_loops: 1 } });
+  topology.nodes[2] = {
+    ...topology.nodes[2]!,
+    outputs: [{ path: "plan.json", contract: "ultrafuzz/json-object@1", primary: true }]
+  };
+  topology.nodes.splice(3, 0, {
+    id: "fanout",
+    prompt: "strategies/fanout.md",
+    group: "strategies",
+    depends_on: ["strategy"],
+    dynamic: {
+      from: { node: "strategy", path: "$.goals" },
+      key: "id",
+      node_id: "dynamic:item:{{ item.id }}"
+    },
+    outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@1", primary: true }]
+  });
+  topology.nodes[4] = { ...topology.nodes[4]!, depends_on: ["fanout"] };
+  return topology;
+}
+
+describe("dynamic source cardinality", () => {
+  function dynamicTopology() {
+    const topology = validTopology({ defaults: { strategy_loops: 1 } });
+    topology.nodes[2] = {
+      ...topology.nodes[2]!,
+      outputs: [{ path: "plan.json", contract: "ultrafuzz/json-object@1", primary: true }]
+    };
+    topology.nodes.splice(3, 0, {
+      id: "fanout",
+      prompt: "strategies/fanout.md",
+      group: "strategies",
+      depends_on: ["strategy"],
+      dynamic: {
+        from: { node: "strategy", path: "$.goals" },
+        key: "id",
+        node_id: "dynamic:item:{{ item.id }}"
+      },
+      outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@1", primary: true }]
+    });
+    topology.nodes[4] = { ...topology.nodes[4]!, depends_on: ["fanout"] };
+    return topology;
+  }
+
+  it("accepts a single-attempt source", () => {
+    expect(() => validateTopology(dynamicTopology())).not.toThrow();
+  });
+
+  it("rejects a source that expands into multiple parallel loop attempts", () => {
+    const topology = dynamicTopology();
+    topology.nodes[2] = { ...topology.nodes[2]!, loops: 2 };
+    expect(() => validateTopology(topology)).toThrow(/must resolve to exactly one concrete attempt; it resolves to 2/u);
+  });
+
+  it("rejects a source that fans out across multiple model profiles", () => {
+    const topology = dynamicTopology();
+    topology.nodes[2] = { ...topology.nodes[2]!, model_profiles: ["default", "secondary"] };
+    expect(() => validateTopology(topology)).toThrow(/must resolve to exactly one concrete attempt; it resolves to 2/u);
+  });
+
+  it("rejects a source whose group defaults fan out across multiple model profiles", () => {
+    const topology = dynamicTopology();
+    topology.groups = {
+      ...topology.groups,
+      strategies: { label: "Strategies", defaults: { model_profiles: ["default", "secondary"] } }
+    };
+    expect(() => validateTopology(topology)).toThrow(/must resolve to exactly one concrete attempt/u);
+  });
+
+  it("accepts a series source whose loops lower to its last attempt", () => {
+    const topology = dynamicTopology();
+    topology.nodes[2] = { ...topology.nodes[2]!, loops: 3, loop_mode: "series" };
+    expect(() => validateTopology(topology)).not.toThrow();
   });
 });

@@ -153,8 +153,13 @@ Reachability fixture examples:
 }
 ```
 
-Do not remove findings during triage. Preserve the upstream finding fields and
-add or update `triage_classification` with the consensus value. Keep concise
+Do not remove findings during triage. Preserve the upstream finding fields,
+including `id` and `dedupe_key` unchanged, because provenance is matched on that
+identity and renumbering fails the node. This file is validated as a normalized
+finding array, so every object must still carry the required fields
+`schema_version`, `title`, `status`, `severity_guess`, `confidence`, and
+`summary`, plus its `source_nodes` union. Add or update `triage_classification`
+with the consensus value. Keep concise
 notes that summarize the votes, decisive evidence, and recommended next action.
 Every triaged finding must include a machine-readable `triage_reason=<reason>`
 or `classification_reason=<reason>` note. If triage demotes a previously
@@ -165,6 +170,11 @@ When a finding is classified as `false-positive`, set `status` to
 the upstream evidence already supports a more specific status.
 In particular, preserve `property_ids` unchanged for every property-derived
 finding.
+
+Preserve each finding's complete `source_nodes` array unchanged, together with
+the compatibility `source_node_id` equal to its first entry. These are the
+discovery nodes corroborating the root cause. Do not replace them with
+`triage`, discard dynamic threat/class IDs, or reduce the union to one source.
 
 For stateful invariant records, preserve any upstream
 `stateful_failure_classification=<classification>` note exactly. Coverage-only

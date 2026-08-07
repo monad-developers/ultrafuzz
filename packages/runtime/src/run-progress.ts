@@ -1,4 +1,4 @@
-import { TERMINAL_RUN_STATE_STATUSES, type RunState } from "@ultrafuzz/artifacts";
+import { NODE_REFERENCE_PATTERN, TERMINAL_RUN_STATE_STATUSES, type RunState } from "@ultrafuzz/artifacts";
 
 import type { RunHealthCounts, RunHealthProgress, RunHealthThroughput, RunProgressSummary } from "./types.js";
 
@@ -134,7 +134,7 @@ function currentStep(state: RunState | undefined, nowMs: number): RunProgressSum
   );
   if (longest === undefined) {
     return {
-      node_id: running[0]?.logical_node_id ?? running[0]?.node_id ?? null,
+      node_id: running[0] === undefined ? null : displayNodeId(running[0]),
       iteration: running[0]?.loop_index ?? null,
       started_at: null,
       elapsed_seconds: null,
@@ -142,12 +142,19 @@ function currentStep(state: RunState | undefined, nowMs: number): RunProgressSum
     };
   }
   return {
-    node_id: longest.node.logical_node_id ?? longest.node.node_id,
+    node_id: displayNodeId(longest.node),
     iteration: longest.node.loop_index ?? null,
     started_at: longest.node.started_at ?? null,
     elapsed_seconds: Math.max(0, Math.floor((nowMs - longest.startedAtMs) / 1_000)),
     running_count: running.length
   };
+}
+
+function displayNodeId(node: RunState["nodes"][string]): string {
+  const producerNodeId = node.provenance?.producer_node_id;
+  return typeof producerNodeId === "string" && NODE_REFERENCE_PATTERN.test(producerNodeId)
+    ? producerNodeId
+    : (node.logical_node_id ?? node.node_id);
 }
 
 function parseTimestampMs(value: string | undefined): number | undefined {

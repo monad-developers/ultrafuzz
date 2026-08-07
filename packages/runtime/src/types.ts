@@ -120,11 +120,13 @@ export interface PlannedGraphNode {
   kind: string;
   depends_on: string[];
   artifact_dir: string;
+  artifact_dirs?: string[];
   outputs: PlannedArtifactOutput[];
   prompt_id: string;
   prompt_path: string;
   reference?: string;
   reference_revision?: {
+    kind: "document" | "vulnerability-database";
     provider: "github";
     repo: string;
     commit: string;
@@ -146,6 +148,32 @@ export interface PlannedGraphNode {
     loop_index: number;
     attempt_index: number;
   }>;
+  /** Static runtime-expansion declaration. This group/template is not itself executed. */
+  dynamic?: {
+    from: {
+      node: string;
+      path: string;
+    };
+    key: string;
+    node_id: string;
+    template_digest?: string;
+    status?: "pending" | "expanded";
+    generated_node_ids?: string[];
+  };
+  /** Direct dynamic group dependencies retained after runtime edges are lowered to generated children. */
+  dynamic_dependencies?: string[];
+  /** Immutable pre-expansion dependency declaration for deterministic rematerialization/resume. */
+  declared_depends_on?: string[];
+  /** Runtime-generated lineage; `id` remains human-readable while `storage_id` is path-safe. */
+  dynamic_generated?: {
+    group_node_id: string;
+    source_node_id: string;
+    source_attempt_id: string;
+    expansion_key: string;
+    item_sha256: string;
+    storage_id: string;
+    manifest_path: string;
+  };
   workflow?: {
     node_id?: string;
     task_node_ids?: string[];
@@ -194,6 +222,11 @@ export interface PlanRunValue {
   validation: ValidateProjectResult;
   layout: RunLayout;
   rendered_prompts: RenderedPromptPlan[];
+  /**
+   * The run-root-relative materialized vulnerability-database planner catalog, when the run has one.
+   * Storing it relative keeps it correct after a workspace relocation or a cloud-root remap.
+   */
+  vulnerability_database?: { relative_path: string; sha256: string };
 }
 
 export type StartRunInput = PlanRunInput;

@@ -201,6 +201,7 @@ jobs:
           : > "$BENCHMARK_CONTROL/launch-attempts.jsonl"
           while IFS=$'\t' read -r config state pair; do
             launch_outcome=succeeded
+            launch_category=launched
             if ! timeout --signal=TERM --kill-after=30s 20m \
               node packages/modal/dist/cli.js launch \
               --config "$BENCHMARK_CONTROL/$config" \
@@ -208,13 +209,15 @@ jobs:
               --mode fresh \
               --repo-root .; then
               launch_outcome=failed
+              launch_category=initial-launch-failed
               echo "Initial detached launch failed for $pair; continuing with the remaining pairs" >&2
             fi
             jq -cn \
               --arg pair "$pair" \
               --arg state "$state" \
               --arg outcome "$launch_outcome" \
-              '{pair: $pair, state_path: $state, outcome: $outcome}' \
+              --arg category "$launch_category" \
+              '{pair: $pair, state_path: $state, outcome: $outcome, category: $category}' \
               >> "$BENCHMARK_CONTROL/launch-attempts.jsonl"
           done < <(jq -r '.pairs[] | [.config_path, .state_path, .pair] | @tsv' "$BENCHMARK_CONTROL/manifest.json")
 
@@ -457,7 +460,6 @@ jobs:
                   all_terminal=false
                   ;;
                 transient-operational-failure)
-                  all_terminal=false
                   if [ ! -f "$BENCHMARK_CONTROL/$config" ]; then
                     jq -n \
                       --arg pair "$pair" \
@@ -465,6 +467,7 @@ jobs:
                       '{pair: $pair, terminal_status: "failed", category: $category}' \
                       > "$outcome_file"
                   else
+                    all_terminal=false
                     resume_exit=0
                     timeout --signal=TERM --kill-after=30s 5m \
                     node packages/modal/dist/cli.js launch \

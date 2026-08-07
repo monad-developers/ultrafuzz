@@ -8,6 +8,14 @@ groups:
   properties:
     label: Properties
     color: "#a16207"
+  goals:
+    label: Threat goals
+    color: "#be123c"
+    defaults:
+      loops: 1
+      timeout_seconds: 7200
+      model_profiles:
+        - default
   strategies:
     label: Strategies
     color: "#7c3aed"
@@ -32,6 +40,18 @@ nodes:
     role: finish
     depends_on:
       - final-report
+  - id: reference-vulnerability-database
+    kind: reference
+    reference: vulnerability-database.web3
+    group: references
+    depends_on:
+      - __start__
+    outputs:
+      - path: vulnerability-db/catalog.json
+        contract: ultrafuzz/json-object@1
+        primary: true
+      - path: references/manifest.json
+        contract: ultrafuzz/json-object@1
   - id: project-discovery
     kind: agentic
     prompt: setup/project-discovery.md
@@ -54,6 +74,85 @@ nodes:
       - path: setup/actors-flows.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+  - id: threat-model
+    kind: agentic
+    prompt: setup/threat-model.md
+    group: setup
+    depends_on:
+      - actors-flows
+      - reference-vulnerability-database
+    loops: 1
+    outputs:
+      - path: THREAT_MODEL.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: threat-model.json
+        contract: ultrafuzz/threat-model@1
+  - id: goal-plan
+    kind: agentic
+    prompt: setup/goal-plan.md
+    group: setup
+    depends_on:
+      - threat-model
+      - reference-vulnerability-database
+    loops: 1
+    outputs:
+      - path: goal-plan.json
+        contract: ultrafuzz/goal-plan@1
+        primary: true
+      - path: vulnerability-db-manifest.json
+        contract: ultrafuzz/json-object@1
+  - id: goal-roaming
+    kind: agentic
+    prompt: strategies/roaming-goal.md
+    group: goals
+    depends_on:
+      - threat-model
+    loops: 1
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@1
+        primary: true
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@1
+  - id: threat-goals
+    kind: agentic
+    prompt: strategies/goal-hunter.mdx
+    group: goals
+    depends_on:
+      - goal-plan
+    loops: 1
+    dynamic:
+      from:
+        node: goal-plan
+        path: $.threat_goals
+      key: id
+      node_id: "dynamic:threat:{{ item.id }}"
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@1
+        primary: true
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@1
+  - id: class-goals
+    kind: agentic
+    prompt: strategies/goal-hunter.mdx
+    group: goals
+    depends_on:
+      - goal-plan
+    loops: 1
+    dynamic:
+      from:
+        node: goal-plan
+        path: $.class_goals
+      key: id
+      node_id: "dynamic:class:{{ item.id }}"
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@1
+        primary: true
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@1
   - id: setup-foundry
     kind: agentic
     prompt: setup/prepare-foundry-harness.md
@@ -820,6 +919,9 @@ nodes:
       - differential-lane-author
       - differential-red-triage
       - differential-repair-and-report-review
+      - goal-roaming
+      - threat-goals
+      - class-goals
     outputs:
       - path: strategy-plan.json
         contract: ultrafuzz/json-object@1
@@ -874,9 +976,12 @@ nodes:
       - differential-red-triage
       - differential-repair-and-report-review
       - dynamic-strategy-generator
+      - goal-roaming
+      - threat-goals
+      - class-goals
     outputs:
       - path: deduped-findings.json
-        contract: ultrafuzz/json-array@1
+        contract: ultrafuzz/findings@1
         primary: true
       - path: strategy-detections.json
         contract: ultrafuzz/json-array@1
@@ -890,7 +995,7 @@ nodes:
       - dedupe-findings
     outputs:
       - path: triaged-findings.json
-        contract: ultrafuzz/json-array@1
+        contract: ultrafuzz/findings@1
         primary: true
       - path: finding-lifecycle-ledger.json
         contract: ultrafuzz/json-object@1
@@ -902,7 +1007,7 @@ nodes:
       - triage
     outputs:
       - path: severity-classified-findings.json
-        contract: ultrafuzz/json-array@1
+        contract: ultrafuzz/findings@1
         primary: true
       - path: strategy-detections.json
         contract: ultrafuzz/json-array@1

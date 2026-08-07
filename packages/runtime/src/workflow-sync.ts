@@ -9,7 +9,11 @@ import {
   appendEvent,
   assertNoSymlinkComponents,
   assertPathInside,
+  buildFindingSourceExpectations,
+  validateArtifactContract,
   FindingsValidationError,
+  materializeCanonicalThreatModelMarkdown,
+  createNodeState,
   createNodeAttemptLedgerEntry,
   getNodeArtifactDir,
   layoutForRunRoot,
@@ -19,12 +23,14 @@ import {
   replayEvents,
   readRunState,
   replayUsageEvents,
+  assertRegularFileInside,
   safeResolveInside,
   stableUsageDimension,
   sha256File,
   updateNodeState,
   updateRunStatus,
   validateSafeId,
+  validateNodeReference,
   writeArtifactManifest,
   writeJsonDurable,
   writeRunState,
@@ -91,6 +97,17 @@ interface StoredWorkflowTask {
     node?: {
       concreteNodeId?: string;
       logicalNodeId?: string;
+      producerNodeId?: string;
+      storageId?: string;
+      dynamic?: {
+        groupNodeId?: string;
+        sourceNodeId?: string;
+        sourceAttemptId?: string;
+        sourceDigest?: string;
+        expansionKey?: string;
+        itemDigest?: string;
+        manifestPath?: string;
+      };
     };
     loop?: {
       attemptIndex?: number;
@@ -1735,6 +1752,19 @@ async function synchronizeTasks(input: {
     ...controllerInvocationsFromWorkflowEvents(input.events, input.workflowRunId)
   ].sort((left, right) => left.invokedAt.localeCompare(right.invokedAt));
   const graphNodeById = new Map(input.graph.nodes.map((node) => [node.id, node]));
+  const tasksByConcreteNode = new Map<string, StoredWorkflowTask[]>();
+  for (const task of input.tasks) {
+    const concreteTasks = tasksByConcreteNode.get(task.concreteNodeId) ?? [];
+    concreteTasks.push(task);
+    tasksByConcreteNode.set(task.concreteNodeId, concreteTasks);
+  }
+  const initialStateChanged = ensureWorkflowTaskStateRecords(
+    input.layout,
+    input.graph,
+    input.tasks,
+    graphNodeById,
+    input.control
+  );
   const taskStatusesByConcreteNode = new Map<string, NodeStatus[]>();
   const taskAttemptsByConcreteNode = new Map<string, string[]>();
   const evidenceByAttempt = new Map(
@@ -1758,7 +1788,7 @@ async function synchronizeTasks(input: {
   );
   const tasksByAttempt = new Map(input.tasks.map((task) => [task.attemptId, task]));
   let syncedNodes = 0;
-  let changed = false;
+  let changed = initialStateChanged;
 
   const orderedTasks = tasksInDependencyOrder(input.tasks);
   for (const task of orderedTasks) {
@@ -1850,16 +1880,18 @@ async function synchronizeTasks(input: {
     if (stateChanged) {
       assertSynchronizationBudget(input.control);
       updateNodeState(input.layout, task.attemptId, patch);
-      appendNodeEvents(input.layout, task.attemptId, finalization.events, input.control);
+      appendNodeEvents(input.layout, task, finalization.events, input.control);
       changed = true;
     }
     syncedNodes += 1;
     if (previous?.status !== patchStatus) {
       assertSynchronizationBudget(input.control);
+      const eventProvenance = eventProvenanceForTask(task);
       appendEvent(input.layout, {
         eventType: "node-synced",
         nodeId: task.attemptId,
         status: patchStatus,
+        ...(eventProvenance === undefined ? {} : { provenance: eventProvenance }),
         payload: {
           workflow_run_id: input.workflowRunId,
           workflow_task_id: attemptEvidence.taskId,
@@ -1877,12 +1909,22 @@ async function synchronizeTasks(input: {
       continue;
     }
     const attemptIds = taskAttemptsByConcreteNode.get(concreteNodeId) ?? [];
-    if (statuses.length === 1 && attemptIds[0] === concreteNodeId) {
+    const concreteTasks = tasksByConcreteNode.get(concreteNodeId) ?? [];
+    const aggregateStateId = concreteTasks[0]?.metadata?.node?.storageId ?? concreteNodeId;
+    if (statuses.length === 1 && attemptIds[0] === aggregateStateId) {
       continue;
     }
-    const aggregateStatus = aggregateAttemptStatuses(statuses);
-    nodeStatuses.set(concreteNodeId, aggregateStatus);
-    const previous = readRunState(input.layout).nodes[concreteNodeId];
+    // Aggregate every materialized model attempt, including attempts for which
+    // Smithers has not emitted evidence yet. Otherwise the first successful
+    // model in a fan-out could make the human dynamic node (and its strict
+    // downstream joins) appear complete while sibling attempts remain pending.
+    const currentState = readRunState(input.layout);
+    const aggregateStatuses = concreteTasks.map(
+      (task) => currentState.nodes[task.attemptId]?.status ?? ("pending" as NodeStatus)
+    );
+    const aggregateStatus = aggregateAttemptStatuses(aggregateStatuses);
+    nodeStatuses.set(aggregateStateId, aggregateStatus);
+    const previous = currentState.nodes[aggregateStateId];
     const patch = {
       status: aggregateStatus,
       timed_out: aggregateStatus === "timed-out",
@@ -1892,13 +1934,64 @@ async function synchronizeTasks(input: {
         ...withoutTerminalDisposition(previous?.provenance),
         workflow: {
           run_id: input.workflowRunId,
-          aggregate_attempt_statuses: statuses
+          aggregate_attempt_statuses: aggregateStatuses
         }
       }
     };
     if (nodePatchChanges(previous, patch)) {
       assertSynchronizationBudget(input.control);
-      updateNodeState(input.layout, concreteNodeId, patch);
+      updateNodeState(input.layout, aggregateStateId, patch);
+      changed = true;
+    }
+  }
+
+  // Child and model aggregate states no longer change during this pass. Read
+  // them once: reparsing a multi-thousand-node state file for every generated
+  // child makes synchronization quadratic in the configured fan-out limit.
+  const aggregateState = readRunState(input.layout);
+  for (const groupNode of input.graph.nodes.filter((node) => node.dynamic !== undefined)) {
+    assertSynchronizationBudget(input.control);
+    const generatedIds = groupNode.dynamic?.generated_node_ids ?? [];
+    if (groupNode.dynamic?.status !== "expanded") continue;
+    const generatedStatuses: NodeStatus[] = [];
+    for (const generatedId of generatedIds) {
+      assertSynchronizationBudget(input.control);
+      const generatedTasks = tasksByConcreteNode.get(generatedId) ?? [];
+      if (generatedTasks.length === 0) {
+        generatedStatuses.push("pending");
+        continue;
+      }
+      const storageId = generatedTasks[0]?.metadata?.node?.storageId;
+      if (storageId !== undefined && aggregateState.nodes[storageId] !== undefined) {
+        generatedStatuses.push(aggregateState.nodes[storageId]!.status);
+        continue;
+      }
+      const attemptStatuses = generatedTasks.flatMap((task) => {
+        const status = aggregateState.nodes[task.attemptId]?.status;
+        return status === undefined ? [] : [status];
+      });
+      generatedStatuses.push(attemptStatuses.length === 0 ? "pending" : aggregateAttemptStatuses(attemptStatuses));
+    }
+    const aggregateStatus = generatedIds.length === 0 ? "succeeded" : aggregateAttemptStatuses(generatedStatuses);
+    nodeStatuses.set(groupNode.id, aggregateStatus);
+    workflowStates.set(groupNode.id, aggregateStatus);
+    const previous = readRunState(input.layout).nodes[groupNode.id];
+    const patch = {
+      status: aggregateStatus,
+      timed_out: aggregateStatus === "timed-out",
+      finished_at: finishedAtForStatus(aggregateStatus, previous),
+      provenance: {
+        ...withoutTerminalDisposition(previous?.provenance),
+        dynamic_group: {
+          status: "expanded",
+          generated_count: generatedIds.length,
+          generated_node_ids: generatedIds
+        }
+      }
+    };
+    if (nodePatchChanges(previous, patch)) {
+      assertSynchronizationBudget(input.control);
+      updateNodeState(input.layout, groupNode.id, patch);
       changed = true;
     }
   }
@@ -2107,6 +2200,19 @@ async function finalizeTerminalTask(input: {
           payload: { materialized: reconciledArtifacts }
         });
       }
+      if (reconciliationError === undefined && input.node.logical_id === "threat-model") {
+        const threatModelJson = safeResolveInside(artifactDir, "threat-model.json", "threat model JSON");
+        if (fs.existsSync(threatModelJson)) {
+          assertSynchronizationBudget(input.control);
+          const canonical = materializeCanonicalThreatModelMarkdown(artifactDir);
+          reconciledArtifacts = Array.from(
+            new Set([
+              ...reconciledArtifacts,
+              path.relative(artifactDir, canonical.markdownPath).split(path.sep).join("/")
+            ])
+          ).sort();
+        }
+      }
     } catch (error) {
       if (synchronizationInterruptionDiagnostic(error) !== undefined) {
         throw error;
@@ -2202,16 +2308,33 @@ async function finalizeTerminalTask(input: {
 
   let findingsCount: number | undefined;
   let findingsValidationFailed = false;
-  const findingsPath = safeResolveInside(artifactDir, "findings.json", "findings path");
-  if (fs.existsSync(findingsPath)) {
+  const findingsOutputs = input.node.outputs.filter((output) => output.contract === "ultrafuzz/findings@1");
+  for (const output of findingsOutputs) {
+    const findingsPath = safeResolveInside(artifactDir, output.path, "findings path");
+    if (!fs.existsSync(findingsPath)) continue;
     try {
       assertSynchronizationBudget(input.control);
+      const preserveSourceNodes = isFindingTransformationNode(input.task.logicalNodeId);
+      const sourceProvenance = preserveSourceNodes
+        ? dependencyFindingProvenanceForTask({
+            layout: input.layout,
+            node: input.node,
+            task: input.task,
+            tasksByAttempt: input.tasksByAttempt
+          })
+        : undefined;
       const report = normalizeFindings({
         artifactDir,
+        relativePath: output.path,
         nodeId: input.task.attemptId,
-        provenance: findingsProvenance(input.node, input.task)
+        provenance: findingsProvenance(input.node, input.task),
+        preserveSourceNodes,
+        requireSourceNodes: preserveSourceNodes,
+        allowedSourceNodes: sourceProvenance?.allowedSourceNodes,
+        sourceExpectations: sourceProvenance?.expectations,
+        requireSourceExpectation: preserveSourceNodes
       });
-      findingsCount = report.count;
+      findingsCount = (findingsCount ?? 0) + report.count;
       events.push({
         eventType: "findings-normalized",
         status: "succeeded",
@@ -2221,9 +2344,7 @@ async function finalizeTerminalTask(input: {
         }
       });
     } catch (error) {
-      if (synchronizationInterruptionDiagnostic(error) !== undefined) {
-        throw error;
-      }
+      if (synchronizationInterruptionDiagnostic(error) !== undefined) throw error;
       findingsValidationFailed = error instanceof FindingsValidationError;
       diagnostics.push(diagnosticFromError(error, "findings", "FINDINGS_NORMALIZE_FAILED"));
     }
@@ -2331,19 +2452,35 @@ function dependencyCascadeFailure(
 
 function appendNodeEvents(
   layout: RunLayout,
-  nodeId: string,
+  task: StoredWorkflowTask,
   events: PendingNodeEvent[],
   control: WorkflowSynchronizationControl
 ): void {
+  const provenance = eventProvenanceForTask(task);
   for (const event of events) {
     assertSynchronizationBudget(control);
     appendEvent(layout, {
       eventType: event.eventType,
-      nodeId,
+      nodeId: task.attemptId,
       status: event.status,
+      ...(provenance === undefined ? {} : { provenance }),
       payload: event.payload
     });
   }
+}
+
+function eventProvenanceForTask(task: StoredWorkflowTask): Record<string, unknown> | undefined {
+  const producerNodeId = task.metadata?.node?.producerNodeId;
+  const storageId = task.metadata?.node?.storageId;
+  const dynamic = task.metadata?.node?.dynamic;
+  if (producerNodeId === undefined && storageId === undefined && dynamic === undefined) return undefined;
+  return {
+    producer_node_id: producerNodeId ?? task.concreteNodeId,
+    concrete_node_id: task.concreteNodeId,
+    strategy_attempt_id: task.attemptId,
+    ...(storageId === undefined ? {} : { storage_id: storageId }),
+    ...(dynamic === undefined ? {} : { dynamic })
+  };
 }
 
 function appendTerminalTaskAttempts(input: {
@@ -3380,7 +3517,7 @@ function parseStoredTask(value: unknown): StoredWorkflowTask[] {
     return [];
   }
   validateSafeId(attemptId, "attempt ID");
-  validateSafeId(concreteNodeId, "concrete node ID");
+  validateNodeReference(concreteNodeId, "concrete node ID");
   validateSafeId(logicalNodeId, "logical node ID");
   return [
     {
@@ -3436,7 +3573,7 @@ function artifactProvenance(
 ): Partial<ArtifactProvenance> {
   const model = task.metadata?.model;
   return {
-    producer_node_id: task.attemptId,
+    producer_node_id: task.metadata?.node?.producerNodeId ?? task.attemptId,
     logical_node_id: task.logicalNodeId,
     attempt_index: model?.attemptIndex ?? task.metadata?.loop?.attemptIndex ?? node.loop.attempt_index,
     loop_index: task.metadata?.loop?.index ?? node.loop.index,
@@ -3448,7 +3585,9 @@ function artifactProvenance(
     workflow_task_id: task.smithersNodeId,
     origin: "workflow",
     metadata: {
-      concrete_node_id: task.concreteNodeId
+      concrete_node_id: task.concreteNodeId,
+      ...(task.metadata?.node?.storageId === undefined ? {} : { storage_id: task.metadata.node.storageId }),
+      ...(task.metadata?.node?.dynamic === undefined ? {} : { dynamic: task.metadata.node.dynamic })
     }
   };
 }
@@ -3457,6 +3596,7 @@ function findingsProvenance(node: PlannedGraphNode, task: StoredWorkflowTask) {
   const model = task.metadata?.model;
   return {
     nodeId: task.attemptId,
+    producerNodeId: task.metadata?.node?.producerNodeId ?? task.attemptId,
     strategy: task.logicalNodeId,
     attemptIndex: model?.attemptIndex ?? task.metadata?.loop?.attemptIndex ?? node.loop.attempt_index,
     modelId: model?.profileId ?? node.model_fanout[0]?.model_profile_id,
@@ -3464,6 +3604,179 @@ function findingsProvenance(node: PlannedGraphNode, task: StoredWorkflowTask) {
     modelIndex: model?.modelIndex ?? node.model_fanout[0]?.model_index,
     loopIndex: task.metadata?.loop?.index ?? node.loop.index
   };
+}
+
+function isFindingTransformationNode(logicalNodeId: string): boolean {
+  return ["dedupe-findings", "triage", "severity-classification", "final-report"].includes(logicalNodeId);
+}
+
+/**
+ * Mirrors `currentFindingLifecycleLedger` in the generated workflow template,
+ * including its failure behaviour. A corrupt ledger throws rather than falling
+ * back to `undefined`: falling back would re-enter the naive one-expectation-
+ * per-upstream-finding state and report a corrupt required artifact as a
+ * findings-contract violation instead of naming the real problem.
+ */
+function readFindingLifecycleLedger(artifactDir: string): unknown | undefined {
+  const ledgerPath = path.resolve(artifactDir, "finding-lifecycle-ledger.json");
+  if (!fs.existsSync(ledgerPath)) return undefined;
+  const resolvedPath = safeResolveInside(artifactDir, "finding-lifecycle-ledger.json", "finding lifecycle ledger");
+  assertRegularFileInside(artifactDir, resolvedPath, "finding lifecycle ledger");
+  try {
+    return JSON.parse(fs.readFileSync(resolvedPath, "utf8")) as unknown;
+  } catch {
+    throw new Error("artifact-contract failure: finding lifecycle ledger must contain valid JSON");
+  }
+}
+
+function dependencyFindingProvenanceForTask(input: {
+  layout: RunLayout;
+  node: PlannedGraphNode;
+  task: StoredWorkflowTask;
+  tasksByAttempt: Map<string, StoredWorkflowTask>;
+}): { allowedSourceNodes: string[]; expectations: ReturnType<typeof buildFindingSourceExpectations> } {
+  const upstream: Array<{ node_id: string; artifact_path: string; finding: unknown }> = [];
+  const artifactDir = getNodeArtifactDir(input.layout, input.task.attemptId);
+  const artifactsParent = path.dirname(artifactDir);
+  const findingFiles = [
+    "severity-classified-findings.json",
+    "triaged-findings.json",
+    "deduped-findings.json",
+    "findings.normalized.json",
+    "findings.json"
+  ];
+  for (const dependencyId of input.task.dependencies) {
+    const dependencyRoot = getNodeArtifactDir(input.layout, dependencyId);
+    if (!fs.existsSync(dependencyRoot)) continue;
+    if (!isStrictlyInsideDirectory(artifactsParent, dependencyRoot)) continue;
+    // Findings name their producing node, not the attempt that stored them. A
+    // generated dynamic child stores under `dynamic-<group>-<hash>` but reports
+    // `dynamic:threat:<id>`, and the lifecycle ledger the agent writes cites the
+    // producer, so matching on the attempt ID would never resolve.
+    const dependencyTask = input.tasksByAttempt.get(dependencyId);
+    const producerNodeId =
+      dependencyTask?.metadata?.node?.producerNodeId ?? dependencyTask?.concreteNodeId ?? dependencyId;
+    for (const fileName of findingFiles) {
+      const findingPath = path.resolve(dependencyRoot, fileName);
+      if (!fs.existsSync(findingPath)) continue;
+      const resolvedPath = safeResolveInside(dependencyRoot, fileName, "dependency findings path");
+      // Reject a symlinked findings file rather than following it out of the
+      // run root, matching the generated template's resolveRegularArtifactFile.
+      assertRegularFileInside(dependencyRoot, resolvedPath, "dependency findings");
+      const validation = validateArtifactContract(
+        "ultrafuzz/findings@1",
+        fs.readFileSync(resolvedPath, "utf8"),
+        fileName
+      );
+      if (!validation.ok || !Array.isArray(validation.value)) continue;
+      upstream.push(
+        ...validation.value.map((finding) => ({ node_id: producerNodeId, artifact_path: resolvedPath, finding }))
+      );
+      break;
+    }
+  }
+  // A dedupe root's `source_nodes` is the union of every upstream finding it
+  // merged, and only the lifecycle ledger says which those were. Rebuilding the
+  // expectations without it yields one single-source expectation per upstream
+  // finding, so a genuine merge matches none of them and this read-only
+  // re-validation would fail a node the authoritative in-workflow gate passed.
+  const requireLifecycleCoverage = input.task.logicalNodeId === "dedupe-findings";
+  const lifecycleLedger = requireLifecycleCoverage ? readFindingLifecycleLedger(artifactDir) : undefined;
+  if (requireLifecycleCoverage && lifecycleLedger === undefined && upstream.length > 0) {
+    // Without it the expectations degrade to one single-source entry per
+    // upstream finding, which reports a missing required artifact as a
+    // findings-contract violation. Name the real problem instead.
+    throw new Error("artifact-contract failure: dedupe provenance requires finding-lifecycle-ledger.json");
+  }
+  const expectations = buildFindingSourceExpectations({
+    upstream,
+    ...(lifecycleLedger === undefined ? {} : { lifecycleLedger }),
+    requireLifecycleCoverage
+  });
+  return {
+    allowedSourceNodes: [...new Set(expectations.flatMap((expectation) => expectation.source_nodes))],
+    expectations
+  };
+}
+
+function isStrictlyInsideDirectory(root: string, candidate: string): boolean {
+  return candidate !== root && candidate.startsWith(`${root}${path.sep}`);
+}
+
+function ensureWorkflowTaskStateRecords(
+  layout: RunLayout,
+  graph: PlannedGraph,
+  tasks: readonly StoredWorkflowTask[],
+  graphNodeById: ReadonlyMap<string, PlannedGraphNode>,
+  control: WorkflowSynchronizationControl
+): boolean {
+  assertSynchronizationBudget(control);
+  const state = readRunState(layout);
+  let changed = false;
+  for (const task of tasks) {
+    assertSynchronizationBudget(control);
+    if (state.nodes[task.attemptId] !== undefined) continue;
+    const node = graphNodeById.get(task.concreteNodeId);
+    if (node === undefined) continue;
+    state.nodes[task.attemptId] = createNodeState({
+      id: task.attemptId,
+      logicalNodeId: task.logicalNodeId,
+      artifactDir: `artifacts/${task.attemptId}`,
+      outputs: node.outputs,
+      attemptIndex: task.metadata?.model?.attemptIndex ?? task.metadata?.loop?.attemptIndex ?? node.loop.attempt_index,
+      loopIndex: task.metadata?.loop?.index ?? node.loop.index,
+      modelId: task.metadata?.model?.profileId ?? node.model_fanout[0]?.model_profile_id,
+      model: task.metadata?.model?.modelName ?? task.modelName ?? node.model_fanout[0]?.model_name,
+      modelIndex: task.metadata?.model?.modelIndex ?? node.model_fanout[0]?.model_index,
+      waitReason: node.depends_on.length > 0 ? "dependency" : "ready",
+      nextEligibleAction: node.depends_on.length > 0 ? "dependency-complete" : "dispatch"
+    });
+    state.nodes[task.attemptId]!.provenance = {
+      ...(task.metadata?.node?.producerNodeId === undefined
+        ? {}
+        : { producer_node_id: task.metadata.node.producerNodeId }),
+      ...(task.metadata?.node?.storageId === undefined ? {} : { storage_id: task.metadata.node.storageId }),
+      ...(task.metadata?.node?.dynamic === undefined ? {} : { dynamic: task.metadata.node.dynamic })
+    };
+    changed = true;
+  }
+  const firstTaskByConcreteNode = new Map<string, StoredWorkflowTask>();
+  for (const task of tasks) {
+    if (!firstTaskByConcreteNode.has(task.concreteNodeId)) {
+      firstTaskByConcreteNode.set(task.concreteNodeId, task);
+    }
+  }
+  for (const node of graph.nodes) {
+    assertSynchronizationBudget(control);
+    const storageId = node.dynamic_generated?.storage_id;
+    if (storageId === undefined || state.nodes[storageId] !== undefined) continue;
+    const task = firstTaskByConcreteNode.get(node.id);
+    if (task === undefined) continue;
+    state.nodes[storageId] = createNodeState({
+      id: storageId,
+      logicalNodeId: node.logical_id,
+      artifactDir: node.artifact_dir,
+      outputs: node.outputs,
+      attemptIndex: node.loop.attempt_index,
+      loopIndex: node.loop.index,
+      waitReason: "dependency",
+      nextEligibleAction: "task-complete"
+    });
+    state.nodes[storageId]!.provenance = {
+      producer_node_id: node.id,
+      storage_id: storageId,
+      ...(task.metadata?.node?.dynamic === undefined ? {} : { dynamic: task.metadata.node.dynamic })
+    };
+    changed = true;
+  }
+  if (changed) {
+    // The loop may materialize thousands of runtime attempts. Check once more
+    // after building the complete replacement so an expired synchronization
+    // budget never publishes a partially observed expansion.
+    assertSynchronizationBudget(control);
+    writeRunState(layout, state);
+  }
+  return changed;
 }
 
 function workflowSnapshotDiagnostic(snapshot: SmithersCommandSnapshot, code: string): RuntimeDiagnostic {

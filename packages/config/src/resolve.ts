@@ -62,6 +62,7 @@ const resolvedConfigValidationSchema = z
         outputDir: projectLocalPathSchema,
         maxParallelAgents: positiveIntegerSchema,
         maxParallelNodes: positiveIntegerSchema,
+        maxDynamicNodes: positiveIntegerSchema,
         forgeGuardEnabled: z.boolean(),
         forgeVmemLimitKb: positiveIntegerSchema,
         forgeRayonThreads: positiveIntegerSchema,
@@ -180,6 +181,7 @@ export function serializeResolvedConfigToml(config: ResolvedConfig): string {
     output_dir: clone.run.outputDir,
     max_parallel_agents: clone.run.maxParallelAgents,
     max_parallel_nodes: clone.run.maxParallelNodes,
+    max_dynamic_nodes: clone.run.maxDynamicNodes,
     keep_workspaces: clone.run.keepWorkspaces,
     forge_guard_enabled: clone.run.forgeGuardEnabled,
     forge_vmem_limit_kb: clone.run.forgeVmemLimitKb,
@@ -506,6 +508,16 @@ function applyEnvironmentOverrides(
   applyIntegerEnv(
     config,
     env,
+    "ULTRAFUZZ_MAX_DYNAMIC_NODES",
+    ["run", "max_dynamic_nodes"],
+    (value) => {
+      config.run.maxDynamicNodes = value;
+    },
+    diagnostics
+  );
+  applyIntegerEnv(
+    config,
+    env,
     "ULTRAFUZZ_MAX_PARALLEL_NODES",
     ["run", "max_parallel_nodes"],
     (value) => {
@@ -551,6 +563,9 @@ function applyRuntimeOverrides(
   }
   if (overrides.maxParallelNodes !== undefined) {
     config.run.maxParallelNodes = overrides.maxParallelNodes;
+  }
+  if (overrides.maxDynamicNodes !== undefined) {
+    config.run.maxDynamicNodes = overrides.maxDynamicNodes;
   }
   if (overrides.outputDir !== undefined) {
     config.run.outputDir = overrides.outputDir;
@@ -691,6 +706,8 @@ function configPathSegment(segment: string): string {
       return "max_parallel_agents";
     case "maxParallelNodes":
       return "max_parallel_nodes";
+    case "maxDynamicNodes":
+      return "max_dynamic_nodes";
     case "forgeGuardEnabled":
       return "forge_guard_enabled";
     case "forgeVmemLimitKb":

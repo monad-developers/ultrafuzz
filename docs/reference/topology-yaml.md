@@ -123,7 +123,8 @@ Built-in contracts include `ultrafuzz/findings@1`,
 `ultrafuzz/implemented-properties@1`, `ultrafuzz/implemented-properties@2`,
 `ultrafuzz/property-campaign@1`,
 `ultrafuzz/nonempty-markdown@1`, `ultrafuzz/json-object@1`,
-`ultrafuzz/json-array@1`, `ultrafuzz/report@1`, and `ultrafuzz/text@1`.
+`ultrafuzz/json-array@1`, `ultrafuzz/goal-plan@1`,
+`ultrafuzz/threat-model@1`, `ultrafuzz/report@1`, and `ultrafuzz/text@1`.
 Contract definitions supply both runtime validation and the shape and
 valid-empty guidance appended to prompts.
 
@@ -182,6 +183,28 @@ Downstream prompts can consume the normalized Markdown primary artifact with:
 {{artifact_handoff:reference-properties-montyly-rounding}}
 ```
 
+The external vulnerability database uses the same reference-node lifecycle but
+declares its machine-readable catalog as the primary output:
+
+```yaml
+- id: reference-vulnerability-database
+  kind: reference
+  reference: vulnerability-database.web3
+  group: references
+  depends_on:
+    - __start__
+  outputs:
+    - path: vulnerability-db/catalog.json
+      contract: ultrafuzz/json-object@1
+      primary: true
+    - path: references/manifest.json
+      contract: ultrafuzz/json-object@1
+```
+
+The reference catalog entry's `kind: vulnerability-database` makes the runtime
+materialize and validate `database.yml`, `capabilities.yml`, `catalog.json`, and
+the catalog-declared `classes/**/*.md` tree instead of concatenating them.
+
 ## Loop Expansion
 
 Loop expansion is deterministic:
@@ -198,6 +221,84 @@ depend on the final series attempt.
 The scaffold uses the `strategies` group default to run normal strategy nodes
 three times, and uses explicit single-loop behavior for setup, references,
 review, invariant, and exception-flow nodes.
+
+## Runtime Dynamic Expansion
+
+An agentic node can act as a static template for work discovered by an upstream
+node at runtime:
+
+```yaml
+- id: threat-goals
+  kind: agentic
+  prompt: strategies/goal-hunter.mdx
+  group: goals
+  depends_on:
+    - goal-plan
+  loops: 1
+  dynamic:
+    from:
+      node: goal-plan
+      path: $.threat_goals
+    key: id
+    node_id: "dynamic:threat:{{ item.id }}"
+  outputs:
+    - path: findings.json
+      contract: ultrafuzz/findings@1
+      primary: true
+    - path: generated-tests.json
+      contract: ultrafuzz/generated-tests@1
+```
+
+The declaration itself is a join group, not an executable attempt. After
+`goal-plan` completes, `from.path` must resolve in its primary JSON artifact to
+an array of objects. Ultrafuzz creates one ordinary runtime node per item using
+the template's prompt, model fan-out, timeout, retry policy, permissions, and
+output contracts.
+
+| Field               | Meaning                                                                        |
+| ------------------- | ------------------------------------------------------------------------------ |
+| `dynamic.from.node` | Direct upstream producer of the source JSON.                                   |
+| `dynamic.from.path` | Restricted object-only JSONPath rooted at `$`, such as `$.threat_goals`.       |
+| `dynamic.key`       | Dot-separated item field whose scalar value is stable and unique in the group. |
+| `dynamic.node_id`   | Human-readable node-ID template. It must include `{{ item.<key> }}`.           |
+
+Dynamic expansion is limited to one level. Dynamic templates must use one loop;
+generated nodes cannot themselves declare dynamic expansion. An empty array is
+valid and completes the group successfully. A downstream node that depends on
+the group becomes eligible only after the generated children satisfy the
+ordinary dependency policy; failed or skipped children remain visible.
+
+Generated human IDs may contain bounded lowercase `:`, `.`, `_`, and `-`, for
+example `dynamic:threat:liquidation.overdue`. Ultrafuzz separately derives a
+path-safe storage/attempt ID. Status, graph, and finding provenance use the
+human ID; artifact directories use the storage/attempt ID.
+
+Each item exposes scalar fields to the prompt as `{{item.<field>}}`. A planner
+may also provide a `replacements` object whose namespaced keys are recursively
+rendered. For example:
+
+```json
+{
+  "id": "liquidation.overdue",
+  "replacements": {
+    "liquidation:overdue": "overdue fixed-term liquidation for {{item.id}}"
+  }
+}
+```
+
+```md
+Your /goal is to find any vulnerability affecting overdue liquidation using
+threat model threat {{liquidation:overdue}}.
+```
+
+Generated children use the same global concurrency scheduler as static nodes.
+`run.max_dynamic_nodes` limits the total number generated across the run;
+exceeding it fails explicitly and never truncates the source array.
+
+The first successful expansion is persisted under
+`dynamic-expansions/<group-id>.json`. Resume reuses that exact manifest and
+rejects changes to its source bytes, prompt template, topology contract, or
+dynamic-node limit instead of silently changing the graph.
 
 ## Model Fan-Out
 
@@ -249,5 +350,7 @@ Topology validation rejects:
 - Nodes without exactly one primary output.
 - Unknown fields at every topology level.
 - Invalid or unknown model profile IDs.
+- Invalid dynamic sources, JSONPaths, keys, node-ID templates, nested dynamic
+  expansion, or dynamic templates with more than one loop.
 - Prompt artifact references to unknown producers, non-ancestors, or producers
   without declared artifacts.

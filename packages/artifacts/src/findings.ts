@@ -1,7 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { ArtifactPathError, readJsonFile, safeResolveInside, validateSafeId, writeJsonDurable } from "./safe-paths.js";
+import {
+  ArtifactPathError,
+  readJsonFile,
+  safeResolveInside,
+  validateNodeReference,
+  validateSafeId,
+  writeJsonDurable
+} from "./safe-paths.js";
 
 export const FINDINGS_SCHEMA_VERSION = "1.0";
 export const FINDINGS_FILE = "findings.json";
@@ -30,6 +37,7 @@ export type TriageClassification = (typeof TRIAGE_CLASSIFICATIONS)[number];
 
 export interface FindingProvenance {
   nodeId?: string;
+  producerNodeId?: string;
   strategy?: string;
   attemptIndex?: number;
   modelId?: string;
@@ -40,8 +48,25 @@ export interface FindingProvenance {
 
 export interface NormalizeFindingsInput {
   artifactDir: string;
+  relativePath?: string;
   nodeId?: string;
   provenance?: FindingProvenance;
+  preserveSourceNodes?: boolean;
+  requireSourceNodes?: boolean;
+  allowedSourceNodes?: readonly string[];
+  sourceExpectations?: readonly FindingSourceExpectation[];
+  requireSourceExpectation?: boolean;
+}
+
+export interface FindingSourceExpectation {
+  finding_keys: readonly string[];
+  source_nodes: readonly string[];
+}
+
+export interface UpstreamFindingSource {
+  node_id: string;
+  artifact_path: string;
+  finding: unknown;
 }
 
 export interface FindingsNormalizeReport {
@@ -71,19 +96,20 @@ export type NormalizedFinding = Record<string, unknown> & {
 
 export function normalizeFindings(input: NormalizeFindingsInput): FindingsNormalizeReport {
   const artifactDir = path.resolve(input.artifactDir);
-  const sourcePath = resolveFindingsSource(artifactDir);
+  const relativePath = input.relativePath ?? FINDINGS_FILE;
+  const sourcePath = resolveFindingsSource(artifactDir, relativePath);
   let raw: unknown;
   try {
     raw = readJsonFile(sourcePath);
   } catch (error) {
     if (error instanceof SyntaxError) {
-      throw new FindingsValidationError(`${FINDINGS_FILE} must contain valid JSON`);
+      throw new FindingsValidationError(`${relativePath} must contain valid JSON`);
     }
     throw error;
   }
-  const values = findingsArrayFromRaw(raw);
+  const values = findingsArrayFromRaw(raw, relativePath);
   const findings = values.map((value, index) => normalizeFinding(value, index, input));
-  const normalizedPath = path.join(artifactDir, FINDINGS_FILE);
+  const normalizedPath = safeResolveInside(artifactDir, relativePath, "normalized findings path");
   writeJsonDurable(normalizedPath, findings);
   return {
     schema_version: FINDINGS_SCHEMA_VERSION,
@@ -98,11 +124,98 @@ export function readFindings(artifactDir: string): NormalizedFinding[] {
   return readJsonFile<NormalizedFinding[]>(path.join(artifactDir, FINDINGS_FILE));
 }
 
-function resolveFindingsSource(artifactDir: string): string {
-  const findingsPath = safeResolveInside(artifactDir, FINDINGS_FILE, "findings source path");
-  rejectSymlinkFindingsSource(findingsPath, FINDINGS_FILE);
+export function findingIdentityKeys(value: unknown): string[] {
+  if (!isPlainRecord(value)) return [];
+  const lifecycle = isPlainRecord(value.lifecycle) ? value.lifecycle : undefined;
+  return uniqueNonEmptyStrings([
+    value.dedupe_key,
+    lifecycle?.dedupe_key,
+    value.id,
+    value.upstream_id,
+    value.source_finding_id,
+    value.finding_id,
+    value.family_id
+  ]);
+}
+
+/**
+ * Derive authoritative discovery-source expectations from verified upstream
+ * findings. For many-to-one dedupe, the lifecycle ledger must account for
+ * every upstream finding and binds each output dedupe key to the exact union of
+ * its declared source artifacts.
+ */
+export function buildFindingSourceExpectations(input: {
+  upstream: readonly UpstreamFindingSource[];
+  lifecycleLedger?: unknown;
+  requireLifecycleCoverage?: boolean;
+}): FindingSourceExpectation[] {
+  const upstream = input.upstream.map((entry, index) => normalizeUpstreamFindingSource(entry, index));
+  const expectations: FindingSourceExpectation[] = upstream.map((entry) => ({
+    finding_keys: entry.keys,
+    source_nodes: entry.sourceNodes
+  }));
+  if (input.lifecycleLedger === undefined) return expectations;
+
+  if (!isPlainRecord(input.lifecycleLedger) || !Array.isArray(input.lifecycleLedger.records)) {
+    throw new FindingsValidationError("finding lifecycle ledger must contain a records array");
+  }
+  const covered = new Set<number>();
+  for (const [recordIndex, rawRecord] of input.lifecycleLedger.records.entries()) {
+    if (!isPlainRecord(rawRecord)) {
+      throw new FindingsValidationError(`finding lifecycle record ${recordIndex} must be an object`);
+    }
+    const keys = findingIdentityKeys(rawRecord);
+    if (keys.length === 0) {
+      throw new FindingsValidationError(`finding lifecycle record ${recordIndex} has no stable finding key`);
+    }
+    if (!Array.isArray(rawRecord.source_artifacts) || rawRecord.source_artifacts.length === 0) {
+      throw new FindingsValidationError(`finding lifecycle record ${recordIndex} has no source_artifacts`);
+    }
+    const sourceNodes: string[] = [];
+    for (const [sourceIndex, rawSource] of rawRecord.source_artifacts.entries()) {
+      if (!isPlainRecord(rawSource)) {
+        throw new FindingsValidationError(
+          `finding lifecycle record ${recordIndex} source_artifact ${sourceIndex} must be an object`
+        );
+      }
+      const findingId = requiredLifecycleString(rawSource, "finding_id", recordIndex, sourceIndex);
+      const nodeId = validateNodeReference(
+        requiredLifecycleString(rawSource, "node_id", recordIndex, sourceIndex),
+        "lifecycle source artifact node ID"
+      );
+      const matches = upstream.filter(
+        (candidate) => candidate.findingId === findingId && candidate.identities.includes(nodeId)
+      );
+      if (matches.length !== 1) {
+        throw new FindingsValidationError(
+          `finding lifecycle source artifact does not identify exactly one dependency finding: ${nodeId}:${findingId}`
+        );
+      }
+      const matched = matches[0]!;
+      if (covered.has(matched.index)) {
+        throw new FindingsValidationError(
+          `dependency finding appears more than once in the lifecycle ledger: ${nodeId}:${findingId}`
+        );
+      }
+      covered.add(matched.index);
+      appendUnique(sourceNodes, matched.sourceNodes);
+    }
+    expectations.push({ finding_keys: keys, source_nodes: sourceNodes });
+  }
+  if (input.requireLifecycleCoverage === true && covered.size !== upstream.length) {
+    const missing = upstream
+      .filter((entry) => !covered.has(entry.index))
+      .map((entry) => `${entry.nodeId}:${entry.findingId}`);
+    throw new FindingsValidationError("finding lifecycle ledger omitted dependency findings: " + missing.join(", "));
+  }
+  return expectations;
+}
+
+function resolveFindingsSource(artifactDir: string, relativePath: string): string {
+  const findingsPath = safeResolveInside(artifactDir, relativePath, "findings source path");
+  rejectSymlinkFindingsSource(findingsPath, relativePath);
   if (!fs.existsSync(findingsPath)) {
-    throw new Error(`missing ${FINDINGS_FILE} in ${artifactDir}`);
+    throw new Error(`missing ${relativePath} in ${artifactDir}`);
   }
   return findingsPath;
 }
@@ -113,11 +226,11 @@ function rejectSymlinkFindingsSource(filePath: string, label: string): void {
   }
 }
 
-function findingsArrayFromRaw(value: unknown): unknown[] {
+function findingsArrayFromRaw(value: unknown, relativePath: string): unknown[] {
   if (Array.isArray(value)) {
     return value;
   }
-  throw new FindingsValidationError(`${FINDINGS_FILE} must contain a findings array`);
+  throw new FindingsValidationError(`${relativePath} must contain a findings array`);
 }
 
 function normalizeFinding(value: unknown, index: number, input: NormalizeFindingsInput): NormalizedFinding {
@@ -126,6 +239,7 @@ function normalizeFinding(value: unknown, index: number, input: NormalizeFinding
   }
   const provenance = input.provenance ?? {};
   const nodeId = input.nodeId ?? provenance.nodeId;
+  const producerNodeId = provenance.producerNodeId ?? provenance.nodeId ?? input.nodeId;
   const schemaVersion = optionalString(value, "schema_version") ?? FINDINGS_SCHEMA_VERSION;
   if (schemaVersion !== FINDINGS_SCHEMA_VERSION) {
     throw new FindingsValidationError(
@@ -146,7 +260,19 @@ function normalizeFinding(value: unknown, index: number, input: NormalizeFinding
     normalized.triage_classification = requiredEnum(value, "triage_classification", TRIAGE_CLASSIFICATIONS, index);
   }
 
-  assignIfMissing(normalized, "source_node_id", nodeId);
+  if (producerNodeId !== undefined) {
+    normalized.producer_node_id = validateNodeReference(producerNodeId, "finding producer node ID");
+  }
+  normalizeSourceNodes(
+    normalized,
+    nodeId,
+    producerNodeId,
+    input.preserveSourceNodes === true,
+    input.requireSourceNodes === true,
+    input.allowedSourceNodes,
+    input.sourceExpectations,
+    input.requireSourceExpectation === true
+  );
   assignIfMissing(normalized, "strategy", provenance.strategy);
   assignIfMissing(normalized, "attempt_index", provenance.attemptIndex);
   assignIfMissing(normalized, "model_id", provenance.modelId);
@@ -165,6 +291,192 @@ function normalizeFinding(value: unknown, index: number, input: NormalizeFinding
   validateEvidence(normalized.evidence, index);
 
   return normalized as NormalizedFinding;
+}
+
+function normalizeSourceNodes(
+  record: Record<string, unknown>,
+  nodeId: string | undefined,
+  producerNodeId: string | undefined,
+  preserveExisting: boolean,
+  requireSourceNodes: boolean,
+  allowedSourceNodes: readonly string[] | undefined,
+  sourceExpectations: readonly FindingSourceExpectation[] | undefined,
+  requireSourceExpectation: boolean
+): void {
+  const existing = record.source_nodes;
+  if (existing !== undefined && !Array.isArray(existing)) {
+    throw new FindingsValidationError("field source_nodes must be an array of non-empty strings");
+  }
+  const values = preserveExisting
+    ? [
+        ...(Array.isArray(existing) ? existing : []),
+        typeof record.source_node_id === "string" ? record.source_node_id : undefined
+      ]
+    : [producerNodeId];
+  const normalized: string[] = [];
+  for (const value of values) {
+    if (value === undefined) continue;
+    if (typeof value !== "string" || value.trim().length === 0) {
+      throw new FindingsValidationError("field source_nodes must be an array of non-empty strings");
+    }
+    const candidate = validateNodeReference(value.trim(), "finding source node ID");
+    if (!normalized.includes(candidate)) normalized.push(candidate);
+  }
+  if (normalized.length > 0) {
+    if (allowedSourceNodes !== undefined) {
+      const allowed = new Set(
+        allowedSourceNodes.map((sourceNode) => validateNodeReference(sourceNode, "allowed finding source node ID"))
+      );
+      const invented = normalized.filter((sourceNode) => !allowed.has(sourceNode));
+      if (invented.length > 0) {
+        throw new FindingsValidationError(
+          "field source_nodes contains IDs not present in dependency findings: " + invented.join(", ")
+        );
+      }
+    }
+    const expected = expectedSourceNodes(record, sourceExpectations);
+    if (expected === undefined && requireSourceExpectation) {
+      throw new FindingsValidationError("finding does not match any dependency provenance record");
+    }
+    if (expected !== undefined) {
+      if (!sameStringSet(normalized, expected)) {
+        throw new FindingsValidationError(
+          "field source_nodes does not preserve the exact dependency discovery-source union"
+        );
+      }
+      normalized.splice(0, normalized.length, ...expected);
+    }
+    record.source_nodes = normalized;
+    // `source_node_id` is the stable compatibility alias for `source_nodes[0]` in every direction:
+    // initial findings and downstream transformations alike. The storage/attempt identity stays in
+    // the explicit `producer_attempt_id` field (and in artifact-manifest/run-state provenance) so a
+    // dynamic hunter's canonical output round-trips through the downstream dedupe gate unchanged.
+    record.source_node_id = normalized[0];
+    if (preserveExisting) {
+      if (record.producer_attempt_id !== undefined) {
+        if (typeof record.producer_attempt_id !== "string") {
+          throw new FindingsValidationError("field producer_attempt_id must be a non-empty string");
+        }
+        record.producer_attempt_id = validateNodeReference(
+          record.producer_attempt_id.trim(),
+          "finding producer attempt ID"
+        );
+      }
+    } else {
+      // The producer attempt identity is runtime-assigned, never model-supplied: drop any
+      // stale/spoofed value before recording the attempt ID for aliased dynamic producers.
+      delete record.producer_attempt_id;
+      if (nodeId !== undefined && nodeId !== normalized[0]) {
+        record.producer_attempt_id = validateNodeReference(nodeId, "finding producer attempt ID");
+      }
+    }
+  } else {
+    if (requireSourceNodes) {
+      throw new FindingsValidationError("field source_nodes must retain at least one discovery node ID");
+    }
+    delete record.source_nodes;
+    delete record.source_node_id;
+    delete record.producer_attempt_id;
+  }
+}
+
+function expectedSourceNodes(
+  record: Record<string, unknown>,
+  expectations: readonly FindingSourceExpectation[] | undefined
+): string[] | undefined {
+  if (expectations === undefined) return undefined;
+  const findingKeys = new Set(findingIdentityKeys(record));
+  const matched = expectations.filter((expectation) => expectation.finding_keys.some((key) => findingKeys.has(key)));
+  if (matched.length === 0) return undefined;
+  const result: string[] = [];
+  for (const expectation of matched) {
+    appendUnique(
+      result,
+      expectation.source_nodes.map((sourceNode) => validateNodeReference(sourceNode, "expected finding source node ID"))
+    );
+  }
+  return result;
+}
+
+function normalizeUpstreamFindingSource(
+  entry: UpstreamFindingSource,
+  index: number
+): {
+  index: number;
+  nodeId: string;
+  findingId: string;
+  identities: string[];
+  keys: string[];
+  sourceNodes: string[];
+} {
+  if (!isPlainRecord(entry.finding)) {
+    throw new FindingsValidationError(`dependency finding ${index} must be an object`);
+  }
+  const nodeId = validateNodeReference(entry.node_id, "dependency finding node ID");
+  const findingId = requiredString(entry.finding, "id", index);
+  const keys = findingIdentityKeys(entry.finding);
+  if (keys.length === 0) {
+    throw new FindingsValidationError(`dependency finding ${index} has no stable finding key`);
+  }
+  const sourceNodes = sourceNodesFromFinding(entry.finding, index);
+  const identities = [nodeId];
+  if (typeof entry.finding.producer_node_id === "string") {
+    appendUnique(identities, [validateNodeReference(entry.finding.producer_node_id, "dependency producer node ID")]);
+  }
+  appendUnique(identities, sourceNodes);
+  return { index, nodeId, findingId, identities, keys, sourceNodes };
+}
+
+function sourceNodesFromFinding(finding: Record<string, unknown>, index: number): string[] {
+  const raw = Array.isArray(finding.source_nodes)
+    ? finding.source_nodes
+    : typeof finding.source_node_id === "string"
+      ? [finding.source_node_id]
+      : [];
+  if (raw.length === 0) {
+    throw new FindingsValidationError(`dependency finding ${index} has no discovery source nodes`);
+  }
+  const result: string[] = [];
+  for (const sourceNode of raw) {
+    if (typeof sourceNode !== "string" || sourceNode.trim() === "") {
+      throw new FindingsValidationError(`dependency finding ${index} has an invalid discovery source node`);
+    }
+    appendUnique(result, [validateNodeReference(sourceNode.trim(), "dependency finding source node ID")]);
+  }
+  return result;
+}
+
+function requiredLifecycleString(
+  record: Record<string, unknown>,
+  key: string,
+  recordIndex: number,
+  sourceIndex: number
+): string {
+  const value = record[key];
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new FindingsValidationError(
+      `finding lifecycle record ${recordIndex} source_artifact ${sourceIndex} requires ${key}`
+    );
+  }
+  return value.trim();
+}
+
+function uniqueNonEmptyStrings(values: readonly unknown[]): string[] {
+  const result: string[] = [];
+  for (const value of values) {
+    if (typeof value === "string" && value.trim() !== "") appendUnique(result, [value.trim()]);
+  }
+  return result;
+}
+
+function appendUnique(target: string[], values: readonly string[]): void {
+  for (const value of values) {
+    if (!target.includes(value)) target.push(value);
+  }
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value) => right.includes(value));
 }
 
 function assignIfMissing(target: Record<string, unknown>, key: string, value: unknown): void {

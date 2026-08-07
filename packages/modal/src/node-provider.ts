@@ -1,9 +1,18 @@
 import { execFileSync } from "node:child_process";
-import crypto from "node:crypto";
+import crypto, { type Hash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import {
+  CLOUD_SELECTED_TASK_CLOUD_EXECUTION,
+  isCloudExecutionGeneration,
+  isInsideCloudHandoffRoot,
+  isSafeCloudHandoffPath,
+  materializePromptSchemas,
+  parseCloudSelectedTask,
+  type CloudSelectedTask
+} from "@ultrafuzz/artifacts";
 import {
   ModalClient,
   SandboxFilesystemNotFoundError,
@@ -13,7 +22,6 @@ import {
   type Secret,
   type Volume
 } from "modal";
-import { materializePromptSchemas } from "@ultrafuzz/artifacts";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
 const PROVIDER_ID = "ultrafuzz-modal-node";
@@ -83,11 +91,23 @@ export interface ModalNodeSandboxInput {
   attempt_id: string;
   execution_generation: string;
   workflow_path: string;
-  prompt_path?: string;
+  prompt_path: string;
   run_root: string;
   artifact_dir: string;
   workspace_dir: string;
   dependency_artifact_dirs: string[];
+  /** Materialized pinned-reference trees this attempt's postprocessors require. */
+  reference_artifact_dirs?: string[];
+  /** Digest-bound materialized planner catalog required by threat-model/goal-plan postprocessors. */
+  vulnerability_database?: { catalogPath: string; catalogSha256: string };
+  /**
+   * The exact, versioned, already-materialized selected task DTO. A worker never rematerializes
+   * controller-owned state, so this crosses the trust boundary and is validated against the shared
+   * contract rather than accepted as an arbitrary record.
+   */
+  selected_task: CloudSelectedTask;
+  /** Deterministic digest of the committed tree and every declared uncommitted handoff overlay. */
+  project_content_sha256?: string;
   project_archive_sha256?: string;
   resources: {
     cpu: number;
@@ -97,6 +117,38 @@ export interface ModalNodeSandboxInput {
   agent_credential_env: string[];
   operator_prompt?: string;
 }
+
+/**
+ * Every key the versioned cloud node input contract defines.
+ *
+ * The dispatch is an untrusted document at the provider boundary, so the outer object is exact: an
+ * unknown key -- a future field, a hydrated-only alias such as `selectedTask`, or smuggled state --
+ * is refused before any archive, credential, or sandbox work happens.
+ */
+const MODAL_NODE_INPUT_KEYS: ReadonlySet<string> = new Set([
+  "schema_version",
+  "run_id",
+  "task_id",
+  "attempt_id",
+  "execution_generation",
+  "workflow_path",
+  "prompt_path",
+  "run_root",
+  "artifact_dir",
+  "workspace_dir",
+  "dependency_artifact_dirs",
+  "reference_artifact_dirs",
+  "vulnerability_database",
+  "selected_task",
+  "project_content_sha256",
+  "project_archive_sha256",
+  "resources",
+  "agent_credential_env",
+  "operator_prompt"
+]);
+
+/** The sandbox is created from exactly these three numbers, so the nested object is exact too. */
+const MODAL_NODE_RESOURCE_KEYS: ReadonlySet<string> = new Set(["cpu", "memory_mib", "timeout_seconds"]);
 
 interface ModalNodeClient {
   apps: {
@@ -133,12 +185,17 @@ async function runModalNodeSandbox(
   options: ModalNodeSandboxProviderOptions,
   request: NodeSandboxProviderRequest
 ): Promise<NodeSandboxProviderResult> {
-  const input = parseModalNodeSandboxInput(request.input);
+  const requestedInput = parseModalNodeSandboxInput(request.input);
+  assertSelectedTaskSourceProjectRoot(requestedInput, request.rootDir);
   const env = options.env ?? process.env;
   const [tokenIdName, tokenSecretName] = options.credentialEnv;
   const tokenId = requiredCredential(env, tokenIdName);
   const tokenSecret = requiredCredential(env, tokenSecretName);
-  const archive = await createModalNodeHandoffArchive(request.rootDir, input);
+  const archive = await createModalNodeHandoffArchive(request.rootDir, requestedInput);
+  const input: ModalNodeSandboxInput = {
+    ...requestedInput,
+    project_content_sha256: archive.contentSha256
+  };
   const requestFile = path.join(path.dirname(archive.path), "request.json");
   const executionDeadline = Date.now() + input.resources.timeout_seconds * 1000;
   let client: ModalNodeClient | undefined;
@@ -152,7 +209,12 @@ async function runModalNodeSandbox(
       (new ModalClient({ tokenId, tokenSecret }) as unknown as ModalNodeClient);
     const app = await client.apps.fromName(options.app, { createIfMissing: true });
     const image = await client.images.fromName(options.image);
-    const tags = modalNodeTags(request.runId, request.sandboxId, input.execution_generation);
+    const tags = modalNodeTags(
+      request.runId,
+      request.sandboxId,
+      input.execution_generation,
+      modalNodeDispatchFingerprint(input)
+    );
     const volume = await client.volumes.fromName(modalNodeVolumeName(request.runId), { createIfMissing: true });
     sandbox = await findLiveSandbox(client, app, tags);
     let result: ModalNodeResult | undefined;
@@ -297,9 +359,14 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
   if (!isRecord(value) || value.schema_version !== "ultrafuzz.modal.node.v1") {
     throw new Error("cloud node input is invalid");
   }
+  const unsupported = Object.keys(value).filter((key) => !MODAL_NODE_INPUT_KEYS.has(key));
+  if (unsupported.length > 0) {
+    throw new Error(`cloud node input has unsupported keys: ${[...unsupported].sort().join(", ")}`);
+  }
   const resources = value.resources;
   if (
     !isRecord(resources) ||
+    Object.keys(resources).some((key) => !MODAL_NODE_RESOURCE_KEYS.has(key)) ||
     typeof resources.cpu !== "number" ||
     !Number.isFinite(resources.cpu) ||
     resources.cpu <= 0 ||
@@ -314,6 +381,7 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
     "attempt_id",
     "execution_generation",
     "workflow_path",
+    "prompt_path",
     "run_root",
     "artifact_dir",
     "workspace_dir"
@@ -323,8 +391,18 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
       throw new Error(`cloud node ${key} is invalid`);
     }
   }
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value.execution_generation as string)) {
+  // The generation names the sandbox, the volume attempt root, and the storage lineage, so the
+  // dispatch identity is validated against the one shared bounded pattern both boundaries use.
+  if (!isCloudExecutionGeneration(value.execution_generation)) {
     throw new Error("cloud node execution generation is invalid");
+  }
+  // Every location in a cloud dispatch is stated project-relative. Validating the canonical safe
+  // shape here, before any filesystem work, is what makes traversal, absolute paths, and
+  // sibling-prefix escapes rejections rather than anchored-path errors deep inside archiving.
+  for (const key of ["workflow_path", "run_root", "artifact_dir", "workspace_dir"] as const) {
+    if (!isSafeCloudHandoffPath(value[key])) {
+      throw new Error(`cloud node ${key} is invalid`);
+    }
   }
   if (!isSafeModalAttemptId(value.attempt_id as string)) {
     throw new Error("cloud node attempt_id is invalid");
@@ -335,14 +413,69 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
   ) {
     throw new Error("cloud node credential environment configuration is invalid");
   }
-  if (
-    !Array.isArray(value.dependency_artifact_dirs) ||
-    !value.dependency_artifact_dirs.every((entry) => typeof entry === "string" && entry.trim() !== "")
-  ) {
+  if (!Array.isArray(value.dependency_artifact_dirs) || !value.dependency_artifact_dirs.every(isSafeCloudHandoffPath)) {
     throw new Error("cloud node dependency artifact configuration is invalid");
   }
-  if (value.prompt_path !== undefined && (typeof value.prompt_path !== "string" || value.prompt_path.trim() === "")) {
+  if (
+    value.reference_artifact_dirs !== undefined &&
+    (!Array.isArray(value.reference_artifact_dirs) || !value.reference_artifact_dirs.every(isSafeCloudHandoffPath))
+  ) {
+    throw new Error("cloud node reference artifact configuration is invalid");
+  }
+  if (value.vulnerability_database !== undefined) {
+    const database = value.vulnerability_database;
+    if (
+      !isRecord(database) ||
+      Object.keys(database).some((key) => !["catalogPath", "catalogSha256"].includes(key)) ||
+      !isSafeCloudHandoffPath(database.catalogPath) ||
+      typeof database.catalogSha256 !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(database.catalogSha256)
+    ) {
+      throw new Error("cloud node vulnerability database configuration is invalid");
+    }
+  }
+  if (!isSafeCloudHandoffPath(value.prompt_path)) {
     throw new Error("cloud node prompt path is invalid");
+  }
+  const input = value as unknown as ModalNodeSandboxInput;
+  const confined: Array<[string, string]> = [
+    ["artifact_dir", input.artifact_dir],
+    ["workspace_dir", input.workspace_dir],
+    ["prompt_path", input.prompt_path],
+    ...input.dependency_artifact_dirs.map((entry): [string, string] => ["dependency_artifact_dirs", entry]),
+    ...(input.reference_artifact_dirs ?? []).map((entry): [string, string] => ["reference_artifact_dirs", entry]),
+    ...(input.vulnerability_database === undefined
+      ? []
+      : [["vulnerability_database.catalogPath", input.vulnerability_database.catalogPath] as [string, string]])
+  ];
+  for (const [label, candidate] of confined) {
+    if (!isInsideCloudHandoffRoot(input.run_root, candidate)) {
+      throw new Error(`cloud node ${label} must stay inside the run root`);
+    }
+  }
+  if (value.selected_task === undefined) {
+    throw new Error("cloud node selected task handoff is required");
+  }
+  // The handoff is the worker's only view of the compiled graph, so it is validated against the
+  // shared contract and cross-checked against the dispatch it travels with.
+  let selected: CloudSelectedTask;
+  try {
+    selected = parseCloudSelectedTask(value.selected_task, {
+      taskId: input.task_id,
+      attemptId: input.attempt_id,
+      executionGeneration: input.execution_generation,
+      // A cloud dispatch may only carry a handoff that claims the cloud/modal execution identity.
+      ...CLOUD_SELECTED_TASK_CLOUD_EXECUTION
+    });
+  } catch (error) {
+    throw new Error(`cloud node selected task handoff is invalid: ${(error as Error).message}`, { cause: error });
+  }
+  assertSelectedTaskAgreesWithDispatch(selected, input);
+  if (
+    value.project_content_sha256 !== undefined &&
+    (typeof value.project_content_sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(value.project_content_sha256))
+  ) {
+    throw new Error("cloud node project content digest is invalid");
   }
   if (
     value.project_archive_sha256 !== undefined &&
@@ -356,12 +489,113 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
   return value as unknown as ModalNodeSandboxInput;
 }
 
-export function modalNodeTags(runId: string, sandboxId: string, executionGeneration = "base"): Record<string, string> {
+/**
+ * Binds the handoff to the dispatch it travels with.
+ *
+ * The archive is built from the top-level dispatch fields while the worker executes from the handoff,
+ * so any disagreement would mean the worker runs an attempt whose inputs were never archived.
+ */
+function assertSelectedTaskAgreesWithDispatch(selected: CloudSelectedTask, input: ModalNodeSandboxInput): void {
+  const agreements: Array<[string, unknown, unknown]> = [
+    ["runRoot", selected.runRoot, input.run_root],
+    ["workflowPath", selected.workflowPath, input.workflow_path],
+    ["artifactDir", selected.artifactDir, input.artifact_dir],
+    ["workspacePath", selected.workspacePath, input.workspace_dir],
+    ["promptPath", selected.promptPath, input.prompt_path],
+    ["metadata.run.ultrafuzzRunId", selected.metadata.run.ultrafuzzRunId, input.run_id],
+    [
+      "dependencyArtifactDirs",
+      JSON.stringify([...selected.dependencyArtifactDirs].sort()),
+      JSON.stringify([...input.dependency_artifact_dirs].sort())
+    ],
+    [
+      "referenceArtifactDirs",
+      JSON.stringify([...selected.referenceArtifactDirs].sort()),
+      JSON.stringify([...(input.reference_artifact_dirs ?? [])].sort())
+    ],
+    [
+      "vulnerabilityDatabase",
+      JSON.stringify(selected.vulnerabilityDatabase ?? null),
+      JSON.stringify(input.vulnerability_database ?? null)
+    ]
+  ];
+  for (const [label, left, right] of agreements) {
+    if (left !== right) {
+      throw new Error(`cloud node selected task handoff ${label} disagrees with the dispatched cloud node input`);
+    }
+  }
+}
+
+export function modalNodeTags(
+  runId: string,
+  sandboxId: string,
+  executionGeneration = "base",
+  logicalDispatchFingerprint?: string
+): Record<string, string> {
   return {
     purpose: "ultrafuzz-node",
     run: boundedIdentity(runId),
-    attempt: boundedIdentity(`${sandboxId}:${executionGeneration}`)
+    attempt: boundedIdentity(`${sandboxId}:${executionGeneration}`),
+    // Reattachment is a lookup by tag, so the logical dispatch is part of the lookup key: a live
+    // sandbox launched for a different logical attempt under the same identity is not found at all,
+    // rather than found and then adopted.
+    ...(logicalDispatchFingerprint === undefined ? {} : { dispatch: logicalDispatchFingerprint.slice(0, 32) })
   };
+}
+
+/**
+ * The canonical logical identity of one cloud dispatch, independent of the generation it runs under.
+ *
+ * A generation reset deliberately re-dispatches the same logical attempt into a new sandbox, volume
+ * attempt root, and storage lineage, so the generation itself cannot be part of this identity.
+ * Everything else -- the archived locations, the validated handoff DTO, the pinned planner catalog,
+ * the resources, and the credential surface -- is provenance for whatever a durable workspace
+ * publishes. Reducing it to one fingerprint gives every durable record, published result, and live
+ * reattachment a single value to agree on instead of each boundary re-deriving its own field subset.
+ *
+ * The byte-level tar digest is deliberately excluded: container metadata can differ while the
+ * semantic staged inputs remain identical. `project_content_sha256` binds those staged inputs here,
+ * while `project_archive_sha256` independently protects the exact transport bytes.
+ */
+export function modalNodeDispatchFingerprint(input: ModalNodeSandboxInput): string {
+  const logical = {
+    schema_version: input.schema_version,
+    run_id: input.run_id,
+    task_id: input.task_id,
+    attempt_id: input.attempt_id,
+    workflow_path: input.workflow_path,
+    prompt_path: input.prompt_path,
+    run_root: input.run_root,
+    artifact_dir: input.artifact_dir,
+    workspace_dir: input.workspace_dir,
+    dependency_artifact_dirs: input.dependency_artifact_dirs,
+    reference_artifact_dirs: input.reference_artifact_dirs ?? [],
+    vulnerability_database: input.vulnerability_database ?? null,
+    project_content_sha256: input.project_content_sha256 ?? null,
+    // The dispatched generation is the one value a reset is allowed to change, so it is normalized
+    // out of the handoff too; every other handoff field stays part of the logical identity.
+    selected_task: {
+      ...input.selected_task,
+      execution: { ...input.selected_task.execution, generation: "<logical>" }
+    },
+    resources: input.resources,
+    agent_credential_env: input.agent_credential_env,
+    operator_prompt: input.operator_prompt ?? null
+  };
+  return crypto.createHash("sha256").update(canonicalDispatchJson(logical)).digest("hex");
+}
+
+/** Key-ordered JSON, so an equal logical dispatch always hashes to the same fingerprint. */
+function canonicalDispatchJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((entry) => canonicalDispatchJson(entry)).join(",")}]`;
+  if (isRecord(value)) {
+    const members = Object.keys(value)
+      .sort()
+      .filter((key) => value[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${canonicalDispatchJson(value[key])}`);
+    return `{${members.join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
 }
 
 export function modalNodeVolumeName(runId: string): string {
@@ -375,23 +609,45 @@ export function modalNodeSandboxName(runId: string, sandboxId: string, execution
 export async function createModalNodeHandoffArchive(
   projectRoot: string,
   input: ModalNodeSandboxInput
-): Promise<{ path: string; sha256: string; cleanup: () => void }> {
+): Promise<{ path: string; sha256: string; contentSha256: string; cleanup: () => void }> {
   const root = fs.realpathSync(path.resolve(projectRoot));
+  assertSelectedTaskSourceProjectRoot(input, root);
+  const contentSha256 = modalNodeHandoffContentFingerprint(root, input);
+  if (input.project_content_sha256 !== undefined && input.project_content_sha256 !== contentSha256) {
+    throw new Error("cloud node project content digest does not match the declared handoff inputs");
+  }
   const workflowPath = checkedPath(root, input.workflow_path, "workflow path");
   const runRoot = checkedPath(root, input.run_root, "run root");
-  const promptPath =
-    input.prompt_path === undefined ? undefined : checkedPath(root, input.prompt_path, "rendered prompt path");
+  const promptPath = checkedPath(root, input.prompt_path, "rendered prompt path");
   const dependencyArtifactDirs = input.dependency_artifact_dirs.map((value) =>
     checkedPath(root, value, "dependency artifact directory")
   );
+  const referenceArtifactDirs = (input.reference_artifact_dirs ?? []).map((value) =>
+    checkedPath(root, value, "reference artifact directory")
+  );
+  const vulnerabilityDatabaseCatalog =
+    input.vulnerability_database === undefined
+      ? undefined
+      : checkedPath(root, input.vulnerability_database.catalogPath, "vulnerability database catalog");
   const artifactDir = checkedPath(root, input.artifact_dir, "artifact directory", false);
-  assertChildPath(runRoot, workflowPath, "workflow path");
-  if (promptPath !== undefined) assertChildPath(runRoot, promptPath, "rendered prompt path");
+  // The generated workflow lives at `.smithers/workflows/`, a project child outside every run root,
+  // so `checkedPath` above is its confinement boundary. Everything else is run-root evidence.
+  assertChildPath(runRoot, promptPath, "rendered prompt path");
   for (const dependencyArtifactDir of dependencyArtifactDirs) {
     assertChildPath(runRoot, dependencyArtifactDir, "dependency artifact directory");
   }
+  for (const referenceArtifactDir of referenceArtifactDirs) {
+    assertChildPath(runRoot, referenceArtifactDir, "reference artifact directory");
+  }
+  if (vulnerabilityDatabaseCatalog !== undefined) {
+    assertChildPath(runRoot, vulnerabilityDatabaseCatalog, "vulnerability database catalog");
+    const actual = crypto.createHash("sha256").update(fs.readFileSync(vulnerabilityDatabaseCatalog)).digest("hex");
+    if (actual !== input.vulnerability_database!.catalogSha256) {
+      throw new Error("vulnerability database catalog does not match its declared cloud-input digest");
+    }
+  }
   assertChildPath(runRoot, artifactDir, "artifact directory");
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-handoff-"));
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-node-handoff-${process.pid}-`));
   fs.chmodSync(temporaryRoot, 0o700);
   const staging = path.join(temporaryRoot, "project");
   const archive = path.join(temporaryRoot, "project.tgz");
@@ -402,7 +658,11 @@ export async function createModalNodeHandoffArchive(
     await extractSafeTarArchive(baseArchive, staging, { gzip: false, label: "cloud handoff" });
     fs.rmSync(baseArchive, { force: true });
     assertSafeTree(staging);
-    execFileSync("git", ["init", "--quiet"], { cwd: staging });
+    const objectFormat = execFileSync("git", ["rev-parse", "--show-object-format"], {
+      cwd: root,
+      encoding: "utf8"
+    }).trim();
+    execFileSync("git", ["init", "--quiet", `--object-format=${objectFormat}`], { cwd: staging });
     execFileSync("git", ["config", "user.name", "Ultrafuzz Cloud"], { cwd: staging });
     execFileSync("git", ["config", "user.email", "cloud@invalid"], { cwd: staging });
     execFileSync("git", ["add", "-A"], { cwd: staging });
@@ -415,38 +675,186 @@ export async function createModalNodeHandoffArchive(
     fs.mkdirSync(path.join(staging, path.relative(root, runRoot)), { recursive: true, mode: 0o700 });
     materializePromptSchemas(path.join(staging, ".ultrafuzz", "schemas"));
     copyFileChecked(root, workflowPath, path.join(staging, path.relative(root, workflowPath)));
-    if (promptPath !== undefined) {
-      copyFileChecked(root, promptPath, path.join(staging, path.relative(root, promptPath)));
-    }
+    copyFileChecked(root, promptPath, path.join(staging, path.relative(root, promptPath)));
     for (const dependencyArtifactDir of dependencyArtifactDirs) {
       copyTreeChecked(dependencyArtifactDir, path.join(staging, path.relative(root, dependencyArtifactDir)));
     }
+    // Reference trees and the run-root planner catalog are explicit cloud inputs: the threat-model
+    // and goal-plan postprocessors verify both against the pinned database, and neither is an
+    // agentic dependency artifact directory.
+    for (const referenceArtifactDir of referenceArtifactDirs) {
+      copyTreeChecked(referenceArtifactDir, path.join(staging, path.relative(root, referenceArtifactDir)));
+    }
+    if (vulnerabilityDatabaseCatalog !== undefined) {
+      copyFileChecked(
+        root,
+        vulnerabilityDatabaseCatalog,
+        path.join(staging, path.relative(root, vulnerabilityDatabaseCatalog))
+      );
+    }
     copyDependencyVerificationMarkers(root, runRoot, dependencyArtifactDirs, staging);
     fs.mkdirSync(path.join(staging, path.relative(root, artifactDir)), { recursive: true, mode: 0o700 });
-    for (const relative of [
-      ".smithers/package.json",
-      ".smithers/agents/index.ts",
-      ".smithers/agents/codex.ts",
-      ".smithers/agents/claude.ts",
-      ".smithers/agents/kimi.ts",
-      ".smithers/agents/toml.ts"
-    ]) {
+    for (const relative of CLOUD_HANDOFF_EXPLICIT_FILES) {
       const source = path.join(root, relative);
       if (fs.existsSync(source)) {
         copyFileChecked(root, source, path.join(staging, relative));
       }
     }
     assertSafeTree(staging);
+    if (modalNodeHandoffContentFingerprint(staging, input, { materialized: true }) !== contentSha256) {
+      throw new Error("cloud node project contents changed while the handoff archive was built");
+    }
     execFileSync("tar", ["-czf", archive, "-C", staging, "."]);
     fs.chmodSync(archive, 0o600);
+    input.project_content_sha256 = contentSha256;
     return {
       path: archive,
       sha256: sha256File(archive),
+      contentSha256,
       cleanup: () => removeHandoffTemporaryRoot(temporaryRoot)
     };
   } catch (error) {
     removeHandoffTemporaryRoot(temporaryRoot);
     throw error;
+  }
+}
+
+const CLOUD_HANDOFF_EXPLICIT_FILES = [
+  // Prompt-referenced canonical artifact contracts. `git archive HEAD` only carries them when
+  // the project committed `.ultrafuzz/schema`, so copy them explicitly like the agent registry.
+  ".ultrafuzz/schema/threat-model.schema.json",
+  ".ultrafuzz/schema/goal-plan.schema.json",
+  ".smithers/package.json",
+  ".smithers/agents/index.ts",
+  ".smithers/agents/codex.ts",
+  ".smithers/agents/claude.ts",
+  ".smithers/agents/kimi.ts",
+  ".smithers/agents/toml.ts"
+] as const;
+
+/**
+ * Hashes the semantic inputs that become the relocated project, independent of tar metadata.
+ *
+ * `git archive HEAD` is represented by its exact Git tree identity. Every path copied over that tree
+ * is then hashed recursively with its relative path, executable bit, and bytes. This is both stable across
+ * equivalent archive rebuilds and sensitive to the uncommitted workflow, rendered prompt,
+ * dependencies, references, planner catalog, and generated agent/schema files the worker receives.
+ */
+export function modalNodeHandoffContentFingerprint(
+  projectRoot: string,
+  input: ModalNodeSandboxInput,
+  options: { materialized?: boolean } = {}
+): string {
+  const root = fs.realpathSync(path.resolve(projectRoot));
+  const hash = crypto.createHash("sha256");
+  updateContentFingerprint(hash, "contract", Buffer.from("ultrafuzz.modal.node-content.v1"));
+  for (const [label, args] of [
+    ["object-format", ["rev-parse", "--show-object-format"]],
+    ["tree", ["rev-parse", "HEAD^{tree}"]]
+  ] as const) {
+    const value = execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+    updateContentFingerprint(hash, `git:${label}`, Buffer.from(value));
+  }
+
+  const overlays: Array<{ label: string; relative: string; kind: "file" | "tree" }> = [
+    { label: "workflow", relative: input.workflow_path, kind: "file" as const },
+    { label: "prompt", relative: input.prompt_path, kind: "file" as const },
+    ...input.dependency_artifact_dirs.map((relative) => ({ label: "dependency", relative, kind: "tree" as const })),
+    ...(input.reference_artifact_dirs ?? []).map((relative) => ({
+      label: "reference",
+      relative,
+      kind: "tree" as const
+    })),
+    ...(input.vulnerability_database === undefined
+      ? []
+      : [
+          { label: "vulnerability-database", relative: input.vulnerability_database.catalogPath, kind: "file" as const }
+        ]),
+    ...CLOUD_HANDOFF_EXPLICIT_FILES.filter((relative) => fs.existsSync(path.join(root, relative))).map((relative) => ({
+      label: "explicit",
+      relative,
+      kind: "file" as const
+    }))
+  ].sort((left, right) => `${left.label}:${left.relative}`.localeCompare(`${right.label}:${right.relative}`));
+
+  for (const overlay of overlays) {
+    const source = checkedPath(root, overlay.relative, `${overlay.label} content`);
+    updateContentFingerprint(hash, `overlay:${overlay.label}`, Buffer.from(overlay.relative));
+    if (overlay.kind === "file") hashContentFile(hash, root, source, overlay.relative);
+    else hashContentTree(hash, root, source, overlay.relative);
+  }
+  hashPromptSchemaBundle(hash, root, options.materialized === true);
+  return hash.digest("hex");
+}
+
+function hashPromptSchemaBundle(hash: Hash, root: string, materialized: boolean): void {
+  const relative = ".ultrafuzz/schemas";
+  updateContentFingerprint(hash, "generated-schema-bundle", Buffer.from(relative));
+  if (materialized) {
+    hashContentTree(hash, root, checkedPath(root, relative, "materialized prompt schemas"), relative);
+    return;
+  }
+
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-schemas-"));
+  fs.chmodSync(temporaryRoot, 0o700);
+  const schemas = path.join(temporaryRoot, "schemas");
+  try {
+    materializePromptSchemas(schemas);
+    hashContentTree(hash, temporaryRoot, schemas, relative);
+  } finally {
+    // The bundle is intentionally read-only; restore directory write access so it can be removed.
+    if (fs.existsSync(schemas) && !fs.lstatSync(schemas).isSymbolicLink()) fs.chmodSync(schemas, 0o700);
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+function hashContentTree(hash: Hash, root: string, directory: string, relative: string): void {
+  const stat = fs.lstatSync(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync(directory) !== directory) {
+    throw new Error("cloud handoff content tree is unsafe");
+  }
+  // copyTreeChecked deliberately normalizes directories to private permissions. Directory modes are
+  // therefore transport metadata, unlike file executable bits, and cannot be part of a source-to-
+  // staging semantic comparison.
+  updateContentFingerprint(hash, "directory", Buffer.from(relative));
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    const child = path.join(directory, entry.name);
+    const childRelative = path.posix.join(relative.split(path.sep).join("/"), entry.name);
+    if (entry.isDirectory() && !entry.isSymbolicLink()) hashContentTree(hash, root, child, childRelative);
+    else if (entry.isFile() && !entry.isSymbolicLink()) hashContentFile(hash, root, child, childRelative);
+    else throw new Error("cloud handoff content tree excludes links and special files");
+  }
+}
+
+function hashContentFile(hash: Hash, root: string, file: string, relative: string): void {
+  const stat = fs.lstatSync(file);
+  const real = fs.realpathSync(file);
+  if (
+    !stat.isFile() ||
+    stat.isSymbolicLink() ||
+    stat.nlink !== 1 ||
+    (real !== root && !real.startsWith(`${root}${path.sep}`))
+  ) {
+    throw new Error("cloud handoff content file is unsafe");
+  }
+  // Safe extraction normalizes regular files to 0600/0700. The executable distinction survives and
+  // can affect runtime behavior; all other permission bits are transport metadata.
+  updateContentFingerprint(hash, "file", Buffer.from(`${relative}\0${stat.mode & 0o111 ? "executable" : "regular"}`));
+  updateContentFingerprint(hash, "bytes", fs.readFileSync(real));
+}
+
+function updateContentFingerprint(hash: Hash, label: string, value: Buffer): void {
+  hash
+    .update(`${Buffer.byteLength(label)}:`)
+    .update(label)
+    .update(`${value.length}:`)
+    .update(value);
+}
+
+function assertSelectedTaskSourceProjectRoot(input: ModalNodeSandboxInput, projectRoot: string): void {
+  const root = fs.realpathSync(path.resolve(projectRoot));
+  if (input.selected_task.sourceProjectRoot !== root) {
+    throw new Error("selected task source project root does not match the archived project root");
   }
 }
 
@@ -473,6 +881,8 @@ interface ModalNodeResult {
   artifact_archive: string;
   artifact_sha256: string;
   storage_lineage: string;
+  /** The logical dispatch this durable workspace actually ran, independent of its generation. */
+  logical_dispatch_fingerprint: string;
   durable_checkpoint: string;
   durable_checkpoint_index: string;
 }
@@ -528,6 +938,9 @@ async function readModalNodeResult(
     typeof parsed.artifact_sha256 === "string" &&
     /^[0-9a-f]{64}$/u.test(parsed.artifact_sha256) &&
     parsed.storage_lineage === `${input.run_id}/${input.attempt_id}/${input.execution_generation}` &&
+    // A recovered or resumed sandbox may already hold a published result. Accepting it means adopting
+    // its artifacts as this dispatch's outputs, so the logical dispatch behind it must be this one.
+    parsed.logical_dispatch_fingerprint === modalNodeDispatchFingerprint(input) &&
     isDurableCheckpointPath(parsed.durable_checkpoint, attemptRoot) &&
     parsed.durable_checkpoint_index === path.posix.join(attemptRoot, "checkpoints", "index.json")
   ) {
@@ -565,11 +978,15 @@ async function validateDurableCheckpoint(
   const workspacePath = path.posix.join(attemptRoot, "workspace");
   const handoffArchive = path.posix.join(attemptRoot, "input", "project.tgz");
   const lineage = `${input.run_id}/${input.attempt_id}/${input.execution_generation}`;
+  // The checkpoint and its index are the durable record of what the workspace ran, so both must name
+  // the same logical dispatch the published result claims and this dispatch expects.
+  const fingerprint = modalNodeDispatchFingerprint(input);
   if (
     !isRecord(checkpoint) ||
     checkpoint.schema_version !== "ultrafuzz.modal.node-checkpoint.v1" ||
     checkpoint.stage !== "completed" ||
     checkpoint.storage_lineage !== lineage ||
+    checkpoint.logical_dispatch_fingerprint !== fingerprint ||
     checkpoint.workspace_path !== workspacePath ||
     checkpoint.run_root !== input.run_root ||
     checkpoint.handoff_archive !== handoffArchive
@@ -580,6 +997,7 @@ async function validateDurableCheckpoint(
     !isRecord(index) ||
     index.schema_version !== "ultrafuzz.modal.node-checkpoint-index.v1" ||
     index.storage_lineage !== lineage ||
+    index.logical_dispatch_fingerprint !== fingerprint ||
     index.workspace_path !== workspacePath ||
     index.run_root !== input.run_root ||
     index.handoff_archive !== handoffArchive ||

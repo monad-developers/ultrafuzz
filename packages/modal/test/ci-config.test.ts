@@ -534,6 +534,10 @@ describe("public Modal benchmark configuration", () => {
     expect(workflowText).not.toContain("pull-requests: write");
     expect(workflowText).not.toContain("group: publish-eval-history");
     expect(workflowText).not.toContain("peter-evans/create-pull-request");
+    expect(workflowText).not.toContain("ULTRAFUZZ_REFERENCE_GITHUB_TOKEN");
+    expect(workflowText).not.toContain("ULTRAFUZZ_REFERENCE_GITHUB_REPOS");
+    expect(workflowText).not.toContain("preflight-reference-access.mjs");
+    expect(workflowText).not.toContain("web3-vulnerability-database");
     expect(workflowText).not.toContain("ultrafuzz-benchmark");
     expect(workflowText).not.toContain("self-hosted");
     expect(workflowText).not.toMatch(/ablation|fake binary|BENCHMARK_EXPERIMENT/iu);

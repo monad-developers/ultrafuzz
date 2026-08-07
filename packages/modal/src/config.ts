@@ -72,7 +72,15 @@ const publicBenchmarkTargetSchema = z
 
 const privateBenchmarkExecutionSchema = z
   .object({
-    excluded_node_ids: z.array(safeId).max(512).default([])
+    excluded_node_ids: z.array(safeId).max(512).default([]),
+    /**
+     * Private lanes curate an explicit node-ID list to isolate one part of the
+     * production topology. Every such list predates the threat-model and goal
+     * fanout nodes and so cannot name them, which would silently widen a
+     * curated lane the first time it ran against the new default topology.
+     * Default to pruning them and require an explicit opt-in to measure them.
+     */
+    include_threat_model_goal_fanout: z.boolean().default(false)
   })
   .strict()
   .superRefine((execution, context) => {
@@ -88,7 +96,7 @@ const privateBenchmarkExecutionSchema = z
       seen.add(id);
     }
   })
-  .default({ excluded_node_ids: [] });
+  .default({ excluded_node_ids: [], include_threat_model_goal_fanout: false });
 
 const privateEvalReportingSchema = z
   .object({

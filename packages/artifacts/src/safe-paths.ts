@@ -4,6 +4,13 @@ import path from "node:path";
 
 export const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 export const SAFE_PATH_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/**
+ * Human-facing topology provenance may contain `:` even though filesystem
+ * identities may not. Keep this deliberately narrower than arbitrary strings
+ * and separate from `SAFE_ID_PATTERN` so it can never be reused as a path
+ * segment by accident.
+ */
+export const NODE_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$/u;
 
 export class ArtifactPathError extends Error {
   readonly code: string;
@@ -24,6 +31,16 @@ export function validateSafeId(value: string, label = "id"): string {
   }
   if (value === "." || value === "..") {
     throw new ArtifactPathError("unsafe-id", `${label} cannot be ${value}`);
+  }
+  return value;
+}
+
+export function validateNodeReference(value: string, label = "node reference"): string {
+  if (!NODE_REFERENCE_PATTERN.test(value)) {
+    throw new ArtifactPathError(
+      "unsafe-node-reference",
+      `${label} must match ${NODE_REFERENCE_PATTERN.source}; received ${JSON.stringify(value)}`
+    );
   }
   return value;
 }

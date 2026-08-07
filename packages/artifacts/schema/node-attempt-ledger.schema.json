@@ -23,7 +23,11 @@
     "schema_version": { "const": "1.0" },
     "attempt_id": { "type": "string", "minLength": 1 },
     "run_id": { "type": "string", "minLength": 1 },
-    "node_id": { "type": "string", "minLength": 1 },
+    "node_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$"
+    },
     "strategy_attempt_id": { "type": "string", "minLength": 1 },
     "executor_retry_id": { "type": "string", "minLength": 1 },
     "checkpoint_generation_id": { "type": "string", "minLength": 1 },

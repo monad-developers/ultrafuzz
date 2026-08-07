@@ -5,7 +5,13 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod/v4";
 
 import { type RunLayout } from "./run-layout.js";
-import { appendLineDurable, sha256Bytes, validateSafeId } from "./safe-paths.js";
+import {
+  appendLineDurable,
+  NODE_REFERENCE_PATTERN,
+  sha256Bytes,
+  validateNodeReference,
+  validateSafeId
+} from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 export const NODE_ATTEMPT_LEDGER_SCHEMA_VERSION = "1.0" as const;
@@ -125,6 +131,7 @@ export interface NodeAttemptLedgerSummary {
 }
 
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
+const nodeReference = z.string().regex(NODE_REFERENCE_PATTERN);
 const dimensionId = z
   .string()
   .min(1)
@@ -143,7 +150,7 @@ export const nodeAttemptLedgerEntrySchema = z
     schema_version: z.literal(NODE_ATTEMPT_LEDGER_SCHEMA_VERSION),
     attempt_id: dimensionId,
     run_id: safeId,
-    node_id: safeId,
+    node_id: nodeReference,
     strategy_attempt_id: dimensionId,
     executor_retry_id: dimensionId,
     checkpoint_generation_id: dimensionId,
@@ -231,7 +238,7 @@ export const nodeAttemptLedgerJsonSchema = {
     schema_version: { const: NODE_ATTEMPT_LEDGER_SCHEMA_VERSION },
     attempt_id: { type: "string", minLength: 1 },
     run_id: { type: "string", minLength: 1 },
-    node_id: { type: "string", minLength: 1 },
+    node_id: { type: "string", minLength: 1, pattern: NODE_REFERENCE_PATTERN.source },
     strategy_attempt_id: { type: "string", minLength: 1 },
     executor_retry_id: { type: "string", minLength: 1 },
     checkpoint_generation_id: { type: "string", minLength: 1 },
@@ -306,7 +313,7 @@ export function assertNodeAttemptLedgerEntry(value: unknown): NodeAttemptLedgerE
 
 export function createNodeAttemptLedgerEntry(layout: Pick<RunLayout, "runId">, input: AppendNodeAttemptInput) {
   const runId = validateSafeId(input.runId ?? layout.runId, "run ID");
-  const nodeId = validateSafeId(input.nodeId, "node ID");
+  const nodeId = validateNodeReference(input.nodeId, "node ID");
   const strategyAttemptId = normalizeDimensionId(input.strategyAttemptId, "strategy attempt ID");
   const executorRetryId = normalizeDimensionId(input.executorRetryId, "executor retry ID");
   const checkpointGenerationId = normalizeDimensionId(input.checkpointGenerationId, "checkpoint generation ID");
