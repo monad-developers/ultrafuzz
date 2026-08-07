@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   appendUsageEvents,
@@ -1553,7 +1554,7 @@ test("a duplicated event ID fails closed without rewriting a torn log", () => {
   assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), contents, "the log must not be rewritten");
 });
 
-test("the torn-tail probe refuses a symlinked log and does not block on a FIFO", { timeout: 30_000 }, () => {
+test("the torn-tail probe refuses a symlinked log and does not block on a FIFO", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-probe-hostile" });
   const record = createEventRecord(layout, {
     eventType: "node-synced",
@@ -1576,21 +1577,31 @@ test("the torn-tail probe refuses a symlinked log and does not block on a FIFO",
   assert.equal(fs.readFileSync(outside, "utf8"), "", "the symlink target must not be written through");
   fs.rmSync(layout.eventsPath);
 
-  // A FIFO must not block the probe. The explicit test timeout matters: without
-  // O_NONBLOCK this hangs rather than failing, and node:test's default per-test
-  // timeout is Infinity, so CI would report a job-level hang with no failing name.
+  // A FIFO must not block the probe. This has to run OUT OF PROCESS: without
+  // O_NONBLOCK the open blocks the thread inside fs.openSync, and a synchronous test
+  // body never yields, so node:test's timer can never fire -- a declared `timeout` on
+  // this test would be inert and the regression would surface as an unnamed job-level
+  // hang rather than a failing test. execFileSync's own timeout does bound it.
   const fifo = path.join(path.dirname(layout.eventsPath), "index-fifo.jsonl");
   execFileSync("mkfifo", [fifo]);
   try {
-    repairTornJsonlTail(fifo);
+    const moduleUrl = pathToFileURL(fileURLToPath(new URL("../src/index.js", import.meta.url))).href;
+    assert.doesNotThrow(() =>
+      execFileSync(
+        process.execPath,
+        ["-e", `import(${JSON.stringify(moduleUrl)}).then((m) => m.repairTornJsonlTail(process.argv[1]));`, fifo],
+        { timeout: 15_000, stdio: "pipe" }
+      )
+    );
     assert.ok(fs.lstatSync(fifo).isFIFO(), "the FIFO must be left untouched");
   } finally {
     fs.rmSync(fifo, { force: true });
   }
 
   // A non-regular entry whose size is NON-zero is what makes the isFile() bail
-  // decisive; a FIFO reports size 0, so the size check returns first and the bail is
-  // never exercised by that fixture alone. Without it this is EISDIR on every append.
+  // decisive. A FIFO reports size 0, so with the bail deleted the size check still
+  // returns first and the FIFO fixture alone leaves that mutation alive. A directory
+  // reports a non-zero size, so without the bail this is EISDIR on every append.
   const directory = path.join(path.dirname(layout.eventsPath), "index-dir.jsonl");
   fs.mkdirSync(directory);
   try {
