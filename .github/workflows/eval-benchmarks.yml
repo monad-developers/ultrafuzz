@@ -10,6 +10,34 @@ on:
       - docs/assets/eval-history/**
   workflow_dispatch:
     inputs:
+      benchmark_mode:
+        description: Lane to dispatch. smoke runs one runner over the three smoke targets; full runs the four-provider EVMBench matrix
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - smoke
+      smoke_provider:
+        description: smoke mode only, runner provider
+        required: true
+        default: deepseek
+        type: choice
+        options:
+          - openai
+          - anthropic
+          - deepseek
+          - kimi
+      smoke_model:
+        description: smoke mode only, runner model
+        required: true
+        default: deepseek-v4-flash
+        type: string
+      smoke_reasoning:
+        description: smoke mode only, runner reasoning effort
+        required: true
+        default: max
+        type: string
       openai_model:
         description: OpenAI runner model for the full EVMBench run
         required: true
@@ -52,7 +80,7 @@ on:
         type: string
 
 env:
-  BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}
+  BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && (inputs.benchmark_mode || 'full') || 'smoke' }}
   BENCHMARK_CANDIDATE: ${{ github.event_name == 'push' && github.event.after || github.sha }}
 
 permissions:
@@ -60,7 +88,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: modal-eval-${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  group: modal-eval-${{ github.event_name == 'workflow_dispatch' && (inputs.benchmark_mode || 'full') || 'smoke' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
@@ -106,10 +134,19 @@ jobs:
           DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
           KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
+          BENCHMARK_SMOKE_PROVIDER: ${{ github.event_name == 'workflow_dispatch' && (inputs.smoke_provider || 'openai') || 'openai' }}
         run: |
+          # The judge profile is always gpt-5.6-sol on CodexAgent, so OPENAI_API_KEY is
+          # required for every lane regardless of which runner provider is selected.
           required=(MODAL_TOKEN_ID MODAL_TOKEN_SECRET OPENAI_API_KEY)
           if [ "$BENCHMARK_MODE" = full ]; then
             required+=(ANTHROPIC_API_KEY KIMI_API_KEY DEEPSEEK_API_KEY)
+          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            case "$BENCHMARK_SMOKE_PROVIDER" in
+              anthropic) required+=(ANTHROPIC_API_KEY) ;;
+              deepseek) required+=(DEEPSEEK_API_KEY) ;;
+              kimi) required+=(KIMI_API_KEY) ;;
+            esac
           fi
           for name in "${required[@]}"; do
             if [ -z "${!name:-}" ]; then
@@ -128,10 +165,22 @@ jobs:
           BENCHMARK_KIMI_REASONING: ${{ inputs.kimi_reasoning || 'max' }}
           BENCHMARK_DEEPSEEK_MODEL: ${{ inputs.deepseek_model || 'deepseek-v4-pro' }}
           BENCHMARK_DEEPSEEK_REASONING: ${{ inputs.deepseek_reasoning || 'max' }}
+          BENCHMARK_SMOKE_PROVIDER: ${{ github.event_name == 'workflow_dispatch' && (inputs.smoke_provider || 'openai') || 'openai' }}
+          BENCHMARK_SMOKE_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke_model || '' }}
+          BENCHMARK_SMOKE_REASONING: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke_reasoning || '' }}
         run: |
           candidate="$(git rev-parse HEAD)"
           generation="${{ github.run_id }}-${{ github.run_attempt }}"
-          if [ "$BENCHMARK_MODE" = smoke ]; then
+          if [ "$BENCHMARK_MODE" = smoke ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            # Dispatched single-runner smoke lane. prepare-modal-benchmarks.mjs accepts a
+            # one-entry smoke matrix from any provider, so the runner is not pinned to the
+            # checked-in lane profile; the lane's targets, loops and judge are unchanged.
+            BENCHMARK_MODELS_JSON="$(jq -cn \
+              --arg provider "$BENCHMARK_SMOKE_PROVIDER" \
+              --arg model "$BENCHMARK_SMOKE_MODEL" \
+              --arg reasoning "$BENCHMARK_SMOKE_REASONING" \
+              '[{provider: $provider, model: $model, reasoning: $reasoning}]')"
+          elif [ "$BENCHMARK_MODE" = smoke ]; then
             BENCHMARK_MODELS_JSON="$(jq -cn \
               --arg model "$BENCHMARK_OPENAI_MODEL" \
               --arg reasoning "high" \
