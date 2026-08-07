@@ -12,6 +12,7 @@ import {
   BENCHMARK_SMOKE_MAX_PARALLEL_RUNS,
   BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS,
   boundedEvalId,
+  evalRunRoot,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
   publicEvalDiagnosticsFailedTargetCount,
@@ -36,6 +37,7 @@ import {
 } from "./public-bundle.js";
 import {
   createPublicEvalDiagnosticsFromRun,
+  MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
   PUBLIC_EVAL_DIAGNOSTICS_FILE,
   publicEvalRecordTerminalDisposition,
   type PublicEvalDiagnostics,
@@ -197,6 +199,14 @@ export async function runPublicBenchmarkWorker(input: {
               publicDiagnosticSecretValues: resolveForbiddenSecretValues
             }
           ).then(() => undefined),
+        corroborateModelWork: () => {
+          // The eval command has finished writing its journal, so what it
+          // recorded about launched rows outranks the flag this worker raised
+          // before the command began (#320).
+          if (publicEvalModelWorkEvidence(evalRunRoot(prepared.controlRoot, prepared.evalRunId)) === "none") {
+            modelWorkStarted = false;
+          }
+        },
         buildDiagnostics: async () =>
           createPublicEvalDiagnosticsFromRun({
             config: input.config,
@@ -331,6 +341,14 @@ export async function runWithPublicPreparationTimeout<T>(
   }
 }
 
+/**
+ * Raises `model_work_started` before the eval command starts.
+ *
+ * The flag has to lead the work it describes: a sandbox reclaimed mid-eval never
+ * writes again, and treating that as a pre-model flake would relaunch a run that
+ * had already spent its budget. `corroborateModelWork` settles the flag against
+ * the eval's own journal once the command returns.
+ */
 export async function checkpointPublicModelWorkStart(
   writer: WorkerResultWriter,
   markStarted: () => void,
@@ -341,8 +359,97 @@ export async function checkpointPublicModelWorkStart(
   await flush();
 }
 
+export type PublicEvalModelWorkEvidence = "launched" | "none" | "unknown";
+
+/**
+ * Diagnostic codes a failed row can carry that leave a workflow possibly running.
+ *
+ * Membership is decided by where the runtime raises the code, not by what the
+ * code is called. `WORKFLOW_SUBMISSION_FAILED` is raised from exactly one place
+ * -- the `catch` around `submitSmithersWorkflow` in `start-run.ts` -- and that
+ * region is entered only once the workflow has been handed to the engine, so a
+ * failure reported there may have landed the workflow and spent its tokens.
+ *
+ * A code belongs here if the runtime can raise it at or after the point of
+ * submission. Nothing else may be added: every code named here costs the pair
+ * the pre-model retry that `none` buys it.
+ */
+const PUBLIC_EVAL_POST_SUBMISSION_DIAGNOSTIC_CODES: ReadonlySet<string> = new Set(["WORKFLOW_SUBMISSION_FAILED"]);
+
+/**
+ * What the eval run's own journal records about model work having begun.
+ *
+ * The public worker keeps no checkpoint of its own -- its counts and usage are
+ * empty in every contract it writes -- so the journal the eval command leaves
+ * behind is the only evidence it has that a row ever reached a model.
+ *
+ * `none` is the only answer that clears `model_work_started`, so it is the only
+ * answer that has to be earned: it is reported only when every record both names
+ * no workflow and names no fault the runtime could have raised after handing a
+ * workflow to the engine. That second test is what makes the guarantee
+ * structural rather than incidental. A row whose submission failed may already
+ * have spent tokens, but the id of the workflow it may have spent them on is
+ * discarded -- `start-run.ts` returns a value-less failure from its submission
+ * `catch`, and `runtimeRowLauncher` records `workflowIds: []` for it -- so
+ * `workflow_ids` cannot answer for that row and its diagnostics have to.
+ *
+ * Absence of a journal is reported as `unknown`, and so is a journal that cannot
+ * rule model work out: only a journal that is present and positively accounts
+ * for every record is evidence that nothing ran.
+ */
+export function publicEvalModelWorkEvidence(evalRoot: string): PublicEvalModelWorkEvidence {
+  const records = readPublicEvalRunRecords(evalRoot);
+  if (records === undefined) return "unknown";
+  if (records.some(recordNamesWorkflow)) return "launched";
+  if (records.some(recordMayHaveSubmittedWorkflow)) return "unknown";
+  return "none";
+}
+
+function recordNamesWorkflow(record: Record<string, unknown>): boolean {
+  return record.status === "launched" || (Array.isArray(record.workflow_ids) && record.workflow_ids.length > 0);
+}
+
+function recordMayHaveSubmittedWorkflow(record: Record<string, unknown>): boolean {
+  return (
+    Array.isArray(record.diagnostics) &&
+    record.diagnostics.some(
+      (entry) =>
+        isPlainRecord(entry) &&
+        typeof entry.code === "string" &&
+        PUBLIC_EVAL_POST_SUBMISSION_DIAGNOSTIC_CODES.has(entry.code)
+    )
+  );
+}
+
+function readPublicEvalRunRecords(evalRoot: string): Array<Record<string, unknown>> | undefined {
+  for (const [name, parse] of [
+    ["run-summary.json", (text: string) => (JSON.parse(text) as { records?: unknown }).records],
+    [
+      "runs.jsonl",
+      (text: string) =>
+        text
+          .split(/\r?\n/u)
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as unknown)
+    ]
+  ] as const) {
+    const filePath = path.join(evalRoot, name);
+    try {
+      const stats = fs.lstatSync(filePath);
+      if (!stats.isFile() || stats.size > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES) continue;
+      const records = parse(fs.readFileSync(filePath, "utf8"));
+      if (Array.isArray(records)) return records.filter(isPlainRecord);
+    } catch {
+      // An unreadable or malformed journal is no evidence either way.
+    }
+  }
+  return undefined;
+}
+
 export async function runAndCheckpointPublicEvalDiagnostics(input: {
   runEval: () => Promise<void>;
+  /** Settles `model_work_started`; called once the eval command has returned. */
+  corroborateModelWork?: () => void;
   buildDiagnostics: () => PublicEvalDiagnostics | Promise<PublicEvalDiagnostics>;
   persistDiagnostics: (diagnostics: PublicEvalDiagnostics) => Promise<void>;
   flush: () => Promise<void>;
@@ -352,6 +459,22 @@ export async function runAndCheckpointPublicEvalDiagnostics(input: {
     await input.runEval();
   } catch (error) {
     runError = error;
+  }
+  // Only a command that returned has a final journal. One that timed out or was
+  // killed may have launched work it never recorded, so its raised flag stands.
+  // Corroborating here, rather than after this function returns, keeps the
+  // settled flag on the contract even when building the diagnostics throws.
+  //
+  // The hook only ever lowers the flag, so a hook that throws costs nothing but
+  // the lowering: the flag stays raised, which is the side that does not retry
+  // spent work. Failing the eval run over it would cost the diagnostics
+  // document, which is the one artifact this function exists to produce.
+  if (runError === undefined) {
+    try {
+      input.corroborateModelWork?.();
+    } catch {
+      // Reading the journal is best-effort evidence, never a run outcome.
+    }
   }
   let diagnostics: PublicEvalDiagnostics;
   try {

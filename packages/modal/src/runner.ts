@@ -2610,8 +2610,7 @@ export async function collectModalBenchmark(input: {
         if (
           collectionConfig !== undefined &&
           isPublicModalBenchmarkConfig(collectionConfig) &&
-          persistedStatus?.model_work_started === true &&
-          selectedEvidence.files[PUBLIC_EVAL_DIAGNOSTICS_FILE] === undefined
+          publicEvalDiagnosticsDroppedFromEvidence({ volumeFiles: files, selectedFiles: selectedEvidence.files })
         ) {
           throw new Error(`public eval diagnostics are not safely collectable for ${launch.slug}`);
         }
@@ -3202,6 +3201,34 @@ function latestPersistedWorkerStatus(
   return latestModalWorkerStatus(
     [parseJson(files["status.json"] ?? "{}"), parseJson(files["result.json"] ?? "{}")],
     launch
+  );
+}
+
+/**
+ * Whether evidence selection dropped a public eval diagnostics document that the
+ * worker had persisted on the volume.
+ *
+ * That is the only unsafe collection this side can detect, and it is detectable
+ * from the two file sets themselves. `selectModalCollectedEvidence` withholds the
+ * document whenever it cannot secret-scan it, so collecting the rest as if
+ * nothing were missing would publish evidence that silently omits the document.
+ *
+ * The predicate this replaces asked instead whether the worker owed a document at
+ * all, and answered from `model_work_started` -- a flag the public worker raises
+ * before its eval command starts. A worker that never got far enough to write the
+ * document was therefore reported as a diagnostics fault, and the throw aborted
+ * the diagnostic-only collection that CI runs for exactly those pairs; run
+ * 31171579070 lost its diagnostics that way (#320). What the worker owed is the
+ * worker's own record to make: it names an unbuildable document
+ * `public-eval-diagnostics-invalid` in its result contract, which is collected.
+ */
+export function publicEvalDiagnosticsDroppedFromEvidence(input: {
+  volumeFiles: Readonly<Record<string, string>>;
+  selectedFiles: Readonly<Record<string, string>>;
+}): boolean {
+  return (
+    input.volumeFiles[PUBLIC_EVAL_DIAGNOSTICS_FILE] !== undefined &&
+    input.selectedFiles[PUBLIC_EVAL_DIAGNOSTICS_FILE] === undefined
   );
 }
 
