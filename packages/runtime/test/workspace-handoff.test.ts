@@ -1001,7 +1001,6 @@ test("ranks the real capture by real bytes, through git and the code that runs i
     git(root, ["config", "core.bigFileThreshold", "512m"]);
     git(root, ["add", ".gitignore"]);
     git(root, ["commit", "--quiet", "-m", "base"]);
-    const baseline = captureWorkspaceTree(root);
 
     // Both files are NUL-free, so git classifies them as TEXT and `--binary` emits their bytes raw
     // rather than deflating them. `corpus/` sorts before `src/`, and git emits in path order, so the
