@@ -1637,6 +1637,13 @@ test("generated Smithers preserves setup-patch baselines across post-agent prepa
   const helper = source.slice(helperStart, materializeStart);
   assert.match(helper, /replayWorkspacePatches: boolean/u);
   assert.match(helper, /if \(!replayWorkspacePatches\)/u);
+  // Issue #312. Replay assumes the task worktree starts at the pinned baseline; a RESUMED run does not
+  // provide that, because the worktree lives on a durable volume and still holds the previous attempt's
+  // state. The first dependency patch then no longer matches and `applyWorkspacePatch` refuses -- which
+  // killed R48 three times at `prepare:stateful-invariant-implement-properties`. The replay path must
+  // skip a patch whose effect is VERIFIABLY already present, and only that.
+  assert.match(helper, /else if \(isWorkspacePatchSatisfied\(workspaceRoot, capture\.manifest\)\)/u);
+  assert.match(source, /isWorkspacePatchSatisfied,/u);
   assert.match(helper, /!workspacePatchBaselineTrees\.has\(task\.attemptId\)/u);
   assert.match(helper, /readWorkspacePatchBaseline\(task\)/u);
   assert.match(helper, /writeWorkspacePatchBaseline\(task, baselineTree\)/u);

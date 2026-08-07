@@ -5,7 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { applyWorkspacePatch, captureWorkspacePatch, captureWorkspaceTree } from "../src/workspace-handoff.js";
+import {
+  applyWorkspacePatch,
+  captureWorkspacePatch,
+  captureWorkspaceTree,
+  isWorkspacePatchSatisfied
+} from "../src/workspace-handoff.js";
 import * as runtime from "../src/index.js";
 
 function git(cwd: string, args: string[], input?: string): string {
@@ -460,15 +465,17 @@ test("applies a validated setup patch and rejects a base-tree mismatch", () => {
   }
 });
 
-test("treats an already-applied dependency patch as satisfied rather than a base tree mismatch", () => {
+test("reports a superseded dependency patch as satisfied without weakening apply", () => {
   // Issue #312, reproduced from R48's manifests. A node that fans in several dependencies can only ever
-  // satisfy the one whose `base_tree` equals the current worktree. R48's chain was
+  // satisfy the one whose `base_tree` equals the current worktree:
   //   setup-foundry      2dd4efef -> 4fefa8df  (1 file)
   //   invariant-setup    4fefa8df -> fd4e3c2c  (7 files)
   //   invariant-handlers fd4e3c2c -> bf324c39  (7 files)
-  // and `implement-properties` then applied setup-foundry's patch against a worktree already at
-  // bf324c39. Its one file was ALREADY THERE, folded in by the later links -- superseded, not stale.
-  // `maxAttempts=1` on the prepare step turned that into a dead run, three times, and R48 went terminal.
+  // `implement-properties` applied setup-foundry's patch against a worktree already at bf324c39, whose
+  // one file was ALREADY THERE. `maxAttempts=1` made that fatal and R48 went terminal.
+  //
+  // `applyWorkspacePatch` must STAY strict: it sees one patch and cannot tell fan-in from local drift.
+  // The caller holds the dependency set, so it is the caller that gets to ask this question.
   const root = fixture();
   try {
     writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
@@ -483,21 +490,18 @@ test("treats an already-applied dependency patch as satisfied rather than a base
     writeFileSync(path.join(root, "Setup.sol"), "contract Setup {}\n");
     captureWorkspacePatch(root, afterEarly);
 
-    // The worktree now carries BOTH nodes' work, exactly as the downstream fan-in finds it. Re-applying
-    // the earlier dependency's patch must be a no-op: every file it declares is present with the content
-    // it produced. It must NOT report a base tree mismatch.
-    assert.doesNotThrow(() => applyWorkspacePatch(root, early));
-    assert.equal(readFileSync(path.join(root, "foundry.toml"), "utf8"), "[profile.default]\n");
-    assert.equal(readFileSync(path.join(root, "Setup.sol"), "utf8"), "contract Setup {}\n");
+    // The worktree carries both nodes' work, as the downstream fan-in finds it on a resumed run.
+    assert.equal(isWorkspacePatchSatisfied(root, early.manifest), true);
+    // ...and the strict guard is untouched, so the drift protection survives.
+    assert.throws(() => applyWorkspacePatch(root, early), /base tree mismatch/u);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("still rejects a patch whose declared files do not match the worktree", () => {
-  // The guard the no-op must not weaken. If a declared file holds different content, the patch is
-  // genuinely unapplicable, and silently continuing would hand the node stale sources while every
-  // downstream check still passed -- the failure the base tree comparison exists to catch.
+test("does not report a patch as satisfied when its own file was changed afterwards", () => {
+  // The predicate must be a content check, not a presence check: if the earlier node's file has since
+  // been modified, its effect is NOT present and skipping would hand the node stale sources.
   const root = fixture();
   try {
     writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
@@ -508,12 +512,8 @@ test("still rejects a patch whose declared files do not match the worktree", () 
     writeFileSync(path.join(root, "foundry.toml"), "[profile.default]\n");
     const early = captureWorkspacePatch(root, pristine);
 
-    const afterEarly = captureWorkspaceTree(root);
-    writeFileSync(path.join(root, "Setup.sol"), "contract Setup {}\n");
-    captureWorkspacePatch(root, afterEarly);
-
     writeFileSync(path.join(root, "foundry.toml"), "[profile.default]\nsolc = '0.8.30'\n");
-    assert.throws(() => applyWorkspacePatch(root, early), /base tree mismatch|digest|result tree/u);
+    assert.equal(isWorkspacePatchSatisfied(root, early.manifest), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

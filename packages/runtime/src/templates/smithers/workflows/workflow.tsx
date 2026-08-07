@@ -38,8 +38,13 @@ const {
   validateInvariantSourceProofSchema,
   writeFileDurable
 } = await import(artifactsModule);
-const { applyWorkspacePatch, captureWorkspacePatch, captureWorkspaceTree, normalizeFinalReportSeverityRecord } =
-  await import(runtimeModule);
+const {
+  applyWorkspacePatch,
+  captureWorkspacePatch,
+  captureWorkspaceTree,
+  isWorkspacePatchSatisfied,
+  normalizeFinalReportSeverityRecord
+} = await import(runtimeModule);
 
 const inputTaskSchema = z.object({
   id: z.string(),
@@ -476,6 +481,17 @@ function materializeWorkspacePatchDependencies(
       // by the dirty workspace and must not be applied over agent changes.
       const currentTree = captureWorkspaceTree(workspaceRoot);
       if (currentTree !== capture.manifest.base_tree) continue;
+    } else if (isWorkspacePatchSatisfied(workspaceRoot, capture.manifest)) {
+      // Replay assumes this task's worktree starts at the pinned baseline, so each dependency's base
+      // tree is satisfied in turn down the chain. A RESUMED run breaks that assumption: the worktree
+      // lives on a durable volume and still holds the previous attempt's state, so the first patch --
+      // whose baseline is the pristine tree -- no longer matches and `applyWorkspacePatch` refuses.
+      //
+      // Issue #312: that killed R48 three times at `prepare:stateful-invariant-implement-properties`,
+      // on a one-file `setup-foundry` patch already folded in by later links of the chain, and
+      // `maxAttempts=1` made each failure fatal. Skip only when the patch's own effect is verifiably
+      // present; anything else still reaches `applyWorkspacePatch` and still fails loudly.
+      continue;
     }
     applyWorkspacePatch(workspaceRoot, capture);
   }
