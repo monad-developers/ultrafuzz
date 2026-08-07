@@ -1530,3 +1530,23 @@ test("a duplicated event ID fails closed and leaves the log byte-identical", () 
   assert.throws(() => ensureEventRecord(layout, record), /duplicates event ID/u);
   assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), contents);
 });
+
+test("a duplicated event ID fails closed without rewriting a torn log", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-duplicate-torn" });
+  const record = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { step: 1 }
+  });
+  const serialized = JSON.stringify(record);
+  // Two durable copies AND a torn tail. The pre-tail duplicate check is the
+  // load-bearing one here: without it `nextMissing` is -1, the tail-repair block runs
+  // first, and the log is mutated on a path documented as leaving it byte-identical.
+  const contents = `${serialized}\n${serialized}\n{"event_id":"evt-tor`;
+  fs.writeFileSync(layout.eventsPath, contents, "utf8");
+
+  assert.throws(() => ensureEventRecord(layout, record), /duplicates event ID/u);
+  assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), contents, "the log must not be rewritten");
+});

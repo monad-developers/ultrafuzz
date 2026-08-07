@@ -18000,3 +18000,54 @@ test("a torn or empty prepared event index re-converges instead of condemning th
     else process.env.XDG_CACHE_HOME = previousXdgCacheHome;
   }
 });
+
+test("durable-write debris is tolerated only when it really is a regular file", async () => {
+  const { planRun: preparePlanRun } = await import("../src/plan-run.js");
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeReferenceTopology(project);
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeReferenceCache(xdgCacheHome);
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  try {
+    const startInput = { projectRoot: project, runId: "debris-typed", env: fakeSmithersEnv(project) };
+    const prepared = await preparePlanRun(startInput, { prepareWorkflowStart: true });
+    assert.equal(prepared.ok, true, JSON.stringify(prepared.diagnostics));
+    const layout = prepared.value!.layout;
+    const startMarker = path.join(layout.root, "smithers", "start-preparation.json");
+
+    // A genuine leftover: an unrenamed regular temp file. Tolerated, because it was
+    // never durable and refusing it wedges the run id permanently.
+    fs.rmSync(startMarker);
+    const debris = path.join(layout.artifactsDir, ".evidence.json.tmp-1-1-abcdef");
+    fs.writeFileSync(debris, "partial", "utf8");
+    const tolerated = await preparePlanRun(startInput, { prepareWorkflowStart: true });
+    assert.equal(tolerated.ok, true, `regular debris rejected: ${JSON.stringify(tolerated.diagnostics)}`);
+    fs.rmSync(debris);
+
+    // The same NAME worn by a symlink must not inherit that tolerance. The type
+    // dispatch it would bypass is the only rejection of a symlink, FIFO, socket or
+    // directory here, so skipping by name alone let a link to a file outside the run
+    // root through a guard that exists to fail closed.
+    const outside = path.join(project, "outside.txt");
+    fs.writeFileSync(outside, "outside\n", "utf8");
+    fs.rmSync(startMarker, { force: true });
+    const linked = path.join(layout.artifactsDir, ".evidence.json.tmp-2-2-bcdefa");
+    fs.symlinkSync(outside, linked);
+    const rejected = await preparePlanRun(startInput, { prepareWorkflowStart: true });
+    assert.equal(rejected.ok, false, "a symlink wearing the debris name was admitted");
+    fs.rmSync(linked);
+
+    // And a directory wearing the name must not slip through the run-root closure,
+    // where its contents would never be validated at all.
+    fs.rmSync(startMarker, { force: true });
+    const directory = path.join(layout.root, ".evidence.json.tmp-3-3-cdefab");
+    fs.mkdirSync(directory);
+    const rejectedDirectory = await preparePlanRun(startInput, { prepareWorkflowStart: true });
+    assert.equal(rejectedDirectory.ok, false, "a directory wearing the debris name was admitted");
+  } finally {
+    if (previousXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+  }
+});

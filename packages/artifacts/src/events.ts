@@ -171,9 +171,15 @@ export function repairTornJsonlTail(eventsPath: string): void {
   // rather than as the performance problem it is.
   let size: number;
   let lastByte: Buffer;
-  const probe = fs.openSync(eventsPath, "r");
+  // O_NOFOLLOW and O_NONBLOCK match what truncateDurable and appendBytesDurable in this
+  // package already require: a symlink planted at this path must not be followed, and a
+  // FIFO must not block the process forever. That matters more now than when only the
+  // event log used this, because every index append runs it against a per-dimension path.
+  const probe = fs.openSync(eventsPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   try {
-    size = fs.fstatSync(probe).size;
+    const stat = fs.fstatSync(probe);
+    if (!stat.isFile()) return;
+    size = stat.size;
     if (size === 0) return;
     lastByte = Buffer.alloc(1);
     fs.readSync(probe, lastByte, 0, 1, size - 1);

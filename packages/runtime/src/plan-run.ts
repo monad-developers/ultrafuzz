@@ -634,6 +634,22 @@ function isDurableWriteTempEntry(entry: string): boolean {
   return DURABLE_WRITE_TEMP_ENTRY.test(entry);
 }
 
+/**
+ * The name alone is not enough to waive a closure check: these callers have no
+ * entry-type dispatch of their own, so a symlink, FIFO, socket or directory wearing
+ * this name would otherwise walk straight through a guard that exists to fail closed
+ * (and, for a directory, would never have its contents validated at all).
+ */
+function isDurableWriteTempLeftover(directory: string, entry: string): boolean {
+  if (!isDurableWriteTempEntry(entry)) return false;
+  try {
+    const stat = fs.lstatSync(path.join(directory, entry));
+    return stat.isFile() && !stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
 function ensureStartPreparationIntent(input: {
   input: PlanRunInput;
   projectRoot: string;
@@ -653,7 +669,7 @@ function ensureStartPreparationIntent(input: {
         (entry) =>
           entry !== START_PREPARATION_LOCK &&
           entry !== START_PREPARATION_RECLAIM_GUARD &&
-          !isDurableWriteTempEntry(entry)
+          !isDurableWriteTempLeftover(input.layout.root, entry)
       );
     if (unexpected.length > 0) {
       throw new Error("existing workflow run root has no durable start intent and is not empty");
@@ -916,7 +932,7 @@ function assertIncompletePreparationRootClosure(layout: RunLayout): void {
     "smithers"
   ]);
   for (const entry of fs.readdirSync(layout.root)) {
-    if (isDurableWriteTempEntry(entry)) continue;
+    if (isDurableWriteTempLeftover(layout.root, entry)) continue;
     if (!allowed.has(entry)) throw new Error(`prepared workflow run root contains an unexpected entry: ${entry}`);
   }
   const smithersDir = path.join(layout.root, "smithers");
@@ -1862,9 +1878,11 @@ function walkPreparedFiles(root: string): string[] {
     const directory = pending.pop()!;
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const candidate = path.join(directory, entry.name);
-      // Skip this module's own unrenamed durable-write leftovers; they were never
-      // durable, and treating them as prepared evidence wedges the run root.
-      if (isDurableWriteTempEntry(entry.name)) continue;
+      // Skip this module's own unrenamed durable-write leftovers -- but only when the
+      // entry really is a regular file. The `else throw` below is the ONLY rejection of
+      // a symlink, FIFO, socket or directory here, so skipping by NAME alone would let
+      // anything wearing this name past a fail-closed guard.
+      if (entry.isFile() && !entry.isSymbolicLink() && isDurableWriteTempEntry(entry.name)) continue;
       if (entry.isDirectory()) pending.push(candidate);
       else if (entry.isFile() && !entry.isSymbolicLink()) files.push(candidate);
       else throw new Error(`prepared reference staging contains an unsafe entry: ${candidate}`);
