@@ -73,9 +73,13 @@ import {
   markModalLaunchFailedWithRecovery,
   markModalLaunchReady,
   markModalSandboxCreated,
+  modalAttemptProvenance,
   modalLaunchTags,
+  modalPreModelAttempt,
+  modalPreModelBudgetExhausted,
   modalRecoveryFinishedAtForWorkerStatus,
   modalRecoveryTerminalReasonForWorkerStatus,
+  modalRunnerAbandonmentMessage,
   modalWorkerLineage,
   parseModalLaunchState,
   parseModalWorkerResult,
@@ -84,7 +88,6 @@ import {
   reserveModalLaunchAttempt,
   withModalLaunchStateLock,
   writeModalLaunchState,
-  type ModalAttemptProvenance,
   type ModalLaunchFailureCategory,
   type ModalLaunchRecord,
   type ModalLaunchState,
@@ -429,7 +432,7 @@ export async function launchModalBenchmark(input: {
         const previousFingerprints = state.fingerprints;
         const history = [
           ...state.attempt_history,
-          ...state.launches.map((launch) => attemptProvenance(launch, previousFingerprints))
+          ...state.launches.map((launch) => modalAttemptProvenance(launch, previousFingerprints))
         ];
         state = createModalLaunchState({
           logicalRunId: config.run_id,
@@ -653,9 +656,10 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       "result.json"
     ]);
     const workerStatus = latestPersistedWorkerStatus(persisted, record);
+    const preModelAttempt = modalPreModelAttempt(input.state, record);
     const runnerStatus = classifyModalRunnerStatus({
       sandbox: probe.state,
-      attempt: record.attempt,
+      preModelAttempt,
       postModelRecovery: configuredPostModelRecovery(input.config),
       modelWorkMayHaveStarted: record.launched_at !== undefined,
       ...(workerStatus === undefined ? {} : { workerStatus }),
@@ -665,16 +669,20 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
     });
     if (runnerStatus.action === "none") {
       const finishedAt = new Date().toISOString();
+      const preModelBudgetExhausted = modalPreModelBudgetExhausted({
+        category: runnerStatus.category,
+        modelWorkStarted: runnerStatus.model_work_started,
+        preModelAttempt,
+        workerCategory: workerStatus?.category,
+        launchFailure: record.failure_category
+      });
       if (
         finishActiveModalRecoveryLifecycle(input.state, record, {
           terminalReason: modalRecoveryTerminalReasonForWorkerStatus({
             category: runnerStatus.category,
-            attempt: record.attempt,
+            preModelAttempt,
             modelWorkStarted: runnerStatus.model_work_started,
-            recoveryBudgetExhausted:
-              runnerStatus.category === "permanent-operational-failure" &&
-              workerStatus?.category !== "permanent-operational-failure" &&
-              record.failure_category !== "permanent-operational-failure"
+            recoveryBudgetExhausted: preModelBudgetExhausted
           }),
           finishedAt: modalRecoveryFinishedAtForWorkerStatus(workerStatus, finishedAt),
           ...(probe.exitCode === undefined ? {} : { workerExitCode: probe.exitCode }),
@@ -686,7 +694,14 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
         await writeModalLaunchState(input.statePath, input.state);
       }
       if (["succeeded", "genuine-task-outcome"].includes(runnerStatus.category)) return;
-      throw new Error(`Modal runner cannot relaunch ${record.slug}: ${runnerStatus.category}`);
+      throw new Error(
+        modalRunnerAbandonmentMessage({
+          slug: record.slug,
+          category: runnerStatus.category,
+          preModelAttempt,
+          preModelBudgetExhausted
+        })
+      );
     }
     const finishedAt = new Date().toISOString();
     if (
@@ -694,6 +709,11 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
         terminalReason: "operational-failure",
         finishedAt: modalRecoveryFinishedAtForWorkerStatus(workerStatus, finishedAt),
         ...(probe.exitCode === undefined ? {} : { workerExitCode: probe.exitCode }),
+        // Deliberately the observation, not `runnerStatus.model_work_started`.
+        // The classifier infers model work from `launched_at` alone so it can
+        // decline to charge the pre-model budget to a launched attempt; the
+        // durable record has to stay a record of what was seen, and `"unknown"`
+        // is what keeps `modalPreModelAttempt` fail-closed.
         modelWorkStarted: workerStatus?.model_work_started ?? (record.launched_at === undefined ? false : "unknown"),
         ...(workerStatus?.updated_at === undefined ? {} : { lastDurableTransitionAt: workerStatus.updated_at }),
         ...(workerStatus?.node_counts === undefined ? {} : { nodeCountsAfter: workerStatus.node_counts })
@@ -784,9 +804,10 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       if (modelMayHaveStarted) {
         throw new Error("Modal launch readiness was uncertain", { cause: error });
       }
-      if (category !== "transient-operational-failure" || record.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT) throw error;
+      const preModelAttempt = modalPreModelAttempt(input.state, record);
+      if (category !== "transient-operational-failure" || preModelAttempt >= MODAL_PRE_MODEL_RETRY_LIMIT) throw error;
       nextStartReason = "pre-model-retry";
-      await sleep(classifyModalRunnerStatus({ sandbox: "missing", attempt: record.attempt }).retry_after_ms);
+      await sleep(classifyModalRunnerStatus({ sandbox: "missing", preModelAttempt }).retry_after_ms);
     }
   }
 }
@@ -1202,23 +1223,6 @@ export function modalSandboxName(
   return `${prefix}${suffix}`;
 }
 
-function attemptProvenance(record: ModalLaunchRecord, fingerprints: ModalLineageFingerprints): ModalAttemptProvenance {
-  return {
-    slug: record.slug,
-    generation: record.generation,
-    attempt: record.attempt,
-    attempt_id: record.attempt_id,
-    model_fingerprint: record.model_fingerprint,
-    fingerprints,
-    workspace_mode: record.workspace_mode,
-    reserved_at: record.reserved_at,
-    ...(record.sandbox_id === undefined ? {} : { sandbox_id: record.sandbox_id }),
-    ...(record.launched_at === undefined ? {} : { launched_at: record.launched_at }),
-    ...(record.finished_at === undefined ? {} : { finished_at: record.finished_at }),
-    phase: record.phase
-  };
-}
-
 function finishActiveModalRecoveryLifecycle(
   state: ModalLaunchState,
   record: Pick<ModalLaunchRecord, "attempt_id">,
@@ -1296,9 +1300,10 @@ export async function modalBenchmarkStatus(input: {
         "result.json"
       ]);
       const workerStatus = latestPersistedWorkerStatus(persisted, launch);
+      const preModelAttempt = modalPreModelAttempt(state, launch);
       const runnerStatus = classifyModalRunnerStatus({
         sandbox: probe.state,
-        attempt: launch.attempt,
+        preModelAttempt,
         postModelRecovery: launch.post_model_recovery ?? "relaunch",
         modelWorkMayHaveStarted: launch.launched_at !== undefined,
         ...(workerStatus === undefined ? {} : { workerStatus }),
@@ -1310,6 +1315,7 @@ export async function modalBenchmarkStatus(input: {
         logical_run_id: state.logical_run_id,
         generation: launch.generation,
         attempt: launch.attempt,
+        pre_model_attempt: preModelAttempt,
         model: launch.model,
         slug: launch.slug,
         runner: probe.state,
@@ -1605,7 +1611,8 @@ export async function overseeModalBenchmarkOnce(
               recoveryStatePath,
               env,
               now,
-              ...(resolution.launchExitCode === undefined ? {} : { observedExitCode: resolution.launchExitCode })
+              ...(resolution.launchExitCode === undefined ? {} : { observedExitCode: resolution.launchExitCode }),
+              ...(workerStatus === undefined ? {} : { workerStatus })
             });
           } else {
             await writeModalRecoveryState(recoveryStatePath, recoveryState);
@@ -1822,6 +1829,8 @@ async function launchModalRecoveryWorker(input: {
   now: () => number;
   /** Exit code already observed on the sandbox being replaced, when ownership resolution saw one. */
   observedExitCode?: number;
+  /** The outgoing attempt's durable worker status, if the volume had a readable one. */
+  workerStatus?: ModalWorkerStatus;
 }): Promise<ModalRecoveryRowState> {
   await reconcileKimiSubscriptionCredentialFromLaunchVolume({
     modal: input.modal,
@@ -1846,6 +1855,11 @@ async function launchModalRecoveryWorker(input: {
       remoteRoot: input.launch.remote_root,
       workspaceMode: "resume",
       postModelRecovery: "relaunch",
+      // The overseer is the only writer that closes the outgoing attempt's
+      // lifecycle, so it must record what the volume actually said. Without
+      // this the streak never resets and #267 stays open for unattended runs.
+      observedModelWorkStarted:
+        input.workerStatus?.model_work_started ?? (input.launch.launched_at === undefined ? false : "unknown"),
       now: new Date(input.now()).toISOString(),
       attemptId,
       // Threaded from the poll `resolveModalRecoveryOwner` already performed this tick, rather than
@@ -2440,7 +2454,7 @@ export async function collectModalBenchmark(input: {
           finishActiveModalRecoveryLifecycle(state, launch, {
             terminalReason: modalRecoveryTerminalReasonForWorkerStatus({
               category: persistedStatus.category,
-              attempt: launch.attempt,
+              preModelAttempt: modalPreModelAttempt(state, launch),
               modelWorkStarted: persistedStatus.model_work_started
             }),
             finishedAt: modalRecoveryFinishedAtForWorkerStatus(persistedStatus, new Date().toISOString()),
