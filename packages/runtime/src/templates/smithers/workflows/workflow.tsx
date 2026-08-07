@@ -847,10 +847,14 @@ function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspa
   }
   const files = new Map<string, { path: string; sha256: string; size: number }>();
   try {
-    for (const value of execFileSync("git", ["ls-files", "--cached", "--others", "--", "test", "tests"], {
-      cwd: workspaceRoot,
-      encoding: "utf8"
-    }).split(/\r?\n/u)) {
+    for (const value of invariantSuiteGitPaths(workspaceRoot, [
+      "ls-files",
+      "--cached",
+      "--others",
+      "--",
+      "test",
+      "tests"
+    ]).split(/\r?\n/u)) {
       if (value.length === 0 || (!value.startsWith("test/") && !value.startsWith("tests/"))) continue;
       const relativePath = assertSafeInvariantSuiteTestPath(value);
       const sourcePath = path.resolve(workspaceRoot, relativePath);
@@ -916,10 +920,16 @@ function invariantSuiteProtectedBaselinePath(task: (typeof taskSpecs)[number]): 
 }
 
 function invariantWorkspaceSourcePaths(workspaceRoot: string): string[] {
-  const values = execFileSync("git", ["ls-files", "--cached", "--others", "--", "src", "contracts", "test", "tests"], {
-    cwd: workspaceRoot,
-    encoding: "utf8"
-  }).split(/\r?\n/u);
+  const values = invariantSuiteGitPaths(workspaceRoot, [
+    "ls-files",
+    "--cached",
+    "--others",
+    "--",
+    "src",
+    "contracts",
+    "test",
+    "tests"
+  ]).split(/\r?\n/u);
   return values.filter(
     (value) =>
       value.startsWith("src/") ||
@@ -3323,6 +3333,21 @@ const INVARIANT_SUITE_WORKSPACE_FILES_DIR = "files";
 const MAX_INVARIANT_SUITE_WORKSPACE_FILES = 4_096;
 const MAX_INVARIANT_SUITE_WORKSPACE_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_INVARIANT_SUITE_WORKSPACE_TOTAL_BYTES = 128 * 1024 * 1024;
+/**
+ * Ceiling on one invariant-discovery git capture, in bytes.
+ *
+ * `execFileSync` defaults to 1 MB. These enumerations list every tracked and untracked path under
+ * `src`, `contracts`, `test` and `tests`, so on a protocol the size of Aave v4 the PATH TEXT alone can
+ * pass that -- and Node then throws a bare `spawnSync git ENOBUFS` naming no subcommand, no size and no
+ * path. #310 hardened `runGit` against exactly that failure; these call sites do not go through it.
+ * Sized to the ceiling a handed-off patch has to meet, since a workspace listing that outgrows it is
+ * not one that can be handed off either.
+ */
+const MAX_INVARIANT_SUITE_ENUMERATION_BYTES = 16 * 1024 * 1024;
+/** Roots named when an enumeration overflows: enough to point at a directory, short enough to read. */
+const INVARIANT_SUITE_ENUMERATION_RANKED_ROOTS = 5;
+/** How much of git's own stderr to inline when stderr, not the path list, is what overflowed. */
+const INVARIANT_SUITE_ENUMERATION_STDERR_BYTES = 400;
 const INVARIANT_TEST_ROOT_NAMES = ["test", "tests"] as const;
 const invariantSuiteNodeIds = new Set([
   "stateful-invariant-setup",
@@ -3344,6 +3369,103 @@ const invariantSuitePublicationSnapshots = new Map<string, Map<string, Buffer>>(
 const invariantSuiteWorkspaceSnapshots = new Map<string, Map<string, Buffer>>();
 const workspacePatchBaselineTrees = new Map<string, string>();
 const workspacePatchPreparationTrees = new Map<string, string>();
+
+/**
+ * Enumerate workspace paths with git, under an explicit capture bound.
+ *
+ * Every invariant-discovery enumeration goes through here so that the bound is stated once and an
+ * overflow arrives as a sentence rather than as a `SystemError`.
+ */
+function invariantSuiteGitPaths(workspaceRoot: string, args: readonly string[]): string {
+  try {
+    // No `encoding`, deliberately. With one, Node decodes the capture BEFORE it throws, and that decode
+    // is lossy: a byte that is not valid UTF-8 comes back as U+FFFD, which re-encodes to three. The byte
+    // totals the diagnostic reports would then not be the bytes `maxBuffer` counted. Decode here, on the
+    // success path, which is what the call sites were already getting from `encoding: "utf8"`.
+    return execFileSync("git", [...args], {
+      cwd: workspaceRoot,
+      maxBuffer: MAX_INVARIANT_SUITE_ENUMERATION_BYTES
+    }).toString("utf8");
+  } catch (error) {
+    rethrowOversizedInvariantSuiteEnumeration(args, error);
+  }
+}
+
+/**
+ * Rethrow an enumeration that outgrew its capture buffer as something an operator can act on.
+ *
+ * The bare failure is `spawnSync git ENOBUFS`: no subcommand, no size, no path, and no hint that the
+ * workspace is at fault. This names all four, following #311, which does the same for the handoff diff.
+ * That helper is not reusable here -- it reads its attribution out of `diff --git` headers, and it is
+ * deliberately not part of the runtime package's public surface, which is all this template can import.
+ *
+ * Scope: this improves the string. The enumeration has already failed by the time it runs.
+ */
+function rethrowOversizedInvariantSuiteEnumeration(args: readonly string[], error: unknown): never {
+  if (!(error instanceof Error) || (error as { code?: unknown }).code !== "ENOBUFS") throw error;
+  // Every call site here passes the subcommand first and no global git options, so no scan is needed.
+  const subcommand = args[0] ?? "git";
+  const capturedStdout = (error as { stdout?: unknown }).stdout;
+  const capturedStderr = (error as { stderr?: unknown }).stderr;
+  const stdoutBytes = Buffer.isBuffer(capturedStdout) ? capturedStdout.length : 0;
+  const stderrBytes = Buffer.isBuffer(capturedStderr) ? capturedStderr.length : 0;
+  // ENOBUFS fires on EITHER stream. Blaming the workspace when git merely wrote a lot of stderr would be
+  // a confident lie that sends an operator to delete sources over a git message, so claim the path list
+  // only when the path list is the larger capture.
+  const overflowedStderr = stderrBytes > stdoutBytes;
+  const attribution = overflowedStderr ? "" : rankInvariantSuiteEnumerationRoots(capturedStdout);
+  const detail = overflowedStderr
+    ? `wrote more than the ${MAX_INVARIANT_SUITE_ENUMERATION_BYTES}-byte enumeration buffer to stderr: ${
+        Buffer.isBuffer(capturedStderr)
+          ? capturedStderr.subarray(0, INVARIANT_SUITE_ENUMERATION_STDERR_BYTES).toString("utf8")
+          : ""
+      }`
+    : `listed more than the ${MAX_INVARIANT_SUITE_ENUMERATION_BYTES}-byte enumeration buffer of workspace paths`;
+  // Drop the payload before this becomes a `cause`. Node holds the capture in both `stdout` and
+  // `output[1]`, and `error.error` is a self-reference, so an unstripped cause serializes to a multiple
+  // of a capture that is by construction at the buffer ceiling -- one way to lose the report of the
+  // failure along with the failure.
+  for (const field of ["stdout", "stderr", "output", "error"]) {
+    delete (error as unknown as Record<string, unknown>)[field];
+  }
+  throw new Error(
+    `artifact-contract failure: git ${subcommand} ${detail}${
+      attribution === ""
+        ? ""
+        : `. Largest contributors within the first ${stdoutBytes} bytes git wrote; git emits in path order, so anything past that cutoff is not visible here: ${attribution}`
+    }`,
+    { cause: error }
+  );
+}
+
+/** Total the captured path list per top-level root, largest first. */
+function rankInvariantSuiteEnumerationRoots(capturedStdout: unknown): string {
+  if (!Buffer.isBuffer(capturedStdout)) return "";
+  // A `latin1` view is a byte/code-unit bijection, so an offset IS a byte offset and the spans below are
+  // exact; a `utf8` decode inflates every undecodable byte threefold and can rank a smaller root first.
+  // The scan is index-based rather than `split("\n")` because this runs in a process that has just been
+  // refused an allocation, and 16 MB of short paths is a million lines. The table cannot grow without
+  // bound: every call site restricts the enumeration to a pathspec of at most four roots.
+  const listing = capturedStdout.toString("latin1");
+  const totals = new Map<string, { bytes: number; paths: number }>();
+  for (let start = 0; start < listing.length;) {
+    const end = listing.indexOf("\n", start);
+    // The last line was cut mid-path by the very overflow being reported, so it is not attributed: its
+    // root may be the prefix of a longer name. Every figure here is a floor for that reason and because
+    // the capture is a prefix of what git had to say.
+    if (end < 0) break;
+    const separator = listing.indexOf("/", start);
+    const root = listing.slice(start, separator >= 0 && separator < end ? separator : end);
+    const previous = totals.get(root) ?? { bytes: 0, paths: 0 };
+    totals.set(root, { bytes: previous.bytes + (end - start) + 1, paths: previous.paths + 1 });
+    start = end + 1;
+  }
+  return [...totals.entries()]
+    .sort((left, right) => right[1].bytes - left[1].bytes)
+    .slice(0, INVARIANT_SUITE_ENUMERATION_RANKED_ROOTS)
+    .map(([root, total]) => `${root} (>=${total.bytes} bytes in ${total.paths} path${total.paths === 1 ? "" : "s"})`)
+    .join(", ");
+}
 
 function invariantTestRoots(workspaceRoot: string): readonly string[] {
   const discovered = INVARIANT_TEST_ROOT_NAMES.filter((root) => {
@@ -3515,7 +3637,7 @@ function changedTestTreePaths(workspaceRoot: string, baselinePath?: string, prot
       ["diff", "--name-only", "HEAD", "--", "test", "tests"],
       ["ls-files", "--others", "--", "test", "tests"]
     ]) {
-      for (const value of execFileSync("git", args, { cwd: workspaceRoot, encoding: "utf8" }).split(/\r?\n/u)) {
+      for (const value of invariantSuiteGitPaths(workspaceRoot, args).split(/\r?\n/u)) {
         if (value.startsWith("test/") || value.startsWith("tests/")) {
           const candidate = path.resolve(workspaceRoot, value);
           if (!existsSync(candidate)) {
@@ -3555,7 +3677,7 @@ function changedInvariantSourcePaths(workspaceRoot: string): string[] {
       ["diff", "--name-only", "HEAD", "--", "src", "contracts"],
       ["ls-files", "--others", "--", "src", "contracts"]
     ]) {
-      for (const value of execFileSync("git", args, { cwd: workspaceRoot, encoding: "utf8" }).split(/\r?\n/u)) {
+      for (const value of invariantSuiteGitPaths(workspaceRoot, args).split(/\r?\n/u)) {
         if (!value.startsWith("src/") && !value.startsWith("contracts/")) continue;
         const relativePath = assertSafeInvariantSuitePath(value);
         const candidate = path.resolve(workspaceRoot, relativePath);
@@ -3581,10 +3703,14 @@ function changedInvariantSourcePaths(workspaceRoot: string): string[] {
 
 function gitTestTreePaths(workspaceRoot: string): string[] {
   const paths = new Set<string>();
-  for (const value of execFileSync("git", ["ls-files", "--cached", "--others", "--", "test", "tests"], {
-    cwd: workspaceRoot,
-    encoding: "utf8"
-  }).split(/\r?\n/u)) {
+  for (const value of invariantSuiteGitPaths(workspaceRoot, [
+    "ls-files",
+    "--cached",
+    "--others",
+    "--",
+    "test",
+    "tests"
+  ]).split(/\r?\n/u)) {
     if (value.startsWith("test/") || value.startsWith("tests/")) {
       const source = resolveRegularArtifactFile(
         workspaceRoot,

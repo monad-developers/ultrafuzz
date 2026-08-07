@@ -264,6 +264,11 @@ function loadWorkflowHelpers(
     restoreWorkspacePatchPreparation: () => undefined,
     prepareArtifactMirror: () => undefined,
     invariantTestRoots: () => [] as readonly string[],
+    // The discovery helpers capture through the template's bounded git wrapper (#323). Standing in for
+    // it keeps this harness on the same string the generated workflow sees; what the bound does when it
+    // is exceeded is pinned in invariant-suite-enumeration-overflow.test.ts.
+    invariantSuiteGitPaths: (workspaceRoot: string, args: readonly string[]) =>
+      execFileSync("git", [...args], { cwd: workspaceRoot, encoding: "utf8" }),
     gitTestTreePaths: (workspaceRoot: string) =>
       execFileSync("git", ["ls-files", "--cached", "--others", "--", "test", "tests"], {
         cwd: workspaceRoot,
