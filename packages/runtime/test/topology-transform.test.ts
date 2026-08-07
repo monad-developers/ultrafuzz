@@ -223,3 +223,23 @@ test("pruning the threat-model workstream leaves a valid, dependency-free produc
     "no vulnerability-database reference node may survive the prune"
   );
 });
+
+test("the dedupe prompt enumerates exactly the dependencies that produce findings", () => {
+  // Ledger coverage is checked against every dependency findings artifact the
+  // run produced, so a producer the prompt never names is unreachable and fails
+  // the node. Nothing else ties the prompt's enumeration to the topology.
+  const topology = loadTopology(REPOSITORY_ROOT, { requirePromptFiles: true });
+  const byId = new Map(topology.nodes.map((node) => [node.id, node]));
+  const producers = (byId.get("dedupe-findings")?.depends_on ?? [])
+    .filter((id) => (byId.get(id)?.outputs ?? []).some((output) => output.path === "findings.json"))
+    .sort();
+
+  const body = loadPromptCatalog({ projectRoot: REPOSITORY_ROOT }).entries.get("dedupe-findings")?.body ?? "";
+  const cited = [
+    ...new Set(
+      [...body.matchAll(/\{\{artifact_path:([a-z0-9-]+)\}\}\/findings\.json/gu)].map((match) => match[1] as string)
+    )
+  ].sort();
+
+  assert.deepEqual(cited, producers, "every findings producer must be enumerated in the dedupe prompt, and none twice");
+});

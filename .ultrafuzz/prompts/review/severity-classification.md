@@ -30,7 +30,9 @@ Finding lifecycle ledger:
 
 Write reportable severity records to
 {{artifact_path}}/severity-classified-findings.json as JSON. Each kept object
-must preserve upstream provenance fields and assign a stable `id`. Use
+must preserve upstream provenance fields and carry the upstream finding's `id`
+and `dedupe_key` through unchanged; provenance is matched on that identity, so
+never renumber a finding here. Use
 `schema_version: "1.0"` on every emitted finding object.
 Preserve each property-derived finding's `property_ids` unchanged.
 Preserve the complete upstream `source_nodes` discovery union and keep

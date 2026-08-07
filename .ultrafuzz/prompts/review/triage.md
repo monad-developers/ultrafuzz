@@ -153,8 +153,10 @@ Reachability fixture examples:
 }
 ```
 
-Do not remove findings during triage. Preserve the upstream finding fields and
-add or update `triage_classification` with the consensus value. Keep concise
+Do not remove findings during triage. Preserve the upstream finding fields,
+including `id` and `dedupe_key` unchanged, because provenance is matched on that
+identity and renumbering fails the node. Add or update `triage_classification`
+with the consensus value. Keep concise
 notes that summarize the votes, decisive evidence, and recommended next action.
 Every triaged finding must include a machine-readable `triage_reason=<reason>`
 or `classification_reason=<reason>` note. If triage demotes a previously

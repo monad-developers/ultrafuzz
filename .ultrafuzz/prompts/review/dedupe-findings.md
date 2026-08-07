@@ -9,7 +9,8 @@ Your job is to collapse duplicate findings that describe the same root behavior 
 
 Restart handling: if {{artifact_path}}/deduped-findings.json,
 {{artifact_path}}/findings.json, {{artifact_path}}/strategy-detections.json,
-and {{artifact_path}}/duplicates.json already exist, first validate their
+{{artifact_path}}/finding-lifecycle-ledger.json, and
+{{artifact_path}}/duplicates.json already exist, first validate their
 required JSON shapes (`deduped-findings.json`, `findings.json`, and
 `strategy-detections.json` are arrays; `duplicates.json` is an object or array).
 If those shapes are valid and the files do not clearly contradict the required
@@ -132,7 +133,8 @@ Dynamic generated-test manifest:
 Also consume every runtime-generated child of the threat/class goal groups plus
 the fixed roaming goal. Ultrafuzz renders one exact artifact path per generated
 node below, so read the enumerated paths and never guess a filesystem location,
-a group directory, or a node-ID pattern:
+a group directory, or a node-ID pattern. A group pruned from this run has its
+line removed and produces nothing to account for:
 
 Threat-goal findings: {{artifact_path:threat-goals}}/findings.json
 
@@ -203,11 +205,17 @@ property reference during deduplication.
 Treat each input finding's runtime-normalized `producer_node_id`,
 `source_nodes`, and compatibility `source_node_id` as provenance, not agent
 commentary. For every retained root, form a stable first-seen union of every
-contributing finding's `source_nodes` (or legacy `source_node_id`). Include all
-corroborating threat, class, roaming, and existing-strategy node IDs. Write the
+contributing finding's `source_nodes` (or legacy `source_node_id`). Write the
 union to `source_nodes` and its first entry to `source_node_id`; never replace
 the discovery sources with `dedupe-findings` or a dynamic group ID. Preserve
 the relevant source union on family variants and in duplicate audit records.
+
+A retained root's `source_nodes` must be exactly the set of `node_id` values in
+its own ledger record's `source_artifacts` — no more and no less. That includes
+the node of every family variant nested inside it, because those artifacts
+belong to the root's record. Do not add the node of a `related_findings` entry
+you deliberately did not merge, and do not add a corroborating node that has no
+`source_artifacts` entry in that record.
 
 For every deduped finding, preserve the strategy and loop-attempt provenance of
 the kept finding plus every matching duplicate or family variant for the same
@@ -228,7 +236,8 @@ rename this metric Temperature.
 
 Also save {{artifact_path}}/finding-lifecycle-ledger.json. It must be a JSON
 object with `schema_version: "1.0"` and a `records` array keyed by
-`dedupe_key`. For each deduped root/family, record:
+`dedupe_key`. Every record carries a `dedupe_key`, including the
+coverage-only ones described below. For each deduped root/family, record:
 
 - `source_artifacts`: every raw finding artifact that contributed to the kept
   root, duplicate, or family variant, with `path`, `node_id`, `finding_id`,
@@ -261,7 +270,9 @@ a generated child those differ from the ID the finding reports. Write
 A finding you judged unsupported still needs coverage. Give it its own ledger
 record with no retained finding rather than attaching it to an unrelated root,
 so no retained root's `source_artifacts` names a node that did not contribute
-to it.
+to it. That record still needs its own `dedupe_key`, and every `dedupe_key` in
+the ledger must be unique: two records sharing one are read as a single
+provenance claim and fail the node.
 
 After writing the required artifacts, run only a small number of direct JSON
 shape checks, then stop. Do not spend the finalization reserve on broad

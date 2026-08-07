@@ -48,7 +48,7 @@ as duplicates or speculation; the ledger is checked for exact coverage and a
 missing or doubly-claimed source fails the node. Give a finding you discarded as
 unsupported its own record with no retained finding rather than attaching it to
 an unrelated root, so no retained root names a node that did not contribute to
-it.
+it. Every record carries its own `dedupe_key`, and no two records may share one.
 
 Write each record's `dedupe_key` onto its retained finding in
 `deduped-findings.json` as that finding's own `dedupe_key` field, byte-for-byte
