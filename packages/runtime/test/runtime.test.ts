@@ -4607,6 +4607,104 @@ test("syncRun marks successful workflow completion, normalizes findings, and wri
   assert.match(events, /artifact-manifest-written/);
 });
 
+// Findings normalization rewrites findings.json in place, stamping the provenance the producer
+// omitted. The workflow verifier has already sealed the pre-normalization bytes into this attempt's
+// verification marker, and every dependent re-hashes the published file against that marker in
+// `assertVerifiedDependency`. A marker left describing bytes that no longer exist fails each
+// dependent's `prepare:` wrapper as `artifact-contract` before its agent runs -- which is exactly
+// what kept `dedupe-findings`, the only smoke-lane node whose dependencies publish findings.json,
+// red on all three targets in every toolchain (issue #348). The drift is not confined to producers
+// that reported findings: `writeJsonDurable` re-serializes with two-space indent and a trailing
+// newline, so even `[]` moves unless the producer already wrote exactly `[]\n`. What kept this
+// hidden is that no fixture drove normalization and a sealed marker together.
+test("syncRun re-seals the verification marker after it normalizes a producer's findings", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-findings-marker";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-findings-marker", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const runRoot = run.value!.run_root;
+  writeRequiredArtifactSet(runRoot, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const findingsPath = path.join(runRoot, "artifacts", "project-discovery", "findings.json");
+  const markdownPath = path.join(runRoot, "artifacts", "project-discovery", "setup", "project-discovery.md");
+  const sha = (filePath: string): string => crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+  // Exactly what the generated workflow's verifier publishes once the agent task succeeds.
+  const sealedFindings = sha(findingsPath);
+  const sealedMarkdown = sha(markdownPath);
+  const markerDir = path.join(runRoot, ".ultrafuzz-verification");
+  fs.mkdirSync(markerDir, { recursive: true });
+  const markerPath = path.join(markerDir, "project-discovery.json");
+  fs.writeFileSync(
+    markerPath,
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.artifact-verification.v1",
+      attempt_id: "project-discovery",
+      node_id: "project-discovery",
+      artifacts: [
+        {
+          path: "setup/project-discovery.md",
+          contract: "ultrafuzz/nonempty-markdown@1",
+          contract_digest: "a".repeat(64),
+          sha256: sealedMarkdown,
+          primary: true
+        },
+        {
+          path: "findings.json",
+          contract: "ultrafuzz/findings@1",
+          contract_digest: "b".repeat(64),
+          sha256: sealedFindings,
+          primary: false
+        }
+      ],
+      publications: [
+        { path: "setup/project-discovery.md", sha256: sealedMarkdown },
+        { path: "findings.json", sha256: sealedFindings }
+      ]
+    })}\n`,
+    "utf8"
+  );
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-findings-marker", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+
+  const normalizedFindings = sha(findingsPath);
+  assert.notEqual(normalizedFindings, sealedFindings, "normalization did not actually rewrite findings.json");
+  const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as {
+    artifacts: Array<{ path: string; sha256: string; contract?: string; contract_digest?: string; primary?: boolean }>;
+    publications: Array<{ path: string; sha256: string }>;
+  };
+  // Both sets a dependent re-checks now attest the bytes on disk.
+  for (const entries of [marker.artifacts, marker.publications]) {
+    assert.equal(entries.find((entry) => entry.path === "findings.json")?.sha256, normalizedFindings);
+    // Nothing the runtime did not rewrite may move.
+    assert.equal(entries.find((entry) => entry.path === "setup/project-discovery.md")?.sha256, sealedMarkdown);
+  }
+  const findingsArtifact = marker.artifacts.find((entry) => entry.path === "findings.json");
+  assert.equal(findingsArtifact?.contract, "ultrafuzz/findings@1");
+  assert.equal(findingsArtifact?.contract_digest, "b".repeat(64));
+  assert.equal(findingsArtifact?.primary, false);
+  // Re-sealing an attestation is a security-relevant edit, so it is recorded rather than silent.
+  const refreshed = sync.diagnostics.find((diagnostic) => diagnostic.code === "ARTIFACT_VERIFICATION_DIGEST_REFRESHED");
+  assert.ok(refreshed, JSON.stringify(sync.diagnostics));
+  assert.equal(refreshed.severity, "warning");
+  assert.equal(refreshed.source, "findings");
+  assert.deepEqual((refreshed.details as { previous_sha256?: string[] }).previous_sha256, [sealedFindings]);
+});
+
 test("syncRun marks task-output validation failures for terminal disposition", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
