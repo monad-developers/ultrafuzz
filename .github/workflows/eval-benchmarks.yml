@@ -675,8 +675,10 @@ jobs:
               elif [ "$smoke_model_soft_fail" = true ] && \
                 jq -e "$smoke_soft_fail_filter" "$outcome_file" > /dev/null; then
                 soft_fail_category="$(jq -r '.category' "$outcome_file")"
-                echo "::warning::Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate"
-                echo "Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate" >&2
+                readiness="$(node scripts/ci/describe-smoke-soft-fail.mjs \
+                  "$BENCHMARK_RESULTS/$pair/$slug/public-eval-diagnostics.json")"
+                echo "::warning::Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate — $readiness"
+                echo "Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate — $readiness" >&2
               else
                 echo "Modal pair $pair did not finish and collect successfully" >&2
                 matrix_failed=true
