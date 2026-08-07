@@ -39,8 +39,9 @@ export const BENCHMARK_DIFFERENTIAL_EXCLUDED_NODE_IDS = [
 ] as const;
 /**
  * Dynamic goal fanout expands one child per planned threat and per applicable
- * vulnerability class, so its cost is unbounded by the static graph. These IDs
- * exist in both the production topology and the dedicated smoke graph.
+ * vulnerability class, so its cost is unbounded by the static graph. They exist
+ * only in the production topology; the dedicated smoke graph declares no
+ * dynamic node at all, which is what keeps that lane comparable.
  */
 export const BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS = ["threat-goals", "class-goals"] as const;
 
@@ -82,6 +83,14 @@ export const BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES = [
   "differential",
   "dynamic-strategy"
 ] as const;
+/**
+ * What the smoke lane's three `disable_*` flags would prune from the PRODUCTION
+ * topology. The smoke lane itself never applies this: it runs a dedicated graph
+ * that omits all of these by construction and passes an empty exclusion list, so
+ * its execution-policy fingerprint stays equal to its published observations'.
+ * This set is the derivation those flags describe, and every ID in it exists in
+ * `.ultrafuzz/topology.yml`, not in `benchmarks/smoke-benchmark.yml`.
+ */
 export const BENCHMARK_SMOKE_EXCLUDED_NODE_IDS = [
   ...BENCHMARK_INVARIANT_EXCLUDED_NODE_IDS,
   ...BENCHMARK_DIFFERENTIAL_EXCLUDED_NODE_IDS,

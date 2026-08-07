@@ -114,9 +114,14 @@ variables, and both are required together:
 
 The token is attached as a per-fetch HTTP `extraheader` scoped to a repository
 on the allowlist, so it is never written to a config file, never sent to a
-repository the allowlist does not name, and is redacted from logs. Declaring
-repositories without supplying a token fails a Modal launch closed rather than
-silently falling back to an anonymous fetch that would 404.
+repository the allowlist does not name, and is redacted from logs.
+
+The two failure modes are deliberately asymmetric. Declaring repositories
+without supplying a token fails a Modal launch closed, because that combination
+can only mean a missing credential. Supplying a token without an allowlist is
+inert instead: the credential is simply never attached, since there is no
+repository it has been authorized for. A private reference then fetches
+anonymously and fails as not found, so set both variables or neither.
 
 ## Cache
 

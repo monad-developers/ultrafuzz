@@ -120,6 +120,14 @@ unbounded goal hunters, and stop being comparable with its earlier runs. Set
 `benchmark_execution.include_threat_model_goal_fanout` to `true` to measure
 them deliberately.
 
+The pruned lane executes the same graph it executed before these nodes existed,
+but `excluded_node_ids` is part of `benchmark_execution`, which is hashed into
+the execution-policy and cohort fingerprints. A curated lane's history therefore
+starts a new lineage group at the release that introduced these nodes even
+though its work is unchanged. Expect one discontinuity in a long-running
+comparison such as an invariant-only trend line, and read across it deliberately
+rather than treating it as a measured regression.
+
 ## Run the public benchmark workflow
 
 The checked-in GitHub workflow uses Actions only to build the candidate and as a

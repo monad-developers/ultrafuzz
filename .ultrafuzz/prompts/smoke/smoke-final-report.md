@@ -31,7 +31,9 @@ likelihood is Medium and otherwise High. Set both `severity` and
 include at least:
 
 - `schema_version: "1.0"`, stable `id`, concise `title`, `status`,
-  `severity_guess`, `confidence`, and `summary`;
+  `severity_guess`, `confidence`, and `summary`. Carry each issue's `id` and
+  `dedupe_key` through unchanged from its deduped finding; provenance is matched
+  on that identity, so renumbering issues fails the node;
 - `strategy` as one originating strategy string, affected files/functions, and
   concrete evidence;
 - `severity`, `impact`, `likelihood`, `description`, and a reproducible

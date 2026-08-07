@@ -228,9 +228,9 @@ An agentic node can act as a static template for work discovered by an upstream
 node at runtime:
 
 ```yaml
-- id: threat-hunters
+- id: threat-goals
   kind: agentic
-  prompt: strategies/threat-hunter.mdx
+  prompt: strategies/goal-hunter.mdx
   depends_on:
     - goal-plan
   dynamic:

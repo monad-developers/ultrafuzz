@@ -38,5 +38,12 @@ records its strategy and any available attempt/model/loop provenance.
 Write `{{artifact_path}}/finding-lifecycle-ledger.json` as an object with
 `schema_version: "1.0"` and `records`. Each record includes `dedupe_key`,
 `source_artifacts`, `strategy_hits`, and `stages` containing raw and deduped
-stages. Validate only JSON shape and required normalized-finding fields, then
-stop.
+stages.
+
+Every `source_artifacts` entry must carry `path`, `node_id`, and `finding_id`,
+where `node_id` is the producing node exactly as the upstream finding reports
+it and `finding_id` is that finding's own ID. Every upstream finding you read
+must appear exactly once across all records, including the ones you discarded
+as duplicates or speculation; the ledger is checked for exact coverage and a
+missing or doubly-claimed source fails the node. Validate only JSON shape and
+required normalized-finding fields, then stop.

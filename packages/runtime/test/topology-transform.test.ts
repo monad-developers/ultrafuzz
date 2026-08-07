@@ -104,3 +104,46 @@ test("the exact smoke exclusions produce a valid filtered production topology", 
   assert.equal(validation.effectiveLoopCounts["boundary-tests"], 1);
   assert.equal(validation.effectiveLoopCounts["encode-decode"], 1);
 });
+
+test("pruning the threat-model workstream leaves a valid, dependency-free production topology", () => {
+  // @ultrafuzz/evals owns THREAT_MODEL_GOAL_FANOUT_NODE_IDS and every curated
+  // private lane prunes exactly this set, but evals depends on runtime, so it
+  // cannot push the set through the real topology itself. Re-declare it here and
+  // prove the pruned graph still plans.
+  const threatModelWorkstream = [
+    "reference-vulnerability-database",
+    "threat-model",
+    "goal-roaming",
+    "threat-goals",
+    "class-goals",
+    "goal-plan"
+  ];
+  const transform = { strategyLoops: 1, excludedNodeIds: threatModelWorkstream };
+  const transformed = transformTopologyForRun(loadTopology(REPOSITORY_ROOT, { requirePromptFiles: true }), transform);
+  const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: REPOSITORY_ROOT }), transform);
+  validateTopology(transformed, {
+    projectRoot: REPOSITORY_ROOT,
+    requirePromptFiles: true,
+    promptTexts: promptTextsForCatalog(prompts)
+  });
+
+  // Completeness: if a later change adds another default-on node belonging to
+  // this workstream, it survives the prune and one of these catches it, rather
+  // than every curated lane silently widening.
+  const remaining = transformed.nodes;
+  assert.deepEqual(
+    remaining.filter((node) => node.dynamic !== undefined).map((node) => node.id),
+    [],
+    "no dynamic expansion may survive the prune"
+  );
+  assert.deepEqual(
+    remaining.filter((node) => node.group === "goals").map((node) => node.id),
+    [],
+    "the goals group must be empty after the prune"
+  );
+  assert.deepEqual(
+    remaining.filter((node) => node.kind === "reference" && node.reference?.startsWith("vulnerability-database")),
+    [],
+    "no vulnerability-database reference node may survive the prune"
+  );
+});

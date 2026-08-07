@@ -2240,7 +2240,14 @@ async function finalizeTerminalTask(input: {
     try {
       assertSynchronizationBudget(input.control);
       const preserveSourceNodes = isFindingTransformationNode(input.task.logicalNodeId);
-      const sourceProvenance = preserveSourceNodes ? dependencyFindingProvenanceForTask(input) : undefined;
+      const sourceProvenance = preserveSourceNodes
+        ? dependencyFindingProvenanceForTask({
+            layout: input.layout,
+            node: input.node,
+            task: input.task,
+            tasksByAttempt: input.tasksByAttempt
+          })
+        : undefined;
       const report = normalizeFindings({
         artifactDir,
         relativePath: output.path,
@@ -3410,13 +3417,28 @@ function isFindingTransformationNode(logicalNodeId: string): boolean {
   return ["dedupe-findings", "triage", "severity-classification", "final-report"].includes(logicalNodeId);
 }
 
+/** Mirrors `currentFindingLifecycleLedger` in the generated workflow template. */
+function readFindingLifecycleLedger(artifactDir: string): unknown | undefined {
+  const ledgerPath = path.resolve(artifactDir, "finding-lifecycle-ledger.json");
+  if (!fs.existsSync(ledgerPath)) return undefined;
+  const resolvedPath = safeResolveInside(artifactDir, "finding-lifecycle-ledger.json", "finding lifecycle ledger");
+  if (!fs.statSync(resolvedPath).isFile()) return undefined;
+  try {
+    return JSON.parse(fs.readFileSync(resolvedPath, "utf8")) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
 function dependencyFindingProvenanceForTask(input: {
   layout: RunLayout;
   node: PlannedGraphNode;
   task: StoredWorkflowTask;
+  tasksByAttempt: Map<string, StoredWorkflowTask>;
 }): { allowedSourceNodes: string[]; expectations: ReturnType<typeof buildFindingSourceExpectations> } {
   const upstream: Array<{ node_id: string; artifact_path: string; finding: unknown }> = [];
-  const artifactsParent = path.dirname(getNodeArtifactDir(input.layout, input.task.attemptId, { create: true }));
+  const artifactDir = getNodeArtifactDir(input.layout, input.task.attemptId);
+  const artifactsParent = path.dirname(artifactDir);
   const findingFiles = [
     "severity-classified-findings.json",
     "triaged-findings.json",
@@ -3425,8 +3447,16 @@ function dependencyFindingProvenanceForTask(input: {
     "findings.json"
   ];
   for (const dependencyId of input.task.dependencies) {
-    const dependencyRoot = getNodeArtifactDir(input.layout, dependencyId, { create: true });
+    const dependencyRoot = getNodeArtifactDir(input.layout, dependencyId);
+    if (!fs.existsSync(dependencyRoot)) continue;
     if (!isStrictlyInsideDirectory(artifactsParent, dependencyRoot)) continue;
+    // Findings name their producing node, not the attempt that stored them. A
+    // generated dynamic child stores under `dynamic-<group>-<hash>` but reports
+    // `dynamic:threat:<id>`, and the lifecycle ledger the agent writes cites the
+    // producer, so matching on the attempt ID would never resolve.
+    const dependencyTask = input.tasksByAttempt.get(dependencyId);
+    const producerNodeId =
+      dependencyTask?.metadata?.node?.producerNodeId ?? dependencyTask?.concreteNodeId ?? dependencyId;
     for (const fileName of findingFiles) {
       const findingPath = path.resolve(dependencyRoot, fileName);
       if (!fs.existsSync(findingPath)) continue;
@@ -3438,14 +3468,22 @@ function dependencyFindingProvenanceForTask(input: {
       );
       if (!validation.ok || !Array.isArray(validation.value)) continue;
       upstream.push(
-        ...validation.value.map((finding) => ({ node_id: dependencyId, artifact_path: resolvedPath, finding }))
+        ...validation.value.map((finding) => ({ node_id: producerNodeId, artifact_path: resolvedPath, finding }))
       );
       break;
     }
   }
+  // A dedupe root's `source_nodes` is the union of every upstream finding it
+  // merged, and only the lifecycle ledger says which those were. Rebuilding the
+  // expectations without it yields one single-source expectation per upstream
+  // finding, so a genuine merge matches none of them and this read-only
+  // re-validation would fail a node the authoritative in-workflow gate passed.
+  const requireLifecycleCoverage = input.task.logicalNodeId === "dedupe-findings";
+  const lifecycleLedger = requireLifecycleCoverage ? readFindingLifecycleLedger(artifactDir) : undefined;
   const expectations = buildFindingSourceExpectations({
     upstream,
-    requireLifecycleCoverage: input.task.logicalNodeId === "dedupe-findings"
+    ...(lifecycleLedger === undefined ? {} : { lifecycleLedger }),
+    requireLifecycleCoverage
   });
   return {
     allowedSourceNodes: [...new Set(expectations.flatMap((expectation) => expectation.source_nodes))],
