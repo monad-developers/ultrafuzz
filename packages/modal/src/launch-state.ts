@@ -588,6 +588,10 @@ function matchesWorkerAttempt(
 function workerResultCategory(contract: WorkerResultContract): ModalWorkerStatusCategory {
   if (contract.exit_category === "finished") return "succeeded";
   if (contract.exit_category === "genuine-evaluation-failure") return "genuine-task-outcome";
+  // Every code below names a fault the worker determined and reported about
+  // itself, so each classifies by the code. A worker that never named a fault
+  // exits `sandbox-exited` with the matching code and falls through to the
+  // exit-category rules; see `namedFaultDisposition` in `worker-result.ts`.
   if (contract.diagnostic_code === "terminal-run-non-resumable") return "permanent-operational-failure";
   if (contract.diagnostic_code === "checkpoint-incompatible") return "incompatible-checkpoint";
   if (contract.diagnostic_code === "public-eval-diagnostics-invalid") return "permanent-operational-failure";
@@ -732,6 +736,18 @@ export function reserveModalLaunchAttempt(input: {
   workspaceMode: ModalLaunchMode;
   postModelRecovery?: ModalPostModelRecovery;
   startReason?: ModalRecoveryStartReason;
+  /**
+   * What the caller durably observed about the attempt this reservation
+   * replaces, used when that attempt's lifecycle is still `active` and has to
+   * be force-closed here.
+   *
+   * The overseer relaunch path reads the outgoing attempt's worker status
+   * before it decides to relaunch and is the only writer of that record, so
+   * defaulting to `"unknown"` would make `modalPreModelAttempt` count every
+   * overseer relaunch as a pre-model flake and leave #267 unfixed for
+   * unattended runs.
+   */
+  observedModelWorkStarted?: boolean | "unknown";
   now?: string;
   attemptId?: string;
   /** Exit code observed on the attempt being replaced, when the caller probed its sandbox. */
@@ -757,12 +773,12 @@ export function reserveModalLaunchAttempt(input: {
         // sandbox at `stateful-invariant-setup` with no way to tell OOM from eviction from a clean exit
         // (issue #302).
         ...(input.observedWorkerExitCode === undefined ? {} : { workerExitCode: input.observedWorkerExitCode }),
-        modelWorkStarted: "unknown",
+        modelWorkStarted: input.observedModelWorkStarted ?? "unknown",
         progressMade: "unknown",
         controllerRequested: "unknown"
       });
     }
-    input.state.attempt_history.push(toAttemptProvenance(existing, input.state.fingerprints));
+    input.state.attempt_history.push(modalAttemptProvenance(existing, input.state.fingerprints));
   }
   const record: ModalLaunchRecord = {
     ...input.model,
@@ -842,6 +858,49 @@ export function markModalLaunchFailed(
   record.finished_at = now;
 }
 
+declare const modalPreModelAttemptBrand: unique symbol;
+
+/**
+ * A consecutive pre-model attempt streak, as produced by `modalPreModelAttempt`.
+ *
+ * The brand exists so `record.attempt` — the counter this budget used to be
+ * wrongly charged against — cannot be passed where a streak is required. Only
+ * `modalPreModelAttempt` produces the brand, so #267 cannot be reintroduced by a
+ * call site that looks plausible; it stops compiling instead.
+ */
+export type ModalPreModelAttempt = number & { readonly [modalPreModelAttemptBrand]: "pre-model-attempt" };
+
+/**
+ * How many consecutive attempts, ending at `record`, have failed to start model
+ * work in this generation.
+ *
+ * `record.attempt` counts every attempt a model has made in the current
+ * generation, including attempts that ran real model work and then asked for a
+ * durable resume. `MODAL_PRE_MODEL_RETRY_LIMIT` only bounds launch flakes that
+ * happen before model work, so it must be charged against this streak instead.
+ * The streak resets on an attempt whose recovery lifecycle definitely observed
+ * model work; an `"unknown"` observation does not reset it, which keeps the
+ * bound fail-closed against a zero-progress relaunch cycle. Every writer that
+ * closes an attempt lifecycle therefore has to record what it actually observed
+ * — see `reserveModalLaunchAttempt`'s `observedModelWorkStarted`.
+ */
+export function modalPreModelAttempt(
+  state: Pick<ModalLaunchState, "recovery_lifecycle">,
+  record: Pick<ModalLaunchRecord, "slug" | "generation" | "attempt">
+): ModalPreModelAttempt {
+  const lastModelWorkAttempt = state.recovery_lifecycle.reduce(
+    (latest, lifecycle) =>
+      lifecycle.model_slug === record.slug &&
+      lifecycle.generation === record.generation &&
+      lifecycle.attempt < record.attempt &&
+      lifecycle.model_work_started === true
+        ? Math.max(latest, lifecycle.attempt)
+        : latest,
+    0
+  );
+  return (record.attempt - lastModelWorkAttempt) as ModalPreModelAttempt;
+}
+
 export function markModalLaunchFailedWithRecovery(
   state: ModalLaunchState,
   record: ModalLaunchRecord,
@@ -855,7 +914,9 @@ export function markModalLaunchFailedWithRecovery(
   markModalLaunchFailed(record, category, input.now);
   return finishModalLaunchRecoveryLifecycle(state, record, {
     terminalReason:
-      category === "transient-operational-failure" && record.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT
+      category === "transient-operational-failure" &&
+      input.modelWorkStarted === false &&
+      modalPreModelAttempt(state, record) >= MODAL_PRE_MODEL_RETRY_LIMIT
         ? "recovery-budget-exhausted"
         : "operational-failure",
     finishedAt: record.finished_at!,
@@ -916,7 +977,8 @@ export interface ModalRunnerStatus {
 
 export function classifyModalRunnerStatus(input: {
   sandbox: ModalSandboxState;
-  attempt: number;
+  /** Consecutive attempts that never reached model work; see `modalPreModelAttempt`. */
+  preModelAttempt: ModalPreModelAttempt;
   workerStatus?: ModalWorkerStatus;
   launchFailure?: ModalLaunchFailureCategory;
   postModelRecovery?: "relaunch" | "stop";
@@ -950,15 +1012,22 @@ export function classifyModalRunnerStatus(input: {
   if (input.launchFailure === "permanent-operational-failure") {
     return status("permanent-operational-failure", "none", false, false, 0);
   }
-  if (input.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT) {
+  if (input.preModelAttempt >= MODAL_PRE_MODEL_RETRY_LIMIT) {
     return status("permanent-operational-failure", "none", false, false, 0);
   }
-  return status("transient-operational-failure", "relaunch", false, true, modalPreModelRetryDelay(input.attempt));
+  return status(
+    "transient-operational-failure",
+    "relaunch",
+    false,
+    true,
+    modalPreModelRetryDelay(input.preModelAttempt)
+  );
 }
 
 export function modalRecoveryTerminalReasonForWorkerStatus(input: {
   category: ModalRunnerStatusCategory | ModalWorkerStatusCategory;
-  attempt: number;
+  /** Consecutive attempts that never reached model work; see `modalPreModelAttempt`. */
+  preModelAttempt: ModalPreModelAttempt;
   modelWorkStarted: boolean;
   recoveryBudgetExhausted?: boolean;
 }): Exclude<ModalRecoveryTerminalReason, "active"> {
@@ -966,12 +1035,50 @@ export function modalRecoveryTerminalReasonForWorkerStatus(input: {
   if (input.category === "genuine-task-outcome") return "genuine-worker-failure";
   if (
     (input.recoveryBudgetExhausted === true || input.category === "transient-operational-failure") &&
-    input.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT &&
+    input.preModelAttempt >= MODAL_PRE_MODEL_RETRY_LIMIT &&
     !input.modelWorkStarted
   ) {
     return "recovery-budget-exhausted";
   }
   return "operational-failure";
+}
+
+/**
+ * Whether the pre-model launch budget is what stopped this attempt.
+ *
+ * Several categories reach `action: "none"` without spending a single
+ * pre-model retry: a worker-reported permanent failure, an incompatible
+ * checkpoint, a permanent launch failure, and `resume-required` under the
+ * stop-on-post-model policy that public benchmark configs use. Naming the
+ * budget on those paths is the same class of misdirection #267 is about.
+ */
+export function modalPreModelBudgetExhausted(input: {
+  category: ModalRunnerStatusCategory;
+  modelWorkStarted: boolean;
+  preModelAttempt: ModalPreModelAttempt;
+  workerCategory: ModalWorkerStatusCategory | undefined;
+  launchFailure: ModalLaunchFailureCategory | undefined;
+}): boolean {
+  return (
+    input.category === "permanent-operational-failure" &&
+    !input.modelWorkStarted &&
+    input.preModelAttempt >= MODAL_PRE_MODEL_RETRY_LIMIT &&
+    input.workerCategory !== "permanent-operational-failure" &&
+    input.launchFailure !== "permanent-operational-failure"
+  );
+}
+
+/** Names the budget position only when `modalPreModelBudgetExhausted` says the budget is the cause. */
+export function modalRunnerAbandonmentMessage(input: {
+  slug: string;
+  category: ModalRunnerStatusCategory;
+  preModelAttempt: ModalPreModelAttempt;
+  preModelBudgetExhausted: boolean;
+}): string {
+  const budget = input.preModelBudgetExhausted
+    ? ` (pre-model attempt ${input.preModelAttempt} of ${MODAL_PRE_MODEL_RETRY_LIMIT})`
+    : "";
+  return `Modal runner cannot relaunch ${input.slug}: ${input.category}${budget}`;
 }
 
 export function modalRecoveryFinishedAtForWorkerStatus(
@@ -1109,7 +1216,8 @@ export async function withModalLaunchStateLock<T>(
   return result as T;
 }
 
-function toAttemptProvenance(
+/** Snapshots a launch record for `attempt_history`, including its recovery policy. */
+export function modalAttemptProvenance(
   record: ModalLaunchRecord,
   fingerprints: ModalLineageFingerprints
 ): ModalAttemptProvenance {

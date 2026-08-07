@@ -224,6 +224,41 @@ test("pruning the threat-model workstream leaves a valid, dependency-free produc
   );
 });
 
+test("the invariant-only exclusions retain the whole stateful-invariant chain", () => {
+  // The inverse of the smoke exclusions: invariant-only campaigns drop every
+  // strategy except the stateful-invariant chain, so the retained chain still
+  // has to reach the review fan-in through its own surviving dependencies.
+  const source = loadTopology(REPOSITORY_ROOT, { requirePromptFiles: true });
+  const invariantNodeIds = source.nodes
+    .filter((node) => node.group === "strategies" && node.id.startsWith("stateful-invariant-"))
+    .map((node) => node.id);
+  const invariantOnlyExcludedNodeIds = source.nodes
+    .filter((node) => node.group === "strategies" && !invariantNodeIds.includes(node.id))
+    .map((node) => node.id);
+  const transform = { strategyLoops: 1, excludedNodeIds: invariantOnlyExcludedNodeIds };
+  const transformed = transformTopologyForRun(source, transform);
+  const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: REPOSITORY_ROOT }), transform);
+  const validation = validateTopology(transformed, {
+    projectRoot: REPOSITORY_ROOT,
+    requirePromptFiles: true,
+    promptTexts: promptTextsForCatalog(prompts)
+  });
+  const nodeIds = new Set(transformed.nodes.map((node) => node.id));
+
+  assert.ok(invariantNodeIds.length >= 5, "the shipped topology no longer declares a stateful-invariant chain");
+  assert.ok(invariantOnlyExcludedNodeIds.length > 0);
+  assert.ok(invariantNodeIds.every((id) => nodeIds.has(id)));
+  assert.ok(invariantOnlyExcludedNodeIds.every((id) => !nodeIds.has(id)));
+  assert.deepEqual(transformed.nodes.find((node) => node.id === "stateful-invariant-handlers")?.depends_on, [
+    "stateful-invariant-setup"
+  ]);
+  assert.ok(
+    transformed.nodes.find((node) => node.id === "dedupe-findings")?.depends_on.includes("stateful-invariant-campaign"),
+    "the review fan-in lost its only surviving strategy dependency"
+  );
+  for (const id of invariantNodeIds) assert.equal(validation.effectiveLoopCounts[id], 1);
+});
+
 function assertDedupePromptEnumeratesProducers(topologyPath: string | undefined, promptId: string): void {
   const topology = loadTopology(REPOSITORY_ROOT, {
     requirePromptFiles: true,

@@ -145,6 +145,13 @@ export interface InvariantConfig {
   propertyPriorityThreshold: "high" | "medium" | "low";
   invariantTestingSmokeTimeoutSeconds: number;
   invariantTestingFuzzerTimeoutSeconds: number;
+  /**
+   * How the property-lens provenance gate treats a reference expectation absent from a supplied
+   * catalogue (issue #285). `warn` strips it and reports a warning; `fail` leaves the lens bytes
+   * intact and fails the node. Omitted means `warn`, and it stays `warn` until a smoke lane has
+   * been observed on a run that actually supplies a catalogue.
+   */
+  referenceExpectationEnforcement?: "warn" | "fail";
 }
 
 export interface TriageConfig {

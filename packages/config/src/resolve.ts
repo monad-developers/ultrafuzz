@@ -111,7 +111,8 @@ const resolvedConfigValidationSchema = z
       .object({
         propertyPriorityThreshold: z.enum(["high", "medium", "low"]),
         invariantTestingSmokeTimeoutSeconds: timeoutSecondsSchema,
-        invariantTestingFuzzerTimeoutSeconds: timeoutSecondsSchema
+        invariantTestingFuzzerTimeoutSeconds: timeoutSecondsSchema,
+        referenceExpectationEnforcement: z.enum(["warn", "fail"]).optional()
       })
       .passthrough(),
     permissions: z
@@ -242,7 +243,8 @@ export function serializeResolvedConfigToml(config: ResolvedConfig): string {
   pushTable(lines, "invariants", {
     property_priority_threshold: clone.invariants.propertyPriorityThreshold,
     invariant_testing_smoke_timeout: formatDurationSeconds(clone.invariants.invariantTestingSmokeTimeoutSeconds),
-    invariant_testing_fuzzer_timeout: formatDurationSeconds(clone.invariants.invariantTestingFuzzerTimeoutSeconds)
+    invariant_testing_fuzzer_timeout: formatDurationSeconds(clone.invariants.invariantTestingFuzzerTimeoutSeconds),
+    reference_expectation_enforcement: clone.invariants.referenceExpectationEnforcement
   });
   pushTable(lines, "triage", {
     quorum: clone.triage.quorum,
@@ -653,6 +655,8 @@ function resolvedConfigDiagnosticCode(issue: ZodIssue): string {
       return "CONFIG_WORKSPACE_MODE_INVALID";
     case "invariants.property_priority_threshold":
       return "CONFIG_INVARIANT_PRIORITY_INVALID";
+    case "invariants.reference_expectation_enforcement":
+      return "CONFIG_REFERENCE_EXPECTATION_ENFORCEMENT_INVALID";
     case "permissions.trust_model":
       return "CONFIG_TRUST_MODEL_INVALID";
     default:
@@ -677,6 +681,8 @@ function resolvedConfigDiagnosticMessage(code: string, issue: ZodIssue, config: 
       return `run.workspace_mode \`${String(valueAtPath(config, issue.path))}\` is not supported`;
     case "CONFIG_INVARIANT_PRIORITY_INVALID":
       return "invariants.property_priority_threshold must be high, medium, or low";
+    case "CONFIG_REFERENCE_EXPECTATION_ENFORCEMENT_INVALID":
+      return "invariants.reference_expectation_enforcement must be warn or fail";
     case "CONFIG_TRUST_MODEL_INVALID":
       return "permissions.trust_model must be skip-permissions";
     default:
@@ -730,6 +736,8 @@ function configPathSegment(segment: string): string {
       return "invariant_testing_smoke_timeout";
     case "invariantTestingFuzzerTimeoutSeconds":
       return "invariant_testing_fuzzer_timeout";
+    case "referenceExpectationEnforcement":
+      return "reference_expectation_enforcement";
     case "trustModel":
       return "trust_model";
     default:

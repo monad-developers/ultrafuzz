@@ -6,9 +6,10 @@ import path from "node:path";
 
 import { normalizeWorkspacePatchPath } from "@ultrafuzz/artifacts";
 
+import { MAX_GIT_CAPTURE_BYTES, MAX_PATCH_BYTES, rethrowOversizedGitOutput } from "./git-capture-diagnostics.js";
+
 const WORKSPACE_PATCH_SCHEMA_VERSION = "ultrafuzz.workspace-patch.v1" as const;
 const GIT_OBJECT_ID = /^[0-9a-f]{40,64}$/u;
-const MAX_PATCH_BYTES = 16 * 1024 * 1024;
 const SENSITIVE_SEGMENTS = new Set([
   ".git",
   ".ultrafuzz",
@@ -44,7 +45,7 @@ const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "art
  *   output[3]: "diff --git a/echidna/coverage/4247432111492442234.txt ..."
  *
  * `captureWorkspacePatch` runs `git diff --cached --binary` over the staged tree, and with corpus
- * enumerated that diff exceeded `runGit`'s `maxBuffer` of `MAX_PATCH_BYTES * 2`. Note the ordering: above
+ * enumerated that diff exceeded `runGit`'s `maxBuffer` of `MAX_GIT_CAPTURE_BYTES`. Note the ordering: above
  * 32 MB the ENOBUFS fires inside `runGit` BEFORE the `MAX_PATCH_BYTES` check below can produce a clean
  * error, so the clean-error window is only 16-32 MB. Excluding these roots keeps the diff under it.
  *
@@ -114,7 +115,41 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
     const resultTree = runGit(workspaceRoot, ["write-tree"], index).trim();
     const patch = runGit(
       workspaceRoot,
-      ["diff", "--cached", "--binary", "--no-ext-diff", "--no-renames", baselineTree],
+      // Every flag after `--no-renames` pins some part of the output format against inherited git
+      // config. `git` reads the system and user config files, and nothing in the sandbox image
+      // guarantees any of these are unset. All verified on git 2.43:
+      //
+      //   `--src-prefix`/`--dst-prefix`  `diff.noprefix` renders `diff --git x x` and
+      //                                  `diff.mnemonicPrefix` renders `diff --git c/x i/x`.
+      //   `--no-color`                   `color.ui=always` prefixes the header with an ANSI escape,
+      //                                  `\e[1mdiff --git a/x b/x\e[m`.
+      //   `-U3`                          `diff.context=0` emits no context lines at all (measured: 0
+      //                                  where the default emits 6).
+      //   `--no-textconv`                a `diff.<driver>.textconv` from `core.attributesFile` replaces
+      //                                  the patch BODY with the driver's output.
+      //
+      // None of these is only an attribution problem. `git apply` defaults to `-p1` and rejects a
+      // coloured header outright (`No valid patches in input`), and zero-context hunks fail to apply.
+      //
+      // textconv splits by change shape, and the split matters. For a MODIFIED tracked file the patch
+      // simply fails to apply (`error: middle.txt: patch does not apply`) -- loud, and caught here. For
+      // an ADDED file it applies cleanly and installs the driver's output as the file's content, which
+      // is the dangerous half: it surfaces downstream as a result-tree mismatch with nothing pointing
+      // back at this line. An earlier version of this comment claimed the second behaviour for both
+      // cases; only the added-file half was measured, and only that half is true.
+      [
+        "diff",
+        "--cached",
+        "--binary",
+        "--no-ext-diff",
+        "--no-renames",
+        "--no-textconv",
+        "--no-color",
+        "-U3",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        baselineTree
+      ],
       index
     );
     const names = runGit(workspaceRoot, ["diff", "--cached", "--name-only", "-z", baselineTree], index);
@@ -140,7 +175,30 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
 }
 
 /** Apply one validated dependency patch to a clean downstream worktree. */
-export function applyWorkspacePatch(workspaceRoot: string, capture: WorkspacePatchCapture): void {
+/**
+ * Every check on a capture that does not depend on the worktree it will be applied to.
+ *
+ * Split out of `applyWorkspacePatch` so a caller that decides NOT to apply a patch can still validate it.
+ * A replaying caller may legitimately skip a patch whose content the worktree already holds (issue #312),
+ * and before this existed, skipping meant the manifest schema, the digest, the object ids and the
+ * sensitive-path rejection were never checked for that dependency at all — so a manifest naming `.env`,
+ * or a `patch_sha256` that does not match its bytes, would be accepted in silence. Worse, the skip
+ * decision itself reads `result_tree`, so an unvalidated field was steering it.
+ *
+ * These are the checks that need nothing but the capture and the repository's `HEAD`. The rest —
+ * `assertPatchPathsMatchManifest`, the empty-patch consistency check and the result-tree verification —
+ * stay in `applyWorkspacePatch` because they are meaningful only against a worktree the patch is being
+ * applied to. So a SKIPPED capture is validated less thoroughly than an applied one: its manifest cannot
+ * name a sensitive path, but nothing cross-checks the paths in its patch BODY against that manifest. That
+ * is acceptable only because the body is never applied, and it is stated here so the guarantee is not
+ * read as broader than it is.
+ *
+ * A caller that validates every capture up front and then applies some of them will validate those twice.
+ * That is deliberate, not an oversight: the skip decision reads `result_tree`, so validation has to
+ * precede the decision, and re-running it inside `applyWorkspacePatch` keeps that function safe for any
+ * caller. Every check here is pure and idempotent; the cost is one extra digest and one extra `rev-parse`.
+ */
+export function validateWorkspacePatchCapture(workspaceRoot: string, capture: WorkspacePatchCapture): void {
   validateManifest(capture.manifest);
   if (Buffer.byteLength(capture.patch, "utf8") > MAX_PATCH_BYTES) {
     throw new Error(`workspace patch exceeds ${MAX_PATCH_BYTES} bytes`);
@@ -148,10 +206,21 @@ export function applyWorkspacePatch(workspaceRoot: string, capture: WorkspacePat
   if (sha256(capture.patch) !== capture.manifest.patch_sha256) {
     throw new Error("workspace patch digest mismatch");
   }
+  if (/\b(?:new|old) file mode (?:120000|160000)\b|\b(?:new|old) mode 160000\b/u.test(capture.patch)) {
+    throw new Error("workspace patch contains a symlink or submodule entry");
+  }
+  // The pinned commit is part of the contract, not of the application: a dependency captured against a
+  // different `HEAD` describes a different target, and that is worth rejecting whether or not this patch
+  // is going to be applied. A caller that skips a patch because the worktree already holds its content
+  // would otherwise never notice the target had been re-pinned between attempts.
   const head = runGit(workspaceRoot, ["rev-parse", "HEAD"]).trim();
   if (head !== capture.manifest.base_commit) {
     throw new Error(`workspace patch base commit mismatch: expected ${capture.manifest.base_commit}, got ${head}`);
   }
+}
+
+export function applyWorkspacePatch(workspaceRoot: string, capture: WorkspacePatchCapture): void {
+  validateWorkspacePatchCapture(workspaceRoot, capture);
   const currentTree = captureWorkspaceTree(workspaceRoot);
   if (currentTree === capture.manifest.result_tree) return;
   if (currentTree !== capture.manifest.base_tree) {
@@ -163,9 +232,6 @@ export function applyWorkspacePatch(workspaceRoot: string, capture: WorkspacePat
       throw new Error("workspace patch is empty but changes are declared");
     }
     return;
-  }
-  if (/\b(?:new|old) file mode (?:120000|160000)\b|\b(?:new|old) mode 160000\b/u.test(capture.patch)) {
-    throw new Error("workspace patch contains a symlink or submodule entry");
   }
   runGit(workspaceRoot, ["apply", "--check", "--binary", "--whitespace=nowarn", "-"], undefined, capture.patch);
   runGit(workspaceRoot, ["apply", "--binary", "--whitespace=nowarn", "-"], undefined, capture.patch);
@@ -462,17 +528,60 @@ function withTemporaryIndex<T>(workspaceRoot: string, callback: (index: string) 
 
 function runGit(workspaceRoot: string, args: string[], index?: string, input?: string | Buffer): string {
   const env = index === undefined ? undefined : { ...process.env, GIT_INDEX_FILE: index };
-  return execFileSync("git", args, {
-    cwd: workspaceRoot,
-    encoding: "utf8",
-    env,
-    input,
-    maxBuffer: MAX_PATCH_BYTES * 2
-  });
+  try {
+    // Decode HERE rather than passing `encoding: "utf8"`. The success path is identical either way --
+    // this is the same decode Node would have done -- but the failure path is not. With `encoding` set,
+    // Node decodes before it throws, so `error.stdout` reaches the diagnostic as a string in which every
+    // undecodable byte has ALREADY become U+FFFD; re-encoding that string then counts three bytes for
+    // one, which inverts the contributor ranking and overstates a figure documented as a floor. Since
+    // `captureWorkspacePatch` takes the diff through here, that was the only path the diagnostic has
+    // ever actually fired on. Omitting `encoding` hands it the raw bytes instead.
+    return execFileSync("git", args, {
+      cwd: workspaceRoot,
+      env,
+      input,
+      maxBuffer: MAX_GIT_CAPTURE_BYTES
+    }).toString("utf8");
+  } catch (error) {
+    // Only the ENOBUFS path wants raw bytes. Every OTHER git failure becomes a durable failure record,
+    // and `errorToJson` expands a Buffer into one JSON key per byte: measured 704 chars with `encoding`
+    // set against 1458 without, for 51 bytes of stderr, scaling linearly from there. A megabyte of git
+    // warnings would serialize to tens of megabytes — the exact class of blow-up this change set exists
+    // to stop, so dropping `encoding` must not reintroduce it through the back door.
+    if ((error as { code?: unknown }).code !== "ENOBUFS") decodeSpawnCaptures(error);
+    return rethrowOversizedGitOutput(args, error);
+  }
+}
+
+/**
+ * Puts a `spawnSync` failure's captures back into the string form `encoding: "utf8"` would have produced.
+ *
+ * `runGit` deliberately omits `encoding` so the ENOBUFS handler receives the bytes git actually wrote.
+ * That is the only caller that benefits, and the cost is paid by every other failure, so it is undone
+ * here for all of them. `error.message` is unaffected either way — Node interpolates stderr into it
+ * before throwing, and a Buffer stringifies identically (verified).
+ */
+function decodeSpawnCaptures(error: unknown): void {
+  if (!(error instanceof Error)) return;
+  const record = error as unknown as Record<string, unknown>;
+  for (const field of ["stdout", "stderr"]) {
+    const value = record[field];
+    if (Buffer.isBuffer(value)) record[field] = value.toString("utf8");
+  }
+  if (Array.isArray(record.output)) {
+    record.output = record.output.map((entry) => (Buffer.isBuffer(entry) ? entry.toString("utf8") : entry));
+  }
 }
 
 /** Byte-exact git output, for path lists that may not be valid UTF-8. */
 function runGitBuffer(workspaceRoot: string, args: string[], index?: string): Buffer {
   const env = index === undefined ? undefined : { ...process.env, GIT_INDEX_FILE: index };
-  return execFileSync("git", args, { cwd: workspaceRoot, env, maxBuffer: MAX_PATCH_BYTES * 2 });
+  try {
+    return execFileSync("git", args, { cwd: workspaceRoot, env, maxBuffer: MAX_GIT_CAPTURE_BYTES });
+  } catch (error) {
+    // Safe to wrap now that the diagnostic reads the error instead of re-running git: it cannot recurse
+    // back into here. A path listing this large has no diff headers to attribute, so it degrades to the
+    // sized message, which still beats a bare `spawnSync git ENOBUFS`.
+    return rethrowOversizedGitOutput(args, error);
+  }
 }

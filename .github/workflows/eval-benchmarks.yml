@@ -637,6 +637,13 @@ jobs:
         run: |
           matrix_failed=false
           smoke_model_soft_fail=false
+          # A failed pair is scoring evidence only when the target itself
+          # produced the outcome. Every other category reports that the
+          # benchmark plane broke, so on a non-default branch it must stay
+          # visible without gating an unrelated PR. Stated once here so a new
+          # operational category cannot silently fall outside it, as
+          # permanent-operational-failure did after #255.
+          smoke_soft_fail_filter='.terminal_status == "failed" and .category != "genuine-task-outcome"'
           if [ "$BENCHMARK_MODE" = smoke ] && \
             [ "$CI_EVENT_NAME" = push ] && \
             [ "$CI_REF_NAME" != "$CI_DEFAULT_BRANCH" ]; then
@@ -669,9 +676,10 @@ jobs:
                   matrix_failed=true
                 fi
               elif [ "$smoke_model_soft_fail" = true ] && \
-                jq -e '.terminal_status == "failed" and .category == "resume-required" and .diagnostic_collection_status == "succeeded"' \
-                  "$outcome_file" > /dev/null; then
-                echo "Modal smoke pair $pair preserved diagnostics after model work; not blocking non-default branch smoke gate" >&2
+                jq -e "$smoke_soft_fail_filter" "$outcome_file" > /dev/null; then
+                soft_fail_category="$(jq -r '.category' "$outcome_file")"
+                echo "::warning::Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate"
+                echo "Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate" >&2
               else
                 echo "Modal pair $pair did not finish and collect successfully" >&2
                 matrix_failed=true

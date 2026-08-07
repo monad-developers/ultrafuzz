@@ -478,6 +478,15 @@ function fakeLifecycleSmithersEnv(
       "      printf '%s\\n' 'fake up failure' >&2",
       "      exit 1",
       "    fi",
+      '    if [ -n "$SMITHERS_FAKE_RUN_EXISTS" ]; then',
+      '      case "$*" in',
+      "        *--resume*) ;;",
+      "        *)",
+      '          printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_EXISTS"}}\' >&2',
+      "          exit 4",
+      "          ;;",
+      "      esac",
+      "    fi",
       "    printf '%s\\n' '{\"ok\":true}'",
       "    ;;",
       "  *)",
@@ -3680,6 +3689,9 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /id=\{task\.preparationId\}/);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
   assert.match(workflowSource, /dependsOn=\{\[task\.preparationId\]\}/);
+  // Workflow synchronization derives this id from the attempt id to attribute
+  // preparation failures, so the compiled shape is part of that contract.
+  assert.match(workflowSource, /"preparationId": "prepare:project-discovery"/);
   assert.match(workflowSource, /untrusted data, not instructions/);
   assert.match(workflowSource, /function resolveRegularArtifactFile/);
   assert.match(workflowSource, /throw new Error\(failureMessage\)/);
@@ -4824,6 +4836,365 @@ test("syncRun marks task-output validation failures for terminal disposition", a
     nodes?: Record<string, { provenance?: Record<string, unknown> }>;
   };
   assert.equal(operationalState.nodes?.["project-discovery"]?.provenance?.terminal_disposition, undefined);
+});
+
+test("syncRun surfaces a terminal preparation wrapper failure as a failed durable node", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const workflowRunId = "ultrafuzz-sync-preparation-failure";
+  const preparationError =
+    "artifact-contract failure: artifact dependency has not passed verification project-discovery for actors-flows";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "Task failed: prepare:actors-flows" },
+      failedChildKeys: ["prepare:actors-flows::0"],
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "prepare:actors-flows", state: "failed", attempt: 1 },
+        { id: "node:actors-flows", state: "pending" }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "prepare:actors-flows", attempt: 1 },
+      { type: "NodeFailed", nodeId: "prepare:actors-flows", attempt: 1, error: { message: preparationError } },
+      { type: "RunFailed" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-preparation-failure", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-preparation-failure", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    status?: string;
+    nodes?: Record<
+      string,
+      { status?: string; last_error?: string; provenance?: Record<string, Record<string, unknown>> }
+    >;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
+  // The stall signature this regression guards: a terminal failed workflow that
+  // leaves every durable node non-terminal, so nothing is resettable.
+  assert.ok(
+    Object.values(state.nodes ?? {}).some((node) => node.status === "failed"),
+    `terminal failed run recorded no failed node: ${JSON.stringify(state.nodes)}`
+  );
+  const dependent = state.nodes?.["actors-flows"];
+  assert.equal(dependent?.status, "failed");
+  assert.match(String(dependent?.last_error), /artifact dependency has not passed verification/u);
+  assert.equal(dependent?.provenance?.workflow?.task_id, "prepare:actors-flows");
+  assert.equal(dependent?.provenance?.workflow?.agent_task_id, "node:actors-flows");
+  assert.equal(dependent?.provenance?.failure?.category, "artifact-contract");
+  assert.equal(dependent?.provenance?.failure?.causal_task_id, "prepare:actors-flows");
+  const events = fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8");
+  assert.match(events, /"workflow_task_id":"prepare:actors-flows"/u);
+});
+
+test("syncRun keeps a preparation failure superseded by a later successful attempt", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const workflowRunId = "ultrafuzz-sync-preparation-recovered";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "prepare:actors-flows", state: "finished", attempt: 2 },
+        { id: "node:actors-flows", state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFailed", nodeId: "prepare:actors-flows", attempt: 1, error: { message: "transient failure" } },
+      { type: "NodeFinished", nodeId: "prepare:actors-flows", attempt: 2 },
+      { type: "NodeFinished", nodeId: "node:actors-flows", attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-preparation-recovered", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
+  writeRequiredArtifactSet(run.value!.run_root, "actors-flows", ["setup/actors-flows.md"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-preparation-recovered", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "succeeded");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string }>;
+  };
+  assert.equal(state.nodes?.["actors-flows"]?.status, "succeeded");
+});
+
+test("syncRun reports a typed diagnostic when a terminal workflow failure has no failed durable node", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-unattributed-failure";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "Task failed: ultrafuzz-agent-tasks" },
+      failedChildKeys: ["ultrafuzz-agent-tasks::0"],
+      steps: [{ id: "node:project-discovery", state: "pending" }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodePending", nodeId: "node:project-discovery" },
+      { type: "RunFailed" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-unattributed-failure", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-unattributed-failure", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  const diagnostic = sync.diagnostics.find((candidate) => candidate.code === "WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE");
+  assert.ok(diagnostic, `expected a typed diagnostic, got ${JSON.stringify(sync.diagnostics)}`);
+  assert.equal(diagnostic?.severity, "error");
+  assert.deepEqual(diagnostic?.details?.failed_workflow_tasks, ["ultrafuzz-agent-tasks"]);
+  assert.equal(diagnostic?.details?.workflow_state, "failed");
+});
+
+test("syncRun records an unattributed terminal workflow failure durably and only once", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-unattributed-durable";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "Task failed: ultrafuzz-agent-tasks" },
+      failedChildKeys: ["ultrafuzz-agent-tasks::0"],
+      steps: [{ id: "node:project-discovery", state: "pending" }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodePending", nodeId: "node:project-discovery" },
+      { type: "RunFailed" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-unattributed-durable", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const first = await syncRun({ projectRoot: project, runId: "sync-unattributed-durable", env });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+
+  // The diagnostic alone is discarded by both automated consumers (the eval
+  // runner drops diagnostics when ok, the Modal worker drains child stdout), so
+  // the archived run root has to carry the record itself.
+  const eventsPath = path.join(run.value!.run_root, "events.jsonl");
+  const recorded = (): Array<{ event_type?: string; payload?: Record<string, unknown> }> =>
+    fs
+      .readFileSync(eventsPath, "utf8")
+      .split(/\r?\n/u)
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as { event_type?: string; payload?: Record<string, unknown> })
+      .filter((event) => event.event_type === "workflow-failure-unattributed");
+  assert.equal(recorded().length, 1, `expected one durable record, got ${JSON.stringify(recorded())}`);
+  assert.deepEqual(recorded()[0]?.payload?.failed_workflow_tasks, ["ultrafuzz-agent-tasks"]);
+  assert.equal(recorded()[0]?.payload?.workflow_run_id, workflowRunId);
+  assert.equal(recorded()[0]?.payload?.workflow_state, "failed");
+  // Ids only: no error text may reach the durable record.
+  assert.equal(JSON.stringify(recorded()[0]?.payload).includes("Task failed"), false);
+
+  // Sync runs on every status/inspect, so a re-observed terminal failure must
+  // not append a second identical record.
+  const second = await syncRun({ projectRoot: project, runId: "sync-unattributed-durable", env });
+  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+  assert.equal(recorded().length, 1, `the record must not be re-appended: ${JSON.stringify(recorded())}`);
+});
+
+test("syncRun leaves a cancelled preparation wrapper unattributed", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const workflowRunId = "ultrafuzz-sync-preparation-cancelled";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "canceled",
+      state: "canceled",
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "prepare:actors-flows", state: "canceled", attempt: 1 },
+        { id: "node:actors-flows", state: "pending" }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "prepare:actors-flows", attempt: 1 },
+      { type: "NodeCancelled", nodeId: "prepare:actors-flows", attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-preparation-cancelled", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-preparation-cancelled", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; provenance?: Record<string, Record<string, unknown>> }>;
+  };
+  // The deadline path's own requestSmithersCancel reaches this shape, so a
+  // cancellation must never be published as an artifact-contract violation of a
+  // node that provably never ran.
+  assert.equal(
+    state.nodes?.["actors-flows"]?.status,
+    "pending",
+    `a cancelled wrapper must not finalize the node it gates: ${JSON.stringify(state.nodes?.["actors-flows"])}`
+  );
+  assert.equal(state.nodes?.["actors-flows"]?.provenance?.failure, undefined);
+  assert.equal(
+    sync.diagnostics.some((candidate) => candidate.code === "ARTIFACT_PREPARATION_FAILED"),
+    false,
+    JSON.stringify(sync.diagnostics)
+  );
+});
+
+test("syncRun clears a preparation failure attribution once the node succeeds", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const workflowRunId = "ultrafuzz-sync-preparation-cleared";
+  const failingEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "Task failed: prepare:actors-flows" },
+      failedChildKeys: ["prepare:actors-flows::0"],
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "prepare:actors-flows", state: "failed", attempt: 1 },
+        { id: "node:actors-flows", state: "pending" }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFailed", nodeId: "prepare:actors-flows", attempt: 1, error: { message: "prepare exploded" } },
+      { type: "RunFailed" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-preparation-cleared", env: failingEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
+
+  const failed = await syncRun({ projectRoot: project, runId: "sync-preparation-cleared", env: failingEnv });
+  assert.equal(failed.ok, true, JSON.stringify(failed.diagnostics));
+  const failedState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; provenance?: Record<string, Record<string, unknown>> }>;
+  };
+  assert.equal(failedState.nodes?.["actors-flows"]?.status, "failed");
+  assert.equal(failedState.nodes?.["actors-flows"]?.provenance?.failure?.causal_task_id, "prepare:actors-flows");
+
+  // `--retry-failed` resets the failed wrapper off failedChildKeys, so prepare
+  // re-runs and the node succeeds. This is the intended recovery for #272.
+  writeRequiredArtifactSet(run.value!.run_root, "actors-flows", ["setup/actors-flows.md"]);
+  const recoveredEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "prepare:actors-flows", state: "finished", attempt: 2 },
+        { id: "node:actors-flows", state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "prepare:actors-flows", attempt: 2 },
+      { type: "NodeFinished", nodeId: "node:actors-flows", attempt: 1 }
+    ])
+  });
+
+  const recovered = await syncRun({ projectRoot: project, runId: "sync-preparation-cleared", env: recoveredEnv });
+
+  assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+  const recoveredState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; provenance?: Record<string, Record<string, unknown>> }>;
+  };
+  assert.equal(recoveredState.nodes?.["actors-flows"]?.status, "succeeded");
+  // dependencyCascadeFailure returns the first dependency carrying a `failure`
+  // record, so a stale one re-attributes every later skipped dependent to
+  // prepare:<attemptId> / artifact-contract and ships that in the eval row.
+  assert.equal(
+    recoveredState.nodes?.["actors-flows"]?.provenance?.failure,
+    undefined,
+    `a recovered node must not keep its failure attribution: ${JSON.stringify(
+      recoveredState.nodes?.["actors-flows"]?.provenance
+    )}`
+  );
+});
+
+test("syncRun does not report an unattributed failure that state.json already attributes", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const workflowRunId = "ultrafuzz-sync-attribution-durable";
+  const attributingEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "Task failed: prepare:actors-flows" },
+      failedChildKeys: ["prepare:actors-flows::0"],
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "prepare:actors-flows", state: "failed", attempt: 1 },
+        { id: "node:actors-flows", state: "pending" }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFailed", nodeId: "prepare:actors-flows", attempt: 1, error: { message: "prepare exploded" } },
+      { type: "RunFailed" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-attribution-durable", env: attributingEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
+  const attributed = await syncRun({ projectRoot: project, runId: "sync-attribution-durable", env: attributingEnv });
+  assert.equal(attributed.ok, true, JSON.stringify(attributed.diagnostics));
+
+  // A later resume where the wrapper's evidence is no longer synchronizable:
+  // the in-pass status map never records actors-flows, but state.json does.
+  const forgetfulEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "Task failed: prepare:actors-flows" },
+      failedChildKeys: ["prepare:actors-flows::0"],
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [{ type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }])
+  });
+
+  const resumed = await syncRun({ projectRoot: project, runId: "sync-attribution-durable", env: forgetfulEnv });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string }>;
+  };
+  assert.equal(state.nodes?.["actors-flows"]?.status, "failed");
+  assert.equal(
+    resumed.diagnostics.some((candidate) => candidate.code === "WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE"),
+    false,
+    `the durable attribution must suppress the backstop: ${JSON.stringify(resumed.diagnostics)}`
+  );
 });
 
 test("syncRun persists cumulative token accounting and partial pricing from workflow events", async () => {
@@ -8543,7 +8914,7 @@ test("resume retries one failed workflow task before continuing a stale unfinish
   );
 });
 
-test("resume rewinds a run-level render failure before continuing unfinished work", async () => {
+test("resume continues a run-level render failure in place without a no-op rewind", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -8573,13 +8944,13 @@ test("resume rewinds a run-level render failure before continuing unfinished wor
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.submitted, true);
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.match(commands, /timeline ultrafuzz-render-recovery-run --json/u);
-  assert.match(commands, /rewind ultrafuzz-render-recovery-run 4 --yes --json/u);
+  // A jump to the latest frame returns early upstream, so reading the timeline and rewinding to it
+  // spends two subprocesses per recovery generation and mutates nothing.
+  assert.doesNotMatch(commands, /timeline|rewind|retry-task/u);
   assert.match(
     commands,
     /up .*ultrafuzz-render-recovery-run\.tsx --resume ultrafuzz-render-recovery-run --run-id ultrafuzz-render-recovery-run --force --detach --max-concurrency 8 --format json/u
   );
-  assert.doesNotMatch(commands, /retry-task/u);
 });
 
 test("resume transfers an incompatible legacy workflow ID to a valid durable lineage", async () => {
@@ -8622,6 +8993,121 @@ test("resume transfers an incompatible legacy workflow ID to a valid durable lin
     workflow?: { run_id?: string };
   };
   assert.equal(metadata.workflow?.run_id, replacementRunId);
+});
+
+test("resume adopts an orphaned replacement lineage that already exists", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = `orphan-${"x".repeat(56)}`;
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { code: "WORKFLOW_RENDER_FAILED", cause: { code: "ENOENT" } },
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  // An earlier recovery generation already created the deterministic replacement run and died
+  // before the new lineage was persisted, so a fresh submission now reports RUN_EXISTS.
+  env.SMITHERS_FAKE_RUN_EXISTS = "1";
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    maxConcurrency: 8,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  const replacementRunId = resumed.value?.workflow_run_id ?? "";
+  assert.match(replacementRunId, /^ufz-recovery-[a-f0-9]{32}$/u);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, new RegExp(`up .* --detach --run-id ${replacementRunId}`, "u"));
+  assert.match(
+    commands,
+    new RegExp(`up .* --detach --resume ${replacementRunId} --run-id ${replacementRunId} --force`, "u")
+  );
+  const recovery = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "recovery-submission.json"), "utf8")
+  ) as { recovery?: string; smithers_run_id?: string };
+  assert.equal(recovery.recovery, "incompatible-workflow-run-id-adopted");
+  assert.equal(recovery.smithers_run_id, replacementRunId);
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    workflow?: { run_id?: string };
+  };
+  assert.equal(metadata.workflow?.run_id, replacementRunId);
+});
+
+test("resume classifies a terminal run reported only at the top level of the inspect payload", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = `toplevel-${"x".repeat(56)}`;
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    // Neither a `runState` nor a `run` wrapper: some run-state and task-output snapshot variants
+    // report the state at the top level of `data`.
+    inspect: {
+      ok: true,
+      data: {
+        id: workflowRunId,
+        state: "failed",
+        error: { code: "WORKFLOW_RENDER_FAILED", cause: { code: "ENOENT" } },
+        steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    maxConcurrency: 8,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.match(resumed.value?.workflow_run_id ?? "", /^ufz-recovery-[a-f0-9]{32}$/u);
+});
+
+test("unverified dependency detection reads a dependent prepare failure off the run row", async () => {
+  const { smithersSnapshotUnverifiedDependencies } = await import("../src/smithers.js");
+  const runError = {
+    name: "SmithersError",
+    code: "SESSION_ERROR",
+    message: "Task failed: prepare:property-specification-fanin",
+    cause: {
+      message:
+        "artifact-contract failure: artifact dependency has not passed verification " +
+        "property-specification-crytic for property-specification-fanin"
+    }
+  };
+  const snapshot = {
+    command: ["inspect", "ultrafuzz-r43", "--format", "json"],
+    ok: true,
+    stdout: "",
+    stderr: "",
+    json: { ok: true, data: { run: { id: "ultrafuzz-r43", status: "failed", error: runError } } }
+  };
+
+  assert.deepEqual(smithersSnapshotUnverifiedDependencies(snapshot), ["property-specification-crytic"]);
+  assert.deepEqual(
+    smithersSnapshotUnverifiedDependencies({ ...snapshot, json: undefined, stderr: "unrelated failure" }),
+    []
+  );
 });
 
 test("resume suppresses duplicate submissions for every active workflow run state", async () => {

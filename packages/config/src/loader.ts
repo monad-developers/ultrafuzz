@@ -59,7 +59,8 @@ const PERMISSION_KEYS = ["trust_model", "prompt_review_required", "materialize_o
 const INVARIANT_KEYS = [
   "property_priority_threshold",
   "invariant_testing_smoke_timeout",
-  "invariant_testing_fuzzer_timeout"
+  "invariant_testing_fuzzer_timeout",
+  "reference_expectation_enforcement"
 ] as const;
 const TRIAGE_KEYS = ["quorum", "panel_size"] as const;
 const EVAL_KEYS = ["eval_config", "ground_truth_root", "provider", "providers"] as const;
@@ -547,6 +548,16 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
         }
       }
     );
+    readEnum(
+      invariants,
+      "reference_expectation_enforcement",
+      ["invariants", "reference_expectation_enforcement"],
+      diagnostics,
+      normalizeReferenceExpectationEnforcement,
+      (value) => {
+        invariantConfig.referenceExpectationEnforcement = value;
+      }
+    );
   }
 
   const triage = readConfigTable(root, "triage", TRIAGE_KEYS, diagnostics);
@@ -896,6 +907,16 @@ function normalizeInvariantPriority(value: string): "high" | "medium" | "low" | 
     case "medium":
     case "low":
       return value.trim().toLowerCase() as "high" | "medium" | "low";
+    default:
+      return undefined;
+  }
+}
+
+function normalizeReferenceExpectationEnforcement(value: string): "warn" | "fail" | undefined {
+  switch (value.trim().toLowerCase()) {
+    case "warn":
+    case "fail":
+      return value.trim().toLowerCase() as "warn" | "fail";
     default:
       return undefined;
   }

@@ -23,3 +23,6 @@ dist/
 dist-test/
 smithers.db*
 .DS_Store
+
+# Agent session artifacts written by package-level test runs
+packages/*/.ultrafuzz/

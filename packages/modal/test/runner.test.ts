@@ -20,6 +20,8 @@ import { fingerprintModalModel, isPublicModalBenchmarkConfig, parseModalBenchmar
 import type { ModalModelSpec } from "../src/defaults.js";
 import {
   createModalLaunchState,
+  latestModalWorkerStatus,
+  markModalLaunchReady,
   markModalSandboxCreated,
   modalLaunchTags,
   readModalLaunchState,
@@ -55,10 +57,13 @@ import {
   modalBenchmarkSecretValues,
   modalVolumeRelativeRoot,
   modalWorkerEntrypointCommand,
+  modalBenchmarkStatusRow,
+  observeTerminalModalRecoveryLifecycle,
   publicBenchmarkCollectionSecretValues,
   readModalCollectResultFilesWithStatusRetry,
   overseeModalBenchmarks,
   readOptionalModalSandboxText,
+  publicEvalDiagnosticsDroppedFromEvidence,
   runningRecoverySandbox,
   replaceSanitizedModalCollectedFiles,
   selectModalCollectedEvidence,
@@ -844,6 +849,46 @@ describe("Modal result collection", () => {
     });
     expect(selected.files).toBe(files);
     expect(selected.forbiddenSecretValues).toEqual(["opaque-secret"]);
+  });
+
+  it("fails collection only for a persisted diagnostics document that selection dropped", async () => {
+    const config = publicCollectionLineage().config;
+    const persisted = {
+      "status.json": "status",
+      "public-eval-diagnostics.json": "diagnostics"
+    };
+    // Run 31171579070, pair ultrafuzz-bench-benchmark-smoke-gpt-5-6-luna-high:
+    // the worker reported that it could not build the document, so it never
+    // persisted one. CI collects that pair on the diagnostic-only path, and
+    // demanding a document nothing ever wrote aborted that collection (#320).
+    const workerNamedTheFault = {
+      "status.json": "status",
+      "result.json": "result",
+      "worker.log": "log"
+    };
+
+    const dropped = await selectModalCollectedEvidence(persisted, undefined, undefined, {});
+    expect(dropped.files["public-eval-diagnostics.json"]).toBeUndefined();
+    expect(publicEvalDiagnosticsDroppedFromEvidence({ volumeFiles: persisted, selectedFiles: dropped.files })).toBe(
+      true
+    );
+
+    const retained = await selectModalCollectedEvidence(persisted, config, config.models[0], {
+      OPENAI_API_KEY: "opaque-secret"
+    });
+    expect(publicEvalDiagnosticsDroppedFromEvidence({ volumeFiles: persisted, selectedFiles: retained.files })).toBe(
+      false
+    );
+
+    const collectable = await selectModalCollectedEvidence(workerNamedTheFault, config, config.models[0], {
+      OPENAI_API_KEY: "opaque-secret"
+    });
+    expect(
+      publicEvalDiagnosticsDroppedFromEvidence({
+        volumeFiles: workerNamedTheFault,
+        selectedFiles: collectable.files
+      })
+    ).toBe(false);
   });
 
   it("retains pre- and post-reconciliation Kimi subscription secrets for public collection", async () => {
@@ -1886,6 +1931,45 @@ describe("Modal worker identity", () => {
   });
 });
 
+describe("Modal recovery summary agreement", () => {
+  it("reports the same recovery summary in status.json and recovery-lifecycle.json", () => {
+    const now = "2026-01-01T00:10:00.000Z";
+    const files = terminalWorkerFiles();
+
+    const statusState = relaunchedState();
+    const statusLaunch = statusState.launches[0]!;
+    const row = modalBenchmarkStatusRow({
+      state: statusState,
+      launch: statusLaunch,
+      files,
+      sandbox: { state: "exited", exitCode: 0 },
+      now
+    });
+
+    // What `collect` folds into the state it persists, then writes as recovery-lifecycle.json.
+    const collectState = relaunchedState();
+    const collectLaunch = collectState.launches[0]!;
+    observeTerminalModalRecoveryLifecycle(
+      collectState,
+      collectLaunch,
+      latestModalWorkerStatus(
+        Object.values(files).map((contents) => JSON.parse(contents) as unknown),
+        collectLaunch
+      ),
+      now
+    );
+    const lifecycle = createModalRecoveryLifecycleDocument(
+      collectState.recovery_lifecycle.filter((record) => record.model_slug === collectLaunch.slug)
+    );
+
+    expect(row.recovery_summary).toEqual(lifecycle.summary);
+    expect(lifecycle.summary.total_generations).toBe(2);
+    expect(lifecycle.summary.model_work_generations).toBe(1);
+    expect(lifecycle.summary.terminal_generations).toBe(2);
+    expect(lifecycle.summary.active_generations).toBe(0);
+  });
+});
+
 function emptyReadableStream(): ReadableStream<string> {
   return new ReadableStream<string>({
     start(controller) {
@@ -1931,6 +2015,74 @@ function terminationState() {
     attemptId: "original-attempt"
   });
   return { state, record };
+}
+
+/** A generation whose first attempt was relaunched, leaving the second attempt still `active`. */
+function relaunchedState() {
+  const state = createModalLaunchState({
+    logicalRunId: "logical-run",
+    generation: 1,
+    generationMode: "fresh",
+    app: "app-placeholder",
+    image: "image-placeholder",
+    imageId: "image-id-placeholder",
+    timeoutMs: 60_000,
+    sourceRevision: "revision-placeholder",
+    fingerprints: { config: "a".repeat(64), source: "b".repeat(64), image: "c".repeat(64) }
+  });
+  reserveModalLaunchAttempt({
+    state,
+    model: MODEL,
+    modelFingerprint: fingerprintModalModel(MODEL),
+    volumeName: "volume-placeholder",
+    remoteRoot: "/data/logical-run/model-one",
+    workspaceMode: "fresh",
+    attemptId: "original-attempt",
+    now: "2026-01-01T00:00:00.000Z"
+  });
+  const record = reserveModalLaunchAttempt({
+    state,
+    model: MODEL,
+    modelFingerprint: fingerprintModalModel(MODEL),
+    volumeName: "volume-placeholder",
+    remoteRoot: "/data/logical-run/model-one",
+    workspaceMode: "resume",
+    startReason: "pre-model-retry",
+    observedModelWorkStarted: false,
+    attemptId: "relaunched-attempt",
+    now: "2026-01-01T00:00:30.000Z"
+  });
+  markModalSandboxCreated(record, "sandbox-placeholder");
+  markModalLaunchReady(record, "2026-01-01T00:01:00.000Z");
+  return state;
+}
+
+function terminalWorkerFiles(): Record<string, string> {
+  const base = {
+    schema_version: "ultrafuzz.modal.worker-result.v2",
+    generation: 3,
+    launch_generation: 1,
+    attempt: 2,
+    model_work_started: true,
+    counts: { succeeded: 1, failed: 0, remaining: 0 },
+    checkpoint: { age_ms: 0, digest: `sha256:${"a".repeat(64)}` },
+    runtime_ms: 100,
+    usage: null
+  };
+  return {
+    "status.json": `${JSON.stringify({
+      ...base,
+      result_type: "partial",
+      exit_category: "live",
+      diagnostic_code: "worker-live"
+    })}\n`,
+    "result.json": `${JSON.stringify({
+      ...base,
+      result_type: "terminal",
+      exit_category: "finished",
+      diagnostic_code: "worker-finished"
+    })}\n`
+  };
 }
 
 function fakeTerminationSandbox(sandboxId: string, tags: Record<string, string>, exitCode: number | null = null) {

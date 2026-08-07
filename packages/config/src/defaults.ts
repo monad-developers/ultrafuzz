@@ -123,7 +123,12 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
         invariants.invariantTestingFuzzerTimeoutSeconds,
         "invariants.invariant_testing_fuzzer_timeout",
         filePath
-      )
+      ),
+      // Optional: absent means `warn`, the staged default for issue #285. Requiring it here would
+      // force every default config to declare a switch that has one safe setting.
+      ...(invariants.referenceExpectationEnforcement !== undefined
+        ? { referenceExpectationEnforcement: invariants.referenceExpectationEnforcement }
+        : {})
     },
     triage: {
       quorum: required(triage.quorum, "triage.quorum", filePath),

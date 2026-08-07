@@ -8,6 +8,7 @@ export * from "./findings-schema.js";
 export * from "./generated-tests.js";
 export * from "./goal-plan.js";
 export * from "./invariant-ledger.js";
+export * from "./invariant-source-pin.js";
 export * from "./invariant-source-proof.js";
 export * from "./manifests.js";
 export * from "./property-provenance.js";

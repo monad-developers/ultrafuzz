@@ -154,6 +154,46 @@ function loadPreservePinnedSourceProof(): (task: {
 // copy that failed Aave run R45 (issue #289) with `invariant scan probe tests is unavailable: scan
 // probe is not a regular file`. Extracting it here means the directory allowance is pinned where it
 // actually runs, not only in the runtime gate's twin.
+type InvariantSourcePinCall = { workspacePath: string; relativePath: string; bytes: Uint8Array; ref?: string };
+
+function loadReadInvariantSourceSnapshot(
+  usesPinnedSource: boolean,
+  checkInvariantSourcePinned: (options: InvariantSourcePinCall) => { ok: boolean }
+): (workspaceRoot: string, relativePath: string, label: string) => { bytes: Buffer; content: string } {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function readInvariantSourceSnapshot");
+  const helperEnd = source.indexOf("\n\nfunction verifyInvariantLedgerSourceEvidence", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+
+  const helper = source
+    .slice(helperStart, helperEnd)
+    .replace(
+      'workspaceRoot: string,\n  relativePath: string,\n  label: "scan probe" | "invariant source"\n): { bytes: Buffer; content: string } {',
+      "workspaceRoot, relativePath, label) {"
+    )
+    .replace("let sourcePath: string;", "let sourcePath;")
+    .replace("let content: string;", "let content;");
+  return new Function(
+    "path",
+    "readFileSync",
+    "isStrictlyInsideDirectory",
+    "resolveRegularArtifactFile",
+    "usesPinnedSource",
+    "checkInvariantSourcePinned",
+    "pinnedSourceRef",
+    `${helper}; return readInvariantSourceSnapshot;`
+  )(
+    path,
+    fs.readFileSync,
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    (_root: string, candidate: string) => candidate,
+    usesPinnedSource,
+    checkInvariantSourcePinned,
+    "refs/heads/ultrafuzz-pinned"
+  ) as (workspaceRoot: string, relativePath: string, label: string) => { bytes: Buffer; content: string };
+}
+
 function loadVerifyInvariantLedgerSourceEvidence(snapshotPaths: string[]): (
   task: {
     attemptId: string;
@@ -499,6 +539,42 @@ test("generated Smithers verifier explains byte-preserving invariant evidence", 
   assert.ok(workflowStart > helperStart, source);
   assert.match(source.slice(helperStart, workflowStart), /\.join\("\\n"\)/u);
   assert.match(source, /invariantSymbolDeclaration[\s\S]*?\.split\(\/\\r\?\\n\/u\)/u);
+});
+
+// Issue #301: the pinned/tracked/unmodified rule used to be inlined here and absent from the runtime
+// gate, so `ultrafuzz validate` and the run enforced different things. The template must now delegate
+// to the shared validator in @ultrafuzz/artifacts, which is the only place the rule lives.
+test("generated Smithers invariant snapshot delegates the pin check to the shared validator", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-template-pin-")));
+  fs.writeFileSync(path.join(root, "Counter.sol"), "contract Counter {}\n");
+  const calls: InvariantSourcePinCall[] = [];
+  try {
+    // The fixture is not a Git repository at all, so an inlined `git ls-files` would fail closed here.
+    const snapshot = loadReadInvariantSourceSnapshot(true, (options) => {
+      calls.push(options);
+      return { ok: true };
+    });
+    assert.equal(snapshot(root, "Counter.sol", "scan probe").content, "contract Counter {}\n");
+    assert.deepEqual(
+      calls.map((call) => [call.workspacePath, call.relativePath, call.ref]),
+      [[root, "Counter.sol", "refs/heads/ultrafuzz-pinned"]]
+    );
+    assert.equal(Buffer.from(calls[0]!.bytes).toString("utf8"), "contract Counter {}\n");
+
+    const rejecting = loadReadInvariantSourceSnapshot(true, () => ({ ok: false }));
+    assert.throws(
+      () => rejecting(root, "Counter.sol", "scan probe"),
+      /invariant scan probe Counter\.sol is not pinned and unchanged/u
+    );
+
+    // Without the pinned ref neither the gate nor the run enforces the pin, so the validator is not consulted.
+    const unpinned = loadReadInvariantSourceSnapshot(false, () => {
+      throw new Error("pin check must not run without the pinned ref");
+    });
+    assert.equal(unpinned(root, "Counter.sol", "scan probe").content, "contract Counter {}\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("generated Smithers worktrees fail closed on any source other than the pinned benchmark ref", () => {
@@ -1175,9 +1251,37 @@ test("generated Smithers invariant discovery uses a Git-compatible ls-files invo
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
 
   assert.doesNotMatch(source, /--no-exclude-standard/u);
-  assert.match(source, /\["ls-files", "--cached", "--others", "--", "src", "contracts", "test", "tests"\]/u);
+  assert.match(
+    source,
+    /invariantSuiteGitPaths\(workspaceRoot, \[\s*"ls-files",\s*"--cached",\s*"--others",\s*"--",\s*"src",\s*"contracts",\s*"test",\s*"tests"\s*\]\)/u
+  );
   assert.match(source, /\["ls-files", "--others", "--", "src", "contracts"\]/u);
   assert.match(source, /\["ls-files", "--others", "--", "test", "tests"\]/u);
+});
+
+test("generated Smithers invariant discovery bounds every git enumeration it captures", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+
+  // Node's `execFileSync` default is 1 MB, and an oversized listing then dies as an anonymous
+  // `spawnSync git ENOBUFS` (#310, #323). Each discovery capture goes through the one helper that states
+  // the bound, so a new call site that reintroduces a bare `execFileSync` fails here.
+  assert.match(source, /const MAX_INVARIANT_SUITE_ENUMERATION_BYTES = /u);
+  assert.match(source, /maxBuffer: MAX_INVARIANT_SUITE_ENUMERATION_BYTES/u);
+  assert.match(source, /function rethrowOversizedInvariantSuiteEnumeration/u);
+  assert.match(source, /listed more than the \$\{MAX_INVARIANT_SUITE_ENUMERATION_BYTES\}-byte enumeration buffer/u);
+  for (const enumeration of [
+    "captureInvariantSuiteBaseline",
+    "invariantWorkspaceSourcePaths",
+    "changedTestTreePaths",
+    "changedInvariantSourcePaths",
+    "gitTestTreePaths"
+  ]) {
+    const start = source.indexOf(`function ${enumeration}(`);
+    assert.ok(start >= 0, enumeration);
+    const body = source.slice(start, source.indexOf("\n}\n", start));
+    assert.match(body, /invariantSuiteGitPaths\(/u, enumeration);
+    assert.doesNotMatch(body, /execFileSync\("git", \["ls-files"/u, enumeration);
+  }
 });
 
 test("invariant git discovery includes tracked, untracked, and ignored sources", () => {
@@ -1734,6 +1838,22 @@ test("generated Smithers preserves setup-patch baselines across post-agent prepa
   assert.match(helper, /writeWorkspacePatchBaseline\(task, baselineTree\)/u);
   assert.match(helper, /persistedPreparation === undefined && !replayWorkspacePatches/u);
   assert.match(helper, /taskPublishesWorkspacePatch\(task\) && !workspacePatchBaselineTrees\.has/u);
+  // #312: a RESUMED task worktree can already sit at -- or past -- some dependencies' outputs, because it
+  // lives on a durable volume and still holds the previous attempt's state. Replay must therefore start
+  // after the prefix the worktree already equals byte for byte, and must do so ONLY on the replay path;
+  // post-agent preparation has its own rule and must not be second-guessed. Two production runs (R48,
+  // R49) died at `prepare:stateful-invariant-implement-properties` without this.
+  assert.match(source, /function firstDependencyRequiringReplay\(/u);
+  assert.match(helper, /replayWorkspacePatches && captures\.length > 0/u);
+  assert.match(helper, /firstDependencyRequiringReplay\(\s*captureWorkspaceTree\(workspaceRoot\),/u);
+  assert.match(helper, /captures\.map\(\(entry\) => entry\.manifest\)/u);
+  // Every capture is validated even when replay skips it: the manifest schema, object ids, digest and
+  // sensitive-path checks all live inside `applyWorkspacePatch`, so a skipped patch would otherwise go
+  // entirely unchecked while its `result_tree` steered the skip decision.
+  assert.match(helper, /for \(const capture of captures\) validateWorkspacePatchCapture\(workspaceRoot, capture\);/u);
+  // The skip is only sound when the skipped prefix is a real chain; a sibling fan-in must replay.
+  assert.match(source, /return chained \? index \+ 1 : 0;/u);
+  assert.match(helper, /captures\.slice\(replayFrom\)/u);
   assert.match(
     source,
     /const result = await agent\.generate\(args\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\);/u

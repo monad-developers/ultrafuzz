@@ -4,7 +4,9 @@ import path from "node:path";
 
 import {
   assertRegularFileInside,
+  checkInvariantSourcePinned,
   getNodeArtifactDir,
+  invariantPinnedSourceRefExists,
   readArtifactManifest,
   readJsonFile,
   readRunState,
@@ -227,6 +229,7 @@ function verifyInvariantEvidenceArtifacts(
       return diagnostics;
     }
     if (parsed.value.entries.length === 0 && (parsed.value.scan_probes?.length ?? 0) > 0) {
+      verifyNoInvariantsJustification(parsed.value.no_invariants_justification, ledgerPath, diagnostics);
       if (parsed.value.inventory_rows === undefined) {
         diagnostics.push({
           code: "INVARIANT_LEDGER_INVENTORY_MISSING",
@@ -257,8 +260,13 @@ function verifyInvariantEvidenceArtifacts(
           path: ledgerPath
         });
       }
-      // Probe paths may intentionally name optional files; the probe result
-      // records absence, so containment is the invariant we can enforce.
+      // DECISION (issue #292), not a fact about probes: a probe path that names nothing is still
+      // accepted, because a probe records WHERE the agent looked and an optional file it did not
+      // find is a legitimate record. Containment stays the only property enforced here — probe
+      // `result` text has zero consumers, so it cannot be checked against anything. What the
+      // decision changed is the weight put on that text: it is no longer allowed to stand in for
+      // the claim "this target has no invariant". That claim now needs
+      // `no_invariants_justification` above.
       for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
         verifyInvariantProbePath(discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
       }
@@ -308,8 +316,10 @@ function verifyInvariantEvidenceArtifacts(
         path: ledgerPath
       });
     }
-    // Probe paths may intentionally name optional files; the probe result
-    // records absence, so containment is the invariant we can enforce.
+    // Same DECISION as the no-evidence branch above (issue #292): an absent probe path is accepted
+    // because a probe records where the agent looked, and containment is the only property that can
+    // be enforced when nothing consumes `result`. On this branch the ledger carries entries, and
+    // those remain byte-checked against the pinned source below.
     for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
       verifyInvariantProbePath(discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
     }
@@ -414,7 +424,17 @@ function verifyInvariantEvidenceArtifacts(
     return diagnostics;
   }
   diagnostics.push(...verifyLensReferenceExpectationPreservation(layout, node, catalog.value));
+  // Fan-in re-checks probe containment on the SAME ledger discovery published (issue #292). It used
+  // to check none: every shape of the ledger returned before reaching a `verifyInvariantProbePath`
+  // call, so an escaping probe path only ever had to survive the discovery node. The ledger lives in
+  // discovery's artifact directory, so its workspace is the one the probes are relative to; when
+  // that workspace has already been reclaimed the check is a no-op, exactly as it is on discovery.
+  const discoveryWorkspace = path.join(layout.workspacesDir, path.basename(path.dirname(path.dirname(ledgerPath))));
+  for (const [probeIndex, probe] of (ledger.value.scan_probes ?? []).entries()) {
+    verifyInvariantProbePath(discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
+  }
   if (ledger.value.entries.length === 0 && (ledger.value.scan_probes?.length ?? 0) > 0) {
+    verifyNoInvariantsJustification(ledger.value.no_invariants_justification, ledgerPath, diagnostics);
     if (ledger.value.inventory_rows === undefined || ledger.value.inventory_rows.length > 0) {
       diagnostics.push({
         code: "INVARIANT_LEDGER_INVENTORY_UNEXPECTED",
@@ -902,6 +922,40 @@ function verifyInvariantSourceEvidence(
   }
 }
 
+/**
+ * Issue #292 verdict, recorded as a decision: REJECT SILENCE, ACCEPT EXPLICIT EMPTINESS.
+ *
+ * A ledger with no entries used to pass on the SHAPE of its emptiness alone — `inventory_rows: []`
+ * plus at least one scan probe — and that shape is free to fabricate: nothing anywhere reads
+ * `probe.result`, every consumer is a presence check, so invented probe text satisfied both evidence
+ * gates. "The agent searched and found nothing" was therefore unfalsifiable.
+ *
+ * A genuinely invariant-free target has to stay possible, so emptiness is not banned; it is made
+ * ATTRIBUTABLE. The ledger must state the claim in `no_invariants_justification`, which survives in
+ * the artifact and can be read against the target after the fact.
+ *
+ * Deliberately NOT the third option in the issue (mark the derived proof `partial`): that adds a
+ * state every consumer of the ledger has to learn, to describe a case that is already fully
+ * described by two existing ones.
+ */
+function verifyNoInvariantsJustification(
+  justification: string | undefined,
+  ledgerPath: string,
+  diagnostics: RuntimeDiagnostic[]
+): void {
+  if (justification !== undefined) {
+    return;
+  }
+  diagnostics.push({
+    code: "INVARIANT_LEDGER_NO_INVARIANTS_UNJUSTIFIED",
+    message:
+      "An invariant evidence ledger with no entries must record no_invariants_justification stating why the target carries no invariant",
+    severity: "error",
+    source: "invariant-ledger",
+    path: `${ledgerPath}#$.no_invariants_justification`
+  });
+}
+
 function verifyInvariantProbePath(
   workspacePath: string,
   relativePath: string,
@@ -973,8 +1027,10 @@ function verifyInvariantProbePath(
         path: diagnosticPath
       });
     } else {
+      let bytes: Buffer;
       try {
-        const content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(probePath));
+        bytes = fs.readFileSync(probePath);
+        const content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
         if (content.includes("\u0000")) throw new Error("NUL");
       } catch {
         diagnostics.push({
@@ -984,12 +1040,40 @@ function verifyInvariantProbePath(
           source: "invariant-ledger",
           path: diagnosticPath
         });
+        return;
       }
+      verifyInvariantProbeSourcePin(workspacePath, relativePath, bytes, diagnosticPath, diagnostics);
     }
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
     diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_LEDGER_PROBE_PATH_INVALID"));
   }
+}
+
+/**
+ * The generated workflow refuses any probe source that is not tracked, unmodified,
+ * and byte-identical to the pinned commit, but only when the pinned ref exists. The
+ * gate used to skip that check entirely, so `ultrafuzz validate` accepted ledgers the
+ * run then killed the node over (issue #301). Both halves now come from one shared
+ * validator, including the "only when pinned" condition.
+ */
+function verifyInvariantProbeSourcePin(
+  workspacePath: string,
+  relativePath: string,
+  bytes: Buffer,
+  diagnosticPath: string,
+  diagnostics: RuntimeDiagnostic[]
+): void {
+  if (!invariantPinnedSourceRefExists(workspacePath)) return;
+  const pinned = checkInvariantSourcePinned({ workspacePath, relativePath, bytes });
+  if (pinned.ok) return;
+  diagnostics.push({
+    code: "INVARIANT_LEDGER_PROBE_SOURCE_UNPINNED",
+    message: `Invariant scan probe source is ${pinned.detail}: ${relativePath}`,
+    severity: "error",
+    source: "invariant-ledger",
+    path: diagnosticPath
+  });
 }
 
 function isSafeInvariantProbePath(relativePath: string): boolean {
@@ -1719,6 +1803,16 @@ function sanitizeLensReferenceExpectationAuthority(
   if (supplied.diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
     return supplied.diagnostics;
   }
+  if (supplied.catalogSupplied && readReferenceExpectationEnforcement(layout) === "fail") {
+    // Issue #285 staging switch, deliberately OFF by default. Once an operator supplies a catalogue,
+    // a citation outside it is a stronger signal than the same citation on a run with no catalogue
+    // at all — the authoritative set was declared and the lens went outside it. Enforcing that as a
+    // node failure is still a behaviour change nobody has watched land, so it stays opt-in until a
+    // smoke lane has been observed. Skipping the rewrite leaves the lens bytes intact, and
+    // `verifyLensReferenceExpectationAuthority` then reports each unauthorized ID as an error. The
+    // marker/disk drift report still runs: no rewrite happened, which is the case it exists for.
+    return reportVerifiedArtifactDigestDrift(layout, attemptId, lensOutput.path, lensPath);
+  }
 
   let removed = 0;
   const removedExpectationIds = new Set<string>();
@@ -1819,7 +1913,26 @@ function propertyLensOutput(node: PlannedGraphNode): PlannedGraphNode["outputs"]
  * out of those checks, with only a `warning` to show for it. What stripping cannot do is manufacture
  * provenance: `reference_expectation_ids` is report-only and no grading path reads it. So the residual
  * exposure is reduced DETECTION of an odd citation, weighed against losing an entire reference lens's
- * coverage, which is what failing the node actually costs. The wider authority question is #285.
+ * coverage, which is what failing the node actually costs.
+ *
+ * The wider authority question (#285) is now DECIDED, in two stages, and this rule is unchanged by
+ * either. The disagreement was that the lens prompt says "copy identifiers out of the supplied
+ * pinned-reference artifacts" — Markdown documents — while authority comes only from a structured
+ * `ultrafuzz/reference-expectations@1` catalogue, which no benchmark run supplies. Option 3 in the
+ * issue was taken: the catalogue is the definition of "supplied", and a run that wants its lens
+ * citations authorized has to provide one.
+ *
+ * Stage one, shipped: when no dependency supplies a catalogue,
+ * `readLensSuppliedExpectationIds` now says so with `PROPERTY_REFERENCE_EXPECTATION_CATALOG_ABSENT`
+ * instead of returning an empty id set in silence. That path was not the exception, it was every
+ * benchmark run, and the silence is what let the gate — and #240's
+ * `verifyImplementationSelectionCoverage` — look active while doing nothing.
+ *
+ * Stage two, NOT shipped by default: once a catalogue is supplied, treating a citation outside it as
+ * a node failure is available behind `invariants.reference_expectation_enforcement = "fail"`. It
+ * stays `warn` (strip, report, keep the run alive) until a smoke lane has been observed, because the
+ * failure mode of getting this wrong is exactly the one items 2 and 3 above document: killing a
+ * whole reference lens over model-authored text.
  */
 // Separator-agnostic on purpose, both BETWEEN the namespace and the identifier and WITHIN the keyword.
 // A prefix allowlist that only knew `:` would let `scfuzzbench_aave_v4_iSpoke_supply` through as an
@@ -1856,9 +1969,10 @@ function isCopiedReferenceCitation(expectationId: string): boolean {
 function readLensSuppliedExpectationIds(
   layout: RunLayout,
   node: PlannedGraphNode
-): { ids: Set<string>; diagnostics: RuntimeDiagnostic[] } {
+): { ids: Set<string>; catalogSupplied: boolean; diagnostics: RuntimeDiagnostic[] } {
   const expectationIds = new Set<string>();
   const diagnostics: RuntimeDiagnostic[] = [];
+  let catalogSupplied = false;
   const state = readRunState(layout);
   for (const dependencyId of node.depends_on) {
     // Only declared, pinned-reference inputs can authorize provenance. In
@@ -1878,6 +1992,7 @@ function readLensSuppliedExpectationIds(
         : [])
     ];
     if (expectationPaths.length === 0) continue;
+    catalogSupplied = true;
     const metadata = state.nodes[dependencyId]?.provenance?.reference_expectations;
     if (
       !isRecord(metadata) ||
@@ -1905,7 +2020,23 @@ function readLensSuppliedExpectationIds(
       );
     }
   }
-  return { ids: expectationIds, diagnostics };
+  if (!catalogSupplied) {
+    // Issue #285, part (a): say so. This path used to return an empty id set in silence, which made
+    // EVERY citation a lens emitted unauthorized and every reference-expectation check downstream
+    // inert — including `verifyImplementationSelectionCoverage`, whose expectation-forced selection
+    // can never fire when no property is allowed to keep an expectation. On a benchmark run with no
+    // `--reference-expectations` catalogue that is the normal case, not the exceptional one, so the
+    // gate was quietly doing nothing exactly where it was supposed to be doing the most.
+    diagnostics.push({
+      code: "PROPERTY_REFERENCE_EXPECTATION_CATALOG_ABSENT",
+      message:
+        "No pinned-reference dependency supplies a reference expectation catalog, so every lens reference expectation is unauthorized and the provenance gate is inert",
+      severity: "warning",
+      source: "property-provenance",
+      path: `state.nodes.${node.id}.depends_on`
+    });
+  }
+  return { ids: expectationIds, catalogSupplied, diagnostics };
 }
 
 function declaresReferenceExpectationCatalog(
@@ -2140,6 +2271,19 @@ function readConfiguredInvariantPrioritySelection(
   const priority_threshold = match[1] as "high" | "medium" | "low";
   const order = ["high", "medium", "low"] as const;
   return { priority_threshold, priorities: order.slice(0, order.indexOf(priority_threshold) + 1) };
+}
+
+/**
+ * Staging switch for issue #285, read the same way as the invariant priority threshold above.
+ * `warn` — the default, and what every run gets until someone changes it — keeps today's behaviour:
+ * an expectation absent from a supplied catalogue is stripped and reported as a warning. `fail`
+ * escalates that to a node failure with the lens bytes left intact.
+ */
+function readReferenceExpectationEnforcement(layout: RunLayout): "warn" | "fail" {
+  if (!fs.existsSync(layout.resolvedConfigPath)) return "warn";
+  const contents = fs.readFileSync(layout.resolvedConfigPath, "utf8");
+  const match = /^\s*reference_expectation_enforcement\s*=\s*["'](warn|fail)["']\s*$/mu.exec(contents);
+  return match === null ? "warn" : (match[1] as "warn" | "fail");
 }
 
 function verifyCampaignPropertyReferences(

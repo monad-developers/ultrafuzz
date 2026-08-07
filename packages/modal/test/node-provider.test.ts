@@ -1640,6 +1640,116 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     }
   });
 
+  it("republishes over a verification marker a runtime gate refreshed to match a sanitized artifact", async () => {
+    const fixture = createProjectFixture();
+    const remoteMarker = verificationMarkerFixture(sha256Hex('{"ok":true}\n'));
+    const result = createResultArchive(fixture.input, { verificationMarker: remoteMarker });
+    const sandbox = fakeSandbox(result);
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
+    try {
+      // A prior publication of this same attempt landed the remote marker and artifact, then a
+      // runtime gate sanitized the artifact and refreshed the marker digest to match it. The
+      // attempt id is stable across retries, so republication must not strand the attempt.
+      const artifactFinding = path.join(fixture.root, fixture.input.artifact_dir, "finding.json");
+      const verificationMarker = path.join(
+        fixture.root,
+        fixture.input.run_root,
+        ".ultrafuzz-verification",
+        "attempt-one.json"
+      );
+      const sanitized = '{"ok":true,"reference_expectations":[]}\n';
+      fs.writeFileSync(artifactFinding, sanitized);
+      fs.writeFileSync(verificationMarker, verificationMarkerFixture(sha256Hex(sanitized)));
+
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished" });
+      expect(fs.readFileSync(artifactFinding, "utf8")).toBe('{"ok":true}\n');
+      expect(fs.readFileSync(verificationMarker, "utf8")).toBe(remoteMarker);
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects verification markers whose refreshed digest matches no published artifact", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive(fixture.input, {
+      verificationMarker: verificationMarkerFixture(sha256Hex('{"ok":true}\n'))
+    });
+    const sandbox = fakeSandbox(result);
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
+    try {
+      const artifactFinding = path.join(fixture.root, fixture.input.artifact_dir, "finding.json");
+      const verificationMarker = path.join(
+        fixture.root,
+        fixture.input.run_root,
+        ".ultrafuzz-verification",
+        "attempt-one.json"
+      );
+      fs.writeFileSync(artifactFinding, '{"ok":true,"reference_expectations":[]}\n');
+      fs.writeFileSync(verificationMarker, verificationMarkerFixture(sha256Hex("bytes nothing on disk has\n")));
+
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/would replace an immutable publication file/u);
+      expect(fs.readFileSync(artifactFinding, "utf8")).toBe('{"ok":true,"reference_expectations":[]}\n');
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects verification markers that differ outside the recorded artifact digests", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive(fixture.input, {
+      verificationMarker: verificationMarkerFixture(sha256Hex('{"ok":true}\n'))
+    });
+    const sandbox = fakeSandbox(result);
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
+    try {
+      const artifactFinding = path.join(fixture.root, fixture.input.artifact_dir, "finding.json");
+      const verificationMarker = path.join(
+        fixture.root,
+        fixture.input.run_root,
+        ".ultrafuzz-verification",
+        "attempt-one.json"
+      );
+      const sanitized = '{"ok":true,"reference_expectations":[]}\n';
+      fs.writeFileSync(artifactFinding, sanitized);
+      fs.writeFileSync(
+        verificationMarker,
+        verificationMarkerFixture(sha256Hex(sanitized)).replace('"node_id": "property-lens"', '"node_id": "forged"')
+      );
+
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/would replace an immutable publication file/u);
+      expect(fs.readFileSync(artifactFinding, "utf8")).toBe(sanitized);
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("rejects v2 cloud results with conflicting existing verification markers before mutating publications", async () => {
     const fixture = createProjectFixture();
     const result = createResultArchive(fixture.input);
@@ -2269,6 +2379,33 @@ function manifestEntry(relativePath: string, filePath: string) {
   };
 }
 
+function sha256Hex(contents: string): string {
+  return crypto.createHash("sha256").update(contents).digest("hex");
+}
+
+/** A marker shaped like the workflow verifier's, recording one artifact digest for `finding.json`. */
+function verificationMarkerFixture(findingSha256: string): string {
+  return `${JSON.stringify(
+    {
+      schema_version: "ultrafuzz.artifact-verification.v1",
+      attempt_id: "attempt-one",
+      node_id: "property-lens",
+      artifacts: [
+        {
+          path: "finding.json",
+          contract: "ultrafuzz/property-lens@1",
+          contract_digest: "b".repeat(64),
+          sha256: findingSha256,
+          primary: true
+        }
+      ],
+      publications: [{ path: "finding.json", sha256: findingSha256 }]
+    },
+    null,
+    2
+  )}\n`;
+}
+
 function createResultArchive(
   dispatch: ModalNodeSandboxInput,
   options: {
@@ -2276,6 +2413,7 @@ function createResultArchive(
     includeDurableCheckpoint?: boolean;
     includeVerificationMarker?: boolean;
     logicalDispatchFingerprint?: string;
+    verificationMarker?: string;
     schemaVersion?: "ultrafuzz.modal.node-result.v1" | "ultrafuzz.modal.node-result.v2";
   } = {}
 ) {
@@ -2304,7 +2442,10 @@ function createResultArchive(
   fs.writeFileSync(path.join(bundle, "source-proofs", "attempt-one.invariant.json"), "durable source proof\n");
   fs.writeFileSync(path.join(bundle, "source-proofs", "attempt-one.json"), "pinned source proof\n");
   if (options.includeVerificationMarker !== false) {
-    fs.writeFileSync(path.join(bundle, "verification", "attempt-one.json"), '{"verified":true}\n');
+    fs.writeFileSync(
+      path.join(bundle, "verification", "attempt-one.json"),
+      options.verificationMarker ?? '{"verified":true}\n'
+    );
   }
   execFileSync("tar", ["-czf", archive, "-C", bundle, "."]);
   const digest = crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
