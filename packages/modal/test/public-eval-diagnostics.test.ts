@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { BENCHMARK_LANE_NAMES } from "@ultrafuzz/evals";
 import { describe, expect, it } from "vitest";
 
 import type { PublicModalBenchmarkConfig } from "../src/config.js";
@@ -183,6 +184,33 @@ describe("public post-eval diagnostics", () => {
     expect(evalRunId.length).toBeLessThanOrEqual(128);
     expect(diagnostics.eval_run_id).toBe(evalRunId);
     expect(parsePublicEvalDiagnostics(diagnostics)).toEqual(diagnostics);
+  });
+
+  it("builds the post-eval checkpoint for every dispatchable lane, not just the published ones", () => {
+    // The worker builds this document from `public_benchmark.lane` only AFTER the
+    // eval run has finished, so a lane the schema rejects fails the
+    // post-eval-pre-score checkpoint with the entire model spend already gone and
+    // no bundle, report, or diagnostics to show for it. The `threat-model`
+    // release gate (#183) is exactly that case.
+    for (const lane of BENCHMARK_LANE_NAMES) {
+      const fixture = evalFixture();
+      const config: PublicModalBenchmarkConfig = {
+        ...CONFIG,
+        public_benchmark: { ...CONFIG.public_benchmark, lane }
+      };
+      const diagnostics = createPublicEvalDiagnostics({
+        config,
+        model: MODEL,
+        lineage: LINEAGE,
+        evalRunId: fixture.evalRunId,
+        matrix: fixture.matrix,
+        runSummary: fixture.runSummary
+      });
+
+      expect(diagnostics.lane).toBe(lane);
+      expect(diagnostics.summary.scoring_ready).toBe(true);
+      expect(parsePublicEvalDiagnostics(diagnostics)).toEqual(diagnostics);
+    }
   });
 
   it("fails closed before scoring for a watched row without a terminal report", () => {

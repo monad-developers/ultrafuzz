@@ -1,5 +1,6 @@
 import { z } from "zod/v4";
 
+import { BENCHMARK_LANE_NAMES } from "./benchmark-manifest.js";
 import { boundedEvalId } from "./utils.js";
 
 export const PUBLIC_EVAL_DIAGNOSTICS_FILE = "public-eval-diagnostics.json" as const;
@@ -112,7 +113,11 @@ const summarySchema = z.strictObject({
 const diagnosticsShape = {
   stage: z.literal("post-eval-pre-score"),
   benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
-  lane: z.enum(["smoke", "full"]),
+  // Every lane the benchmark plane can dispatch, not just the two longitudinal
+  // ones. The worker builds this document from `public_benchmark.lane` AFTER the
+  // whole eval run, so a lane missing here fails the post-eval-pre-score
+  // checkpoint with the model spend already gone (#183).
+  lane: z.enum(BENCHMARK_LANE_NAMES),
   model_slug: safeId,
   model: z.string().min(1).max(256),
   reasoning: z.string().min(1).max(64),
