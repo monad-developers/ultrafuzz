@@ -868,13 +868,40 @@ test("keeps the inlined stderr head far smaller than the retained one", () => {
   );
 });
 
-test("pins the diff header prefixes against inherited git config", () => {
-  // `diff.noprefix` and `diff.mnemonicPrefix` are read from the system and user config files, and either
-  // rewrites `diff --git a/x b/x` to `diff --git x x` or `diff --git c/x i/x` (git 2.43). Nothing in the
-  // sandbox image guarantees they are unset. Beyond losing the attribution, `git apply` defaults to
-  // `-p1`, so a prefix-less patch does not apply downstream -- the handoff itself breaks, silently.
-  for (const setting of ["diff.noprefix", "diff.mnemonicPrefix"]) {
+test("pins the diff format against inherited git config", () => {
+  // All of these are read from the system and user config files, and nothing in the sandbox image
+  // guarantees any of them are unset. Each breaks the handoff in a different way (git 2.43):
+  //
+  //   diff.noprefix        `diff --git x x`        -- attribution lost, and `git apply` defaults to -p1
+  //   diff.mnemonicPrefix  `diff --git c/x i/x`    -- same
+  //   color.ui=always      `\e[1mdiff --git ...`   -- regex matches nothing AND apply rejects the patch
+  //   diff.context=0       no context lines        -- hunks fail to apply
+  //
+  // The failure mode they share is silence: the capture succeeds, every verification check passes, and
+  // the damage surfaces downstream as something that does not point back here.
+  for (const [setting, value] of [
+    ["diff.noprefix", "true"],
+    ["diff.mnemonicPrefix", "true"],
+    ["color.ui", "always"],
+    ["diff.context", "0"],
+    ["textconv", ""]
+  ] as ReadonlyArray<[string, string]>) {
     const root = fixture();
+    // A MULTI-LINE tracked file, modified in the MIDDLE. Both details are load-bearing. `diff.context`
+    // only manifests around an existing hunk, so a fixture that merely adds files cannot see it -- and a
+    // change at end-of-file applies even with zero context, because the line numbers are unambiguous
+    // there. An earlier version of this test appended to a two-line file and passed with `-U3` removed.
+    const original = Array.from({ length: 12 }, (_, line) => `line ${line}`).join("\n") + "\n";
+    const edited = original.replace("line 6", "line 6 EDITED");
+    writeFileSync(path.join(root, "middle.txt"), original);
+    if (setting === "textconv") {
+      // textconv is not a plain boolean: it needs an attribute selecting a driver plus the driver's
+      // command. `/bin/echo` stands in for a real one -- it replaces the file's content with its name.
+      writeFileSync(path.join(root, ".gitattributes"), "*.txt diff=redact\n");
+    }
+    git(root, ["add", "-A"]);
+    git(root, ["commit", "--quiet", "-m", "content to modify"]);
+
     // Clone for the downstream rather than building a second fixture. Two independently created commits
     // share a hash only when their timestamps land in the same second, so `base_commit` verification
     // makes a second fixture pass or fail on wall-clock luck -- measured at one failure in six runs
@@ -884,18 +911,30 @@ test("pins the diff header prefixes against inherited git config", () => {
     const downstream = path.join(downstreamParent, "checkout");
     git(downstreamParent, ["clone", "--quiet", root, downstream]);
     try {
-      git(root, ["config", setting, "true"]);
+      const apply = (repository: string): void => {
+        if (setting === "textconv") git(repository, ["config", "diff.redact.textconv", "/bin/echo"]);
+        else git(repository, ["config", setting, value]);
+      };
+      apply(root);
       // The downstream carries the setting too: a clone does not inherit the source's LOCAL config, and
       // the point is that neither end may assume the other's git is configured the way it expects.
-      git(downstream, ["config", setting, "true"]);
+      apply(downstream);
       const baseline = captureWorkspaceTree(root);
+      writeFileSync(path.join(root, "middle.txt"), edited);
       writeFileSync(path.join(root, "Setup.sol"), "contract Setup {}\n");
       const capture = captureWorkspacePatch(root, baseline);
       assert.match(capture.patch, /^diff --git a\/Setup\.sol b\/Setup\.sol$/mu, `${setting}: ${capture.patch}`);
 
-      // And it still round-trips: a patch that cannot be applied is worse than one that is unreadable.
+      // And it still round-trips: a patch that cannot be applied is worse than one that is unreadable,
+      // and a patch that applies while carrying the WRONG CONTENT is worse than either -- textconv does
+      // exactly that, surfacing downstream as a result-tree mismatch with nothing pointing back here.
       applyWorkspacePatch(downstream, capture);
       assert.equal(readFileSync(path.join(downstream, "Setup.sol"), "utf8"), "contract Setup {}\n");
+      assert.equal(
+        readFileSync(path.join(downstream, "middle.txt"), "utf8"),
+        edited,
+        `${setting}: the mid-file modification did not survive the round trip`
+      );
     } finally {
       rmSync(downstreamParent, { recursive: true, force: true });
       rmSync(root, { recursive: true, force: true });
@@ -918,4 +957,107 @@ test("bounds the root table and says so instead of truncating silently", () => {
   assert.match(message, /culprit \(>=\d+ diff bytes in 1 file\)/u, message);
   // And the shortfall is stated rather than left to look like a complete survey.
   assert.match(message, /further files under roots past the 4096-root table, not counted above/u, message);
+});
+
+// The end-to-end pin for the whole diagnostic: real git, real `runGit`, a real oversized capture.
+// Everything else in this file hands `rethrowOversizedGitOutput` a synthetic error, which cannot catch a
+// defect in HOW the capture is obtained. This test exists because exactly that happened: the byte-exact
+// measurement was fixed on the Buffer branch while `runGit` still passed `encoding: "utf8"`, so on the
+// only path that has ever fired, Node decoded before throwing and every undecodable byte reached the
+// diagnostic as a 3-byte replacement character. The ranking inverted and a documented floor was overstated
+// threefold, with every unit test green.
+test("ranks the real capture by real bytes, through git and the code that runs it", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "base"]);
+    const baseline = captureWorkspaceTree(root);
+
+    // Both files are NUL-free, so git classifies them as TEXT and `--binary` emits their bytes raw
+    // rather than deflating them. `corpus/` sorts before `src/`, and git emits in path order, so the
+    // capture holds all of corpus and a truncated head of src.
+    //
+    // 0xE9 is a valid latin-1 byte and an invalid UTF-8 sequence: 12 MB of it decodes to 12M replacement
+    // characters worth 36 MB, which is how a 12 MB root outranks a 21 MB one.
+    mkdirSync(path.join(root, "corpus"), { recursive: true });
+    mkdirSync(path.join(root, "src"), { recursive: true });
+    writeFileSync(path.join(root, "corpus", "latin.bin"), Buffer.alloc(12 * 1024 * 1024, 0xe9));
+    writeFileSync(path.join(root, "src", "big.bin"), Buffer.alloc(30 * 1024 * 1024, 0x61));
+
+    assert.throws(
+      () => captureWorkspacePatch(root, baseline),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        const ranked = [...message.matchAll(/\b(corpus|src) \(>=(\d+) diff bytes/gu)].map((match) => ({
+          root: match[1] ?? "",
+          bytes: Number(match[2])
+        }));
+        assert.deepEqual(
+          ranked.map((entry) => entry.root),
+          ["src", "corpus"],
+          message
+        );
+        // The floor must be a floor. `corpus` is fully captured, so its total cannot exceed its own size
+        // by more than the hunk headers -- under the decode bug it reported roughly three times this.
+        const corpus = ranked.find((entry) => entry.root === "corpus");
+        assert.ok(corpus !== undefined && corpus.bytes < 13 * 1024 * 1024, message);
+
+        // The cutoff quoted in the message is the capture Node retained, so it must be at least the sum
+        // of everything attributed within it -- the arithmetic the sentence asserts about itself.
+        const cutoff = Number(/within the first (\d+) bytes git wrote/u.exec(message)?.[1] ?? "0");
+        assert.ok(
+          cutoff >= ranked.reduce((sum, entry) => sum + entry.bytes, 0),
+          `cutoff ${cutoff} is smaller than the totals it introduces: ${message}`
+        );
+        // And it must reflect the LARGER of the two ceilings: a capture buffer sized at the patch limit
+        // would cut here instead, while the message went on naming the bigger number.
+        assert.ok(cutoff > 16 * 1024 * 1024, message);
+        return true;
+      }
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("bounds retained stderr on a MIXED capture, where one shrink pass is not enough", () => {
+  // Every other stderr fixture here is homogeneous -- all 0xFF, all lone surrogates, all CJK -- and those
+  // converge in a single pass, so a single-pass implementation passes them all. A realistic git error is
+  // mixed: a latin-1 path followed by ASCII prose. Truncating makes the retained prefix DENSER, so the
+  // inflation ratio rises rather than falls and the loop has to iterate.
+  const capture = Buffer.concat([
+    Buffer.from("fatal: pathspec '"),
+    Buffer.alloc(690, 0xe9),
+    Buffer.from("' did not match any file(s) known to git. "),
+    Buffer.alloc(7000, 0x61)
+  ]);
+  const retained = retainedStderrOf("x".repeat(50), capture);
+  assert.ok(retained.length > 0, "a head of stderr should survive");
+  assert.ok(
+    Buffer.byteLength(retained, "utf8") <= 2048,
+    `retained stderr was ${Buffer.byteLength(retained, "utf8")} bytes, bound is 2048`
+  );
+});
+
+test("does not blame stderr when neither stream is larger", () => {
+  // A tie is not evidence of a stderr flood, and the degenerate tie -- both captures absent -- would
+  // otherwise assert one from nothing at all.
+  assert.doesNotMatch(messageOf("", ""), /to stderr/u);
+  assert.doesNotMatch(messageOf("abcd", "abcd"), /to stderr/u);
+});
+
+test("finds the subcommand past a leading global flag", () => {
+  // `git -c foo=bar diff ...` is a shape this repo already uses elsewhere, and taking args[0] would name
+  // `-c` as the subcommand in a message whose entire complaint is that the original named none.
+  assert.match(messageOf("", ""), /^git diff /u);
+  const message = ((): string => {
+    try {
+      rethrowOversizedGitOutput(["-c", "core.quotepath=false", "diff", "--cached"], enobufs("", ""));
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+    throw new Error("expected rethrowOversizedGitOutput to throw");
+  })();
+  assert.match(message, /^git diff /u, message);
 });

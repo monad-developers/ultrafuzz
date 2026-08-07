@@ -115,17 +115,32 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
     const resultTree = runGit(workspaceRoot, ["write-tree"], index).trim();
     const patch = runGit(
       workspaceRoot,
-      // `--src-prefix`/`--dst-prefix` pin the header format against inherited git config. `git` reads
-      // `diff.noprefix` and `diff.mnemonicPrefix` from the system and user files, and either one changes
-      // `diff --git a/x b/x` to `diff --git x x` or `diff --git c/x i/x` (verified on git 2.43). That is
-      // not only an attribution problem: `git apply` defaults to `-p1`, so a prefix-less patch would not
-      // apply downstream either. Nothing in the sandbox image guarantees these are unset.
+      // Every flag after `--no-renames` pins some part of the output format against inherited git
+      // config. `git` reads the system and user config files, and nothing in the sandbox image
+      // guarantees any of these are unset. All verified on git 2.43:
+      //
+      //   `--src-prefix`/`--dst-prefix`  `diff.noprefix` renders `diff --git x x` and
+      //                                  `diff.mnemonicPrefix` renders `diff --git c/x i/x`.
+      //   `--no-color`                   `color.ui=always` prefixes the header with an ANSI escape,
+      //                                  `\e[1mdiff --git a/x b/x\e[m`.
+      //   `-U3`                          `diff.context=0` emits no context lines at all (measured: 0
+      //                                  where the default emits 6).
+      //   `--no-textconv`                a `diff.<driver>.textconv` from `core.attributesFile` replaces
+      //                                  the patch BODY with the driver's output.
+      //
+      // None of these is only an attribution problem. `git apply` defaults to `-p1` and rejects a
+      // coloured header outright (`No valid patches in input`), zero-context hunks fail to apply, and a
+      // textconv body applies CLEANLY while carrying the wrong content -- surfacing downstream as a
+      // result-tree mismatch with nothing pointing at the cause.
       [
         "diff",
         "--cached",
         "--binary",
         "--no-ext-diff",
         "--no-renames",
+        "--no-textconv",
+        "--no-color",
+        "-U3",
         "--src-prefix=a/",
         "--dst-prefix=b/",
         baselineTree
@@ -478,13 +493,19 @@ function withTemporaryIndex<T>(workspaceRoot: string, callback: (index: string) 
 function runGit(workspaceRoot: string, args: string[], index?: string, input?: string | Buffer): string {
   const env = index === undefined ? undefined : { ...process.env, GIT_INDEX_FILE: index };
   try {
+    // Decode HERE rather than passing `encoding: "utf8"`. The success path is identical either way --
+    // this is the same decode Node would have done -- but the failure path is not. With `encoding` set,
+    // Node decodes before it throws, so `error.stdout` reaches the diagnostic as a string in which every
+    // undecodable byte has ALREADY become U+FFFD; re-encoding that string then counts three bytes for
+    // one, which inverts the contributor ranking and overstates a figure documented as a floor. Since
+    // `captureWorkspacePatch` takes the diff through here, that was the only path the diagnostic has
+    // ever actually fired on. Omitting `encoding` hands it the raw bytes instead.
     return execFileSync("git", args, {
       cwd: workspaceRoot,
-      encoding: "utf8",
       env,
       input,
       maxBuffer: MAX_GIT_CAPTURE_BYTES
-    });
+    }).toString("utf8");
   } catch (error) {
     return rethrowOversizedGitOutput(args, error);
   }

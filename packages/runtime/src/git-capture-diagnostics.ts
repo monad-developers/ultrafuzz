@@ -30,7 +30,8 @@ export const MAX_GIT_CAPTURE_BYTES = MAX_PATCH_BYTES * 2;
  * capture with no newline for tens of megabytes it overflows the stack and throws `RangeError: Maximum
  * call stack size exceeded` OUT of the handler, destroying the ENOBUFS it exists to explain and
  * replacing it with something less actionable than the bare error. Measured at 10 MB: throws in 64 ms.
- * 4096 is past `PATH_MAX`, so no real path is excluded, and the bounded form is also ~10x faster.
+ * 4096 is `PATH_MAX` on Linux, so no path git can hand back is excluded, and the bounded form is also
+ * substantially faster (measured 14.7x on the 10 MB case).
  *
  * This bound and the latin1 view below are REDUNDANT: the overflow needs a two-byte string, and either
  * one alone prevents it. The regression test pins the property — that no `RangeError` escapes — and
@@ -55,28 +56,74 @@ const INLINED_STDERR_BYTES = 400;
 /**
  * Distinct roots to keep totals for. The table is the last structure here that grows with the CAPTURE
  * rather than with a constant, and the capture's root names are whatever the agent wrote to disk, so its
- * cardinality is not bounded by anything in this repo. Measured on a 51 MB capture of 1.19M headers, all
- * with distinct roots: holding the capture alone peaks at 454 MB, and the scan added 522 MB on top before
- * it was streamed, 270 MB after. This runs inside a process that has just been refused an allocation, so
- * the tail of that distribution is exactly when it must not ask for more.
+ * cardinality is not bounded by anything in this repo. Peak RSS on a 51 MB capture of 1.19M headers with
+ * all-distinct roots, each figure from `/usr/bin/time -v` on the same fixture:
  *
- * Roots past the cap are counted, not silently dropped — a truncated ranking that reads as a complete one
- * is how an operator gets sent after the wrong directory.
+ *   hold the capture and do nothing else      454 MB          (what the code did before this change)
+ *   materialise every match, table unbounded  976 MB  +522 MB  3101 ms
+ *   stream the matches, table unbounded       724 MB  +270 MB  1842 ms
+ *   stream the matches, table capped here     457 MB    +3 MB   817 ms
+ *
+ * Only the last row ships. This runs inside a process that has just been REFUSED an allocation, so the
+ * tail of that distribution is exactly when it must not ask for more.
+ *
+ * Roots past the cap are counted — with their bytes, not merely a file count — rather than silently
+ * dropped. Admission is first-encounter order, so a root arriving after the table fills is excluded no
+ * matter how large it is, and a truncated ranking that reads as a complete one is how an operator gets
+ * sent after the wrong directory.
  */
 const MAX_RANKED_ROOTS = 4096;
+
+/**
+ * Global `git` options that consume the NEXT argument, which is therefore not the subcommand.
+ *
+ * Without this, `git -c core.quotepath=false diff` reports its subcommand as `core.quotepath=false`: the
+ * value does not start with `-`, so a plain "first non-flag argument" scan stops on it. Naming the wrong
+ * thing is worse here than naming nothing, because the entire complaint this diagnostic answers is that
+ * the original error named no subcommand at all. The `--opt=value` forms need no entry — they start with
+ * `-` and are skipped anyway.
+ */
+const GIT_OPTIONS_TAKING_A_VALUE = new Set([
+  "-c",
+  "-C",
+  "--git-dir",
+  "--work-tree",
+  "--namespace",
+  "--exec-path",
+  "--super-prefix"
+]);
+
+/** The subcommand in a `git` argument list, skipping global options and their values. */
+function gitSubcommand(args: readonly string[]): string {
+  for (let position = 0; position < args.length; position += 1) {
+    const argument = args[position] ?? "";
+    if (GIT_OPTIONS_TAKING_A_VALUE.has(argument)) {
+      position += 1;
+      continue;
+    }
+    if (!argument.startsWith("-")) return argument;
+  }
+  return "git";
+}
 
 /** A string whose UTF-8 encoding is at most `limit` bytes, taken from the head of `buffer`. */
 function truncateUtf8(buffer: Buffer, limit: number): string {
   // Decoding is LOSSY, and a lossy decode can GROW: every byte that is not valid UTF-8 becomes U+FFFD,
   // which re-encodes to THREE bytes. So bounding the input buffer bounds nothing -- 2048 bytes of 0xFF
   // come back as a string worth 6144. Shrink until the ENCODED text fits, which is the bound the
-  // constant names. `runGitBuffer` omits `encoding` precisely because git's output need not be valid
-  // UTF-8, so this is the ordinary case for it, not a contrived one.
-  let take = Math.min(limit, buffer.length);
+  // constant names. Neither git wrapper passes `encoding`, precisely because git's output need not be
+  // valid UTF-8, so an undecodable capture is the ordinary case here, not a contrived one.
+  // `Math.max(0, ...)` because `subarray(0, -1)` is END-relative and would return nearly the whole
+  // buffer -- a negative limit is unreachable from the two constants here, but "unreachable" is a
+  // property of today's callers, not of this function.
+  let take = Math.max(0, Math.min(limit, buffer.length));
   let text = buffer.subarray(0, take).toString("utf8");
   for (let encoded = Buffer.byteLength(text, "utf8"); take > 0 && encoded > limit;) {
-    // Scale by the observed ratio, but always cut by at least one byte so this terminates. The ratio is
-    // at most 3, so the first step lands at or below a third of the limit and one more settles it.
+    // Scale by the observed ratio, and cut by at least one byte so `take` strictly decreases: that, with
+    // the `take > 0` guard, is the whole termination argument. Iteration count is NOT bounded by two --
+    // the ratio applies to the whole prefix while the excess may sit in one region of it. Fuzzed over
+    // 200,000 random buffers of mixed valid and invalid UTF-8: 6 iterations worst case, and zero cases
+    // where the returned text exceeded the limit.
     take = Math.max(0, Math.min(take - 1, Math.floor((take * limit) / encoded)));
     text = buffer.subarray(0, take).toString("utf8");
     encoded = Buffer.byteLength(text, "utf8");
@@ -132,7 +179,7 @@ function captureBytes(value: unknown): number {
  */
 export function rethrowOversizedGitOutput(args: readonly string[], error: unknown): never {
   if (!(error instanceof Error) || (error as { code?: unknown }).code !== "ENOBUFS") throw error;
-  const subcommand = args.find((argument) => !argument.startsWith("-")) ?? "git";
+  const subcommand = gitSubcommand(args);
   const capturedStdout = (error as { stdout?: unknown }).stdout;
   const capturedStderr = (error as { stderr?: unknown }).stderr;
   // Work on a `latin1` view of the capture, whatever form it arrived in. Three things fall out of that
@@ -140,9 +187,12 @@ export function rethrowOversizedGitOutput(args: readonly string[], error: unknow
   //
   //   1. latin1 is a byte/code-unit bijection, so a string offset IS a byte offset: `end - start` is the
   //      exact span, with no re-encoding estimate and no per-header slice allocation.
-  //   2. `utf8` is lossy on a capture Node did not decode — `runGitBuffer` omits `encoding` precisely
-  //      because git's output need not be valid UTF-8 — and each undecodable byte returns as U+FFFD
-  //      worth three, inflating a root's contribution threefold and ranking a smaller one first.
+  //   2. `utf8` is lossy on a capture Node did not decode — neither `runGit` nor `runGitBuffer` passes
+  //      `encoding`, precisely because git's output need not be valid UTF-8 — and each undecodable byte
+  //      returns as U+FFFD worth three, inflating a root's contribution threefold and ranking a smaller
+  //      one first. The string branch below is a FALLBACK, not a live path: once Node has decoded, the
+  //      original bytes are gone and nothing here can recover them, which is why the fix for that case
+  //      lives at the call site rather than in this function.
   //   3. A latin1 string is one-byte internally. `DIFF_HEADER` over a TWO-byte string overflows V8's
   //      backtrack stack on a capture with no line terminator, throwing `RangeError` out of this
   //      handler; a single character above U+00FF anywhere in the capture is enough to flip a string to
@@ -168,11 +218,17 @@ export function rethrowOversizedGitOutput(args: readonly string[], error: unknow
   // already hit an allocation ceiling, and a 32 MB capture of minimal headers holds over a million of
   // them. Only the previous header's root and offset are ever needed.
   const matcher = new RegExp(DIFF_HEADER.source, DIFF_HEADER.flags);
-  let unrankedRoots = 0;
+  // Files, not roots: one increment per header that could not be admitted. Carrying the BYTES too is
+  // what keeps the cap honest -- admission is first-encounter order, so a root arriving after the table
+  // fills is excluded regardless of size, and a count alone cannot tell an operator whether what was
+  // dropped is negligible or larger than everything ranked above it.
+  let unrankedFiles = 0;
+  let unrankedBytes = 0;
   const record = (root: string, start: number, end: number): void => {
     const total = totals.get(root);
     if (total === undefined && totals.size >= MAX_RANKED_ROOTS) {
-      unrankedRoots += 1;
+      unrankedFiles += 1;
+      unrankedBytes += end - start;
       return;
     }
     // `end - start` is exact: `diff` is a latin1 view, so one code unit is one byte.
@@ -193,9 +249,9 @@ export function rethrowOversizedGitOutput(args: readonly string[], error: unknow
     )
     .join(", ");
   const attribution =
-    unrankedRoots === 0
+    unrankedFiles === 0
       ? ranked
-      : `${ranked} (and ${unrankedRoots} further file${unrankedRoots === 1 ? "" : "s"} under roots past the ${MAX_RANKED_ROOTS}-root table, not counted above)`;
+      : `${ranked} (and ${unrankedBytes} diff bytes in ${unrankedFiles} further file${unrankedFiles === 1 ? "" : "s"} under roots past the ${MAX_RANKED_ROOTS}-root table, not counted above)`;
 
   // ENOBUFS fires on EITHER stream. Saying "the workspace is too large" when git merely wrote a lot of
   // stderr would be a confident lie, so claim it only when stdout is the larger capture. An earlier form
