@@ -3199,6 +3199,27 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
   const selectedSources = new Map<string, { dependency: string; bytes: Buffer; direct: boolean }>();
   let selectedBytes = 0;
   const suitePathsByDependency = invariantSuiteDependencySuitePaths(dependencies);
+  // Collect EVERY publisher of every path before deciding any of them (issue #315, and the confluence
+  // hole review found in the first revision of this fix).
+  //
+  // The previous shape folded pairwise against whichever ancestor happened to have been selected so far,
+  // and that made the outcome depend on the visit order `orderedInvariantSuiteDependencies` produces --
+  // which tie-breaks equal-directness ancestors ALPHABETICALLY. Two consequences, both constructed and
+  // run rather than reasoned about:
+  //
+  //   - A fan-in merge resolved cleanly or threw depending purely on node NAMING: siblings `L` and `N`
+  //     plus a merge node `M` depending on both succeeded when `M` sorted first and threw when it sorted
+  //     last.
+  //   - Worse, an ancestor whose entry was REPLACED -- including replacement by identical bytes -- was
+  //     forgotten and never reachability-checked, so an unordered claim could be silently dropped instead
+  //     of raising the conflict it should. That arm was NEW; before the fix both orderings threw.
+  //
+  // Resolving per path removes the order dependence entirely, because the answer is a property of the set
+  // of publishers rather than of the sequence they arrive in.
+  const publishersByPath = new Map<
+    string,
+    Array<{ dependency: string; attemptId: string; bytes: Buffer; direct: boolean }>
+  >();
   for (const dependency of dependencies) {
     const suitePaths = suitePathsByDependency.get(dependency);
     if (suitePaths === undefined) continue;
@@ -3210,36 +3231,42 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
       // descendant workspace.
       if (tombstones.has(relativePath)) continue;
       const bytes = readInvariantSuiteSourceBytes(suiteRoot, relativePath, "artifact handoff invariant suite");
-      const previous = selectedSources.get(relativePath);
-      if (previous !== undefined && !previous.bytes.equals(bytes)) {
-        if (previous.direct === isDirect) {
-          // Equal directness is the case that used to throw unconditionally, and it is the ONLY case this
-          // touches. Two ancestors publishing the same path with different bytes are in conflict just
-          // when neither ran after the other; if one transitively depends on the other, the descendant's
-          // bytes are the newer content, not a competing claim (issue #315).
-          //
-          // Deliberately confined to this branch. A first attempt asked the graph before the directness
-          // rule and inverted the precedence a DIRECT predecessor has over an indirect ancestor, which
-          // broke the #217 tombstone tests — while the comment above it claimed no working selection
-          // could change. The suite disproved the comment on the first run.
-          const previousAttemptId = path.basename(previous.dependency);
-          const currentAttemptId = path.basename(dependency);
-          if (invariantSuiteAncestorSupersedes(previousAttemptId, currentAttemptId)) continue;
-          if (!invariantSuiteAncestorSupersedes(currentAttemptId, previousAttemptId)) {
-            throw new Error(
-              `artifact handoff ancestor invariant suite sources conflict for ${relativePath}: ${previous.dependency} vs ${dependency}`
-            );
-          }
-        } else if (!isDirect) {
-          continue;
-        }
-      }
-      const prior = selectedSources.get(relativePath);
-      if (prior === undefined) selectedBytes += bytes.length;
-      else selectedBytes += bytes.length - prior.bytes.length;
-      selectedSources.set(relativePath, { dependency, bytes, direct: isDirect });
-      assertInvariantSuiteSourceBudget(selectedSources.size, selectedBytes);
+      const publishers = publishersByPath.get(relativePath) ?? [];
+      publishers.push({ dependency, attemptId: path.basename(dependency), bytes, direct: isDirect });
+      publishersByPath.set(relativePath, publishers);
     }
+  }
+  for (const [relativePath, publishers] of publishersByPath) {
+    // Reachability first, and BEFORE directness. A publisher that another publisher transitively depends
+    // on has been superseded: its bytes are simply older, not a competing claim. Doing this first also
+    // settles the case where a DIRECT ancestor is stale and an INDIRECT descendant rewrote it -- the old
+    // rule handed that to the direct one, silently selecting the older Solidity.
+    const maximal = publishers.filter(
+      (candidate) =>
+        !publishers.some(
+          (other) => other !== candidate && invariantSuiteAncestorSupersedes(other.attemptId, candidate.attemptId)
+        )
+    );
+    // Among publishers that nothing supersedes, a DIRECT dependency still outranks an indirect one, which
+    // is long-standing behaviour the #217 tombstone tests depend on.
+    const preferred = maximal.some((candidate) => candidate.direct)
+      ? maximal.filter((candidate) => candidate.direct)
+      : maximal;
+    const first = preferred[0];
+    if (first === undefined) continue;
+    const conflicting = preferred.find((candidate) => !candidate.bytes.equals(first.bytes));
+    if (conflicting !== undefined) {
+      // Genuinely unordered publishers disagreeing about the same file. Selecting either would drop the
+      // other's work with no error, so this stays fail-closed in every visit order.
+      throw new Error(
+        `artifact handoff ancestor invariant suite sources conflict for ${relativePath}: ${first.dependency} vs ${conflicting.dependency}`
+      );
+    }
+    // Every remaining publisher carries identical bytes, so `first` is not an arbitrary tie-break: the
+    // content is settled and only the attribution differs.
+    selectedBytes += first.bytes.length;
+    selectedSources.set(relativePath, { dependency: first.dependency, bytes: first.bytes, direct: first.direct });
+    assertInvariantSuiteSourceBudget(selectedSources.size, selectedBytes);
   }
   assertInvariantSuiteSourceBudget(
     selectedSources.size,
