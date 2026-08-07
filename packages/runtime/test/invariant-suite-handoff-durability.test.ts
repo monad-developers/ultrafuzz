@@ -62,6 +62,11 @@ type WorkflowHelpers = {
   ) => void;
   resetTaskArtifactsForRetry?: (task: TaskSpecLike) => void;
   changedTestTreePaths?: (workspaceRoot: string, baselinePath?: string, protectedBaselinePath?: string) => string[];
+  captureInvariantSuiteBaseline?: (task: TaskSpecLike, workspaceRoot: string) => void;
+  invariantSuiteProtectedBaselinePath?: (task: TaskSpecLike) => string;
+  assertSafeInvariantSuitePath?: (value: string) => string;
+  assertSafeInvariantSuiteTestPath?: (value: string) => string;
+  assertInvariantSuiteSourceBudget?: (fileCount: number, totalBytes: number) => void;
 };
 
 /** Slice a top-level `function name(...)` declaration out of the template. */
@@ -195,6 +200,7 @@ function loadWorkflowHelpers(
     execFileSync,
     existsSync: fs.existsSync,
     readFileSync: fs.readFileSync,
+    readdirSync: fs.readdirSync,
     realpathSync: fs.realpathSync,
     lstatSync: fs.lstatSync,
     statSync: fs.statSync,
@@ -223,6 +229,10 @@ function loadWorkflowHelpers(
     MAX_INVARIANT_SUITE_FILES: 512,
     MAX_INVARIANT_SUITE_SOURCE_BYTES: 16 * 1024 * 1024,
     MAX_INVARIANT_SUITE_TOTAL_BYTES: 64 * 1024 * 1024,
+    MAX_INVARIANT_SUITE_PATH_LENGTH: 4_096,
+    MAX_INVARIANT_SUITE_SEGMENT_LENGTH: 255,
+    INVARIANT_SUITE_SENSITIVE_SEGMENTS: new Set([".git", ".ultrafuzz", ".smithers", "node_modules", ".env"]),
+    INVARIANT_SUITE_ALLOWED_ROOTS: ["src", "contracts", "test", "tests"] as const,
     resolveRegularArtifactFile,
     resolveNonEmptyRegularArtifactFile,
     listInvariantSuiteSources,
@@ -263,6 +273,7 @@ function loadWorkflowHelpers(
     restoreInvariantSuiteWorkspaceSnapshot: () => undefined,
     restoreWorkspacePatchPreparation: () => undefined,
     prepareArtifactMirror: () => undefined,
+    INVARIANT_TEST_ROOT_NAMES: ["test", "tests"] as const,
     invariantTestRoots: () => [] as readonly string[],
     gitTestTreePaths: (workspaceRoot: string) =>
       execFileSync("git", ["ls-files", "--cached", "--others", "--", "test", "tests"], {
@@ -325,25 +336,48 @@ const MATERIALIZATION_HELPERS = [
   "materializeInvariantSuiteFromDependencies"
 ] as const;
 
+/**
+ * Provenance path validation, lifted whole. The harness stub for
+ * `assertSafeInvariantSuitePath` only rejects absolute paths and traversal, so
+ * a list that stubs it cannot say anything about supported roots or internal
+ * state segments.
+ */
+const PROVENANCE_HELPERS = [
+  "assertSafeInvariantSuitePath",
+  "assertSafeInvariantSuiteTestPath",
+  "assertInvariantSuiteSourceBudget",
+  "assertInvariantSuiteSourceSize"
+] as const;
+
 const PUBLICATION_HELPERS = [
+  ...PROVENANCE_HELPERS,
   "assertInvariantSuiteTombstoneBudget",
   "parseInvariantSuiteManifestRecord",
   "readInvariantSuiteManifestRecord",
   "rememberVerifiedPublication",
   "recoverInvariantSuitePublicationSnapshot",
+  "listInvariantSuiteSources",
   "rememberInvariantSuitePublications"
 ] as const;
 
 const COMPANION_HELPERS = [
   ...HANDOFF_RECORD_HELPERS,
+  "assertSafeInvariantSuitePath",
+  "assertSafeInvariantSuiteTestPath",
   "resetInvariantSuiteArtifactRoot",
   "copyDependencyInvariantSuiteToArtifact",
   "materializeInvariantSuiteCompanions"
 ] as const;
 
-const RETRY_HELPERS = ["resetTaskArtifactsForRetry"] as const;
+const RETRY_HELPERS = ["invariantTestRoots", "resetTaskArtifactsForRetry"] as const;
 
-const DISCOVERY_HELPERS = ["gitTestTreePaths", "recordInvariantSuiteTombstone", "changedTestTreePaths"] as const;
+const DISCOVERY_HELPERS = [
+  "gitTestTreePaths",
+  "recordInvariantSuiteTombstone",
+  "invariantSuiteProtectedBaselinePath",
+  "captureInvariantSuiteBaseline",
+  "changedTestTreePaths"
+] as const;
 
 function writeSuiteSource(artifactDir: string, relativePath: string, contents: string): void {
   const target = path.join(artifactDir, "invariant-suite", relativePath);
@@ -1327,6 +1361,338 @@ test("#315 a direct publisher does not mask a conflict between two unordered ind
       () => helpers.materializeInvariantSuiteFromDependencies?.(downstream, downstream.workspacePath),
       /ancestor invariant suite sources conflict for test\/recon\/Properties\.sol/u,
       "two unordered indirect publishers disagreeing must not be masked by an unrelated direct one"
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#213 the protected baseline outranks a sidecar the agent rewrote", () => {
+  // `invariant-suite-baseline.json` lives in the artifact directory the agent
+  // gets as a writable addDir. Editing an entry's digest to match its own edit
+  // makes a generated harness source hash as unchanged, and the change detector
+  // then omits it from the durable suite. The protected copy under run state is
+  // never mounted into the agent, so it is the only thing that can contradict
+  // the sidecar once a restart has emptied the in-process digest map.
+  const { runRoot, setup, state } = createInvariantChain();
+  try {
+    const workspaceRoot = fs.realpathSync(setup.workspacePath);
+    const git = (...args: string[]): void => {
+      execFileSync("git", args, { cwd: workspaceRoot, stdio: "ignore" });
+    };
+    git("init", "--quiet");
+    git("config", "user.email", "ultrafuzz@example.com");
+    git("config", "user.name", "ultrafuzz");
+    const relativePath = "test/recon/TargetFunctions.sol";
+    const sourcePath = path.join(workspaceRoot, relativePath);
+    fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+    fs.writeFileSync(sourcePath, "contract TargetFunctions { /* pinned */ }\n", "utf8");
+    git("add", "--all");
+    git("commit", "--quiet", "-m", "pinned");
+
+    const helpers = loadWorkflowHelpers([...DISCOVERY_HELPERS], state);
+    const captureInvariantSuiteBaseline = helpers.captureInvariantSuiteBaseline;
+    const changedTestTreePaths = helpers.changedTestTreePaths;
+    const invariantSuiteProtectedBaselinePath = helpers.invariantSuiteProtectedBaselinePath;
+    assert.ok(captureInvariantSuiteBaseline);
+    assert.ok(changedTestTreePaths);
+    assert.ok(invariantSuiteProtectedBaselinePath);
+
+    captureInvariantSuiteBaseline(setup, workspaceRoot);
+    const sidecarPath = path.join(setup.artifactDir, "invariant-suite-baseline.json");
+    const protectedPath = path.join(runRoot, "invariant-suite-baselines", `${setup.attemptId}.json`);
+    assert.equal(
+      invariantSuiteProtectedBaselinePath(setup),
+      protectedPath,
+      "the protected baseline must live under durable run state, outside every agent-writable artifact root"
+    );
+    const captured = fs.readFileSync(protectedPath, "utf8");
+    assert.equal(fs.readFileSync(sidecarPath, "utf8"), captured);
+
+    // The agent rewrites the harness source and edits the sidecar so its own
+    // edit hashes as unchanged.
+    fs.writeFileSync(sourcePath, "contract TargetFunctions { /* generated */ }\n", "utf8");
+    const authoredBytes = fs.readFileSync(sourcePath);
+    const forged = JSON.parse(captured) as { files: Array<{ path: string; sha256: string; size: number }> };
+    forged.files = forged.files.map((entry) =>
+      entry.path === relativePath
+        ? { ...entry, size: authoredBytes.length, sha256: createHash("sha256").update(authoredBytes).digest("hex") }
+        : entry
+    );
+    fs.writeFileSync(sidecarPath, `${JSON.stringify(forged, null, 2)}\n`, "utf8");
+
+    // Durable resume: the workflow process restarted, so the in-memory digests
+    // that would otherwise catch the edit are gone.
+    state.baselineSnapshots.clear();
+    state.protectedBaselineSnapshots.clear();
+
+    captureInvariantSuiteBaseline(setup, workspaceRoot);
+    assert.equal(
+      fs.readFileSync(sidecarPath, "utf8"),
+      captured,
+      "the post-agent pass must restore the sidecar from the protected copy instead of trusting the agent's"
+    );
+    assert.deepEqual(
+      changedTestTreePaths(workspaceRoot, sidecarPath, protectedPath),
+      [relativePath],
+      "the source the agent rewrote must still be detected as changed and reach the durable suite"
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#215 a changed src/ helper reaches the manifest and survives one hop downstream", () => {
+  // Invariant setup routinely edits an interface or a mock under src/ so the
+  // harness compiles. Capturing only the test tree drops it, and the downstream
+  // campaign worktree then builds the pinned repository without it.
+  const { runRoot, handlers, coverage, state } = createInvariantChain();
+  try {
+    const helperSource = "library HarnessHelper { /* invariant mock */ }\n";
+    const helperPath = path.join(handlers.workspacePath, "src/HarnessHelper.sol");
+    fs.mkdirSync(path.dirname(helperPath), { recursive: true });
+    fs.writeFileSync(helperPath, helperSource, "utf8");
+    const targetPath = path.join(handlers.workspacePath, "test/recon/TargetFunctions.sol");
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.writeFileSync(targetPath, "contract TargetFunctions { /* v1 */ }\n", "utf8");
+    state.changedTestTreePaths = ["test/recon/TargetFunctions.sol"];
+    state.changedInvariantSourcePaths = ["src/HarnessHelper.sol"];
+    state.dependencySnapshots.set("handlers", new Map<string, SuiteEntry>());
+
+    const companionHelpers = loadWorkflowHelpers([...COMPANION_HELPERS], state);
+    assert.ok(companionHelpers.materializeInvariantSuiteCompanions);
+    companionHelpers.materializeInvariantSuiteCompanions(handlers);
+
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(handlers.artifactDir, "invariant-suite-manifest.json"), "utf8")
+    ) as { files: Array<{ path: string }> };
+    assert.deepEqual(
+      manifest.files.map((file) => file.path),
+      ["src/HarnessHelper.sol", "test/recon/TargetFunctions.sol"],
+      "an invariant source edited outside the test tree must be published alongside the harness it supports"
+    );
+    assert.equal(
+      fs.readFileSync(path.join(handlers.artifactDir, "invariant-suite", "src/HarnessHelper.sol"), "utf8"),
+      helperSource
+    );
+
+    state.dependencySnapshots.clear();
+    const materializationHelpers = loadWorkflowHelpers([...MATERIALIZATION_HELPERS], state);
+    assert.ok(materializationHelpers.materializeInvariantSuiteFromDependencies);
+    materializationHelpers.materializeInvariantSuiteFromDependencies(coverage, coverage.workspacePath);
+    assert.equal(
+      fs.readFileSync(path.join(coverage.workspacePath, "src/HarnessHelper.sol"), "utf8"),
+      helperSource,
+      "the next stage's worktree must receive the exact src/ source the previous stage used"
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#212 retry cleanup resets generated tests under the repository's plural tests/ root", () => {
+  // Aave v4 at the benchmark commit has no test/ at all: `git ls-files test`
+  // is empty and the Foundry root is tests/. A retry that resets test/foundry/
+  // leaves the previous attempt's generated sources in place under tests/, and
+  // the stage republishes them as if this attempt had authored them.
+  const { runRoot, handlers, state } = createInvariantChain();
+  try {
+    const workspaceRoot = fs.realpathSync(handlers.workspacePath);
+    fs.mkdirSync(path.join(workspaceRoot, "tests", "recon"), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspaceRoot, "tests", "recon", "CryticTester.sol"),
+      "contract CryticTester { /* recon */ }\n",
+      "utf8"
+    );
+    handlers.outputs = [{ path: "generated-tests/CryticTester.sol", contract: "ultrafuzz/generated-tests@1" }];
+
+    const resetGeneratedTestRoots: string[] = [];
+    const helpers = loadWorkflowHelpers([...RETRY_HELPERS], state, {
+      resetTaskArtifactContents: (rootPath: string, _attemptId: string, label: string) => {
+        if (label === "generated-test") resetGeneratedTestRoots.push(rootPath);
+      }
+    });
+    assert.ok(helpers.resetTaskArtifactsForRetry);
+    helpers.resetTaskArtifactsForRetry(handlers);
+
+    assert.deepEqual(
+      resetGeneratedTestRoots,
+      [path.join(workspaceRoot, "tests", "foundry", "stateful-invariant-handlers")],
+      "retry cleanup must follow the repository's own Foundry test root, not a hardcoded test/"
+    );
+    assert.equal(
+      fs.existsSync(path.join(workspaceRoot, "test")),
+      false,
+      "a repository that uses tests/ must not have a singular test/ root invented for it"
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#211 an inherited-only suite source survives a stage that never touches it", () => {
+  // `downstream` sees ONLY handlers' artifact directory, so Setup.sol reaches
+  // it exclusively through handlers republishing what it inherited. Every other
+  // fixture here tombstones the ancestor file, which proves the suppression
+  // path and says nothing about the retention path.
+  const runRoot = fs.mkdtempSync(path.join(process.cwd(), "ultrafuzz-invariant-211-"));
+  try {
+    const setup = makeTaskSpec(runRoot, "setup", "stateful-invariant-setup", [], []);
+    const handlers = makeTaskSpec(runRoot, "handlers", "stateful-invariant-handlers", ["setup"], ["setup"]);
+    const downstream = makeTaskSpec(runRoot, "downstream", "stateful-invariant-coverage", ["handlers"], ["handlers"]);
+    const state = createHarnessState([setup, handlers, downstream]);
+
+    const inherited = "contract Setup { /* inherited */ }\n";
+    writeSuiteSource(setup.artifactDir, "test/recon/Setup.sol", inherited);
+    writeSuiteSource(setup.artifactDir, "test/recon/TargetFunctions.sol", "contract TargetFunctions { /* v1 */ }\n");
+    writeSuiteManifest(setup.artifactDir, "stateful-invariant-setup", "setup", [
+      "test/recon/Setup.sol",
+      "test/recon/TargetFunctions.sol"
+    ]);
+
+    const materializationHelpers = loadWorkflowHelpers([...MATERIALIZATION_HELPERS], state);
+    assert.ok(materializationHelpers.materializeInvariantSuiteFromDependencies);
+    materializationHelpers.materializeInvariantSuiteFromDependencies(handlers, handlers.workspacePath);
+
+    // handlers rewrites TargetFunctions.sol only. Nothing in its own provenance
+    // names Setup.sol.
+    fs.writeFileSync(
+      path.join(handlers.workspacePath, "test/recon/TargetFunctions.sol"),
+      "contract TargetFunctions { /* v2 */ }\n",
+      "utf8"
+    );
+    state.changedTestTreePaths = ["test/recon/TargetFunctions.sol"];
+
+    const companionHelpers = loadWorkflowHelpers([...COMPANION_HELPERS], state);
+    assert.ok(companionHelpers.materializeInvariantSuiteCompanions);
+    companionHelpers.materializeInvariantSuiteCompanions(handlers);
+
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(handlers.artifactDir, "invariant-suite-manifest.json"), "utf8")
+    ) as { files: Array<{ path: string }> };
+    assert.deepEqual(
+      manifest.files.map((file) => file.path),
+      ["test/recon/Setup.sol", "test/recon/TargetFunctions.sol"],
+      "this stage's artifact must carry the union of what it inherited and what it authored"
+    );
+    assert.equal(
+      fs.readFileSync(path.join(handlers.artifactDir, "invariant-suite", "test/recon/Setup.sol"), "utf8"),
+      inherited,
+      "the inherited source must be republished as bytes, not merely listed in the manifest"
+    );
+
+    state.dependencySnapshots.clear();
+    materializationHelpers.materializeInvariantSuiteFromDependencies(downstream, downstream.workspacePath);
+    assert.equal(
+      fs.readFileSync(path.join(downstream.workspacePath, "test/recon/Setup.sol"), "utf8"),
+      inherited,
+      "a stage that only sees its direct predecessor must still receive the ancestor's Setup.sol"
+    );
+    assert.equal(
+      fs.readFileSync(path.join(downstream.workspacePath, "test/recon/TargetFunctions.sol"), "utf8"),
+      "contract TargetFunctions { /* v2 */ }\n"
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#211 invariant suite provenance is restricted to supported source roots", () => {
+  const state = createHarnessState([]);
+  const helpers = loadWorkflowHelpers([...PROVENANCE_HELPERS], state);
+  const assertSafeInvariantSuitePath = helpers.assertSafeInvariantSuitePath;
+  const assertSafeInvariantSuiteTestPath = helpers.assertSafeInvariantSuiteTestPath;
+  const assertInvariantSuiteSourceBudget = helpers.assertInvariantSuiteSourceBudget;
+  assert.ok(assertSafeInvariantSuitePath);
+  assert.ok(assertSafeInvariantSuiteTestPath);
+  assert.ok(assertInvariantSuiteSourceBudget);
+
+  for (const accepted of [
+    "src/HarnessHelper.sol",
+    "contracts/interfaces/IPool.sol",
+    "test/recon/Properties.sol",
+    "tests/recon/Properties.sol"
+  ]) {
+    assert.equal(assertSafeInvariantSuitePath(accepted), accepted, `${accepted} is a supported source root`);
+  }
+
+  // A malformed or malicious implementation record naming internal state or a
+  // secret must never copy it into the published suite.
+  for (const rejected of [
+    "artifacts/workspace-state.json",
+    ".envrc",
+    ".git/config",
+    "src/../.envrc",
+    "src/.ultrafuzz/state.json",
+    "node_modules/pkg/index.js",
+    "src/.env.local",
+    "/etc/passwd",
+    ""
+  ]) {
+    assert.throws(
+      () => assertSafeInvariantSuitePath(rejected),
+      /artifact-contract failure: (unsafe invariant suite source path|unsupported invariant suite source root)/u,
+      `${rejected || "<empty>"} must be rejected`
+    );
+  }
+
+  assert.equal(assertSafeInvariantSuiteTestPath("tests/recon/Properties.sol"), "tests/recon/Properties.sol");
+  assert.throws(
+    () => assertSafeInvariantSuiteTestPath("src/HarnessHelper.sol"),
+    /invariant suite test path must be under test\/ or tests\//u,
+    "test provenance must stay inside a Foundry test root even though src/ is a supported source root"
+  );
+
+  assert.doesNotThrow(() => assertInvariantSuiteSourceBudget(512, 64 * 1024 * 1024));
+  assert.throws(
+    () => assertInvariantSuiteSourceBudget(513, 0),
+    /invariant suite has too many source files \(513\)/u,
+    "the file-count budget must be enforced, not assumed"
+  );
+  assert.throws(
+    () => assertInvariantSuiteSourceBudget(1, 64 * 1024 * 1024 + 1),
+    /invariant suite exceeds the source byte budget/u
+  );
+});
+
+test("#214 an unreferenced file under invariant-suite/ fails the publication closed", () => {
+  // The suite root is inside an agent-writable artifact directory. Anything the
+  // agent drops there used to be walked and published with no provenance record
+  // tying it to a property or a source change.
+  const { runRoot, handlers, state } = createInvariantChain();
+  try {
+    writeSuiteSource(handlers.artifactDir, "test/recon/TargetFunctions.sol", "contract TargetFunctions { /* v2 */ }\n");
+    writeSuiteManifest(handlers.artifactDir, "stateful-invariant-handlers", "handlers", [
+      "test/recon/TargetFunctions.sol"
+    ]);
+
+    const helpers = loadWorkflowHelpers([...PUBLICATION_HELPERS], state);
+    const rememberInvariantSuitePublications = helpers.rememberInvariantSuitePublications;
+    assert.ok(rememberInvariantSuitePublications);
+    const artifactRoots = [fs.realpathSync(handlers.artifactDir)];
+
+    const extraPath = path.join(handlers.artifactDir, "invariant-suite", "test/recon/Sneaky.sol");
+    writeSuiteSource(handlers.artifactDir, "test/recon/Sneaky.sol", "contract Sneaky { /* unreferenced */ }\n");
+    const publications = new Map<string, Buffer>();
+    assert.throws(
+      () => rememberInvariantSuitePublications(handlers, publications, artifactRoots),
+      /artifact-contract failure: unexpected invariant suite artifact test\/recon\/Sneaky\.sol/u,
+      "a suite file no validated provenance record selected must not be published"
+    );
+    assert.equal(
+      publications.has("invariant-suite/test/recon/Sneaky.sol"),
+      false,
+      "the rejected extra must never be remembered as a publication"
+    );
+    fs.rmSync(extraPath);
+
+    // An extra outside the supported source roots is rejected while the suite
+    // is enumerated, before any comparison against the manifest happens.
+    writeSuiteSource(handlers.artifactDir, "artifacts/workspace-state.json", "{}\n");
+    assert.throws(
+      () => rememberInvariantSuitePublications(handlers, new Map<string, Buffer>(), artifactRoots),
+      /artifact-contract failure: unsupported invariant suite source root artifacts\/workspace-state\.json/u,
+      "internal state smuggled into the suite root must fail closed rather than be published"
     );
   } finally {
     fs.rmSync(runRoot, { recursive: true, force: true });
