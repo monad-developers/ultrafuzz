@@ -518,3 +518,28 @@ test("does not report a patch as satisfied when its own file was changed afterwa
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("does not report a patch as satisfied when its result tree does not exist", () => {
+  // `git rev-parse <tree>:<path>` fails identically for "tree has no such path" and "tree does not
+  // exist", and both read as undefined. Without a check on the tree itself, a manifest naming a bogus
+  // result tree matches absent-against-absent on every declared path and the patch is skipped silently
+  // -- the one way this predicate could hand a node an unprepared worktree with no error at all.
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "base"]);
+    const pristine = captureWorkspaceTree(root);
+    writeFileSync(path.join(root, "foundry.toml"), "[profile.default]\n");
+    const captured = captureWorkspacePatch(root, pristine);
+
+    const forged = {
+      ...captured.manifest,
+      result_tree: "0000000000000000000000000000000000000000",
+      files: [{ path: "never-existed.sol" }]
+    };
+    assert.equal(isWorkspacePatchSatisfied(root, forged), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

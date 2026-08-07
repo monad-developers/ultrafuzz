@@ -208,6 +208,15 @@ function treeEntryId(workspaceRoot: string, tree: string, entryPath: string): st
  * Only a caller holding the full dependency set can ask the second question.
  */
 export function isWorkspacePatchSatisfied(workspaceRoot: string, manifest: WorkspacePatchManifest): boolean {
+  // `treeEntryId` cannot distinguish "this tree has nothing there" from "this tree does not exist", so a
+  // manifest naming a bogus `result_tree` would report every declared path as absent, match absent
+  // against absent, and skip the patch silently. Confirm the tree is real before trusting any comparison
+  // against it; if it is not, fall through and let the strict apply path fail loudly.
+  try {
+    if (runGit(workspaceRoot, ["cat-file", "-t", manifest.result_tree]).trim() !== "tree") return false;
+  } catch {
+    return false;
+  }
   const currentTree = captureWorkspaceTree(workspaceRoot);
   if (currentTree === manifest.result_tree) return true;
   // An empty declaration proves nothing about the worktree, so it cannot stand in for having applied.
