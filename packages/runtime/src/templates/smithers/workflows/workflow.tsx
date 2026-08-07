@@ -830,7 +830,11 @@ function discardSupersededWorkspacePatchArtifacts(artifactRoot: string): void {
   }
   if (!existsSync(patchPath) || !existsSync(manifestPath)) return;
   const patch = readFileSync(
-    resolveRegularArtifactFile(artifactRoot, patchPath, "artifact-contract failure: workspace patch artifact is unsafe"),
+    resolveRegularArtifactFile(
+      artifactRoot,
+      patchPath,
+      "artifact-contract failure: workspace patch artifact is unsafe"
+    ),
     "utf8"
   );
   const manifestText = readFileSync(
