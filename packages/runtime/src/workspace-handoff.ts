@@ -184,6 +184,19 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
  * sensitive-path rejection were never checked for that dependency at all — so a manifest naming `.env`,
  * or a `patch_sha256` that does not match its bytes, would be accepted in silence. Worse, the skip
  * decision itself reads `result_tree`, so an unvalidated field was steering it.
+ *
+ * These are the checks that need nothing but the capture and the repository's `HEAD`. The rest —
+ * `assertPatchPathsMatchManifest`, the empty-patch consistency check and the result-tree verification —
+ * stay in `applyWorkspacePatch` because they are meaningful only against a worktree the patch is being
+ * applied to. So a SKIPPED capture is validated less thoroughly than an applied one: its manifest cannot
+ * name a sensitive path, but nothing cross-checks the paths in its patch BODY against that manifest. That
+ * is acceptable only because the body is never applied, and it is stated here so the guarantee is not
+ * read as broader than it is.
+ *
+ * A caller that validates every capture up front and then applies some of them will validate those twice.
+ * That is deliberate, not an oversight: the skip decision reads `result_tree`, so validation has to
+ * precede the decision, and re-running it inside `applyWorkspacePatch` keeps that function safe for any
+ * caller. Every check here is pure and idempotent; the cost is one extra digest and one extra `rev-parse`.
  */
 export function validateWorkspacePatchCapture(workspaceRoot: string, capture: WorkspacePatchCapture): void {
   validateManifest(capture.manifest);
