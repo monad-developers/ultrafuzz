@@ -107,6 +107,37 @@ invariant_testing_smoke_timeout = "10min"
     expect(resolved.value.invariants.invariantTestingSmokeTimeoutSeconds).toBe(900);
   });
 
+  // Issue #285 staging switch. The runtime gate reads this key straight out of the RESOLVED config
+  // TOML, so a key the loader accepts but the serializer drops would be a switch nobody can flip.
+  it("carries the reference expectation enforcement switch into the resolved config", () => {
+    const parsed = parseProjectConfigToml(`
+[invariants]
+reference_expectation_enforcement = "fail"
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.invariants?.referenceExpectationEnforcement).toBe("fail");
+
+    const resolved = resolveConfig({ env: {}, projectConfig: parsed.value });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.invariants.referenceExpectationEnforcement).toBe("fail");
+    expect(serializeRedactedResolvedConfigToml(resolved.value)).toContain('reference_expectation_enforcement = "fail"');
+
+    // Absent is the default, and the serialized config must not invent one.
+    const defaulted = resolveConfig({ env: {} });
+    expect(defaulted.ok).toBe(true);
+    if (!defaulted.ok) return;
+    expect(defaulted.value.invariants.referenceExpectationEnforcement).toBeUndefined();
+    expect(serializeRedactedResolvedConfigToml(defaulted.value)).not.toContain("reference_expectation_enforcement");
+
+    const invalid = parseProjectConfigToml(`
+[invariants]
+reference_expectation_enforcement = "strict"
+`);
+    expect(invalid.ok).toBe(false);
+  });
+
   it("resolves provider-neutral cloud resources and logical-node overrides without persisting credentials", () => {
     const parsed = parseProjectConfigToml(`
 [execution]
