@@ -123,10 +123,32 @@ export function describeWorkerTermination(error: unknown): string {
     links.push(describeErrorLink(current));
     current = current instanceof Error ? current.cause : undefined;
   }
-  return sanitizeWorkerDiagnosticMessage(links.join(" <- "), {
+  const described = sanitizeWorkerDiagnosticMessage(links.join(" <- "), {
     maxBytes: MAX_TERMINATION_DETAIL_BYTES,
     keep: "head"
   });
+  // A rejection with `undefined`, `null` or an empty string still has to name itself, otherwise the terminal
+  // log is the bare prefix again, which is the failure mode this whole module exists to remove.
+  return described === "" ? String(error) : described;
+}
+
+/**
+ * The call frames of the rejection's own stack, bounded and redacted, or `undefined` when it has none.
+ *
+ * `Error.prototype.stack` is a plain string of `name: message` plus frames; it never carries an error's own
+ * enumerable properties, so an `execFileSync` `ENOBUFS` `SystemError`'s `output`/`stdout`/`stderr` payload
+ * cannot reach it. Without the frames an unanticipated failure -- a `TypeError` in the worker's own code,
+ * exactly the class that leaves no other trace -- names no file and no line.
+ */
+export function workerTerminationStack(error: unknown): string | undefined {
+  if (!(error instanceof Error) || typeof error.stack !== "string") return undefined;
+  const frames = error.stack.split("\n").filter((line) => /^\s+at\s/u.test(line));
+  if (frames.length === 0) return undefined;
+  const sanitized = sanitizeWorkerDiagnosticMessage(frames.join("\n"), {
+    maxBytes: MAX_TERMINATION_DETAIL_BYTES,
+    keep: "head"
+  });
+  return sanitized === "" ? undefined : sanitized;
 }
 
 function describeErrorLink(value: unknown): string {

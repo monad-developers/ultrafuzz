@@ -53,7 +53,12 @@ import {
 } from "./worker-result.js";
 import { modalTargetToml } from "./workspace-config.js";
 import { runPublicBenchmarkWorker } from "./public-worker.js";
-import { childExitFailureCause, describeWorkerTermination, drainChildOutput } from "./worker-diagnostics.js";
+import {
+  childExitFailureCause,
+  describeWorkerTermination,
+  drainChildOutput,
+  workerTerminationStack
+} from "./worker-diagnostics.js";
 import {
   assertWorkerInputLineage,
   CheckpointIncompatibleError,
@@ -621,5 +626,9 @@ void (
   // workspace diff, which `util.inspect` would dump. `describeWorkerTermination` walks the `cause` chain and
   // emits only bounded, redacted `name (code): message` text.
   console.error("worker terminated:", describeWorkerTermination(error));
+  // The frames come from `error.stack`, a plain string that never carries those payload properties, so an
+  // unanticipated failure still names a file and a line rather than only a message.
+  const stack = workerTerminationStack(error);
+  if (stack !== undefined) console.error("worker terminated at:", stack);
   process.exitCode = 1;
 });

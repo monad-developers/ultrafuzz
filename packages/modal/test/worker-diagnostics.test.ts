@@ -8,7 +8,8 @@ import {
   createBoundedStderrTail,
   describeWorkerTermination,
   drainChildOutput,
-  sanitizeWorkerDiagnosticMessage
+  sanitizeWorkerDiagnosticMessage,
+  workerTerminationStack
 } from "../src/worker-diagnostics.js";
 
 it("retains only the last bytes appended to a bounded stderr tail", () => {
@@ -105,4 +106,45 @@ it("describes non-Error rejections and self-referencing cause chains", () => {
   const looping = new Error("loop");
   looping.cause = looping;
   expect(describeWorkerTermination(looping)).toBe("Error: loop");
+});
+
+it("names an empty rejection rather than printing a bare prefix", () => {
+  expect(describeWorkerTermination(undefined)).toBe("undefined");
+  expect(describeWorkerTermination(null)).toBe("null");
+  expect(describeWorkerTermination(new Error(""))).toBe("Error:");
+});
+
+it("locates an unanticipated failure by its own stack frames", () => {
+  let unanticipated: unknown;
+  try {
+    (undefined as unknown as { missingHandler: () => void }).missingHandler();
+  } catch (error) {
+    unanticipated = error;
+  }
+
+  // The message alone names no file and no line, which is the complaint in #307.
+  expect(describeWorkerTermination(unanticipated)).not.toContain("worker-diagnostics.test.ts");
+  const stack = workerTerminationStack(unanticipated);
+  expect(stack).toBeDefined();
+  expect(stack).toContain("worker-diagnostics.test.ts");
+  expect(stack).not.toContain("\n");
+  expect(Buffer.byteLength(stack!, "utf8")).toBeLessThanOrEqual(2_000);
+});
+
+it("takes stack frames from the plain string, never from the error's payload properties", () => {
+  const enobufs = Object.assign(new Error("spawnSync git ENOBUFS"), {
+    name: "SystemError",
+    code: "ENOBUFS",
+    stdout: `diff --git a/echidna ${"D".repeat(50_000)}`,
+    stderr: "workspace patch payload",
+    output: ["", "workspace patch payload"]
+  });
+
+  const stack = workerTerminationStack(enobufs);
+
+  expect(stack).toBeDefined();
+  expect(stack).not.toContain("workspace patch payload");
+  expect(stack).not.toContain("D".repeat(64));
+  expect(workerTerminationStack("not an error")).toBeUndefined();
+  expect(workerTerminationStack(Object.assign(new Error("no frames"), { stack: "Error: no frames" }))).toBeUndefined();
 });
