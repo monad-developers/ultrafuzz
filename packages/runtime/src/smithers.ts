@@ -465,6 +465,12 @@ export interface CompiledSmithersWorkflow {
   workflowName: string;
   tasks: readonly CompiledSmithersTask[];
   dynamicGroups: readonly CompiledSmithersDynamicGroup[];
+  /**
+   * Resolved `run.max_dynamic_nodes`. Carried on the compiled workflow rather than read back out of
+   * a dynamic group so the planner can record the limit it planned under even in a topology whose
+   * dynamic groups have not been compiled.
+   */
+  maxDynamicNodes: number;
   projectRoot: string;
   runRoot: string;
   workflowPath: string;
@@ -650,6 +656,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     workflowName,
     tasks,
     dynamicGroups,
+    maxDynamicNodes: input.config.run.maxDynamicNodes,
     projectRoot,
     runRoot: input.runLayout.root,
     workflowPath,
@@ -2624,6 +2631,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
     ),
     __ULTRAFUZZ_COMPILED_TASKS__: compiledTasks,
     __ULTRAFUZZ_DYNAMIC_GROUPS__: dynamicGroups,
+    __ULTRAFUZZ_MAX_DYNAMIC_NODES__: JSON.stringify(compiled.maxDynamicNodes),
     __ULTRAFUZZ_TASK_SPECS__: taskSpecs,
     __ULTRAFUZZ_WORKFLOW_NAME__: JSON.stringify(compiled.workflowName),
     __ULTRAFUZZ_ARTIFACTS_MODULE__: JSON.stringify(import.meta.resolve("@ultrafuzz/artifacts")),

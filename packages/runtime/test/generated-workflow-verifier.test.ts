@@ -1039,7 +1039,7 @@ test("generated Smithers verifier canonicalizes threat Markdown and materializes
   assert.match(canonical, /logicalNodeId !== "goal-plan"/u);
   assert.match(
     canonical,
-    /materializeGoalPlanVulnerabilityDatabaseSnapshots\(artifactRoot, \{ threatModelArtifactDirs, runRoot \}\)/u
+    /materializeGoalPlanVulnerabilityDatabaseSnapshots\(artifactRoot, \{\s*threatModelArtifactDirs,\s*runRoot,\s*maxDynamicNodes\s*\}\)/u
   );
 
   const verifier = source.slice(verifierStart, workflowStart);

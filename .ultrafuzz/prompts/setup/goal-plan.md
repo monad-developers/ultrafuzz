@@ -108,6 +108,13 @@ Include:
 - fixed `roaming_goal`;
 - exact `counts`.
 
+Do not write `expected_child_count`, `threat_count`, `applicable_class_count`,
+`max_dynamic_nodes`, or `goal_lanes`. After the agent returns, Ultrafuzz
+deterministically records those from the plan you wrote plus the run's
+configured dynamic-node limit, and fails closed if a value you wrote disagrees.
+The canonical schema lists them as required because they are present by the time
+the plan is validated.
+
 `modeled_threat_ids` must exactly equal the IDs in the upstream threat model;
 class goals may reference only those IDs.
 

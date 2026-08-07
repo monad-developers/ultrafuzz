@@ -10,6 +10,7 @@ import {
   appendNodeAttempt,
   appendEvent,
   appendLineDurable,
+  assertUsageLedgerEntry,
   createRunLayout,
   getNodeArtifactDir,
   normalizeFindings,
@@ -114,6 +115,44 @@ test("generated usage events append idempotently with stable checkpoint dimensio
 
   appendLineDurable(layout.usageLedgerPath, "{malformed", layout.root);
   assert.equal(replayUsageEvents(layout).malformedEntries, 1);
+});
+
+test("usage entries carry an optional node_id join key that older ledgers may omit", () => {
+  // `attempt_id` is a digest of (workflow run, node, iteration, attempt), so nothing outside this
+  // module can join to it without copying the hash rule. `node_id` is the join key, and it is
+  // optional because `usage.jsonl` is durable: ledgers written before it existed must still parse.
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-usage-node-id" });
+  const base = {
+    workflowRunId: "workflow-run-usage",
+    sourceEventId: "source-event-1",
+    checkpointGenerationId: "checkpoint-1",
+    observedAt: "2026-07-18T00:00:00.000Z",
+    nodeId: "node:dynamic-fanout-1",
+    iteration: 0,
+    attempt: 1,
+    usage: { total_tokens: 15 },
+    usageComplete: true,
+    usageIncompleteReasons: []
+  };
+
+  const historical = appendUsageEvents(layout, [base]);
+  assert.equal(historical.entries[0]?.node_id, undefined);
+  assert.equal(assertUsageLedgerEntry(JSON.parse(JSON.stringify(historical.entries[0]))).node_id, undefined);
+
+  // The same event re-observed by a writer that now resolves the state identity. An addition to an
+  // otherwise unchanged record must not fail the replay of a run resumed across the upgrade.
+  const resumed = appendUsageEvents(layout, [{ ...base, stateNodeId: "dynamic-fanout-1" }]);
+  assert.equal(resumed.appended, 0);
+  assert.equal(replayUsageEvents(layout).entries.length, 1);
+
+  const fresh = createRunLayout({ projectRoot: tempProject(), runId: "run-usage-node-id-fresh" });
+  const written = appendUsageEvents(fresh, [{ ...base, stateNodeId: "dynamic-fanout-1" }]);
+  assert.equal(written.entries[0]?.node_id, "dynamic-fanout-1");
+  assert.equal(replayUsageEvents(fresh).entries[0]?.node_id, "dynamic-fanout-1");
+  // A node ID the ledger cannot carry is dropped, never thrown on: usage accounting must not abort
+  // the run it is only observing.
+  const unsafe = createRunLayout({ projectRoot: tempProject(), runId: "run-usage-node-id-unsafe" });
+  assert.equal(appendUsageEvents(unsafe, [{ ...base, stateNodeId: "../escape" }]).entries[0]?.node_id, undefined);
 });
 
 test("usage ledger replay rejects entries copied from another run", () => {

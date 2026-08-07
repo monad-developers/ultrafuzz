@@ -159,6 +159,8 @@ const dynamicGraphPath = path.join(dynamicRunRoot, "graph.json");
 const dynamicTasksPath = path.join(dynamicRunRoot, "smithers", "tasks.json");
 const compiledBaseTasks = __ULTRAFUZZ_COMPILED_TASKS__;
 const dynamicGroupSpecs = __ULTRAFUZZ_DYNAMIC_GROUPS__;
+/** Resolved `run.max_dynamic_nodes`, recorded by the planner into `goal-plan.json`. */
+const maxDynamicNodes = __ULTRAFUZZ_MAX_DYNAMIC_NODES__;
 const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
 /**
  * Hydrates one serialized task spec against the current project root.
@@ -2654,7 +2656,11 @@ function materializeGoalPlanDatabaseArtifacts(task: (typeof taskSpecs)[number]):
       goalPlanPath,
       "artifact-contract failure: goal-plan.json is not a regular file"
     );
-    materializeGoalPlanVulnerabilityDatabaseSnapshots(artifactRoot, { threatModelArtifactDirs, runRoot });
+    materializeGoalPlanVulnerabilityDatabaseSnapshots(artifactRoot, {
+      threatModelArtifactDirs,
+      runRoot,
+      maxDynamicNodes
+    });
   }
 }
 
