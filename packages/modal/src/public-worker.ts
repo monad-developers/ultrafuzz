@@ -12,6 +12,7 @@ import {
   BENCHMARK_SMOKE_MAX_PARALLEL_RUNS,
   BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS,
   boundedEvalId,
+  evalRunRoot,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
   publicEvalDiagnosticsFailedTargetCount,
@@ -19,7 +20,6 @@ import {
   type EvalRunRecord,
   type EvalSuiteSpec
 } from "@ultrafuzz/evals";
-import { redactSecretsInText, redactSecretValueRepresentations } from "@ultrafuzz/security";
 import {
   VERIFIER_PUBLIC_EVIDENCE_MAX_BYTES,
   parseVerifierReceipt,
@@ -51,12 +51,18 @@ import {
 } from "./public-bundle.js";
 import {
   createPublicEvalDiagnosticsFromRun,
+  MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
   PUBLIC_EVAL_DIAGNOSTICS_FILE,
   publicEvalRecordTerminalDisposition,
   type PublicEvalDiagnostics,
   writePublicEvalDiagnosticsAtomic
 } from "./public-eval-diagnostics.js";
 import { capModalTargetTopologyTimeouts, modalTargetToml } from "./workspace-config.js";
+import {
+  describeWorkerTermination,
+  sanitizeWorkerDiagnosticMessage,
+  WORKER_STDERR_TAIL_BYTES
+} from "./worker-diagnostics.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "./worker-result.js";
 import { OperationalDispositionError } from "./terminal-disposition.js";
 
@@ -87,6 +93,28 @@ export class PublicEvalDiagnosticsBuildError extends Error {
 
   constructor(cause: unknown) {
     super("public eval diagnostics could not be built", { cause });
+  }
+}
+
+/**
+ * A command that was cut short, as opposed to one that ran to completion.
+ *
+ * Both shapes are operationally `unreachable`, but only one of them leaves a
+ * finished journal behind. A command that returned has written everything it
+ * was ever going to write, whatever exit code it chose; a command that was
+ * timed out, aborted, or killed by a signal from anywhere else -- a reclaimed
+ * sandbox, the OOM killer -- may have launched work it never got to record.
+ * "Killed" is not this worker's own kills only: an exit code is chosen, and a
+ * child that never chose one never reached the end of its writing. Every
+ * reader that has to tell those apart -- today, the `model_work_started`
+ * corroboration gate -- needs the distinction made at the throw site, not
+ * guessed at from an exit code or a message.
+ */
+export class PublicWorkerCommandInterruptedError extends OperationalDispositionError {
+  override readonly name = "PublicWorkerCommandInterruptedError";
+
+  constructor(options: { cause?: unknown } = {}) {
+    super("unreachable", options);
   }
 }
 const PUBLIC_EVAL_RUN_ID_MAX_LENGTH = 128;
@@ -216,6 +244,21 @@ export async function runPublicBenchmarkWorker(input: {
               publicDiagnosticSecretValues: resolveForbiddenSecretValues
             }
           ).then(() => undefined),
+        corroborateModelWork: () => {
+          // The eval command has finished writing its journal, so what it
+          // recorded about launched rows outranks the flag this worker raised
+          // before the command began (#320).
+          if (publicEvalModelWorkEvidence(evalRunRoot(prepared.controlRoot, prepared.evalRunId)) === "none") {
+            modelWorkStarted = false;
+          }
+        },
+        reportCorroborationFailure: (error) => {
+          appendPublicWorkerLogLine(
+            logPath,
+            `model-work-corroboration-failed ${describeWorkerTermination(error)}`,
+            retainedForbiddenSecretValues
+          );
+        },
         buildDiagnostics: async () =>
           createPublicEvalDiagnosticsFromRun({
             config: input.config,
@@ -363,6 +406,16 @@ export async function runWithPublicPreparationTimeout<T>(
   }
 }
 
+/**
+ * Raises `model_work_started` before the eval command starts.
+ *
+ * The flag has to lead the work it describes: a sandbox reclaimed mid-eval never
+ * writes again, and treating that as a pre-model flake would relaunch a run that
+ * had already spent its budget. `corroborateModelWork` settles the flag against
+ * the eval's own journal once the command returns -- including when it returns
+ * nonzero, which is what an all-failed matrix does and the only case in which
+ * the flag is ever lowered.
+ */
 export async function checkpointPublicModelWorkStart(
   writer: WorkerResultWriter,
   markStarted: () => void,
@@ -373,8 +426,116 @@ export async function checkpointPublicModelWorkStart(
   await flush();
 }
 
+export type PublicEvalModelWorkEvidence = "launched" | "none" | "unknown";
+
+/**
+ * Diagnostic codes a failed row can carry that leave a workflow possibly running.
+ *
+ * Membership is decided by where the runtime raises the code, not by what the
+ * code is called. `WORKFLOW_SUBMISSION_FAILED` is raised from exactly one place
+ * -- the `catch` around `submitSmithersWorkflow` in `start-run.ts` -- and that
+ * region is entered only once the workflow has been handed to the engine, so a
+ * failure reported there may have landed the workflow and spent its tokens.
+ *
+ * A code belongs here if the runtime can raise it at or after the point of
+ * submission. Nothing else may be added: every code named here costs the pair
+ * the pre-model retry that `none` buys it.
+ */
+const PUBLIC_EVAL_POST_SUBMISSION_DIAGNOSTIC_CODES: ReadonlySet<string> = new Set(["WORKFLOW_SUBMISSION_FAILED"]);
+
+/**
+ * What the eval run's own journal records about model work having begun.
+ *
+ * The public worker keeps no checkpoint of its own -- its counts and usage are
+ * empty in every contract it writes -- so the journal the eval command leaves
+ * behind is the only evidence it has that a row ever reached a model.
+ *
+ * `none` is the only answer that clears `model_work_started`, so it is the only
+ * answer that has to be earned: it is reported only when every record both names
+ * no workflow and names no fault the runtime could have raised after handing a
+ * workflow to the engine. That second test is what makes the guarantee
+ * structural rather than incidental. A row whose submission failed may already
+ * have spent tokens, but the id of the workflow it may have spent them on is
+ * discarded -- `start-run.ts` returns a value-less failure from its submission
+ * `catch`, and `runtimeRowLauncher` records `workflowIds: []` for it -- so
+ * `workflow_ids` cannot answer for that row and its diagnostics have to.
+ *
+ * Absence of a journal is reported as `unknown`, and so is a journal that cannot
+ * rule model work out: only a journal that is present and positively accounts
+ * for every record is evidence that nothing ran.
+ */
+export function publicEvalModelWorkEvidence(evalRoot: string): PublicEvalModelWorkEvidence {
+  const records = readPublicEvalRunRecords(evalRoot);
+  if (records === undefined) return "unknown";
+  if (records.some(recordNamesWorkflow)) return "launched";
+  if (records.some(recordMayHaveSubmittedWorkflow)) return "unknown";
+  return "none";
+}
+
+function recordNamesWorkflow(record: Record<string, unknown>): boolean {
+  return record.status === "launched" || (Array.isArray(record.workflow_ids) && record.workflow_ids.length > 0);
+}
+
+function recordMayHaveSubmittedWorkflow(record: Record<string, unknown>): boolean {
+  return (
+    Array.isArray(record.diagnostics) &&
+    record.diagnostics.some(
+      (entry) =>
+        isPlainRecord(entry) &&
+        typeof entry.code === "string" &&
+        PUBLIC_EVAL_POST_SUBMISSION_DIAGNOSTIC_CODES.has(entry.code)
+    )
+  );
+}
+
+function readPublicEvalRunRecords(evalRoot: string): Array<Record<string, unknown>> | undefined {
+  for (const [name, parse] of [
+    ["run-summary.json", (text: string) => (JSON.parse(text) as { records?: unknown }).records],
+    [
+      "runs.jsonl",
+      (text: string) =>
+        text
+          .split(/\r?\n/u)
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as unknown)
+    ]
+  ] as const) {
+    const filePath = path.join(evalRoot, name);
+    try {
+      const stats = fs.lstatSync(filePath);
+      if (!stats.isFile() || stats.size > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES) continue;
+      const records = parse(fs.readFileSync(filePath, "utf8"));
+      if (Array.isArray(records)) return records.filter(isPlainRecord);
+    } catch {
+      // An unreadable or malformed journal is no evidence either way.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Whether the eval command left a journal that can be read as final.
+ *
+ * A nonzero exit is the normal outcome here, not an anomaly: `eval run` reports
+ * `ok: false` for any failed or incomplete row, `emitCommandResult` turns that
+ * into exit 1, and `runCommand` turns exit 1 into a throw. Gating corroboration
+ * on "the command threw" would therefore gate it on the very rows it exists to
+ * account for, which is what #332 found. What actually matters is narrower: a
+ * command that returned has finished writing, however it exited, while a
+ * command that was killed -- by this worker's timeout, by an abort, or by a
+ * signal from outside it -- may have launched work it never recorded, and only
+ * that one keeps its raised flag on the strength of the interruption alone.
+ */
+export function publicEvalCommandLeftFinalJournal(runError: unknown): boolean {
+  return !(runError instanceof PublicWorkerCommandInterruptedError);
+}
+
 export async function runAndCheckpointPublicEvalDiagnostics(input: {
   runEval: () => Promise<void>;
+  /** Settles `model_work_started`; called once the eval command has returned, whatever its exit code. */
+  corroborateModelWork?: () => void;
+  /** Records a corroboration read that threw, so a read that never succeeds is not invisible. */
+  reportCorroborationFailure?: (error: unknown) => void;
   buildDiagnostics: () => PublicEvalDiagnostics | Promise<PublicEvalDiagnostics>;
   persistDiagnostics: (diagnostics: PublicEvalDiagnostics) => Promise<void>;
   flush: () => Promise<void>;
@@ -384,6 +545,26 @@ export async function runAndCheckpointPublicEvalDiagnostics(input: {
     await input.runEval();
   } catch (error) {
     runError = error;
+  }
+  // Corroborating here, rather than after this function returns, keeps the
+  // settled flag on the contract even when building the diagnostics throws.
+  //
+  // The hook only ever lowers the flag, so a hook that throws costs nothing but
+  // the lowering: the flag stays raised, which is the side that does not retry
+  // spent work. Failing the eval run over it would cost the diagnostics
+  // document, which is the one artifact this function exists to produce. It
+  // still has to say so: a read that throws every time would otherwise look
+  // exactly like a journal that keeps answering `launched`.
+  if (publicEvalCommandLeftFinalJournal(runError)) {
+    try {
+      input.corroborateModelWork?.();
+    } catch (error) {
+      try {
+        input.reportCorroborationFailure?.(error);
+      } catch {
+        // A reporter that cannot report is still not a run outcome.
+      }
+    }
   }
   let diagnostics: PublicEvalDiagnostics;
   try {
@@ -1212,20 +1393,28 @@ async function runCommand(
   };
   options.signal?.addEventListener("abort", abortHandler, { once: true });
   if (options.signal?.aborted) abortHandler();
-  const exitCode = await new Promise<number>((resolve, reject) => {
+  // `close` reports an exit code or a termination signal, never both, and the
+  // difference is the one this worker's readers turn on: a child that chose an
+  // exit code finished writing, a child something else killed did not. Folding
+  // a signal into `code ?? 1` would hand a reclaimed or OOM-killed eval command
+  // to `publicEvalCommandLeftFinalJournal` as one that returned.
+  const termination = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
     child.once("error", reject);
-    child.once("close", (code) => resolve(code ?? 1));
+    child.once("close", (code, signal) => resolve({ code, signal }));
   }).finally(() => {
     clearTimeout(timer);
     if (killTimer !== undefined) clearTimeout(killTimer);
     options.signal?.removeEventListener("abort", abortHandler);
   });
+  const exitCode = termination.code ?? 1;
   const capturedStdout = Buffer.concat(stdout).toString("utf8");
-  if (options.publicDiagnosticSecretValues !== undefined) {
-    const forbiddenSecretValues =
-      typeof options.publicDiagnosticSecretValues === "function"
+  const forbiddenSecretValues =
+    options.publicDiagnosticSecretValues === undefined
+      ? []
+      : typeof options.publicDiagnosticSecretValues === "function"
         ? await options.publicDiagnosticSecretValues()
         : options.publicDiagnosticSecretValues;
+  if (options.publicDiagnosticSecretValues !== undefined) {
     const payload = publicEvalFailureDiagnosticLogPayload(capturedStdout, forbiddenSecretValues);
     if (payload !== undefined) {
       await fs.promises.appendFile(
@@ -1234,24 +1423,55 @@ async function runCommand(
       );
     }
   }
-  if (timedOut || aborted) {
+  // A kill this worker did not order counts the same as one it did. An eval
+  // command reclaimed by the sandbox or taken by the OOM killer stops mid-write
+  // exactly like a timed-out one, and its half-written journal must not be read
+  // as a final account of what launched.
+  if (timedOut || aborted || termination.signal !== null) {
     await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-failed\n`);
-    throw new OperationalDispositionError("unreachable", {
-      cause:
-        aborted && options.signal?.reason instanceof Error
-          ? options.signal.reason
-          : new Error(options.timeoutCategory ?? "operation-timeout")
+    throw new PublicWorkerCommandInterruptedError({
+      cause: interruptedCommandCause({
+        label: argv[0]!,
+        timedOut,
+        aborted,
+        terminationSignal: termination.signal,
+        abortReason: options.signal?.reason,
+        ...(options.timeoutCategory === undefined ? {} : { timeoutCategory: options.timeoutCategory })
+      })
     });
   }
   if (exitCode !== 0) {
     await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-failed\n`);
-    const detail = Buffer.concat(stderr).toString("utf8").slice(-4_000).trim();
+    // The stderr tail can quote configuration, so it goes through the same sanitizer as every other
+    // diagnostic string this worker emits rather than being embedded raw.
+    const detail = sanitizeWorkerDiagnosticMessage(
+      Buffer.concat(stderr).subarray(-WORKER_STDERR_TAIL_BYTES).toString("utf8"),
+      {
+        forbiddenSecretValues
+      }
+    );
     throw new OperationalDispositionError("unreachable", {
       cause: new Error(`${argv[0]} exited ${exitCode}${detail === "" ? "" : `: ${detail}`}`)
     });
   }
   await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-finished\n`);
   return capturedStdout;
+}
+
+/** Why an interrupted command stopped: this worker's own reason first, the signal that took it otherwise. */
+function interruptedCommandCause(input: {
+  label: string;
+  timedOut: boolean;
+  aborted: boolean;
+  terminationSignal: NodeJS.Signals | null;
+  abortReason: unknown;
+  timeoutCategory?: string;
+}): Error {
+  if (input.aborted && input.abortReason instanceof Error) return input.abortReason;
+  if (!input.timedOut && !input.aborted && input.terminationSignal !== null) {
+    return new Error(`${input.label} terminated by ${input.terminationSignal}`);
+  }
+  return new Error(input.timeoutCategory ?? "operation-timeout");
 }
 
 export function publicEvalFailureDiagnosticLogPayload(
@@ -1273,24 +1493,10 @@ export function publicEvalFailureDiagnosticLogPayload(
     .slice(0, 3)
     .map((entry) => ({
       code: "WORKFLOW_SUBMISSION_FAILED",
-      message: sanitizePublicDiagnosticMessage(entry.message as string, forbiddenSecretValues)
+      message: sanitizeWorkerDiagnosticMessage(entry.message as string, { forbiddenSecretValues })
     }));
   if (diagnostics.length === 0) return undefined;
   return Buffer.from(JSON.stringify(diagnostics), "utf8").toString("base64url");
-}
-
-function sanitizePublicDiagnosticMessage(message: string, forbiddenSecretValues: readonly string[]): string {
-  let sanitized = redactSecretValueRepresentations(message, forbiddenSecretValues);
-  sanitized = [...redactSecretsInText(sanitized)]
-    .map((character) => {
-      const codePoint = character.codePointAt(0)!;
-      return codePoint <= 31 || codePoint === 127 ? " " : character;
-    })
-    .join("")
-    .replace(/\s+/gu, " ")
-    .trim();
-  const bytes = Buffer.from(sanitized, "utf8");
-  return bytes.subarray(Math.max(0, bytes.length - 1_000)).toString("utf8");
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -1310,6 +1516,29 @@ async function runBare(argv: string[]): Promise<void> {
   if (exitCode !== 0) throw new Error(`${argv[0]} exited ${exitCode}`);
 }
 
+/**
+ * Append one redacted line to the worker log without ever becoming a failure.
+ *
+ * Callers use this from paths whose whole point is that they cannot fail the
+ * run -- a best-effort read that threw, say -- so a log that cannot be written
+ * must not turn into the outcome the caller was avoiding.
+ */
+export function appendPublicWorkerLogLine(
+  logPath: string,
+  message: string,
+  forbiddenSecretValues: Iterable<string> = []
+): void {
+  try {
+    const sanitized = sanitizeWorkerDiagnosticMessage(message, {
+      forbiddenSecretValues: [...forbiddenSecretValues],
+      keep: "head"
+    });
+    fs.appendFileSync(logPath, `${new Date().toISOString()} ${sanitized}\n`);
+  } catch {
+    // The log is evidence, not an outcome.
+  }
+}
+
 function requiredEnv(name: string, env: Record<string, string | undefined> = process.env): string {
   const value = env[name];
   if (value === undefined || value.trim() === "") throw new Error(`${name} is required`);
@@ -1318,7 +1547,9 @@ function requiredEnv(name: string, env: Record<string, string | undefined> = pro
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
-  throw new OperationalDispositionError("unreachable", {
+  // An abort between two commands is the same interruption as an abort during
+  // one: whatever was running was cut short rather than allowed to finish.
+  throw new PublicWorkerCommandInterruptedError({
     cause: signal.reason instanceof Error ? signal.reason : new Error("preparation-timeout")
   });
 }

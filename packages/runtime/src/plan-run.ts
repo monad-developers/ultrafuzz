@@ -1618,7 +1618,16 @@ function provisionReferenceExpectationOutput(
   const sourceContents = fs.readFileSync(sourcePath);
   const parsed = validateReferenceExpectationsSchema(JSON.parse(sourceContents.toString("utf8")), sourcePath);
   if (!parsed.ok || parsed.value === undefined) {
-    throw new Error(parsed.issues.map((issue) => issue.message).join("; "));
+    // Include the field path. Mapping `message` alone reproduced the #328 symptom exactly on a
+    // USER-SUPPLIED catalog: 40 malformed entries became 40 identical copies of
+    // `Invalid input: expected string, received undefined`, with nothing to say which entry was wrong.
+    // Formatted here rather than via the artifacts package's `schemaErrorMessage`, which is internal to
+    // that package -- widening its public API for one call site is a worse trade than four lines.
+    throw new Error(
+      `reference expectation catalog is invalid: ${parsed.issues
+        .map((issue) => `${issue.path} ${issue.message}`)
+        .join("; ")}`
+    );
   }
   const contract = artifactContractDefinition("ultrafuzz/reference-expectations@1");
   const referenceNodes = graph.nodes.filter((node) => node.kind === "reference");

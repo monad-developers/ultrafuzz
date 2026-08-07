@@ -23,9 +23,15 @@ import {
 
 import type { PublicModalBenchmarkConfig } from "../src/config.js";
 import type { ModalModelSpec } from "../src/defaults.js";
-import type { ModalWorkerLineage } from "../src/launch-state.js";
+import {
+  classifyModalRunnerStatus,
+  modalPreModelAttempt,
+  parseModalWorkerStatus,
+  type ModalWorkerLineage
+} from "../src/launch-state.js";
 import { PUBLIC_EVAL_DIAGNOSTICS_FILE, type PublicEvalDiagnostics } from "../src/public-eval-diagnostics.js";
 import {
+  appendPublicWorkerLogLine,
   assertPublicWorkerInput,
   assertPublicWorkerBundleLineage,
   checkpointPublicModelWorkStart,
@@ -36,7 +42,8 @@ import {
   PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS,
   PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS,
   PUBLIC_FULL_BENCHMARK_MAX_PARALLEL_EVAL_ROWS,
-  type PublicEvalDiagnosticsBuildError,
+  PublicEvalDiagnosticsBuildError,
+  PublicWorkerCommandInterruptedError,
   publicBenchmarkMaxParallelEvalRows,
   publicBenchmarkWorkRoot,
   publicBundleSources,
@@ -44,6 +51,8 @@ import {
   publicEvalRunId,
   preparePublicEvalSuite,
   publicEvalFailureDiagnosticLogPayload,
+  publicEvalModelWorkEvidence,
+  publicEvalCommandLeftFinalJournal,
   publicEvalRunErrorCanBePublished,
   runAndCheckpointPublicEvalDiagnostics,
   runPublicBenchmarkWorker,
@@ -60,7 +69,8 @@ import {
   type PublicBenchmarkBundle
 } from "../src/public-bundle.js";
 import { createExactCandidateSourceArchive } from "../src/runner.js";
-import { WorkerResultWriter } from "../src/worker-result.js";
+import { OperationalDispositionError } from "../src/terminal-disposition.js";
+import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "../src/worker-result.js";
 import { writeTerminalEvidenceFixture } from "./helpers/terminal-evidence.js";
 
 it("keeps high-fanout public benchmark work off the persistent Modal volume", () => {
@@ -304,7 +314,10 @@ it("durably checkpoints the transition to paid model work before launch", async 
   });
 });
 
-it("checkpoints diagnostics even when eval run exits nonzero", async () => {
+it("checkpoints diagnostics and still reads the journal when eval run exits nonzero", async () => {
+  // Exit 1 is the ordinary outcome for a matrix with a failed or incomplete
+  // row, so it is the only outcome under which the journal can hold the
+  // non-launched rows corroboration exists to find (#332).
   const failure = new Error("eval run reported an incomplete row");
   const diagnostics = { summary: { scoring_ready: false } } as PublicEvalDiagnostics;
   const order: string[] = [];
@@ -314,6 +327,7 @@ it("checkpoints diagnostics even when eval run exits nonzero", async () => {
       order.push("run");
       throw failure;
     },
+    corroborateModelWork: () => order.push("corroborate"),
     buildDiagnostics: async () => {
       await new Promise((resolve) => setImmediate(resolve));
       order.push("build");
@@ -329,8 +343,524 @@ it("checkpoints diagnostics even when eval run exits nonzero", async () => {
   });
 
   expect(result).toEqual({ diagnostics, runError: failure });
-  expect(order).toEqual(["run", "build", "persist", "flush"]);
+  expect(order).toEqual(["run", "corroborate", "build", "persist", "flush"]);
 });
+
+it("does not read the journal of a command it killed", async () => {
+  // A command that never returned may have launched work it never journaled,
+  // so its raised `model_work_started` is not up for revision. This is the one
+  // exit shape that keeps the flag on the strength of the interruption alone.
+  const order: string[] = [];
+  const interrupted = new PublicWorkerCommandInterruptedError({ cause: new Error("model-work-timeout") });
+
+  const result = await runAndCheckpointPublicEvalDiagnostics({
+    runEval: async () => {
+      order.push("run");
+      throw interrupted;
+    },
+    corroborateModelWork: () => order.push("corroborate"),
+    buildDiagnostics: async () => {
+      order.push("build");
+      return { summary: { scoring_ready: false } } as PublicEvalDiagnostics;
+    },
+    persistDiagnostics: async () => {
+      order.push("persist");
+    },
+    flush: async () => {
+      order.push("flush");
+    }
+  });
+
+  expect(result.runError).toBe(interrupted);
+  expect(order).toEqual(["run", "build", "persist", "flush"]);
+  expect(publicEvalCommandLeftFinalJournal(interrupted)).toBe(false);
+  // Every other rejection -- including the `unreachable` a nonzero exit raises
+  // -- is a command that returned and wrote everything it was going to write.
+  expect(publicEvalCommandLeftFinalJournal(undefined)).toBe(true);
+  expect(publicEvalCommandLeftFinalJournal(new OperationalDispositionError("unreachable"))).toBe(true);
+});
+
+it("settles model work against the eval journal before the diagnostics can fail", async () => {
+  const order: string[] = [];
+  const buildFailure = new Error("run summary is not a diagnostics document");
+
+  await expect(
+    runAndCheckpointPublicEvalDiagnostics({
+      runEval: async () => {
+        order.push("run");
+      },
+      corroborateModelWork: () => order.push("corroborate"),
+      buildDiagnostics: () => {
+        order.push("build");
+        throw buildFailure;
+      },
+      persistDiagnostics: async () => {
+        order.push("persist");
+      },
+      flush: async () => {
+        order.push("flush");
+      }
+    })
+  ).rejects.toMatchObject({ name: "PublicEvalDiagnosticsBuildError", cause: buildFailure });
+
+  expect(order).toEqual(["run", "corroborate", "build"]);
+});
+
+it("reads model work evidence from the eval journal and never invents it", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-evidence-"));
+  const evalRoot = path.join(root, "eval-run");
+  fs.mkdirSync(evalRoot, { recursive: true });
+
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("unknown");
+  expect(publicEvalModelWorkEvidence(path.join(root, "absent"))).toBe("unknown");
+
+  fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(runSummary(0))}\n`);
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("none");
+
+  fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(runSummary(1))}\n`);
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("launched");
+
+  // A row whose launcher failed after submitting a workflow may already have
+  // spent tokens, so it counts as work having started.
+  fs.writeFileSync(
+    path.join(evalRoot, "run-summary.json"),
+    `${JSON.stringify({ records: [{ row_id: "row-1", status: "failed", workflow_ids: ["workflow-1"] }] })}\n`
+  );
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("launched");
+
+  // The journal outlives a summary the command never got to write.
+  fs.rmSync(path.join(evalRoot, "run-summary.json"));
+  fs.writeFileSync(
+    path.join(evalRoot, "runs.jsonl"),
+    `${JSON.stringify({ row_id: "row-1", status: "failed", workflow_ids: [] })}\n`
+  );
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("none");
+
+  fs.writeFileSync(path.join(evalRoot, "run-summary.json"), "{ not json\n");
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("none");
+});
+
+it("never reports no model work for a row whose submission may have landed", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-submission-"));
+  const evalRoot = path.join(root, "eval-run");
+  fs.mkdirSync(evalRoot, { recursive: true });
+  const submissionFailed = {
+    row_id: "row-1",
+    target_id: "row-1",
+    status: "failed",
+    // `submitSmithersWorkflow` can fail after the engine has taken the workflow
+    // -- a lease or acknowledgement that never comes back -- and the runtime
+    // discards the id on that path, so the row names no workflow to count.
+    workflow_ids: [],
+    diagnostics: [{ code: "WORKFLOW_SUBMISSION_FAILED", message: "detached admission timed out" }]
+  };
+
+  fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify({ records: [submissionFailed] })}\n`);
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("unknown");
+
+  // One such row is enough to make the whole journal unable to say nothing ran.
+  fs.writeFileSync(
+    path.join(evalRoot, "run-summary.json"),
+    `${JSON.stringify({ records: [...runSummary(0).records, submissionFailed] })}\n`
+  );
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("unknown");
+
+  // A row that did launch still outranks it: the journal knows work began.
+  fs.writeFileSync(
+    path.join(evalRoot, "run-summary.json"),
+    `${JSON.stringify({ records: [...runSummary(1).records, submissionFailed] })}\n`
+  );
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("launched");
+
+  // The same reading from the line journal, and codes raised before submission
+  // still leave the verdict earnable.
+  fs.rmSync(path.join(evalRoot, "run-summary.json"));
+  fs.writeFileSync(path.join(evalRoot, "runs.jsonl"), `${JSON.stringify(submissionFailed)}\n`);
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("unknown");
+  fs.writeFileSync(
+    path.join(evalRoot, "runs.jsonl"),
+    `${JSON.stringify({ ...submissionFailed, diagnostics: [{ code: "EVAL_ROW_SYNC_FAILED" }] })}\n`
+  );
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("none");
+});
+
+it("keeps a submission that may have landed out of the pre-model retry budget", async () => {
+  // The end of the road for Finding A: clearing `model_work_started` is exactly
+  // what moves a pair out of the `resume-required` + `postModelRecovery: "stop"`
+  // branch that #286 added, so a journal that cannot rule out a landed workflow
+  // must not clear it. Walk the whole chain rather than assert the flag alone.
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-relaunch-"));
+  const statusPath = path.join(root, "status.json");
+  const resultPath = path.join(root, "result.json");
+  const evalRoot = path.join(root, "eval-run");
+  fs.mkdirSync(evalRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(evalRoot, "run-summary.json"),
+    `${JSON.stringify({
+      launched: 0,
+      records: [
+        {
+          row_id: "row-1",
+          status: "failed",
+          workflow_ids: [],
+          diagnostics: [{ code: "WORKFLOW_SUBMISSION_FAILED", message: "detached admission timed out" }]
+        }
+      ]
+    })}\n`
+  );
+  let modelWorkStarted = false;
+  const writer = await WorkerResultWriter.create({
+    statusPath,
+    resultPath,
+    executionContext: () => ({ launch_generation: 3, attempt: 1, model_work_started: modelWorkStarted })
+  });
+
+  // The eval command returns and the flag is settled against the journal; then
+  // the sandbox is reclaimed during the bundle work that follows. That failure
+  // names nothing, so the contract goes out as a real sandbox exit -- the one
+  // shape whose category is read off `model_work_started` alone.
+  const death = new Error("the sandbox went away");
+  await expect(
+    runWithTerminalPersistence({
+      writer,
+      snapshot: async () => emptyWorkerCheckpoint(),
+      flush: async () => undefined,
+      run: async () => {
+        await checkpointPublicModelWorkStart(
+          writer,
+          () => {
+            modelWorkStarted = true;
+          },
+          async () => undefined
+        );
+        await runAndCheckpointPublicEvalDiagnostics({
+          runEval: async () => undefined,
+          corroborateModelWork: () => {
+            if (publicEvalModelWorkEvidence(evalRoot) === "none") modelWorkStarted = false;
+          },
+          buildDiagnostics: async () =>
+            ({ summary: { scoring_ready: true }, rows: [] }) as unknown as PublicEvalDiagnostics,
+          persistDiagnostics: async () => undefined,
+          flush: async () => undefined
+        });
+        throw death;
+      }
+    })
+  ).rejects.toBe(death);
+
+  const contract = JSON.parse(fs.readFileSync(resultPath, "utf8")) as unknown;
+  expect(contract).toMatchObject({
+    exit_category: "sandbox-exited",
+    diagnostic_code: "sandbox-exited",
+    model_work_started: true
+  });
+  const workerStatus = parseModalWorkerStatus(contract);
+  expect(workerStatus).toMatchObject({ category: "resume-required", model_work_started: true });
+  expect(
+    classifyModalRunnerStatus({
+      sandbox: "exited",
+      preModelAttempt: modalPreModelAttempt(
+        { recovery_lifecycle: [] },
+        { slug: "gpt-5-6-luna-high", generation: 3, attempt: 1 }
+      ),
+      workerStatus,
+      postModelRecovery: "stop"
+    })
+  ).toMatchObject({ category: "resume-required", action: "none" });
+});
+
+// #332: `eval run` reports `ok: false` for any failed or incomplete row, and
+// `emitCommandResult` turns that into exit 1, so the journals corroboration was
+// written to read are exactly the ones that reach it through a thrown
+// `runError`. Walk the whole chain for each of the three verdicts rather than
+// assert the flag alone -- the flag only matters for what it does to the
+// relaunch decision at the far end.
+it("settles model work against a journal the eval command left behind after exiting nonzero", async () => {
+  const preModelFailures = runSummary(0);
+  const settled = await settleAfterFailedEvalRun(preModelFailures);
+
+  expect(settled.journalReads).toBe(1);
+  expect(settled.contract).toMatchObject({
+    result_type: "terminal",
+    exit_category: "unreachable",
+    model_work_started: false
+  });
+  expect(settled.workerStatus).toMatchObject({
+    category: "transient-operational-failure",
+    model_work_started: false,
+    retryable: true
+  });
+  // The point of the whole mechanism: a matrix that never reached a model is
+  // relaunched rather than written off as spent work.
+  expect(settled.runnerStatus).toMatchObject({
+    category: "transient-operational-failure",
+    action: "relaunch",
+    model_work_started: false
+  });
+});
+
+it("keeps the flag raised after a nonzero exit whose journal cannot rule model work out", async () => {
+  const mayHaveLaunched = await settleAfterFailedEvalRun({
+    launched: 0,
+    records: [
+      ...runSummary(0).records,
+      {
+        row_id: "row-4",
+        target_id: "row-4",
+        status: "failed",
+        workflow_ids: [],
+        diagnostics: [{ code: "WORKFLOW_SUBMISSION_FAILED", message: "detached admission timed out" }]
+      }
+    ]
+  });
+
+  // The read happens and declines to lower the flag, which is a different fact
+  // from the read never happening -- and the only one of the two that survives
+  // a journal whose rows are all failures.
+  expect(mayHaveLaunched.journalReads).toBe(1);
+  expect(mayHaveLaunched.contract).toMatchObject({ model_work_started: true });
+  expect(mayHaveLaunched.workerStatus).toMatchObject({ category: "resume-required", model_work_started: true });
+  expect(mayHaveLaunched.runnerStatus).toMatchObject({ category: "resume-required", action: "none" });
+
+  // A row that did launch is the same answer by a shorter route.
+  const launched = await settleAfterFailedEvalRun(runSummary(1));
+  expect(launched.journalReads).toBe(1);
+  expect(launched.contract).toMatchObject({ model_work_started: true });
+  expect(launched.runnerStatus).toMatchObject({ category: "resume-required", action: "none" });
+});
+
+it("clears the flag for a nonzero exit over an empty matrix", async () => {
+  const empty = await settleAfterFailedEvalRun({ launched: 0, records: [] });
+
+  expect(empty.journalReads).toBe(1);
+  expect(empty.contract).toMatchObject({ model_work_started: false });
+  expect(empty.runnerStatus).toMatchObject({ category: "transient-operational-failure", action: "relaunch" });
+});
+
+/**
+ * The worker's own sequence for an eval command that returned nonzero: raise the
+ * flag, run the command, settle the flag against the journal, then fail the run
+ * the way `scoring_ready === false` does, and read the terminal contract back.
+ */
+async function settleAfterFailedEvalRun(journal: {
+  launched: number;
+  records: Array<Record<string, unknown>>;
+}): Promise<{
+  contract: unknown;
+  journalReads: number;
+  workerStatus: ReturnType<typeof parseModalWorkerStatus>;
+  runnerStatus: ReturnType<typeof classifyModalRunnerStatus>;
+}> {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-nonzero-"));
+  const resultPath = path.join(root, "result.json");
+  const evalRoot = path.join(root, "eval-run");
+  fs.mkdirSync(evalRoot, { recursive: true });
+  fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(journal)}\n`);
+  let modelWorkStarted = false;
+  let journalReads = 0;
+  const writer = await WorkerResultWriter.create({
+    statusPath: path.join(root, "status.json"),
+    resultPath,
+    executionContext: () => ({ launch_generation: 3, attempt: 1, model_work_started: modelWorkStarted })
+  });
+  // Exactly what `runCommand` raises when the CLI exits 1; see
+  // "reports a child that exited nonzero as a command that returned".
+  const exitedOne = new OperationalDispositionError("unreachable", {
+    cause: new Error("node exited 1: eval run reported failed rows")
+  });
+
+  await expect(
+    runWithTerminalPersistence({
+      writer,
+      snapshot: async () => emptyWorkerCheckpoint(),
+      flush: async () => undefined,
+      run: async () => {
+        await checkpointPublicModelWorkStart(
+          writer,
+          () => {
+            modelWorkStarted = true;
+          },
+          async () => undefined
+        );
+        const checkpoint = await runAndCheckpointPublicEvalDiagnostics({
+          runEval: async () => {
+            throw exitedOne;
+          },
+          corroborateModelWork: () => {
+            journalReads += 1;
+            if (publicEvalModelWorkEvidence(evalRoot) === "none") modelWorkStarted = false;
+          },
+          buildDiagnostics: async () =>
+            ({ summary: { scoring_ready: false }, rows: [] }) as unknown as PublicEvalDiagnostics,
+          persistDiagnostics: async () => undefined,
+          flush: async () => undefined
+        });
+        expect(checkpoint.diagnostics.summary.scoring_ready).toBe(false);
+        throw new OperationalDispositionError("unreachable", { cause: checkpoint.runError });
+      }
+    })
+  ).rejects.toMatchObject({ name: "OperationalDispositionError", cause: exitedOne });
+
+  const contract = JSON.parse(fs.readFileSync(resultPath, "utf8")) as unknown;
+  const workerStatus = parseModalWorkerStatus(contract);
+  return {
+    contract,
+    journalReads,
+    workerStatus,
+    runnerStatus: classifyModalRunnerStatus({
+      sandbox: "exited",
+      preModelAttempt: modalPreModelAttempt(
+        { recovery_lifecycle: [] },
+        { slug: "gpt-5-6-luna-high", generation: 3, attempt: 1 }
+      ),
+      ...(workerStatus === undefined ? {} : { workerStatus }),
+      postModelRecovery: "stop"
+    })
+  };
+}
+
+it("settles the flag without ever costing the diagnostics document, and says so when it cannot", async () => {
+  const corroborationFailure = new Error("eval run ID is not a safe identifier");
+  const persisted: PublicEvalDiagnostics[] = [];
+  const reported: unknown[] = [];
+  const checkpoint = await runAndCheckpointPublicEvalDiagnostics({
+    runEval: async () => undefined,
+    corroborateModelWork: () => {
+      // `evalRunRoot`'s `assertSafeEvalId` throws for an unsafe eval run ID.
+      throw corroborationFailure;
+    },
+    // A read that throws every time is otherwise indistinguishable from a
+    // journal that keeps answering `launched`, so it has to leave a trace.
+    reportCorroborationFailure: (error) => reported.push(error),
+    buildDiagnostics: async () => ({ summary: { scoring_ready: true }, rows: [] }) as unknown as PublicEvalDiagnostics,
+    persistDiagnostics: async (diagnostics) => {
+      persisted.push(diagnostics);
+    },
+    flush: async () => undefined
+  });
+
+  expect(reported).toEqual([corroborationFailure]);
+  expect(persisted).toHaveLength(1);
+  expect(checkpoint.diagnostics.summary.scoring_ready).toBe(true);
+  expect(checkpoint.runError).toBeUndefined();
+
+  // A reporter that cannot report is still not a run outcome.
+  const withBrokenReporter = await runAndCheckpointPublicEvalDiagnostics({
+    runEval: async () => undefined,
+    corroborateModelWork: () => {
+      throw corroborationFailure;
+    },
+    reportCorroborationFailure: () => {
+      throw new Error("worker log is not writable");
+    },
+    buildDiagnostics: async () => ({ summary: { scoring_ready: true }, rows: [] }) as unknown as PublicEvalDiagnostics,
+    persistDiagnostics: async () => undefined,
+    flush: async () => undefined
+  });
+  expect(withBrokenReporter.diagnostics.summary.scoring_ready).toBe(true);
+});
+
+it("records a corroboration read that threw in the worker log without redacting nothing", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-log-"));
+  const logPath = path.join(root, "worker.log");
+  fs.writeFileSync(logPath, "");
+  const secret = "sk-fixture-secret-value";
+
+  appendPublicWorkerLogLine(logPath, `model-work-corroboration-failed opened ${secret}\nsecond line`, [secret]);
+  const written = fs.readFileSync(logPath, "utf8");
+
+  expect(written).toContain("model-work-corroboration-failed");
+  expect(written).not.toContain(secret);
+  expect(written.trimEnd().split("\n")).toHaveLength(1);
+
+  // The log is evidence, not an outcome: an unwritable path is swallowed.
+  expect(() => appendPublicWorkerLogLine(path.join(root, "absent-dir", "worker.log"), "anything")).not.toThrow();
+});
+
+it("reports an unbuildable diagnostics document without claiming a sandbox exit or model work", async () => {
+  // Run 31171579070, pair ultrafuzz-bench-benchmark-smoke-gpt-5-6-luna-high. The
+  // worker log ends `operation-finished` at the same millisecond the terminal
+  // contract was written: the eval command returned, `createPublicEvalDiagnostics`
+  // threw, and the contract went out as `sandbox-exited` with
+  // `model_work_started: true`, `usage: null` and all-zero counts -- a sandbox
+  // that never exited, and work that the eval journal says never ran (#320).
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-zero-work-"));
+  const statusPath = path.join(root, "status.json");
+  const resultPath = path.join(root, "result.json");
+  const evalRoot = path.join(root, "eval-run");
+  fs.mkdirSync(evalRoot, { recursive: true });
+  fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(runSummary(0))}\n`);
+  let modelWorkStarted = false;
+  const writer = await WorkerResultWriter.create({
+    statusPath,
+    resultPath,
+    executionContext: () => ({ launch_generation: 1, attempt: 1, model_work_started: modelWorkStarted })
+  });
+  const buildFailure = new Error("public eval run journal contains a row outside the matrix");
+
+  await expect(
+    runWithTerminalPersistence({
+      writer,
+      snapshot: async () => emptyWorkerCheckpoint(),
+      flush: async () => undefined,
+      diagnosticCodeForError: (error) =>
+        error instanceof PublicEvalDiagnosticsBuildError ? "public-eval-diagnostics-invalid" : undefined,
+      run: async () => {
+        await checkpointPublicModelWorkStart(
+          writer,
+          () => {
+            modelWorkStarted = true;
+          },
+          async () => undefined
+        );
+        await runAndCheckpointPublicEvalDiagnostics({
+          runEval: async () => undefined,
+          corroborateModelWork: () => {
+            if (publicEvalModelWorkEvidence(evalRoot) === "none") modelWorkStarted = false;
+          },
+          buildDiagnostics: () => {
+            throw buildFailure;
+          },
+          persistDiagnostics: async () => undefined,
+          flush: async () => undefined
+        });
+        return "finished";
+      }
+    })
+  ).rejects.toMatchObject({ name: "PublicEvalDiagnosticsBuildError" });
+
+  const contract = JSON.parse(fs.readFileSync(resultPath, "utf8")) as unknown;
+  expect(contract).toMatchObject({
+    result_type: "terminal",
+    exit_category: "unreachable",
+    diagnostic_code: "public-eval-diagnostics-invalid",
+    model_work_started: false,
+    counts: { succeeded: 0, failed: 0, remaining: 0 },
+    usage: null
+  });
+  expect(parseModalWorkerStatus(contract)).toMatchObject({
+    category: "permanent-operational-failure",
+    model_work_started: false,
+    error_code: "public-eval-diagnostics-invalid"
+  });
+});
+
+// A journal whose failed rows never reached submission: the target checkout was
+// missing, so `runtimeRowLauncher` threw before it compiled anything to submit.
+// A row that failed at submission is a different journal and a different answer;
+// see "never reports no model work for a row whose submission may have landed".
+function runSummary(launched: number): { launched: number; records: Array<Record<string, unknown>> } {
+  return {
+    launched,
+    records: ["row-1", "row-2", "row-3"].map((rowId, index) => ({
+      row_id: rowId,
+      target_id: rowId,
+      status: index < launched ? "launched" : "failed",
+      workflow_ids: index < launched ? [`workflow-${rowId}`] : [],
+      diagnostics: index < launched ? [] : [{ code: "EVAL_TARGET_PATH_MISSING" }]
+    }))
+  };
+}
 
 it("continues only after one publishable genuine task-failure target", () => {
   const failedRow = {
@@ -512,6 +1042,133 @@ it("materializes the private candidate from the image with exact clean Git prove
     );
   }
 });
+
+it("redacts the child stderr tail it attaches as a failure cause", async () => {
+  const secret = "sk-ant-fixturebakedcandidatearchive";
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-baked-stderr-"));
+  const destination = path.join(root, "candidate");
+  const logPath = path.join(root, "worker.log");
+
+  const failure = await materializeBakedCandidate(
+    "f".repeat(40),
+    destination,
+    logPath,
+    path.join(root, `${secret}.tgz`)
+  )
+    .then(() => undefined)
+    .catch((error: unknown) => error);
+
+  const cause = (failure as { cause?: unknown }).cause;
+  expect(cause).toBeInstanceOf(Error);
+  expect((cause as Error).message).toContain("tar exited");
+  expect((cause as Error).message).toContain("<redacted>");
+  expect((cause as Error).message).not.toContain(secret);
+  expect((cause as Error).message).not.toContain("\n");
+});
+
+it("tells a command it killed apart from one that returned nonzero", async () => {
+  // The distinction the corroboration gate turns on. A child that chose its own
+  // exit code has finished writing; one this worker cut short has not, and only
+  // the second may have launched work that never reached a journal (#332).
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-baked-interrupt-"));
+  const destination = path.join(root, "candidate");
+  const logPath = path.join(root, "worker.log");
+
+  const exited = await materializeBakedCandidate("f".repeat(40), destination, logPath, path.join(root, "absent.tgz"))
+    .then(() => undefined)
+    .catch((error: unknown) => error);
+  expect(exited).toBeInstanceOf(OperationalDispositionError);
+  expect(exited).not.toBeInstanceOf(PublicWorkerCommandInterruptedError);
+  expect(publicEvalCommandLeftFinalJournal(exited)).toBe(true);
+
+  const controller = new AbortController();
+  controller.abort(new Error("preparation-timeout"));
+  const interrupted = await materializeBakedCandidate(
+    "f".repeat(40),
+    destination,
+    logPath,
+    path.join(root, "absent.tgz"),
+    controller.signal
+  )
+    .then(() => undefined)
+    .catch((error: unknown) => error);
+  expect(interrupted).toBeInstanceOf(PublicWorkerCommandInterruptedError);
+  expect((interrupted as OperationalDispositionError).category).toBe("unreachable");
+  expect(publicEvalCommandLeftFinalJournal(interrupted)).toBe(false);
+});
+
+it("classifies a child cut short after it started as an interruption, not an exit", async () => {
+  // The pre-aborted case above never reaches `runCommand`: `materializeBakedCandidate`
+  // rejects at its own `throwIfAborted`. The branch that actually fires in
+  // production is the one inside `runCommand` after the child is already
+  // running -- the eval command hitting `model-work-timeout` reaches the same
+  // throw -- so it needs a child that is alive when the interruption lands.
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-baked-cutshort-"));
+  const started = path.join(root, "tar-started");
+  // `exec` so the process holding the stdio pipes is the one the worker kills;
+  // a shell that leaves an orphan behind never closes them.
+  const restorePath = shimTar(root, `#!/bin/sh\ntouch ${JSON.stringify(started)}\nexec sleep 60\n`);
+  try {
+    const controller = new AbortController();
+    const pending = materializeBakedCandidate(
+      "f".repeat(40),
+      path.join(root, "candidate"),
+      path.join(root, "worker.log"),
+      path.join(root, "absent.tgz"),
+      controller.signal
+    )
+      .then(() => undefined)
+      .catch((error: unknown) => error);
+    while (!fs.existsSync(started)) await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort(new Error("model-work-timeout"));
+
+    const interrupted = await pending;
+    expect(interrupted).toBeInstanceOf(PublicWorkerCommandInterruptedError);
+    expect(publicEvalCommandLeftFinalJournal(interrupted)).toBe(false);
+  } finally {
+    restorePath();
+  }
+});
+
+it("treats a child killed by a signal it did not send as a command that never finished writing", async () => {
+  // An eval command reclaimed by the sandbox or taken by the OOM killer reports
+  // no exit code at all. Reading that as "exited 1" would hand its half-written
+  // `runs.jsonl` to corroboration as a final account of what launched, and a
+  // journal holding only the rows that already appended reads `none` -- which
+  // buys a relaunch of a run that may have spent its budget.
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-baked-signal-"));
+  const restorePath = shimTar(root, "#!/bin/sh\nkill -9 $$\n");
+  try {
+    const killed = await materializeBakedCandidate(
+      "f".repeat(40),
+      path.join(root, "candidate"),
+      path.join(root, "worker.log"),
+      path.join(root, "absent.tgz")
+    )
+      .then(() => undefined)
+      .catch((error: unknown) => error);
+
+    expect(killed).toBeInstanceOf(PublicWorkerCommandInterruptedError);
+    expect((killed as OperationalDispositionError).category).toBe("unreachable");
+    expect(String((killed as Error).cause)).toContain("SIGKILL");
+    expect(publicEvalCommandLeftFinalJournal(killed)).toBe(false);
+  } finally {
+    restorePath();
+  }
+});
+
+/** Put a `tar` of our own ahead of the real one for the duration of one test. */
+function shimTar(root: string, script: string): () => void {
+  const binDir = path.join(root, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(binDir, "tar"), script, { mode: 0o755 });
+  const previous = process.env.PATH;
+  process.env.PATH = `${binDir}${path.delimiter}${previous ?? ""}`;
+  return () => {
+    if (previous === undefined) delete process.env.PATH;
+    else process.env.PATH = previous;
+  };
+}
 
 it("bounds public provider fan-out by mode", () => {
   const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");

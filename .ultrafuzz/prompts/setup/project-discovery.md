@@ -127,8 +127,11 @@ classifications. Keep every `source_path` target-relative; for ledger
 `entries`, use a line range or symbol that can be checked against the
 checked-out source.
 If no invariant statement is found, emit `entries: []`, `inventory_rows: []`,
-and at least one non-empty `scan_probes` record explaining the searches and
-their results.
+at least one non-empty `scan_probes` record explaining the searches and
+their results, and a `no_invariants_justification` stating why this target
+carries no invariant: what you searched, and why the absence is a property of
+the target rather than of the search. The justification is required only for an
+empty ledger and is rejected on a ledger that has entries.
 
 ### Byte-preserving ledger construction
 

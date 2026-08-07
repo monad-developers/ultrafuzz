@@ -1316,11 +1316,59 @@ describe("public Modal benchmark configuration", () => {
     expect(finalGate.run).toContain('[ "$BENCHMARK_MODE" = smoke ]');
     expect(finalGate.run).toContain('[ "$CI_EVENT_NAME" = push ]');
     expect(finalGate.run).toContain('[ "$CI_REF_NAME" != "$CI_DEFAULT_BRANCH" ]');
-    expect(finalGate.run).toContain(
-      '.terminal_status == "failed" and .category == "resume-required" and .diagnostic_collection_status == "succeeded"'
-    );
     expect(finalGate.run).toContain("not blocking non-default branch smoke gate");
     expect(finalGate.run).toContain("exit 1");
+
+    // The soft-fail rule lives in exactly one jq filter, and the gate applies
+    // that filter rather than restating a condition of its own.
+    const softFailFilter = /^\s*smoke_soft_fail_filter='(?<filter>[^']+)'$/mu.exec(finalGate.run ?? "")?.groups?.filter;
+    expect(softFailFilter).toBeTypeOf("string");
+    expect(finalGate.run).toContain('jq -e "$smoke_soft_fail_filter" "$outcome_file"');
+    expect(finalGate.run?.match(/smoke_soft_fail_filter=/gu)).toHaveLength(1);
+    // A forgiven pair still announces itself as a run annotation.
+    expect(finalGate.run).toContain("::warning::Modal smoke pair $pair failed operationally");
+
+    const softFails = (outcome: Record<string, unknown>): boolean =>
+      spawnSync("jq", ["-e", softFailFilter as string], { input: JSON.stringify(outcome), encoding: "utf8" }).status ===
+      0;
+    // #255: model work started and diagnostics survived.
+    expect(
+      softFails({
+        pair: "openai-one",
+        terminal_status: "failed",
+        category: "resume-required",
+        diagnostic_collection_status: "succeeded"
+      })
+    ).toBe(true);
+    // #321: the same pair broke operationally and diagnostics did not survive.
+    expect(
+      softFails({
+        pair: "openai-one",
+        terminal_status: "failed",
+        category: "permanent-operational-failure",
+        diagnostic_collection_status: "failed"
+      })
+    ).toBe(true);
+    for (const category of ["control-plane-timeout", "collection-failed", "launch-state-missing"]) {
+      expect(softFails({ pair: "openai-one", terminal_status: "failed", category })).toBe(true);
+    }
+    // A genuine target outcome is scoring evidence and still hard-fails.
+    expect(
+      softFails({
+        pair: "openai-one",
+        terminal_status: "failed",
+        category: "genuine-task-outcome",
+        diagnostic_collection_status: "succeeded"
+      })
+    ).toBe(false);
+    expect(
+      softFails({
+        pair: "openai-one",
+        terminal_status: "succeeded",
+        category: "succeeded",
+        collection_status: "succeeded"
+      })
+    ).toBe(false);
   });
 
   it("hydrates pinned target submodules before initializing a public benchmark", () => {

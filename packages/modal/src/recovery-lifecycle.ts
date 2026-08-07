@@ -372,6 +372,14 @@ type CountByTerminalReason = Record<ModalRecoveryTerminalReason, number>;
 type CountByTerminalClass = Record<ModalRecoveryTerminalClass, number>;
 
 export interface ModalRecoveryLifecycleSummary {
+  /**
+   * Recorded Modal launch generation-attempts, not evolutionary generations.
+   *
+   * A worker result reports both counters and they are unrelated: `launch_generation` is the Modal
+   * generation this summary counts, while `generation` is how far the evaluation's own loop got. A
+   * run showing `generation: 3`, `launch_generation: 1` and `total_generations: 1` is consistent —
+   * one Modal launch that reached the third evolutionary generation (#322).
+   */
   total_generations: number;
   terminal_generations: number;
   active_generations: number;

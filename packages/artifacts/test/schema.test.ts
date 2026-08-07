@@ -1163,3 +1163,95 @@ function readableSchemaDir(candidate: string): boolean {
     return false;
   }
 }
+
+// R51 died three times at `stateful-invariant-implement-properties` on this, and the error said only
+// `Too small: expected array to have >=1 items` eighty-eight times with no field path. The document --
+// 173,510 bytes, recovered from the task workspace on the durable volume -- held 89 properties, every one
+// `status: "pending"` with a `pending-triage` blocker, and every one carrying `reference_expectations: []`.
+//
+// `reference_expectations` is OPTIONAL in all three places it appears, so `.min(1)` never guards a required
+// field: it only makes an empty list invalid where omitting the field entirely is valid. An empty optional
+// list is a natural thing for a producer to emit and means exactly what omission means (issue #328).
+test("an empty optional reference_expectations list is accepted, as omitting it already was", () => {
+  const property = {
+    property_id: "property-1",
+    status: "pending" as const,
+    implementation_paths: [],
+    test_paths: [],
+    blocker: {
+      code: "pending-triage",
+      summary: "Awaiting invariant-suite implementation triage.",
+      next_action: "Audit the harness and either implement the assertion or record a concrete blocker."
+    }
+  };
+  // `@2` requires `selection`; omitting it fails with IMPLEMENTED_PROPERTIES_SELECTION_REQUIRED and would
+  // make this test pass or fail for a reason unrelated to the field under test. R51's real document did
+  // carry a selection block, which is why its ONLY error was the expectations list.
+  const document = (extra: Record<string, unknown>) =>
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      properties: [{ ...property, ...extra }],
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] }
+    });
+
+  // Omitting it was always valid; the empty array must be too, and a populated one must keep working.
+  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@2", document({})).ok, true);
+  const empty = validateArtifactContract(
+    "ultrafuzz/implemented-properties@2",
+    document({ reference_expectations: [] })
+  );
+  assert.equal(empty.ok, true, JSON.stringify(empty.issues));
+  assert.equal(
+    validateArtifactContract("ultrafuzz/implemented-properties@2", document({ reference_expectations: ["e1"] })).ok,
+    true
+  );
+});
+
+test("a duplicated reference expectation is still rejected once empty lists are allowed", () => {
+  // Accepting `[]` must not accept anything else. The dedup rule inside the list is the reason the schema
+  // is more than `z.array(string)`, so it has to survive the change.
+  const result = validateArtifactContract(
+    "ultrafuzz/implemented-properties@2",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented" as const,
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: ["test/recon/CryticTester.sol"],
+          reference_expectations: ["e1", "e1"]
+        }
+      ],
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] }
+    })
+  );
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.issues.some((issue) => /duplicate/iu.test(issue.message)),
+    JSON.stringify(result.issues)
+  );
+});
+
+test("every schema validation issue carries the field path that identifies it", () => {
+  // PRE-EXISTING INVARIANT, not a test of #328. `validateWithZod` already populated `issue.path`, so this
+  // passes on `main` unchanged -- review caught me claiming otherwise. The #328 bug was the TEMPLATE's
+  // formatter discarding the path, and this file never loads the template; that behaviour is covered by
+  // `#328 a contract failure names the field paths` in packages/runtime/test.
+  //
+  // Kept because the invariant is what makes that formatter possible: if paths ever stopped being
+  // populated here, the useful message downstream would silently become useless again.
+  const result = validateArtifactContract(
+    "ultrafuzz/implemented-properties@2",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      properties: [{ property_id: "", status: "pending", implementation_paths: [], test_paths: [] }],
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] }
+    })
+  );
+  assert.equal(result.ok, false);
+  for (const issue of result.issues) {
+    assert.ok(typeof issue.path === "string" && issue.path.length > 0, JSON.stringify(issue));
+    assert.ok(/properties/u.test(issue.path), `path should locate the offending field: ${issue.path}`);
+  }
+});

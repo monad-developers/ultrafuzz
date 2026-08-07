@@ -10,6 +10,7 @@ import {
   assertNoSymlinkComponents,
   assertPathInside,
   createEventRecord,
+  FINDINGS_FILE,
   FindingsValidationError,
   createNodeAttemptLedgerEntry,
   getPricingCatalogSnapshotPath,
@@ -52,7 +53,7 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import { agentPostflightFailureCode } from "./agent-postflight.js";
-import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
+import { refreshVerifiedArtifactDigest, verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
 import {
   ArtifactReconciliationInterruptedError,
   isRetryableArtifactReconciliationError,
@@ -161,6 +162,7 @@ interface WorkflowInspect {
   startedAt?: string;
   finishedAt?: string;
   steps: WorkflowStep[];
+  failedWorkflowTaskIds: string[];
 }
 
 interface WorkflowEvent {
@@ -344,7 +346,7 @@ interface NodeWorkflowEvidence {
 
 interface AttemptWorkflowEvidence {
   evidence: NodeWorkflowEvidence;
-  source: "agent" | "verifier";
+  source: "agent" | "verifier" | "preparation";
   taskId: string;
   executorAttempt?: number;
   executorIteration?: number;
@@ -397,6 +399,28 @@ const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
   "reused-from-prior-run",
   "invalidated"
 ]);
+// A preparation wrapper that ends `skipped` is a dependency cascade already
+// carried by the agent task it gates, so only genuine wrapper failures are
+// attributed back to the durable node here.
+const PREPARATION_FAILURE_STATUSES = new Set<NodeStatus>(["failed", "timed-out"]);
+// `statusFromWorkflowState` collapses `cancelled`/`canceled`/`stuck` onto
+// `failed`, so the raw workflow state is the only thing that separates a genuine
+// preparation failure from a run the operator — or the deadline path's own
+// `requestSmithersCancel` — cancelled while the wrapper was in flight, and from
+// a controller-loss stall. Attributing either to the node would durably record
+// an artifact-contract violation the run never committed, and publish it.
+const PREPARATION_FAILURE_WORKFLOW_STATES = new Set([
+  "failed",
+  "error",
+  "timeout",
+  "timed-out",
+  "timedout",
+  "heartbeat-timeout"
+]);
+const TERMINAL_FAILED_WORKFLOW_STATES = new Set(["failed", "error", "timeout", "timed-out", "timedout"]);
+// A node that reached one of these did not fail, so a failure attribution from
+// an earlier attempt must not survive on it.
+const NODE_RECOVERED_STATUSES = new Set<NodeStatus>(["succeeded", "reused-from-prior-run"]);
 const ACCOUNTING_SCHEMA_VERSION = "2.0";
 const ACCOUNTING_CHECKPOINT_SCHEMA_VERSION = "1.0";
 const MODEL_IDENTITY_SCHEMA_VERSION = "ultrafuzz.runtime.model-identity.v1" as const;
@@ -816,6 +840,19 @@ async function synchronizeLinkedWorkflowRunWithExecution(
         source: "workflow"
       });
     }
+    // `syncResult.nodeStatuses` only holds the tasks that reached the bottom of
+    // the synchronization loop; a task whose graph node or evidence was missing
+    // this pass is absent from it even when state.json already records it failed.
+    // The durable statuses are the source of truth for "is this failure already
+    // attributed", so union the two before deciding.
+    const attributionStatuses = new Map<string, NodeStatus>(
+      Object.entries(readRunState(layout).nodes).map(([nodeId, node]) => [nodeId, node.status])
+    );
+    for (const [nodeId, status] of syncResult.nodeStatuses) attributionStatuses.set(nodeId, status);
+    const unattributedFailure = unattributedTerminalWorkflowFailure(inspect, attributionStatuses);
+    if (unattributedFailure !== undefined) {
+      diagnostics.push(unattributedFailure);
+    }
 
     const preAccountingBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
     if (preAccountingBudgetDiagnostic !== undefined) {
@@ -920,6 +957,32 @@ async function synchronizeLinkedWorkflowRunWithExecution(
           }
         })
       );
+    }
+    // Persist the backstop. Returning it in `diagnostics` alone is not enough: the
+    // eval runner drops `result.diagnostics` whenever `result.ok`, and the Modal
+    // worker drains the CLI child's stdout without persisting it, so for the
+    // residual class this exists to cover the archived run root would still look
+    // byte-identical to the black hole #272 describes. Ids only — no error text.
+    //
+    // It rides the same bounded local commit unit as `workflow-synced` rather than
+    // appending on its own: nothing unbounded may run past the checkpoint above, and
+    // a cancellation between two separate appends could publish terminal state
+    // without the event that explains it.
+    if (unattributedFailure !== undefined) {
+      const payload = {
+        workflow_run_id: evidence.smithersRunId,
+        ...unattributedFailure.details
+      };
+      if (!unattributedTerminalFailureRecorded(layout, payload)) {
+        commitEvents.push(
+          createEventRecord(layout, {
+            eventType: "workflow-failure-unattributed",
+            status: deadlineApplied ? "timed-out" : finalStatus,
+            timestamp: statusObservedAt,
+            payload
+          })
+        );
+      }
     }
     if (runStatusChanged || workflowControl.changed || deadlineApplied || commitEvents.length > 0) {
       await commitWorkflowSynchronizationState(
@@ -2833,7 +2896,19 @@ async function synchronizeTasks(input: {
         input.inspectCollectionCompletedAt,
         currentContinuation
       );
-      const evidence = completionEvidenceForTask(task, agentEvidence, verifierEvidence);
+      const preparationTaskId = preparationSmithersNodeIdForAttempt(task.attemptId);
+      // Fenced exactly like the agent and verifier evidence above: the preparation wrapper
+      // is read from the same inspection, so it must be held to the same collection window
+      // and continuation boundary or a pre-continuation wrapper failure could be attributed
+      // to this pass.
+      const preparationEvidence = mergeNodeWorkflowEvidence(
+        steps.get(preparationTaskId),
+        eventsByNode.get(preparationTaskId) ?? [],
+        input.inspectCollectionStartedAt,
+        input.inspectCollectionCompletedAt,
+        currentContinuation
+      );
+      const evidence = completionEvidenceForTask(task, agentEvidence, verifierEvidence, preparationEvidence);
       return evidence === undefined ? [] : [[task.attemptId, evidence] as const];
     })
   );
@@ -3036,7 +3111,7 @@ async function synchronizeTasks(input: {
       finished_at: finishedAtForStatus(patchStatus, previous, evidence.finishedAt),
       last_error: effectiveFinalization.lastError,
       provenance: {
-        ...withoutTerminalDisposition(previous?.provenance),
+        ...withoutSupersededFailure(withoutTerminalDisposition(previous?.provenance), patchStatus, finalization),
         workflow: {
           run_id: input.workflowRunId,
           task_id: attemptEvidence.taskId,
@@ -3494,7 +3569,7 @@ async function finalizeTerminalTask(input: {
   task: StoredWorkflowTask;
   workflowRunId: string;
   evidence: NodeWorkflowEvidence;
-  evidenceSource: "agent" | "verifier";
+  evidenceSource: "agent" | "verifier" | "preparation";
   tasksByAttempt: Map<string, StoredWorkflowTask>;
   force: boolean;
   previous: NodeState | undefined;
@@ -3504,42 +3579,56 @@ async function finalizeTerminalTask(input: {
   control: WorkflowSynchronizationControl;
 }): Promise<NodeFinalization> {
   if (input.evidence.status !== "succeeded") {
+    // A postflight fault is raised INSIDE the agent task, so it never arrives as
+    // wrapper evidence; the two attributions below are mutually exclusive.
     const postflightFailureCode =
       input.evidenceSource === "agent" && input.evidence.status === "failed"
         ? agentPostflightFailureCode(input.evidence.error)
         : undefined;
+    // Preparation and verification wrappers both enforce the artifact contract
+    // around the agent task, so a wrapper failure is reported as one.
+    const wrapperSource = input.evidenceSource === "verifier" || input.evidenceSource === "preparation";
     const category =
       input.evidence.status === "skipped"
         ? "dependency-cascade"
-        : input.evidenceSource === "verifier"
+        : wrapperSource
           ? "artifact-contract"
           : postflightFailureCode !== undefined
             ? "artifact-contract"
             : input.evidence.status === "timed-out"
               ? "provider-interruption"
               : "agent-failure";
-    const verifierFailure = input.evidenceSource === "verifier" && category === "artifact-contract";
+    const wrapperFailure = wrapperSource && category === "artifact-contract";
+    const preparationFailure = wrapperFailure && input.evidenceSource === "preparation";
+    const wrapperTaskId = preparationFailure
+      ? preparationSmithersNodeIdForAttempt(input.task.attemptId)
+      : input.task.verifierSmithersNodeId;
+    const wrapperLabel = preparationFailure ? "artifact preparation" : "artifact verifier";
     const postflightFailure = postflightFailureCode !== undefined && category === "artifact-contract";
     return {
       status: input.evidence.status,
       diagnostics:
-        verifierFailure || postflightFailure
+        wrapperFailure || postflightFailure
           ? [
               {
-                code: postflightFailure ? "AGENT_POSTFLIGHT_FAILED" : "ARTIFACT_VERIFIER_FAILED",
+                code: postflightFailure
+                  ? "AGENT_POSTFLIGHT_FAILED"
+                  : preparationFailure
+                    ? "ARTIFACT_PREPARATION_FAILED"
+                    : "ARTIFACT_VERIFIER_FAILED",
                 message: postflightFailure
                   ? `agent postflight failed at ${postflightFailureCode} for ${input.task.attemptId}`
-                  : `artifact verifier did not complete successfully for ${input.task.attemptId}`,
+                  : `${wrapperLabel} did not complete successfully for ${input.task.attemptId}`,
                 severity: "error",
                 source: "artifact-contracts",
-                path: postflightFailure ? input.task.smithersNodeId : input.task.verifierSmithersNodeId
+                path: postflightFailure ? input.task.smithersNodeId : wrapperTaskId
               }
             ]
           : [],
       ...(input.evidence.error
         ? { lastError: input.evidence.error }
-        : verifierFailure
-          ? { lastError: `artifact verifier ended with status ${input.evidence.status}` }
+        : wrapperFailure
+          ? { lastError: `${wrapperLabel} ended with status ${input.evidence.status}` }
           : {}),
       provenance: {
         failure:
@@ -3548,7 +3637,7 @@ async function finalizeTerminalTask(input: {
             : {
                 category,
                 ...(postflightFailureCode === undefined ? {} : { code: postflightFailureCode }),
-                causal_task_id: verifierFailure ? input.task.verifierSmithersNodeId : input.task.smithersNodeId,
+                causal_task_id: wrapperFailure ? wrapperTaskId : input.task.smithersNodeId,
                 causal_failure_category: category,
                 dependent_task_ids: []
               }
@@ -3714,16 +3803,41 @@ async function finalizeTerminalTask(input: {
   if (fs.existsSync(findingsPath)) {
     try {
       assertSynchronizationBudget(input.control);
-      const verifiedFindingsDigest = sha256File(findingsPath);
       const report = normalizeFindings({
         artifactDir,
         nodeId: input.task.attemptId,
         provenance: findingsProvenance(input.node, input.task)
       });
-      if (sha256File(findingsPath) !== verifiedFindingsDigest) {
-        throw new FindingsValidationError("verified findings.json is not in canonical normalized form");
-      }
       findingsCount = report.count;
+      // Normalization REWRITES findings.json: it fills in ids, canonicalizes confidence and stamps
+      // the node/strategy/attempt/model/loop provenance the producer omitted. The workflow verifier
+      // has already hashed the pre-normalization bytes into this attempt's verification marker, and
+      // every dependent re-hashes the published file against that marker in
+      // `assertVerifiedDependency`. Left alone, the marker attests bytes that no longer exist and
+      // each dependent's `prepare:` wrapper fails permanently as `artifact-contract` before its
+      // agent ever runs -- which is what kept `dedupe-findings`, the only smoke-lane node whose
+      // dependencies publish findings.json, red on all three targets (issue #348). The runtime made
+      // the edit, so the marker follows it, exactly as the property-lens sanitizer already does
+      // (issue #275). A findings.json that is not a declared output leaves the marker untouched.
+      //
+      // This branch also replaces the digest guard this branch previously wrapped the call above
+      // in, which raised `FindingsValidationError` whenever normalization changed a byte. The two
+      // are the same observation with opposite responses, and only one can hold: the guard failed
+      // the node closed as `artifact-contract`, which is the permanent `prepare:` failure #348
+      // describes, raised one layer up. Nothing is silenced by dropping it -- a digest that moved
+      // is reported as `ARTIFACT_VERIFICATION_DIGEST_REFRESHED` carrying `previous_sha256`, and the
+      // helper no-ops when nothing moved (which is the normal case now that the generated
+      // template's postflight normalizes before the verifier seals). Drift the runtime did NOT
+      // cause keeps failing closed through `reportVerifiedArtifactDigestDrift`.
+      diagnostics.push(
+        ...refreshVerifiedArtifactDigest(
+          input.layout,
+          input.task.attemptId,
+          FINDINGS_FILE,
+          report.normalized_path,
+          "findings"
+        )
+      );
       events.push({
         eventType: "findings-normalized",
         status: "succeeded",
@@ -4694,8 +4808,25 @@ function timestampIsAfter(candidate: string | undefined, reference: string | und
 function completionEvidenceForTask(
   task: StoredWorkflowTask,
   agentEvidence: NodeWorkflowEvidence | undefined,
-  verifierEvidence: NodeWorkflowEvidence | undefined
+  verifierEvidence: NodeWorkflowEvidence | undefined,
+  preparationEvidence: NodeWorkflowEvidence | undefined
 ): AttemptWorkflowEvidence | undefined {
+  // The preparation wrapper runs before the agent task and carries no durable
+  // node of its own. When it fails terminally the agent task never runs, so
+  // without this branch the attempt stays `pending` with no recorded error and
+  // a terminal failed workflow reports zero failed nodes.
+  if (
+    preparationEvidence !== undefined &&
+    PREPARATION_FAILURE_STATUSES.has(preparationEvidence.status) &&
+    preparationWorkflowStateIsFailure(preparationEvidence.workflowState) &&
+    (agentEvidence === undefined || !terminalStatus(agentEvidence.status))
+  ) {
+    return {
+      evidence: preparationEvidence,
+      source: "preparation",
+      taskId: preparationSmithersNodeIdForAttempt(task.attemptId)
+    };
+  }
   if (agentEvidence === undefined) {
     return undefined;
   }
@@ -4966,6 +5097,55 @@ function finalRunStatus(
   return currentStatus === "pending" ? "running" : currentStatus;
 }
 
+// A workflow that ends terminally failed while every durable node is still
+// non-terminal is unrecoverable by node-level retry: there is nothing to reset
+// and the next resume re-finalizes identically. That is a defect in failure
+// attribution, so name the workflow tasks the failure was charged to instead of
+// leaving the run indistinguishable from an idle one.
+function unattributedTerminalWorkflowFailure(
+  inspect: WorkflowInspect,
+  nodeStatuses: Map<string, NodeStatus>
+): RuntimeDiagnostic | undefined {
+  const workflowState = (inspect.runState ?? inspect.runStatus ?? "").toLowerCase();
+  if (!TERMINAL_FAILED_WORKFLOW_STATES.has(workflowState)) {
+    return undefined;
+  }
+  if ([...nodeStatuses.values()].some((status) => ["failed", "timed-out", "skipped", "invalidated"].includes(status))) {
+    return undefined;
+  }
+  const failedWorkflowTasks = inspect.failedWorkflowTaskIds;
+  return {
+    code: "WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE",
+    message: `workflow run ended ${workflowState} with no failed durable node; failing workflow task(s): ${
+      failedWorkflowTasks.length === 0 ? "unreported" : failedWorkflowTasks.join(", ")
+    }`,
+    severity: "error",
+    source: "workflow",
+    details: {
+      workflow_state: workflowState,
+      failed_workflow_tasks: failedWorkflowTasks,
+      durable_node_statuses: [...new Set(nodeStatuses.values())].sort()
+    }
+  };
+}
+
+// The backstop is re-derived on every synchronization pass, and sync runs on
+// every `status`/`inspect`. Compare against what is already durable so a
+// repeatedly re-observed terminal failure records one event, not one per pass.
+function unattributedTerminalFailureRecorded(layout: RunLayout, payload: Record<string, unknown>): boolean {
+  const key = unattributedTerminalFailureKey(payload);
+  for (const record of replayEvents(layout).records) {
+    if (record.event_type !== "workflow-failure-unattributed") continue;
+    if (unattributedTerminalFailureKey(record.payload) === key) return true;
+  }
+  return false;
+}
+
+function unattributedTerminalFailureKey(payload: unknown): string {
+  const source: Record<string, unknown> = isRecord(payload) ? payload : {};
+  return JSON.stringify([source.workflow_run_id, source.workflow_state, source.failed_workflow_tasks]);
+}
+
 function workflowSucceeded(inspect: WorkflowInspect): boolean {
   return ["succeeded", "finished", "continued", "success", "complete", "completed"].includes(
     (inspect.runState ?? inspect.runStatus ?? "").toLowerCase()
@@ -4993,6 +5173,21 @@ function aggregateAttemptStatuses(statuses: NodeStatus[]): NodeStatus {
 
 function terminalStatus(status: NodeStatus): boolean {
   return NODE_TERMINAL_STATUSES.has(status);
+}
+
+// Mirrors the `prepare:` wrapper id compiled in smithers.ts. It is derived from
+// the attempt id rather than read from tasks.json so runs compiled before this
+// change still attribute their preparation failures on resume.
+function preparationSmithersNodeIdForAttempt(attemptId: string): string {
+  return `prepare:${attemptId}`;
+}
+
+function preparationWorkflowStateIsFailure(workflowState: string | undefined): boolean {
+  // Every shape `evidenceFromStep` and `evidenceFromEvents` produce carries a
+  // raw state. If a future one does not, trust the collapsed status rather than
+  // losing the attribution this whole branch exists to provide.
+  if (workflowState === undefined) return true;
+  return PREPARATION_FAILURE_WORKFLOW_STATES.has(workflowState.toLowerCase());
 }
 
 function finishedAtForStatus(
@@ -5033,6 +5228,25 @@ function withoutTerminalDisposition(provenance: Record<string, unknown> | undefi
   if (provenance === undefined) return {};
   const result = { ...provenance };
   delete result.terminal_disposition;
+  return result;
+}
+
+// Drop a failure attribution the node has outlived. `--retry-failed` resets a
+// failed `prepare:` wrapper off `failedChildKeys`, so "recorded failed, then
+// retried and succeeded" is the intended recovery for a preparation failure —
+// and `dependencyCascadeFailure` returns the FIRST dependency carrying a
+// `failure` record, so a stale one silently re-attributes every later skipped
+// dependent to `prepare:<attemptId>` / `artifact-contract` and ships that
+// category in the public eval row. Never clears a failure the current
+// finalization recorded.
+function withoutSupersededFailure(
+  provenance: Record<string, unknown>,
+  status: NodeStatus,
+  finalization: NodeFinalization
+): Record<string, unknown> {
+  if (!NODE_RECOVERED_STATUSES.has(status) || finalization.provenance.failure !== undefined) return provenance;
+  const result = { ...provenance };
+  delete result.failure;
   return result;
 }
 
@@ -5082,8 +5296,26 @@ function parseInspectSnapshot(value: unknown): WorkflowInspect {
     runState: stringField(runState, "state") ?? stringField(data, "state"),
     startedAt: stringField(run, "started") ?? stringField(run, "startedAt"),
     finishedAt: stringField(run, "finished") ?? stringField(run, "finishedAt"),
-    steps
+    steps,
+    failedWorkflowTaskIds: failedWorkflowTaskIds(data, steps)
   };
+}
+
+// The workflow task keys a terminal failure is attributed to. Wrapper tasks
+// (`prepare:`/`verify:`) appear here even though they own no durable node, so a
+// failure that cannot be attributed to a node is still nameable.
+function failedWorkflowTaskIds(data: Record<string, unknown> | undefined, steps: WorkflowStep[]): string[] {
+  const ids = new Set<string>();
+  for (const key of firstArrayField(data, ["failedChildKeys"])) {
+    if (typeof key !== "string") continue;
+    const separator = key.lastIndexOf("::");
+    const id = (separator < 0 ? key : key.slice(0, separator)).trim();
+    if (id !== "") ids.add(id);
+  }
+  for (const step of steps) {
+    if (TERMINAL_FAILED_WORKFLOW_STATES.has(step.state.toLowerCase())) ids.add(step.id);
+  }
+  return [...ids].sort();
 }
 
 function parseWorkflowEvents(stdout: string): WorkflowEvent[] {

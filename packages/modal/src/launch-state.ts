@@ -588,6 +588,10 @@ function matchesWorkerAttempt(
 function workerResultCategory(contract: WorkerResultContract): ModalWorkerStatusCategory {
   if (contract.exit_category === "finished") return "succeeded";
   if (contract.exit_category === "genuine-evaluation-failure") return "genuine-task-outcome";
+  // Every code below names a fault the worker determined and reported about
+  // itself, so each classifies by the code. A worker that never named a fault
+  // exits `sandbox-exited` with the matching code and falls through to the
+  // exit-category rules; see `namedFaultDisposition` in `worker-result.ts`.
   if (contract.diagnostic_code === "terminal-run-non-resumable") return "permanent-operational-failure";
   if (contract.diagnostic_code === "checkpoint-incompatible") return "incompatible-checkpoint";
   if (contract.diagnostic_code === "public-eval-diagnostics-invalid") return "permanent-operational-failure";
