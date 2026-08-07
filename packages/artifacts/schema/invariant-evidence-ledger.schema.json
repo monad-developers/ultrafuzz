@@ -62,6 +62,11 @@
         }
       }
     },
+    "no_invariants_justification": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Required when entries is empty and forbidden otherwise: an explicit, auditable statement of why the target carries no invariant, naming what was searched and why the absence is genuine."
+    },
     "scan_probes": {
       "type": "array",
       "items": {
@@ -85,6 +90,7 @@
     {
       "if": { "properties": { "entries": { "maxItems": 0 } } },
       "then": {
+        "required": ["no_invariants_justification"],
         "properties": {
           "inventory_rows": { "maxItems": 0 },
           "scan_probes": { "minItems": 1 }
