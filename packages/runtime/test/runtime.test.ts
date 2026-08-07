@@ -5980,7 +5980,13 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.doesNotMatch(workflowSource, /repositoryAwareWorkspaceOutputRoots\(task, workspaceRoot\)\.map/);
   assert.match(workflowSource, /function prepareTaskWorkspaceOutputRoots/);
   assert.match(workflowSource, /function prepareAnchoredDirectory/);
-  assert.match(workflowSource, /cleanWorkspaceOutputRootsForRetry\(workspaceRoot, testOutputRoots\)/);
+  // Retry cleanup names the union of the previous attempt's roots and the freshly
+  // prepared ones, so a flipped anchor leaves no stale output behind.
+  assert.match(
+    workflowSource,
+    /cleanWorkspaceOutputRootsForRetry\(\s*workspaceRoot,\s*\[\s*\.\.\.new Set\(\[\.\.\.previousTestOutputRoots, \.\.\.taskTestOutputRelativeRoots\(task\)\]\)\s*\]\s*\)/
+  );
+  assert.doesNotMatch(workflowSource, /cleanWorkspaceOutputRootsForRetry\(workspaceRoot, testOutputRoots\)/);
   assert.match(workflowSource, /persistLegacyWorkspaceSourceClaim\(\{/);
   assert.match(
     workflowSource,

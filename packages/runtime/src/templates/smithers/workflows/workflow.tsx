@@ -593,10 +593,19 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
   );
   resetTaskArtifactContents(path.join(artifactsParent, task.attemptId), task.attemptId, "mirror");
 
-  const testOutputRoots = taskTestOutputRelativeRoots(task);
-  if (testOutputRoots.length > 0) {
+  // The roots the PREVIOUS attempt used, read before preparation re-pins them.
+  const previousTestOutputRoots = taskTestOutputRelativeRoots(task);
+  if (previousTestOutputRoots.length > 0) {
     prepareTaskWorkspaceOutputRoots(task);
-    cleanWorkspaceOutputRootsForRetry(workspaceRoot, testOutputRoots);
+    // Clean the union of the previous and the freshly prepared roots. Preparation
+    // re-discovers, so an agent that renamed `tests/` to `test/` between attempts
+    // flips the anchor: cleaning only the previous set would leave the new root's
+    // stale output to be staged into this attempt's patch, and cleaning only the new
+    // set would leave the abandoned one. `cleanWorkspaceOutputRootsForRetry` skips a
+    // root that no longer exists, so naming both is safe.
+    cleanWorkspaceOutputRootsForRetry(workspaceRoot, [
+      ...new Set([...previousTestOutputRoots, ...taskTestOutputRelativeRoots(task)])
+    ]);
   }
   restoreWorkspacePatchPreparation(task, workspaceRoot);
   prepareTaskWorkspaceOutputRoots(task, { replayWorkspacePatches: false });

@@ -47,24 +47,30 @@ function sliceTopLevelFunction(source: string, name: string): string {
   return `${source.slice(start, end + 3)}\n`;
 }
 
-type TaskLike = { workspaceOutputRoots: readonly string[]; attemptId?: string };
+type TaskLike = { workspaceOutputRoots: readonly string[]; attemptId?: string; workspacePath?: string };
 
 type Helpers = {
   invariantTestRootName: (workspaceRoot: string) => string;
   repositoryAwareWorkspaceOutputRoots: (task: TaskLike, root: string) => string[];
   resolvedWorkspaceOutputRoots: (task: TaskLike, root: string) => string[];
   preparedWorkspaceOutputRootsKey: (task: TaskLike, root: string) => string;
+  prepareTaskWorkspaceOutputRoots: (task: TaskLike, options?: { replayWorkspacePatches?: boolean }) => void;
   preparedWorkspaceOutputRoots: Map<string, readonly string[]>;
+  anchored: string[];
 };
 
+const bagAnchored: string[] = [];
+
 function loadHelpers(): Helpers {
+  bagAnchored.length = 0;
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const declarations = [
     "invariantTestRootName",
     "isNotADirectoryError",
     "repositoryAwareWorkspaceOutputRoots",
     "preparedWorkspaceOutputRootsKey",
-    "resolvedWorkspaceOutputRoots"
+    "resolvedWorkspaceOutputRoots",
+    "prepareTaskWorkspaceOutputRoots"
   ]
     .map((name) => sliceTopLevelFunction(source, name))
     .join("\n");
@@ -79,15 +85,29 @@ function loadHelpers(): Helpers {
     INVARIANT_TEST_ROOT_NAMES: ["test", "tests"] as const,
     isMissingPathError: (error: unknown): boolean =>
       error instanceof Error && "code" in error && error.code === "ENOENT",
-    preparedWorkspaceOutputRoots: new Map<string, readonly string[]>()
+    preparedWorkspaceOutputRoots: new Map<string, readonly string[]>(),
+    // Collaborators of the real writer that are out of scope here. Recording the
+    // anchored roots lets a test assert what preparation actually created.
+    anchored: bagAnchored,
+    prepareAnchoredDirectory: (rootPath: string, relativePath: string): string => {
+      const candidate = path.resolve(rootPath, relativePath);
+      fs.mkdirSync(candidate, { recursive: true, mode: 0o700 });
+      bagAnchored.push(relativePath);
+      return fs.realpathSync(candidate);
+    },
+    prepareArtifactMirror: (): void => undefined
   };
   const names = Object.keys(bag);
   const factory = new Function(
     ...names,
-    `${emitted}\nreturn { invariantTestRootName, repositoryAwareWorkspaceOutputRoots, resolvedWorkspaceOutputRoots, preparedWorkspaceOutputRootsKey };`
+    `${emitted}\nreturn { invariantTestRootName, repositoryAwareWorkspaceOutputRoots, resolvedWorkspaceOutputRoots, preparedWorkspaceOutputRootsKey, prepareTaskWorkspaceOutputRoots };`
   ) as (...args: unknown[]) => Omit<Helpers, "preparedWorkspaceOutputRoots">;
   const lifted = factory(...names.map((name) => (bag as Record<string, unknown>)[name]));
-  return { ...lifted, preparedWorkspaceOutputRoots: bag.preparedWorkspaceOutputRoots };
+  return {
+    ...lifted,
+    preparedWorkspaceOutputRoots: bag.preparedWorkspaceOutputRoots,
+    anchored: bag.anchored
+  };
 }
 
 function workspace(layout: readonly string[]): string {
@@ -186,10 +206,34 @@ test("a symlinked test root is not followed", () => {
   const root = workspace(["real-tests"]);
   fs.symlinkSync(path.join(root, "real-tests"), path.join(root, "tests"));
 
-  // Adopting the symlink would anchor output outside the workspace's own tree, so the
-  // fallback must apply instead. This discriminates: swapping lstat for stat, or
-  // dropping the realpath identity check, yields "tests".
+  // NOTE on what this does and does not prove: `lstat` of a symlink reports
+  // isDirectory() === false, so the isDirectory() guard alone already rejects it.
+  // This case therefore pins the lstat-not-stat choice (swapping in `stat` makes the
+  // symlink look like a directory and yields "tests"); it does NOT exercise the
+  // symlink or realpath-identity guards, which the next test covers.
   assert.equal(helpers.invariantTestRootName(root), "test");
+});
+
+test("a non-canonical workspace root is rejected by the realpath identity check", () => {
+  const helpers = loadHelpers();
+  const real = workspace(["tests"]);
+  const link = `${real}-link`;
+  fs.symlinkSync(real, link);
+
+  // This is the case the realpath-identity guard decides, and it is the only test that
+  // exercises it: resolving `tests` under a symlinked parent yields a candidate whose
+  // realpath differs from itself, so the guard rejects it and the fallback applies,
+  // even though the same directory is accepted under its canonical path. Deleting
+  // `realpathSync(candidate) === candidate` makes this return "tests" instead.
+  //
+  // This asymmetry is why every production caller realpaths the workspace root before
+  // calling in; the assertion documents the guard rather than endorsing the asymmetry.
+  try {
+    assert.equal(helpers.invariantTestRootName(real), "tests");
+    assert.equal(helpers.invariantTestRootName(link), "test");
+  } finally {
+    fs.unlinkSync(link);
+  }
 });
 
 test("a regular file named test is not adopted as a root", () => {
@@ -259,12 +303,12 @@ test("the roots prepared for an attempt are pinned, so a later-appearing test ro
 
   // Pinning is what prevents that: consumers see exactly what preparation created.
   assert.deepEqual(helpers.resolvedWorkspaceOutputRoots(task, root), prepared);
-  for (const relativeRoot of helpers.resolvedWorkspaceOutputRoots(task, root)) {
-    if (relativeRoot.startsWith("tests/")) {
-      // These are the ones preparation would have created; they must be the ones used.
-      assert.ok(relativeRoot.startsWith("tests/"));
-    }
-  }
+  assert.ok(
+    helpers
+      .resolvedWorkspaceOutputRoots(task, root)
+      .every((entry) => entry === "artifacts/stateful-invariant-setup" || entry.startsWith("tests/")),
+    "every resolved root must stay under the anchor preparation chose"
+  );
 });
 
 test("a fresh attempt is not served another attempt's pinned roots", () => {
@@ -295,5 +339,59 @@ test("an unreadable candidate root is surfaced, not silently treated as absent",
     assert.throws(() => helpers.invariantTestRootName(blocked), /EACCES/u);
   } finally {
     fs.chmodSync(blocked, 0o700);
+  }
+});
+
+test("a workspace root that is not a directory falls back instead of throwing", () => {
+  const helpers = loadHelpers();
+  const root = workspace([]);
+  const notADirectory = path.join(root, "regular-file");
+  fs.writeFileSync(notADirectory, "not a directory\n");
+
+  // lstat("<regular-file>/test") raises ENOTDIR, not ENOENT. That is the arm the
+  // errno classification adds beyond ENOENT, so exercise it explicitly rather than
+  // claiming coverage the suite does not have: it must be read as "this root is
+  // absent" and fall back, not rethrown as an unexpected filesystem fault.
+  assert.equal(helpers.invariantTestRootName(notADirectory), "test");
+});
+
+test("the real preparation writer pins the roots it creates, keyed by workspace and attempt", () => {
+  const helpers = loadHelpers();
+  const root = workspace(["tests"]);
+  const task = {
+    workspaceOutputRoots: INVARIANT_TASK.workspaceOutputRoots,
+    attemptId: "stateful-invariant-setup",
+    workspacePath: root
+  };
+
+  // Drive the PRODUCTION write path rather than seeding the Map by hand. Seeding it
+  // cannot catch a key-shape regression: a writer that keyed on attemptId alone would
+  // still satisfy a test that computes both the set and the get with the same helper.
+  // In production that writer's pin would never be found, preparation would silently
+  // degrade to per-call rediscovery, and taskWorkspaceOutputRoots would lstat a root
+  // whose subdirectories were never created.
+  helpers.prepareTaskWorkspaceOutputRoots(task);
+
+  assert.deepEqual(helpers.anchored, [
+    "artifacts/stateful-invariant-setup",
+    "tests/recon",
+    "tests/chimera",
+    "tests/invariants",
+    "tests/foundry/invariants"
+  ]);
+
+  // The pin must be discoverable under the key the READER computes.
+  const pinned = helpers.preparedWorkspaceOutputRoots.get(helpers.preparedWorkspaceOutputRootsKey(task, root));
+  assert.deepEqual(pinned, helpers.anchored);
+
+  // An ancestor patch then introduces the other root, exactly as base-test-setup does.
+  fs.mkdirSync(path.join(root, "test", "foundry"), { recursive: true });
+  assert.equal(helpers.invariantTestRootName(root), "test");
+
+  // The pin, written by the real writer, still wins.
+  assert.deepEqual(helpers.resolvedWorkspaceOutputRoots(task, root), helpers.anchored);
+  for (const relativeRoot of helpers.resolvedWorkspaceOutputRoots(task, root)) {
+    if (relativeRoot === "artifacts/stateful-invariant-setup") continue;
+    assert.ok(fs.existsSync(path.join(root, relativeRoot)), `${relativeRoot} must have been created`);
   }
 });

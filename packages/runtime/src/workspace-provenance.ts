@@ -373,7 +373,19 @@ export function cleanWorkspaceOutputRootsForRetry(
     if (!candidate.startsWith(`${workspaceRoot}${path.sep}`)) {
       throw new Error("workspace-provenance failure: retry output root escapes the task worktree");
     }
-    const stat = lstatSync(candidate);
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+      stat = lstatSync(candidate);
+    } catch (error) {
+      // A root the previous attempt used may legitimately be gone: output roots are
+      // re-anchored per attempt onto the test root the repository actually has, so an
+      // agent that renamed `tests/` to `test/` flips the anchor and leaves the old
+      // root absent. Cleaning what is no longer there is a no-op, and throwing a bare
+      // ENOENT out of `generate()` here would abort the retry that this cleanup exists
+      // to enable.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw new Error("workspace-provenance failure: retry output root is unsafe", { cause: error });
+    }
     const resolved = realpathSync(candidate);
     if (!stat.isDirectory() || stat.isSymbolicLink() || resolved !== candidate) {
       throw new Error("workspace-provenance failure: retry output root is unsafe");

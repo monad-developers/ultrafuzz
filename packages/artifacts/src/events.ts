@@ -144,7 +144,60 @@ export function createEventRecord(layout: RunLayout, input: AppendEventInput): E
 }
 
 export function appendEventRecord(eventsPath: string, record: EventRecord): void {
+  repairTornEventTail(eventsPath);
   appendLineDurable(eventsPath, JSON.stringify({ ...record, payload: redactValue(record.payload) }));
+}
+
+/**
+ * Make the log newline-terminated before appending.
+ *
+ * A process killed mid-append leaves an unterminated fragment. Appending straight
+ * after it would fuse the fragment and the new record into a single unparseable line
+ * in the *interior* of the log, where the trailing-tail repair in
+ * `ensureExactEventLines` can never see it — and every later exactly-once check would
+ * then fail permanently, taking cancel, pause and every guarded mutation with it.
+ *
+ * The repair follows the same policy as that trailing-tail logic: a fragment that
+ * still parses as a plain object is a complete record that only lost its newline, so
+ * terminate it rather than lose the evidence; anything else was never a durable line,
+ * so discard it.
+ */
+function repairTornEventTail(eventsPath: string): void {
+  if (!fs.existsSync(eventsPath)) return;
+  // Read only the final byte to decide. The log grows without bound over a run and
+  // this runs on EVERY append, so reading the whole file here would make appending
+  // quadratic in the number of events — slow enough, on a long run, to stall the
+  // caller past a lock heartbeat and surface as a spurious lock-ownership failure
+  // rather than as the performance problem it is.
+  let size: number;
+  let lastByte: Buffer;
+  const probe = fs.openSync(eventsPath, "r");
+  try {
+    size = fs.fstatSync(probe).size;
+    if (size === 0) return;
+    lastByte = Buffer.alloc(1);
+    fs.readSync(probe, lastByte, 0, 1, size - 1);
+  } finally {
+    fs.closeSync(probe);
+  }
+  if (lastByte[0] === 0x0a) return;
+
+  // Only a torn log pays for the full read, and only until the next append fixes it.
+  const contents = fs.readFileSync(eventsPath);
+  if (contents.length === 0 || contents[contents.length - 1] === 0x0a) return;
+  const finalNewline = contents.lastIndexOf(0x0a);
+  const tail = contents.subarray(finalNewline + 1);
+  let parsedTail: unknown;
+  try {
+    parsedTail = JSON.parse(tail.toString("utf8")) as unknown;
+  } catch {
+    parsedTail = undefined;
+  }
+  if (typeof parsedTail === "object" && parsedTail !== null && !Array.isArray(parsedTail)) {
+    appendBytesDurableAt(eventsPath, Buffer.from("\n"), { expectedSize: contents.length });
+    return;
+  }
+  truncateDurable(eventsPath, finalNewline + 1, { expectedSize: contents.length });
 }
 
 export function replayEvents(layoutOrPath: RunLayout | string, limit = DEFAULT_EVENT_REPLAY_LIMIT): EventReplay {
@@ -403,8 +456,16 @@ function inspectExactEventLines(
     let candidate: unknown;
     try {
       candidate = JSON.parse(line) as unknown;
-    } catch (error) {
-      throw new Error(`${label} contains a malformed event record`, { cause: error });
+    } catch {
+      // Skip rather than throw. An unparseable interior line is the fused remains of a
+      // torn append, and the trailing-tail repair cannot reach it because it is no
+      // longer the tail. Refusing here would make every guarded lifecycle operation on
+      // this run — including cancel, the operator escape hatch — permanently
+      // impossible with no repair path, which is the same reasoning the tail repair
+      // above applies. It cannot corrupt the exactly-once accounting either: a line
+      // that does not parse can never match `expected`, and `replayEvents` already
+      // tolerates such a line, so no reader depends on it being rejected.
+      continue;
     }
     if (assertExactEventCandidate(candidate, record, expected, label)) matches += 1;
   }

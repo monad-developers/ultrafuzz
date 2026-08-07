@@ -12,6 +12,7 @@ import {
   appendBytesDurable,
   appendBytesDurableAt,
   appendLineDurable,
+  appendEventRecord,
   createEventRecord,
   createRunLayout,
   ensureEventRecord,
@@ -648,17 +649,22 @@ test("event recovery fails closed on integrity violations and repairs torn tails
   const conflicting = JSON.stringify({ ...record, payload: { recovered: false } });
   const serialized = JSON.stringify(record);
 
-  // A completed line that cannot be parsed, and a record whose ID is already
-  // present with different content, are genuine integrity violations: fail closed
-  // and leave the log byte-identical.
-  for (const testCase of [
-    { name: "conflicting event ID", contents: conflicting, expected: /conflicting event ID/u },
-    { name: "malformed completed record", contents: "{malformed\n", expected: /malformed event record/u }
-  ]) {
+  // A record whose ID is already present with different content is a genuine
+  // integrity violation: fail closed and leave the log byte-identical.
+  for (const testCase of [{ name: "conflicting event ID", contents: conflicting, expected: /conflicting event ID/u }]) {
     fs.writeFileSync(layout.eventsPath, testCase.contents, "utf8");
     assert.throws(() => ensureEventRecord(layout, record), testCase.expected, testCase.name);
     assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), testCase.contents, testCase.name);
   }
+
+  // An unparseable COMPLETED line is not an integrity violation and must not fail
+  // closed. It is the fused remains of a torn append, it can never match any expected
+  // record, and `replayEvents` already skips it. Refusing would wedge the run: the
+  // trailing-tail repair cannot reach an interior line, so cancel, pause and every
+  // guarded mutation would throw forever with no repair path.
+  fs.writeFileSync(layout.eventsPath, "{malformed\n", "utf8");
+  ensureEventRecord(layout, record);
+  assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), `{malformed\n${serialized}\n`);
 
   // A record already durably present AND duplicated as the unterminated tail: the tail
   // was never a durable line, so it is discarded rather than committed a second time.
@@ -1356,4 +1362,71 @@ test("generated-test manifest writer rejects paths outside the generated-tests r
     /cannot traverse outside/u
   );
   assert.equal(fs.existsSync(path.join(layout.artifactsDir, "Outside.t.sol")), false);
+});
+
+test("a torn append cannot fuse into an interior line and wedge every later guarded operation", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-torn-fusion" });
+  const first = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { step: 1 }
+  });
+  const serializedFirst = JSON.stringify(first);
+
+  // A process killed mid-append leaves an unterminated fragment after a durable line.
+  fs.writeFileSync(layout.eventsPath, `${serializedFirst}\n{"event_id":"evt-tor`, "utf8");
+
+  // Appending must not concatenate the new record onto that fragment. Before the fix
+  // the two fused into one unparseable line in the log INTERIOR, which the
+  // trailing-tail repair can never see because it only inspects bytes after the last
+  // newline.
+  const second = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-b",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:01.000Z",
+    payload: { step: 2 }
+  });
+  appendEventRecord(layout.eventsPath, second);
+
+  const lines = fs.readFileSync(layout.eventsPath, "utf8").split("\n").filter(Boolean);
+  for (const line of lines) {
+    assert.doesNotThrow(() => JSON.parse(line), `every line must remain parseable: ${line}`);
+  }
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0], serializedFirst);
+  assert.deepEqual((JSON.parse(lines[1]!) as { event_id: string }).event_id, second.event_id);
+
+  // The torn fragment was never a durable line, so discarding it loses nothing, and
+  // the durable record before it survives untouched.
+  assert.equal(replayEvents(layout).malformedRecords, 0);
+
+  // The run remains operable: exactly-once recovery still works afterwards.
+  ensureEventRecord(layout, second);
+  assert.equal(fs.readFileSync(layout.eventsPath, "utf8").split("\n").filter(Boolean).length, 2);
+});
+
+test("an interior line that is already fused does not permanently wedge exactly-once recovery", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-interior-fused" });
+  const record = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { recovered: true }
+  });
+  const serialized = JSON.stringify(record);
+
+  // A log already in the fused state from before the append-path fix. Recovery must
+  // still be able to make progress rather than throwing forever.
+  fs.writeFileSync(layout.eventsPath, `{"event_id":"evt-torn{"fused":true}\n`, "utf8");
+  ensureEventRecord(layout, record);
+
+  const contents = fs.readFileSync(layout.eventsPath, "utf8");
+  assert.ok(contents.endsWith(`${serialized}\n`), "the missing record is appended");
+  // The unparseable line is left alone rather than silently rewritten; it is simply
+  // skipped, exactly as replayEvents already does.
+  assert.equal(replayEvents(layout).malformedRecords, 1);
 });

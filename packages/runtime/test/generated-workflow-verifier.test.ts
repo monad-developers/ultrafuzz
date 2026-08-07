@@ -728,8 +728,15 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
     reset,
     /resetTaskArtifactContents\(path\.join\(artifactsParent, task\.attemptId\), task\.attemptId, "mirror"\)/u
   );
-  assert.match(reset, /const testOutputRoots = taskTestOutputRelativeRoots\(task\)/u);
-  assert.match(reset, /cleanWorkspaceOutputRootsForRetry\(workspaceRoot, testOutputRoots\)/u);
+  assert.match(reset, /const previousTestOutputRoots = taskTestOutputRelativeRoots\(task\)/u);
+  // Retry cleanup must name the union of the roots the previous attempt used and the
+  // roots preparation just re-anchored. Cleaning only one side leaves stale output
+  // from the other to be staged into this attempt's patch when the anchor flips.
+  assert.match(
+    reset,
+    /cleanWorkspaceOutputRootsForRetry\(\s*workspaceRoot,\s*\[\s*\.\.\.new Set\(\[\.\.\.previousTestOutputRoots, \.\.\.taskTestOutputRelativeRoots\(task\)\]\)\s*\]\s*\)/u
+  );
+  assert.doesNotMatch(reset, /cleanWorkspaceOutputRootsForRetry\(workspaceRoot, testOutputRoots\)/u);
   assert.match(reset, /path\.basename\(candidate\) !== attemptId/u);
   assert.match(reset, /const parent = realpathSync\(path\.dirname\(candidate\)\)/u);
   assert.match(reset, /const anchoredRoot = realpathSync\(candidate\)/u);
