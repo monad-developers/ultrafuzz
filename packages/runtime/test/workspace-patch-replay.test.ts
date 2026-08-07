@@ -449,6 +449,8 @@ test("#328 a contract failure names the field paths and collapses repeated messa
     { path: "properties.0.property_id", message: "Too small" },
     { path: "selection.priorities", message: "Invalid input" }
   ]);
-  assert.match(mixed, /Too small at properties\.0\.property_id/u);
-  assert.match(mixed, /Invalid input at selection\.priorities/u);
+  // Assert the SEPARATOR, not just the two entries. Paths inside one group are joined with ", ", so
+  // changing "; " to ", " makes `msgA at p1, p2; msgB at p3` collapse into one unreadable run -- and two
+  // independent `match` calls never observe it. That mutation survived until this line existed.
+  assert.match(mixed, /Too small at properties\.0\.property_id; Invalid input at selection\.priorities/u);
 });

@@ -1218,9 +1218,13 @@ test("a duplicated reference expectation is still rejected once empty lists are 
 });
 
 test("every schema validation issue carries the field path that identifies it", () => {
-  // The 88 identical messages were undiagnosable because the failure text dropped `path`, which
-  // `validateWithZod` had already computed. The path is the difference between a one-line diagnosis and an
-  // hour of reading artifacts off a volume, so it must be present on the issue itself.
+  // PRE-EXISTING INVARIANT, not a test of #328. `validateWithZod` already populated `issue.path`, so this
+  // passes on `main` unchanged -- review caught me claiming otherwise. The #328 bug was the TEMPLATE's
+  // formatter discarding the path, and this file never loads the template; that behaviour is covered by
+  // `#328 a contract failure names the field paths` in packages/runtime/test.
+  //
+  // Kept because the invariant is what makes that formatter possible: if paths ever stopped being
+  // populated here, the useful message downstream would silently become useless again.
   const result = validateArtifactContract(
     "ultrafuzz/implemented-properties@2",
     JSON.stringify({

@@ -399,7 +399,6 @@ export const propertiesJsonSchema = {
           priority: { enum: [...PROPERTY_PRIORITIES] },
           reference_expectations: {
             type: "array",
-            minItems: 1,
             uniqueItems: true,
             items: { type: "string", minLength: 1 }
           },
@@ -478,7 +477,6 @@ export const lensPropertiesJsonSchema = {
           priority: { enum: [...PROPERTY_PRIORITIES] },
           reference_expectations: {
             type: "array",
-            minItems: 1,
             uniqueItems: true,
             items: { type: "string", minLength: 1 }
           }
