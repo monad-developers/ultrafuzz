@@ -124,7 +124,8 @@ import {
   createModalRecoveryLifecycleDocument,
   MODAL_RECOVERY_LIFECYCLE_FILE,
   parseModalRecoveryLifecycleDocument,
-  summarizeModalRecoveryLifecycle,
+  type ModalRecoveryLifecycleDocument,
+  type ModalRecoveryLifecycleSummary,
   type ModalRecoveryStartReason,
   type ModalRecoveryTerminalReason
 } from "./recovery-lifecycle.js";
@@ -1236,10 +1237,59 @@ function finishActiveModalRecoveryLifecycle(
   return finishModalLaunchRecoveryLifecycle(state, record, input);
 }
 
-function modalRecoveryAnalysisSummary(records: ModalLaunchState["recovery_lifecycle"]): AnalysisRecoverySummary {
+/**
+ * Folds the terminal worker status persisted on a launch's volume into its recovery lifecycle.
+ *
+ * Every artifact that reports recovery — `status.json`'s `recovery_summary`,
+ * `recovery-lifecycle.json`, and the analysis bundle's `recovery-summary` — is rendered from
+ * `state.recovery_lifecycle`, so they can only agree if every reader folds the same observed worker
+ * status in before summarizing. `collect` was once the only caller that did, so the same run
+ * reported `active_generations: 1` / `unknown_model_work_generations: 1` in `status.json` and
+ * `terminal_generations: 1` / `model_work_generations: 1` in `recovery-lifecycle.json` (#322). A
+ * summary that disagrees with itself makes `model_work_started` — and every classification derived
+ * from it — unfalsifiable, so the fold belongs to one function that both readers call.
+ *
+ * Returns whether the lifecycle changed, so a caller holding the state lock knows to persist it.
+ * `status` does not hold the lock and only folds its in-memory copy: the transition is a pure
+ * function of the persisted worker status, so the summary it prints is the one `collect` writes.
+ */
+export function observeTerminalModalRecoveryLifecycle(
+  state: ModalLaunchState,
+  launch: ModalLaunchRecord,
+  workerStatus: ModalWorkerStatus | undefined,
+  now = new Date().toISOString()
+): boolean {
+  if (!isModalWorkerStatusTerminal(workerStatus)) return false;
+  return finishActiveModalRecoveryLifecycle(state, launch, {
+    terminalReason: modalRecoveryTerminalReasonForWorkerStatus({
+      category: workerStatus.category,
+      preModelAttempt: modalPreModelAttempt(state, launch),
+      modelWorkStarted: workerStatus.model_work_started
+    }),
+    finishedAt: modalRecoveryFinishedAtForWorkerStatus(workerStatus, now),
+    modelWorkStarted: workerStatus.model_work_started,
+    ...(workerStatus.updated_at === undefined ? {} : { lastDurableTransitionAt: workerStatus.updated_at }),
+    ...(workerStatus.node_counts === undefined ? {} : { nodeCountsAfter: workerStatus.node_counts })
+  });
+}
+
+/**
+ * The one recovery-lifecycle document for a model: what `collect` writes to
+ * `recovery-lifecycle.json`, and the summary `status.json` and the analysis bundle render.
+ */
+export function modalRecoveryLifecycleForModel(
+  state: Pick<ModalLaunchState, "recovery_lifecycle">,
+  modelSlug: string
+): ModalRecoveryLifecycleDocument {
+  return createModalRecoveryLifecycleDocument(
+    state.recovery_lifecycle.filter((record) => record.model_slug === modelSlug)
+  );
+}
+
+function modalRecoveryAnalysisSummary(summary: ModalRecoveryLifecycleSummary): AnalysisRecoverySummary {
   return {
     schema_version: ANALYSIS_BUNDLE_SCHEMA_VERSION,
-    ...summarizeModalRecoveryLifecycle(records)
+    ...summary
   };
 }
 
@@ -1299,38 +1349,55 @@ export async function modalBenchmarkStatus(input: {
         "status.json",
         "result.json"
       ]);
-      const workerStatus = latestPersistedWorkerStatus(persisted, launch);
-      const preModelAttempt = modalPreModelAttempt(state, launch);
-      const runnerStatus = classifyModalRunnerStatus({
-        sandbox: probe.state,
-        preModelAttempt,
-        postModelRecovery: launch.post_model_recovery ?? "relaunch",
-        modelWorkMayHaveStarted: launch.launched_at !== undefined,
-        ...(workerStatus === undefined ? {} : { workerStatus }),
-        ...(launch.phase === "failed" && launch.failure_category !== undefined
-          ? { launchFailure: launch.failure_category }
-          : {})
-      });
-      rows.push({
-        logical_run_id: state.logical_run_id,
-        generation: launch.generation,
-        attempt: launch.attempt,
-        pre_model_attempt: preModelAttempt,
-        model: launch.model,
-        slug: launch.slug,
-        runner: probe.state,
-        exit_code: probe.exitCode,
-        runner_status: runnerStatus,
-        worker_status: workerStatus ?? null,
-        recovery_summary: summarizeModalRecoveryLifecycle(
-          state.recovery_lifecycle.filter((record) => record.model_slug === launch.slug)
-        )
-      });
+      rows.push(modalBenchmarkStatusRow({ state, launch, files: persisted, sandbox: probe }));
     }
     return rows;
   } finally {
     modal.close();
   }
+}
+
+/**
+ * The `status.json` row for one launch, given everything already read from Modal.
+ *
+ * Extracted from `modalBenchmarkStatus` so the row a run is judged by can be exercised without a
+ * Modal client — the regression that keeps `status.json` and `recovery-lifecycle.json` agreeing
+ * (#322) needs both artifacts computed from the same launch state.
+ */
+export function modalBenchmarkStatusRow(input: {
+  state: ModalLaunchState;
+  launch: ModalLaunchRecord;
+  files: Readonly<Record<string, string>>;
+  sandbox: { state: ModalSandboxState; exitCode?: number | null };
+  now?: string;
+}): Record<string, unknown> {
+  const { state, launch } = input;
+  const workerStatus = latestPersistedWorkerStatus(input.files, launch);
+  const preModelAttempt = modalPreModelAttempt(state, launch);
+  const runnerStatus = classifyModalRunnerStatus({
+    sandbox: input.sandbox.state,
+    preModelAttempt,
+    postModelRecovery: launch.post_model_recovery ?? "relaunch",
+    modelWorkMayHaveStarted: launch.launched_at !== undefined,
+    ...(workerStatus === undefined ? {} : { workerStatus }),
+    ...(launch.phase === "failed" && launch.failure_category !== undefined
+      ? { launchFailure: launch.failure_category }
+      : {})
+  });
+  observeTerminalModalRecoveryLifecycle(state, launch, workerStatus, input.now);
+  return {
+    logical_run_id: state.logical_run_id,
+    generation: launch.generation,
+    attempt: launch.attempt,
+    pre_model_attempt: preModelAttempt,
+    model: launch.model,
+    slug: launch.slug,
+    runner: input.sandbox.state,
+    exit_code: input.sandbox.exitCode,
+    runner_status: runnerStatus,
+    worker_status: workerStatus ?? null,
+    recovery_summary: modalRecoveryLifecycleForModel(state, launch.slug).summary
+  };
 }
 
 export interface ModalOverseerJob {
@@ -2449,22 +2516,7 @@ export async function collectModalBenchmark(input: {
             ])
         });
         const persistedStatus = latestPersistedWorkerStatus(files, launch);
-        if (
-          isModalWorkerStatusTerminal(persistedStatus) &&
-          finishActiveModalRecoveryLifecycle(state, launch, {
-            terminalReason: modalRecoveryTerminalReasonForWorkerStatus({
-              category: persistedStatus.category,
-              preModelAttempt: modalPreModelAttempt(state, launch),
-              modelWorkStarted: persistedStatus.model_work_started
-            }),
-            finishedAt: modalRecoveryFinishedAtForWorkerStatus(persistedStatus, new Date().toISOString()),
-            modelWorkStarted: persistedStatus.model_work_started,
-            ...(persistedStatus.updated_at === undefined
-              ? {}
-              : { lastDurableTransitionAt: persistedStatus.updated_at }),
-            ...(persistedStatus.node_counts === undefined ? {} : { nodeCountsAfter: persistedStatus.node_counts })
-          })
-        ) {
+        if (observeTerminalModalRecoveryLifecycle(state, launch, persistedStatus)) {
           await writeModalLaunchState(input.statePath, state);
         }
         const output = path.resolve(input.outputDir, launch.slug);
@@ -2521,9 +2573,7 @@ export async function collectModalBenchmark(input: {
           collectionEnv,
           retainedCollectionSecretValues
         );
-        const recoveryLifecycle = createModalRecoveryLifecycleDocument(
-          state.recovery_lifecycle.filter((record) => record.model_slug === launch.slug)
-        );
+        const recoveryLifecycle = modalRecoveryLifecycleForModel(state, launch.slug);
         assertModalRecoveryLifecycleContainsNoSecrets(recoveryLifecycle, selectedWorkerEvidence.forbiddenSecretValues);
         const selectedEvidence: { files: Readonly<Record<string, string>>; forbiddenSecretValues: string[] } = {
           files: {
@@ -2554,9 +2604,7 @@ export async function collectModalBenchmark(input: {
         writeAnalysisBundle({
           outputDir: path.join(output, "analysis"),
           payloads: {
-            "recovery-summary": modalRecoveryAnalysisSummary(
-              state.recovery_lifecycle.filter((record) => record.model_slug === launch.slug)
-            )
+            "recovery-summary": modalRecoveryAnalysisSummary(recoveryLifecycle.summary)
           }
         });
         if (
