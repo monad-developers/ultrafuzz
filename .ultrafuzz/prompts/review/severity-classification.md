@@ -34,6 +34,13 @@ must preserve upstream provenance fields and carry the upstream finding's `id`
 and `dedupe_key` through unchanged; provenance is matched on that identity, so
 never renumber a finding here. Use
 `schema_version: "1.0"` on every emitted finding object.
+
+This file is validated as a normalized finding array, so every object must also
+carry the required fields `title`, `status`, `severity_guess`, `confidence`, and
+`summary`, plus its `source_nodes` union. Carry each of them through from the
+upstream finding unchanged unless this stage is what revises it; a record that
+drops `summary` fails the node. The worked examples below show only the severity
+fields this stage adds, not the whole object you must emit.
 Preserve each property-derived finding's `property_ids` unchanged.
 Preserve the complete upstream `source_nodes` discovery union and keep
 `source_node_id` equal to its first entry. Do not substitute this review node

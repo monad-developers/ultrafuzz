@@ -12,7 +12,11 @@ Restart handling: if {{artifact_path}}/deduped-findings.json,
 {{artifact_path}}/finding-lifecycle-ledger.json, and
 {{artifact_path}}/duplicates.json already exist, first validate their
 required JSON shapes (`deduped-findings.json`, `findings.json`, and
-`strategy-detections.json` are arrays; `duplicates.json` is an object or array).
+`strategy-detections.json` are arrays; `duplicates.json` is an object or array;
+`finding-lifecycle-ledger.json` is an object whose `records` array covers every
+upstream finding exactly once). Rebuild rather than finish if the ledger is
+truncated, has an empty `records` array while upstream findings exist, or leaves
+any upstream finding unaccounted for.
 If those shapes are valid and the files do not clearly contradict the required
 schema, treat them as the materialized dedupe result for this node, refresh only
 missing required files, and finish. Do not rebuild the dedupe from scratch,
@@ -179,6 +183,10 @@ the broader state space.
 
 Save the full deduplicated finding array, including candidates that may later
 triage as non-production outcomes, to {{artifact_path}}/deduped-findings.json.
+This file is validated as a normalized finding array, so every retained object
+must carry `schema_version`, `id`, `title`, `status`, `severity_guess`,
+`confidence`, and `summary`, plus its `source_nodes` union. Carry each through
+from the finding you kept rather than inventing a new value.
 Also save the same array to {{artifact_path}}/findings.json when a generic
 findings handoff is useful. Save duplicate and family audit details to a
 separate {{artifact_path}}/duplicates.json object or array; do not replace
@@ -207,8 +215,9 @@ Treat each input finding's runtime-normalized `producer_node_id`,
 commentary. For every retained root, form a stable first-seen union of every
 contributing finding's `source_nodes` (or legacy `source_node_id`). Write the
 union to `source_nodes` and its first entry to `source_node_id`; never replace
-the discovery sources with `dedupe-findings` or a dynamic group ID. Preserve
-the relevant source union on family variants and in duplicate audit records.
+the discovery sources with `dedupe-findings` or a dynamic group ID. Record each
+nested family variant's and duplicate audit record's own source union on that
+nested object, which never narrows the root's own `source_nodes`.
 
 A retained root's `source_nodes` must be exactly the set of `node_id` values in
 its own ledger record's `source_artifacts` — no more and no less. That includes

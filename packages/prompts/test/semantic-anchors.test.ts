@@ -799,3 +799,18 @@ describe("prompt semantic anchors", () => {
     expect(baseSetup).toContain("project-local Vyper dependencies as explicit validation blockers");
   });
 });
+
+it("tells every findings@1 review producer which fields the contract requires", () => {
+  // This PR moved deduped-findings.json, triaged-findings.json and
+  // severity-classified-findings.json from ultrafuzz/json-array@1 to
+  // ultrafuzz/findings@1, which subjects them to the full normalized-finding
+  // field check. A prompt that never names a required field lets a model emit
+  // an object without it and fails the node on every attempt.
+  const required = ["title", "status", "severity_guess", "confidence", "summary"];
+  for (const relativePath of ["review/dedupe-findings.md", "review/triage.md", "review/severity-classification.md"]) {
+    const body = prompt(relativePath);
+    for (const field of required) {
+      expect(body, `${relativePath} must name required field ${field}`).toContain(`\`${field}\``);
+    }
+  }
+});
