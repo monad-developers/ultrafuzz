@@ -46,6 +46,10 @@ function invariantProbeLedger(probes: readonly Record<string, string>[]): string
   return JSON.stringify({
     schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
     entries: [],
+    // This fixture exercises scan-probe containment only, so it carries no
+    // invariant entries and must say why (#292).
+    no_invariants_justification:
+      "the pinned scan probe fixture exercises probe containment only and declares no invariant",
     inventory_rows: [],
     scan_probes: probes
   });
