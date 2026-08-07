@@ -5,7 +5,12 @@ import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { classifyModalRunnerStatus, parseModalWorkerStatus } from "../src/launch-state.js";
+import {
+  classifyModalRunnerStatus,
+  modalPreModelAttempt,
+  parseModalWorkerStatus,
+  type ModalPreModelAttempt
+} from "../src/launch-state.js";
 import {
   NonResumableTerminalRunError,
   repairModalEvalRunRecord,
@@ -157,7 +162,7 @@ describe("terminal artifact-gate recovery", () => {
       retryable: false,
       error_code: "terminal-run-non-resumable"
     });
-    expect(classifyModalRunnerStatus({ sandbox: "exited", attempt: 1, workerStatus })).toMatchObject({
+    expect(classifyModalRunnerStatus({ sandbox: "exited", preModelAttempt: streak(1), workerStatus })).toMatchObject({
       category: "permanent-operational-failure",
       action: "none",
       retryable: false
@@ -165,6 +170,11 @@ describe("terminal artifact-gate recovery", () => {
     expect(fs.readFileSync(durableStatePath, "utf8")).toBe(durableStateBytes);
   });
 });
+
+/** A pre-model streak of `attempt`, derived through the real function against an empty lifecycle. */
+function streak(attempt: number): ModalPreModelAttempt {
+  return modalPreModelAttempt({ recovery_lifecycle: [] }, { slug: "model-one", generation: 1, attempt });
+}
 
 function recoveryWorkspace(root: string): ModalResumeWorkspace {
   const target = path.join(root, "target");
