@@ -4,7 +4,9 @@ import path from "node:path";
 
 import {
   assertRegularFileInside,
+  checkInvariantSourcePinned,
   getNodeArtifactDir,
+  invariantPinnedSourceRefExists,
   readArtifactManifest,
   readJsonFile,
   readRunState,
@@ -973,8 +975,10 @@ function verifyInvariantProbePath(
         path: diagnosticPath
       });
     } else {
+      let bytes: Buffer;
       try {
-        const content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(probePath));
+        bytes = fs.readFileSync(probePath);
+        const content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
         if (content.includes("\u0000")) throw new Error("NUL");
       } catch {
         diagnostics.push({
@@ -984,12 +988,40 @@ function verifyInvariantProbePath(
           source: "invariant-ledger",
           path: diagnosticPath
         });
+        return;
       }
+      verifyInvariantProbeSourcePin(workspacePath, relativePath, bytes, diagnosticPath, diagnostics);
     }
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
     diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_LEDGER_PROBE_PATH_INVALID"));
   }
+}
+
+/**
+ * The generated workflow refuses any probe source that is not tracked, unmodified,
+ * and byte-identical to the pinned commit, but only when the pinned ref exists. The
+ * gate used to skip that check entirely, so `ultrafuzz validate` accepted ledgers the
+ * run then killed the node over (issue #301). Both halves now come from one shared
+ * validator, including the "only when pinned" condition.
+ */
+function verifyInvariantProbeSourcePin(
+  workspacePath: string,
+  relativePath: string,
+  bytes: Buffer,
+  diagnosticPath: string,
+  diagnostics: RuntimeDiagnostic[]
+): void {
+  if (!invariantPinnedSourceRefExists(workspacePath)) return;
+  const pinned = checkInvariantSourcePinned({ workspacePath, relativePath, bytes });
+  if (pinned.ok) return;
+  diagnostics.push({
+    code: "INVARIANT_LEDGER_PROBE_SOURCE_UNPINNED",
+    message: `Invariant scan probe source is ${pinned.detail}: ${relativePath}`,
+    severity: "error",
+    source: "invariant-ledger",
+    path: diagnosticPath
+  });
 }
 
 function isSafeInvariantProbePath(relativePath: string): boolean {

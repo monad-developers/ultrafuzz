@@ -30,6 +30,8 @@ const runtimeModule = process.env.ULTRAFUZZ_RUNTIME_MODULE ?? __ULTRAFUZZ_RUNTIM
 const {
   artifactContractDefinition,
   assertRegularFileInside,
+  checkInvariantSourcePinned,
+  invariantPinnedSourceRefExists,
   materializePromptSchemas,
   publishFileDurableExclusive,
   validateArtifactContract,
@@ -137,15 +139,7 @@ const authorizedDefensiveSecurityContext = [
 ].join("\n");
 
 function sourceUsesPinnedBranch(): boolean {
-  try {
-    execFileSync("git", ["rev-parse", "--verify", `${pinnedSourceRef}^{commit}`], {
-      cwd: process.cwd(),
-      stdio: ["ignore", "ignore", "ignore"]
-    });
-    return true;
-  } catch {
-    return false;
-  }
+  return invariantPinnedSourceRefExists(process.cwd(), pinnedSourceRef);
 }
 function readCloudExecutionGeneration(): string {
   const runRoot = taskSpecs.find((task) => task.execution.mode === "cloud")?.runRoot;
@@ -4124,26 +4118,11 @@ function readInvariantSourceSnapshot(
   if (content.includes("\u0000")) {
     throw new Error(`artifact-contract failure: invariant ${label} ${relativePath} is binary`);
   }
-  if (usesPinnedSource) {
-    try {
-      execFileSync("git", ["ls-files", "--error-unmatch", "--", relativePath], {
-        cwd: workspaceRoot,
-        stdio: ["ignore", "ignore", "pipe"]
-      });
-      execFileSync("git", ["diff", "--quiet", "HEAD", "--", relativePath], {
-        cwd: workspaceRoot,
-        stdio: ["ignore", "ignore", "pipe"]
-      });
-      const pinnedBytes = execFileSync("git", ["show", `${pinnedSourceRef}:${relativePath}`], {
-        cwd: workspaceRoot,
-        stdio: ["ignore", "pipe", "pipe"]
-      });
-      if (!Buffer.from(pinnedBytes).equals(bytes)) {
-        throw new Error(`source differs from pinned commit for ${relativePath}`);
-      }
-    } catch {
-      throw new Error(`artifact-contract failure: invariant ${label} ${relativePath} is not pinned and unchanged`);
-    }
+  if (
+    usesPinnedSource &&
+    !checkInvariantSourcePinned({ workspacePath: workspaceRoot, relativePath, bytes, ref: pinnedSourceRef }).ok
+  ) {
+    throw new Error(`artifact-contract failure: invariant ${label} ${relativePath} is not pinned and unchanged`);
   }
   return { bytes, content };
 }

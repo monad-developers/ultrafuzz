@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -22,6 +23,32 @@ import {
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-gates-"));
+}
+
+// A discovery workspace as a benchmark run sees it: a Git worktree whose pinned branch exists and
+// whose tracked sources match it exactly.
+function pinnedDiscoveryWorkspace(layout: ReturnType<typeof createRunLayout>): string {
+  const workspace = path.join(layout.workspacesDir, "project-discovery");
+  fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, "src", "Counter.sol"), "contract Counter {}\n");
+  const git = (args: string[]): void => {
+    execFileSync("git", args, { cwd: workspace, stdio: ["ignore", "ignore", "ignore"] });
+  };
+  git(["init", "--quiet", "--initial-branch=ultrafuzz-pinned"]);
+  git(["config", "user.name", "Ultrafuzz test"]);
+  git(["config", "user.email", "ultrafuzz@example.invalid"]);
+  git(["add", "src/Counter.sol"]);
+  git(["commit", "--quiet", "-m", "pinned"]);
+  return workspace;
+}
+
+function invariantProbeLedger(probes: readonly Record<string, string>[]): string {
+  return JSON.stringify({
+    schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+    entries: [],
+    inventory_rows: [],
+    scan_probes: probes
+  });
 }
 
 function plannedNode(paths: string[]): PlannedGraphNode {
@@ -431,6 +458,72 @@ test("project discovery gate rejects a symlinked-directory scan probe", () => {
     result.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID"),
     JSON.stringify(result.diagnostics)
   );
+});
+
+// Issue #301: the generated workflow refuses a scan probe whose source is not tracked, unmodified,
+// and byte-identical to the pinned commit, but the gate did no Git check at all. A probe naming an
+// existing-but-untracked file therefore passed `ultrafuzz validate` and then killed the node mid-run.
+// Both sites now call the shared validator, so the gate predicts what the run enforces.
+test("project discovery gate rejects an untracked scan probe source in a pinned workspace", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-unpinned-probe" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const discoveryWorkspace = pinnedDiscoveryWorkspace(layout);
+  fs.mkdirSync(path.join(discoveryWorkspace, "out"), { recursive: true });
+  fs.writeFileSync(path.join(discoveryWorkspace, "out", "Counter.json"), '{"abi":[]}\n');
+  writeArtifact(layout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    invariantProbeLedger([
+      {
+        id: "probe-generated-abi",
+        source_path: "out/Counter.json",
+        query: "invariant harness scan",
+        result: "Scanned the generated ABI"
+      }
+    ])
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_SOURCE_UNPINNED"),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+// The mirrored rule must not over-fire: a tracked, unmodified, pinned probe source is exactly what
+// the run accepts, so the gate has to accept it too.
+test("project discovery gate accepts a pinned and unchanged scan probe source", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-pinned-probe" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  pinnedDiscoveryWorkspace(layout);
+  writeArtifact(layout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    invariantProbeLedger([
+      {
+        id: "probe-counter",
+        source_path: "src/Counter.sol",
+        query: "invariant harness scan",
+        result: "Scanned the counter source"
+      }
+    ])
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
 // An invariant SOURCE is different: its bytes are the evidence, so a directory must still be refused.
