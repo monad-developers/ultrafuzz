@@ -35,6 +35,27 @@ const referenceExpectationIdsSchema = z
       seen.add(expectationId);
     }
   });
+// An implementation record carries the expectation IDs of the property it
+// implements, and a property with no reference expectations has none to carry.
+// Absent and empty both mean "none", so this variant keeps the duplicate-ID
+// check without the non-empty bound that `referenceExpectationIdsSchema`
+// applies to catalog entries. The refinement is repeated rather than shared so
+// neither schema constrains the other. See #298 for the same fix on ledger_ids.
+const implementedReferenceExpectationIdsSchema = z
+  .array(nonEmptyString)
+  .superRefine((expectationIds, context) => {
+    const seen = new Set<string>();
+    for (const [expectationIndex, expectationId] of expectationIds.entries()) {
+      if (seen.has(expectationId)) {
+        context.addIssue({
+          code: "custom",
+          message: `Duplicate reference expectation ID ${JSON.stringify(expectationId)}`,
+          path: [expectationIndex]
+        });
+      }
+      seen.add(expectationId);
+    }
+  });
 export const PROPERTY_PRIORITIES = ["high", "medium", "low"] as const;
 export const propertyPrioritySchema = z.enum(PROPERTY_PRIORITIES);
 export type PropertyPriority = (typeof PROPERTY_PRIORITIES)[number];
@@ -254,7 +275,7 @@ const implementedPropertySchema = z.looseObject({
   status: z.enum(["implemented", "pending", "deferred", "blocked"]),
   implementation_paths: nonEmptyStringArray,
   test_paths: nonEmptyStringArray,
-  reference_expectations: referenceExpectationIdsSchema.optional(),
+  reference_expectations: implementedReferenceExpectationIdsSchema.optional(),
   blocker: z
     .strictObject({
       code: nonEmptyString,

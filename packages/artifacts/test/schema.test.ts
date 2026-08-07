@@ -572,6 +572,33 @@ test("canonical property schema preserves typed benchmark expectations", () => {
   );
 });
 
+test("implementation records accept an absent or empty reference expectation list", () => {
+  const record = {
+    property_id: "property-1",
+    status: "implemented",
+    implementation_paths: ["tests/recon/Properties.sol"],
+    test_paths: []
+  };
+  const artifact = (referenceExpectations?: string[]) => ({
+    schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+    properties: [
+      referenceExpectations === undefined ? record : { ...record, reference_expectations: referenceExpectations }
+    ]
+  });
+  assert.equal(validateImplementedPropertiesSchema(artifact()).ok, true, "an absent list means no expectations");
+  assert.equal(validateImplementedPropertiesSchema(artifact([])).ok, true, "an empty list also means no expectations");
+  assert.equal(
+    validateImplementedPropertiesSchema(artifact(["scfuzzbench:aave-v4:iSpoke_supply"])).ok,
+    true,
+    "a populated list stays valid"
+  );
+  const duplicate = validateImplementedPropertiesSchema(
+    artifact(["scfuzzbench:aave-v4:iSpoke_supply", "scfuzzbench:aave-v4:iSpoke_supply"])
+  );
+  assert.equal(duplicate.ok, false, "duplicate expectation IDs are still rejected");
+  assert.ok(duplicate.issues.some((issue) => /Duplicate reference expectation ID/u.test(issue.message)));
+});
+
 test("property implementation and campaign schemas retain canonical references", () => {
   const implemented = {
     schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,

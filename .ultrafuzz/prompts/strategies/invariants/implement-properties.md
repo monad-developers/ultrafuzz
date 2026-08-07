@@ -47,8 +47,10 @@ cannot be lost during priority filtering.
    only as its human-readable companion.
    - Select properties whose `priority` is one of the included priority values
      above or whose `reference_expectations` array is non-empty.
-   - Preserve each selected property's complete `reference_expectations` array
-     in the implementation summary and use it to explain any blocker.
+   - Preserve the complete `reference_expectations` array of each selected
+     property **that has one** in the implementation summary, and use it to
+     explain any blocker. A property with no reference expectations has no
+     array to preserve: omit the field on its record.
    - Preserve each selected property's canonical `id` as `property_id`, plus
      its title, priority, oracle, setup
      requirements, preconditions, source lenses, and false-positive risks in
@@ -168,10 +170,12 @@ an actionable `blocker` object with this shape:
 ```
 
 `status` must be `implemented`, `pending`, `deferred`, or `blocked`. Include
-both path arrays on every record, using empty arrays when no path exists. A
-selected property with `reference_expectations` carries the complete
-expectation-ID array on its implementation record in the same order-independent
-set. A
+both path arrays on every record, using empty arrays when no path exists. That
+empty-array convention is specific to the two path arrays. A selected property
+with `reference_expectations` carries the complete expectation-ID array on its
+implementation record in the same order-independent set; a selected property
+with no reference expectations omits `reference_expectations` entirely rather
+than emitting an empty array. A
 `property_id` must exactly match a canonical ID in `properties.json`; dangling
 references fail artifact validation. Preserve generated and changed test paths
 in `test_paths` and invariant/helper implementation paths in
