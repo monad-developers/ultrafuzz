@@ -442,10 +442,16 @@ test("generated Smithers workflow guards runtime-owned workspace patch publicati
 
   const helper = source.slice(helperStart, helperEnd);
   assert.match(helper, /resolveRegularArtifactFile\(/u);
-  assert.match(helper, /These paths are runtime-owned\. Replace only an empty runtime placeholder/u);
+  assert.match(helper, /These paths are runtime-owned/u);
   assert.match(helper, /existingContents !== "" && existingContents !== "\\n"/u);
   assert.match(helper, /workspace patch artifact was modified/u);
   assert.match(helper, /writeFileDurable\(target, contents\)/u);
+  // #357 widened the rule from "replace only an empty placeholder" to "replace an empty placeholder,
+  // or a pair this node published in an earlier generation". The rejection must stay gated on the
+  // caller's classification rather than becoming unconditional, so pin both halves: the throw is
+  // guarded by the flag, and the flag defaults to rejecting.
+  assert.match(helper, /replaceSuperseded = false/u);
+  assert.match(helper, /if \(!replaceSuperseded\) \{/u);
 });
 
 test("runtime workspace patch publication replaces empty placeholders but rejects non-empty agent patches", () => {
@@ -458,7 +464,10 @@ test("runtime workspace patch publication replaces empty placeholders but reject
 
   const helper = source
     .slice(helperStart, helperEnd)
-    .replace("root: string, relativePath: string, contents: string): void", "root, relativePath, contents)");
+    .replace(
+      /root: string,\n\s*relativePath: string,\n\s*contents: string,\n\s*replaceSuperseded = false\n\): void/u,
+      "root, relativePath, contents, replaceSuperseded = false)"
+    );
   const writeWorkspacePatchArtifact = new Function(
     "path",
     "isStrictlyInsideDirectory",
@@ -479,7 +488,7 @@ test("runtime workspace patch publication replaces empty placeholders but reject
     },
     fs.readFileSync,
     writeFileDurable
-  ) as (root: string, relativePath: string, contents: string) => void;
+  ) as (root: string, relativePath: string, contents: string, replaceSuperseded?: boolean) => void;
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-patch-publication-"));
   try {
@@ -493,6 +502,12 @@ test("runtime workspace patch publication replaces empty placeholders but reject
       () => writeWorkspacePatchArtifact(root, "workspace.patch", "captured patch\n"),
       /workspace patch artifact was modified/u
     );
+
+    // #357: the same non-empty survivor is replaced once the caller has classified it as a pair this
+    // node published in an earlier generation. Only the flag differs, so this pins that the widening
+    // rides on the classification and not on anything about the bytes.
+    writeWorkspacePatchArtifact(root, "workspace.patch", "captured patch\n", true);
+    assert.equal(fs.readFileSync(patchPath, "utf8"), "captured patch\n");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
