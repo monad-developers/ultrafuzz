@@ -1751,7 +1751,11 @@ function normalizeLegacyReportProvenanceFields(contents: string): string | undef
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return undefined;
   }
-  const report = parsed as { issues?: unknown; property_provenance?: unknown };
+  const report = parsed as {
+    issues?: unknown;
+    property_provenance?: unknown;
+    property_implementation_coverage?: unknown;
+  };
 
   let changed = false;
   const issues = Array.isArray(report.issues)
@@ -1783,18 +1787,48 @@ function normalizeLegacyReportProvenanceFields(contents: string): string | undef
         return provenance;
       })
     : report.property_provenance;
+  const propertyImplementationCoverage = normalizeLegacyPropertyImplementationCoverage(
+    report.property_implementation_coverage
+  );
+  changed ||= propertyImplementationCoverage.changed;
 
   return changed
     ? `${JSON.stringify(
         {
           ...report,
           ...(issues === undefined ? {} : { issues }),
-          ...(propertyProvenance === undefined ? {} : { property_provenance: propertyProvenance })
+          ...(propertyProvenance === undefined ? {} : { property_provenance: propertyProvenance }),
+          ...(propertyImplementationCoverage.value === undefined
+            ? {}
+            : { property_implementation_coverage: propertyImplementationCoverage.value })
         },
         null,
         2
       )}\n`
     : undefined;
+}
+
+function normalizeLegacyPropertyImplementationCoverage(value: unknown): { value: unknown; changed: boolean } {
+  if (!isPlainRecord(value) || !Array.isArray(value.blocker_summaries)) {
+    return { value, changed: false };
+  }
+  let changed = false;
+  const blockerSummaries = value.blocker_summaries.map((entry) => {
+    if (typeof entry === "string") {
+      return entry;
+    }
+    if (!isPlainRecord(entry)) {
+      return entry;
+    }
+    const propertyId = typeof entry.property_id === "string" ? entry.property_id.trim() : "";
+    const summary = typeof entry.summary === "string" ? entry.summary.trim() : "";
+    if (propertyId.length === 0 || summary.length === 0) {
+      return entry;
+    }
+    changed = true;
+    return `${propertyId}: ${summary}`;
+  });
+  return changed ? { value: { ...value, blocker_summaries: blockerSummaries }, changed: true } : { value, changed };
 }
 
 function normalizeLegacyGeneratedTestManifests(task: (typeof taskSpecs)[number]): void {

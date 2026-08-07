@@ -564,6 +564,12 @@ test("generated Smithers agent normalizes legacy unavailable report provenance f
   assert.match(normalizer, /provenance\[field\] = \[\]/u);
   assert.match(normalizer, /\["fuzzer_backend", "fuzzer_backends"\]/u);
   assert.match(normalizer, /delete provenance\[field\]/u);
+  assert.match(normalizer, /normalizeLegacyPropertyImplementationCoverage/u);
+  assert.match(normalizer, /property_implementation_coverage/u);
+  assert.match(normalizer, /blocker_summaries/u);
+  assert.match(normalizer, /entry\.property_id/u);
+  assert.match(normalizer, /entry\.summary/u);
+  assert.match(normalizer, /\$\{propertyId\}: \$\{summary\}/u);
   assert.match(normalizer, /validateArtifactContract\(output\.contract, normalized, output\.path\)\.ok/u);
   assert.match(normalizer, /writeFileSync\(resolvedPath, normalized/u);
 });
