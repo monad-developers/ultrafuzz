@@ -38,6 +38,10 @@ export const invariantLedgerSchema = z
     schema_version: z.literal(INVARIANT_LEDGER_SCHEMA_VERSION),
     entries: z.array(invariantLedgerEntrySchema),
     inventory_rows: z.array(invariantInventoryRowSchema).optional(),
+    // Present only on a ledger that records no invariant at all. The gate requires it there
+    // (issue #292): an empty ledger is otherwise indistinguishable from an agent that did not
+    // look, and nothing reads `scan_probes[].result`, so probe text alone cannot carry that claim.
+    no_invariants_justification: nonEmptyString.optional(),
     scan_probes: z
       .array(
         z.strictObject({
@@ -111,6 +115,13 @@ export const invariantLedgerSchema = z
         });
       }
       return;
+    }
+    if (artifact.no_invariants_justification !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "no_invariants_justification is only valid on an invariant ledger with no entries",
+        path: ["no_invariants_justification"]
+      });
     }
     if (artifact.inventory_rows === undefined) {
       context.addIssue({
@@ -279,6 +290,12 @@ export const invariantLedgerJsonSchema = {
         }
       }
     },
+    no_invariants_justification: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Required when entries is empty and forbidden otherwise: an explicit, auditable statement of why the target carries no invariant, naming what was searched and why the absence is genuine."
+    },
     scan_probes: {
       type: "array",
       items: {
@@ -298,6 +315,11 @@ export const invariantLedgerJsonSchema = {
     {
       if: { properties: { entries: { minItems: 1 } } },
       then: {
+        // The zod validator rejects `no_invariants_justification` here, and the prompt tells the
+        // agent to validate against THIS document first. Without the same rule the agent's own
+        // validation passes and the discovery gate then fails the node on a generic
+        // INVARIANT_LEDGER_SCHEMA_INVALID, which is the opaque failure this field exists to avoid.
+        not: { required: ["no_invariants_justification"] },
         properties: {
           inventory_rows: { minItems: 1 }
         }
@@ -306,6 +328,7 @@ export const invariantLedgerJsonSchema = {
     {
       if: { properties: { entries: { maxItems: 0 } } },
       then: {
+        required: ["no_invariants_justification"],
         properties: {
           inventory_rows: { maxItems: 0 },
           scan_probes: { minItems: 1 }

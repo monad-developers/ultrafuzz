@@ -1159,9 +1159,37 @@ test("generated Smithers invariant discovery uses a Git-compatible ls-files invo
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
 
   assert.doesNotMatch(source, /--no-exclude-standard/u);
-  assert.match(source, /\["ls-files", "--cached", "--others", "--", "src", "contracts", "test", "tests"\]/u);
+  assert.match(
+    source,
+    /invariantSuiteGitPaths\(workspaceRoot, \[\s*"ls-files",\s*"--cached",\s*"--others",\s*"--",\s*"src",\s*"contracts",\s*"test",\s*"tests"\s*\]\)/u
+  );
   assert.match(source, /\["ls-files", "--others", "--", "src", "contracts"\]/u);
   assert.match(source, /\["ls-files", "--others", "--", "test", "tests"\]/u);
+});
+
+test("generated Smithers invariant discovery bounds every git enumeration it captures", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+
+  // Node's `execFileSync` default is 1 MB, and an oversized listing then dies as an anonymous
+  // `spawnSync git ENOBUFS` (#310, #323). Each discovery capture goes through the one helper that states
+  // the bound, so a new call site that reintroduces a bare `execFileSync` fails here.
+  assert.match(source, /const MAX_INVARIANT_SUITE_ENUMERATION_BYTES = /u);
+  assert.match(source, /maxBuffer: MAX_INVARIANT_SUITE_ENUMERATION_BYTES/u);
+  assert.match(source, /function rethrowOversizedInvariantSuiteEnumeration/u);
+  assert.match(source, /listed more than the \$\{MAX_INVARIANT_SUITE_ENUMERATION_BYTES\}-byte enumeration buffer/u);
+  for (const enumeration of [
+    "captureInvariantSuiteBaseline",
+    "invariantWorkspaceSourcePaths",
+    "changedTestTreePaths",
+    "changedInvariantSourcePaths",
+    "gitTestTreePaths"
+  ]) {
+    const start = source.indexOf(`function ${enumeration}(`);
+    assert.ok(start >= 0, enumeration);
+    const body = source.slice(start, source.indexOf("\n}\n", start));
+    assert.match(body, /invariantSuiteGitPaths\(/u, enumeration);
+    assert.doesNotMatch(body, /execFileSync\("git", \["ls-files"/u, enumeration);
+  }
 });
 
 test("invariant git discovery includes tracked, untracked, and ignored sources", () => {

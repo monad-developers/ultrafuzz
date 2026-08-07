@@ -317,6 +317,7 @@ test("project discovery gate requires ledger evidence to survive in the markdown
       schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
       entries: [],
       inventory_rows: [],
+      no_invariants_justification: "The documentation set states no invariant; only prose overviews are present.",
       scan_probes: [
         {
           id: "probe-docs-no-invariants",
@@ -328,7 +329,7 @@ test("project discovery gate requires ledger evidence to survive in the markdown
     })
   );
   const explicitNoEvidence = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(explicitNoEvidence.ok, true);
+  assert.equal(explicitNoEvidence.ok, true, JSON.stringify(explicitNoEvidence.diagnostics));
 
   writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", JSON.stringify(ledger));
   writeArtifact(
@@ -362,6 +363,7 @@ test("project discovery gate accepts a repository-root scan probe", () => {
       schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
       entries: [],
       inventory_rows: [],
+      no_invariants_justification: "The repository-wide scan found no invariant statement to record.",
       scan_probes: [
         {
           id: "probe-repository-root",
@@ -375,6 +377,78 @@ test("project discovery gate accepts a repository-root scan probe", () => {
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+// Issue #292: this is the exact artifact from the report. An empty ledger whose only evidence is
+// probe text nothing reads used to satisfy both evidence gates, because the gate enforced the SHAPE
+// of the emptiness rather than asking anyone to stand behind it. Emptiness stays reachable, but only
+// as an explicit, auditable claim.
+test("project discovery gate rejects an empty ledger that does not justify the absence", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-unjustified-empty" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  fs.mkdirSync(path.join(layout.workspacesDir, "project-discovery"), { recursive: true });
+  writeArtifact(layout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  const ledger = (justification?: string) =>
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      ...(justification === undefined ? {} : { no_invariants_justification: justification }),
+      // The issue's literal `"id": "p1"` no longer passes the `^probe-` pattern; everything else
+      // about the reported artifact, including the invented result text, is reproduced verbatim.
+      scan_probes: [{ id: "probe-p1", source_path: ".", query: "invariant", result: "invented result text" }]
+    });
+
+  writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", ledger());
+  const unjustified = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(unjustified.ok, false, JSON.stringify(unjustified.diagnostics));
+  assert.ok(
+    unjustified.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_NO_INVARIANTS_UNJUSTIFIED"),
+    JSON.stringify(unjustified.diagnostics)
+  );
+
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    ledger("This target is a pure library of pure functions and states no invariant of its own.")
+  );
+  const justified = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(justified.ok, true, JSON.stringify(justified.diagnostics));
+
+  // A justification on a ledger that DOES carry entries is contradictory, so the schema refuses it
+  // rather than letting both readings of the artifact coexist.
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [
+        {
+          id: "evidence-1",
+          source_path: "docs/overview.md",
+          source_location: "line 1",
+          kind: "invariant",
+          verbatim: "Total borrowed <= total supplied",
+          inventory_ids: ["inventory-1"]
+        }
+      ],
+      inventory_rows: [{ id: "inventory-1", description: "Solvency", ledger_ids: ["evidence-1"] }],
+      no_invariants_justification: "Contradicts the entries above.",
+      scan_probes: []
+    })
+  );
+  const contradictory = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(contradictory.ok, false);
+  assert.ok(
+    contradictory.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SCHEMA_INVALID"),
+    JSON.stringify(contradictory.diagnostics)
+  );
 });
 
 // R45's `project-discovery` died on `artifact-contract failure: invariant scan probe tests is
@@ -400,6 +474,7 @@ test("project discovery gate accepts a directory scan probe", () => {
       schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
       entries: [],
       inventory_rows: [],
+      no_invariants_justification: "The tests directory carries no invariant statement to record.",
       scan_probes: [
         {
           id: "probe-tests-directory",
@@ -1009,6 +1084,84 @@ test("project discovery gate preserves symbol evidence whitespace", () => {
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+// Surfaced while settling issue #292 and independent of the empty-ledger question: every shape of
+// the ledger returned before fan-in reached a `verifyInvariantProbePath` call, so fan-in checked
+// probe containment for no shape at all. An escaping probe path only ever had to survive the
+// discovery node, and fan-in re-reads that same artifact without re-checking it.
+test("fanin gate checks scan probe containment against the discovery workspace", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-fanin-probe-containment" });
+  const node = {
+    ...plannedNode(["properties.json", "properties.md"]),
+    id: "property-specification-fanin",
+    logical_id: "property-specification-fanin"
+  };
+  fs.mkdirSync(path.join(layout.workspacesDir, "project-discovery"), { recursive: true });
+  const ledger = (probePath: string) =>
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      no_invariants_justification: "Discovery found no invariant statement in this target.",
+      scan_probes: [{ id: "probe-1", source_path: probePath, query: "invariant", result: "nothing found" }]
+    });
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-1",
+          description: "A canonical property with no ledger evidence behind it.",
+          category: "hub-accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-1" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    "### Canonical property: property-1\n- description: A canonical property with no ledger evidence behind it.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1\n### End canonical property: property-1\n"
+  );
+
+  writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", ledger("."));
+  const contained = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(contained.ok, true, JSON.stringify(contained.diagnostics));
+
+  writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", ledger("../../outside"));
+  const escaping = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(escaping.ok, false, JSON.stringify(escaping.diagnostics));
+  assert.ok(
+    escaping.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID"),
+    JSON.stringify(escaping.diagnostics)
+  );
+
+  // Fan-in is the second gate that reads this artifact, and issue #292's whole point is that the
+  // ledger must have ONE reading at both of them. Discovery's copy of this rule was covered; this
+  // one was not, so deleting the fan-in call broke nothing.
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: [{ id: "probe-1", source_path: ".", query: "invariant", result: "nothing found" }]
+    })
+  );
+  const unjustified = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(unjustified.ok, false, JSON.stringify(unjustified.diagnostics));
+  assert.ok(
+    unjustified.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_NO_INVARIANTS_UNJUSTIFIED"),
+    JSON.stringify(unjustified.diagnostics)
+  );
 });
 
 test("fanin gate requires every invariant ledger entry to map to a canonical property", () => {
@@ -1859,6 +2012,146 @@ test("property lens gate strips unsupported external labels without weakening be
     tampered.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
     JSON.stringify(tampered.diagnostics)
   );
+});
+
+// Issue #285(a). Aave run R44 supplied no catalogue — its config keys were `app_name,
+// benchmark_execution, braintrust, eval_reporting, ground_truth, image_name, models,
+// node_timeout_seconds, run_id, schema_version, target` — so `readLensSuppliedExpectationIds`
+// returned an empty id set with no diagnostic and the provenance gate authorized nothing while
+// looking active. That is every benchmark run, not an edge case, so it has to be said out loud.
+test("property lens gate reports that no reference expectation catalog was supplied", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-no-catalog" });
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+  writeArtifact(
+    layout,
+    node.id,
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: ["LEND_ACC_01"]
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  const absent = result.diagnostics.find(
+    (diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_CATALOG_ABSENT"
+  );
+  assert.ok(absent !== undefined, JSON.stringify(result.diagnostics));
+  // Reporting the inert gate must not by itself fail a node: the diagnostic describes the run's
+  // configuration, which no agent can fix from inside the lens.
+  assert.equal(absent.severity, "warning");
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+// Issue #285(b) staging. Once a catalogue IS supplied, escalating "cited but absent from it" to a
+// node failure is a behaviour change nobody has watched land, and getting it wrong costs an entire
+// reference lens (issues #283, #293). So it is opt-in, and the default stays the strip-and-warn
+// behaviour six existing tests already pin.
+test("supplied reference expectation catalog fails the lens only when enforcement is switched to fail", () => {
+  const expectationId = "supplied-expectation-01";
+  const citedElsewhereId = "LEND_ACC_01";
+  const expectationCatalog = JSON.stringify({
+    schema_version: "ultrafuzz.reference-expectations.v1",
+    expectations: [{ id: expectationId }]
+  });
+  const expectationDigest = createHash("sha256").update(expectationCatalog).digest("hex");
+  const referenceStateNode = {
+    id: "reference-properties-recon",
+    status: "succeeded" as const,
+    outputs: [
+      {
+        path: "references/expectations.json",
+        contract: "ultrafuzz/reference-expectations@1" as const,
+        contract_digest: "a".repeat(64),
+        primary: false
+      }
+    ],
+    provenance: {
+      origin: "pinned-reference",
+      reference_expectations: {
+        source: "operator-supplied",
+        path: "reference-expectations.json",
+        sha256: expectationDigest
+      }
+    }
+  };
+  const lensJson = JSON.stringify({
+    schema_version: "ultrafuzz.property-lens.v1",
+    properties: [
+      {
+        id: "iSpoke_supply",
+        description: "Supply completes for valid state.",
+        category: "dos-liveness",
+        priority: "high",
+        reference_expectations: [expectationId, citedElsewhereId]
+      }
+    ]
+  });
+
+  const runGate = (resolvedConfigToml?: string) => {
+    const layout = createRunLayout({
+      projectRoot: tempProject(),
+      runId: "run-properties-enforcement",
+      stateNodes: [referenceStateNode],
+      ...(resolvedConfigToml === undefined ? {} : { resolvedConfigToml })
+    });
+    const base = plannedNode(["properties/recon.json"]);
+    const node = {
+      ...base,
+      id: "property-specification-recon",
+      logical_id: "property-specification-recon",
+      depends_on: ["reference-properties-recon"],
+      outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+    };
+    writeArtifact(layout, node.id, "properties/recon.json", lensJson);
+    writeArtifact(layout, "reference-properties-recon", "references/expectations.json", expectationCatalog);
+    writeArtifactManifest({
+      layout,
+      nodeId: "reference-properties-recon",
+      outputs: referenceStateNode.outputs,
+      provenance: { origin: "pinned-reference" }
+    });
+    const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+    const lens = JSON.parse(
+      fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8")
+    );
+    return { result, referenceExpectations: lens.properties[0].reference_expectations };
+  };
+
+  const defaulted = runGate();
+  assert.equal(defaulted.result.ok, true, JSON.stringify(defaulted.result.diagnostics));
+  assert.ok(
+    defaulted.result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
+    JSON.stringify(defaulted.result.diagnostics)
+  );
+  assert.deepEqual(defaulted.referenceExpectations, [expectationId]);
+
+  const warned = runGate('[invariants]\nreference_expectation_enforcement = "warn"\n');
+  assert.equal(warned.result.ok, true, JSON.stringify(warned.result.diagnostics));
+  assert.deepEqual(warned.referenceExpectations, [expectationId]);
+
+  const failed = runGate('[invariants]\nreference_expectation_enforcement = "fail"\n');
+  assert.equal(failed.result.ok, false, JSON.stringify(failed.result.diagnostics));
+  assert.ok(
+    failed.result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+    JSON.stringify(failed.result.diagnostics)
+  );
+  // The lens keeps the bytes the model wrote: that artifact is the evidence of what was cited.
+  assert.deepEqual(failed.referenceExpectations, [expectationId, citedElsewhereId]);
 });
 
 test("property lens gate rejects schema-invalid expectation catalogs even when digest-bound", () => {

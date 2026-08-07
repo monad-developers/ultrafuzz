@@ -462,6 +462,35 @@ function taskPublishesWorkspacePatch(task: (typeof taskSpecs)[number]): boolean 
  * When the prefix is not a chain this returns 0: replay everything, and let `applyWorkspacePatch` raise
  * its base-tree mismatch exactly as it does today. Failing the way we already fail is the safe direction.
  */
+/**
+ * Render schema-validation issues so the failure names WHERE it happened.
+ *
+ * `validateWithZod` computes a path for every issue and both call sites used to map `issue.message` alone,
+ * discarding it. R51 died three times on `implemented-properties.json` and the durable error read
+ * `Too small: expected array to have >=1 items` eighty-eight times with nothing to distinguish them --
+ * while the issues themselves carried `properties.0.reference_expectations` all along (issue #328).
+ *
+ * Identical messages are collapsed with their paths listed, because eighty-eight copies of one sentence is
+ * not eighty-eight problems, and the paths are the only part that varies. Truncated, because a document
+ * with thousands of entries should not turn one failure into an unreadable durable record -- the same
+ * reasoning as the capture-attribution cap in #311.
+ */
+function formatSchemaValidationIssues(issues: readonly { path: string; message: string }[]): string {
+  const byMessage = new Map<string, string[]>();
+  for (const issue of issues) {
+    const paths = byMessage.get(issue.message) ?? [];
+    paths.push(issue.path);
+    byMessage.set(issue.message, paths);
+  }
+  return [...byMessage.entries()]
+    .map(([message, paths]) => {
+      const shown = paths.slice(0, 5).join(", ");
+      const rest = paths.length > 5 ? ` and ${paths.length - 5} more` : "";
+      return `${message} at ${shown}${rest}`;
+    })
+    .join("; ");
+}
+
 function firstDependencyRequiringReplay(
   currentTree: string,
   manifests: readonly { base_tree: string; result_tree: string }[]
@@ -841,10 +870,14 @@ function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspa
   }
   const files = new Map<string, { path: string; sha256: string; size: number }>();
   try {
-    for (const value of execFileSync("git", ["ls-files", "--cached", "--others", "--", "test", "tests"], {
-      cwd: workspaceRoot,
-      encoding: "utf8"
-    }).split(/\r?\n/u)) {
+    for (const value of invariantSuiteGitPaths(workspaceRoot, [
+      "ls-files",
+      "--cached",
+      "--others",
+      "--",
+      "test",
+      "tests"
+    ]).split(/\r?\n/u)) {
       if (value.length === 0 || (!value.startsWith("test/") && !value.startsWith("tests/"))) continue;
       const relativePath = assertSafeInvariantSuiteTestPath(value);
       const sourcePath = path.resolve(workspaceRoot, relativePath);
@@ -910,10 +943,16 @@ function invariantSuiteProtectedBaselinePath(task: (typeof taskSpecs)[number]): 
 }
 
 function invariantWorkspaceSourcePaths(workspaceRoot: string): string[] {
-  const values = execFileSync("git", ["ls-files", "--cached", "--others", "--", "src", "contracts", "test", "tests"], {
-    cwd: workspaceRoot,
-    encoding: "utf8"
-  }).split(/\r?\n/u);
+  const values = invariantSuiteGitPaths(workspaceRoot, [
+    "ls-files",
+    "--cached",
+    "--others",
+    "--",
+    "src",
+    "contracts",
+    "test",
+    "tests"
+  ]).split(/\r?\n/u);
   return values.filter(
     (value) =>
       value.startsWith("src/") ||
@@ -2467,12 +2506,19 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
   for (const relativePath of changedInvariantSourcePaths(realpathSync(task.workspacePath))) {
     paths.add(relativePath);
   }
+  // The budget covers the ASSEMBLED publication -- the inherited ancestor union
+  // plus this stage's own paths -- because every entry of it is written to each
+  // artifact root below. Budgeting `paths` alone let the union reach roughly
+  // twice the limit on disk before verifyArtifacts rejected the manifest.
   let totalBytes = 0;
   const publicationSnapshot = new Map<string, Buffer>();
   const tombstones = invariantSuiteTombstones.get(realpathSync(task.workspacePath)) ?? new Set<string>();
   const selectedDependencies = resolveInvariantSuiteDependencySnapshot(task);
   for (const [relativePath, entry] of selectedDependencies) {
-    if (!tombstones.has(relativePath)) publicationSnapshot.set(relativePath, Buffer.from(entry.bytes));
+    if (tombstones.has(relativePath)) continue;
+    publicationSnapshot.set(relativePath, Buffer.from(entry.bytes));
+    totalBytes += entry.bytes.length;
+    assertInvariantSuiteSourceBudget(publicationSnapshot.size, totalBytes);
   }
   for (const relativePath of paths) {
     const sourcePath = path.resolve(task.workspacePath, relativePath);
@@ -2488,10 +2534,12 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
     if (sourceBytes.length !== sourceStat.size) {
       throw new Error(`artifact-contract failure: invariant suite source changed ${relativePath}`);
     }
-    totalBytes += sourceBytes.length;
+    // A path this stage republishes REPLACES the inherited copy rather than
+    // adding to it, so the superseded bytes leave the running total.
+    totalBytes += sourceBytes.length - (publicationSnapshot.get(relativePath)?.length ?? 0);
     publicationSnapshot.set(relativePath, sourceBytes);
+    assertInvariantSuiteSourceBudget(publicationSnapshot.size, totalBytes);
   }
-  assertInvariantSuiteSourceBudget(paths.size, totalBytes);
   invariantSuitePublicationSnapshots.set(task.attemptId, publicationSnapshot);
   const manifestFiles = [...publicationSnapshot]
     .sort(([left], [right]) => left.localeCompare(right))
@@ -3016,8 +3064,16 @@ function orderedInvariantSuiteDependencies(task: (typeof taskSpecs)[number]): st
  * List the published suite sources of every dependency whose invariant-suite
  * manifest validates against its producer. A dependency with no manifest, or
  * one that does not identify its own producer, contributes nothing.
+ *
+ * `budget` is shared across every dependency on purpose. A fresh allowance per
+ * ancestor bounds one suite at a time, but the caller goes on to retain a buffer
+ * for every (ancestor, path) pair, so the retained bytes scaled with the number
+ * of ancestors instead of with the limit.
  */
-function invariantSuiteDependencySuitePaths(dependencies: readonly string[]): Map<string, string[]> {
+function invariantSuiteDependencySuitePaths(
+  dependencies: readonly string[],
+  budget: { files: number; totalBytes: number } = { files: 0, totalBytes: 0 }
+): Map<string, string[]> {
   const suitePathsByDependency = new Map<string, string[]>();
   for (const dependency of dependencies) {
     const producer = invariantSuiteProducerTask(dependency);
@@ -3054,7 +3110,7 @@ function invariantSuiteDependencySuitePaths(dependencies: readonly string[]): Ma
     ) {
       continue;
     }
-    suitePathsByDependency.set(dependency, listInvariantSuiteSources(suiteRoot));
+    suitePathsByDependency.set(dependency, listInvariantSuiteSources(suiteRoot, "", budget));
   }
   return suitePathsByDependency;
 }
@@ -3156,6 +3212,9 @@ function reconcileInvariantSuiteWorkspace(
 function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
   if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) return;
   const dependencies = orderedInvariantSuiteDependencies(task);
+  // ONE allowance for the whole ancestor union rather than one per ancestor: the
+  // selection below retains a buffer for every (ancestor, path) pair it walks.
+  const suiteBudget = { files: 0, totalBytes: 0 };
   const previousSnapshot = invariantSuiteDependencySnapshots.get(task.attemptId);
   if (previousSnapshot !== undefined) {
     for (const [relativePath, entry] of previousSnapshot) {
@@ -3181,7 +3240,11 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
         throw new Error(`artifact-contract failure: invariant suite handoff record is inconsistent ${relativePath}`);
       }
     }
-    assertInvariantSuiteDependencyExpectations(task, dependencies, invariantSuiteDependencySuitePaths(dependencies));
+    assertInvariantSuiteDependencyExpectations(
+      task,
+      dependencies,
+      invariantSuiteDependencySuitePaths(dependencies, suiteBudget)
+    );
     reconcileInvariantSuiteWorkspace(task, workspaceRoot, recorded.selected, recorded.tombstones);
     return;
   }
@@ -3192,7 +3255,7 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
   const directDependencies = new Set(task.metadata.dependencies.attemptIds);
   const selectedSources = new Map<string, { dependency: string; bytes: Buffer; direct: boolean }>();
   let selectedBytes = 0;
-  const suitePathsByDependency = invariantSuiteDependencySuitePaths(dependencies);
+  const suitePathsByDependency = invariantSuiteDependencySuitePaths(dependencies, suiteBudget);
   // Collect EVERY publisher of every path before deciding any of them (issue #315, and the confluence
   // hole review found in the first revision of this fix).
   //
@@ -3302,6 +3365,7 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
 const MAX_INVARIANT_SUITE_PATH_LENGTH = 4_096;
 const MAX_INVARIANT_SUITE_SEGMENT_LENGTH = 255;
 const MAX_INVARIANT_SUITE_FILES = 512;
+const MAX_INVARIANT_SUITE_SOURCE_DEPTH = 32;
 const MAX_INVARIANT_SUITE_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_INVARIANT_SUITE_TOTAL_BYTES = 64 * 1024 * 1024;
 const INVARIANT_SUITE_BASELINE_FILE = "invariant-suite-baseline.json";
@@ -3317,6 +3381,21 @@ const INVARIANT_SUITE_WORKSPACE_FILES_DIR = "files";
 const MAX_INVARIANT_SUITE_WORKSPACE_FILES = 4_096;
 const MAX_INVARIANT_SUITE_WORKSPACE_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_INVARIANT_SUITE_WORKSPACE_TOTAL_BYTES = 128 * 1024 * 1024;
+/**
+ * Ceiling on one invariant-discovery git capture, in bytes.
+ *
+ * `execFileSync` defaults to 1 MB. These enumerations list every tracked and untracked path under
+ * `src`, `contracts`, `test` and `tests`, so on a protocol the size of Aave v4 the PATH TEXT alone can
+ * pass that -- and Node then throws a bare `spawnSync git ENOBUFS` naming no subcommand, no size and no
+ * path. #310 hardened `runGit` against exactly that failure; these call sites do not go through it.
+ * Sized to the ceiling a handed-off patch has to meet, since a workspace listing that outgrows it is
+ * not one that can be handed off either.
+ */
+const MAX_INVARIANT_SUITE_ENUMERATION_BYTES = 16 * 1024 * 1024;
+/** Roots named when an enumeration overflows: enough to point at a directory, short enough to read. */
+const INVARIANT_SUITE_ENUMERATION_RANKED_ROOTS = 5;
+/** How much of git's own stderr to inline when stderr, not the path list, is what overflowed. */
+const INVARIANT_SUITE_ENUMERATION_STDERR_BYTES = 400;
 const INVARIANT_TEST_ROOT_NAMES = ["test", "tests"] as const;
 const invariantSuiteNodeIds = new Set([
   "stateful-invariant-setup",
@@ -3338,6 +3417,103 @@ const invariantSuitePublicationSnapshots = new Map<string, Map<string, Buffer>>(
 const invariantSuiteWorkspaceSnapshots = new Map<string, Map<string, Buffer>>();
 const workspacePatchBaselineTrees = new Map<string, string>();
 const workspacePatchPreparationTrees = new Map<string, string>();
+
+/**
+ * Enumerate workspace paths with git, under an explicit capture bound.
+ *
+ * Every invariant-discovery enumeration goes through here so that the bound is stated once and an
+ * overflow arrives as a sentence rather than as a `SystemError`.
+ */
+function invariantSuiteGitPaths(workspaceRoot: string, args: readonly string[]): string {
+  try {
+    // No `encoding`, deliberately. With one, Node decodes the capture BEFORE it throws, and that decode
+    // is lossy: a byte that is not valid UTF-8 comes back as U+FFFD, which re-encodes to three. The byte
+    // totals the diagnostic reports would then not be the bytes `maxBuffer` counted. Decode here, on the
+    // success path, which is what the call sites were already getting from `encoding: "utf8"`.
+    return execFileSync("git", [...args], {
+      cwd: workspaceRoot,
+      maxBuffer: MAX_INVARIANT_SUITE_ENUMERATION_BYTES
+    }).toString("utf8");
+  } catch (error) {
+    rethrowOversizedInvariantSuiteEnumeration(args, error);
+  }
+}
+
+/**
+ * Rethrow an enumeration that outgrew its capture buffer as something an operator can act on.
+ *
+ * The bare failure is `spawnSync git ENOBUFS`: no subcommand, no size, no path, and no hint that the
+ * workspace is at fault. This names all four, following #311, which does the same for the handoff diff.
+ * That helper is not reusable here -- it reads its attribution out of `diff --git` headers, and it is
+ * deliberately not part of the runtime package's public surface, which is all this template can import.
+ *
+ * Scope: this improves the string. The enumeration has already failed by the time it runs.
+ */
+function rethrowOversizedInvariantSuiteEnumeration(args: readonly string[], error: unknown): never {
+  if (!(error instanceof Error) || (error as { code?: unknown }).code !== "ENOBUFS") throw error;
+  // Every call site here passes the subcommand first and no global git options, so no scan is needed.
+  const subcommand = args[0] ?? "git";
+  const capturedStdout = (error as { stdout?: unknown }).stdout;
+  const capturedStderr = (error as { stderr?: unknown }).stderr;
+  const stdoutBytes = Buffer.isBuffer(capturedStdout) ? capturedStdout.length : 0;
+  const stderrBytes = Buffer.isBuffer(capturedStderr) ? capturedStderr.length : 0;
+  // ENOBUFS fires on EITHER stream. Blaming the workspace when git merely wrote a lot of stderr would be
+  // a confident lie that sends an operator to delete sources over a git message, so claim the path list
+  // only when the path list is the larger capture.
+  const overflowedStderr = stderrBytes > stdoutBytes;
+  const attribution = overflowedStderr ? "" : rankInvariantSuiteEnumerationRoots(capturedStdout);
+  const detail = overflowedStderr
+    ? `wrote more than the ${MAX_INVARIANT_SUITE_ENUMERATION_BYTES}-byte enumeration buffer to stderr: ${
+        Buffer.isBuffer(capturedStderr)
+          ? capturedStderr.subarray(0, INVARIANT_SUITE_ENUMERATION_STDERR_BYTES).toString("utf8")
+          : ""
+      }`
+    : `listed more than the ${MAX_INVARIANT_SUITE_ENUMERATION_BYTES}-byte enumeration buffer of workspace paths`;
+  // Drop the payload before this becomes a `cause`. Node holds the capture in both `stdout` and
+  // `output[1]`, and `error.error` is a self-reference, so an unstripped cause serializes to a multiple
+  // of a capture that is by construction at the buffer ceiling -- one way to lose the report of the
+  // failure along with the failure.
+  for (const field of ["stdout", "stderr", "output", "error"]) {
+    delete (error as unknown as Record<string, unknown>)[field];
+  }
+  throw new Error(
+    `artifact-contract failure: git ${subcommand} ${detail}${
+      attribution === ""
+        ? ""
+        : `. Largest contributors within the first ${stdoutBytes} bytes git wrote; git emits in path order, so anything past that cutoff is not visible here: ${attribution}`
+    }`,
+    { cause: error }
+  );
+}
+
+/** Total the captured path list per top-level root, largest first. */
+function rankInvariantSuiteEnumerationRoots(capturedStdout: unknown): string {
+  if (!Buffer.isBuffer(capturedStdout)) return "";
+  // A `latin1` view is a byte/code-unit bijection, so an offset IS a byte offset and the spans below are
+  // exact; a `utf8` decode inflates every undecodable byte threefold and can rank a smaller root first.
+  // The scan is index-based rather than `split("\n")` because this runs in a process that has just been
+  // refused an allocation, and 16 MB of short paths is a million lines. The table cannot grow without
+  // bound: every call site restricts the enumeration to a pathspec of at most four roots.
+  const listing = capturedStdout.toString("latin1");
+  const totals = new Map<string, { bytes: number; paths: number }>();
+  for (let start = 0; start < listing.length;) {
+    const end = listing.indexOf("\n", start);
+    // The last line was cut mid-path by the very overflow being reported, so it is not attributed: its
+    // root may be the prefix of a longer name. Every figure here is a floor for that reason and because
+    // the capture is a prefix of what git had to say.
+    if (end < 0) break;
+    const separator = listing.indexOf("/", start);
+    const root = listing.slice(start, separator >= 0 && separator < end ? separator : end);
+    const previous = totals.get(root) ?? { bytes: 0, paths: 0 };
+    totals.set(root, { bytes: previous.bytes + (end - start) + 1, paths: previous.paths + 1 });
+    start = end + 1;
+  }
+  return [...totals.entries()]
+    .sort((left, right) => right[1].bytes - left[1].bytes)
+    .slice(0, INVARIANT_SUITE_ENUMERATION_RANKED_ROOTS)
+    .map(([root, total]) => `${root} (>=${total.bytes} bytes in ${total.paths} path${total.paths === 1 ? "" : "s"})`)
+    .join(", ");
+}
 
 function invariantTestRoots(workspaceRoot: string): readonly string[] {
   const discovered = INVARIANT_TEST_ROOT_NAMES.filter((root) => {
@@ -3509,7 +3685,7 @@ function changedTestTreePaths(workspaceRoot: string, baselinePath?: string, prot
       ["diff", "--name-only", "HEAD", "--", "test", "tests"],
       ["ls-files", "--others", "--", "test", "tests"]
     ]) {
-      for (const value of execFileSync("git", args, { cwd: workspaceRoot, encoding: "utf8" }).split(/\r?\n/u)) {
+      for (const value of invariantSuiteGitPaths(workspaceRoot, args).split(/\r?\n/u)) {
         if (value.startsWith("test/") || value.startsWith("tests/")) {
           const candidate = path.resolve(workspaceRoot, value);
           if (!existsSync(candidate)) {
@@ -3549,7 +3725,7 @@ function changedInvariantSourcePaths(workspaceRoot: string): string[] {
       ["diff", "--name-only", "HEAD", "--", "src", "contracts"],
       ["ls-files", "--others", "--", "src", "contracts"]
     ]) {
-      for (const value of execFileSync("git", args, { cwd: workspaceRoot, encoding: "utf8" }).split(/\r?\n/u)) {
+      for (const value of invariantSuiteGitPaths(workspaceRoot, args).split(/\r?\n/u)) {
         if (!value.startsWith("src/") && !value.startsWith("contracts/")) continue;
         const relativePath = assertSafeInvariantSuitePath(value);
         const candidate = path.resolve(workspaceRoot, relativePath);
@@ -3575,10 +3751,14 @@ function changedInvariantSourcePaths(workspaceRoot: string): string[] {
 
 function gitTestTreePaths(workspaceRoot: string): string[] {
   const paths = new Set<string>();
-  for (const value of execFileSync("git", ["ls-files", "--cached", "--others", "--", "test", "tests"], {
-    cwd: workspaceRoot,
-    encoding: "utf8"
-  }).split(/\r?\n/u)) {
+  for (const value of invariantSuiteGitPaths(workspaceRoot, [
+    "ls-files",
+    "--cached",
+    "--others",
+    "--",
+    "test",
+    "tests"
+  ]).split(/\r?\n/u)) {
     if (value.startsWith("test/") || value.startsWith("tests/")) {
       const source = resolveRegularArtifactFile(
         workspaceRoot,
@@ -3674,6 +3854,12 @@ function listInvariantSuiteSources(
   relative = "",
   budget: { files: number; totalBytes: number } = { files: 0, totalBytes: 0 }
 ): string[] {
+  // Bound the walk BEFORE stat'ing the entry. A suite whose tree is nested past
+  // the limit is rejected on the way down instead of after the recursion has
+  // already paid for it.
+  if (relative.split(path.sep).length > MAX_INVARIANT_SUITE_SOURCE_DEPTH) {
+    throw new Error(`artifact handoff invariant-suite tree is too deep: ${relative}`);
+  }
   const current = relative.length === 0 ? suiteRoot : path.join(suiteRoot, relative);
   const stat = lstatSync(current);
   if (stat.isSymbolicLink()) {
@@ -4059,9 +4245,7 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
     const validation = validateArtifactContract(output.contract, contents, output.path);
     if (!validation.ok) {
       throw new Error(
-        `artifact-contract failure for ${output.path} (${output.contract}): ${validation.issues
-          .map((issue) => issue.message)
-          .join("; ")}`
+        `artifact-contract failure for ${output.path} (${output.contract}): ${formatSchemaValidationIssues(validation.issues)}`
       );
     }
     rememberVerifiedPublication(publications, output.path, bytes);
@@ -4279,9 +4463,7 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
   const proofValidation = validateInvariantSourceProofSchema(proof, "invariant-source-proof");
   if (!proofValidation.ok) {
     throw new Error(
-      `artifact-contract failure: invariant source proof is invalid: ${proofValidation.issues
-        .map((issue) => issue.message)
-        .join("; ")}`
+      `artifact-contract failure: invariant source proof is invalid: ${formatSchemaValidationIssues(proofValidation.issues)}`
     );
   }
   const runRoot = realpathSync(path.resolve(process.cwd(), task.metadata.artifacts.dir, "..", ".."));

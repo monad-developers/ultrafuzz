@@ -6,7 +6,9 @@
   "required": ["schema_version", "properties"],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "ultrafuzz.property-lens.v1" },
+    "schema_version": {
+      "const": "ultrafuzz.property-lens.v1"
+    },
     "properties": {
       "type": "array",
       "minItems": 1,
@@ -15,15 +17,28 @@
         "required": ["id", "description", "category", "priority"],
         "additionalProperties": false,
         "properties": {
-          "id": { "type": "string", "minLength": 1 },
-          "description": { "type": "string", "minLength": 1 },
-          "category": { "type": "string", "minLength": 1 },
-          "priority": { "enum": ["high", "medium", "low"] },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "category": {
+            "type": "string",
+            "minLength": 1
+          },
+          "priority": {
+            "enum": ["high", "medium", "low"]
+          },
           "reference_expectations": {
             "type": "array",
-            "minItems": 1,
             "uniqueItems": true,
-            "items": { "type": "string", "minLength": 1 }
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         }
       }
