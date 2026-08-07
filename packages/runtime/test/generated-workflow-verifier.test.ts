@@ -154,6 +154,46 @@ function loadPreservePinnedSourceProof(): (task: {
 // copy that failed Aave run R45 (issue #289) with `invariant scan probe tests is unavailable: scan
 // probe is not a regular file`. Extracting it here means the directory allowance is pinned where it
 // actually runs, not only in the runtime gate's twin.
+type InvariantSourcePinCall = { workspacePath: string; relativePath: string; bytes: Uint8Array; ref?: string };
+
+function loadReadInvariantSourceSnapshot(
+  usesPinnedSource: boolean,
+  checkInvariantSourcePinned: (options: InvariantSourcePinCall) => { ok: boolean }
+): (workspaceRoot: string, relativePath: string, label: string) => { bytes: Buffer; content: string } {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function readInvariantSourceSnapshot");
+  const helperEnd = source.indexOf("\n\nfunction verifyInvariantLedgerSourceEvidence", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+
+  const helper = source
+    .slice(helperStart, helperEnd)
+    .replace(
+      'workspaceRoot: string,\n  relativePath: string,\n  label: "scan probe" | "invariant source"\n): { bytes: Buffer; content: string } {',
+      "workspaceRoot, relativePath, label) {"
+    )
+    .replace("let sourcePath: string;", "let sourcePath;")
+    .replace("let content: string;", "let content;");
+  return new Function(
+    "path",
+    "readFileSync",
+    "isStrictlyInsideDirectory",
+    "resolveRegularArtifactFile",
+    "usesPinnedSource",
+    "checkInvariantSourcePinned",
+    "pinnedSourceRef",
+    `${helper}; return readInvariantSourceSnapshot;`
+  )(
+    path,
+    fs.readFileSync,
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    (_root: string, candidate: string) => candidate,
+    usesPinnedSource,
+    checkInvariantSourcePinned,
+    "refs/heads/ultrafuzz-pinned"
+  ) as (workspaceRoot: string, relativePath: string, label: string) => { bytes: Buffer; content: string };
+}
+
 function loadVerifyInvariantLedgerSourceEvidence(snapshotPaths: string[]): (
   task: {
     attemptId: string;
@@ -473,6 +513,42 @@ test("generated Smithers verifier explains byte-preserving invariant evidence", 
   assert.ok(workflowStart > helperStart, source);
   assert.match(source.slice(helperStart, workflowStart), /\.join\("\\n"\)/u);
   assert.match(source, /invariantSymbolDeclaration[\s\S]*?\.split\(\/\\r\?\\n\/u\)/u);
+});
+
+// Issue #301: the pinned/tracked/unmodified rule used to be inlined here and absent from the runtime
+// gate, so `ultrafuzz validate` and the run enforced different things. The template must now delegate
+// to the shared validator in @ultrafuzz/artifacts, which is the only place the rule lives.
+test("generated Smithers invariant snapshot delegates the pin check to the shared validator", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-template-pin-")));
+  fs.writeFileSync(path.join(root, "Counter.sol"), "contract Counter {}\n");
+  const calls: InvariantSourcePinCall[] = [];
+  try {
+    // The fixture is not a Git repository at all, so an inlined `git ls-files` would fail closed here.
+    const snapshot = loadReadInvariantSourceSnapshot(true, (options) => {
+      calls.push(options);
+      return { ok: true };
+    });
+    assert.equal(snapshot(root, "Counter.sol", "scan probe").content, "contract Counter {}\n");
+    assert.deepEqual(
+      calls.map((call) => [call.workspacePath, call.relativePath, call.ref]),
+      [[root, "Counter.sol", "refs/heads/ultrafuzz-pinned"]]
+    );
+    assert.equal(Buffer.from(calls[0]!.bytes).toString("utf8"), "contract Counter {}\n");
+
+    const rejecting = loadReadInvariantSourceSnapshot(true, () => ({ ok: false }));
+    assert.throws(
+      () => rejecting(root, "Counter.sol", "scan probe"),
+      /invariant scan probe Counter\.sol is not pinned and unchanged/u
+    );
+
+    // Without the pinned ref neither the gate nor the run enforces the pin, so the validator is not consulted.
+    const unpinned = loadReadInvariantSourceSnapshot(false, () => {
+      throw new Error("pin check must not run without the pinned ref");
+    });
+    assert.equal(unpinned(root, "Counter.sol", "scan probe").content, "contract Counter {}\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("generated Smithers worktrees fail closed on any source other than the pinned benchmark ref", () => {
