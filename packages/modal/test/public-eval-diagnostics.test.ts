@@ -1264,6 +1264,10 @@ function writeCompleteModelAccountingFixture(
   configuredModel: string,
   overrides: {
     providerReportedModel?: string;
+    /** Model an eval that produced NO model invocations at all. */
+    emptyModelWork?: boolean;
+    /** Zero invocations but a non-empty model list: inconsistent, NOT the empty shape. */
+    inconsistentIdentity?: boolean;
     rates?: {
       inputUsdPerMillion: number;
       cachedInputUsdPerMillion: number;
@@ -1376,16 +1380,19 @@ function writeCompleteModelAccountingFixture(
           model_identity: {
             schema_version: "ultrafuzz.runtime.model-identity.v1",
             status: "complete",
-            invocation_count: 1,
-            configured_models: [configuredModel],
-            provider_reported_models: [providerReportedModel],
-            invocations: [
-              {
-                invocation_id: "workflow-one/task-one/0",
-                configured_model: configuredModel,
-                provider_reported_model: providerReportedModel
-              }
-            ]
+            invocation_count: overrides.emptyModelWork === true || overrides.inconsistentIdentity === true ? 0 : 1,
+            configured_models: overrides.emptyModelWork === true ? [] : [configuredModel],
+            provider_reported_models: overrides.emptyModelWork === true ? [] : [providerReportedModel],
+            invocations:
+              overrides.emptyModelWork === true || overrides.inconsistentIdentity === true
+                ? []
+                : [
+                    {
+                      invocation_id: "workflow-one/task-one/0",
+                      configured_model: configuredModel,
+                      provider_reported_model: providerReportedModel
+                    }
+                  ]
           },
           current: summary,
           cumulative: summary,
@@ -1596,6 +1603,78 @@ describe("public post-eval diagnostics pricing fallback", () => {
     expect(diagnostics.rows[0]).toMatchObject({
       pricing: { rates_usd_per_million: { output: 2, reasoning: 3 } }
     });
+  });
+
+  it("still fails closed on identity evidence that is merely inconsistent, not empty", () => {
+    const config: PublicModalBenchmarkConfig = {
+      ...CONFIG,
+      models: [DEEPSEEK_FLASH_MODEL],
+      public_benchmark: {
+        ...CONFIG.public_benchmark,
+        runner_model_profile: DEEPSEEK_FLASH_MODEL.slug
+      }
+    };
+    const fixture = evalFixture(DEEPSEEK_FLASH_MODEL, config);
+    // Zero invocations but a NON-empty configured-model list. This is not the empty-run
+    // shape, it is inconsistent evidence, and it must keep failing closed. Without this
+    // the empty-run tolerance can be widened to swallow ANY malformed metadata and the
+    // suite stays green -- which would surrender the identity guarantee this branch adds.
+    writeCompleteModelAccountingFixture(fixture.runRoot, DEEPSEEK_FLASH_MODEL.model, {
+      inconsistentIdentity: true
+    });
+    refreshTerminalEvidenceBinding(fixture);
+
+    expect(() =>
+      createPublicEvalDiagnostics({
+        config,
+        model: DEEPSEEK_FLASH_MODEL,
+        lineage: LINEAGE,
+        evalRunId: fixture.evalRunId,
+        matrix: fixture.matrix,
+        runSummary: fixture.runSummary,
+        createdAt: "2026-08-03T00:10:00.000Z"
+      })
+    ).toThrow(/does not contain complete model and pricing evidence/u);
+  });
+
+  it("builds diagnostics for a run that produced no model invocations instead of failing closed", () => {
+    const config: PublicModalBenchmarkConfig = {
+      ...CONFIG,
+      models: [DEEPSEEK_FLASH_MODEL],
+      public_benchmark: {
+        ...CONFIG.public_benchmark,
+        runner_model_profile: DEEPSEEK_FLASH_MODEL.slug
+      }
+    };
+    const fixture = evalFixture(DEEPSEEK_FLASH_MODEL, config);
+    // The model work produced nothing: zero invocations, no configured models. Both
+    // identity and pricing guards are fail-closed, so applying them here threw
+    // PublicEvalDiagnosticsBuildError -> diagnostic_code
+    // "public-eval-diagnostics-invalid" -> permanent-operational-failure, a category the
+    // non-default-branch smoke soft-fail does not cover. The whole benchmark hard-failed
+    // where it should have degraded. origin/main has neither guard and builds diagnostics
+    // for such a run.
+    writeCompleteModelAccountingFixture(fixture.runRoot, DEEPSEEK_FLASH_MODEL.model, {
+      emptyModelWork: true
+    });
+    refreshTerminalEvidenceBinding(fixture);
+
+    const diagnostics = createPublicEvalDiagnostics({
+      config,
+      model: DEEPSEEK_FLASH_MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: fixture.matrix,
+      runSummary: fixture.runSummary,
+      createdAt: "2026-08-03T00:10:00.000Z"
+    });
+
+    // It builds, and the row carries no pricing evidence, so it cannot be scoring-ready
+    // and cannot publish. That is the correct degraded outcome, not a thrown build error.
+    expect(diagnostics.schema_version).toBe("ultrafuzz.modal.public-eval-diagnostics.v4");
+    const row = diagnostics.rows[0] as unknown as Record<string, unknown>;
+    expect(row.pricing).toBeUndefined();
+    expect(row.model_identity).toBeUndefined();
   });
 
   it("prices reasoning from the output rate when the catalog omits a reasoning rate", () => {

@@ -232,6 +232,22 @@ const accountingSummaryInputSchema = z.looseObject({
   unpriced_event_count: z.literal(0),
   models: z.array(z.string().min(1).max(256)).min(1).max(64)
 });
+/**
+ * The exact shape of a run that performed no model work at all: a zero invocation count
+ * with empty identity arrays. Deliberately narrow, so it cannot absorb a run whose
+ * identity evidence is merely incomplete, inconsistent, or substituted.
+ */
+const emptyModelWorkMetadataSchema = z.looseObject({
+  accounting: z.looseObject({
+    model_identity: z.looseObject({
+      invocation_count: z.literal(0),
+      configured_models: z.array(z.unknown()).max(0),
+      provider_reported_models: z.array(z.unknown()).max(0),
+      invocations: z.array(z.unknown()).max(0)
+    })
+  })
+});
+
 const runMetadataInputSchema = z.looseObject({
   accounting: z.looseObject({
     schema_version: z.string().min(1).max(128),
@@ -605,6 +621,22 @@ function publicEvalRecordModelEvidence(
   try {
     metadata = runMetadataInputSchema.parse(metadataValue);
   } catch (error) {
+    // A run that produced NO model invocations has no identity or pricing evidence, and
+    // the schema above requires a positive invocation count with non-empty identity
+    // arrays. Rejecting that shape turns a normal degraded outcome -- the model work
+    // produced nothing -- into a thrown PublicEvalDiagnosticsBuildError, which the worker
+    // records as `public-eval-diagnostics-invalid` and launch-state maps to
+    // `permanent-operational-failure`. That category is NOT covered by the
+    // non-default-branch smoke soft-fail, so the whole benchmark hard-fails where it
+    // should have degraded. origin/main has no such schema and builds diagnostics for
+    // such a run.
+    //
+    // Returning undefined is the path the caller already expects (`modelEvidence?.pricing`):
+    // the row carries no pricing evidence and so is not scoring-ready, which is exactly
+    // right for a run that produced nothing, and nothing can publish that way, because
+    // publication independently requires scoring-ready rows and the exact pinned rates.
+    // Every OTHER malformed shape still fails closed here.
+    if (emptyModelWorkMetadataSchema.safeParse(metadataValue).success) return undefined;
     throw new Error("public eval run metadata does not contain complete model and pricing evidence", {
       cause: error
     });
