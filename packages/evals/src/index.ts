@@ -1,6 +1,7 @@
 export * from "./analysis-bundle.js";
 export * from "./benchmark-manifest.js";
 export * from "./efficiency.js";
+export * from "./expansion.js";
 export * from "./evaluator/adjudicator-prompt.js";
 export * from "./evaluator/judge-panel.js";
 export * from "./history.js";
