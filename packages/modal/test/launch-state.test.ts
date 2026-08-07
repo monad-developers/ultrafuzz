@@ -625,6 +625,43 @@ describe("Modal runner status", () => {
     ).toMatchObject({ stage: "succeeded", terminal: true, category: "succeeded" });
   });
 
+  it("classifies a sandbox exit by the exit and a named fault by its name", () => {
+    // A sandbox that really exited names no fault of its own, so the code names
+    // the exit and the surviving `model_work_started` asks for a resume.
+    const sandboxExit = workerResult({
+      generation: 3,
+      model_work_started: true,
+      counts: { succeeded: 0, failed: 0, remaining: 0 },
+      exit_category: "sandbox-exited",
+      runtime_ms: 315_786,
+      usage: null,
+      diagnostic_code: "sandbox-exited"
+    });
+    // Run 31171579070, pair ultrafuzz-bench-benchmark-smoke-gpt-5-6-luna-high,
+    // as the fixed worker records it: the eval command returned, the diagnostics
+    // document could not be built, and the journal corroborated no model work.
+    // The worker was alive to say all of that, so nothing claims a sandbox exit.
+    const unbuildableDiagnostics = workerResult({
+      generation: 3,
+      model_work_started: false,
+      counts: { succeeded: 0, failed: 0, remaining: 0 },
+      exit_category: "unreachable",
+      runtime_ms: 315_786,
+      usage: null,
+      diagnostic_code: "public-eval-diagnostics-invalid"
+    });
+
+    expect(parseModalWorkerStatus(sandboxExit)).toMatchObject({
+      category: "resume-required",
+      error_code: "sandbox-exited"
+    });
+    expect(parseModalWorkerStatus(unbuildableDiagnostics)).toMatchObject({
+      category: "permanent-operational-failure",
+      model_work_started: false,
+      error_code: "public-eval-diagnostics-invalid"
+    });
+  });
+
   it("uses the newest exact-attempt contract after a split terminal write", () => {
     const partial = workerResult({
       result_type: "partial",

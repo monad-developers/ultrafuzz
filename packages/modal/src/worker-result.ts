@@ -300,11 +300,8 @@ export async function runWithTerminalPersistence(input: {
     }
     let terminalWriteFailed = false;
     try {
-      await input.writer.writeTerminal(
-        category,
-        snapshot,
-        workerFailure === undefined ? undefined : input.diagnosticCodeForError?.(workerFailure)
-      );
+      const diagnosticCode = workerFailure === undefined ? undefined : input.diagnosticCodeForError?.(workerFailure);
+      await input.writer.writeTerminal(namedFaultDisposition(category, diagnosticCode), snapshot, diagnosticCode);
     } catch (error) {
       terminalWriteFailed = true;
       finalizationFailure ??= error;
@@ -334,6 +331,29 @@ export async function runWithTerminalPersistence(input: {
     throw new OperationalDispositionError("unreachable", { cause: finalizationFailure });
   }
   return category as TerminalCompletionCategory;
+}
+
+/**
+ * The exit category to record for a failure the worker named itself.
+ *
+ * `sandbox-exited` is what `operationalDispositionForError` falls back to for an
+ * error that declared no disposition, so it is the one category that is never a
+ * determination. Pairing it with a diagnostic code the worker chose claims a
+ * sandbox death that demonstrably did not happen -- the worker was alive enough
+ * to name the fault and to write this very contract. Run 31171579070 reported
+ * `sandbox-exited` with `public-eval-diagnostics-invalid` seconds after its eval
+ * command returned normally (#320).
+ *
+ * A named fault therefore records `unreachable`: the worker's own operation
+ * failed. `sandbox-exited` keeps its literal meaning -- the worker died without
+ * naming a cause -- so a contract that carries it always carries the matching
+ * `sandbox-exited` diagnostic code.
+ */
+function namedFaultDisposition(
+  category: Exclude<OperationalDispositionCategory, "live">,
+  diagnosticCode: WorkerDiagnosticCode | undefined
+): Exclude<OperationalDispositionCategory, "live"> {
+  return diagnosticCode !== undefined && category === "sandbox-exited" ? "unreachable" : category;
 }
 
 export async function readWorkerCheckpoint(projectRoot: string, nowMs = Date.now()): Promise<WorkerCheckpointSnapshot> {

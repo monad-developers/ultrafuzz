@@ -13,7 +13,7 @@ import {
 
 import type { PublicModalBenchmarkConfig } from "../src/config.js";
 import type { ModalModelSpec } from "../src/defaults.js";
-import type { ModalWorkerLineage } from "../src/launch-state.js";
+import { parseModalWorkerStatus, type ModalWorkerLineage } from "../src/launch-state.js";
 import { PUBLIC_EVAL_DIAGNOSTICS_FILE, type PublicEvalDiagnostics } from "../src/public-eval-diagnostics.js";
 import {
   assertPublicWorkerInput,
@@ -26,7 +26,7 @@ import {
   PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS,
   PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS,
   PUBLIC_FULL_BENCHMARK_MAX_PARALLEL_EVAL_ROWS,
-  type PublicEvalDiagnosticsBuildError,
+  PublicEvalDiagnosticsBuildError,
   publicBenchmarkMaxParallelEvalRows,
   publicBenchmarkWorkRoot,
   publicBundleSources,
@@ -34,6 +34,7 @@ import {
   publicEvalRunId,
   preparePublicEvalSuite,
   publicEvalFailureDiagnosticLogPayload,
+  publicEvalModelWorkEvidence,
   publicEvalRunErrorCanBePublished,
   runAndCheckpointPublicEvalDiagnostics,
   runPublicBenchmarkWorker,
@@ -43,7 +44,7 @@ import {
 } from "../src/public-worker.js";
 import type { PublicBenchmarkBundle } from "../src/public-bundle.js";
 import { createExactCandidateSourceArchive } from "../src/runner.js";
-import { WorkerResultWriter } from "../src/worker-result.js";
+import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "../src/worker-result.js";
 
 it("keeps high-fanout public benchmark work off the persistent Modal volume", () => {
   const dataRoot = "/data/public-run/model";
@@ -296,6 +297,9 @@ it("checkpoints diagnostics even when eval run exits nonzero", async () => {
       order.push("run");
       throw failure;
     },
+    // A command that never returned may have launched work it never journaled,
+    // so its raised `model_work_started` is not up for revision.
+    corroborateModelWork: () => order.push("corroborate"),
     buildDiagnostics: async () => {
       await new Promise((resolve) => setImmediate(resolve));
       order.push("build");
@@ -313,6 +317,147 @@ it("checkpoints diagnostics even when eval run exits nonzero", async () => {
   expect(result).toEqual({ diagnostics, runError: failure });
   expect(order).toEqual(["run", "build", "persist", "flush"]);
 });
+
+it("settles model work against the eval journal before the diagnostics can fail", async () => {
+  const order: string[] = [];
+  const buildFailure = new Error("run summary is not a diagnostics document");
+
+  await expect(
+    runAndCheckpointPublicEvalDiagnostics({
+      runEval: async () => {
+        order.push("run");
+      },
+      corroborateModelWork: () => order.push("corroborate"),
+      buildDiagnostics: () => {
+        order.push("build");
+        throw buildFailure;
+      },
+      persistDiagnostics: async () => {
+        order.push("persist");
+      },
+      flush: async () => {
+        order.push("flush");
+      }
+    })
+  ).rejects.toMatchObject({ name: "PublicEvalDiagnosticsBuildError", cause: buildFailure });
+
+  expect(order).toEqual(["run", "corroborate", "build"]);
+});
+
+it("reads model work evidence from the eval journal and never invents it", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-evidence-"));
+  const evalRoot = path.join(root, "eval-run");
+  fs.mkdirSync(evalRoot, { recursive: true });
+
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("unknown");
+  expect(publicEvalModelWorkEvidence(path.join(root, "absent"))).toBe("unknown");
+
+  fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(runSummary(0))}\n`);
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("none");
+
+  fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(runSummary(1))}\n`);
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("launched");
+
+  // A row whose launcher failed after submitting a workflow may already have
+  // spent tokens, so it counts as work having started.
+  fs.writeFileSync(
+    path.join(evalRoot, "run-summary.json"),
+    `${JSON.stringify({ records: [{ row_id: "row-1", status: "failed", workflow_ids: ["workflow-1"] }] })}\n`
+  );
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("launched");
+
+  // The journal outlives a summary the command never got to write.
+  fs.rmSync(path.join(evalRoot, "run-summary.json"));
+  fs.writeFileSync(
+    path.join(evalRoot, "runs.jsonl"),
+    `${JSON.stringify({ row_id: "row-1", status: "failed", workflow_ids: [] })}\n`
+  );
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("none");
+
+  fs.writeFileSync(path.join(evalRoot, "run-summary.json"), "{ not json\n");
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("none");
+});
+
+it("reports an unbuildable diagnostics document without claiming a sandbox exit or model work", async () => {
+  // Run 31171579070, pair ultrafuzz-bench-benchmark-smoke-gpt-5-6-luna-high. The
+  // worker log ends `operation-finished` at the same millisecond the terminal
+  // contract was written: the eval command returned, `createPublicEvalDiagnostics`
+  // threw, and the contract went out as `sandbox-exited` with
+  // `model_work_started: true`, `usage: null` and all-zero counts -- a sandbox
+  // that never exited, and work that the eval journal says never ran (#320).
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-zero-work-"));
+  const statusPath = path.join(root, "status.json");
+  const resultPath = path.join(root, "result.json");
+  const evalRoot = path.join(root, "eval-run");
+  fs.mkdirSync(evalRoot, { recursive: true });
+  fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(runSummary(0))}\n`);
+  let modelWorkStarted = false;
+  const writer = await WorkerResultWriter.create({
+    statusPath,
+    resultPath,
+    executionContext: () => ({ launch_generation: 1, attempt: 1, model_work_started: modelWorkStarted })
+  });
+  const buildFailure = new Error("public eval run journal contains a row outside the matrix");
+
+  await expect(
+    runWithTerminalPersistence({
+      writer,
+      snapshot: async () => emptyWorkerCheckpoint(),
+      flush: async () => undefined,
+      diagnosticCodeForError: (error) =>
+        error instanceof PublicEvalDiagnosticsBuildError ? "public-eval-diagnostics-invalid" : undefined,
+      run: async () => {
+        await checkpointPublicModelWorkStart(
+          writer,
+          () => {
+            modelWorkStarted = true;
+          },
+          async () => undefined
+        );
+        await runAndCheckpointPublicEvalDiagnostics({
+          runEval: async () => undefined,
+          corroborateModelWork: () => {
+            if (publicEvalModelWorkEvidence(evalRoot) === "none") modelWorkStarted = false;
+          },
+          buildDiagnostics: () => {
+            throw buildFailure;
+          },
+          persistDiagnostics: async () => undefined,
+          flush: async () => undefined
+        });
+        return "finished";
+      }
+    })
+  ).rejects.toMatchObject({ name: "PublicEvalDiagnosticsBuildError" });
+
+  const contract = JSON.parse(fs.readFileSync(resultPath, "utf8")) as unknown;
+  expect(contract).toMatchObject({
+    result_type: "terminal",
+    exit_category: "unreachable",
+    diagnostic_code: "public-eval-diagnostics-invalid",
+    model_work_started: false,
+    counts: { succeeded: 0, failed: 0, remaining: 0 },
+    usage: null
+  });
+  expect(parseModalWorkerStatus(contract)).toMatchObject({
+    category: "permanent-operational-failure",
+    model_work_started: false,
+    error_code: "public-eval-diagnostics-invalid"
+  });
+});
+
+function runSummary(launched: number): { launched: number; records: Array<Record<string, unknown>> } {
+  return {
+    launched,
+    records: ["row-1", "row-2", "row-3"].map((rowId, index) => ({
+      row_id: rowId,
+      target_id: rowId,
+      status: index < launched ? "launched" : "failed",
+      workflow_ids: index < launched ? [`workflow-${rowId}`] : [],
+      diagnostics: index < launched ? [] : [{ code: "WORKFLOW_SUBMISSION_FAILED" }]
+    }))
+  };
+}
 
 it("continues after the eval command reports one publishable failed datapoint", () => {
   const failedRow = {

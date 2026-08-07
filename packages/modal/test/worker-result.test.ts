@@ -48,11 +48,56 @@ describe("sanitized worker result contracts", () => {
     expect(status).toBe(result);
     expect(JSON.parse(result)).toMatchObject({
       result_type: "terminal",
-      exit_category: "sandbox-exited",
+      exit_category: "unreachable",
       diagnostic_code: "public-eval-diagnostics-invalid"
     });
     expect(result).not.toContain(privateCause.message);
     expect(result).not.toContain(failure.message);
+  });
+
+  it("never reports a sandbox exit for a fault the worker named itself", async () => {
+    // `sandbox-exited` is the disposition an unclassified error falls back to,
+    // so it was what run 31171579070 recorded for a worker that was alive, had
+    // just watched its eval command return, and named the fault in the same
+    // contract. Naming a fault is proof the sandbox did not take the worker
+    // with it, so the exit category may not claim it did (#320).
+    for (const [failure, expected] of [
+      [new Error("diagnostics could not be built"), "unreachable"],
+      [new OperationalDispositionError("capacity-unavailable"), "capacity-unavailable"],
+      [new OperationalDispositionError("sandbox-exited"), "unreachable"]
+    ] as const) {
+      const harness = await terminalHarness();
+      await expect(
+        runWithTerminalPersistence({
+          ...harness.input,
+          diagnosticCodeForError: () => "public-eval-diagnostics-invalid",
+          run: async () => {
+            throw failure;
+          }
+        })
+      ).rejects.toBe(failure);
+      expect(readContract(harness.resultPath)).toMatchObject({
+        exit_category: expected,
+        diagnostic_code: "public-eval-diagnostics-invalid"
+      });
+    }
+
+    // A worker that named nothing is the only one that reports a sandbox exit,
+    // and it reports the code that names that exit.
+    const unnamed = await terminalHarness();
+    const death = new Error("the sandbox went away");
+    await expect(
+      runWithTerminalPersistence({
+        ...unnamed.input,
+        run: async () => {
+          throw death;
+        }
+      })
+    ).rejects.toBe(death);
+    expect(readContract(unnamed.resultPath)).toMatchObject({
+      exit_category: "sandbox-exited",
+      diagnostic_code: "sandbox-exited"
+    });
   });
 
   it("persists the sanitized non-resumable terminal diagnostic without private failure text", async () => {
@@ -72,7 +117,7 @@ describe("sanitized worker result contracts", () => {
     const result = fs.readFileSync(harness.resultPath, "utf8");
     expect(JSON.parse(result)).toMatchObject({
       result_type: "terminal",
-      exit_category: "sandbox-exited",
+      exit_category: "unreachable",
       diagnostic_code: "terminal-run-non-resumable"
     });
     expect(result).not.toContain(failure.message);

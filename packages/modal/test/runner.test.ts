@@ -59,6 +59,7 @@ import {
   readModalCollectResultFilesWithStatusRetry,
   overseeModalBenchmarks,
   readOptionalModalSandboxText,
+  publicEvalDiagnosticsDroppedFromEvidence,
   runningRecoverySandbox,
   replaceSanitizedModalCollectedFiles,
   selectModalCollectedEvidence,
@@ -844,6 +845,46 @@ describe("Modal result collection", () => {
     });
     expect(selected.files).toBe(files);
     expect(selected.forbiddenSecretValues).toEqual(["opaque-secret"]);
+  });
+
+  it("fails collection only for a persisted diagnostics document that selection dropped", async () => {
+    const config = publicCollectionLineage().config;
+    const persisted = {
+      "status.json": "status",
+      "public-eval-diagnostics.json": "diagnostics"
+    };
+    // Run 31171579070, pair ultrafuzz-bench-benchmark-smoke-gpt-5-6-luna-high:
+    // the worker reported that it could not build the document, so it never
+    // persisted one. CI collects that pair on the diagnostic-only path, and
+    // demanding a document nothing ever wrote aborted that collection (#320).
+    const workerNamedTheFault = {
+      "status.json": "status",
+      "result.json": "result",
+      "worker.log": "log"
+    };
+
+    const dropped = await selectModalCollectedEvidence(persisted, undefined, undefined, {});
+    expect(dropped.files["public-eval-diagnostics.json"]).toBeUndefined();
+    expect(publicEvalDiagnosticsDroppedFromEvidence({ volumeFiles: persisted, selectedFiles: dropped.files })).toBe(
+      true
+    );
+
+    const retained = await selectModalCollectedEvidence(persisted, config, config.models[0], {
+      OPENAI_API_KEY: "opaque-secret"
+    });
+    expect(publicEvalDiagnosticsDroppedFromEvidence({ volumeFiles: persisted, selectedFiles: retained.files })).toBe(
+      false
+    );
+
+    const collectable = await selectModalCollectedEvidence(workerNamedTheFault, config, config.models[0], {
+      OPENAI_API_KEY: "opaque-secret"
+    });
+    expect(
+      publicEvalDiagnosticsDroppedFromEvidence({
+        volumeFiles: workerNamedTheFault,
+        selectedFiles: collectable.files
+      })
+    ).toBe(false);
   });
 
   it("retains pre- and post-reconciliation Kimi subscription secrets for public collection", async () => {
