@@ -73,9 +73,13 @@ import {
   markModalLaunchFailedWithRecovery,
   markModalLaunchReady,
   markModalSandboxCreated,
+  modalAttemptProvenance,
   modalLaunchTags,
+  modalPreModelAttempt,
+  modalPreModelBudgetExhausted,
   modalRecoveryFinishedAtForWorkerStatus,
   modalRecoveryTerminalReasonForWorkerStatus,
+  modalRunnerAbandonmentMessage,
   modalWorkerLineage,
   parseModalLaunchState,
   parseModalWorkerResult,
@@ -84,7 +88,6 @@ import {
   reserveModalLaunchAttempt,
   withModalLaunchStateLock,
   writeModalLaunchState,
-  type ModalAttemptProvenance,
   type ModalLaunchFailureCategory,
   type ModalLaunchRecord,
   type ModalLaunchState,
@@ -121,7 +124,8 @@ import {
   createModalRecoveryLifecycleDocument,
   MODAL_RECOVERY_LIFECYCLE_FILE,
   parseModalRecoveryLifecycleDocument,
-  summarizeModalRecoveryLifecycle,
+  type ModalRecoveryLifecycleDocument,
+  type ModalRecoveryLifecycleSummary,
   type ModalRecoveryStartReason,
   type ModalRecoveryTerminalReason
 } from "./recovery-lifecycle.js";
@@ -429,7 +433,7 @@ export async function launchModalBenchmark(input: {
         const previousFingerprints = state.fingerprints;
         const history = [
           ...state.attempt_history,
-          ...state.launches.map((launch) => attemptProvenance(launch, previousFingerprints))
+          ...state.launches.map((launch) => modalAttemptProvenance(launch, previousFingerprints))
         ];
         state = createModalLaunchState({
           logicalRunId: config.run_id,
@@ -653,9 +657,10 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       "result.json"
     ]);
     const workerStatus = latestPersistedWorkerStatus(persisted, record);
+    const preModelAttempt = modalPreModelAttempt(input.state, record);
     const runnerStatus = classifyModalRunnerStatus({
       sandbox: probe.state,
-      attempt: record.attempt,
+      preModelAttempt,
       postModelRecovery: configuredPostModelRecovery(input.config),
       modelWorkMayHaveStarted: record.launched_at !== undefined,
       ...(workerStatus === undefined ? {} : { workerStatus }),
@@ -665,16 +670,20 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
     });
     if (runnerStatus.action === "none") {
       const finishedAt = new Date().toISOString();
+      const preModelBudgetExhausted = modalPreModelBudgetExhausted({
+        category: runnerStatus.category,
+        modelWorkStarted: runnerStatus.model_work_started,
+        preModelAttempt,
+        workerCategory: workerStatus?.category,
+        launchFailure: record.failure_category
+      });
       if (
         finishActiveModalRecoveryLifecycle(input.state, record, {
           terminalReason: modalRecoveryTerminalReasonForWorkerStatus({
             category: runnerStatus.category,
-            attempt: record.attempt,
+            preModelAttempt,
             modelWorkStarted: runnerStatus.model_work_started,
-            recoveryBudgetExhausted:
-              runnerStatus.category === "permanent-operational-failure" &&
-              workerStatus?.category !== "permanent-operational-failure" &&
-              record.failure_category !== "permanent-operational-failure"
+            recoveryBudgetExhausted: preModelBudgetExhausted
           }),
           finishedAt: modalRecoveryFinishedAtForWorkerStatus(workerStatus, finishedAt),
           ...(probe.exitCode === undefined ? {} : { workerExitCode: probe.exitCode }),
@@ -686,7 +695,14 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
         await writeModalLaunchState(input.statePath, input.state);
       }
       if (["succeeded", "genuine-task-outcome"].includes(runnerStatus.category)) return;
-      throw new Error(`Modal runner cannot relaunch ${record.slug}: ${runnerStatus.category}`);
+      throw new Error(
+        modalRunnerAbandonmentMessage({
+          slug: record.slug,
+          category: runnerStatus.category,
+          preModelAttempt,
+          preModelBudgetExhausted
+        })
+      );
     }
     const finishedAt = new Date().toISOString();
     if (
@@ -694,6 +710,11 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
         terminalReason: "operational-failure",
         finishedAt: modalRecoveryFinishedAtForWorkerStatus(workerStatus, finishedAt),
         ...(probe.exitCode === undefined ? {} : { workerExitCode: probe.exitCode }),
+        // Deliberately the observation, not `runnerStatus.model_work_started`.
+        // The classifier infers model work from `launched_at` alone so it can
+        // decline to charge the pre-model budget to a launched attempt; the
+        // durable record has to stay a record of what was seen, and `"unknown"`
+        // is what keeps `modalPreModelAttempt` fail-closed.
         modelWorkStarted: workerStatus?.model_work_started ?? (record.launched_at === undefined ? false : "unknown"),
         ...(workerStatus?.updated_at === undefined ? {} : { lastDurableTransitionAt: workerStatus.updated_at }),
         ...(workerStatus?.node_counts === undefined ? {} : { nodeCountsAfter: workerStatus.node_counts })
@@ -784,9 +805,10 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       if (modelMayHaveStarted) {
         throw new Error("Modal launch readiness was uncertain", { cause: error });
       }
-      if (category !== "transient-operational-failure" || record.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT) throw error;
+      const preModelAttempt = modalPreModelAttempt(input.state, record);
+      if (category !== "transient-operational-failure" || preModelAttempt >= MODAL_PRE_MODEL_RETRY_LIMIT) throw error;
       nextStartReason = "pre-model-retry";
-      await sleep(classifyModalRunnerStatus({ sandbox: "missing", attempt: record.attempt }).retry_after_ms);
+      await sleep(classifyModalRunnerStatus({ sandbox: "missing", preModelAttempt }).retry_after_ms);
     }
   }
 }
@@ -1202,23 +1224,6 @@ export function modalSandboxName(
   return `${prefix}${suffix}`;
 }
 
-function attemptProvenance(record: ModalLaunchRecord, fingerprints: ModalLineageFingerprints): ModalAttemptProvenance {
-  return {
-    slug: record.slug,
-    generation: record.generation,
-    attempt: record.attempt,
-    attempt_id: record.attempt_id,
-    model_fingerprint: record.model_fingerprint,
-    fingerprints,
-    workspace_mode: record.workspace_mode,
-    reserved_at: record.reserved_at,
-    ...(record.sandbox_id === undefined ? {} : { sandbox_id: record.sandbox_id }),
-    ...(record.launched_at === undefined ? {} : { launched_at: record.launched_at }),
-    ...(record.finished_at === undefined ? {} : { finished_at: record.finished_at }),
-    phase: record.phase
-  };
-}
-
 function finishActiveModalRecoveryLifecycle(
   state: ModalLaunchState,
   record: Pick<ModalLaunchRecord, "attempt_id">,
@@ -1232,10 +1237,59 @@ function finishActiveModalRecoveryLifecycle(
   return finishModalLaunchRecoveryLifecycle(state, record, input);
 }
 
-function modalRecoveryAnalysisSummary(records: ModalLaunchState["recovery_lifecycle"]): AnalysisRecoverySummary {
+/**
+ * Folds the terminal worker status persisted on a launch's volume into its recovery lifecycle.
+ *
+ * Every artifact that reports recovery — `status.json`'s `recovery_summary`,
+ * `recovery-lifecycle.json`, and the analysis bundle's `recovery-summary` — is rendered from
+ * `state.recovery_lifecycle`, so they can only agree if every reader folds the same observed worker
+ * status in before summarizing. `collect` was once the only caller that did, so the same run
+ * reported `active_generations: 1` / `unknown_model_work_generations: 1` in `status.json` and
+ * `terminal_generations: 1` / `model_work_generations: 1` in `recovery-lifecycle.json` (#322). A
+ * summary that disagrees with itself makes `model_work_started` — and every classification derived
+ * from it — unfalsifiable, so the fold belongs to one function that both readers call.
+ *
+ * Returns whether the lifecycle changed, so a caller holding the state lock knows to persist it.
+ * `status` does not hold the lock and only folds its in-memory copy: the transition is a pure
+ * function of the persisted worker status, so the summary it prints is the one `collect` writes.
+ */
+export function observeTerminalModalRecoveryLifecycle(
+  state: ModalLaunchState,
+  launch: ModalLaunchRecord,
+  workerStatus: ModalWorkerStatus | undefined,
+  now = new Date().toISOString()
+): boolean {
+  if (!isModalWorkerStatusTerminal(workerStatus)) return false;
+  return finishActiveModalRecoveryLifecycle(state, launch, {
+    terminalReason: modalRecoveryTerminalReasonForWorkerStatus({
+      category: workerStatus.category,
+      preModelAttempt: modalPreModelAttempt(state, launch),
+      modelWorkStarted: workerStatus.model_work_started
+    }),
+    finishedAt: modalRecoveryFinishedAtForWorkerStatus(workerStatus, now),
+    modelWorkStarted: workerStatus.model_work_started,
+    ...(workerStatus.updated_at === undefined ? {} : { lastDurableTransitionAt: workerStatus.updated_at }),
+    ...(workerStatus.node_counts === undefined ? {} : { nodeCountsAfter: workerStatus.node_counts })
+  });
+}
+
+/**
+ * The one recovery-lifecycle document for a model: what `collect` writes to
+ * `recovery-lifecycle.json`, and the summary `status.json` and the analysis bundle render.
+ */
+export function modalRecoveryLifecycleForModel(
+  state: Pick<ModalLaunchState, "recovery_lifecycle">,
+  modelSlug: string
+): ModalRecoveryLifecycleDocument {
+  return createModalRecoveryLifecycleDocument(
+    state.recovery_lifecycle.filter((record) => record.model_slug === modelSlug)
+  );
+}
+
+function modalRecoveryAnalysisSummary(summary: ModalRecoveryLifecycleSummary): AnalysisRecoverySummary {
   return {
     schema_version: ANALYSIS_BUNDLE_SCHEMA_VERSION,
-    ...summarizeModalRecoveryLifecycle(records)
+    ...summary
   };
 }
 
@@ -1295,36 +1349,55 @@ export async function modalBenchmarkStatus(input: {
         "status.json",
         "result.json"
       ]);
-      const workerStatus = latestPersistedWorkerStatus(persisted, launch);
-      const runnerStatus = classifyModalRunnerStatus({
-        sandbox: probe.state,
-        attempt: launch.attempt,
-        postModelRecovery: launch.post_model_recovery ?? "relaunch",
-        modelWorkMayHaveStarted: launch.launched_at !== undefined,
-        ...(workerStatus === undefined ? {} : { workerStatus }),
-        ...(launch.phase === "failed" && launch.failure_category !== undefined
-          ? { launchFailure: launch.failure_category }
-          : {})
-      });
-      rows.push({
-        logical_run_id: state.logical_run_id,
-        generation: launch.generation,
-        attempt: launch.attempt,
-        model: launch.model,
-        slug: launch.slug,
-        runner: probe.state,
-        exit_code: probe.exitCode,
-        runner_status: runnerStatus,
-        worker_status: workerStatus ?? null,
-        recovery_summary: summarizeModalRecoveryLifecycle(
-          state.recovery_lifecycle.filter((record) => record.model_slug === launch.slug)
-        )
-      });
+      rows.push(modalBenchmarkStatusRow({ state, launch, files: persisted, sandbox: probe }));
     }
     return rows;
   } finally {
     modal.close();
   }
+}
+
+/**
+ * The `status.json` row for one launch, given everything already read from Modal.
+ *
+ * Extracted from `modalBenchmarkStatus` so the row a run is judged by can be exercised without a
+ * Modal client — the regression that keeps `status.json` and `recovery-lifecycle.json` agreeing
+ * (#322) needs both artifacts computed from the same launch state.
+ */
+export function modalBenchmarkStatusRow(input: {
+  state: ModalLaunchState;
+  launch: ModalLaunchRecord;
+  files: Readonly<Record<string, string>>;
+  sandbox: { state: ModalSandboxState; exitCode?: number | null };
+  now?: string;
+}): Record<string, unknown> {
+  const { state, launch } = input;
+  const workerStatus = latestPersistedWorkerStatus(input.files, launch);
+  const preModelAttempt = modalPreModelAttempt(state, launch);
+  const runnerStatus = classifyModalRunnerStatus({
+    sandbox: input.sandbox.state,
+    preModelAttempt,
+    postModelRecovery: launch.post_model_recovery ?? "relaunch",
+    modelWorkMayHaveStarted: launch.launched_at !== undefined,
+    ...(workerStatus === undefined ? {} : { workerStatus }),
+    ...(launch.phase === "failed" && launch.failure_category !== undefined
+      ? { launchFailure: launch.failure_category }
+      : {})
+  });
+  observeTerminalModalRecoveryLifecycle(state, launch, workerStatus, input.now);
+  return {
+    logical_run_id: state.logical_run_id,
+    generation: launch.generation,
+    attempt: launch.attempt,
+    pre_model_attempt: preModelAttempt,
+    model: launch.model,
+    slug: launch.slug,
+    runner: input.sandbox.state,
+    exit_code: input.sandbox.exitCode,
+    runner_status: runnerStatus,
+    worker_status: workerStatus ?? null,
+    recovery_summary: modalRecoveryLifecycleForModel(state, launch.slug).summary
+  };
 }
 
 export interface ModalOverseerJob {
@@ -1605,7 +1678,8 @@ export async function overseeModalBenchmarkOnce(
               recoveryStatePath,
               env,
               now,
-              ...(resolution.launchExitCode === undefined ? {} : { observedExitCode: resolution.launchExitCode })
+              ...(resolution.launchExitCode === undefined ? {} : { observedExitCode: resolution.launchExitCode }),
+              ...(workerStatus === undefined ? {} : { workerStatus })
             });
           } else {
             await writeModalRecoveryState(recoveryStatePath, recoveryState);
@@ -1822,6 +1896,8 @@ async function launchModalRecoveryWorker(input: {
   now: () => number;
   /** Exit code already observed on the sandbox being replaced, when ownership resolution saw one. */
   observedExitCode?: number;
+  /** The outgoing attempt's durable worker status, if the volume had a readable one. */
+  workerStatus?: ModalWorkerStatus;
 }): Promise<ModalRecoveryRowState> {
   await reconcileKimiSubscriptionCredentialFromLaunchVolume({
     modal: input.modal,
@@ -1846,6 +1922,11 @@ async function launchModalRecoveryWorker(input: {
       remoteRoot: input.launch.remote_root,
       workspaceMode: "resume",
       postModelRecovery: "relaunch",
+      // The overseer is the only writer that closes the outgoing attempt's
+      // lifecycle, so it must record what the volume actually said. Without
+      // this the streak never resets and #267 stays open for unattended runs.
+      observedModelWorkStarted:
+        input.workerStatus?.model_work_started ?? (input.launch.launched_at === undefined ? false : "unknown"),
       now: new Date(input.now()).toISOString(),
       attemptId,
       // Threaded from the poll `resolveModalRecoveryOwner` already performed this tick, rather than
@@ -2435,22 +2516,7 @@ export async function collectModalBenchmark(input: {
             ])
         });
         const persistedStatus = latestPersistedWorkerStatus(files, launch);
-        if (
-          isModalWorkerStatusTerminal(persistedStatus) &&
-          finishActiveModalRecoveryLifecycle(state, launch, {
-            terminalReason: modalRecoveryTerminalReasonForWorkerStatus({
-              category: persistedStatus.category,
-              attempt: launch.attempt,
-              modelWorkStarted: persistedStatus.model_work_started
-            }),
-            finishedAt: modalRecoveryFinishedAtForWorkerStatus(persistedStatus, new Date().toISOString()),
-            modelWorkStarted: persistedStatus.model_work_started,
-            ...(persistedStatus.updated_at === undefined
-              ? {}
-              : { lastDurableTransitionAt: persistedStatus.updated_at }),
-            ...(persistedStatus.node_counts === undefined ? {} : { nodeCountsAfter: persistedStatus.node_counts })
-          })
-        ) {
+        if (observeTerminalModalRecoveryLifecycle(state, launch, persistedStatus)) {
           await writeModalLaunchState(input.statePath, state);
         }
         const output = path.resolve(input.outputDir, launch.slug);
@@ -2507,9 +2573,7 @@ export async function collectModalBenchmark(input: {
           collectionEnv,
           retainedCollectionSecretValues
         );
-        const recoveryLifecycle = createModalRecoveryLifecycleDocument(
-          state.recovery_lifecycle.filter((record) => record.model_slug === launch.slug)
-        );
+        const recoveryLifecycle = modalRecoveryLifecycleForModel(state, launch.slug);
         assertModalRecoveryLifecycleContainsNoSecrets(recoveryLifecycle, selectedWorkerEvidence.forbiddenSecretValues);
         const selectedEvidence: { files: Readonly<Record<string, string>>; forbiddenSecretValues: string[] } = {
           files: {
@@ -2540,16 +2604,13 @@ export async function collectModalBenchmark(input: {
         writeAnalysisBundle({
           outputDir: path.join(output, "analysis"),
           payloads: {
-            "recovery-summary": modalRecoveryAnalysisSummary(
-              state.recovery_lifecycle.filter((record) => record.model_slug === launch.slug)
-            )
+            "recovery-summary": modalRecoveryAnalysisSummary(recoveryLifecycle.summary)
           }
         });
         if (
           collectionConfig !== undefined &&
           isPublicModalBenchmarkConfig(collectionConfig) &&
-          persistedStatus?.model_work_started === true &&
-          selectedEvidence.files[PUBLIC_EVAL_DIAGNOSTICS_FILE] === undefined
+          publicEvalDiagnosticsDroppedFromEvidence({ volumeFiles: files, selectedFiles: selectedEvidence.files })
         ) {
           throw new Error(`public eval diagnostics are not safely collectable for ${launch.slug}`);
         }
@@ -3140,6 +3201,34 @@ function latestPersistedWorkerStatus(
   return latestModalWorkerStatus(
     [parseJson(files["status.json"] ?? "{}"), parseJson(files["result.json"] ?? "{}")],
     launch
+  );
+}
+
+/**
+ * Whether evidence selection dropped a public eval diagnostics document that the
+ * worker had persisted on the volume.
+ *
+ * That is the only unsafe collection this side can detect, and it is detectable
+ * from the two file sets themselves. `selectModalCollectedEvidence` withholds the
+ * document whenever it cannot secret-scan it, so collecting the rest as if
+ * nothing were missing would publish evidence that silently omits the document.
+ *
+ * The predicate this replaces asked instead whether the worker owed a document at
+ * all, and answered from `model_work_started` -- a flag the public worker raises
+ * before its eval command starts. A worker that never got far enough to write the
+ * document was therefore reported as a diagnostics fault, and the throw aborted
+ * the diagnostic-only collection that CI runs for exactly those pairs; run
+ * 31171579070 lost its diagnostics that way (#320). What the worker owed is the
+ * worker's own record to make: it names an unbuildable document
+ * `public-eval-diagnostics-invalid` in its result contract, which is collected.
+ */
+export function publicEvalDiagnosticsDroppedFromEvidence(input: {
+  volumeFiles: Readonly<Record<string, string>>;
+  selectedFiles: Readonly<Record<string, string>>;
+}): boolean {
+  return (
+    input.volumeFiles[PUBLIC_EVAL_DIAGNOSTICS_FILE] !== undefined &&
+    input.selectedFiles[PUBLIC_EVAL_DIAGNOSTICS_FILE] === undefined
   );
 }
 

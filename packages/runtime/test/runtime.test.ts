@@ -461,6 +461,15 @@ function fakeLifecycleSmithersEnv(
       "      printf '%s\\n' 'fake up failure' >&2",
       "      exit 1",
       "    fi",
+      '    if [ -n "$SMITHERS_FAKE_RUN_EXISTS" ]; then',
+      '      case "$*" in',
+      "        *--resume*) ;;",
+      "        *)",
+      '          printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_EXISTS"}}\' >&2',
+      "          exit 4",
+      "          ;;",
+      "      esac",
+      "    fi",
       "    printf '%s\\n' '{\"ok\":true}'",
       "    ;;",
       "  *)",
@@ -8732,7 +8741,7 @@ test("resume retries one failed workflow task before continuing a stale unfinish
   );
 });
 
-test("resume rewinds a run-level render failure before continuing unfinished work", async () => {
+test("resume continues a run-level render failure in place without a no-op rewind", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -8762,13 +8771,13 @@ test("resume rewinds a run-level render failure before continuing unfinished wor
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.submitted, true);
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.match(commands, /timeline ultrafuzz-render-recovery-run --json/u);
-  assert.match(commands, /rewind ultrafuzz-render-recovery-run 4 --yes --json/u);
+  // A jump to the latest frame returns early upstream, so reading the timeline and rewinding to it
+  // spends two subprocesses per recovery generation and mutates nothing.
+  assert.doesNotMatch(commands, /timeline|rewind|retry-task/u);
   assert.match(
     commands,
     /up .*ultrafuzz-render-recovery-run\.tsx --resume ultrafuzz-render-recovery-run --run-id ultrafuzz-render-recovery-run --force --detach --max-concurrency 8 --format json/u
   );
-  assert.doesNotMatch(commands, /retry-task/u);
 });
 
 test("resume transfers an incompatible legacy workflow ID to a valid durable lineage", async () => {
@@ -8811,6 +8820,121 @@ test("resume transfers an incompatible legacy workflow ID to a valid durable lin
     workflow?: { run_id?: string };
   };
   assert.equal(metadata.workflow?.run_id, replacementRunId);
+});
+
+test("resume adopts an orphaned replacement lineage that already exists", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = `orphan-${"x".repeat(56)}`;
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { code: "WORKFLOW_RENDER_FAILED", cause: { code: "ENOENT" } },
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  // An earlier recovery generation already created the deterministic replacement run and died
+  // before the new lineage was persisted, so a fresh submission now reports RUN_EXISTS.
+  env.SMITHERS_FAKE_RUN_EXISTS = "1";
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    maxConcurrency: 8,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  const replacementRunId = resumed.value?.workflow_run_id ?? "";
+  assert.match(replacementRunId, /^ufz-recovery-[a-f0-9]{32}$/u);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, new RegExp(`up .* --detach --run-id ${replacementRunId}`, "u"));
+  assert.match(
+    commands,
+    new RegExp(`up .* --detach --resume ${replacementRunId} --run-id ${replacementRunId} --force`, "u")
+  );
+  const recovery = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "recovery-submission.json"), "utf8")
+  ) as { recovery?: string; smithers_run_id?: string };
+  assert.equal(recovery.recovery, "incompatible-workflow-run-id-adopted");
+  assert.equal(recovery.smithers_run_id, replacementRunId);
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    workflow?: { run_id?: string };
+  };
+  assert.equal(metadata.workflow?.run_id, replacementRunId);
+});
+
+test("resume classifies a terminal run reported only at the top level of the inspect payload", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = `toplevel-${"x".repeat(56)}`;
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    // Neither a `runState` nor a `run` wrapper: some run-state and task-output snapshot variants
+    // report the state at the top level of `data`.
+    inspect: {
+      ok: true,
+      data: {
+        id: workflowRunId,
+        state: "failed",
+        error: { code: "WORKFLOW_RENDER_FAILED", cause: { code: "ENOENT" } },
+        steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    maxConcurrency: 8,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.match(resumed.value?.workflow_run_id ?? "", /^ufz-recovery-[a-f0-9]{32}$/u);
+});
+
+test("unverified dependency detection reads a dependent prepare failure off the run row", async () => {
+  const { smithersSnapshotUnverifiedDependencies } = await import("../src/smithers.js");
+  const runError = {
+    name: "SmithersError",
+    code: "SESSION_ERROR",
+    message: "Task failed: prepare:property-specification-fanin",
+    cause: {
+      message:
+        "artifact-contract failure: artifact dependency has not passed verification " +
+        "property-specification-crytic for property-specification-fanin"
+    }
+  };
+  const snapshot = {
+    command: ["inspect", "ultrafuzz-r43", "--format", "json"],
+    ok: true,
+    stdout: "",
+    stderr: "",
+    json: { ok: true, data: { run: { id: "ultrafuzz-r43", status: "failed", error: runError } } }
+  };
+
+  assert.deepEqual(smithersSnapshotUnverifiedDependencies(snapshot), ["property-specification-crytic"]);
+  assert.deepEqual(
+    smithersSnapshotUnverifiedDependencies({ ...snapshot, json: undefined, stderr: "unrelated failure" }),
+    []
+  );
 });
 
 test("resume suppresses duplicate submissions for every active workflow run state", async () => {

@@ -246,6 +246,9 @@ const SMITHERS_ACTIVE_RUN_STATES = new Set([
   "waiting-timer"
 ]);
 
+// `smithers up` exits 4 with code RUN_EXISTS when a non-resume submission names an existing run.
+const SMITHERS_RUN_EXISTS_EXIT_CODE = 4;
+
 export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v1" as const;
 export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v1" as const;
 export const SMITHERS_SUBMISSION_SCHEMA_VERSION = "ultrafuzz.smithers.submission.v1" as const;
@@ -1032,69 +1035,79 @@ export async function runSmithersLifecycleCommand(input: {
       input.retryFailed === true &&
       (smithersSnapshotRunStateIsFailed(inspection) || smithersSnapshotRunStateIsStale(inspection))
     ) {
-      if (input.resetNode === undefined && smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED")) {
-        if (!isCompatibleSmithersRunId(input.smithersRunId)) {
-          assertRegularFileInside(
-            input.resumeRecovery.runRoot,
-            input.resumeRecovery.inputPath,
-            "persisted workflow input"
-          );
-          assertPathInside(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
-          fs.mkdirSync(input.resumeRecovery.logsDir, { recursive: true });
-          assertNoSymlinkComponents(
-            input.resumeRecovery.runRoot,
-            input.resumeRecovery.logsDir,
-            "workflow log directory"
-          );
-          const replacementRunId = compatibleRecoveryRunId(input.smithersRunId);
-          const recovery = await execSmithersCli({
-            args: [
-              "up",
-              input.workflowPath,
-              "--detach",
-              "--run-id",
-              replacementRunId,
-              ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
-              "--root",
-              input.projectRoot,
-              "--log-dir",
-              input.resumeRecovery.logsDir,
-              "--input",
-              fs.readFileSync(input.resumeRecovery.inputPath, "utf8"),
-              "--format",
-              "json",
-              ...supervisorCommandArgs(input.controllerLeaseSeconds)
-            ],
+      // A rewind to the latest timeline frame is a no-op upstream: `jumpToFrame` returns early
+      // without touching the run row or any node, and `up --resume` already un-terminalizes a
+      // failed run on its own. So the only recovery worth issuing here is the replacement lineage
+      // for a run id the backend can no longer resume in place.
+      if (
+        input.resetNode === undefined &&
+        smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED") &&
+        !isCompatibleSmithersRunId(input.smithersRunId)
+      ) {
+        const resumeRecovery = input.resumeRecovery;
+        assertRegularFileInside(resumeRecovery.runRoot, resumeRecovery.inputPath, "persisted workflow input");
+        assertPathInside(resumeRecovery.runRoot, resumeRecovery.logsDir, "workflow log directory");
+        fs.mkdirSync(resumeRecovery.logsDir, { recursive: true });
+        assertNoSymlinkComponents(resumeRecovery.runRoot, resumeRecovery.logsDir, "workflow log directory");
+        const replacementRunId = compatibleRecoveryRunId(input.smithersRunId);
+        const replacementInputJson = fs.readFileSync(resumeRecovery.inputPath, "utf8");
+        const replacementArgs = (adoptExisting: boolean) => [
+          "up",
+          input.workflowPath,
+          "--detach",
+          ...(adoptExisting ? ["--resume", replacementRunId] : []),
+          "--run-id",
+          replacementRunId,
+          ...(adoptExisting && input.force === true ? ["--force"] : []),
+          ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+          "--root",
+          input.projectRoot,
+          "--log-dir",
+          resumeRecovery.logsDir,
+          "--input",
+          replacementInputJson,
+          "--format",
+          "json",
+          ...supervisorCommandArgs(input.controllerLeaseSeconds)
+        ];
+        let recovery = await execSmithersCli({
+          args: replacementArgs(false),
+          projectRoot: input.projectRoot,
+          env: input.env,
+          environmentVariableNames: input.environmentVariableNames,
+          keepWorkspaces: input.keepWorkspaces,
+          acceptedExitCodes: [SMITHERS_RUN_EXISTS_EXIT_CODE]
+        });
+        let appliedRecovery = "incompatible-workflow-run-id";
+        if (recovery.exitCode !== 0) {
+          if (!smithersOutputRejectsExistingRun(recovery)) {
+            throw new Error(
+              `replacement workflow lineage submission failed: ${recovery.stderr.trim() || recovery.stdout.trim() || `exit ${recovery.exitCode}`}`
+            );
+          }
+          // An earlier recovery generation created this replacement run and then died before the
+          // new lineage was persisted, so the durable run still points at the old id and every
+          // later generation recomputes the same replacement id. Adopt the orphan by resuming it
+          // instead of wedging on RUN_EXISTS forever.
+          recovery = await execSmithersCli({
+            args: replacementArgs(true),
             projectRoot: input.projectRoot,
             env: input.env,
             environmentVariableNames: input.environmentVariableNames,
             keepWorkspaces: input.keepWorkspaces
           });
-          writeJsonDurable(path.join(path.dirname(input.resumeRecovery.inputPath), "recovery-submission.json"), {
-            schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
-            smithers_run_id: replacementRunId,
-            recovery: "incompatible-workflow-run-id",
-            command: recovery.command,
-            stdout: redactedEvidenceText(recovery.stdout),
-            stderr: redactedEvidenceText(recovery.stderr),
-            submitted_at: new Date().toISOString()
-          });
-          return { ...recovery, workflowRunId: replacementRunId };
+          appliedRecovery = "incompatible-workflow-run-id-adopted";
         }
-        const timeline = await execSmithersCli({
-          args: ["timeline", input.smithersRunId, "--json"],
-          projectRoot: input.projectRoot,
-          env: input.env
+        writeJsonDurable(path.join(path.dirname(resumeRecovery.inputPath), "recovery-submission.json"), {
+          schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
+          smithers_run_id: replacementRunId,
+          recovery: appliedRecovery,
+          command: recovery.command,
+          stdout: redactedEvidenceText(recovery.stdout),
+          stderr: redactedEvidenceText(recovery.stderr),
+          submitted_at: new Date().toISOString()
         });
-        const latestFrame = latestSmithersTimelineFrame(jsonField(timeline.stdout).json);
-        if (latestFrame !== undefined) {
-          const rewind = await execSmithersCli({
-            args: ["rewind", input.smithersRunId, String(latestFrame), "--yes", "--json"],
-            projectRoot: input.projectRoot,
-            env: input.env
-          });
-          preResumeStderr = [timeline.stderr, rewind.stderr].filter((value) => value.length > 0).join("\n");
-        }
+        return { ...recovery, workflowRunId: replacementRunId };
       }
     }
   }
@@ -1331,7 +1344,13 @@ function smithersSnapshotRunState(snapshot: SmithersCommandSnapshot): string | u
     return runState;
   }
   const runStatus = isObjectRecord(data.run) ? data.run.status : undefined;
-  return typeof runStatus === "string" ? runStatus : undefined;
+  if (typeof runStatus === "string") {
+    return runStatus;
+  }
+  // Some run-state and task-output snapshot variants report the state at the top level of `data`
+  // with no `runState`/`run` wrapper; without this fallback a terminal failed run reads as unknown
+  // and resume proceeds in place.
+  return [data.state, data.status].find((value): value is string => typeof value === "string");
 }
 
 function smithersSnapshotRunStateIsActive(snapshot: SmithersCommandSnapshot): boolean {
@@ -1391,19 +1410,34 @@ function smithersSnapshotFailedTasks(snapshot: SmithersCommandSnapshot): Array<{
   return [...failedTasks.values()];
 }
 
-function latestSmithersTimelineFrame(value: unknown): number | undefined {
-  const parsed = isObjectRecord(value) ? value : {};
-  const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
-  const timeline = isObjectRecord(data.timeline) ? data.timeline : data;
-  const frames = Array.isArray(timeline.frames) ? timeline.frames : [];
-  const frameNumbers = frames.flatMap((frame) => {
-    if (!isObjectRecord(frame)) return [];
-    const frameNumber = frame.frameNo ?? frame.frame_no ?? frame.frame;
-    return typeof frameNumber === "number" && Number.isSafeInteger(frameNumber) && frameNumber >= 0
-      ? [frameNumber]
-      : [];
-  });
-  return frameNumbers.length === 0 ? undefined : Math.max(...frameNumbers);
+function smithersOutputRejectsExistingRun(snapshot: { stdout: string; stderr: string }): boolean {
+  return [snapshot.stdout, snapshot.stderr].some((value) => value.includes("RUN_EXISTS"));
+}
+
+/**
+ * Dependency attempt ids whose verified artifacts no longer match their verification marker.
+ * The message is emitted by the generated workflow's own `assertVerifiedDependency`, so the shape
+ * is stable, and it is the only signal that reaches the resume side: the failure lands on the
+ * dependent's `prepare:` task and leaves no failed node behind, so the run row's `error_json` is
+ * where it surfaces. Recovery on top of this is tracked separately in #288.
+ */
+export function smithersSnapshotUnverifiedDependencies(snapshot: SmithersCommandSnapshot): string[] {
+  const evidence = [
+    snapshot.stdout,
+    snapshot.stderr,
+    snapshot.error ?? "",
+    snapshot.json === undefined ? "" : JSON.stringify(snapshot.json)
+  ].join("\n");
+  const dependencies = new Set<string>();
+  for (const match of evidence.matchAll(
+    /artifact dependency has not passed verification ([A-Za-z0-9._-]+) for [A-Za-z0-9._-]+/gu
+  )) {
+    const dependency = match[1];
+    if (dependency !== undefined && dependency.trim() !== "" && !dependency.includes("..")) {
+      dependencies.add(dependency);
+    }
+  }
+  return [...dependencies].sort();
 }
 
 function isCompatibleSmithersRunId(value: string): boolean {
