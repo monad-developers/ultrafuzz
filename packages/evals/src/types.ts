@@ -531,8 +531,13 @@ export interface EvalRowScore {
    * Node-level expansion and concurrency for this row. Carried on the score so
    * a dynamic fan-out is observable from `scores.jsonl` and `summary.json`,
    * both of which the public bundle already retains, with no reporter involved.
+   *
+   * Optional for the same reason the record-level field is: it is derived from
+   * `EvalRunRecord.expansion`, which is absent on any row scored before this
+   * existed, and `scores.jsonl` is persisted — a required field here would make
+   * every historical score unreadable.
    */
-  expansion: EvalRunExpansion;
+  expansion?: EvalRunExpansion;
   recovery_equivalence: EvalRecoveryEquivalence;
 }
 
