@@ -17945,3 +17945,58 @@ function workspaceRoot(): string {
   }
   return process.cwd();
 }
+
+test("a torn or empty prepared event index re-converges instead of condemning the run id", async () => {
+  const { planRun: preparePlanRun } = await import("../src/plan-run.js");
+  // Reference nodes are what materialize per-node event indexes during prepare, so the
+  // small topology cannot exercise this path at all.
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeReferenceTopology(project);
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeReferenceCache(xdgCacheHome);
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  try {
+    for (const tear of ["single-unterminated-line", "zero-byte"] as const) {
+      const startInput = {
+        projectRoot: project,
+        runId: `prepared-index-${tear}`,
+        env: fakeSmithersEnv(project)
+      };
+      const prepared = await preparePlanRun(startInput, { prepareWorkflowStart: true });
+      assert.equal(prepared.ok, true, `${tear}: ${JSON.stringify(prepared.diagnostics)}`);
+      const layout = prepared.value!.layout;
+
+      // A per-node index holds exactly one line, so ANY interrupted write to it is a
+      // first-line tear with no newline at all; and appendBytesDurable opens with
+      // O_CREAT before writing, so a kill in that window leaves a 0-byte file. Both
+      // previously made every later planRun throw "prepared event index conflicts with
+      // its reference-materialization prefix" -- permanently, with only a new run id to
+      // escape. Reference materialization is what writes these, so find one that exists.
+      const nodeIndexDir = path.join(layout.eventsIndexDir, "node");
+      // Fail loudly rather than skipping: a `continue` here would make this test pass
+      // vacuously on a fixture that never materializes a reference node index.
+      assert.ok(fs.existsSync(nodeIndexDir), `${tear}: fixture produced no node index directory`);
+      const indexFile = fs.readdirSync(nodeIndexDir).find((entry) => entry.endsWith(".jsonl"));
+      assert.ok(indexFile !== undefined, `${tear}: fixture produced no node index file`);
+      const indexPath = path.join(nodeIndexDir, indexFile);
+      const complete = fs.readFileSync(indexPath, "utf8");
+      assert.ok(complete.endsWith("\n"), `${tear}: fixture expects a terminated index`);
+
+      fs.rmSync(path.join(layout.root, "smithers", "start-preparation.json"));
+      fs.writeFileSync(
+        indexPath,
+        tear === "zero-byte" ? "" : complete.slice(0, Math.max(1, complete.length - 5)).replace(/\n$/u, ""),
+        "utf8"
+      );
+
+      const recovered = await preparePlanRun(startInput, { prepareWorkflowStart: true });
+      assert.equal(recovered.ok, true, `${tear}: ${JSON.stringify(recovered.diagnostics)}`);
+      assert.equal(fs.readFileSync(indexPath, "utf8"), complete, `${tear}: index did not re-converge`);
+    }
+  } finally {
+    if (previousXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+  }
+});

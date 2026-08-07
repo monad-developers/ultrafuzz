@@ -931,8 +931,11 @@ function writeWorkflowSyncCommitJournal(layout: RunLayout, journal: WorkflowSync
   assertSafeJournalFile(layout, journalPath, "workflow synchronization commit journal");
 }
 
-function assertCurrentWorkflowMutationLockOwner(layout: RunLayout): void {
-  assertWorkflowRunHoldsAreIntact(layout, "workflow synchronization commit");
+export function assertCurrentWorkflowMutationLockOwner(
+  layout: RunLayout,
+  label = "workflow synchronization commit"
+): void {
+  assertWorkflowRunHoldsAreIntact(layout, label);
   const lockPath = path.join(anchoredRunRoot(layout), WORKFLOW_MUTATION_LOCK);
   const owner = readWorkflowRunLockOwner(
     layout,
@@ -941,7 +944,7 @@ function assertCurrentWorkflowMutationLockOwner(layout: RunLayout): void {
   );
   const currentStart = workflowMutationProcessStartToken(process.pid);
   if (owner.pid !== process.pid || currentStart === null || owner.process_start !== currentStart) {
-    throw new Error("workflow synchronization commit requires the current workflow mutation lock owner");
+    throw new Error(`${label} requires the current workflow mutation lock owner`);
   }
 }
 

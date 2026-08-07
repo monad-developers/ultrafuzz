@@ -20,6 +20,7 @@ import { fingerprintGraph, type ExpandedGraph } from "@ultrafuzz/topology";
 import { bindSmithersExecutableCapability } from "./smithers-executable-capability.js";
 import {
   acquireWorkflowMutationLock,
+  assertCurrentWorkflowMutationLockOwner,
   pendingWorkflowLifecycleAction,
   type WorkflowMutationLockControl,
   workflowLifecycleAction
@@ -1355,6 +1356,10 @@ function retainedWorkflowExecutionSnapshotRoots(
   layout: RunLayout,
   allocations: ReadonlyMap<string, WorkflowExecutionSnapshotAllocation>
 ): Set<string> {
+  // Enforced, not merely documented: the repair below rewrites the event log under
+  // size fences, so it is only safe while this process holds the workflow mutation
+  // lock. Every current caller does; this stops a future one from quietly not.
+  assertCurrentWorkflowMutationLockOwner(layout, "workflow execution snapshot retention");
   const retained = new Set<string>();
   const retain = (root: string, controlGeneration: string, label: string): void => {
     const allocation = allocations.get(root);
@@ -1480,12 +1485,20 @@ function retainedWorkflowExecutionSnapshotRoots(
     }
   }
 
-  // Repair a torn trailing line before judging the evidence. This runs from cancelRun,
-  // pauseRun and submitLifecycleAction BEFORE the workflow mutation lock is taken, so
-  // the append path's own repair and recoverPreparedWorkflowSyncCommit have not run
-  // yet. Without this, the ordinary crash signature -- a process killed mid-append --
-  // makes the run permanently uncancellable and unpausable, which is the exact wedge
-  // this machinery exists to survive.
+  // Repair a torn trailing line before judging the evidence.
+  //
+  // This runs UNDER the workflow mutation lock: the only reachable callers arrive via
+  // sweepWorkflowExecutionSnapshotAllocations, which acquires it first, and
+  // acquireOwnedRunLock has therefore already run recoverPreparedWorkflowSyncCommit.
+  // That recovery is a no-op unless a prepared-phase journal exists, so the ordinary
+  // crash signature -- a process killed mid-append, with no prepared journal -- still
+  // reached the malformedRecords check below and made the run permanently
+  // uncancellable and unpausable from cancelRun, pauseRun and submitLifecycleAction.
+  //
+  // Holding the lock is also what makes repairing safe here: truncateDurable and
+  // appendBytesDurableAt are fenced on the file size they observed, so a concurrent
+  // appender would otherwise turn this into a spurious failure. The assertion above
+  // enforces that rather than leaving it to a future caller to honour.
   repairTornJsonlTail(layout.eventsPath);
   const replay = replayEvents(layout, Number.MAX_SAFE_INTEGER);
   if (replay.malformedRecords !== 0 || replay.truncatedRecords !== 0) {

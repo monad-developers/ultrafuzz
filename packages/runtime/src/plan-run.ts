@@ -1012,7 +1012,17 @@ function reconcilePreparedEventIndexes(layout: RunLayout, events: ReturnType<typ
     const observed =
       relativePath === "query-inputs.json" || raw.endsWith("\n") ? raw : raw.slice(0, raw.lastIndexOf("\n") + 1);
     if (observed === expectedContents) continue;
-    if (relativePath !== "query-inputs.json" && observed.endsWith("\n") && expectedContents.startsWith(observed)) {
+    // An empty `observed` is the valid ZERO-LINE prefix, not a conflict. It arises from
+    // the two most likely index tears, not the least: a per-node index receives exactly
+    // one line, so any interrupted write to it is a first-line tear with no newline at
+    // all; and appendBytesDurable opens with O_CREAT before writing, so a kill in that
+    // window leaves a 0-byte file. Requiring a trailing newline here condemned the
+    // prepared root permanently in exactly the case this tolerance exists to repair.
+    if (
+      relativePath !== "query-inputs.json" &&
+      (observed.length === 0 || observed.endsWith("\n")) &&
+      expectedContents.startsWith(observed)
+    ) {
       writeFileDurable(filePath, expectedContents);
       continue;
     }
