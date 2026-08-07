@@ -1056,11 +1056,12 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
       if (!isStrictlyInsideDirectory(workspaceRoot, foundryParent)) {
         throw new Error(`artifact-contract failure: unsafe generated test parent ${task.attemptId}`);
       }
-      resetTaskArtifactContents(
-        path.join(foundryParent, task.metadata.node.logicalNodeId),
-        task.metadata.node.logicalNodeId,
-        "generated-test"
-      );
+      // Every directory the companion lookup accepts must be cleared, or the
+      // previous attempt's test survives in the one this reset skipped and the
+      // next attempt publishes it as its own.
+      for (const nodeId of generatedTestNodeIds(task)) {
+        resetTaskArtifactContents(path.join(foundryParent, nodeId), nodeId, "generated-test");
+      }
     }
   }
   restoreWorkspacePatchPreparation(task, workspaceRoot);
@@ -1563,15 +1564,100 @@ function materializeWorkspacePatch(task: (typeof taskSpecs)[number]): void {
   if (baselineTree === undefined) {
     throw new Error(`artifact-contract failure: workspace patch baseline is unavailable ${task.attemptId}`);
   }
-  const captured = captureWorkspacePatch(realpathSync(task.workspacePath), baselineTree);
+  const workspaceRoot = realpathSync(task.workspacePath);
+  const captured = captureWorkspacePatch(workspaceRoot, baselineTree);
   const manifest = `${JSON.stringify(captured.manifest, null, 2)}\n`;
   for (const artifactRoot of taskArtifactRoots(task, realpathSync(task.metadata.artifacts.dir))) {
-    writeWorkspacePatchArtifact(artifactRoot, "workspace.patch", captured.patch);
-    writeWorkspacePatchArtifact(artifactRoot, "workspace-patch.json", manifest);
+    // Classify the surviving pair BEFORE writing either half of the new one. Writing the patch first
+    // would leave the manifest describing different bytes, and the pair could no longer be recognised
+    // as one this node published.
+    const superseded = holdsSupersededWorkspacePatchPair(artifactRoot, workspaceRoot, baselineTree);
+    writeWorkspacePatchArtifact(artifactRoot, "workspace.patch", captured.patch, superseded);
+    writeWorkspacePatchArtifact(artifactRoot, "workspace-patch.json", manifest, superseded);
   }
 }
 
-function writeWorkspacePatchArtifact(root: string, relativePath: string, contents: string): void {
+/**
+ * Does this artifact root hold a workspace patch pair THIS node published in an earlier recovery
+ * generation (#357)?
+ *
+ * A re-executed node's fresh capture legitimately differs from the one still on the durable volume --
+ * its agent ran again -- so `writeWorkspacePatchArtifact` read the survivor as tampering and killed the
+ * run. Nothing clears it across that boundary: `resetTaskArtifactsForRetry` only fires for
+ * `attempt > 1` within ONE process, and a new generation starts a new process at attempt 1. That holds
+ * whatever `max_attempts` a topology sets, and the pair is not in the set reset preserves anyway.
+ *
+ * Content equality cannot be the discriminator -- it is exactly what conflates "my own superseded
+ * output" with "someone edited this". Two things together answer it. `validateWorkspacePatchCapture`
+ * establishes that the pair is a well-formed capture whose manifest digest matches its patch, and the
+ * `base_tree` identity establishes it was taken from THIS node's baseline rather than copied from a
+ * dependency's artifact dir, which agents can read. Anything else -- a lone patch, a mismatched digest,
+ * an unreadable or foreign manifest, another node's capture -- is left for the caller to reject exactly
+ * as before.
+ *
+ * This only decides; it does not delete. `writeFileDurable` renames over the target, so the caller
+ * replaces the pair atomically and the durable artifact is never momentarily absent. That matters
+ * because `materializeWorkspacePatchDependencies` SILENTLY skips a dependency missing both files, so an
+ * absence window is a silent hole rather than an error.
+ *
+ * `patch_sha256` is a digest of a file the agent can read, and the artifact root is reachable from the
+ * model-controlled workspace, so a forged pair is cheap to produce. This is a self-consistency
+ * heuristic and a tripwire, NOT provenance. It stays acceptable only because the runtime's own capture
+ * is written over the survivor either way, so forging one gains an agent nothing but silence.
+ *
+ * Real provenance is available and deliberately not used here: `invariantSuiteProtectedBaselinePath`
+ * keeps a digest-checked copy outside the agent-writable tree, and recording each published patch
+ * digest the same way would keep tamper detection fully intact. That is more durable machinery than
+ * this bug warrants, so it is named rather than built -- but anyone reusing this helper somewhere that
+ * does NOT immediately overwrite the survivor needs that mechanism instead of this one.
+ */
+function holdsSupersededWorkspacePatchPair(artifactRoot: string, workspaceRoot: string, baselineTree: string): boolean {
+  const patchPath = path.resolve(artifactRoot, "workspace.patch");
+  const manifestPath = path.resolve(artifactRoot, "workspace-patch.json");
+  // Both halves are required: a lone patch keeps the caller's rejection, which is what stops an agent
+  // laundering one by deleting the manifest beside it.
+  if (!existsSync(patchPath) || !existsSync(manifestPath)) return false;
+  // Name the file that failed rather than "artifact", so a symlinked or non-regular half is diagnosable
+  // from the message alone.
+  const patch = readFileSync(
+    resolveRegularArtifactFile(
+      artifactRoot,
+      patchPath,
+      "artifact-contract failure: workspace patch artifact is unsafe workspace.patch"
+    ),
+    "utf8"
+  );
+  const manifestText = readFileSync(
+    resolveRegularArtifactFile(
+      artifactRoot,
+      manifestPath,
+      "artifact-contract failure: workspace patch artifact is unsafe workspace-patch.json"
+    ),
+    "utf8"
+  );
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(manifestText) as unknown;
+  } catch {
+    return false;
+  }
+  if (manifest === null || (manifest as Record<string, unknown>).base_tree !== baselineTree) return false;
+  try {
+    validateWorkspacePatchCapture(workspaceRoot, { patch, manifest } as Parameters<
+      typeof validateWorkspacePatchCapture
+    >[1]);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+function writeWorkspacePatchArtifact(
+  root: string,
+  relativePath: string,
+  contents: string,
+  replaceSuperseded = false
+): void {
   const target = path.resolve(root, relativePath);
   if (!isStrictlyInsideDirectory(root, target)) {
     throw new Error(`artifact-contract failure: unsafe workspace patch artifact path ${relativePath}`);
@@ -1586,11 +1672,13 @@ function writeWorkspacePatchArtifact(root: string, relativePath: string, content
     const existingContents = readFileSync(existing, "utf8");
     if (existingContents !== "" && existingContents !== "\n") {
       if (existingContents === contents) return;
-      throw new Error(`artifact-contract failure: workspace patch artifact was modified ${relativePath}`);
+      // These paths are runtime-owned. Replace an empty placeholder, or a pair this node published in
+      // an earlier generation; reject any other non-empty agent-authored or tampered patch.
+      if (!replaceSuperseded) {
+        throw new Error(`artifact-contract failure: workspace patch artifact was modified ${relativePath}`);
+      }
     }
   }
-  // These paths are runtime-owned. Replace only an empty runtime placeholder;
-  // reject any non-empty agent-authored or tampered patch above.
   writeFileDurable(target, contents);
 }
 
@@ -3317,22 +3405,33 @@ function materializeGeneratedTestCompanions(task: (typeof taskSpecs)[number]): v
       }
       const entries = (validation.value as { generated_tests?: Array<{ path?: string }> }).generated_tests ?? [];
       for (const entry of entries) {
-        materializeGeneratedTestCompanion(
-          workspaceRoot,
-          candidateRoot,
-          task.metadata.node.concreteNodeId,
-          entry.path ?? ""
-        );
+        materializeGeneratedTestCompanion(workspaceRoot, candidateRoot, generatedTestNodeIds(task), entry.path ?? "");
       }
       break;
     }
   }
 }
 
+/**
+ * Directory names an agent may have used for its generated tests, most
+ * authoritative first.
+ *
+ * `strategy_attempt_test_dir` (`packages/prompts/src/render.ts`) mandates
+ * `<workspace>/test/foundry/<LOGICAL node id>/`, and the retry reset below
+ * clears that same logical directory. Only this lookup used the CONCRETE node
+ * id, so on any node the topology expands (`loops > 1`, model fan-out) the one
+ * directory the prompt named was never searched and an obedient agent's test
+ * failed the contract as missing. Both ids are accepted: the logical id is what
+ * the prompt promises, and the concrete id stays valid for a run that used it.
+ */
+function generatedTestNodeIds(task: (typeof taskSpecs)[number]): string[] {
+  return [...new Set([task.metadata.node.logicalNodeId, task.metadata.node.concreteNodeId])];
+}
+
 function materializeGeneratedTestCompanion(
   workspaceRoot: string,
   artifactRoot: string,
-  nodeId: string,
+  nodeIds: readonly string[],
   relativePath: string
 ): void {
   const generatedPrefix = "generated-tests/";
@@ -3354,10 +3453,14 @@ function materializeGeneratedTestCompanion(
   }
 
   const workspaceRelativePath = relativePath.slice(generatedPrefix.length);
-  const sourceCandidates = INVARIANT_TEST_ROOT_NAMES.flatMap((testRoot) => [
-    path.resolve(workspaceRoot, testRoot, "foundry", workspaceRelativePath),
-    path.resolve(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath)
-  ]);
+  const sourceCandidates = [
+    ...new Set(
+      INVARIANT_TEST_ROOT_NAMES.flatMap((testRoot) => [
+        path.resolve(workspaceRoot, testRoot, "foundry", workspaceRelativePath),
+        ...nodeIds.map((nodeId) => path.resolve(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath))
+      ])
+    )
+  ];
   const existingCandidates = sourceCandidates.filter((candidate) => existsSync(candidate));
   const sourceCandidate = existingCandidates[0] ?? sourceCandidates[0];
   if (existingCandidates.length > 1) {
