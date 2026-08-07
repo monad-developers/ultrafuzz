@@ -1288,3 +1288,47 @@ test("#315 a cyclic dependency graph fails closed instead of silently dropping t
     fs.rmSync(runRoot, { recursive: true, force: true });
   }
 });
+
+test("#315 a direct publisher does not mask a conflict between two unordered indirect ones", () => {
+  // Review's PROBE C, run against three revisions: `main` throws, the first restructure threw, and the
+  // second SELECTED silently. Filtering to the direct publisher before checking for disagreement discards
+  // both indirect claims with no error -- a strict loss of fail-closed behaviour in exactly the class this
+  // change is about, and invisible to every other fixture because they have at most two publishers.
+  //
+  // Not reachable in the shipped topology, which is a pure chain; that is why it is latent rather than
+  // live, and why it is worth a test rather than a comment.
+  const runRoot = fs.mkdtempSync(path.join(process.cwd(), "ultrafuzz-invariant-315-mask-"));
+  try {
+    const root = makeTaskSpec(runRoot, "root", "property-specification-fanin", [], []);
+    const i1 = makeTaskSpec(runRoot, "i1", "stateful-invariant-setup", ["root"], ["root"]);
+    const i2 = makeTaskSpec(runRoot, "i2", "stateful-invariant-handlers", ["root"], ["root"]);
+    const zd = makeTaskSpec(runRoot, "zd", "stateful-invariant-coverage", ["root"], ["root"]);
+    const downstream = makeTaskSpec(
+      runRoot,
+      "downstream",
+      "stateful-invariant-implement-properties",
+      ["root", "i1", "i2", "zd"],
+      ["zd"]
+    );
+    const state = createHarnessState([root, i1, i2, zd, downstream]);
+
+    for (const [spec, node, marker] of [
+      [i1, "stateful-invariant-setup", "I1"],
+      [i2, "stateful-invariant-handlers", "I2"],
+      [zd, "stateful-invariant-coverage", "D"]
+    ] as ReadonlyArray<readonly [typeof i1, string, string]>) {
+      writeSuiteSource(spec.artifactDir, "test/recon/Properties.sol", `contract Properties { /* ${marker} */ }\n`);
+      writeSuiteManifest(spec.artifactDir, node, spec.attemptId, ["test/recon/Properties.sol"]);
+    }
+
+    const helpers = loadWorkflowHelpers([...MATERIALIZATION_HELPERS], state);
+    assert.ok(helpers.materializeInvariantSuiteFromDependencies);
+    assert.throws(
+      () => helpers.materializeInvariantSuiteFromDependencies?.(downstream, downstream.workspacePath),
+      /ancestor invariant suite sources conflict for test\/recon\/Properties\.sol/u,
+      "two unordered indirect publishers disagreeing must not be masked by an unrelated direct one"
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});

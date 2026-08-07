@@ -3252,28 +3252,36 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
     // path SILENTLY, which is the failure mode this whole change exists to remove. Keeping every publisher
     // instead hands the decision to the conflict check below, which fails closed.
     const maximal = unsuperseded.length > 0 ? unsuperseded : publishers;
-    // Among publishers that nothing supersedes, a DIRECT dependency still outranks an indirect one, which
-    // is long-standing behaviour the #217 tombstone tests depend on.
+    // Disagreement between publishers of the SAME directness is a real conflict, and it has to be
+    // detected across the WHOLE maximal set. Applying the directness preference first hides it: with two
+    // unordered indirect publishers disagreeing and one unrelated direct publisher, filtering to the
+    // direct one first drops both indirect claims with no error. `main` throws there, so doing this
+    // second was a strict loss of fail-closed behaviour, found by review running the algorithm over
+    // permutations rather than by reading it.
+    //
+    // Checking per directness group, rather than across the whole set, is what `main` does — its pairwise
+    // rule is "same directness disagreeing throws, otherwise the direct publisher wins". `main` reaches
+    // that outcome only for some arrival orders; grouping makes it the outcome for all of them.
+    for (const group of [maximal.filter((c) => c.direct), maximal.filter((c) => !c.direct)]) {
+      const head = group[0];
+      if (head === undefined) continue;
+      const disagreeing = group.find((candidate) => !candidate.bytes.equals(head.bytes));
+      if (disagreeing !== undefined) {
+        throw new Error(
+          `artifact handoff ancestor invariant suite sources conflict for ${relativePath}: ${head.dependency} vs ${disagreeing.dependency}`
+        );
+      }
+    }
+    // A DIRECT dependency outranks an indirect one when they disagree, which is long-standing behaviour
+    // the #217 tombstone tests depend on. Only cross-directness disagreement reaches here; same-directness
+    // disagreement has already thrown.
     const preferred = maximal.some((candidate) => candidate.direct)
       ? maximal.filter((candidate) => candidate.direct)
       : maximal;
     const first = preferred[0];
-    // `publishers` is never empty — a path only enters the map when some dependency published it — so this
-    // is unreachable, and `continue` rather than a throw keeps an impossible case from inventing an error.
+    // `publishers` is never empty — a path only enters the map when some dependency published it — and an
+    // empty unsuperseded set falls back to the full list above, so this is unreachable.
     if (first === undefined) continue;
-    const conflicting = preferred.find((candidate) => !candidate.bytes.equals(first.bytes));
-    if (conflicting !== undefined) {
-      // Unordered publishers disagreeing about the same file, where nothing can say which is newer.
-      //
-      // The guarantee is fail-closed WITHIN `preferred`, and not before it: the directness filter above
-      // can already have dropped an unordered INDIRECT publisher whose bytes differ, silently, in favour
-      // of a direct one. That arm is pre-existing behaviour the #217 tombstone tests depend on and is
-      // deliberately preserved — but it is not fail-closed, and an earlier version of this comment
-      // claimed a blanket guarantee that the directness filter contradicts.
-      throw new Error(
-        `artifact handoff ancestor invariant suite sources conflict for ${relativePath}: ${first.dependency} vs ${conflicting.dependency}`
-      );
-    }
     // Every remaining publisher carries identical bytes, so `first` is not an arbitrary tie-break: the
     // content is settled and only the attribution differs.
     selectedBytes += first.bytes.length;
