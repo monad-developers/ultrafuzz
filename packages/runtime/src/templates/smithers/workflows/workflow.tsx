@@ -2512,12 +2512,19 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
   for (const relativePath of changedInvariantSourcePaths(realpathSync(task.workspacePath))) {
     paths.add(relativePath);
   }
+  // The budget covers the ASSEMBLED publication -- the inherited ancestor union
+  // plus this stage's own paths -- because every entry of it is written to each
+  // artifact root below. Budgeting `paths` alone let the union reach roughly
+  // twice the limit on disk before verifyArtifacts rejected the manifest.
   let totalBytes = 0;
   const publicationSnapshot = new Map<string, Buffer>();
   const tombstones = invariantSuiteTombstones.get(realpathSync(task.workspacePath)) ?? new Set<string>();
   const selectedDependencies = resolveInvariantSuiteDependencySnapshot(task);
   for (const [relativePath, entry] of selectedDependencies) {
-    if (!tombstones.has(relativePath)) publicationSnapshot.set(relativePath, Buffer.from(entry.bytes));
+    if (tombstones.has(relativePath)) continue;
+    publicationSnapshot.set(relativePath, Buffer.from(entry.bytes));
+    totalBytes += entry.bytes.length;
+    assertInvariantSuiteSourceBudget(publicationSnapshot.size, totalBytes);
   }
   for (const relativePath of paths) {
     const sourcePath = path.resolve(task.workspacePath, relativePath);
@@ -2533,10 +2540,12 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
     if (sourceBytes.length !== sourceStat.size) {
       throw new Error(`artifact-contract failure: invariant suite source changed ${relativePath}`);
     }
-    totalBytes += sourceBytes.length;
+    // A path this stage republishes REPLACES the inherited copy rather than
+    // adding to it, so the superseded bytes leave the running total.
+    totalBytes += sourceBytes.length - (publicationSnapshot.get(relativePath)?.length ?? 0);
     publicationSnapshot.set(relativePath, sourceBytes);
+    assertInvariantSuiteSourceBudget(publicationSnapshot.size, totalBytes);
   }
-  assertInvariantSuiteSourceBudget(paths.size, totalBytes);
   invariantSuitePublicationSnapshots.set(task.attemptId, publicationSnapshot);
   const manifestFiles = [...publicationSnapshot]
     .sort(([left], [right]) => left.localeCompare(right))
@@ -3061,8 +3070,16 @@ function orderedInvariantSuiteDependencies(task: (typeof taskSpecs)[number]): st
  * List the published suite sources of every dependency whose invariant-suite
  * manifest validates against its producer. A dependency with no manifest, or
  * one that does not identify its own producer, contributes nothing.
+ *
+ * `budget` is shared across every dependency on purpose. A fresh allowance per
+ * ancestor bounds one suite at a time, but the caller goes on to retain a buffer
+ * for every (ancestor, path) pair, so the retained bytes scaled with the number
+ * of ancestors instead of with the limit.
  */
-function invariantSuiteDependencySuitePaths(dependencies: readonly string[]): Map<string, string[]> {
+function invariantSuiteDependencySuitePaths(
+  dependencies: readonly string[],
+  budget: { files: number; totalBytes: number } = { files: 0, totalBytes: 0 }
+): Map<string, string[]> {
   const suitePathsByDependency = new Map<string, string[]>();
   for (const dependency of dependencies) {
     const producer = invariantSuiteProducerTask(dependency);
@@ -3099,7 +3116,7 @@ function invariantSuiteDependencySuitePaths(dependencies: readonly string[]): Ma
     ) {
       continue;
     }
-    suitePathsByDependency.set(dependency, listInvariantSuiteSources(suiteRoot));
+    suitePathsByDependency.set(dependency, listInvariantSuiteSources(suiteRoot, "", budget));
   }
   return suitePathsByDependency;
 }
@@ -3201,6 +3218,9 @@ function reconcileInvariantSuiteWorkspace(
 function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
   if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) return;
   const dependencies = orderedInvariantSuiteDependencies(task);
+  // ONE allowance for the whole ancestor union rather than one per ancestor: the
+  // selection below retains a buffer for every (ancestor, path) pair it walks.
+  const suiteBudget = { files: 0, totalBytes: 0 };
   const previousSnapshot = invariantSuiteDependencySnapshots.get(task.attemptId);
   if (previousSnapshot !== undefined) {
     for (const [relativePath, entry] of previousSnapshot) {
@@ -3226,7 +3246,11 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
         throw new Error(`artifact-contract failure: invariant suite handoff record is inconsistent ${relativePath}`);
       }
     }
-    assertInvariantSuiteDependencyExpectations(task, dependencies, invariantSuiteDependencySuitePaths(dependencies));
+    assertInvariantSuiteDependencyExpectations(
+      task,
+      dependencies,
+      invariantSuiteDependencySuitePaths(dependencies, suiteBudget)
+    );
     reconcileInvariantSuiteWorkspace(task, workspaceRoot, recorded.selected, recorded.tombstones);
     return;
   }
@@ -3237,7 +3261,7 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
   const directDependencies = new Set(task.metadata.dependencies.attemptIds);
   const selectedSources = new Map<string, { dependency: string; bytes: Buffer; direct: boolean }>();
   let selectedBytes = 0;
-  const suitePathsByDependency = invariantSuiteDependencySuitePaths(dependencies);
+  const suitePathsByDependency = invariantSuiteDependencySuitePaths(dependencies, suiteBudget);
   // Collect EVERY publisher of every path before deciding any of them (issue #315, and the confluence
   // hole review found in the first revision of this fix).
   //
@@ -3347,6 +3371,7 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
 const MAX_INVARIANT_SUITE_PATH_LENGTH = 4_096;
 const MAX_INVARIANT_SUITE_SEGMENT_LENGTH = 255;
 const MAX_INVARIANT_SUITE_FILES = 512;
+const MAX_INVARIANT_SUITE_SOURCE_DEPTH = 32;
 const MAX_INVARIANT_SUITE_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_INVARIANT_SUITE_TOTAL_BYTES = 64 * 1024 * 1024;
 const INVARIANT_SUITE_BASELINE_FILE = "invariant-suite-baseline.json";
@@ -3835,6 +3860,12 @@ function listInvariantSuiteSources(
   relative = "",
   budget: { files: number; totalBytes: number } = { files: 0, totalBytes: 0 }
 ): string[] {
+  // Bound the walk BEFORE stat'ing the entry. A suite whose tree is nested past
+  // the limit is rejected on the way down instead of after the recursion has
+  // already paid for it.
+  if (relative.split(path.sep).length > MAX_INVARIANT_SUITE_SOURCE_DEPTH) {
+    throw new Error(`artifact handoff invariant-suite tree is too deep: ${relative}`);
+  }
   const current = relative.length === 0 ? suiteRoot : path.join(suiteRoot, relative);
   const stat = lstatSync(current);
   if (stat.isSymbolicLink()) {
