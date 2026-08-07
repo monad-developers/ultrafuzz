@@ -1642,6 +1642,16 @@ test("generated Smithers preserves setup-patch baselines across post-agent prepa
   assert.match(helper, /writeWorkspacePatchBaseline\(task, baselineTree\)/u);
   assert.match(helper, /persistedPreparation === undefined && !replayWorkspacePatches/u);
   assert.match(helper, /taskPublishesWorkspacePatch\(task\) && !workspacePatchBaselineTrees\.has/u);
+  // #312: a RESUMED task worktree can already sit at -- or past -- some dependencies' outputs, because it
+  // lives on a durable volume and still holds the previous attempt's state. Replay must therefore start
+  // after the prefix the worktree already equals byte for byte, and must do so ONLY on the replay path;
+  // post-agent preparation has its own rule and must not be second-guessed. Two production runs (R48,
+  // R49) died at `prepare:stateful-invariant-implement-properties` without this.
+  assert.match(source, /function firstDependencyRequiringReplay\(/u);
+  assert.match(helper, /const replayFrom = replayWorkspacePatches/u);
+  assert.match(helper, /firstDependencyRequiringReplay\(\s*captureWorkspaceTree\(workspaceRoot\),/u);
+  assert.match(helper, /captures\.map\(\(entry\) => entry\.manifest\.result_tree\)/u);
+  assert.match(helper, /captures\.slice\(replayFrom\)/u);
   assert.match(
     source,
     /const result = await agent\.generate\(args\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\);/u

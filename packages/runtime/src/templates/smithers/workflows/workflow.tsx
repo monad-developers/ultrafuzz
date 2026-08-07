@@ -426,6 +426,37 @@ function taskPublishesWorkspacePatch(task: (typeof taskSpecs)[number]): boolean 
   );
 }
 
+/**
+ * Where replay of a dependency chain should START, given the worktree it is replaying into (issue #312).
+ *
+ * Replaying every dependency patch unconditionally is correct on a fresh run: the task worktree begins at
+ * the pinned baseline, so each patch's declared `base_tree` is satisfied in turn down the chain. A RESUMED
+ * run breaks that precondition, because the worktree lives on a durable volume and still holds the
+ * previous attempt's state. Two production runs died on it at the same node with the same expected tree —
+ * R48 (`got bf324c39…`) and R49 (`got b8d46f13…`), both against `setup-foundry`'s pristine `2dd4efef…`.
+ * In both, the worktree was at the END of the chain: every dependency's content was already present, and
+ * `applyWorkspacePatch` threw only because it compares the worktree against one patch's own `base_tree` in
+ * isolation and cannot see the chain that patch belongs to.
+ *
+ * The rule is sound for one reason, and it is worth being precise about it: a tree id is a content hash of
+ * the WHOLE snapshot. If the worktree's tree equals a dependency's declared `result_tree`, the workspace
+ * is byte-identical to that dependency's output, so that dependency and every one before it in replay
+ * order are already materialized. That is an identity, not an inference about what someone intended.
+ *
+ * It also never suppresses an error. A worktree matching no declared output replays from the start and
+ * `applyWorkspacePatch` raises its base-tree mismatch exactly as before, which is what keeps genuine drift
+ * loud instead of quietly producing a corrupt workspace.
+ */
+function firstDependencyRequiringReplay(currentTree: string, resultTrees: readonly string[]): number {
+  // Scan from the end: with a no-op dependency in the chain (`base-test-setup` declares base == result)
+  // two adjacent entries share an output, and resuming after the LAST of them is the honest reading of
+  // "everything up to here is already present".
+  for (let index = resultTrees.length - 1; index >= 0; index -= 1) {
+    if (resultTrees[index] === currentTree) return index + 1;
+  }
+  return 0;
+}
+
 function materializeWorkspacePatchDependencies(
   task: (typeof taskSpecs)[number],
   workspaceRoot: string,
@@ -446,7 +477,11 @@ function materializeWorkspacePatchDependencies(
       const rightIndex = taskSpecs.findIndex((candidate) => candidate.attemptId === path.basename(right));
       return leftIndex - rightIndex || left.localeCompare(right);
     });
-  for (const dependency of dependencies) {
+  // Read every manifest BEFORE applying any of them. The decision below is about the chain as a whole --
+  // whether a LATER dependency's output already describes this worktree -- and that cannot be made one
+  // patch at a time. Reading first also keeps the artifact-contract failures ordered by dependency rather
+  // than interleaved with partially applied patches.
+  const captures = dependencies.map((dependency) => {
     const patchPath = resolveRegularArtifactFile(
       dependency,
       path.join(dependency, "workspace.patch"),
@@ -465,10 +500,21 @@ function materializeWorkspacePatchDependencies(
         cause: error
       });
     }
-    const capture = {
+    return {
       patch: readFileSync(patchPath, "utf8"),
       manifest: manifest as Parameters<typeof applyWorkspacePatch>[1]["manifest"]
     };
+  });
+  // On a RESUME the worktree lives on a durable volume and still holds the previous attempt's state, so
+  // it can already sit at -- or past -- some of these dependencies' outputs. Skip the prefix the worktree
+  // already equals byte for byte (issue #312); on a fresh run nothing matches and this is a no-op.
+  const replayFrom = replayWorkspacePatches
+    ? firstDependencyRequiringReplay(
+        captureWorkspaceTree(workspaceRoot),
+        captures.map((entry) => entry.manifest.result_tree)
+      )
+    : 0;
+  for (const capture of captures.slice(replayFrom)) {
     if (!replayWorkspacePatches) {
       // Post-agent preparation may see a dirty worktree. Replay only when the
       // exact dependency result tree is absent and the clean base tree is
