@@ -507,10 +507,15 @@ test("applies a validated setup patch and rejects a base-tree mismatch", () => {
  * A `spawnSync` ENOBUFS failure, shaped exactly as Node builds it: the capture in `stdout`, a duplicate
  * in `output[1]`, and `error` pointing at the error itself.
  */
-function enobufs(stdout: string, stderr = ""): Error {
+function enobufs(stdout: string | Buffer, stderr: string | Buffer = ""): Error {
   const error = new Error("spawnSync git ENOBUFS") as Error & Record<string, unknown>;
-  const out = Buffer.from(stdout);
-  const err = Buffer.from(stderr);
+  // Buffers pass through unconverted. `runGitBuffer` omits `encoding` because git's output need not be
+  // valid UTF-8, so a capture that CANNOT round-trip through a string is a shape this helper has to be
+  // able to express. While it took only strings, every byte it produced was well-formed UTF-8 by
+  // construction, and a decode can only shrink a well-formed count -- which is why the byte-bound tests
+  // here passed against code whose bound a real capture overshoots threefold.
+  const out = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
+  const err = Buffer.isBuffer(stderr) ? stderr : Buffer.from(stderr);
   error.code = "ENOBUFS";
   error.errno = -105;
   error.stdout = out;
@@ -530,7 +535,7 @@ function syntheticDiff(entries: ReadonlyArray<{ path: string; bytes: number }>):
     .join("");
 }
 
-function messageOf(capture: string, stderr = ""): string {
+function messageOf(capture: string | Buffer, stderr: string | Buffer = ""): string {
   try {
     rethrowOversizedGitOutput(["diff", "--cached"], enobufs(capture, stderr));
   } catch (error) {
@@ -696,4 +701,98 @@ test("picks the overflowing stream by bytes, not by UTF-16 code units", () => {
   const message = messageOf(stdout, stderr);
   assert.match(message, /to stderr/u, message);
   assert.doesNotMatch(message, /workspace is too large/u, message);
+});
+
+/**
+ * The three tests below all fail the same way before the fix, because they share one cause: every
+ * measurement in the diagnostic was taken AFTER a lossy UTF-8 decode. `runGitBuffer` omits `encoding`
+ * precisely because git output need not be valid UTF-8, and each byte that fails to decode becomes one
+ * U+FFFD, which re-encodes to THREE bytes. So a decode is not size-preserving in the direction the
+ * existing tests probe — those feed valid UTF-8, where a decode only ever shrinks the count.
+ */
+function retainedStderrOf(stdout: string | Buffer, stderr: string | Buffer): string {
+  try {
+    rethrowOversizedGitOutput(["diff"], enobufs(stdout, stderr));
+  } catch (error) {
+    const cause = (error as { cause?: Record<string, unknown> }).cause ?? {};
+    return String(cause.stderr ?? "");
+  }
+  throw new Error("expected rethrowOversizedGitOutput to throw");
+}
+
+test("bounds retained stderr in bytes when git's output is not valid UTF-8", () => {
+  // Bounding the input BUFFER bounds nothing once the decode can grow. 2048 bytes of 0xFF decode to
+  // 2048 replacement characters worth 6144 bytes, and dropping the single trailing one leaves 6141.
+  for (const [label, capture] of [
+    ["a run of undecodable bytes", Buffer.alloc(8000, 0xff)],
+    // What this actually looks like in production: a latin-1 path in a git error message.
+    [
+      "a latin-1 path in an error message",
+      Buffer.concat([Buffer.from("fatal: pathspec '"), Buffer.alloc(4000, 0xe9), Buffer.from("' bad\n")])
+    ],
+    // A lone surrogate is ill-formed UTF-8 and decodes to one replacement character per byte.
+    ["a lone surrogate run", Buffer.from(Array.from({ length: 3000 }, (_, index) => [0xed, 0xa0, 0x80][index % 3] ?? 0))]
+  ] as ReadonlyArray<[string, Buffer]>) {
+    const retained = retainedStderrOf("x".repeat(50), capture);
+    assert.ok(retained.length > 0, `a head of stderr should survive ${label}`);
+    assert.ok(
+      Buffer.byteLength(retained, "utf8") <= 2048,
+      `${label}: retained stderr was ${Buffer.byteLength(retained, "utf8")} bytes, bound is 2048`
+    );
+  }
+});
+
+test("picks the overflowing stream by raw capture bytes, not by decoded length", () => {
+  // stdout is nearly 3x stderr in the bytes the buffer actually counted, but stderr is undecodable, so
+  // measuring the decode inflates it 3x and inverts the comparison. The cost is not cosmetic: blaming
+  // stderr suppresses the contributor attribution this diagnostic exists to produce, and inlines a
+  // screenful of replacement characters in its place.
+  const stdout = Buffer.concat([
+    Buffer.from("diff --git a/contracts/Vault.sol b/contracts/Vault.sol\n@@ -0,0 +1 @@\n+"),
+    Buffer.alloc(3_000_000, 0x61)
+  ]);
+  const stderr = Buffer.alloc(1_200_000, 0xe9);
+  assert.ok(stdout.length > stderr.length, "fixture must be stdout-dominant in real bytes");
+  const message = messageOf(stdout, stderr);
+  assert.doesNotMatch(message, /to stderr/u, message);
+  assert.match(message, /contracts \(>=\d+ diff bytes/u, message);
+});
+
+test("ranks contributors by raw diff bytes when the capture is not valid UTF-8", () => {
+  // git treats a NUL-free latin-1 file as text, so `diff --binary` emits its bytes raw. Decoding first
+  // triples that root's apparent contribution: here the root that contributed HALF as much is ranked
+  // first, and the `>=` figure -- advertised as a floor -- is a 3x over-count.
+  const header = (file: string): Buffer => Buffer.from(`diff --git a/${file} b/${file}\n@@ -0,0 +1 @@\n+`);
+  const asciiBytes = 200_000;
+  const latinBytes = 100_000;
+  const capture = Buffer.concat([
+    header("ascii/big.csv"),
+    Buffer.alloc(asciiBytes, 0x61),
+    Buffer.from("\n"),
+    header("latin/small.csv"),
+    Buffer.alloc(latinBytes, 0xe9),
+    Buffer.from("\n")
+  ]);
+  const message = messageOf(capture, "");
+  const ranked = [...message.matchAll(/\b(ascii|latin) \(>=(\d+) diff bytes/gu)].map((match) => ({
+    root: match[1] ?? "",
+    bytes: Number(match[2])
+  }));
+  assert.deepEqual(
+    ranked.map((entry) => entry.root),
+    ["ascii", "latin"],
+    message
+  );
+  // Every figure is documented as a floor. A decode-inflated count is an over-statement, which sends an
+  // operator to trim a root that was never the problem.
+  const truth = new Map([
+    ["ascii", asciiBytes + header("ascii/big.csv").length + 1],
+    ["latin", latinBytes + header("latin/small.csv").length + 1]
+  ]);
+  for (const entry of ranked) {
+    assert.ok(
+      entry.bytes <= (truth.get(entry.root) ?? 0),
+      `${entry.root} reported >=${entry.bytes} but really contributed ${truth.get(entry.root)}`
+    );
+  }
 });
