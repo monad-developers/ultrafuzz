@@ -11,8 +11,10 @@ import ts from "typescript";
 
 /**
  * Regression coverage for #217 (invariant-suite deletions must survive the
- * ancestor handoff) and #219 (the handoff provenance must be rebuildable from
- * durable run state rather than a module-level Map).
+ * ancestor handoff), #219 (the handoff provenance must be rebuildable from
+ * durable run state rather than a module-level Map) and #218 (the source
+ * budgets must bound the traversal and the whole ancestor union, not one
+ * ancestor at a time and not after the bytes are already on disk).
  *
  * The generated Smithers workflow is a template rather than an importable
  * module, so these tests lift the real top-level helpers out of the template,
@@ -62,7 +64,11 @@ type WorkflowHelpers = {
   ) => void;
   resetTaskArtifactsForRetry?: (task: TaskSpecLike) => void;
   changedTestTreePaths?: (workspaceRoot: string, baselinePath?: string, protectedBaselinePath?: string) => string[];
+  listInvariantSuiteSources?: (suiteRoot: string, relative?: string, budget?: SuiteBudget) => string[];
 };
+
+/** The running file/byte allowance `listInvariantSuiteSources` spends while it walks. */
+type SuiteBudget = { files: number; totalBytes: number };
 
 /** Slice a top-level `function name(...)` declaration out of the template. */
 function sliceTopLevelFunction(source: string, name: string): string {
@@ -198,6 +204,7 @@ function loadWorkflowHelpers(
     realpathSync: fs.realpathSync,
     lstatSync: fs.lstatSync,
     statSync: fs.statSync,
+    readdirSync: fs.readdirSync,
     mkdirSync: fs.mkdirSync,
     rmSync: fs.rmSync,
     writeFileDurable,
@@ -223,6 +230,7 @@ function loadWorkflowHelpers(
     MAX_INVARIANT_SUITE_FILES: 512,
     MAX_INVARIANT_SUITE_SOURCE_BYTES: 16 * 1024 * 1024,
     MAX_INVARIANT_SUITE_TOTAL_BYTES: 64 * 1024 * 1024,
+    MAX_INVARIANT_SUITE_SOURCE_DEPTH: 32,
     resolveRegularArtifactFile,
     resolveNonEmptyRegularArtifactFile,
     listInvariantSuiteSources,
@@ -1327,6 +1335,110 @@ test("#315 a direct publisher does not mask a conflict between two unordered ind
       () => helpers.materializeInvariantSuiteFromDependencies?.(downstream, downstream.workspacePath),
       /ancestor invariant suite sources conflict for test\/recon\/Properties\.sol/u,
       "two unordered indirect publishers disagreeing must not be masked by an unrelated direct one"
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#218 a suite tree nested past the depth bound is rejected on the way down", () => {
+  const { runRoot, setup, state } = createInvariantChain();
+  try {
+    // 40 nested directories under test/, which is past MAX_INVARIANT_SUITE_SOURCE_DEPTH.
+    const nested = ["test", ...Array.from({ length: 40 }, (_unused, index) => `d${index}`)].join("/");
+    writeSuiteSource(setup.artifactDir, `${nested}/Properties.sol`, "contract Properties {}\n");
+
+    const helpers = loadWorkflowHelpers(["listInvariantSuiteSources"], state);
+    const listInvariantSuiteSources = helpers.listInvariantSuiteSources;
+    assert.ok(listInvariantSuiteSources);
+    assert.throws(
+      () => listInvariantSuiteSources(path.join(setup.artifactDir, "invariant-suite")),
+      /invariant-suite tree is too deep/u,
+      "an unbounded recursion walks and stats an adversarial tree before any limit applies"
+    );
+
+    // A suite of ordinary depth still lists normally.
+    const { runRoot: shallowRoot, setup: shallow, state: shallowState } = createInvariantChain();
+    try {
+      writeSuiteSource(shallow.artifactDir, "test/recon/Properties.sol", "contract Properties {}\n");
+      const shallowHelpers = loadWorkflowHelpers(["listInvariantSuiteSources"], shallowState);
+      assert.deepEqual(shallowHelpers.listInvariantSuiteSources?.(path.join(shallow.artifactDir, "invariant-suite")), [
+        "test/recon/Properties.sol"
+      ]);
+    } finally {
+      fs.rmSync(shallowRoot, { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#218 the source budget is spent across the whole ancestor union, not reset per ancestor", () => {
+  const { runRoot, setup, handlers, coverage, state } = createInvariantChain();
+  try {
+    // Two ancestors publishing two sources each. The handoff reads a buffer per
+    // (ancestor, path) pair, so a per-ancestor allowance bounds nothing.
+    for (const [spec, node] of [
+      [setup, "stateful-invariant-setup"],
+      [handlers, "stateful-invariant-handlers"]
+    ] as ReadonlyArray<readonly [TaskSpecLike, string]>) {
+      writeSuiteSource(spec.artifactDir, "test/recon/Properties.sol", "contract Properties {}\n");
+      writeSuiteSource(spec.artifactDir, "test/recon/TargetFunctions.sol", "contract TargetFunctions {}\n");
+      writeSuiteManifest(spec.artifactDir, node, spec.attemptId, [
+        "test/recon/Properties.sol",
+        "test/recon/TargetFunctions.sol"
+      ]);
+    }
+
+    const helpers = loadWorkflowHelpers(
+      [...MATERIALIZATION_HELPERS, "listInvariantSuiteSources", "assertInvariantSuiteSourceBudget"],
+      state,
+      { MAX_INVARIANT_SUITE_FILES: 3 }
+    );
+    assert.ok(helpers.materializeInvariantSuiteFromDependencies);
+    assert.throws(
+      () => helpers.materializeInvariantSuiteFromDependencies?.(coverage, coverage.workspacePath),
+      /invariant suite has too many source files \(4\)/u,
+      "two ancestors of two sources each must be charged to one budget, not to two fresh ones"
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#218 the publication budget covers the inherited union and rejects before anything is written", () => {
+  const { runRoot, setup, handlers, state } = createInvariantChain();
+  try {
+    writeSuiteSource(setup.artifactDir, "test/recon/Properties.sol", "contract Properties { /* v1 */ }\n");
+    writeSuiteSource(setup.artifactDir, "test/recon/TargetFunctions.sol", "contract TargetFunctions { /* v1 */ }\n");
+    writeSuiteManifest(setup.artifactDir, "stateful-invariant-setup", "setup", [
+      "test/recon/Properties.sol",
+      "test/recon/TargetFunctions.sol"
+    ]);
+
+    const materialization = loadWorkflowHelpers([...MATERIALIZATION_HELPERS], state);
+    assert.ok(materialization.materializeInvariantSuiteFromDependencies);
+    materialization.materializeInvariantSuiteFromDependencies(handlers, handlers.workspacePath);
+
+    // The stage adds a single source of its own on top of the two it inherited.
+    const authored = path.join(handlers.workspacePath, "test/recon/Handlers.sol");
+    fs.mkdirSync(path.dirname(authored), { recursive: true });
+    fs.writeFileSync(authored, "contract Handlers {}\n", "utf8");
+    state.changedTestTreePaths = ["test/recon/Handlers.sol"];
+
+    const companions = loadWorkflowHelpers([...COMPANION_HELPERS, "assertInvariantSuiteSourceBudget"], state, {
+      MAX_INVARIANT_SUITE_FILES: 2
+    });
+    assert.ok(companions.materializeInvariantSuiteCompanions);
+    assert.throws(
+      () => companions.materializeInvariantSuiteCompanions?.(handlers),
+      /invariant suite has too many source files \(3\)/u,
+      "budgeting only this stage's own paths lets the assembled publication run to twice the limit"
+    );
+    assert.equal(
+      fs.existsSync(path.join(handlers.artifactDir, "invariant-suite")),
+      false,
+      "the budget must reject before the assembled suite is copied into the artifact roots"
     );
   } finally {
     fs.rmSync(runRoot, { recursive: true, force: true });
