@@ -13,7 +13,12 @@ import {
 
 import type { PublicModalBenchmarkConfig } from "../src/config.js";
 import type { ModalModelSpec } from "../src/defaults.js";
-import { parseModalWorkerStatus, type ModalWorkerLineage } from "../src/launch-state.js";
+import {
+  classifyModalRunnerStatus,
+  modalPreModelAttempt,
+  parseModalWorkerStatus,
+  type ModalWorkerLineage
+} from "../src/launch-state.js";
 import { PUBLIC_EVAL_DIAGNOSTICS_FILE, type PublicEvalDiagnostics } from "../src/public-eval-diagnostics.js";
 import {
   assertPublicWorkerInput,
@@ -378,6 +383,156 @@ it("reads model work evidence from the eval journal and never invents it", () =>
   expect(publicEvalModelWorkEvidence(evalRoot)).toBe("none");
 });
 
+it("never reports no model work for a row whose submission may have landed", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-submission-"));
+  const evalRoot = path.join(root, "eval-run");
+  fs.mkdirSync(evalRoot, { recursive: true });
+  const submissionFailed = {
+    row_id: "row-1",
+    target_id: "row-1",
+    status: "failed",
+    // `submitSmithersWorkflow` can fail after the engine has taken the workflow
+    // -- a lease or acknowledgement that never comes back -- and the runtime
+    // discards the id on that path, so the row names no workflow to count.
+    workflow_ids: [],
+    diagnostics: [{ code: "WORKFLOW_SUBMISSION_FAILED", message: "detached admission timed out" }]
+  };
+
+  fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify({ records: [submissionFailed] })}\n`);
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("unknown");
+
+  // One such row is enough to make the whole journal unable to say nothing ran.
+  fs.writeFileSync(
+    path.join(evalRoot, "run-summary.json"),
+    `${JSON.stringify({ records: [...runSummary(0).records, submissionFailed] })}\n`
+  );
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("unknown");
+
+  // A row that did launch still outranks it: the journal knows work began.
+  fs.writeFileSync(
+    path.join(evalRoot, "run-summary.json"),
+    `${JSON.stringify({ records: [...runSummary(1).records, submissionFailed] })}\n`
+  );
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("launched");
+
+  // The same reading from the line journal, and codes raised before submission
+  // still leave the verdict earnable.
+  fs.rmSync(path.join(evalRoot, "run-summary.json"));
+  fs.writeFileSync(path.join(evalRoot, "runs.jsonl"), `${JSON.stringify(submissionFailed)}\n`);
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("unknown");
+  fs.writeFileSync(
+    path.join(evalRoot, "runs.jsonl"),
+    `${JSON.stringify({ ...submissionFailed, diagnostics: [{ code: "EVAL_ROW_SYNC_FAILED" }] })}\n`
+  );
+  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("none");
+});
+
+it("keeps a submission that may have landed out of the pre-model retry budget", async () => {
+  // The end of the road for Finding A: clearing `model_work_started` is exactly
+  // what moves a pair out of the `resume-required` + `postModelRecovery: "stop"`
+  // branch that #286 added, so a journal that cannot rule out a landed workflow
+  // must not clear it. Walk the whole chain rather than assert the flag alone.
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-relaunch-"));
+  const statusPath = path.join(root, "status.json");
+  const resultPath = path.join(root, "result.json");
+  const evalRoot = path.join(root, "eval-run");
+  fs.mkdirSync(evalRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(evalRoot, "run-summary.json"),
+    `${JSON.stringify({
+      launched: 0,
+      records: [
+        {
+          row_id: "row-1",
+          status: "failed",
+          workflow_ids: [],
+          diagnostics: [{ code: "WORKFLOW_SUBMISSION_FAILED", message: "detached admission timed out" }]
+        }
+      ]
+    })}\n`
+  );
+  let modelWorkStarted = false;
+  const writer = await WorkerResultWriter.create({
+    statusPath,
+    resultPath,
+    executionContext: () => ({ launch_generation: 3, attempt: 1, model_work_started: modelWorkStarted })
+  });
+
+  // The eval command returns and the flag is settled against the journal; then
+  // the sandbox is reclaimed during the bundle work that follows. That failure
+  // names nothing, so the contract goes out as a real sandbox exit -- the one
+  // shape whose category is read off `model_work_started` alone.
+  const death = new Error("the sandbox went away");
+  await expect(
+    runWithTerminalPersistence({
+      writer,
+      snapshot: async () => emptyWorkerCheckpoint(),
+      flush: async () => undefined,
+      run: async () => {
+        await checkpointPublicModelWorkStart(
+          writer,
+          () => {
+            modelWorkStarted = true;
+          },
+          async () => undefined
+        );
+        await runAndCheckpointPublicEvalDiagnostics({
+          runEval: async () => undefined,
+          corroborateModelWork: () => {
+            if (publicEvalModelWorkEvidence(evalRoot) === "none") modelWorkStarted = false;
+          },
+          buildDiagnostics: async () =>
+            ({ summary: { scoring_ready: true }, rows: [] }) as unknown as PublicEvalDiagnostics,
+          persistDiagnostics: async () => undefined,
+          flush: async () => undefined
+        });
+        throw death;
+      }
+    })
+  ).rejects.toBe(death);
+
+  const contract = JSON.parse(fs.readFileSync(resultPath, "utf8")) as unknown;
+  expect(contract).toMatchObject({
+    exit_category: "sandbox-exited",
+    diagnostic_code: "sandbox-exited",
+    model_work_started: true
+  });
+  const workerStatus = parseModalWorkerStatus(contract);
+  expect(workerStatus).toMatchObject({ category: "resume-required", model_work_started: true });
+  expect(
+    classifyModalRunnerStatus({
+      sandbox: "exited",
+      preModelAttempt: modalPreModelAttempt(
+        { recovery_lifecycle: [] },
+        { slug: "gpt-5-6-luna-high", generation: 3, attempt: 1 }
+      ),
+      workerStatus,
+      postModelRecovery: "stop"
+    })
+  ).toMatchObject({ category: "resume-required", action: "none" });
+});
+
+it("settles the flag without ever costing the diagnostics document", async () => {
+  const corroborationFailure = new Error("eval run ID is not a safe identifier");
+  const persisted: PublicEvalDiagnostics[] = [];
+  const checkpoint = await runAndCheckpointPublicEvalDiagnostics({
+    runEval: async () => undefined,
+    corroborateModelWork: () => {
+      // `evalRunRoot`'s `assertSafeEvalId` throws for an unsafe eval run ID.
+      throw corroborationFailure;
+    },
+    buildDiagnostics: async () => ({ summary: { scoring_ready: true }, rows: [] }) as unknown as PublicEvalDiagnostics,
+    persistDiagnostics: async (diagnostics) => {
+      persisted.push(diagnostics);
+    },
+    flush: async () => undefined
+  });
+
+  expect(persisted).toHaveLength(1);
+  expect(checkpoint.diagnostics.summary.scoring_ready).toBe(true);
+  expect(checkpoint.runError).toBeUndefined();
+});
+
 it("reports an unbuildable diagnostics document without claiming a sandbox exit or model work", async () => {
   // Run 31171579070, pair ultrafuzz-bench-benchmark-smoke-gpt-5-6-luna-high. The
   // worker log ends `operation-finished` at the same millisecond the terminal
@@ -446,6 +601,10 @@ it("reports an unbuildable diagnostics document without claiming a sandbox exit 
   });
 });
 
+// A journal whose failed rows never reached submission: the target checkout was
+// missing, so `runtimeRowLauncher` threw before it compiled anything to submit.
+// A row that failed at submission is a different journal and a different answer;
+// see "never reports no model work for a row whose submission may have landed".
 function runSummary(launched: number): { launched: number; records: Array<Record<string, unknown>> } {
   return {
     launched,
@@ -454,7 +613,7 @@ function runSummary(launched: number): { launched: number; records: Array<Record
       target_id: rowId,
       status: index < launched ? "launched" : "failed",
       workflow_ids: index < launched ? [`workflow-${rowId}`] : [],
-      diagnostics: index < launched ? [] : [{ code: "WORKFLOW_SUBMISSION_FAILED" }]
+      diagnostics: index < launched ? [] : [{ code: "EVAL_TARGET_PATH_MISSING" }]
     }))
   };
 }

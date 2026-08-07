@@ -525,6 +525,14 @@ describe("Modal runner status", () => {
       result_generation: 2
     });
     expect(parseModalWorkerStatus(workerResult(), { generation: 1, attempt: 2 })).toBeUndefined();
+    // The `sandbox-exited` pairings below are legacy contracts, not contracts a
+    // worker can still write: `namedFaultDisposition` now records `unreachable`
+    // for any fault the worker named, so a contract written today pairs each of
+    // these codes with `unreachable` (see "classifies a sandbox exit by the exit
+    // and a named fault by its name" below). They stay asserted because Modal
+    // volumes outlive a deploy: a contract persisted by a pre-#320 worker is
+    // still read by this parser, and it must keep classifying by the code it
+    // names rather than by the exit category that was never a determination.
     expect(
       parseModalWorkerStatus(
         workerResult({ exit_category: "sandbox-exited", diagnostic_code: "checkpoint-incompatible" })
