@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 
+import { BENCHMARK_LANE_NAMES } from "@ultrafuzz/evals";
 import { z } from "zod/v4";
 
 import {
@@ -152,7 +153,7 @@ const publicBenchmarkConfigSchema = z
     public_benchmark: z
       .object({
         benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
-        lane: z.enum(["smoke", "full"]).default("smoke"),
+        lane: z.enum(BENCHMARK_LANE_NAMES).default("smoke"),
         runner_model_profile: safeId,
         candidate_repository: httpsUrl,
         candidate_commit: fullSha,

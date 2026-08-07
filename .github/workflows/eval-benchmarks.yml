@@ -10,6 +10,20 @@ on:
       - docs/assets/eval-history/**
   workflow_dispatch:
     inputs:
+      benchmark_lane:
+        description: >-
+          Which lane to dispatch. `full` is the EVMBench model matrix. `threat-model` is the v0.1.0
+          release gate from #183: the pinned three-target Ultrafuzz-bench cohort through the
+          PRODUCTION topology, so the threat-model, goal-plan and dynamic goal-fanout nodes actually
+          run. It ignores the model inputs below and uses the checked-in lane profile in
+          benchmarks/lanes.json (gpt-5.6-luna / high), and it is never published to the longitudinal
+          history. It costs real money: confirm an owner and a compute budget before dispatching.
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - threat-model
       openai_model:
         description: OpenAI runner model for the full EVMBench run
         required: true
@@ -52,7 +66,7 @@ on:
         type: string
 
 env:
-  BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}
+  BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_lane || 'smoke' }}
   BENCHMARK_CANDIDATE: ${{ github.event_name == 'push' && github.event.after || github.sha }}
 
 permissions:
@@ -60,7 +74,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: modal-eval-${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  group: modal-eval-${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_lane || 'smoke' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
@@ -80,6 +94,13 @@ jobs:
           ref: ${{ env.BENCHMARK_CANDIDATE }}
           fetch-depth: 0
           persist-credentials: false
+
+      # The dispatched lane is not in the workflow_run payload the publication
+      # qualifier reads, but step names are. This declares it there, exactly once,
+      # so publication can tell a longitudinal observation from a release gate
+      # instead of assuming every dispatch is the EVMBench matrix.
+      - name: Benchmark lane ${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_lane || 'smoke' }}
+        run: echo "Dispatching the $BENCHMARK_MODE benchmark lane"
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
@@ -102,10 +123,10 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
-          DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
-          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
-          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
+          ANTHROPIC_API_KEY: ${{ inputs.benchmark_lane == 'full' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ inputs.benchmark_lane == 'full' && secrets.DEEPSEEK_API_KEY || '' }}
+          KIMI_API_KEY: ${{ inputs.benchmark_lane == 'full' && secrets.KIMI_API_KEY || inputs.benchmark_lane == 'full' && secrets.MOONSHOT_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ inputs.benchmark_lane == 'full' && secrets.KIMI_BASE_URL || inputs.benchmark_lane == 'full' && vars.KIMI_BASE_URL || '' }}
         run: |
           required=(MODAL_TOKEN_ID MODAL_TOKEN_SECRET OPENAI_API_KEY)
           if [ "$BENCHMARK_MODE" = full ]; then
@@ -131,7 +152,12 @@ jobs:
         run: |
           candidate="$(git rev-parse HEAD)"
           generation="${{ github.run_id }}-${{ github.run_attempt }}"
-          if [ "$BENCHMARK_MODE" = smoke ]; then
+          # The release gate has a fixed model identity (#183). Leaving the matrix
+          # unset makes prepare-modal-benchmarks.mjs fall back to the lane's own
+          # checked-in profile, so no dispatch-form value can retune the gate.
+          if [ "$BENCHMARK_MODE" = threat-model ]; then
+            BENCHMARK_MODELS_JSON=""
+          elif [ "$BENCHMARK_MODE" = smoke ]; then
             BENCHMARK_MODELS_JSON="$(jq -cn \
               --arg model "$BENCHMARK_OPENAI_MODEL" \
               --arg reasoning "high" \
@@ -193,10 +219,10 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
-          DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
-          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
-          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
+          ANTHROPIC_API_KEY: ${{ inputs.benchmark_lane == 'full' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ inputs.benchmark_lane == 'full' && secrets.DEEPSEEK_API_KEY || '' }}
+          KIMI_API_KEY: ${{ inputs.benchmark_lane == 'full' && secrets.KIMI_API_KEY || inputs.benchmark_lane == 'full' && secrets.MOONSHOT_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ inputs.benchmark_lane == 'full' && secrets.KIMI_BASE_URL || inputs.benchmark_lane == 'full' && vars.KIMI_BASE_URL || '' }}
         run: |
           : > "$BENCHMARK_CONTROL/launch-attempts.jsonl"
           while IFS=$'\t' read -r config state pair; do
@@ -328,10 +354,10 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
-          DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
-          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
-          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
+          ANTHROPIC_API_KEY: ${{ inputs.benchmark_lane == 'full' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ inputs.benchmark_lane == 'full' && secrets.DEEPSEEK_API_KEY || '' }}
+          KIMI_API_KEY: ${{ inputs.benchmark_lane == 'full' && secrets.KIMI_API_KEY || inputs.benchmark_lane == 'full' && secrets.MOONSHOT_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ inputs.benchmark_lane == 'full' && secrets.KIMI_BASE_URL || inputs.benchmark_lane == 'full' && vars.KIMI_BASE_URL || '' }}
         run: |
           control_timeout_seconds="$(jq -er \
             '.control_timeout_seconds | select(type == "number" and . == floor and . >= 300)' \
@@ -532,10 +558,10 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
-          DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
-          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
-          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
+          ANTHROPIC_API_KEY: ${{ inputs.benchmark_lane == 'full' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ inputs.benchmark_lane == 'full' && secrets.DEEPSEEK_API_KEY || '' }}
+          KIMI_API_KEY: ${{ inputs.benchmark_lane == 'full' && secrets.KIMI_API_KEY || inputs.benchmark_lane == 'full' && secrets.MOONSHOT_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ inputs.benchmark_lane == 'full' && secrets.KIMI_BASE_URL || inputs.benchmark_lane == 'full' && vars.KIMI_BASE_URL || '' }}
         run: |
           mkdir -p "$BENCHMARK_RESULTS"
           collect_pair() {

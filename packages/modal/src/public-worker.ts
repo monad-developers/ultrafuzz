@@ -7,6 +7,7 @@ import path from "node:path";
 import {
   adaptBenchmarkManifestToEvalSuite,
   benchmarkLaneConcurrency,
+  benchmarkLaneSelectedTargetIds,
   BENCHMARK_FULL_MAX_PARALLEL_RUNS,
   BENCHMARK_FULL_MAX_PARALLEL_TARGETS,
   BENCHMARK_SMOKE_MAX_PARALLEL_RUNS,
@@ -18,6 +19,7 @@ import {
   publicEvalDiagnosticsFailedTargetCount,
   resolveTerminalReportPath,
   type BenchmarkCohortManifest,
+  type BenchmarkLaneName,
   type EvalRunRecord,
   type EvalSuiteSpec
 } from "@ultrafuzz/evals";
@@ -68,6 +70,12 @@ export const PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS = 20 * 60;
 // topology bound for workflow transitions and final synchronization.
 export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 4 * 60 * 60 + 10 * 60;
 export const PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS = 60 * 60;
+// The production topology adds the threat model, the plan, the roaming goal and
+// an unbounded dynamic fanout on top of everything the full graph runs, so this
+// lane wants every second the Modal watchdog will grant. 15,000 is that ceiling:
+// `public_benchmark.max_runtime_seconds` is capped there in `config.ts`, so a
+// larger value is rejected at parse time rather than silently clamped.
+export const PUBLIC_BENCHMARK_THREAT_MODEL_MAX_RUNTIME_SECONDS = 15_000;
 
 export class PublicEvalDiagnosticsBuildError extends Error {
   override readonly name = "PublicEvalDiagnosticsBuildError";
@@ -298,16 +306,18 @@ export function publicEvalRunErrorCanBePublished(diagnostics: PublicEvalDiagnost
   return diagnostics.summary.scoring_ready && publicEvalDiagnosticsFailedTargetCount(diagnostics.rows) === 1;
 }
 
-export function publicBenchmarkMaxParallelEvalRows(lane: "smoke" | "full"): number {
+export function publicBenchmarkMaxParallelEvalRows(lane: BenchmarkLaneName): number {
   return benchmarkLaneConcurrency(lane).max_parallel_runs;
 }
 
-export function publicBenchmarkMaxParallelWorkflowNodes(lane: "smoke" | "full"): number {
+export function publicBenchmarkMaxParallelWorkflowNodes(lane: BenchmarkLaneName): number {
   return benchmarkLaneConcurrency(lane).max_parallel_targets;
 }
 
-export function publicBenchmarkMaxRuntimeSeconds(lane: "smoke" | "full"): number {
-  return lane === "smoke" ? PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS : PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS;
+export function publicBenchmarkMaxRuntimeSeconds(lane: BenchmarkLaneName): number {
+  if (lane === "smoke") return PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS;
+  if (lane === "threat-model") return PUBLIC_BENCHMARK_THREAT_MODEL_MAX_RUNTIME_SECONDS;
+  return PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS;
 }
 
 export function publicEvalCommandTimeoutSeconds(input: {
@@ -710,8 +720,7 @@ function publicBenchmarkConfiguredTargetIds(
 ): string[] | undefined {
   const configured = config.public_benchmark.targets;
   if (configured === undefined) return undefined;
-  const selectedIds =
-    config.public_benchmark.lane === "smoke" ? cohort.smoke_targets : cohort.targets.map((target) => target.id);
+  const selectedIds = benchmarkLaneSelectedTargetIds(config.public_benchmark.lane, cohort);
   const cohortTargets = new Map(cohort.targets.map((target) => [target.id, target]));
   const seen = new Set<string>();
   for (const target of configured) {
@@ -772,7 +781,7 @@ export async function materializeBakedCandidate(
   }
 }
 
-export function preparePublicEvalSuite(baseSuite: EvalSuiteSpec, lane: "smoke" | "full"): EvalSuiteSpec {
+export function preparePublicEvalSuite(baseSuite: EvalSuiteSpec, lane: BenchmarkLaneName): EvalSuiteSpec {
   return {
     ...baseSuite,
     run: {
@@ -780,7 +789,9 @@ export function preparePublicEvalSuite(baseSuite: EvalSuiteSpec, lane: "smoke" |
       // Smoke runs all three pinned target rows together, with one four-way
       // strategy wave inside each bounded workflow. Full mode uses two target
       // waves for the 40-target EVMbench cohort and eight-way concurrency
-      // within each production workflow.
+      // within each production workflow. The threat-model gate runs the same
+      // three pinned rows as smoke but with the full lane's eight-way in-workflow
+      // concurrency, because its dynamic goal fanout is what fills that queue.
       max_parallel_runs: publicBenchmarkMaxParallelEvalRows(lane),
       max_parallel_targets: publicBenchmarkMaxParallelWorkflowNodes(lane)
     }
@@ -871,7 +882,7 @@ export function publicBundleSources(
   controlRoot: string,
   evalRunId: string,
   diagnostics: { root: string; source: string },
-  lane: "smoke" | "full" = "full"
+  lane: BenchmarkLaneName = "full"
 ): PublicBenchmarkBundleSource[] {
   const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
   const sources: PublicBenchmarkBundleSource[] = [
