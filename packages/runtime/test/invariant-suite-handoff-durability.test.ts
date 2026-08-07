@@ -317,6 +317,7 @@ const HANDOFF_RECORD_HELPERS = [
 
 const MATERIALIZATION_HELPERS = [
   ...HANDOFF_RECORD_HELPERS,
+  "invariantSuiteAncestorSupersedes",
   "orderedInvariantSuiteDependencies",
   "invariantSuiteDependencySuitePaths",
   "assertInvariantSuiteDependencyExpectations",
@@ -1019,6 +1020,90 @@ test("#217 an emptied test-tree source is tombstoned on both discovery paths", (
       [...(state.tombstones.get(workspaceRoot) ?? new Set<string>())],
       [relativePath],
       "the baseline branch must record the truncation as a deletion"
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#315 a later ancestor's rewrite supersedes an earlier one instead of failing as a conflict", () => {
+  // R50's exact shape. `implement-properties` depends DIRECTLY only on `coverage`, so `setup` and
+  // `handlers` are both INDIRECT ancestors -- equal directness, which is the case that used to throw
+  // unconditionally. The existing #217 fixtures never reach it, because `coverage` has `handlers` direct
+  // and `setup` indirect.
+  //
+  // `handlers` depends on `setup` and rewrote Properties.sol after it. That is supersession, and reading
+  // it as a conflict killed R50 at 25 succeeded / 0 failed, one node from the Recon campaign no run has
+  // ever entered.
+  const runRoot = fs.mkdtempSync(path.join(process.cwd(), "ultrafuzz-invariant-315-"));
+  try {
+    const setup = makeTaskSpec(runRoot, "setup", "stateful-invariant-setup", [], []);
+    const handlers = makeTaskSpec(runRoot, "handlers", "stateful-invariant-handlers", ["setup"], ["setup"]);
+    const coverage = makeTaskSpec(
+      runRoot,
+      "coverage",
+      "stateful-invariant-coverage",
+      ["setup", "handlers"],
+      ["handlers"]
+    );
+    const implement = makeTaskSpec(
+      runRoot,
+      "implement",
+      "stateful-invariant-implement-properties",
+      ["setup", "handlers", "coverage"],
+      ["coverage"]
+    );
+    const state = createHarnessState([setup, handlers, coverage, implement]);
+
+    writeSuiteSource(setup.artifactDir, "test/recon/Properties.sol", "contract Properties { /* setup */ }\n");
+    writeSuiteManifest(setup.artifactDir, "stateful-invariant-setup", "setup", ["test/recon/Properties.sol"]);
+    writeSuiteSource(handlers.artifactDir, "test/recon/Properties.sol", "contract Properties { /* handlers */ }\n");
+    writeSuiteManifest(handlers.artifactDir, "stateful-invariant-handlers", "handlers", ["test/recon/Properties.sol"]);
+    writeSuiteSource(coverage.artifactDir, "test/recon/Properties.sol", "contract Properties { /* handlers */ }\n");
+    writeSuiteManifest(coverage.artifactDir, "stateful-invariant-coverage", "coverage", ["test/recon/Properties.sol"]);
+
+    const helpers = loadWorkflowHelpers([...MATERIALIZATION_HELPERS], state);
+    assert.ok(helpers.materializeInvariantSuiteFromDependencies);
+    helpers.materializeInvariantSuiteFromDependencies(implement, implement.workspacePath);
+
+    assert.equal(
+      fs.readFileSync(path.join(implement.workspacePath, "test/recon/Properties.sol"), "utf8"),
+      "contract Properties { /* handlers */ }\n",
+      "the descendant ancestor's rewrite must win over the one it superseded"
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("#315 two UNORDERED ancestors publishing different bytes still fail closed", () => {
+  // The guard that keeps the fix honest. Siblings that neither depend on the other are a genuine
+  // conflict: picking one would silently drop the other's work, which is the failure that made the first
+  // revision of #314 unmergeable. Reachability, not sort position, is what separates the two cases.
+  const runRoot = fs.mkdtempSync(path.join(process.cwd(), "ultrafuzz-invariant-315-conflict-"));
+  try {
+    const root = makeTaskSpec(runRoot, "root", "property-specification-fanin", [], []);
+    const left = makeTaskSpec(runRoot, "left", "stateful-invariant-setup", ["root"], ["root"]);
+    const right = makeTaskSpec(runRoot, "right", "stateful-invariant-handlers", ["root"], ["root"]);
+    const downstream = makeTaskSpec(
+      runRoot,
+      "downstream",
+      "stateful-invariant-implement-properties",
+      ["root", "left", "right"],
+      ["root"]
+    );
+    const state = createHarnessState([root, left, right, downstream]);
+
+    writeSuiteSource(left.artifactDir, "test/recon/Properties.sol", "contract Properties { /* left */ }\n");
+    writeSuiteManifest(left.artifactDir, "stateful-invariant-setup", "left", ["test/recon/Properties.sol"]);
+    writeSuiteSource(right.artifactDir, "test/recon/Properties.sol", "contract Properties { /* right */ }\n");
+    writeSuiteManifest(right.artifactDir, "stateful-invariant-handlers", "right", ["test/recon/Properties.sol"]);
+
+    const helpers = loadWorkflowHelpers([...MATERIALIZATION_HELPERS], state);
+    assert.ok(helpers.materializeInvariantSuiteFromDependencies);
+    assert.throws(
+      () => helpers.materializeInvariantSuiteFromDependencies?.(downstream, downstream.workspacePath),
+      /ancestor invariant suite sources conflict for test\/recon\/Properties\.sol/u
     );
   } finally {
     fs.rmSync(runRoot, { recursive: true, force: true });

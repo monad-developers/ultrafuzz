@@ -2949,6 +2949,48 @@ function resolveInheritedInvariantSuiteTombstones(task: (typeof taskSpecs)[numbe
  * Order the ancestor closure so indirect ancestors are visited before declared
  * dependencies. A declared dependency therefore always wins a byte conflict.
  */
+/**
+ * Does `later` transitively depend on `earlier`? (issue #315)
+ *
+ * When two ancestors publish the same invariant-suite source with different bytes, the selection below
+ * has to decide whether that is a CONFLICT or a SUPERSESSION, and the answer is a property of the
+ * dependency graph, not of anything in the bytes.
+ *
+ * R50 died on exactly this at `prepare:stateful-invariant-implement-properties`, at 25 succeeded and zero
+ * failed, with `tests/recon/Properties.sol` published by both `stateful-invariant-setup` and
+ * `stateful-invariant-handlers`. `handlers` depends on `setup`, runs after it, and legitimately rewrites
+ * the file. Nothing was in conflict; the newer content simply replaced the older.
+ *
+ * `orderedInvariantSuiteDependencies` could not express that. It sorts by directness and then
+ * ALPHABETICALLY, and `implement-properties` depends directly only on `stateful-invariant-coverage`, so
+ * both of these are indirect and the tie-break is `localeCompare` — under which `handlers` sorts BEFORE
+ * `setup`, the reverse of causal order. Sort position is not causality.
+ *
+ * Reachability, not ordering, is deliberately the question asked. Two ancestors that are unordered with
+ * respect to each other — parallel siblings publishing different bytes for the same path — are a genuine
+ * conflict and must still fail closed. Answering "whichever sorts later wins" would silently drop a
+ * sibling's work, which is the exact failure that made the first revision of #314 unmergeable.
+ *
+ * Terminates on a malformed cyclic graph. The topology validator rejects cycles, so that should be
+ * unreachable, but a helper that hangs on bad input converts a validation bug into a run that never fails
+ * and never finishes — worse than an error.
+ */
+function invariantSuiteAncestorSupersedes(later: string, earlier: string): boolean {
+  if (later === earlier) return false;
+  const byAttemptId = new Map(taskSpecs.map((candidate) => [candidate.attemptId, candidate]));
+  const visited = new Set<string>();
+  const pending = [later];
+  for (let current = pending.pop(); current !== undefined; current = pending.pop()) {
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const dependency of byAttemptId.get(current)?.metadata.dependencies.attemptIds ?? []) {
+      if (dependency === earlier) return true;
+      pending.push(dependency);
+    }
+  }
+  return false;
+}
+
 function orderedInvariantSuiteDependencies(task: (typeof taskSpecs)[number]): string[] {
   const directDependencies = new Set(task.metadata.dependencies.attemptIds);
   return [...task.dependencyArtifactDirs].sort((left, right) => {
@@ -3153,12 +3195,27 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
       const bytes = readInvariantSuiteSourceBytes(suiteRoot, relativePath, "artifact handoff invariant suite");
       const previous = selectedSources.get(relativePath);
       if (previous !== undefined && !previous.bytes.equals(bytes)) {
-        if (previous.direct === isDirect || (!previous.direct && !isDirect)) {
-          throw new Error(
-            `artifact handoff ancestor invariant suite sources conflict for ${relativePath}: ${previous.dependency} vs ${dependency}`
-          );
+        if (previous.direct === isDirect) {
+          // Equal directness is the case that used to throw unconditionally, and it is the ONLY case this
+          // touches. Two ancestors publishing the same path with different bytes are in conflict just
+          // when neither ran after the other; if one transitively depends on the other, the descendant's
+          // bytes are the newer content, not a competing claim (issue #315).
+          //
+          // Deliberately confined to this branch. A first attempt asked the graph before the directness
+          // rule and inverted the precedence a DIRECT predecessor has over an indirect ancestor, which
+          // broke the #217 tombstone tests — while the comment above it claimed no working selection
+          // could change. The suite disproved the comment on the first run.
+          const previousAttemptId = path.basename(previous.dependency);
+          const currentAttemptId = path.basename(dependency);
+          if (invariantSuiteAncestorSupersedes(previousAttemptId, currentAttemptId)) continue;
+          if (!invariantSuiteAncestorSupersedes(currentAttemptId, previousAttemptId)) {
+            throw new Error(
+              `artifact handoff ancestor invariant suite sources conflict for ${relativePath}: ${previous.dependency} vs ${dependency}`
+            );
+          }
+        } else if (!isDirect) {
+          continue;
         }
-        if (!isDirect) continue;
       }
       const prior = selectedSources.get(relativePath);
       if (prior === undefined) selectedBytes += bytes.length;
