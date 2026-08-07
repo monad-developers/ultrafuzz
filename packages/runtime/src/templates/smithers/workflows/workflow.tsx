@@ -38,8 +38,13 @@ const {
   validateInvariantSourceProofSchema,
   writeFileDurable
 } = await import(artifactsModule);
-const { applyWorkspacePatch, captureWorkspacePatch, captureWorkspaceTree, normalizeFinalReportSeverityRecord } =
-  await import(runtimeModule);
+const {
+  applyWorkspacePatch,
+  captureWorkspacePatch,
+  captureWorkspaceTree,
+  normalizeFinalReportSeverityRecord,
+  validateWorkspacePatchCapture
+} = await import(runtimeModule);
 
 const inputTaskSchema = z.object({
   id: z.string(),
@@ -432,27 +437,54 @@ function taskPublishesWorkspacePatch(task: (typeof taskSpecs)[number]): boolean 
  * Replaying every dependency patch unconditionally is correct on a fresh run: the task worktree begins at
  * the pinned baseline, so each patch's declared `base_tree` is satisfied in turn down the chain. A RESUMED
  * run breaks that precondition, because the worktree lives on a durable volume and still holds the
- * previous attempt's state. Two production runs died on it at the same node with the same expected tree —
- * R48 (`got bf324c39…`) and R49 (`got b8d46f13…`), both against `setup-foundry`'s pristine `2dd4efef…`.
- * In both, the worktree was at the END of the chain: every dependency's content was already present, and
- * `applyWorkspacePatch` threw only because it compares the worktree against one patch's own `base_tree` in
- * isolation and cannot see the chain that patch belongs to.
+ * previous attempt's state. R48 died on it at this node with `expected 2dd4efef… got bf324c39…`, and its
+ * dependency manifests, dumped from the volume, show why: the worktree was at the END of the chain, so
+ * every dependency's content was already present and `applyWorkspacePatch` threw only because it compares
+ * the worktree against one patch's own `base_tree` in isolation. R49 failed at the same node with the same
+ * expected tree (`got b8d46f13…`), but its manifests were never dumped, so its worktree being at the end
+ * of ITS chain is a hypothesis, not a measurement.
  *
- * The rule is sound for one reason, and it is worth being precise about it: a tree id is a content hash of
- * the WHOLE snapshot. If the worktree's tree equals a dependency's declared `result_tree`, the workspace
- * is byte-identical to that dependency's output, so that dependency and every one before it in replay
- * order are already materialized. That is an identity, not an inference about what someone intended.
+ * Two conditions are needed, and only the first is a hash identity:
  *
- * It also never suppresses an error. A worktree matching no declared output replays from the start and
- * `applyWorkspacePatch` raises its base-tree mismatch exactly as before, which is what keeps genuine drift
- * loud instead of quietly producing a corrupt workspace.
+ *   1. The worktree's tree equals dependency `i`'s declared `result_tree`. A tree id is a content hash, so
+ *      this means the workspace is identical to that dependency's output over the snapshot the hash covers
+ *      — every path `stageWorkspaceTree` stages. Content outside it is content no patch can carry either,
+ *      because `captureWorkspacePatch` diffs the same staged index, so nothing patch-delivered is missed.
+ *   2. The dependencies BEFORE `i` form a chain into it, each one's `result_tree` being the next one's
+ *      `base_tree`. Without this, "everything before `i` is already materialized" is an inference about
+ *      topology rather than a fact about content — and a false one for a fan-in of siblings that share a
+ *      base and diverge, where skipping to the end would silently drop a sibling's work and leave a hole
+ *      that every descendant then inherits through this task's own published patch.
+ *
+ * Condition 2 is why this checks the prefix instead of trusting the ordering. A partial skip is
+ * self-validating (the next `applyWorkspacePatch` re-checks `base_tree` and throws), but a TOTAL skip
+ * validates nothing at all, and that is exactly the case a non-chain fan-in produces.
+ *
+ * Today's topology pins `loops: 1` on every patch publisher, so a sibling fan-in is not reachable; but
+ * `loop_mode` defaults to `parallel`, nothing validates linearity of `workspace-patch@1` publishers, and
+ * the dependency sort follows topology DECLARATION order, which is not required to be causal order. A
+ * one-line topology change should not silently corrupt a workspace.
+ *
+ * When the prefix is not a chain this returns 0: replay everything, and let `applyWorkspacePatch` raise
+ * its base-tree mismatch exactly as it does today. Failing the way we already fail is the safe direction.
  */
-function firstDependencyRequiringReplay(currentTree: string, resultTrees: readonly string[]): number {
-  // Scan from the end: with a no-op dependency in the chain (`base-test-setup` declares base == result)
+function firstDependencyRequiringReplay(
+  currentTree: string,
+  manifests: readonly { base_tree: string; result_tree: string }[]
+): number {
+  // Scan from the end: with a no-op dependency in the chain (`base-test-setup` declared base == result)
   // two adjacent entries share an output, and resuming after the LAST of them is the honest reading of
   // "everything up to here is already present".
-  for (let index = resultTrees.length - 1; index >= 0; index -= 1) {
-    if (resultTrees[index] === currentTree) return index + 1;
+  for (let index = manifests.length - 1; index >= 0; index -= 1) {
+    if (manifests[index]?.result_tree !== currentTree) continue;
+    let chained = true;
+    for (let link = 1; link <= index; link += 1) {
+      if (manifests[link]?.base_tree !== manifests[link - 1]?.result_tree) {
+        chained = false;
+        break;
+      }
+    }
+    return chained ? index + 1 : 0;
   }
   return 0;
 }
@@ -477,7 +509,7 @@ function materializeWorkspacePatchDependencies(
       const rightIndex = taskSpecs.findIndex((candidate) => candidate.attemptId === path.basename(right));
       return leftIndex - rightIndex || left.localeCompare(right);
     });
-  // Read every manifest BEFORE applying any of them. The decision below is about the chain as a whole --
+  // Read every manifest and patch BEFORE applying any of them. The decision below is about the chain as a whole --
   // whether a LATER dependency's output already describes this worktree -- and that cannot be made one
   // patch at a time. Reading first also keeps the artifact-contract failures ordered by dependency rather
   // than interleaved with partially applied patches.
@@ -505,15 +537,24 @@ function materializeWorkspacePatchDependencies(
       manifest: manifest as Parameters<typeof applyWorkspacePatch>[1]["manifest"]
     };
   });
-  // On a RESUME the worktree lives on a durable volume and still holds the previous attempt's state, so
-  // it can already sit at -- or past -- some of these dependencies' outputs. Skip the prefix the worktree
-  // already equals byte for byte (issue #312); on a fresh run nothing matches and this is a no-op.
-  const replayFrom = replayWorkspacePatches
-    ? firstDependencyRequiringReplay(
-        captureWorkspaceTree(workspaceRoot),
-        captures.map((entry) => entry.manifest.result_tree)
-      )
-    : 0;
+  // Validate EVERY capture, including any the replay below decides to skip. All of these checks -- the
+  // manifest schema, the object ids, the patch digest, the symlink/submodule rejection and the
+  // sensitive-path rejection -- used to live inside `applyWorkspacePatch`, so skipping a patch meant
+  // skipping its validation entirely, and the skip decision reads `result_tree` from a manifest nothing
+  // had checked was even well formed.
+  for (const capture of captures) validateWorkspacePatchCapture(workspaceRoot, capture);
+  // On a RESUME the worktree lives on a durable volume and still holds the previous attempt's state, so it
+  // can already sit at -- or past -- some of these dependencies' outputs. Skip the prefix the worktree
+  // already holds (issue #312). On a fresh run at the pinned baseline nothing normally matches, though a
+  // leading dependency that published a zero-file patch declares `base_tree === result_tree` and so can
+  // match; skipping that one is a no-op, since `applyWorkspacePatch` already early-returns on it.
+  const replayFrom =
+    replayWorkspacePatches && captures.length > 0
+      ? firstDependencyRequiringReplay(
+          captureWorkspaceTree(workspaceRoot),
+          captures.map((entry) => entry.manifest)
+        )
+      : 0;
   for (const capture of captures.slice(replayFrom)) {
     if (!replayWorkspacePatches) {
       // Post-agent preparation may see a dirty worktree. Replay only when the

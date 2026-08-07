@@ -1648,9 +1648,15 @@ test("generated Smithers preserves setup-patch baselines across post-agent prepa
   // post-agent preparation has its own rule and must not be second-guessed. Two production runs (R48,
   // R49) died at `prepare:stateful-invariant-implement-properties` without this.
   assert.match(source, /function firstDependencyRequiringReplay\(/u);
-  assert.match(helper, /const replayFrom = replayWorkspacePatches/u);
+  assert.match(helper, /replayWorkspacePatches && captures\.length > 0/u);
   assert.match(helper, /firstDependencyRequiringReplay\(\s*captureWorkspaceTree\(workspaceRoot\),/u);
-  assert.match(helper, /captures\.map\(\(entry\) => entry\.manifest\.result_tree\)/u);
+  assert.match(helper, /captures\.map\(\(entry\) => entry\.manifest\)/u);
+  // Every capture is validated even when replay skips it: the manifest schema, object ids, digest and
+  // sensitive-path checks all live inside `applyWorkspacePatch`, so a skipped patch would otherwise go
+  // entirely unchecked while its `result_tree` steered the skip decision.
+  assert.match(helper, /for \(const capture of captures\) validateWorkspacePatchCapture\(workspaceRoot, capture\);/u);
+  // The skip is only sound when the skipped prefix is a real chain; a sibling fan-in must replay.
+  assert.match(source, /return chained \? index \+ 1 : 0;/u);
   assert.match(helper, /captures\.slice\(replayFrom\)/u);
   assert.match(
     source,
