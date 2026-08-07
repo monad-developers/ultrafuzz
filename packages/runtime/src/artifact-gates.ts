@@ -1673,12 +1673,16 @@ function verifyLensReferenceExpectationAuthority(
  * Keep a verification marker consistent with an artifact a runtime gate just rewrote. Updates the
  * recorded sha256 for that one path in both `artifacts` and `publications`, leaving every other
  * entry and the rest of the marker untouched, so the marker still attests exactly what is on disk.
+ *
+ * Exported because findings normalization rewrites `findings.json` from `workflow-sync`, outside
+ * this module, and leaves exactly the same stale attestation behind (issue #348).
  */
-function refreshVerifiedArtifactDigest(
+export function refreshVerifiedArtifactDigest(
   layout: RunLayout,
   attemptId: string,
   relativePath: string,
-  absolutePath: string
+  absolutePath: string,
+  source = "property-provenance"
 ): RuntimeDiagnostic[] {
   const markerPath = path.join(layout.root, ARTIFACT_VERIFICATION_DIRECTORY, `${attemptId}.json`);
   let parsed: unknown;
@@ -1713,7 +1717,7 @@ function refreshVerifiedArtifactDigest(
       code: "ARTIFACT_VERIFICATION_DIGEST_REFRESHED",
       message: `Refreshed the verification marker digest for ${relativePath} after runtime sanitization`,
       severity: "warning",
-      source: "property-provenance",
+      source,
       path: markerPath,
       details: {
         attempt_id: attemptId,

@@ -9,6 +9,7 @@ import {
   appendEvent,
   assertNoSymlinkComponents,
   assertPathInside,
+  FINDINGS_FILE,
   FindingsValidationError,
   createNodeAttemptLedgerEntry,
   getNodeArtifactDir,
@@ -46,7 +47,7 @@ import {
   type UsageLedgerReplay
 } from "@ultrafuzz/artifacts";
 
-import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
+import { refreshVerifiedArtifactDigest, verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
 import {
   ArtifactReconciliationInterruptedError,
   isRetryableArtifactReconciliationError,
@@ -2212,6 +2213,25 @@ async function finalizeTerminalTask(input: {
         provenance: findingsProvenance(input.node, input.task)
       });
       findingsCount = report.count;
+      // Normalization REWRITES findings.json: it fills in ids, canonicalizes confidence and stamps
+      // the node/strategy/attempt/model/loop provenance the producer omitted. The workflow verifier
+      // has already hashed the pre-normalization bytes into this attempt's verification marker, and
+      // every dependent re-hashes the published file against that marker in
+      // `assertVerifiedDependency`. Left alone, the marker attests bytes that no longer exist and
+      // each dependent's `prepare:` wrapper fails permanently as `artifact-contract` before its
+      // agent ever runs -- which is what kept `dedupe-findings`, the only smoke-lane node whose
+      // dependencies publish findings.json, red on all three targets (issue #348). The runtime made
+      // the edit, so the marker follows it, exactly as the property-lens sanitizer already does
+      // (issue #275). A findings.json that is not a declared output leaves the marker untouched.
+      diagnostics.push(
+        ...refreshVerifiedArtifactDigest(
+          input.layout,
+          input.task.attemptId,
+          FINDINGS_FILE,
+          report.normalized_path,
+          "findings"
+        )
+      );
       events.push({
         eventType: "findings-normalized",
         status: "succeeded",
