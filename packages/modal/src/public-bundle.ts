@@ -2887,7 +2887,16 @@ function assertRawRunMetadataClosure(input: {
       ? {}
       : { cacheWriteUsdPerMillion: input.modelPrice.cacheWriteUsdPerMillion }),
     outputUsdPerMillion: input.modelPrice.outputUsdPerMillion,
-    reasoningUsdPerMillion: input.modelPrice.reasoningUsdPerMillion ?? input.modelPrice.outputUsdPerMillion
+    // NOT the emitted-rate fallback: this reconstructs the run-metadata SNAPSHOT, which is a
+    // verbatim dump of ModelPricing and omits the key entirely when the catalog carries no
+    // cost.reasoning (model-pricing.ts). Substituting the output rate here injects a key the
+    // snapshot cannot have, so the comparison below fails with "run metadata does not replay
+    // from raw evidence" -- which would merely MOVE the hard failure this change exists to
+    // remove, from diagnostics build to bundle publication. Mirror the sibling cache-write
+    // line and omit it instead.
+    ...(input.modelPrice.reasoningUsdPerMillion === undefined
+      ? {}
+      : { reasoningUsdPerMillion: input.modelPrice.reasoningUsdPerMillion })
   };
   const outstanding = accounting?.outstanding_model_invocations;
   const configuredModels = identity?.configured_models;

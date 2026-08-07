@@ -1289,6 +1289,32 @@ describe("public Modal benchmark bundles", () => {
     ).toThrow(/diagnostics row does not match the matrix/u);
   });
 
+  it("parses a bundle whose catalog carries no reasoning rate, pricing it from the output rate", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-no-reasoning-"));
+    // A catalog with NO cost.reasoning. Before the fallback this hard-failed the whole
+    // benchmark: the diagnostics guard threw, which becomes public-eval-diagnostics-invalid
+    // -> permanent-operational-failure, a category the smoke soft-fail does not cover. The
+    // first cut of the fix only moved that failure here, because the run-metadata snapshot
+    // omits the key while the verifier substituted one, giving "run metadata does not replay
+    // from raw evidence". This is the bundle-level case the diagnostics test cannot reach.
+    const bundle = asDeepSeekFlashBundle(
+      createPublicBenchmarkBundle({
+        ...TEST_BUNDLE_METADATA,
+        files: completePublicSources(root, ["target-a-runner-trial-1"])
+      }),
+      {
+        input: 0.14,
+        cache_read: 0.0028,
+        output: 0.28
+      }
+    );
+
+    // Parsing at all is the assertion: every guard on this path -- the raw re-pricing
+    // comparison and the run-metadata snapshot replay -- must accept a catalog that omits
+    // the reasoning rate. Either one rejecting it reinstates the hard failure.
+    expect(() => parsePublicBenchmarkBundle(bundle)).not.toThrow();
+  });
+
   it("requires exact provider identity and complete DeepSeek Flash pricing for every v7 row", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-deepseek-pricing-"));
     const rowId = "target-a-runner-trial-1";
@@ -2400,7 +2426,9 @@ interface DeepSeekFlashCatalogRates {
   input: number;
   cache_read: number;
   output: number;
-  reasoning: number;
+  // Optional so a fixture can model a catalog that carries NO cost.reasoning, which is the
+  // shape that made the whole benchmark hard-fail before the fallback landed.
+  reasoning?: number;
 }
 
 const EXACT_DEEPSEEK_FLASH_CATALOG_RATES: DeepSeekFlashCatalogRates = {
@@ -2536,7 +2564,9 @@ function asDeepSeekFlashBundle(
           inputUsdPerMillion: catalogRates.input,
           cachedInputUsdPerMillion: catalogRates.cache_read,
           outputUsdPerMillion: catalogRates.output,
-          reasoningUsdPerMillion: catalogRates.reasoning
+          // Omit the key entirely when the catalog omits it: modelPricingSnapshot is a
+          // verbatim ModelPricing dump, so a present-but-substituted key cannot replay.
+          ...(catalogRates.reasoning === undefined ? {} : { reasoningUsdPerMillion: catalogRates.reasoning })
         }
       }
     };
@@ -2639,7 +2669,9 @@ function deepSeekFlashPricingFixture(
       cache_read: catalogRates.cache_read,
       cache_write: null,
       output: catalogRates.output,
-      reasoning: catalogRates.reasoning
+      // The DIAGNOSTICS always carry a concrete reasoning rate -- production emits the
+      // fell-back output rate when the catalog omits one. Only the CATALOG omits the key.
+      reasoning: catalogRates.reasoning ?? catalogRates.output
     },
     usage: {
       uncached_input_tokens: 1_000,
