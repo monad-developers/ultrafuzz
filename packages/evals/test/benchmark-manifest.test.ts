@@ -347,9 +347,9 @@ describe("public benchmark manifests", () => {
     // place that knows which nodes the threat-model workstream turned on. If a
     // later change adds another one, this fails instead of silently widening
     // every curated lane.
-    const topology = parseYaml(
-      fs.readFileSync(path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"), "utf8")
-    ) as { nodes: { id: string; group?: string }[] };
+    const topology = parseYaml(fs.readFileSync(path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"), "utf8")) as {
+      nodes: { id: string; group?: string }[];
+    };
     const goalGroupNodeIds = topology.nodes.filter((node) => node.group === "goals").map((node) => node.id);
     const declared = [...goalGroupNodeIds, "threat-model", "goal-plan", "reference-vulnerability-database"].sort();
     expect([...THREAT_MODEL_GOAL_FANOUT_NODE_IDS].sort()).toEqual(declared);
@@ -366,7 +366,10 @@ describe("public benchmark manifests", () => {
     // prune it explicitly or the guarantee is silently false.
     const smokeTopology = parseYaml(fs.readFileSync(path.join(REPOSITORY_ROOT, BENCHMARK_SMOKE_WORKFLOW_PATH), "utf8"));
     const nodes = (smokeTopology as { nodes: { id: string; dynamic?: unknown }[] }).nodes;
-    const declaredDynamicNodeIds = nodes.filter((node) => node.dynamic !== undefined).map((node) => node.id).sort();
+    const declaredDynamicNodeIds = nodes
+      .filter((node) => node.dynamic !== undefined)
+      .map((node) => node.id)
+      .sort();
     expect(declaredDynamicNodeIds).toEqual([...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS].sort());
 
     const suite = adaptBenchmarkManifestToEvalSuite({

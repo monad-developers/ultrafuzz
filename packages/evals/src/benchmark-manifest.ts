@@ -45,6 +45,21 @@ export const BENCHMARK_DIFFERENTIAL_EXCLUDED_NODE_IDS = [
 export const BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS = ["threat-goals", "class-goals"] as const;
 
 /**
+ * What it takes to remove the goal fanout from a graph and leave it valid.
+ * `goal-plan` exists only to feed the fanout, so once the fanout goes it is
+ * terminal, and it is the producer the report prompts cite through
+ * `artifact_path`, which requires an ancestor. Pruning it with the fanout also
+ * strips those citations from the rendered prompts.
+ */
+export const BENCHMARK_GOAL_FANOUT_EXCLUDED_NODE_IDS = [
+  ...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS,
+  "goal-plan"
+] as const;
+
+/** The dedicated smoke graph has no `dynamic-strategy-generator` to prune. */
+export const BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS = BENCHMARK_GOAL_FANOUT_EXCLUDED_NODE_IDS;
+
+/**
  * Every default-on node the threat-model workstream adds to the production
  * topology. Curated lanes that prune by an explicit node-ID list cannot name
  * these, because their lists were written before the IDs existed, so the list
@@ -54,28 +69,16 @@ export const BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS = ["threat-goals", "class-go
  * `reference-vulnerability-database` the `references` group, so no group-level
  * filter catches them either.
  */
-/**
- * What the smoke lane prunes to honour `disable_dynamic_strategies`. `goal-plan`
- * exists only to drive the fanout, and it is the sole producer the smoke report
- * prompt cites via `artifact_path`, so pruning the fanout without it would leave
- * that citation without an ancestor and fail topology validation. Excluding it
- * also strips the citation from the rendered prompt.
- */
-export const BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS = [
-  ...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS,
-  "goal-plan"
-] as const;
-
 export const THREAT_MODEL_GOAL_FANOUT_NODE_IDS = [
   "reference-vulnerability-database",
   "threat-model",
-  "goal-plan",
   "goal-roaming",
-  ...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS
+  ...BENCHMARK_GOAL_FANOUT_EXCLUDED_NODE_IDS
 ] as const;
+
 export const BENCHMARK_DYNAMIC_EXCLUDED_NODE_IDS = [
   "dynamic-strategy-generator",
-  ...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS
+  ...BENCHMARK_GOAL_FANOUT_EXCLUDED_NODE_IDS
 ] as const;
 export const BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES = [
   "stateful-invariant",
