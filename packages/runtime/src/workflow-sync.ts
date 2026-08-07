@@ -3490,6 +3490,12 @@ function dependencyFindingProvenanceForTask(input: {
   // re-validation would fail a node the authoritative in-workflow gate passed.
   const requireLifecycleCoverage = input.task.logicalNodeId === "dedupe-findings";
   const lifecycleLedger = requireLifecycleCoverage ? readFindingLifecycleLedger(artifactDir) : undefined;
+  if (requireLifecycleCoverage && lifecycleLedger === undefined && upstream.length > 0) {
+    // Without it the expectations degrade to one single-source entry per
+    // upstream finding, which reports a missing required artifact as a
+    // findings-contract violation. Name the real problem instead.
+    throw new Error("artifact-contract failure: dedupe provenance requires finding-lifecycle-ledger.json");
+  }
   const expectations = buildFindingSourceExpectations({
     upstream,
     ...(lifecycleLedger === undefined ? {} : { lifecycleLedger }),

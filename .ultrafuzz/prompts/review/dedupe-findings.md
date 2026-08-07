@@ -85,6 +85,36 @@ or inline environment-assignment prefixes. Preserve the original command's
 environment, selectors, and test-root semantics, count actual failing tests,
 and keep framework-specific blocked and failing results distinct.
 
+Read the findings of every strategy lane below. Ledger coverage is checked
+against every dependency findings artifact the run produced, not against the
+lanes you chose to inspect, so none of these may be skipped. A lane pruned
+from this run has its line removed and produces nothing to account for.
+
+Boundary tests findings: {{artifact_path:boundary-tests}}/findings.json
+Encode decode findings: {{artifact_path:encode-decode}}/findings.json
+Differential library tests findings: {{artifact_path:differential-library-tests}}/findings.json
+Round trip findings: {{artifact_path:round-trip}}/findings.json
+Workflow property based tests findings: {{artifact_path:workflow-property-based-tests}}/findings.json
+Time warp sequences findings: {{artifact_path:time-warp-sequences}}/findings.json
+Expand coverage findings: {{artifact_path:expand-coverage}}/findings.json
+External dependency boundaries findings: {{artifact_path:external-dependency-boundaries}}/findings.json
+Externalized state accounting findings: {{artifact_path:externalized-state-accounting}}/findings.json
+Amm boundary liquidity findings: {{artifact_path:amm-boundary-liquidity}}/findings.json
+Payable fallback accounting findings: {{artifact_path:payable-fallback-accounting}}/findings.json
+Packed action parity findings: {{artifact_path:packed-action-parity}}/findings.json
+Batch atomicity unsupported actions findings: {{artifact_path:batch-atomicity-unsupported-actions}}/findings.json
+Router exact accounting findings: {{artifact_path:router-exact-accounting}}/findings.json
+Rounding direction audit findings: {{artifact_path:rounding-direction-audit}}/findings.json
+Market exhaustion boundaries findings: {{artifact_path:market-exhaustion-boundaries}}/findings.json
+Order replacement collateral findings: {{artifact_path:order-replacement-collateral}}/findings.json
+State machine boundaries findings: {{artifact_path:state-machine-boundaries}}/findings.json
+Lifecycle view boundaries findings: {{artifact_path:lifecycle-view-boundaries}}/findings.json
+Stateful invariant coverage findings: {{artifact_path:stateful-invariant-coverage}}/findings.json
+Stateful invariant implement properties findings: {{artifact_path:stateful-invariant-implement-properties}}/findings.json
+Stateful invariant campaign findings: {{artifact_path:stateful-invariant-campaign}}/findings.json
+Differential lane author findings: {{artifact_path:differential-lane-author}}/findings.json
+Differential repair and report review findings: {{artifact_path:differential-repair-and-report-review}}/findings.json
+
 Also inspect the Dynamic strategy generator outputs before deduping:
 
 Dynamic strategy plan:
@@ -216,9 +246,22 @@ more than one upstream node resolves to its ledger record only through that
 shared key; without it the merge is rejected as not preserving the exact
 discovery-source union.
 
-Every upstream finding you read must appear exactly once across all
-`source_artifacts` in the ledger, including the ones you recorded only as a
-duplicate or family variant. A missing or doubly-claimed source fails the node.
+Every finding in every dependency `findings.json` enumerated above must appear
+exactly once across all `source_artifacts` in the ledger, including the ones you
+recorded only as a duplicate or family variant and the ones you judged
+unsupported. Coverage is checked against what the runtime read, not against the
+lanes you chose to inspect, so a missing or doubly-claimed source fails the node.
+
+Write `node_id` by copying the producing node out of the finding itself, from
+its own `source_nodes` entry or `producer_node_id`. Never write the group
+template ID, and never write a directory name taken from the artifact path; for
+a generated child those differ from the ID the finding reports. Write
+`finding_id` as that finding's own `id`.
+
+A finding you judged unsupported still needs coverage. Give it its own ledger
+record with no retained finding rather than attaching it to an unrelated root,
+so no retained root's `source_artifacts` names a node that did not contribute
+to it.
 
 After writing the required artifacts, run only a small number of direct JSON
 shape checks, then stop. Do not spend the finalization reserve on broad

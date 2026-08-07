@@ -45,7 +45,10 @@ where `node_id` is the producing node exactly as the upstream finding reports
 it and `finding_id` is that finding's own ID. Every upstream finding you read
 must appear exactly once across all records, including the ones you discarded
 as duplicates or speculation; the ledger is checked for exact coverage and a
-missing or doubly-claimed source fails the node.
+missing or doubly-claimed source fails the node. Give a finding you discarded as
+unsupported its own record with no retained finding rather than attaching it to
+an unrelated root, so no retained root names a node that did not contribute to
+it.
 
 Write each record's `dedupe_key` onto its retained finding in
 `deduped-findings.json` as that finding's own `dedupe_key` field, byte-for-byte
