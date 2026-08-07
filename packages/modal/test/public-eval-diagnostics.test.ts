@@ -1277,7 +1277,11 @@ function writeCompleteModelAccountingFixture(
     inputUsdPerMillion: 1,
     cachedInputUsdPerMillion: 0.1,
     outputUsdPerMillion: 2,
-    reasoningUsdPerMillion: 2
+    // Distinct from the output rate on purpose: with them equal,
+    // `reasoningUsdPerMillion ?? outputUsdPerMillion` at the emit site is
+    // indistinguishable from plain `outputUsdPerMillion`, so discarding the catalog's
+    // declared rate survives the whole suite.
+    reasoningUsdPerMillion: 3
   };
   const catalogReasoning =
     rates.reasoningUsdPerMillion === undefined ? {} : { reasoningUsdPerMillion: rates.reasoningUsdPerMillion };
@@ -1555,6 +1559,45 @@ function terminalWorkflow(status: "succeeded" | "failed") {
 }
 
 describe("public post-eval diagnostics pricing fallback", () => {
+  it("preserves the catalog's own reasoning rate when it differs from the output rate", () => {
+    const config: PublicModalBenchmarkConfig = {
+      ...CONFIG,
+      models: [MODEL],
+      public_benchmark: {
+        ...CONFIG.public_benchmark,
+        runner_model_profile: MODEL.slug
+      }
+    };
+    const fixture = evalFixture(MODEL, config);
+    // A non-pinned model, so the deepseek rate pin does not apply, with a reasoning rate
+    // that DIFFERS from output. Without this the `??` left-hand side is unobservable:
+    // every other fixture sets reasoning == output, so discarding the catalog's declared
+    // rate entirely survives the suite.
+    writeCompleteModelAccountingFixture(fixture.runRoot, MODEL.model, {
+      rates: {
+        inputUsdPerMillion: 1,
+        cachedInputUsdPerMillion: 0.1,
+        outputUsdPerMillion: 2,
+        reasoningUsdPerMillion: 3
+      }
+    });
+    refreshTerminalEvidenceBinding(fixture);
+
+    const diagnostics = createPublicEvalDiagnostics({
+      config,
+      model: MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: fixture.matrix,
+      runSummary: fixture.runSummary,
+      createdAt: "2026-08-03T00:10:00.000Z"
+    });
+
+    expect(diagnostics.rows[0]).toMatchObject({
+      pricing: { rates_usd_per_million: { output: 2, reasoning: 3 } }
+    });
+  });
+
   it("prices reasoning from the output rate when the catalog omits a reasoning rate", () => {
     const config: PublicModalBenchmarkConfig = {
       ...CONFIG,

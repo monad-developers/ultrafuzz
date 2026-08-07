@@ -68,7 +68,11 @@ const TEST_PRICING_CATALOG_BYTES = Buffer.from(
   `${JSON.stringify({
     openai: {
       models: {
-        [TEST_MODEL]: { cost: { input: 1, cache_read: 0.1, output: 2, reasoning: 2 } }
+        // reasoning deliberately DIFFERS from output: with them equal,
+        // `reasoningUsdPerMillion ?? outputUsdPerMillion` is indistinguishable from plain
+        // `outputUsdPerMillion`, so discarding the catalog's declared rate survives the
+        // whole suite. A distinct value makes every emit site's left-hand side observable.
+        [TEST_MODEL]: { cost: { input: 1, cache_read: 0.1, output: 2, reasoning: 3 } }
       }
     }
   })}\n`,
@@ -3037,7 +3041,8 @@ function fixturePublicPricing() {
       cache_read: 0.1,
       cache_write: null,
       output: 2,
-      reasoning: 2
+      // Matches the catalog's distinct reasoning rate above.
+      reasoning: 3
     },
     usage: {
       uncached_input_tokens: 1_000,
@@ -3379,7 +3384,7 @@ function writePublicExecutionEvidenceFixture(input: {
             inputUsdPerMillion: 1,
             cachedInputUsdPerMillion: 0.1,
             outputUsdPerMillion: 2,
-            reasoningUsdPerMillion: 2
+            reasoningUsdPerMillion: 3
           }
         }
       },
