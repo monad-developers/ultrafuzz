@@ -44,7 +44,11 @@ import {
   writePublicEvalDiagnosticsAtomic
 } from "./public-eval-diagnostics.js";
 import { capModalTargetTopologyTimeouts, modalTargetToml } from "./workspace-config.js";
-import { sanitizeWorkerDiagnosticMessage, WORKER_STDERR_TAIL_BYTES } from "./worker-diagnostics.js";
+import {
+  describeWorkerTermination,
+  sanitizeWorkerDiagnosticMessage,
+  WORKER_STDERR_TAIL_BYTES
+} from "./worker-diagnostics.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "./worker-result.js";
 import { OperationalDispositionError } from "./terminal-disposition.js";
 
@@ -73,6 +77,25 @@ export class PublicEvalDiagnosticsBuildError extends Error {
 
   constructor(cause: unknown) {
     super("public eval diagnostics could not be built", { cause });
+  }
+}
+
+/**
+ * A command this worker killed, as opposed to one that ran to completion.
+ *
+ * Both shapes are operationally `unreachable`, but only one of them leaves a
+ * finished journal behind. A command that returned has written everything it
+ * was ever going to write, whatever exit code it chose; a command that was
+ * timed out or aborted may have launched work it never got to record. Every
+ * reader that has to tell those apart -- today, the `model_work_started`
+ * corroboration gate -- needs the distinction made at the throw site, not
+ * guessed at from an exit code or a message.
+ */
+export class PublicWorkerCommandInterruptedError extends OperationalDispositionError {
+  override readonly name = "PublicWorkerCommandInterruptedError";
+
+  constructor(options: { cause?: unknown } = {}) {
+    super("unreachable", options);
   }
 }
 const PUBLIC_EVAL_RUN_ID_MAX_LENGTH = 128;
@@ -206,6 +229,13 @@ export async function runPublicBenchmarkWorker(input: {
           if (publicEvalModelWorkEvidence(evalRunRoot(prepared.controlRoot, prepared.evalRunId)) === "none") {
             modelWorkStarted = false;
           }
+        },
+        reportCorroborationFailure: (error) => {
+          appendPublicWorkerLogLine(
+            logPath,
+            `model-work-corroboration-failed ${describeWorkerTermination(error)}`,
+            retainedForbiddenSecretValues
+          );
         },
         buildDiagnostics: async () =>
           createPublicEvalDiagnosticsFromRun({
@@ -347,7 +377,9 @@ export async function runWithPublicPreparationTimeout<T>(
  * The flag has to lead the work it describes: a sandbox reclaimed mid-eval never
  * writes again, and treating that as a pre-model flake would relaunch a run that
  * had already spent its budget. `corroborateModelWork` settles the flag against
- * the eval's own journal once the command returns.
+ * the eval's own journal once the command returns -- including when it returns
+ * nonzero, which is what an all-failed matrix does and the only case in which
+ * the flag is ever lowered.
  */
 export async function checkpointPublicModelWorkStart(
   writer: WorkerResultWriter,
@@ -446,10 +478,28 @@ function readPublicEvalRunRecords(evalRoot: string): Array<Record<string, unknow
   return undefined;
 }
 
+/**
+ * Whether the eval command left a journal that can be read as final.
+ *
+ * A nonzero exit is the normal outcome here, not an anomaly: `eval run` reports
+ * `ok: false` for any failed or incomplete row, `emitCommandResult` turns that
+ * into exit 1, and `runCommand` turns exit 1 into a throw. Gating corroboration
+ * on "the command threw" would therefore gate it on the very rows it exists to
+ * account for, which is what #332 found. What actually matters is narrower: a
+ * command that returned has finished writing, however it exited, while a
+ * command this worker killed may have launched work it never recorded, and only
+ * that one keeps its raised flag on the strength of the interruption alone.
+ */
+export function publicEvalCommandLeftFinalJournal(runError: unknown): boolean {
+  return !(runError instanceof PublicWorkerCommandInterruptedError);
+}
+
 export async function runAndCheckpointPublicEvalDiagnostics(input: {
   runEval: () => Promise<void>;
-  /** Settles `model_work_started`; called once the eval command has returned. */
+  /** Settles `model_work_started`; called once the eval command has returned, whatever its exit code. */
   corroborateModelWork?: () => void;
+  /** Records a corroboration read that threw, so a read that never succeeds is not invisible. */
+  reportCorroborationFailure?: (error: unknown) => void;
   buildDiagnostics: () => PublicEvalDiagnostics | Promise<PublicEvalDiagnostics>;
   persistDiagnostics: (diagnostics: PublicEvalDiagnostics) => Promise<void>;
   flush: () => Promise<void>;
@@ -460,20 +510,24 @@ export async function runAndCheckpointPublicEvalDiagnostics(input: {
   } catch (error) {
     runError = error;
   }
-  // Only a command that returned has a final journal. One that timed out or was
-  // killed may have launched work it never recorded, so its raised flag stands.
   // Corroborating here, rather than after this function returns, keeps the
   // settled flag on the contract even when building the diagnostics throws.
   //
   // The hook only ever lowers the flag, so a hook that throws costs nothing but
   // the lowering: the flag stays raised, which is the side that does not retry
   // spent work. Failing the eval run over it would cost the diagnostics
-  // document, which is the one artifact this function exists to produce.
-  if (runError === undefined) {
+  // document, which is the one artifact this function exists to produce. It
+  // still has to say so: a read that throws every time would otherwise look
+  // exactly like a journal that keeps answering `launched`.
+  if (publicEvalCommandLeftFinalJournal(runError)) {
     try {
       input.corroborateModelWork?.();
-    } catch {
-      // Reading the journal is best-effort evidence, never a run outcome.
+    } catch (error) {
+      try {
+        input.reportCorroborationFailure?.(error);
+      } catch {
+        // A reporter that cannot report is still not a run outcome.
+      }
     }
   }
   let diagnostics: PublicEvalDiagnostics;
@@ -1043,7 +1097,7 @@ async function runCommand(
   }
   if (timedOut || aborted) {
     await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-failed\n`);
-    throw new OperationalDispositionError("unreachable", {
+    throw new PublicWorkerCommandInterruptedError({
       cause:
         aborted && options.signal?.reason instanceof Error
           ? options.signal.reason
@@ -1110,6 +1164,29 @@ async function runBare(argv: string[]): Promise<void> {
   if (exitCode !== 0) throw new Error(`${argv[0]} exited ${exitCode}`);
 }
 
+/**
+ * Append one redacted line to the worker log without ever becoming a failure.
+ *
+ * Callers use this from paths whose whole point is that they cannot fail the
+ * run -- a best-effort read that threw, say -- so a log that cannot be written
+ * must not turn into the outcome the caller was avoiding.
+ */
+export function appendPublicWorkerLogLine(
+  logPath: string,
+  message: string,
+  forbiddenSecretValues: Iterable<string> = []
+): void {
+  try {
+    const sanitized = sanitizeWorkerDiagnosticMessage(message, {
+      forbiddenSecretValues: [...forbiddenSecretValues],
+      keep: "head"
+    });
+    fs.appendFileSync(logPath, `${new Date().toISOString()} ${sanitized}\n`);
+  } catch {
+    // The log is evidence, not an outcome.
+  }
+}
+
 function requiredEnv(name: string, env: Record<string, string | undefined> = process.env): string {
   const value = env[name];
   if (value === undefined || value.trim() === "") throw new Error(`${name} is required`);
@@ -1118,7 +1195,9 @@ function requiredEnv(name: string, env: Record<string, string | undefined> = pro
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
-  throw new OperationalDispositionError("unreachable", {
+  // An abort between two commands is the same interruption as an abort during
+  // one: whatever was running was cut short rather than allowed to finish.
+  throw new PublicWorkerCommandInterruptedError({
     cause: signal.reason instanceof Error ? signal.reason : new Error("preparation-timeout")
   });
 }
