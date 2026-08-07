@@ -155,6 +155,16 @@ export function applyWorkspacePatch(workspaceRoot: string, capture: WorkspacePat
   const currentTree = captureWorkspaceTree(workspaceRoot);
   if (currentTree === capture.manifest.result_tree) return;
   if (currentTree !== capture.manifest.base_tree) {
+    // A node that fans in several dependencies can only ever match ONE of their base trees: applying the
+    // first advances the worktree past every other declared baseline. The later patches are not stale,
+    // they are superseded — their content is already folded in by whichever nodes ran between. Issue #312:
+    // R48 died here on a one-file `setup-foundry` patch whose file was already present, and `maxAttempts=1`
+    // on the prepare step turned that into a dead run three times over.
+    //
+    // Superseded is VERIFIED, never assumed. Every path the manifest declares must already carry exactly
+    // the object the patch would have produced; anything less falls through to the error below, because
+    // continuing quietly is how a node ends up building on stale sources with all its checks green.
+    if (patchAlreadySatisfied(workspaceRoot, capture.manifest, currentTree)) return;
     throw new Error(`workspace patch base tree mismatch: expected ${capture.manifest.base_tree}, got ${currentTree}`);
   }
   assertPatchPathsMatchManifest(workspaceRoot, capture.manifest.base_tree, capture.patch, capture.manifest.files);
@@ -175,6 +185,35 @@ export function applyWorkspacePatch(workspaceRoot: string, capture: WorkspacePat
       `workspace patch result tree mismatch: expected ${capture.manifest.result_tree}, got ${appliedTree}`
     );
   }
+}
+
+/** The object a tree holds at `entryPath`, or undefined when the tree has nothing there. */
+function treeEntryId(workspaceRoot: string, tree: string, entryPath: string): string | undefined {
+  try {
+    return runGit(workspaceRoot, ["rev-parse", `${tree}:${entryPath}`]).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * True when every path this patch declares already holds the object the patch would have produced.
+ *
+ * Compares per declared path against `result_tree` rather than comparing whole trees: the worktree
+ * legitimately carries other nodes' work, so it will never equal `result_tree` outright. A declared path
+ * missing from BOTH trees also matches — that is what a deletion looks like once applied.
+ */
+function patchAlreadySatisfied(
+  workspaceRoot: string,
+  manifest: WorkspacePatchManifest,
+  currentTree: string
+): boolean {
+  // An empty declaration proves nothing about the worktree, so it cannot stand in for having applied.
+  if (manifest.files.length === 0) return false;
+  return manifest.files.every((entry) => {
+    const expected = treeEntryId(workspaceRoot, manifest.result_tree, entry.path);
+    return expected === treeEntryId(workspaceRoot, currentTree, entry.path);
+  });
 }
 
 function parseChangedPaths(raw: string): WorkspacePatchFile[] {
