@@ -644,7 +644,6 @@ function publicEvalRecordModelEvidence(
     modelPrices === undefined ||
     (modelPrices.contextTiers?.length ?? 0) !== 0 ||
     modelPrices.cachedInputUsdPerMillion === undefined ||
-    modelPrices.reasoningUsdPerMillion === undefined ||
     JSON.stringify(publicAccountingComparable(current)) !== JSON.stringify(publicAccountingComparable(cumulative)) ||
     cumulative.models.length !== 1 ||
     cumulative.models[0] !== expectedConfiguredModel ||
@@ -684,7 +683,14 @@ function publicEvalRecordModelEvidence(
       cache_read: modelPrices.cachedInputUsdPerMillion,
       cache_write: modelPrices.cacheWriteUsdPerMillion ?? null,
       output: modelPrices.outputUsdPerMillion,
-      reasoning: modelPrices.reasoningUsdPerMillion
+      // Mirror the pricing engine's own fallback (workflow-sync.ts: `reasoningUsdPerMillion
+      // ?? outputUsdPerMillion`) rather than requiring the catalog to carry a separate
+      // reasoning rate. Demanding one fails CLOSED for any model whose catalog entry omits
+      // it, and that surfaces as `public-eval-diagnostics-invalid` ->
+      // permanent-operational-failure, which is not soft-failable -- so a lane that would
+      // otherwise degrade gracefully hard-fails instead. For deepseek-v4-flash the value is
+      // identical either way, since its pinned reasoning rate equals its output rate.
+      reasoning: modelPrices.reasoningUsdPerMillion ?? modelPrices.outputUsdPerMillion
     },
     usage: {
       uncached_input_tokens: cumulative.uncached_input_tokens,

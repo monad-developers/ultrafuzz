@@ -1268,7 +1268,7 @@ function writeCompleteModelAccountingFixture(
       inputUsdPerMillion: number;
       cachedInputUsdPerMillion: number;
       outputUsdPerMillion: number;
-      reasoningUsdPerMillion: number;
+      reasoningUsdPerMillion?: number;
     };
   } = {}
 ): void {
@@ -1279,6 +1279,8 @@ function writeCompleteModelAccountingFixture(
     outputUsdPerMillion: 2,
     reasoningUsdPerMillion: 2
   };
+  const catalogReasoning =
+    rates.reasoningUsdPerMillion === undefined ? {} : { reasoningUsdPerMillion: rates.reasoningUsdPerMillion };
   const summary = {
     uncached_input_tokens: 1_000,
     cache_read_tokens: 100,
@@ -1390,7 +1392,14 @@ function writeCompleteModelAccountingFixture(
             catalog_sha256: catalogSha256,
             resolved_models: [configuredModel],
             unresolved_models: [],
-            model_prices: { [configuredModel]: rates }
+            model_prices: {
+              [configuredModel]: {
+                inputUsdPerMillion: rates.inputUsdPerMillion,
+                cachedInputUsdPerMillion: rates.cachedInputUsdPerMillion,
+                outputUsdPerMillion: rates.outputUsdPerMillion,
+                ...catalogReasoning
+              }
+            }
           }
         }
       },
@@ -1544,3 +1553,54 @@ function terminalWorkflow(status: "succeeded" | "failed") {
     finished_at: "2026-07-20T00:00:01.000Z"
   } as const;
 }
+
+describe("public post-eval diagnostics pricing fallback", () => {
+  it("prices reasoning from the output rate when the catalog omits a reasoning rate", () => {
+    const config: PublicModalBenchmarkConfig = {
+      ...CONFIG,
+      models: [DEEPSEEK_FLASH_MODEL],
+      public_benchmark: {
+        ...CONFIG.public_benchmark,
+        runner_model_profile: DEEPSEEK_FLASH_MODEL.slug
+      }
+    };
+    const fixture = evalFixture(DEEPSEEK_FLASH_MODEL, config);
+    // A catalog entry with NO reasoning rate. Requiring one here fails closed, which
+    // surfaces as `public-eval-diagnostics-invalid` -> permanent-operational-failure --
+    // not soft-failable -- so a lane that would otherwise degrade gracefully hard-fails
+    // the whole benchmark. The pricing engine already falls back to the output rate
+    // (workflow-sync.ts `reasoningUsdPerMillion ?? outputUsdPerMillion`), so the
+    // diagnostics must mirror that rather than reject the catalog.
+    writeCompleteModelAccountingFixture(fixture.runRoot, DEEPSEEK_FLASH_MODEL.model, {
+      rates: {
+        inputUsdPerMillion: 0.14,
+        cachedInputUsdPerMillion: 0.0028,
+        outputUsdPerMillion: 0.28
+      }
+    });
+    refreshTerminalEvidenceBinding(fixture);
+
+    const diagnostics = createPublicEvalDiagnostics({
+      config,
+      model: DEEPSEEK_FLASH_MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: fixture.matrix,
+      runSummary: fixture.runSummary,
+      createdAt: "2026-08-03T00:10:00.000Z"
+    });
+
+    expect(diagnostics.rows[0]).toMatchObject({
+      pricing: {
+        rates_usd_per_million: {
+          uncached_input: 0.14,
+          cache_read: 0.0028,
+          cache_write: null,
+          output: 0.28,
+          // Fell back to the output rate rather than rejecting the catalog.
+          reasoning: 0.28
+        }
+      }
+    });
+  });
+});

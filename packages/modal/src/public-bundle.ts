@@ -2674,7 +2674,6 @@ function assertRawAccountingClosure(input: {
   if (
     modelPrice === undefined ||
     modelPrice.cachedInputUsdPerMillion === undefined ||
-    modelPrice.reasoningUsdPerMillion === undefined ||
     (modelPrice.contextTiers?.length ?? 0) !== 0
   ) {
     throw new Error(`public benchmark bundle row ${input.rowId} raw catalog has incomplete public pricing rates`);
@@ -2684,7 +2683,9 @@ function assertRawAccountingClosure(input: {
     cache_read: modelPrice.cachedInputUsdPerMillion,
     cache_write: modelPrice.cacheWriteUsdPerMillion ?? null,
     output: modelPrice.outputUsdPerMillion,
-    reasoning: modelPrice.reasoningUsdPerMillion
+    // Same fallback the diagnostics emit and the pricing engine applies; comparing a
+    // required-rate against a fell-back rate would reject every valid bundle.
+    reasoning: modelPrice.reasoningUsdPerMillion ?? modelPrice.outputUsdPerMillion
   };
   if (canonicalJson(rates) !== canonicalJson(input.pricing.rates_usd_per_million)) {
     throw new Error(`public benchmark bundle row ${input.rowId} diagnostics rates do not match the raw catalog`);
@@ -2767,7 +2768,7 @@ function replayRawPublicAccounting(
     cache_read: modelPrice.cachedInputUsdPerMillion,
     cache_write: modelPrice.cacheWriteUsdPerMillion,
     output: modelPrice.outputUsdPerMillion,
-    reasoning: modelPrice.reasoningUsdPerMillion
+    reasoning: modelPrice.reasoningUsdPerMillion ?? modelPrice.outputUsdPerMillion
   };
   for (const entry of entries) {
     const uncachedInput = rawTokenCount(entry, "input_tokens");
@@ -2886,7 +2887,7 @@ function assertRawRunMetadataClosure(input: {
       ? {}
       : { cacheWriteUsdPerMillion: input.modelPrice.cacheWriteUsdPerMillion }),
     outputUsdPerMillion: input.modelPrice.outputUsdPerMillion,
-    reasoningUsdPerMillion: input.modelPrice.reasoningUsdPerMillion
+    reasoningUsdPerMillion: input.modelPrice.reasoningUsdPerMillion ?? input.modelPrice.outputUsdPerMillion
   };
   const outstanding = accounting?.outstanding_model_invocations;
   const configuredModels = identity?.configured_models;
