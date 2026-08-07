@@ -610,6 +610,29 @@ function materializeWorkspacePatchDependencies(
     const baselineTree = persistedBaseline ?? captureWorkspaceTree(workspaceRoot);
     workspacePatchBaselineTrees.set(task.attemptId, baselineTree);
     if (persistedBaseline === undefined) writeWorkspacePatchBaseline(task, baselineTree);
+    clearWorkspacePatchArtifacts(task);
+  }
+}
+
+// The runtime writes the workspace patch artifacts at the end of an attempt, and
+// the artifact directory outlives the attempt. A later attempt necessarily
+// captures a different patch — a fuzzing campaign alone produces new corpus and
+// reproducer content every run — so a leftover from the previous attempt reads as
+// agent tampering in writeWorkspacePatchArtifact and fails the node for good.
+// Clearing them once this attempt's baseline is settled keeps that guard meaning
+// "nothing non-empty was written during this attempt", which is what its comment
+// claims. Anything that is not a regular file is left alone so the write path
+// still reports it with its own error.
+function clearWorkspacePatchArtifacts(task: (typeof taskSpecs)[number]): void {
+  for (const artifactRoot of taskArtifactRoots(task, realpathSync(task.metadata.artifacts.dir))) {
+    for (const relativePath of WORKSPACE_PATCH_ARTIFACT_FILES) {
+      const target = path.resolve(artifactRoot, relativePath);
+      if (!isStrictlyInsideDirectory(artifactRoot, target)) {
+        throw new Error(`artifact-contract failure: unsafe workspace patch artifact path ${relativePath}`);
+      }
+      if (!existsSync(target) || !lstatSync(target).isFile()) continue;
+      rmSync(target, { force: true });
+    }
   }
 }
 
@@ -3371,6 +3394,7 @@ const MAX_INVARIANT_SUITE_TOTAL_BYTES = 64 * 1024 * 1024;
 const INVARIANT_SUITE_BASELINE_FILE = "invariant-suite-baseline.json";
 const WORKSPACE_PATCH_BASELINE_FILE = "workspace-patch-baseline.json";
 const WORKSPACE_PATCH_PREPARATION_FILE = "workspace-patch-preparation.json";
+const WORKSPACE_PATCH_ARTIFACT_FILES = ["workspace.patch", "workspace-patch.json"] as const;
 const INVARIANT_SUITE_MANIFEST_FILE = "invariant-suite-manifest.json";
 const INVARIANT_SUITE_HANDOFF_DIR = "invariant-suite-handoffs";
 const INVARIANT_SUITE_HANDOFF_FILE = "handoff.json";
