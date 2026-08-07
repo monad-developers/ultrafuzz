@@ -1553,7 +1553,7 @@ test("a duplicated event ID fails closed without rewriting a torn log", () => {
   assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), contents, "the log must not be rewritten");
 });
 
-test("the torn-tail probe refuses a symlinked log and does not block on a FIFO", () => {
+test("the torn-tail probe refuses a symlinked log and does not block on a FIFO", { timeout: 30_000 }, () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-probe-hostile" });
   const record = createEventRecord(layout, {
     eventType: "node-synced",
@@ -1563,27 +1563,39 @@ test("the torn-tail probe refuses a symlinked log and does not block on a FIFO",
     payload: { step: 1 }
   });
 
-  // A symlink at the log path must not be written through to its target. Without
-  // O_NOFOLLOW the probe would follow it, and nothing else in the repo plants one, so
-  // a later refactor could drop the flag and stay green.
   const outside = path.join(path.dirname(layout.eventsPath), "outside.jsonl");
   fs.writeFileSync(outside, "", "utf8");
   fs.rmSync(layout.eventsPath, { force: true });
   fs.symlinkSync(outside, layout.eventsPath);
+  // Assert on the PROBE directly. Asserting only via appendEventRecord would re-pin
+  // appendBytesDurable's own O_NOFOLLOW instead: the symlink target is empty, so a
+  // probe without the flag opens it, sees size 0 and returns silently, and the ELOOP
+  // arrives later from safe-paths -- leaving the probe's flag free to be dropped.
+  assert.throws(() => repairTornJsonlTail(layout.eventsPath), /ELOOP/u);
   assert.throws(() => appendEventRecord(layout.eventsPath, record), /ELOOP|EMLINK|symbolic/u);
   assert.equal(fs.readFileSync(outside, "utf8"), "", "the symlink target must not be written through");
   fs.rmSync(layout.eventsPath);
 
-  // A FIFO must not block the probe. O_NONBLOCK plus the isFile() bail make this
-  // return promptly; without them the read-open waits for a writer forever.
+  // A FIFO must not block the probe. The explicit test timeout matters: without
+  // O_NONBLOCK this hangs rather than failing, and node:test's default per-test
+  // timeout is Infinity, so CI would report a job-level hang with no failing name.
   const fifo = path.join(path.dirname(layout.eventsPath), "index-fifo.jsonl");
   execFileSync("mkfifo", [fifo]);
   try {
-    const started = Date.now();
     repairTornJsonlTail(fifo);
-    assert.ok(Date.now() - started < 5_000, "the probe must not block on a FIFO");
     assert.ok(fs.lstatSync(fifo).isFIFO(), "the FIFO must be left untouched");
   } finally {
     fs.rmSync(fifo, { force: true });
+  }
+
+  // A non-regular entry whose size is NON-zero is what makes the isFile() bail
+  // decisive; a FIFO reports size 0, so the size check returns first and the bail is
+  // never exercised by that fixture alone. Without it this is EISDIR on every append.
+  const directory = path.join(path.dirname(layout.eventsPath), "index-dir.jsonl");
+  fs.mkdirSync(directory);
+  try {
+    assert.doesNotThrow(() => repairTornJsonlTail(directory));
+  } finally {
+    fs.rmdirSync(directory);
   }
 });
