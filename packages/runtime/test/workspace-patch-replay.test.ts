@@ -14,7 +14,7 @@ import ts from "typescript";
  * patch's declared `base_tree` is satisfied in turn down the chain. A resumed run breaks the precondition,
  * because the worktree lives on a durable volume and still holds the previous attempt's state.
  *
- * Two production runs died on exactly this, at the same node, with the same expected tree:
+ * Two production runs died at this node with the same expected tree:
  *
  *   R48  expected 2dd4efefbb8b667bf6cabf4f1ec6e990e35c11ab, got bf324c395d095250396c77f57c165eee92554701
  *   R49  expected 2dd4efefbb8b667bf6cabf4f1ec6e990e35c11ab, got b8d46f13b8f3988a6a94a4eff1555e73ebff61f3
@@ -33,14 +33,22 @@ import ts from "typescript";
  * tree, but its own manifests were never dumped -- the volume walk timed out -- so R49's worktree being at
  * the end of ITS chain is a hypothesis. The fixtures below are R48's measured shape.
  *
- * The rule under test decides where replay should START. It is sound for one reason worth stating
- * plainly: a tree id is a content hash of the WHOLE snapshot. If the worktree's tree equals a
- * dependency's declared `result_tree`, the workspace is byte-identical to that dependency's output, so
- * that dependency and every one before it in replay order are already materialized. That is an identity,
- * not an inference about intent — which is what two earlier attempts at this issue lacked. One tried to
- * relax `applyWorkspacePatch` (from inside that function a fan-in is indistinguishable from real drift)
- * and one tried to consult recorded provenance (a task that throws inside the replay loop never persists
- * a preparation record, so the evidence does not exist at the moment the decision is made).
+ * The rule under test decides where replay should START, and it needs TWO conditions. Only the first is a
+ * hash identity, and an earlier revision of this file claimed both were:
+ *
+ *   1. The worktree's tree equals dependency `i`'s declared `result_tree`. A tree id is a content hash, so
+ *      the workspace is identical to that dependency's output over the snapshot the hash covers — every
+ *      path `stageWorkspaceTree` stages. Content outside it is content no patch can carry either, since
+ *      `captureWorkspacePatch` diffs the same staged index, so nothing patch-delivered is missed.
+ *   2. The dependencies BEFORE `i` chain into it, each one's `result_tree` being the next one's
+ *      `base_tree`. Without this, "everything before `i` is already materialized" is a claim about
+ *      TOPOLOGY, not about content — and review demonstrated it false for a sibling fan-in, on a FRESH
+ *      run, with no error raised anywhere. That case has its own test below.
+ *
+ * Two earlier attempts at this issue were rejected for needing evidence that does not exist: relaxing
+ * `applyWorkspacePatch` (from inside that function a fan-in is indistinguishable from real drift) and
+ * consulting recorded provenance (a task that throws inside the replay loop never persists a preparation
+ * record, so there is nothing to consult at the moment the decision is made).
  */
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
