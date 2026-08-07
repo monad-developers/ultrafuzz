@@ -1135,3 +1135,88 @@ test("leaves an ordinary git failure's captures as strings", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// R53's `stateful-invariant-handlers` died here (issue #368) on an image that ALREADY carried the #305
+// exclusion. That exclusion is an exact-name list -- `recon-corpus`, `echidna`, `magic` -- and the agent
+// wrote its deep fuzzing pass to `recon-corpus-deep/` and `echidna-deep/` instead. Grepping the invariant
+// prompts for `-deep` returns nothing, so the agent invented those names; one file under
+// `recon-corpus-deep` was >=33.8 MB by itself, over the whole 32 MiB capture buffer:
+//
+//   git diff produced more than the 33554432-byte capture buffer ... Largest contributors ...:
+//   recon-corpus-deep (>=33865139 diff bytes in 1 file), echidna-deep (>=37453 diff bytes in 15 files)
+test("excludes agent-chosen variants of the generated corpus roots", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\ncache/\nout/\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "ignore build output"]);
+    const baseline = captureWorkspaceTree(root);
+
+    // Deliberately NOT gitignored and NOT in the name list, exactly as on the real target.
+    for (const generated of ["recon-corpus-deep", "echidna-deep", "magic-2"]) {
+      mkdirSync(path.join(root, generated, "build-snapshot"), { recursive: true });
+      writeFileSync(path.join(root, generated, "build-snapshot", "0b7f82b3.json"), `{"g":"${generated}"}\n`);
+    }
+    writeFileSync(path.join(root, "AuthoredHandlers.t.sol"), "contract AuthoredHandlers {}\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["AuthoredHandlers.t.sol"]
+    );
+    assert.doesNotMatch(captured.patch, /recon-corpus-deep|echidna-deep|magic-2/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The prefix must stay ROOT-ANCHORED. An authored directory that merely starts with a generated root's
+// name is not corpus, and a `test/` tree containing a nested corpus must never be dropped wholesale --
+// that granularity failure is what closed the size-ceiling attempt in PR #372, where an entire authored
+// suite vanished because a corpus sat under the same first path segment.
+test("keeps authored trees the corpus prefix must not reach", () => {
+  const root = fixture();
+  try {
+    const baseline = captureWorkspaceTree(root);
+    // Nested corpus under an authored test root: the authored Solidity beside it MUST survive.
+    mkdirSync(path.join(root, "test", "recon", "recon-corpus"), { recursive: true });
+    writeFileSync(path.join(root, "test", "recon", "Handlers.t.sol"), "contract Handlers {}\n");
+    writeFileSync(path.join(root, "test", "recon", "recon-corpus", "seed.bin"), "seed\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+
+    assert.deepEqual(captured.manifest.files.map((entry) => entry.path).sort(), [
+      "test/recon/Handlers.t.sol",
+      "test/recon/recon-corpus/seed.bin"
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A TRACKED file whose name starts with a generated root must never be dropped. The exclusion is a
+// pathspec on the untracked listing only, so this holds by construction -- but PR #372 asserted exactly
+// that property in a comment while applying its rule to the merged tracked+untracked list, and silently
+// dropped tracked edits. Asserting it here rather than trusting the shape.
+test("keeps a tracked file under a corpus-prefixed path", () => {
+  const root = fixture();
+  try {
+    mkdirSync(path.join(root, "echidna-config"), { recursive: true });
+    writeFileSync(path.join(root, "echidna-config", "Authored.sol"), "contract Authored {}\n");
+    git(root, ["add", "echidna-config"]);
+    git(root, ["commit", "--quiet", "-m", "tracked config"]);
+    const baseline = captureWorkspaceTree(root);
+    writeFileSync(path.join(root, "echidna-config", "Authored.sol"), "contract Authored { uint256 v = 2; }\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["echidna-config/Authored.sol"]
+    );
+    assert.match(captured.patch, /uint256 v = 2/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

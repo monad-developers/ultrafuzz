@@ -76,8 +76,6 @@ const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "art
  */
 const WORKSPACE_GENERATED_ROOTS = ["recon-corpus", "echidna", "magic"] as const;
 
-const WORKSPACE_EXCLUDED_ROOTS = [...WORKSPACE_RUNTIME_ROOTS, ...WORKSPACE_GENERATED_ROOTS] as const;
-
 export interface WorkspacePatchFile {
   path: string;
 }
@@ -335,7 +333,22 @@ function stageableWorkspacePaths(workspaceRoot: string, index: string): Buffer[]
       "--exclude-standard",
       "--",
       ".",
-      ...WORKSPACE_EXCLUDED_ROOTS.map((root) => `:(exclude)${root}/**`)
+      ...WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}/**`),
+      // Prefix, not exact name (issue #368). R53 died on an image that already carried the #305
+      // exclusion because the agent wrote its deep fuzzing pass to `recon-corpus-deep/` and
+      // `echidna-deep/`. Those names appear nowhere in the prompts -- the agent invented them -- and one
+      // file under `recon-corpus-deep` was >=33.8 MB by itself, over the whole 32 MiB capture buffer.
+      //
+      // This is the SAME mechanism as the exact-name exclusion above, so it inherits its properties
+      // rather than introducing new ones: it is a pathspec on the UNTRACKED listing only, so a tracked
+      // edit can never be dropped; it is root-anchored, so an authored `test/` tree is untouchable; and
+      // it is a fixed string, so capture and apply always agree without consulting the filesystem.
+      //
+      // It is deliberately NOT durable: `corpus-deep/` or a nested `test/recon-corpus/` still escape,
+      // exactly as the comment above says a name list must. The durable fix is to retry on MEASURED
+      // overflow using the diff-byte ranking `git-capture-diagnostics.ts` already computes, which is
+      // recorded on #368. This buys the runs that fix needs, at the cost of one glob character.
+      ...WORKSPACE_GENERATED_ROOTS.map((root) => `:(exclude)${root}*/**`)
     ],
     index
   );
