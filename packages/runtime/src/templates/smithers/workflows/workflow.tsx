@@ -2949,6 +2949,65 @@ function resolveInheritedInvariantSuiteTombstones(task: (typeof taskSpecs)[numbe
  * Order the ancestor closure so indirect ancestors are visited before declared
  * dependencies. A declared dependency therefore always wins a byte conflict.
  */
+/**
+ * Does `later` transitively depend on `earlier`? (issue #315)
+ *
+ * When two ancestors publish the same invariant-suite source with different bytes, the selection below
+ * has to decide whether that is a CONFLICT or a SUPERSESSION, and the answer is a property of the
+ * dependency graph, not of anything in the bytes.
+ *
+ * R50 died on exactly this at `prepare:stateful-invariant-implement-properties`, at 25 succeeded and zero
+ * failed, with `tests/recon/Properties.sol` published by both `stateful-invariant-setup` and
+ * `stateful-invariant-handlers`. `handlers` depends on `setup`, runs after it, and legitimately rewrites
+ * the file. Nothing was in conflict; the newer content simply replaced the older.
+ *
+ * `orderedInvariantSuiteDependencies` could not express that. It sorts by directness and then
+ * ALPHABETICALLY, and `implement-properties` depends directly only on `stateful-invariant-coverage`, so
+ * both of these are indirect and the tie-break is `localeCompare` — under which `handlers` sorts BEFORE
+ * `setup`, the reverse of causal order. Sort position is not causality.
+ *
+ * Reachability, not ordering, is deliberately the question asked. Two ancestors that are unordered with
+ * respect to each other — parallel siblings publishing different bytes for the same path — are a genuine
+ * conflict and must still fail closed. Answering "whichever sorts later wins" would silently drop a
+ * sibling's work, which is the exact failure that made the first revision of #314 unmergeable.
+ *
+ * Terminates on a malformed cyclic graph. The topology validator rejects cycles, so that should be
+ * unreachable, but a helper that hangs on bad input converts a validation bug into a run that never fails
+ * and never finishes — worse than an error.
+ *
+ * Two limitations, both measured rather than assumed, neither fixed here:
+ *
+ *   1. The caller folds over ancestors in sort order, so on a FAN-IN MERGE shape the outcome depends on
+ *      node naming. With unordered siblings `L` and `N` plus a merge node `M` that depends on both and
+ *      republished the merged file, visiting `M` first resolves cleanly, while visiting `L` then `N`
+ *      throws before `M` is ever reached — same graph, same bytes, opposite outcomes decided by
+ *      `localeCompare`. The failing direction is fail-closed and identical to the behaviour before this
+ *      change, and the shipped invariant topology is a pure chain, so it does not arise today. Making it
+ *      order-independent means reducing the publishers of each path to their maximal elements before
+ *      comparing, which is a restructure rather than a guard (#317).
+ *   2. Attempt ids are stable across re-runs, so a node re-run OUT OF ORDER loses loudness: retrying
+ *      `stateful-invariant-setup` after `stateful-invariant-handlers` has already succeeded leaves setup's
+ *      content newer in wall-clock time while `supersedes(handlers, setup)` is still true, so the retried
+ *      bytes are silently discarded where the old code raised a conflict. That is the deliberate trade —
+ *      always throwing is what killed R50 — but it is a real loss and is recorded so it is not rediscovered
+ *      as a surprise.
+ */
+function invariantSuiteAncestorSupersedes(later: string, earlier: string): boolean {
+  if (later === earlier) return false;
+  const byAttemptId = new Map(taskSpecs.map((candidate) => [candidate.attemptId, candidate]));
+  const visited = new Set<string>();
+  const pending = [later];
+  for (let current = pending.pop(); current !== undefined; current = pending.pop()) {
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const dependency of byAttemptId.get(current)?.metadata.dependencies.attemptIds ?? []) {
+      if (dependency === earlier) return true;
+      pending.push(dependency);
+    }
+  }
+  return false;
+}
+
 function orderedInvariantSuiteDependencies(task: (typeof taskSpecs)[number]): string[] {
   const directDependencies = new Set(task.metadata.dependencies.attemptIds);
   return [...task.dependencyArtifactDirs].sort((left, right) => {
@@ -3140,6 +3199,27 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
   const selectedSources = new Map<string, { dependency: string; bytes: Buffer; direct: boolean }>();
   let selectedBytes = 0;
   const suitePathsByDependency = invariantSuiteDependencySuitePaths(dependencies);
+  // Collect EVERY publisher of every path before deciding any of them (issue #315, and the confluence
+  // hole review found in the first revision of this fix).
+  //
+  // The previous shape folded pairwise against whichever ancestor happened to have been selected so far,
+  // and that made the outcome depend on the visit order `orderedInvariantSuiteDependencies` produces --
+  // which tie-breaks equal-directness ancestors ALPHABETICALLY. Two consequences, both constructed and
+  // run rather than reasoned about:
+  //
+  //   - A fan-in merge resolved cleanly or threw depending purely on node NAMING: siblings `L` and `N`
+  //     plus a merge node `M` depending on both succeeded when `M` sorted first and threw when it sorted
+  //     last.
+  //   - Worse, an ancestor whose entry was REPLACED -- including replacement by identical bytes -- was
+  //     forgotten and never reachability-checked, so an unordered claim could be silently dropped instead
+  //     of raising the conflict it should. That arm was NEW; before the fix both orderings threw.
+  //
+  // Resolving per path removes the order dependence entirely, because the answer is a property of the set
+  // of publishers rather than of the sequence they arrive in.
+  const publishersByPath = new Map<
+    string,
+    Array<{ dependency: string; attemptId: string; bytes: Buffer; direct: boolean }>
+  >();
   for (const dependency of dependencies) {
     const suitePaths = suitePathsByDependency.get(dependency);
     if (suitePaths === undefined) continue;
@@ -3151,21 +3231,62 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
       // descendant workspace.
       if (tombstones.has(relativePath)) continue;
       const bytes = readInvariantSuiteSourceBytes(suiteRoot, relativePath, "artifact handoff invariant suite");
-      const previous = selectedSources.get(relativePath);
-      if (previous !== undefined && !previous.bytes.equals(bytes)) {
-        if (previous.direct === isDirect || (!previous.direct && !isDirect)) {
-          throw new Error(
-            `artifact handoff ancestor invariant suite sources conflict for ${relativePath}: ${previous.dependency} vs ${dependency}`
-          );
-        }
-        if (!isDirect) continue;
-      }
-      const prior = selectedSources.get(relativePath);
-      if (prior === undefined) selectedBytes += bytes.length;
-      else selectedBytes += bytes.length - prior.bytes.length;
-      selectedSources.set(relativePath, { dependency, bytes, direct: isDirect });
-      assertInvariantSuiteSourceBudget(selectedSources.size, selectedBytes);
+      const publishers = publishersByPath.get(relativePath) ?? [];
+      publishers.push({ dependency, attemptId: path.basename(dependency), bytes, direct: isDirect });
+      publishersByPath.set(relativePath, publishers);
     }
+  }
+  for (const [relativePath, publishers] of publishersByPath) {
+    // Reachability first, and BEFORE directness. A publisher that another publisher transitively depends
+    // on has been superseded: its bytes are simply older, not a competing claim. Doing this first also
+    // settles the case where a DIRECT ancestor is stale and an INDIRECT descendant rewrote it -- the old
+    // rule handed that to the direct one, silently selecting the older Solidity.
+    const unsuperseded = publishers.filter(
+      (candidate) =>
+        !publishers.some(
+          (other) => other !== candidate && invariantSuiteAncestorSupersedes(other.attemptId, candidate.attemptId)
+        )
+    );
+    // A cycle would leave every publisher superseded by another and the set empty. The topology validator
+    // rejects cycles, so this should be unreachable — but falling through with an empty set would drop the
+    // path SILENTLY, which is the failure mode this whole change exists to remove. Keeping every publisher
+    // instead hands the decision to the conflict check below, which fails closed.
+    const maximal = unsuperseded.length > 0 ? unsuperseded : publishers;
+    // Disagreement between publishers of the SAME directness is a real conflict, and it has to be
+    // detected across the WHOLE maximal set. Applying the directness preference first hides it: with two
+    // unordered indirect publishers disagreeing and one unrelated direct publisher, filtering to the
+    // direct one first drops both indirect claims with no error. `main` throws there, so doing this
+    // second was a strict loss of fail-closed behaviour, found by review running the algorithm over
+    // permutations rather than by reading it.
+    //
+    // Checking per directness group, rather than across the whole set, is what `main` does — its pairwise
+    // rule is "same directness disagreeing throws, otherwise the direct publisher wins". `main` reaches
+    // that outcome only for some arrival orders; grouping makes it the outcome for all of them.
+    for (const group of [maximal.filter((c) => c.direct), maximal.filter((c) => !c.direct)]) {
+      const head = group[0];
+      if (head === undefined) continue;
+      const disagreeing = group.find((candidate) => !candidate.bytes.equals(head.bytes));
+      if (disagreeing !== undefined) {
+        throw new Error(
+          `artifact handoff ancestor invariant suite sources conflict for ${relativePath}: ${head.dependency} vs ${disagreeing.dependency}`
+        );
+      }
+    }
+    // A DIRECT dependency outranks an indirect one when they disagree, which is long-standing behaviour
+    // the #217 tombstone tests depend on. Only cross-directness disagreement reaches here; same-directness
+    // disagreement has already thrown.
+    const preferred = maximal.some((candidate) => candidate.direct)
+      ? maximal.filter((candidate) => candidate.direct)
+      : maximal;
+    const first = preferred[0];
+    // `publishers` is never empty — a path only enters the map when some dependency published it — and an
+    // empty unsuperseded set falls back to the full list above, so this is unreachable.
+    if (first === undefined) continue;
+    // Every remaining publisher carries identical bytes, so `first` is not an arbitrary tie-break: the
+    // content is settled and only the attribution differs.
+    selectedBytes += first.bytes.length;
+    selectedSources.set(relativePath, { dependency: first.dependency, bytes: first.bytes, direct: first.direct });
+    assertInvariantSuiteSourceBudget(selectedSources.size, selectedBytes);
   }
   assertInvariantSuiteSourceBudget(
     selectedSources.size,
