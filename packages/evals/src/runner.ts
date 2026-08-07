@@ -7,6 +7,7 @@ import { startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { BENCHMARK_SMOKE_WORKFLOW_PROFILE } from "./benchmark-manifest.js";
 import { evalWorkflowLifecycle, isTerminalWorkflowStatus } from "./efficiency.js";
+import { evalRunExpansion } from "./expansion.js";
 import { NodeTelemetryPump } from "./node-telemetry.js";
 import {
   buildEvalRunProvenance,
@@ -529,6 +530,7 @@ export async function watchEvalRow(
     ...input.record,
     final_status: result.status,
     workflow: evalWorkflowLifecycle(state),
+    expansion: evalRunExpansion({ ...(runRoot === undefined ? {} : { runRoot }), state }),
     ...(recoveryEquivalence === undefined ? {} : { recovery_equivalence: recoveryEquivalence }),
     ...(syncFailureDiagnostic === undefined && timeoutDiagnostic === undefined
       ? {}

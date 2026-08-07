@@ -3,11 +3,13 @@ import path from "node:path";
 
 import { RUN_STATE_STATUSES, type NodeState, type RunState } from "@ultrafuzz/artifacts";
 
+import { evalRunExpansion } from "./expansion.js";
 import type {
   EvalEfficiency,
   EvalEfficiencyCompleteness,
   EvalEfficiencyReason,
   EvalRowLifecycle,
+  EvalRunExpansion,
   EvalRunRecord,
   EvalWorkflowStatus
 } from "./types.js";
@@ -15,6 +17,11 @@ import type {
 export interface EvalTerminalSummary {
   lifecycle: EvalRowLifecycle;
   efficiency: EvalEfficiency;
+  /**
+   * Re-derived from the run root rather than read off the record, so a row
+   * written before `expansion` existed is still observable.
+   */
+  expansion: EvalRunExpansion;
 }
 
 const TERMINAL_WORKFLOW_STATUSES = new Set<EvalWorkflowStatus>(["succeeded", "failed", "timed-out", "canceled"]);
@@ -45,7 +52,11 @@ export function summarizeEvalTerminal(record: EvalRunRecord | undefined): EvalTe
     efficiency: {
       ...runtimeEfficiency(state, lifecycle.workflow.status),
       ...accountingEfficiency(record?.ultrafuzz_run_root, lifecycle.workflow.status)
-    }
+    },
+    expansion: evalRunExpansion({
+      ...(record?.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root }),
+      state
+    })
   };
 }
 
