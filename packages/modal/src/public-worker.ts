@@ -81,12 +81,15 @@ export class PublicEvalDiagnosticsBuildError extends Error {
 }
 
 /**
- * A command this worker killed, as opposed to one that ran to completion.
+ * A command that was cut short, as opposed to one that ran to completion.
  *
  * Both shapes are operationally `unreachable`, but only one of them leaves a
  * finished journal behind. A command that returned has written everything it
  * was ever going to write, whatever exit code it chose; a command that was
- * timed out or aborted may have launched work it never got to record. Every
+ * timed out, aborted, or killed by a signal from anywhere else -- a reclaimed
+ * sandbox, the OOM killer -- may have launched work it never got to record.
+ * "Killed" is not this worker's own kills only: an exit code is chosen, and a
+ * child that never chose one never reached the end of its writing. Every
  * reader that has to tell those apart -- today, the `model_work_started`
  * corroboration gate -- needs the distinction made at the throw site, not
  * guessed at from an exit code or a message.
@@ -487,7 +490,8 @@ function readPublicEvalRunRecords(evalRoot: string): Array<Record<string, unknow
  * on "the command threw" would therefore gate it on the very rows it exists to
  * account for, which is what #332 found. What actually matters is narrower: a
  * command that returned has finished writing, however it exited, while a
- * command this worker killed may have launched work it never recorded, and only
+ * command that was killed -- by this worker's timeout, by an abort, or by a
+ * signal from outside it -- may have launched work it never recorded, and only
  * that one keeps its raised flag on the strength of the interruption alone.
  */
 export function publicEvalCommandLeftFinalJournal(runError: unknown): boolean {
@@ -1071,14 +1075,20 @@ async function runCommand(
   };
   options.signal?.addEventListener("abort", abortHandler, { once: true });
   if (options.signal?.aborted) abortHandler();
-  const exitCode = await new Promise<number>((resolve, reject) => {
+  // `close` reports an exit code or a termination signal, never both, and the
+  // difference is the one this worker's readers turn on: a child that chose an
+  // exit code finished writing, a child something else killed did not. Folding
+  // a signal into `code ?? 1` would hand a reclaimed or OOM-killed eval command
+  // to `publicEvalCommandLeftFinalJournal` as one that returned.
+  const termination = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
     child.once("error", reject);
-    child.once("close", (code) => resolve(code ?? 1));
+    child.once("close", (code, signal) => resolve({ code, signal }));
   }).finally(() => {
     clearTimeout(timer);
     if (killTimer !== undefined) clearTimeout(killTimer);
     options.signal?.removeEventListener("abort", abortHandler);
   });
+  const exitCode = termination.code ?? 1;
   const capturedStdout = Buffer.concat(stdout).toString("utf8");
   const forbiddenSecretValues =
     options.publicDiagnosticSecretValues === undefined
@@ -1095,13 +1105,21 @@ async function runCommand(
       );
     }
   }
-  if (timedOut || aborted) {
+  // A kill this worker did not order counts the same as one it did. An eval
+  // command reclaimed by the sandbox or taken by the OOM killer stops mid-write
+  // exactly like a timed-out one, and its half-written journal must not be read
+  // as a final account of what launched.
+  if (timedOut || aborted || termination.signal !== null) {
     await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-failed\n`);
     throw new PublicWorkerCommandInterruptedError({
-      cause:
-        aborted && options.signal?.reason instanceof Error
-          ? options.signal.reason
-          : new Error(options.timeoutCategory ?? "operation-timeout")
+      cause: interruptedCommandCause({
+        label: argv[0]!,
+        timedOut,
+        aborted,
+        terminationSignal: termination.signal,
+        abortReason: options.signal?.reason,
+        ...(options.timeoutCategory === undefined ? {} : { timeoutCategory: options.timeoutCategory })
+      })
     });
   }
   if (exitCode !== 0) {
@@ -1120,6 +1138,22 @@ async function runCommand(
   }
   await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-finished\n`);
   return capturedStdout;
+}
+
+/** Why an interrupted command stopped: this worker's own reason first, the signal that took it otherwise. */
+function interruptedCommandCause(input: {
+  label: string;
+  timedOut: boolean;
+  aborted: boolean;
+  terminationSignal: NodeJS.Signals | null;
+  abortReason: unknown;
+  timeoutCategory?: string;
+}): Error {
+  if (input.aborted && input.abortReason instanceof Error) return input.abortReason;
+  if (!input.timedOut && !input.aborted && input.terminationSignal !== null) {
+    return new Error(`${input.label} terminated by ${input.terminationSignal}`);
+  }
+  return new Error(input.timeoutCategory ?? "operation-timeout");
 }
 
 export function publicEvalFailureDiagnosticLogPayload(

@@ -1053,6 +1053,79 @@ it("tells a command it killed apart from one that returned nonzero", async () =>
   expect(publicEvalCommandLeftFinalJournal(interrupted)).toBe(false);
 });
 
+it("classifies a child cut short after it started as an interruption, not an exit", async () => {
+  // The pre-aborted case above never reaches `runCommand`: `materializeBakedCandidate`
+  // rejects at its own `throwIfAborted`. The branch that actually fires in
+  // production is the one inside `runCommand` after the child is already
+  // running -- the eval command hitting `model-work-timeout` reaches the same
+  // throw -- so it needs a child that is alive when the interruption lands.
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-baked-cutshort-"));
+  const started = path.join(root, "tar-started");
+  // `exec` so the process holding the stdio pipes is the one the worker kills;
+  // a shell that leaves an orphan behind never closes them.
+  const restorePath = shimTar(root, `#!/bin/sh\ntouch ${JSON.stringify(started)}\nexec sleep 60\n`);
+  try {
+    const controller = new AbortController();
+    const pending = materializeBakedCandidate(
+      "f".repeat(40),
+      path.join(root, "candidate"),
+      path.join(root, "worker.log"),
+      path.join(root, "absent.tgz"),
+      controller.signal
+    )
+      .then(() => undefined)
+      .catch((error: unknown) => error);
+    while (!fs.existsSync(started)) await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort(new Error("model-work-timeout"));
+
+    const interrupted = await pending;
+    expect(interrupted).toBeInstanceOf(PublicWorkerCommandInterruptedError);
+    expect(publicEvalCommandLeftFinalJournal(interrupted)).toBe(false);
+  } finally {
+    restorePath();
+  }
+});
+
+it("treats a child killed by a signal it did not send as a command that never finished writing", async () => {
+  // An eval command reclaimed by the sandbox or taken by the OOM killer reports
+  // no exit code at all. Reading that as "exited 1" would hand its half-written
+  // `runs.jsonl` to corroboration as a final account of what launched, and a
+  // journal holding only the rows that already appended reads `none` -- which
+  // buys a relaunch of a run that may have spent its budget.
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-baked-signal-"));
+  const restorePath = shimTar(root, "#!/bin/sh\nkill -9 $$\n");
+  try {
+    const killed = await materializeBakedCandidate(
+      "f".repeat(40),
+      path.join(root, "candidate"),
+      path.join(root, "worker.log"),
+      path.join(root, "absent.tgz")
+    )
+      .then(() => undefined)
+      .catch((error: unknown) => error);
+
+    expect(killed).toBeInstanceOf(PublicWorkerCommandInterruptedError);
+    expect((killed as OperationalDispositionError).category).toBe("unreachable");
+    expect(String((killed as Error).cause)).toContain("SIGKILL");
+    expect(publicEvalCommandLeftFinalJournal(killed)).toBe(false);
+  } finally {
+    restorePath();
+  }
+});
+
+/** Put a `tar` of our own ahead of the real one for the duration of one test. */
+function shimTar(root: string, script: string): () => void {
+  const binDir = path.join(root, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(binDir, "tar"), script, { mode: 0o755 });
+  const previous = process.env.PATH;
+  process.env.PATH = `${binDir}${path.delimiter}${previous ?? ""}`;
+  return () => {
+    if (previous === undefined) delete process.env.PATH;
+    else process.env.PATH = previous;
+  };
+}
+
 it("bounds public provider fan-out by mode", () => {
   const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
   const lanes = loadBenchmarkLanesManifest(path.join(repositoryRoot, "benchmarks/lanes.json"));
