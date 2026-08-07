@@ -1,4 +1,4 @@
-import type { RunStatus } from "@ultrafuzz/artifacts";
+import type { NodeStatus, RunStatus } from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 export const EVAL_SPEC_SCHEMA_VERSION = "ultrafuzz.eval.v1" as const;
@@ -292,6 +292,60 @@ export interface EvalEfficiency {
   cost: EvalEfficiencyCompleteness;
 }
 
+export type EvalNodeStatusCounts = Record<NodeStatus, number>;
+
+export type EvalExpansionReason = "workflow-state-unavailable" | "run-graph-unavailable" | "concurrency-unavailable";
+
+export type EvalExpansionCompleteness =
+  { status: "complete"; reason: null } | { status: "partial" | "unavailable"; reason: EvalExpansionReason };
+
+/** One node the run added after the graph was fixed, with its declared lineage. */
+export interface EvalDynamicNode {
+  node_id: string;
+  logical_node_id: string | null;
+  status: NodeStatus;
+  /** Producer recorded on the node's provenance, or null when the run recorded none. */
+  source_node_id: string | null;
+  retry_count: number;
+  timed_out: boolean;
+}
+
+/** Concurrency as the run itself observed it, not as the suite requested it. */
+export interface EvalRunConcurrencyObservation {
+  requested: number | null;
+  effective: number | null;
+  ready_queue_depth: number | null;
+  active_work: number | null;
+}
+
+/**
+ * Node-level view of one row, derived from `state.json` and `graph.json` alone.
+ *
+ * Counts are always exact. Identifier lists are capped at
+ * `MAX_EVAL_EXPANSION_NODE_IDS`, and `truncated` is set when any of them was, so
+ * a bounded record is never mistaken for a complete one. `dynamic_*` fields are
+ * null when the run graph could not be read, because static and dynamic nodes
+ * cannot be told apart without it.
+ */
+export interface EvalRunExpansion {
+  node_count: number;
+  status_counts: EvalNodeStatusCounts;
+  static_node_count: number | null;
+  dynamic_node_count: number | null;
+  dynamic_status_counts: EvalNodeStatusCounts | null;
+  dynamic_nodes: EvalDynamicNode[] | null;
+  retried_node_count: number;
+  failed_node_count: number;
+  failed_node_ids: string[];
+  timed_out_node_count: number;
+  timed_out_node_ids: string[];
+  concurrency: EvalRunConcurrencyObservation;
+  truncated: boolean;
+  nodes: EvalExpansionCompleteness;
+  lineage: EvalExpansionCompleteness;
+  concurrency_evidence: EvalExpansionCompleteness;
+}
+
 export interface EvalRunRecord {
   schema_version: typeof EVAL_RUN_SCHEMA_VERSION;
   eval_run_id: string;
@@ -314,6 +368,11 @@ export interface EvalRunRecord {
   launcher?: EvalLauncherLifecycle;
   /** Last observed durable workflow lifecycle; summaries always re-read state.json. */
   workflow?: EvalWorkflowLifecycle;
+  /**
+   * Last observed node-level expansion and concurrency. Present on new records;
+   * summaries re-derive it from the run root so an older record is not a gap.
+   */
+  expansion?: EvalRunExpansion;
   /** Immutable execution-exposure classification captured from append-only run evidence. */
   recovery_equivalence?: EvalRecoveryEquivalence;
   /** Legacy launcher timestamp retained for reading existing eval runs. */
@@ -468,6 +527,17 @@ export interface EvalRowScore {
   cost_estimate: number | null;
   lifecycle: EvalRowLifecycle;
   efficiency: EvalEfficiency;
+  /**
+   * Node-level expansion and concurrency for this row. Carried on the score so
+   * a dynamic fan-out is observable from `scores.jsonl` and `summary.json`,
+   * both of which the public bundle already retains, with no reporter involved.
+   *
+   * Optional for the same reason the record-level field is: it is derived from
+   * `EvalRunRecord.expansion`, which is absent on any row scored before this
+   * existed, and `scores.jsonl` is persisted — a required field here would make
+   * every historical score unreadable.
+   */
+  expansion?: EvalRunExpansion;
   recovery_equivalence: EvalRecoveryEquivalence;
 }
 

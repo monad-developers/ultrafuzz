@@ -785,6 +785,7 @@ async function scoreFindings(input: {
     cost_estimate: terminal.efficiency.cost_usd,
     lifecycle: terminal.lifecycle,
     efficiency: terminal.efficiency,
+    expansion: terminal.expansion,
     recovery_equivalence: recoveryEquivalence
   };
   return { rowScore, findingScores: matches, reviewQueue };

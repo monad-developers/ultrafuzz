@@ -18,10 +18,17 @@ export const PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-be
 const PUBLIC_BENCHMARK_BUNDLE_LEGACY_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v3" as const;
 export const MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES = 256 * 1024 * 1024;
 
-const MAX_FILE_BYTES = 5 * 1024 * 1024;
+export const MAX_PUBLIC_BENCHMARK_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_FILE_BYTES = MAX_PUBLIC_BENCHMARK_FILE_BYTES;
 const MAX_FILE_BASE64_CHARACTERS = 4 * Math.ceil(MAX_FILE_BYTES / 3);
 const MAX_ROWS = 2_048;
 const PUBLIC_REPORT_FILES = ["report.md", "report.json", "findings.normalized.json"] as const;
+/**
+ * Files a row may contribute: the fixed report set, plus the bounded set of
+ * optional run artifacts `publicBundleSources` retains when the topology
+ * produced them (`MAX_PUBLIC_OPTIONAL_ROW_ARTIFACT_FILES`).
+ */
+const MAX_ROW_FILES = PUBLIC_REPORT_FILES.length + 32;
 const DEFAULT_PUBLICATION_BUNDLE_PATH = "public-results.json";
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
@@ -107,7 +114,7 @@ const bundleShape = {
   files: z
     .array(bundleFileSchema)
     .min(1)
-    .max(MAX_ROWS * 4 + 16)
+    .max(MAX_ROWS * MAX_ROW_FILES + 16)
 } as const;
 
 const currentBundleSchema = z.strictObject({

@@ -7,6 +7,7 @@ import { startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { BENCHMARK_SMOKE_WORKFLOW_PROFILE } from "./benchmark-manifest.js";
 import { evalWorkflowLifecycle, isTerminalWorkflowStatus } from "./efficiency.js";
+import { evalRunExpansion } from "./expansion.js";
 import { NodeTelemetryPump } from "./node-telemetry.js";
 import {
   buildEvalRunProvenance,
@@ -239,12 +240,19 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
   }
 
   const finishedAt = new Date().toISOString();
+  // Everything from here to the `runs.jsonl` append is enrichment read off the
+  // run root, and a launch that succeeded has already spent its budget. None of
+  // these reads may be able to keep the row out of the journal: a launched row
+  // missing from `runs.jsonl` reads downstream as a run that never reached a
+  // model -- `publicEvalModelWorkEvidence` would answer `none` for it -- and
+  // buys a relaunch of work that already ran. `readRunFingerprints` swallows its
+  // own faults; `resolveTerminalReportPath` is guarded here instead of there
+  // because its callers elsewhere do want to hear about an unresolvable path.
   const runFingerprints = launch.ok && launch.runRoot !== undefined ? readRunFingerprints(launch.runRoot) : {};
   const graphFingerprint = launch.graphFingerprint ?? runFingerprints.graph_fingerprint;
   const configFingerprint = launch.configFingerprint ?? runFingerprints.config_fingerprint;
   const executionArtifactId = launch.executionArtifactId ?? input.candidateProvenance?.execution_artifact_id;
-  const reportJsonPath =
-    launch.ok && launch.runRoot !== undefined ? resolveTerminalReportPath({ runRoot: launch.runRoot }).path : undefined;
+  const reportJsonPath = launch.ok && launch.runRoot !== undefined ? readTerminalReportPath(launch.runRoot) : undefined;
   const record: EvalRunRecord =
     launch.ok && launch.runId !== undefined && launch.runRoot !== undefined
       ? {
@@ -522,6 +530,7 @@ export async function watchEvalRow(
     ...input.record,
     final_status: result.status,
     workflow: evalWorkflowLifecycle(state),
+    expansion: evalRunExpansion({ ...(runRoot === undefined ? {} : { runRoot }), state }),
     ...(recoveryEquivalence === undefined ? {} : { recovery_equivalence: recoveryEquivalence }),
     ...(syncFailureDiagnostic === undefined && timeoutDiagnostic === undefined
       ? {}
@@ -564,6 +573,15 @@ function readGraph(runRoot: string): unknown {
 function readStateSafe(runRoot: string): RunState | undefined {
   try {
     return readRunState(path.join(runRoot, "state.json"));
+  } catch {
+    return undefined;
+  }
+}
+
+/** The row's terminal report path, or nothing -- never a throw that would cost the row its journal entry. */
+function readTerminalReportPath(runRoot: string): string | undefined {
+  try {
+    return resolveTerminalReportPath({ runRoot }).path;
   } catch {
     return undefined;
   }

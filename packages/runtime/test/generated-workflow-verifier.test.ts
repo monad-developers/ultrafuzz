@@ -69,6 +69,59 @@ function loadRestoreInvariantSuiteWorkspaceSnapshot(
   ) => void;
 }
 
+function loadMaterializeGeneratedTestCompanion(): (
+  workspaceRoot: string,
+  artifactRoot: string,
+  nodeIds: readonly string[],
+  relativePath: string
+) => void {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function materializeGeneratedTestCompanion(");
+  const helperEnd = source.indexOf("\n\n/**\n * Preserve the complete invariant suite", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+
+  const helper = source
+    .slice(helperStart, helperEnd)
+    .replaceAll("workspaceRoot: string", "workspaceRoot")
+    .replaceAll("artifactRoot: string", "artifactRoot")
+    .replaceAll("nodeIds: readonly string[]", "nodeIds")
+    .replaceAll("relativePath: string", "relativePath")
+    .replace("): void {", ") {");
+  return new Function(
+    "path",
+    "existsSync",
+    "readFileSync",
+    "writeFileSync",
+    "mkdirSync",
+    "realpathSync",
+    "statSync",
+    "createHash",
+    "isStrictlyInsideDirectory",
+    "resolveNonEmptyRegularArtifactFile",
+    "INVARIANT_TEST_ROOT_NAMES",
+    `${helper}; return materializeGeneratedTestCompanion;`
+  )(
+    path,
+    fs.existsSync,
+    fs.readFileSync,
+    fs.writeFileSync,
+    fs.mkdirSync,
+    fs.realpathSync,
+    fs.statSync,
+    createHash,
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    (root: string, candidate: string, missingMessage: string, emptyMessage: string) => {
+      if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) throw new Error(missingMessage);
+      const resolved = fs.realpathSync(candidate);
+      assertRegularFileInside(root, resolved, missingMessage);
+      if (fs.statSync(resolved).size === 0) throw new Error(emptyMessage);
+      return resolved;
+    },
+    ["test", "tests"] as const
+  ) as (workspaceRoot: string, artifactRoot: string, nodeIds: readonly string[], relativePath: string) => void;
+}
+
 function loadSafeInvariantSuiteDirectory(): (root: string, candidate: string) => string {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function safeInvariantSuiteDirectory");
@@ -455,10 +508,16 @@ test("generated Smithers workflow guards runtime-owned workspace patch publicati
 
   const helper = source.slice(helperStart, helperEnd);
   assert.match(helper, /resolveRegularArtifactFile\(/u);
-  assert.match(helper, /These paths are runtime-owned\. Replace only an empty runtime placeholder/u);
+  assert.match(helper, /These paths are runtime-owned/u);
   assert.match(helper, /existingContents !== "" && existingContents !== "\\n"/u);
   assert.match(helper, /workspace patch artifact was modified/u);
   assert.match(helper, /writeFileDurable\(target, contents\)/u);
+  // #357 widened the rule from "replace only an empty placeholder" to "replace an empty placeholder,
+  // or a pair this node published in an earlier generation". The rejection must stay gated on the
+  // caller's classification rather than becoming unconditional, so pin both halves: the throw is
+  // guarded by the flag, and the flag defaults to rejecting.
+  assert.match(helper, /replaceSuperseded = false/u);
+  assert.match(helper, /if \(!replaceSuperseded\) \{/u);
 });
 
 test("runtime workspace patch publication replaces empty placeholders but rejects non-empty agent patches", () => {
@@ -471,7 +530,10 @@ test("runtime workspace patch publication replaces empty placeholders but reject
 
   const helper = source
     .slice(helperStart, helperEnd)
-    .replace("root: string, relativePath: string, contents: string): void", "root, relativePath, contents)");
+    .replace(
+      /root: string,\n\s*relativePath: string,\n\s*contents: string,\n\s*replaceSuperseded = false\n\): void/u,
+      "root, relativePath, contents, replaceSuperseded = false)"
+    );
   const writeWorkspacePatchArtifact = new Function(
     "path",
     "isStrictlyInsideDirectory",
@@ -492,7 +554,7 @@ test("runtime workspace patch publication replaces empty placeholders but reject
     },
     fs.readFileSync,
     writeFileDurable
-  ) as (root: string, relativePath: string, contents: string) => void;
+  ) as (root: string, relativePath: string, contents: string, replaceSuperseded?: boolean) => void;
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-patch-publication-"));
   try {
@@ -506,6 +568,12 @@ test("runtime workspace patch publication replaces empty placeholders but reject
       () => writeWorkspacePatchArtifact(root, "workspace.patch", "captured patch\n"),
       /workspace patch artifact was modified/u
     );
+
+    // #357: the same non-empty survivor is replaced once the caller has classified it as a pair this
+    // node published in an earlier generation. Only the flag differs, so this pins that the widening
+    // rides on the classification and not on anything about the bytes.
+    writeWorkspacePatchArtifact(root, "workspace.patch", "captured patch\n", true);
+    assert.equal(fs.readFileSync(patchPath, "utf8"), "captured patch\n");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -820,10 +888,8 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
   assert.match(reset, /output\.contract === "ultrafuzz\/generated-tests@1"/u);
   assert.match(reset, /for \(const testRoot of invariantTestRoots\(workspaceRoot\)\)/u);
   assert.match(reset, /path\.resolve\(workspaceRoot, testRoot, "foundry"\)/u);
-  assert.match(
-    reset,
-    /path\.join\(foundryParent, task\.metadata\.node\.logicalNodeId\),\s*task\.metadata\.node\.logicalNodeId,\s*"generated-test"/u
-  );
+  assert.match(reset, /for \(const nodeId of generatedTestNodeIds\(task\)\)/u);
+  assert.match(reset, /path\.join\(foundryParent, nodeId\), nodeId, "generated-test"/u);
   assert.match(reset, /path\.basename\(candidate\) !== attemptId/u);
   assert.match(reset, /const parent = realpathSync\(path\.dirname\(candidate\)\)/u);
   assert.match(reset, /const anchoredRoot = realpathSync\(candidate\)/u);
@@ -1162,8 +1228,11 @@ test("generated Smithers agent mirrors declared workspace tests before strict ve
 
   const materializer = source.slice(materializerStart, resolverStart);
   assert.match(materializer, /const generatedPrefix = "generated-tests\/"/u);
-  assert.match(materializer, /const sourceCandidates = INVARIANT_TEST_ROOT_NAMES\.flatMap/u);
-  assert.match(materializer, /path\.resolve\(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath\)/u);
+  assert.match(materializer, /INVARIANT_TEST_ROOT_NAMES\.flatMap/u);
+  assert.match(
+    materializer,
+    /nodeIds\.map\(\(nodeId\) => path\.resolve\(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath\)\)/u
+  );
   assert.match(
     materializer,
     /const existingCandidates = sourceCandidates\.filter\(\(candidate\) => existsSync\(candidate\)\)/u
@@ -1173,6 +1242,81 @@ test("generated Smithers agent mirrors declared workspace tests before strict ve
   assert.match(materializer, /sourceBefore\.nlink !== 1/u);
   assert.match(materializer, /writeFileSync\(anchoredArtifactPath, contents, \{ flag: "wx", mode: 0o600 \}\)/u);
   assert.match(materializer, /generated test copy mismatch/u);
+});
+
+test("generated Smithers companions accept the logical node directory the prompt mandates", () => {
+  // `strategy_attempt_test_dir` renders `<workspace>/test/foundry/<logical id>`
+  // (packages/prompts/src/render.ts). Any node the topology expands -- every
+  // `strategies` node in the production topology, which carries `loops: 3` --
+  // has a concrete id like `externalized-state-accounting-0`, so a lookup keyed
+  // only on the concrete id never visits the directory the prompt named and an
+  // obedient agent's test is rejected as missing. Issue #348.
+  const materialize = loadMaterializeGeneratedTestCompanion();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-test-companion-"));
+  try {
+    const workspaceRoot = fs.realpathSync(root);
+    const artifactRoot = path.join(workspaceRoot, "artifacts");
+    const mandatedDir = path.join(workspaceRoot, "test", "foundry", "externalized-state-accounting");
+    fs.mkdirSync(artifactRoot, { recursive: true });
+    fs.mkdirSync(mandatedDir, { recursive: true });
+    fs.writeFileSync(path.join(mandatedDir, "Esa.t.sol"), "contract EsaTest {}\n", "utf8");
+
+    materialize(
+      workspaceRoot,
+      artifactRoot,
+      ["externalized-state-accounting", "externalized-state-accounting-0"],
+      "generated-tests/Esa.t.sol"
+    );
+
+    assert.equal(
+      fs.readFileSync(path.join(artifactRoot, "generated-tests", "Esa.t.sol"), "utf8"),
+      "contract EsaTest {}\n"
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers companions still reject a test that reached no accepted directory", () => {
+  const materialize = loadMaterializeGeneratedTestCompanion();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-test-companion-"));
+  try {
+    const workspaceRoot = fs.realpathSync(root);
+    const artifactRoot = path.join(workspaceRoot, "artifacts");
+    fs.mkdirSync(artifactRoot, { recursive: true });
+    // The conventional Foundry location, not one the companion contract accepts.
+    fs.mkdirSync(path.join(workspaceRoot, "test"), { recursive: true });
+    fs.writeFileSync(path.join(workspaceRoot, "test", "Esa.t.sol"), "contract EsaTest {}\n", "utf8");
+
+    assert.throws(
+      () =>
+        materialize(
+          workspaceRoot,
+          artifactRoot,
+          ["externalized-state-accounting", "externalized-state-accounting-0"],
+          "generated-tests/Esa.t.sol"
+        ),
+      /generated test file is missing generated-tests\/Esa\.t\.sol/u
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers retries clear every generated-test directory the companion lookup accepts", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const resetStart = source.indexOf("function resetTaskArtifactsForRetry");
+  const resetEnd = source.indexOf("function resetTaskArtifactContents", resetStart);
+  assert.ok(resetStart >= 0, source);
+  assert.ok(resetEnd > resetStart, source);
+
+  const reset = source.slice(resetStart, resetEnd);
+  assert.match(reset, /for \(const nodeId of generatedTestNodeIds\(task\)\) \{/u);
+  assert.match(reset, /resetTaskArtifactContents\(path\.join\(foundryParent, nodeId\), nodeId, "generated-test"\)/u);
+  assert.match(
+    source,
+    /function generatedTestNodeIds[\s\S]*new Set\(\[task\.metadata\.node\.logicalNodeId, task\.metadata\.node\.concreteNodeId\]\)/u
+  );
 });
 
 test("generated Smithers workflow preserves the complete invariant suite across worktree handoffs", () => {
