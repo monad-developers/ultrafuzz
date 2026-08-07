@@ -188,6 +188,9 @@ export function parsePublicEvalDiagnostics(value: unknown): PublicEvalDiagnostic
   return parsed;
 }
 
+// A zero-row set is never scoreable: an eval that planned nothing has nothing to
+// score. Both readiness conjuncts hold vacuously over `[]`, so guard on the count
+// rather than letting `every` and a zero failed-target count report readiness.
 export function summarizePublicEvalDiagnosticsRows(rows: PublicEvalDiagnosticsRow[]): PublicEvalDiagnostics["summary"] {
   return {
     planned: rows.length,
@@ -199,7 +202,8 @@ export function summarizePublicEvalDiagnosticsRows(rows: PublicEvalDiagnosticsRo
     workflow_nonterminal: rows.filter((row) => !row.workflow_terminal).length,
     genuine_task_failure_rows: rows.filter((row) => row.terminal_disposition === "genuine-task-failures").length,
     terminal_reports_present: rows.filter((row) => row.terminal_report_present).length,
-    scoring_ready: rows.every((row) => row.scoring_ready) && publicEvalDiagnosticsFailedTargetCount(rows) <= 1
+    scoring_ready:
+      rows.length > 0 && rows.every((row) => row.scoring_ready) && publicEvalDiagnosticsFailedTargetCount(rows) <= 1
   };
 }
 
@@ -214,7 +218,7 @@ function summarizeLegacyPublicEvalDiagnosticsRows(rows: PublicEvalDiagnosticsRow
     workflow_nonterminal: rows.filter((row) => !row.workflow_terminal).length,
     genuine_task_failure_rows: rows.filter((row) => row.terminal_disposition === "genuine-task-failures").length,
     terminal_reports_present: rows.filter((row) => row.terminal_report_present).length,
-    scoring_ready: rows.every((row) => row.scoring_ready)
+    scoring_ready: rows.length > 0 && rows.every((row) => row.scoring_ready)
   };
 }
 
