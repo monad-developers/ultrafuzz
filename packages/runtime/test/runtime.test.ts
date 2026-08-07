@@ -4613,9 +4613,10 @@ test("syncRun marks successful workflow completion, normalizes findings, and wri
 // `assertVerifiedDependency`. A marker left describing bytes that no longer exist fails each
 // dependent's `prepare:` wrapper as `artifact-contract` before its agent runs -- which is exactly
 // what kept `dedupe-findings`, the only smoke-lane node whose dependencies publish findings.json,
-// red on all three targets in every toolchain (issue #348). Only a producer that reported at least
-// one finding drifts: an empty array normalizes back to the same bytes, which is why the lane's own
-// empty-artifact fixtures never surfaced this.
+// red on all three targets in every toolchain (issue #348). The drift is not confined to producers
+// that reported findings: `writeJsonDurable` re-serializes with two-space indent and a trailing
+// newline, so even `[]` moves unless the producer already wrote exactly `[]\n`. What kept this
+// hidden is that no fixture drove normalization and a sealed marker together.
 test("syncRun re-seals the verification marker after it normalizes a producer's findings", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
