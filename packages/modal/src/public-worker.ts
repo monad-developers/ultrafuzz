@@ -20,7 +20,6 @@ import {
   type EvalRunRecord,
   type EvalSuiteSpec
 } from "@ultrafuzz/evals";
-import { redactSecretsInText } from "@ultrafuzz/security";
 import { stringify } from "yaml";
 
 import { kimiSubscriptionAuthSecretValuesFromRoots, runnerApiKeyEnv } from "./auth.js";
@@ -43,6 +42,7 @@ import {
   writePublicEvalDiagnosticsAtomic
 } from "./public-eval-diagnostics.js";
 import { capModalTargetTopologyTimeouts, modalTargetToml } from "./workspace-config.js";
+import { sanitizeWorkerDiagnosticMessage, WORKER_STDERR_TAIL_BYTES } from "./worker-diagnostics.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "./worker-result.js";
 import { OperationalDispositionError } from "./terminal-disposition.js";
 
@@ -903,11 +903,13 @@ async function runCommand(
     options.signal?.removeEventListener("abort", abortHandler);
   });
   const capturedStdout = Buffer.concat(stdout).toString("utf8");
-  if (options.publicDiagnosticSecretValues !== undefined) {
-    const forbiddenSecretValues =
-      typeof options.publicDiagnosticSecretValues === "function"
+  const forbiddenSecretValues =
+    options.publicDiagnosticSecretValues === undefined
+      ? []
+      : typeof options.publicDiagnosticSecretValues === "function"
         ? await options.publicDiagnosticSecretValues()
         : options.publicDiagnosticSecretValues;
+  if (options.publicDiagnosticSecretValues !== undefined) {
     const payload = publicEvalFailureDiagnosticLogPayload(capturedStdout, forbiddenSecretValues);
     if (payload !== undefined) {
       await fs.promises.appendFile(
@@ -927,7 +929,14 @@ async function runCommand(
   }
   if (exitCode !== 0) {
     await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-failed\n`);
-    const detail = Buffer.concat(stderr).toString("utf8").slice(-4_000).trim();
+    // The stderr tail can quote configuration, so it goes through the same sanitizer as every other
+    // diagnostic string this worker emits rather than being embedded raw.
+    const detail = sanitizeWorkerDiagnosticMessage(
+      Buffer.concat(stderr).subarray(-WORKER_STDERR_TAIL_BYTES).toString("utf8"),
+      {
+        forbiddenSecretValues
+      }
+    );
     throw new OperationalDispositionError("unreachable", {
       cause: new Error(`${argv[0]} exited ${exitCode}${detail === "" ? "" : `: ${detail}`}`)
     });
@@ -955,29 +964,10 @@ export function publicEvalFailureDiagnosticLogPayload(
     .slice(0, 3)
     .map((entry) => ({
       code: "WORKFLOW_SUBMISSION_FAILED",
-      message: sanitizePublicDiagnosticMessage(entry.message as string, forbiddenSecretValues)
+      message: sanitizeWorkerDiagnosticMessage(entry.message as string, { forbiddenSecretValues })
     }));
   if (diagnostics.length === 0) return undefined;
   return Buffer.from(JSON.stringify(diagnostics), "utf8").toString("base64url");
-}
-
-function sanitizePublicDiagnosticMessage(message: string, forbiddenSecretValues: readonly string[]): string {
-  let sanitized = message;
-  for (const secret of [...new Set(forbiddenSecretValues.filter((value) => value.length > 0))].sort(
-    (left, right) => right.length - left.length
-  )) {
-    sanitized = sanitized.split(secret).join("<redacted>");
-  }
-  sanitized = [...redactSecretsInText(sanitized)]
-    .map((character) => {
-      const codePoint = character.codePointAt(0)!;
-      return codePoint <= 31 || codePoint === 127 ? " " : character;
-    })
-    .join("")
-    .replace(/\s+/gu, " ")
-    .trim();
-  const bytes = Buffer.from(sanitized, "utf8");
-  return bytes.subarray(Math.max(0, bytes.length - 1_000)).toString("utf8");
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

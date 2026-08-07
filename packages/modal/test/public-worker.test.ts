@@ -469,6 +469,29 @@ it("materializes the private candidate from the image with exact clean Git prove
   }
 });
 
+it("redacts the child stderr tail it attaches as a failure cause", async () => {
+  const secret = "sk-ant-fixturebakedcandidatearchive";
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-baked-stderr-"));
+  const destination = path.join(root, "candidate");
+  const logPath = path.join(root, "worker.log");
+
+  const failure = await materializeBakedCandidate(
+    "f".repeat(40),
+    destination,
+    logPath,
+    path.join(root, `${secret}.tgz`)
+  )
+    .then(() => undefined)
+    .catch((error: unknown) => error);
+
+  const cause = (failure as { cause?: unknown }).cause;
+  expect(cause).toBeInstanceOf(Error);
+  expect((cause as Error).message).toContain("tar exited");
+  expect((cause as Error).message).toContain("<redacted>");
+  expect((cause as Error).message).not.toContain(secret);
+  expect((cause as Error).message).not.toContain("\n");
+});
+
 it("bounds public provider fan-out by mode", () => {
   const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
   const lanes = loadBenchmarkLanesManifest(path.join(repositoryRoot, "benchmarks/lanes.json"));

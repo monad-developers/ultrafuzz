@@ -53,6 +53,7 @@ import {
 } from "./worker-result.js";
 import { modalTargetToml } from "./workspace-config.js";
 import { runPublicBenchmarkWorker } from "./public-worker.js";
+import { childExitFailureCause, describeWorkerTermination, drainChildOutput } from "./worker-diagnostics.js";
 import {
   assertWorkerInputLineage,
   CheckpointIncompatibleError,
@@ -506,11 +507,7 @@ async function runChecked(
     env: { ...process.env, ...options.env },
     stdio: ["ignore", "pipe", "pipe"]
   });
-  const streams = [child.stdout, child.stderr].map(async (stream) => {
-    for await (const _chunk of stream) {
-      // Drain child output without persisting provider responses or benchmark contents.
-    }
-  });
+  const { drained, stderrTail } = drainChildOutput(child);
   let exitCode: number;
   try {
     exitCode = await new Promise<number>((resolve, reject) => {
@@ -518,16 +515,18 @@ async function runChecked(
       child.once("close", (code) => resolve(code ?? 1));
     });
   } catch (error) {
-    await Promise.all(streams).catch(() => undefined);
+    await drained.catch(() => undefined);
     await appendGenericLog("operation-failed");
     throw new OperationalDispositionError(capacityFailure(error) ? "capacity-unavailable" : failureCategory(options), {
       cause: error
     });
   }
-  await Promise.all(streams);
+  await drained;
   if (exitCode !== 0) {
     await appendGenericLog("operation-failed");
-    throw new OperationalDispositionError(failureCategory(options));
+    throw new OperationalDispositionError(failureCategory(options), {
+      cause: childExitFailureCause(options.label, exitCode, stderrTail)
+    });
   }
   await appendGenericLog("operation-finished");
 }
@@ -616,7 +615,11 @@ void (
         checkpointIncompatibleError: (message) => new CheckpointIncompatibleError(message)
       })
     : main()
-).catch(() => {
-  console.error("worker terminated");
+).catch((error: unknown) => {
+  // Bind the reason and print it. The error object itself is never handed to `console.error`: an
+  // `execFileSync` ENOBUFS `SystemError` carries `output`/`stdout`/`stderr` holding up to the whole captured
+  // workspace diff, which `util.inspect` would dump. `describeWorkerTermination` walks the `cause` chain and
+  // emits only bounded, redacted `name (code): message` text.
+  console.error("worker terminated:", describeWorkerTermination(error));
   process.exitCode = 1;
 });
