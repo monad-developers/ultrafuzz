@@ -41,21 +41,19 @@ const referenceExpectationIdsSchema = z
 // check without the non-empty bound that `referenceExpectationIdsSchema`
 // applies to catalog entries. The refinement is repeated rather than shared so
 // neither schema constrains the other. See #298 for the same fix on ledger_ids.
-const implementedReferenceExpectationIdsSchema = z
-  .array(nonEmptyString)
-  .superRefine((expectationIds, context) => {
-    const seen = new Set<string>();
-    for (const [expectationIndex, expectationId] of expectationIds.entries()) {
-      if (seen.has(expectationId)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate reference expectation ID ${JSON.stringify(expectationId)}`,
-          path: [expectationIndex]
-        });
-      }
-      seen.add(expectationId);
+const implementedReferenceExpectationIdsSchema = z.array(nonEmptyString).superRefine((expectationIds, context) => {
+  const seen = new Set<string>();
+  for (const [expectationIndex, expectationId] of expectationIds.entries()) {
+    if (seen.has(expectationId)) {
+      context.addIssue({
+        code: "custom",
+        message: `Duplicate reference expectation ID ${JSON.stringify(expectationId)}`,
+        path: [expectationIndex]
+      });
     }
-  });
+    seen.add(expectationId);
+  }
+});
 export const PROPERTY_PRIORITIES = ["high", "medium", "low"] as const;
 export const propertyPrioritySchema = z.enum(PROPERTY_PRIORITIES);
 export type PropertyPriority = (typeof PROPERTY_PRIORITIES)[number];
