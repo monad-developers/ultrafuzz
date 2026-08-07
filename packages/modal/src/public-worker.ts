@@ -21,7 +21,8 @@ import {
   type BenchmarkCohortManifest,
   type BenchmarkLaneName,
   type EvalRunRecord,
-  type EvalSuiteSpec
+  type EvalSuiteSpec,
+  BENCHMARK_THREAT_MODEL_RETAINED_ARTIFACTS
 } from "@ultrafuzz/evals";
 import { REFERENCE_GITHUB_TOKEN_ENV } from "@ultrafuzz/references";
 import { stringify } from "yaml";
@@ -131,12 +132,7 @@ const PUBLIC_EVAL_RUN_ID_MAX_LENGTH = 128;
  * produced by more than one node stays attributable and can never collide with
  * the fixed set.
  */
-export const PUBLIC_OPTIONAL_ROW_ARTIFACTS = [
-  "THREAT_MODEL.md",
-  "goal-plan.json",
-  "threat-model.json",
-  "vulnerability-db-manifest.json"
-] as const;
+export const PUBLIC_OPTIONAL_ROW_ARTIFACTS = BENCHMARK_THREAT_MODEL_RETAINED_ARTIFACTS;
 
 /**
  * Ceiling on optional artifacts published for one row. Four names across a
