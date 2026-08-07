@@ -236,6 +236,90 @@ const applicabilityDecisionSchema = z
     });
   });
 
+export const GOAL_LANE_KINDS = ["threat", "class", "roaming"] as const;
+export type GoalLaneKind = (typeof GOAL_LANE_KINDS)[number];
+
+/**
+ * One goal lane: a named unit of hunting work and the concrete node IDs it owns.
+ *
+ * Lanes exist so "failed goal lanes" and per-lane tokens/cost/wall-clock (#183) are a *grouping* of
+ * data the run already records, not new telemetry. `node_ids` is a list because one lane may own
+ * several nodes once model fanout materializes more than one attempt per goal.
+ *
+ * A lane is one goal, not one dynamic group; that choice and the alternative are argued in
+ * `goalPlanExpansionFacts`.
+ */
+const goalLaneSchema = z.strictObject({
+  // A lane is named by the goal it runs: a threat ID, a class ID, or the fixed roaming node ID.
+  lane_id: z.union([stableId, threatId]),
+  kind: z.enum(GOAL_LANE_KINDS),
+  node_ids: z.array(nodeReference).min(1).refine(uniqueValues, { message: "Lane node IDs must be unique" })
+});
+
+export type GoalLane = z.infer<typeof goalLaneSchema>;
+
+export interface GoalPlanExpansionFactsInput {
+  threat_goals: ReadonlyArray<{ id: string; node_id: string }>;
+  class_goals: ReadonlyArray<{ id: string; node_id: string }>;
+  roaming_goal: { node_id: string };
+  max_dynamic_nodes: number;
+}
+
+export interface GoalPlanExpansionFacts {
+  expected_child_count: number;
+  threat_count: number;
+  applicable_class_count: number;
+  max_dynamic_nodes: number;
+  goal_lanes: GoalLane[];
+}
+
+/**
+ * The single authority for #183's dynamic-fanout cardinality rule: one dynamic child per modeled
+ * threat plus one per applicable database class, alongside the fixed roaming node, which is a static
+ * topology node and therefore never a dynamic child.
+ *
+ * Both the planner-side recorder that writes these numbers into `goal-plan.json` and the contract
+ * that validates them call this one function, so the rule is stated exactly once. That includes the
+ * pre-existing `counts` block, whose `threats`, `applicable_classes` and `dynamic_goals` are the same
+ * arithmetic: they are checked against these facts rather than recomputed, so the two cannot drift.
+ * `counts` is retained because it is already published and read; `expected_child_count`,
+ * `threat_count` and `applicable_class_count` are its #364-named aliases, and a reader may use
+ * either. The eval side never calls this function -- it reads what the planner wrote and compares, so
+ * a planner that under-expands is caught by a component that did not compute the expectation (#364,
+ * option (a)).
+ *
+ * Lane granularity, decided here and recorded rather than assumed: a lane is **one goal**, so
+ * `lane_id` is a threat ID or a class ID and a run has `threats + classes + 1` lanes. The alternative
+ * reading -- lane = dynamic group, giving exactly three lanes (`threat-goals`, `class-goals`,
+ * `goal-roaming`) per run -- is cheaper to aggregate but reports the cost of a whole group, which
+ * says nothing about which goal was expensive or which one failed. #364 left this open; per-goal is
+ * chosen because per-goal cost and per-goal failure are the metrics #183 asks for. Group-level
+ * numbers remain derivable by summing lanes of one `kind`; the reverse is not.
+ */
+export function goalPlanExpansionFacts(input: GoalPlanExpansionFactsInput): GoalPlanExpansionFacts {
+  const threatCount = input.threat_goals.length;
+  const applicableClassCount = input.class_goals.length;
+  return {
+    expected_child_count: threatCount + applicableClassCount,
+    threat_count: threatCount,
+    applicable_class_count: applicableClassCount,
+    max_dynamic_nodes: input.max_dynamic_nodes,
+    goal_lanes: [
+      ...input.threat_goals.map((goal) => ({
+        lane_id: goal.id,
+        kind: "threat" as const,
+        node_ids: [goal.node_id]
+      })),
+      ...input.class_goals.map((goal) => ({
+        lane_id: goal.id,
+        kind: "class" as const,
+        node_ids: [goal.node_id]
+      })),
+      { lane_id: input.roaming_goal.node_id, kind: "roaming" as const, node_ids: [input.roaming_goal.node_id] }
+    ]
+  };
+}
+
 export const goalPlanSchema = z
   .strictObject({
     schema_version: z.literal(GOAL_PLAN_SCHEMA_VERSION),
@@ -265,7 +349,21 @@ export const goalPlanSchema = z
       inapplicable_classes: z.number().int().nonnegative(),
       dynamic_goals: z.number().int().nonnegative(),
       total_goals: z.number().int().positive()
-    })
+    }),
+    /**
+     * How many dynamic children this plan expects the runtime to create, written down at planning
+     * time so the eval side can compare it against what the run actually produced without ever
+     * recomputing the rule (#364). Equal to `counts.dynamic_goals` by construction -- both are
+     * checked against `goalPlanExpansionFacts`, which computes it once.
+     */
+    expected_child_count: z.number().int().nonnegative(),
+    /** Equal to `counts.threats`; see `expected_child_count`. */
+    threat_count: z.number().int().nonnegative(),
+    /** Equal to `counts.applicable_classes`; see `expected_child_count`. */
+    applicable_class_count: z.number().int().nonnegative(),
+    /** The `run.max_dynamic_nodes` limit this plan was produced under. */
+    max_dynamic_nodes: z.number().int().positive(),
+    goal_lanes: z.array(goalLaneSchema).min(1)
   })
   .superRefine((value, context) => {
     addDuplicateIssues(value.threat_goals, "threat_goals", context);
@@ -323,17 +421,43 @@ export const goalPlanSchema = z
       }
     });
 
+    // One computation feeds both blocks below. `counts` predates #364 and `expected_child_count` and
+    // friends were added by it, but they are the same arithmetic over the same goals: computing it
+    // twice is the drift hazard #364 chose option (a) to avoid, so the pre-existing `counts` block is
+    // derived from these facts rather than restating `threat_goals.length + class_goals.length`.
+    const facts = goalPlanExpansionFacts(value);
     const expected = {
-      threats: value.threat_goals.length,
-      applicable_classes: value.class_goals.length,
+      threats: facts.threat_count,
+      applicable_classes: facts.applicable_class_count,
       inapplicable_classes: value.applicability_decisions.filter((item) => item.decision === "inapplicable").length,
-      dynamic_goals: value.threat_goals.length + value.class_goals.length,
-      total_goals: value.threat_goals.length + value.class_goals.length + 1
+      dynamic_goals: facts.expected_child_count,
+      // The one goal that is not a dynamic child: the fixed roaming node, which is static topology.
+      total_goals: facts.expected_child_count + 1
     };
     for (const [field, count] of Object.entries(expected)) {
       if (value.counts[field as keyof typeof expected] !== count) {
         context.addIssue({ code: "custom", path: ["counts", field], message: "Count must equal " + String(count) });
       }
+    }
+
+    for (const field of ["expected_child_count", "threat_count", "applicable_class_count"] as const) {
+      if (value[field] !== facts[field]) {
+        context.addIssue({ code: "custom", path: [field], message: `${field} must equal ${String(facts[field])}` });
+      }
+    }
+    if (value.expected_child_count > value.max_dynamic_nodes) {
+      context.addIssue({
+        code: "custom",
+        path: ["expected_child_count"],
+        message: `Plan expects ${String(value.expected_child_count)} dynamic children, exceeding max_dynamic_nodes=${String(value.max_dynamic_nodes)}`
+      });
+    }
+    if (!sameJson(value.goal_lanes, facts.goal_lanes)) {
+      context.addIssue({
+        code: "custom",
+        path: ["goal_lanes"],
+        message: "goal_lanes must name every threat goal, class goal, and the fixed roaming goal exactly once"
+      });
     }
   });
 
@@ -554,6 +678,18 @@ function addDuplicateIssues(
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function uniqueValues(values: readonly string[]): boolean {
+  return new Set(values).size === values.length;
+}
+
+/**
+ * Order-sensitive structural comparison. Lane order is itself part of the recorded plan, so a
+ * reordered `goal_lanes` is a different document and must not be silently accepted.
+ */
+function sameJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 const vulnerabilityDatabaseManifestSchema = z.looseObject({

@@ -184,6 +184,44 @@ exactly once. Only selected vulnerability-class Markdown is snapshotted. Its
 exact path, byte size, and SHA-256 must agree across the plan, database snapshot
 manifest, artifact manifest, and bundled bytes.
 
+The plan also writes down what it expects the runtime to build.
+`expected_child_count`, `threat_count`, `applicable_class_count`, and
+`max_dynamic_nodes` are recorded deterministically after the planner agent
+returns, from the plan it wrote plus the run's resolved
+`run.max_dynamic_nodes`; the agent must not write them itself. `goal_lanes`
+names every threat goal, every class goal, and the fixed roaming goal, each with
+the node IDs it owns. `expected_child_count` is `threat_count +
+applicable_class_count`: the roaming goal is a static topology node, so it is a
+named lane but never a dynamic child. A plan whose recorded numbers disagree
+with its own goals, or that expects more children than `max_dynamic_nodes`
+permits, is rejected by the `ultrafuzz/goal-plan@1` contract.
+
+Three of those numbers are aliases, not new arithmetic: `threat_count`,
+`applicable_class_count`, and `expected_child_count` are by construction equal to
+the pre-existing `counts.threats`, `counts.applicable_classes`, and
+`counts.dynamic_goals`. Both blocks are checked against one function, so the
+cardinality rule is computed once and the two cannot drift. `max_dynamic_nodes`
+and `goal_lanes` are the genuinely new fields; readers may use either name for
+the counts.
+
+A goal lane is **one goal**: `lane_id` is a threat ID, a class ID, or the fixed
+roaming node ID, so a run has `threats + classes + 1` lanes. The alternative —
+one lane per dynamic group, giving three lanes per run — reports the cost of a
+whole group and cannot say which goal was expensive or which one failed, so
+per-goal is what is recorded. Group totals remain derivable by summing lanes of
+one `kind`; the reverse is not.
+
+Evaluation reads these numbers and compares them against the run rather than
+recomputing them, so a planner that under-expands is caught by a component that
+did not derive the expectation. Dynamic child nodes record
+`provenance.source_node_id` in `state.json`, naming the node whose output
+produced them. Per-lane tokens and cost are joined from `usage.jsonl` on its
+`node_id`, the identity `state.json` keys a node under. That field is optional:
+ledgers written before it existed carry none, and an entry without it is
+unjoinable, which the record reports as `cost_evidence` /`lane_cost_evidence` of
+`unavailable` with a reason. A lane that genuinely spent nothing reports zero
+with complete evidence, so it is never confused with a join that did not land.
+
 The default `stateful-invariant-campaign` runs one final recon-fuzzer backend
 and writes backend-neutral `campaign-plan.json`, `campaign-summary.json`, and
 `campaign-report.md` artifacts plus `recon-fuzzer-results.json`. The plan

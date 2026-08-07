@@ -431,6 +431,61 @@
       },
       "required": ["threats", "applicable_classes", "inapplicable_classes", "dynamic_goals", "total_goals"],
       "additionalProperties": false
+    },
+    "expected_child_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "threat_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "applicable_class_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "max_dynamic_nodes": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "goal_lanes": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lane_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$"
+              },
+              {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*:[a-z0-9]+(?:[.:-][a-z0-9]+)*$"
+              }
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["threat", "class", "roaming"]
+          },
+          "node_ids": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$"
+            }
+          }
+        },
+        "required": ["lane_id", "kind", "node_ids"],
+        "additionalProperties": false
+      }
     }
   },
   "required": [
@@ -445,7 +500,12 @@
     "applicability_decisions",
     "selected_class_records",
     "roaming_goal",
-    "counts"
+    "counts",
+    "expected_child_count",
+    "threat_count",
+    "applicable_class_count",
+    "max_dynamic_nodes",
+    "goal_lanes"
   ],
   "additionalProperties": false,
   "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/goal-plan",
