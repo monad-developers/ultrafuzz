@@ -101,6 +101,23 @@ payload, and only then normalizes it into its own digest-bound planner catalog.
 Nothing from an external repository is executed, and no unvalidated upstream
 field reaches a planner prompt.
 
+### Private references
+
+The shipped references are all public and need no credential. A project that
+pins a reference in a private repository supplies one through two environment
+variables, and both are required together:
+
+| Variable                           | Meaning                                                          |
+| ---------------------------------- | ---------------------------------------------------------------- |
+| `ULTRAFUZZ_REFERENCE_GITHUB_REPOS` | Comma-separated `owner/repo` allowlist the token may be sent to. |
+| `ULTRAFUZZ_REFERENCE_GITHUB_TOKEN` | The token itself. Never commit it or pass it on a command line.  |
+
+The token is attached as a per-fetch HTTP `extraheader` scoped to a repository
+on the allowlist, so it is never written to a config file, never sent to a
+repository the allowlist does not name, and is redacted from logs. Declaring
+repositories without supplying a token fails a Modal launch closed rather than
+silently falling back to an anonymous fetch that would 404.
+
 ## Cache
 
 Synced content is stored outside the project repository:

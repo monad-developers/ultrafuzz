@@ -10,8 +10,6 @@ import { describe, expect, it } from "vitest";
 import {
   adaptBenchmarkManifestToEvalSuite,
   benchmarkLaneTopologyExclusions,
-  BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS,
-  BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS,
   BENCHMARK_SMOKE_EXCLUDED_NODE_IDS,
   BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES,
   BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS,
@@ -78,13 +76,13 @@ describe("public benchmark manifests", () => {
         workflow_profile: BENCHMARK_SMOKE_WORKFLOW_PROFILE,
         selected_strategy_ids: [...BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS],
         strategy_loops: 1,
-        excluded_node_ids: [...BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS]
+        excluded_node_ids: []
       }
     });
     expect(benchmarkTopologyTransform({ workflow_input: suite.variants[0]?.workflow_input })).toMatchObject({
       topologyTransform: {
         strategyLoops: 1,
-        excludedNodeIds: [...BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS]
+        excludedNodeIds: []
       }
     });
     expect(
@@ -359,18 +357,18 @@ describe("public benchmark manifests", () => {
     for (const id of THREAT_MODEL_GOAL_FANOUT_NODE_IDS) expect(topologyNodeIds.has(id)).toBe(true);
   });
 
-  it("prunes every dynamic node the smoke graph actually declares", () => {
+  it("keeps the smoke graph free of dynamic and threat-model work by construction", () => {
     // #277 requires the smoke lane to run no invariant, differential or dynamic
-    // work. Invariant and differential nodes are absent from the smoke graph by
-    // construction, but dynamic goal fanout is declared there, so the lane must
-    // prune it explicitly or the guarantee is silently false.
+    // work, and its results append to already-published observations. The lane
+    // therefore holds that guarantee structurally -- the dedicated graph simply
+    // does not declare those nodes -- rather than by pruning them, which would
+    // move the execution-policy fingerprint and break comparability.
     const smokeTopology = parseYaml(fs.readFileSync(path.join(REPOSITORY_ROOT, BENCHMARK_SMOKE_WORKFLOW_PATH), "utf8"));
     const nodes = (smokeTopology as { nodes: { id: string; dynamic?: unknown }[] }).nodes;
-    const declaredDynamicNodeIds = nodes
-      .filter((node) => node.dynamic !== undefined)
-      .map((node) => node.id)
-      .sort();
-    expect(declaredDynamicNodeIds).toEqual([...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS].sort());
+    const smokeNodeIds = new Set(nodes.map((node) => node.id));
+
+    expect(nodes.filter((node) => node.dynamic !== undefined)).toEqual([]);
+    for (const id of THREAT_MODEL_GOAL_FANOUT_NODE_IDS) expect(smokeNodeIds.has(id)).toBe(false);
 
     const suite = adaptBenchmarkManifestToEvalSuite({
       benchmark: "ultrafuzz-bench",
@@ -379,23 +377,9 @@ describe("public benchmark manifests", () => {
       lanes: loadBenchmarkLanesManifest(LANES_PATH)
     });
     const transform = benchmarkTopologyTransform({ workflow_input: suite.variants[0]?.workflow_input });
-    const excluded = transform.topologyTransform?.excludedNodeIds ?? [];
-    for (const id of declaredDynamicNodeIds) expect(excluded).toContain(id);
-
-    // Every pruned ID must exist in the graph, or planning throws "unknown node".
-    const smokeNodeIds = new Set(nodes.map((node) => node.id));
-    for (const id of excluded) expect(smokeNodeIds.has(id)).toBe(true);
-  });
-
-  it("prunes goal-plan alongside the fanout it feeds", () => {
-    // `artifact_path` requires the cited producer to be an ancestor, and the
-    // smoke report prompt cites goal-plan. Once the fanout goes, goal-plan is no
-    // longer an ancestor of final-report, so it has to go too or expansion
-    // fails. packages/topology asserts the pruned graph really does expand.
-    expect(BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS).toContain("goal-plan");
-    for (const id of BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS) {
-      expect(BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS).toContain(id);
-    }
+    // An empty list keeps benchmark_execution -- and so the execution-policy and
+    // cohort fingerprints -- byte-identical to the published smoke observations.
+    expect(transform.topologyTransform?.excludedNodeIds).toEqual([]);
   });
 
   it("keeps the canonical Ultrafuzz cohort immutable without a fallback target", () => {

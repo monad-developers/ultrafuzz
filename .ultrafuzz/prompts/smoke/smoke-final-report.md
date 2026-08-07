@@ -11,9 +11,6 @@ This is one final evidence review, not another repository-wide audit.
 Required inputs:
 
 - Context: `{{artifact_path:smoke-context}}/smoke-context.md`
-- Threat model narrative: `{{artifact_path:threat-model}}/THREAT_MODEL.md`
-- Threat model record: `{{artifact_path:threat-model}}/threat-model.json`
-- Goal plan: `{{artifact_path:goal-plan}}/goal-plan.json`
 - Findings: `{{artifact_path:dedupe-findings}}/deduped-findings.json`
 - Strategy hits: `{{artifact_path:dedupe-findings}}/strategy-detections.json`
 - Lifecycle: `{{artifact_path:dedupe-findings}}/finding-lifecycle-ledger.json`
@@ -62,21 +59,7 @@ Write `{{artifact_path}}/report.md` beginning with `# Ultrafuzz report`. Include
 a concise run summary, an issue index, and for each production issue its
 severity reasoning, evidence/PoC, affected code, strategy detections, and a
 `- **Source nodes**:` bullet listing the finding's `source_nodes` union as
-comma-separated backticked IDs. Render this exact deterministic section
-immediately after the run summary, omitting a bullet whose artifact the run did
-not produce and the whole section when it produced none:
-
-```md
-## Audit context
-
-- Threat model: [THREAT_MODEL.md](<relative path to THREAT_MODEL.md>); [threat-model.json](<relative path to threat-model.json>)
-- Goal plan: [goal-plan.json](<relative path to goal-plan.json>)
-```
-
-Use report-relative paths to the run's own artifacts, never absolute paths or
-external URLs. Do not invent a different heading, ordering, or link text, and do
-not copy the content of those artifacts into the report; `ultrafuzz report`
-regenerates this exact section deterministically. Add a short
+comma-separated backticked IDs. Add a short
 non-production outcomes table when needed. State `No issues reported.`
 only when the evidence supports no production issue. Validate all three
 required files against their output contracts, then stop.

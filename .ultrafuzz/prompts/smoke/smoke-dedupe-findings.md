@@ -5,10 +5,9 @@ display_name: Dedupe smoke findings
 
 # Dedupe smoke findings
 
-Perform one bounded, model-only consolidation pass over the four fixed strategy
-lanes, every generated threat/class goal child, and the fixed roaming goal. Do
-not rerun tests, install dependencies, edit production code, or begin new
-exploratory analysis.
+Perform one bounded, model-only consolidation pass over the four completed
+strategy lanes. Do not rerun tests, install dependencies, edit production code,
+or begin new exploratory analysis.
 
 Read every input, including valid empty arrays:
 
@@ -16,9 +15,6 @@ Read every input, including valid empty arrays:
 - External dependencies: `{{artifact_path:external-dependency-boundaries}}/findings.json`
 - Externalized accounting: `{{artifact_path:externalized-state-accounting}}/findings.json`
 - Lifecycle/views: `{{artifact_path:lifecycle-view-boundaries}}/findings.json`
-- Roaming goal: `{{artifact_path:goal-roaming}}/findings.json`
-- Threat-goal children, one exact path per generated node: {{artifact_path:threat-goals}}/findings.json
-- Class-goal children, one exact path per generated node: {{artifact_path:class-goals}}/findings.json
 
 Use affected code, reachable workflow, violated property, root cause, and
 reproduction shape as the dedupe key. Merge only findings proven to share a
@@ -29,9 +25,7 @@ source-backed finding merely because native execution was blocked.
 
 For every retained root, write the stable first-seen union of all contributing
 runtime `source_nodes` values, falling back to legacy `source_node_id`. Keep
-`source_node_id` equal to the union's first entry. Never replace generated
-human IDs such as `dynamic:threat:...` or `dynamic:class:...` with a group or
-dedupe node ID.
+`source_node_id` equal to the union's first entry.
 
 Write the retained normalized finding array to
 `{{artifact_path}}/deduped-findings.json`. Never add a synthetic finding when

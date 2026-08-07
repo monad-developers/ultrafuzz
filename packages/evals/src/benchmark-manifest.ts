@@ -56,9 +56,6 @@ export const BENCHMARK_GOAL_FANOUT_EXCLUDED_NODE_IDS = [
   "goal-plan"
 ] as const;
 
-/** The dedicated smoke graph has no `dynamic-strategy-generator` to prune. */
-export const BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS = BENCHMARK_GOAL_FANOUT_EXCLUDED_NODE_IDS;
-
 /**
  * Every default-on node the threat-model workstream adds to the production
  * topology. Curated lanes that prune by an explicit node-ID list cannot name
@@ -475,17 +472,12 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
               }
             : {}),
           strategy_loops: lane.strategy_loops,
-          // The dedicated smoke graph omits the invariant, differential and
-          // dynamic-strategy nodes outright, so those production-topology
-          // exclusions would be unknown-node errors here. It does carry the
-          // dynamic goal-fanout nodes, so those must be pruned explicitly for
-          // `disable_dynamic_strategies` to actually hold on the smoke lane.
-          excluded_node_ids:
-            input.lane === "smoke"
-              ? lane.disable_dynamic_strategies
-                ? [...BENCHMARK_SMOKE_DYNAMIC_EXCLUDED_NODE_IDS]
-                : []
-              : topologyExclusions.excluded_node_ids
+          // The dedicated smoke graph contains only its selected nodes -- no
+          // invariant, differential, dynamic-strategy or goal-fanout node -- so
+          // production-topology exclusions would be unknown-node errors here.
+          // Keeping the list empty also keeps the lane's execution-policy
+          // fingerprint identical to the one its published observations carry.
+          excluded_node_ids: input.lane === "smoke" ? [] : topologyExclusions.excluded_node_ids
         }
       }
     })),

@@ -145,13 +145,11 @@ The smoke has exactly three targets: one Foundry target, one Hardhat target, and
 one Vyper target. It defaults to GPT-5.6 Luna at `high`, uses one strategy loop,
 and uses the dedicated `benchmarks/smoke-benchmark.yml` graph. One
 medium-reasoning context node feeds four high-reasoning bug-finding strategies
-in parallel; a medium-reasoning threat model adds one high-reasoning roaming
-goal, and medium-reasoning dedupe and report nodes finish the row. Invariant,
-differential, dynamic-strategy, and production-only review stages are absent
-from this graph. The graph does declare the dynamic goal fanout, but the lane
-sets `disable_dynamic_strategies`, which prunes `threat-goals`, `class-goals`,
-and the `goal-plan` node that feeds them, so the row stays bounded and no
-dynamic expansion runs. Repository variable `BENCHMARK_SMOKE_OPENAI_MODEL` can override the
+in parallel; medium-reasoning dedupe and report nodes finish the row. Invariant,
+differential, dynamic, threat-model, goal-fanout, and production-only review
+stages are absent from this graph, so the lane stays cheap, bounded, and
+comparable with its already-published observations.
+Repository variable `BENCHMARK_SMOKE_OPENAI_MODEL` can override the
 smoke model without changing its single OpenAI/Codex provider, fixed
 high/medium reasoning split, or target and topology limits.
 
@@ -166,9 +164,9 @@ strategies, with all three disable flags set to `false`. Push events can never
 select this lane.
 
 Both lanes use the standard Modal benchmark resources described above. Each
-smoke target row has a 15,000-second model-work watchdog: the smoke graph's six
-sequential agent stages may each use two 1,200-second attempts, with ten minutes
-reserved for workflow transitions and final synchronization. Full-lane rows retain
+smoke target row has a 15,000-second model-work watchdog: the smoke graph's four
+sequential agent stages may each use two 1,800-second attempts, with ten minutes
+left for workflow transitions and final synchronization. Full-lane rows retain
 the 3,600-second bound. The smoke admits all three
 rows at a time; the full lane admits 20, keeping each checked-in cohort to two row
 waves. Smoke uses four-way workflow concurrency; full uses eight-way concurrency

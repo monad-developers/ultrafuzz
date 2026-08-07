@@ -6,7 +6,6 @@ groups:
     label: Smoke context
     color: "#2563eb"
     defaults:
-      timeout_seconds: 1200
       max_attempts: 2
       model_profiles:
         - smoke-coordination
@@ -14,28 +13,14 @@ groups:
     label: Ground-truth-informed smoke strategies
     color: "#7c3aed"
     defaults:
-      timeout_seconds: 1200
       loops: 1
       max_attempts: 2
       model_profiles:
         - benchmark
-  goals:
-    label: Threat goals
-    color: "#be123c"
-    defaults:
-      timeout_seconds: 1200
-      loops: 1
-      max_attempts: 2
-      model_profiles:
-        - benchmark
-  references:
-    label: References
-    color: "#4b5563"
   review:
     label: Bounded smoke review
     color: "#0f766e"
     defaults:
-      timeout_seconds: 1200
       max_attempts: 2
       model_profiles:
         - smoke-coordination
@@ -49,18 +34,6 @@ nodes:
     role: finish
     depends_on:
       - final-report
-  - id: reference-vulnerability-database
-    kind: reference
-    reference: vulnerability-database.web3
-    group: references
-    depends_on:
-      - __start__
-    outputs:
-      - path: vulnerability-db/catalog.json
-        contract: ultrafuzz/json-object@1
-        primary: true
-      - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
   - id: smoke-context
     kind: agentic
     prompt: smoke/smoke-context.md
@@ -71,80 +44,6 @@ nodes:
       - path: smoke-context.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
-  - id: threat-model
-    kind: agentic
-    prompt: smoke/smoke-threat-model.md
-    group: setup
-    depends_on:
-      - smoke-context
-      - reference-vulnerability-database
-    outputs:
-      - path: THREAT_MODEL.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: threat-model.json
-        contract: ultrafuzz/threat-model@1
-  - id: goal-plan
-    kind: agentic
-    prompt: setup/goal-plan.md
-    group: setup
-    depends_on:
-      - threat-model
-      - reference-vulnerability-database
-    outputs:
-      - path: goal-plan.json
-        contract: ultrafuzz/goal-plan@1
-        primary: true
-      - path: vulnerability-db-manifest.json
-        contract: ultrafuzz/json-object@1
-  - id: goal-roaming
-    kind: agentic
-    prompt: strategies/roaming-goal.md
-    group: goals
-    depends_on:
-      - threat-model
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
-  - id: threat-goals
-    kind: agentic
-    prompt: strategies/goal-hunter.mdx
-    group: goals
-    depends_on:
-      - goal-plan
-    dynamic:
-      from:
-        node: goal-plan
-        path: $.threat_goals
-      key: id
-      node_id: "dynamic:threat:{{ item.id }}"
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
-  - id: class-goals
-    kind: agentic
-    prompt: strategies/goal-hunter.mdx
-    group: goals
-    depends_on:
-      - goal-plan
-    dynamic:
-      from:
-        node: goal-plan
-        path: $.class_goals
-      key: id
-      node_id: "dynamic:class:{{ item.id }}"
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
   - id: time-warp-sequences
     kind: agentic
     prompt: smoke/smoke-strategy.md
@@ -202,9 +101,6 @@ nodes:
       - external-dependency-boundaries
       - externalized-state-accounting
       - lifecycle-view-boundaries
-      - goal-roaming
-      - threat-goals
-      - class-goals
     outputs:
       - path: deduped-findings.json
         contract: ultrafuzz/findings@1

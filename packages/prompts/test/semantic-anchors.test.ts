@@ -619,7 +619,6 @@ describe("prompt semantic anchors", () => {
 
     const planner = prompt("setup/goal-plan.md");
     const threatModel = prompt("setup/threat-model.md");
-    const smokeThreatModel = prompt("smoke/smoke-threat-model.md");
     const hunter = prompt("strategies/goal-hunter.mdx");
     const dedupe = prompt("review/dedupe-findings.md");
     const report = prompt("review/final-report.md");
@@ -632,7 +631,6 @@ describe("prompt semantic anchors", () => {
     expect(planner).toMatch(/`class_replacement_key` is exactly `class:` followed\s+by `id`/u);
     expect(threatModel).toContain("canonical repository-relative POSIX path");
     expect(threatModel).toContain("existing regular file in the current task workspace");
-    expect(smokeThreatModel).toMatch(/canonical\s+repository-relative POSIX path/u);
     const smokeStrategy = prompt("smoke/smoke-strategy.md");
     expect(smokeStrategy).toMatch(/canonical\s+repository-relative POSIX `path`/u);
     expect(smokeStrategy).toContain("exactly one contiguous range per evidence object");
@@ -644,7 +642,9 @@ describe("prompt semantic anchors", () => {
   });
 
   it("renders one exact path per generated dynamic child in the dedupe prompts", () => {
-    for (const relativePath of ["review/dedupe-findings.md", "smoke/smoke-dedupe-findings.md"]) {
+    // The smoke lane has no goal fanout, so only the production dedupe prompt
+    // enumerates generated dynamic children.
+    for (const relativePath of ["review/dedupe-findings.md"]) {
       const body = prompt(relativePath);
       // Never a guessed filesystem location or node-ID pattern for generated children.
       expect(body, relativePath).not.toMatch(/artifacts\/dynamic[:-]/u);
@@ -681,11 +681,9 @@ describe("prompt semantic anchors", () => {
 
   it("keeps report structure deterministic instead of asking the model to invent one", () => {
     const report = prompt("review/final-report.md");
-    const smokeReport = prompt("smoke/smoke-final-report.md");
-    for (const [name, body] of [
-      ["final-report", report],
-      ["smoke-final-report", smokeReport]
-    ] as const) {
+    // Only the production report cites the threat model and goal plan; the smoke
+    // graph does not run either node.
+    for (const [name, body] of [["final-report", report]] as const) {
       // The shape must match the deterministic renderer in packages/cli/src/report-artifacts.ts,
       // which joins both threat-model links into one bullet and regenerates the whole section.
       expect(body, name).toContain("## Audit context");
@@ -703,7 +701,7 @@ describe("prompt semantic anchors", () => {
   it("points threat-model prompts at the canonical schema JSON file", () => {
     // The pointer is a rendered core variable, not a project-relative literal: the agent works in a
     // worktree, so only an absolute rendered path resolves in both a local and a relocated run.
-    for (const relativePath of ["setup/threat-model.md", "smoke/smoke-threat-model.md"]) {
+    for (const relativePath of ["setup/threat-model.md"]) {
       const body = prompt(relativePath);
       expect(body, relativePath).toContain("{{artifact_schema_dir}}/threat-model.schema.json");
       expect(body, relativePath).not.toContain("`.ultrafuzz/schema/");
