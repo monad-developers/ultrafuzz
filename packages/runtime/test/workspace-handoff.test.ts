@@ -185,15 +185,22 @@ test("attributes a capture overflow to what fed the diff, not to bulk that contr
 
     // The only new content, and so the only possible source of diff bytes. Incompressible, because
     // `git diff --binary` deflates the payload.
-    mkdirSync(path.join(root, "generated"), { recursive: true });
-    writeFileSync(path.join(root, "generated", "huge.bin"), randomBytes(34 * 1024 * 1024));
+    // Six roots of 6 MiB each. Every one is UNDER the 8 MiB per-root ceiling (#368), so the ceiling
+    // deliberately does not catch them and the aggregate still overflows the 32 MiB capture buffer.
+    // Written this way rather than as one 34 MiB root because the ceiling would exclude that root and
+    // there would be no overflow left to diagnose -- which would retire this regression rather than
+    // keep it honest.
+    for (let bucket = 0; bucket < 6; bucket += 1) {
+      mkdirSync(path.join(root, `generated-${bucket}`), { recursive: true });
+      writeFileSync(path.join(root, `generated-${bucket}`, "huge.bin"), randomBytes(6 * 1024 * 1024));
+    }
 
     assert.throws(
       () => captureWorkspacePatch(root, baseline),
       (error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         assert.match(message, /produced more than the \d+-byte capture buffer/u);
-        assert.match(message, /generated \(>=\d+ diff bytes in \d+ files?\)/u);
+        assert.match(message, /generated-\d \(>=\d+ diff bytes in \d+ files?\)/u);
         assert.doesNotMatch(message, /lib/u, message);
         assert.equal((error as { cause?: { code?: string } }).cause?.code, "ENOBUFS");
         return true;
@@ -1002,13 +1009,22 @@ test("ranks the real capture by real bytes, through git and the code that runs i
     //
     // 0xE9 is a valid latin-1 byte and an invalid UTF-8 sequence: 12 MB of it decodes to 12M replacement
     // characters worth 36 MB, which is how a 12 MB root outranks a 21 MB one.
+    // TRACKED files, modified. The #368 ceiling applies to UNTRACKED roots only, so committing these
+    // first keeps both roots in the capture and leaves this ranking regression measuring what it was
+    // written to measure. Staging them as untracked would have them excluded by size and there would be
+    // no overflow to rank.
     mkdirSync(path.join(root, "corpus"), { recursive: true });
     mkdirSync(path.join(root, "src"), { recursive: true });
+    writeFileSync(path.join(root, "corpus", "latin.bin"), "seed\n");
+    writeFileSync(path.join(root, "src", "big.bin"), "seed\n");
+    git(root, ["add", "corpus", "src"]);
+    git(root, ["commit", "--quiet", "-m", "seed tracked roots"]);
+    const trackedBaseline = captureWorkspaceTree(root);
     writeFileSync(path.join(root, "corpus", "latin.bin"), Buffer.alloc(12 * 1024 * 1024, 0xe9));
     writeFileSync(path.join(root, "src", "big.bin"), Buffer.alloc(30 * 1024 * 1024, 0x61));
 
     assert.throws(
-      () => captureWorkspacePatch(root, baseline),
+      () => captureWorkspacePatch(root, trackedBaseline),
       (error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         const ranked = [...message.matchAll(/\b(corpus|src) \(>=(\d+) diff bytes/gu)].map((match) => ({
@@ -1130,6 +1146,122 @@ test("leaves an ordinary git failure's captures as strings", () => {
         }
         return true;
       }
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// R53's `stateful-invariant-handlers` died here (issue #368), on an image that already carried the
+// #305 corpus exclusion. That exclusion is an EXACT-NAME list -- `recon-corpus`, `echidna`, `magic` --
+// and the agent wrote its deep fuzzing pass to `recon-corpus-deep/` and `echidna-deep/` instead. Those
+// names appear nowhere in the invariant prompts, so they are the agent's own invention and no name list
+// could have predicted them. One file under `recon-corpus-deep` was >=33.8 MB on its own, over the
+// 32 MiB capture buffer before anything else was counted:
+//
+//   git diff produced more than the 33554432-byte capture buffer ... Largest contributors ...:
+//   recon-corpus-deep (>=33865139 diff bytes in 1 file), echidna-deep (>=37453 diff bytes in 15 files)
+//
+// The #305 comment above predicted precisely this: "a gap a size ceiling would close and a name list
+// cannot". So the rule here is size, not spelling.
+test("excludes an oversized untracked root whose name no list could have predicted", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\ncache/\nout/\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "ignore build output"]);
+    const baseline = captureWorkspaceTree(root);
+
+    // Not gitignored and not in any exclusion list, exactly as on the real target.
+    mkdirSync(path.join(root, "recon-corpus-deep"), { recursive: true });
+    writeFileSync(path.join(root, "recon-corpus-deep", "coverage.json"), `${"0".repeat(9 * 1024 * 1024)}\n`);
+    writeFileSync(path.join(root, "AuthoredHandlers.t.sol"), "contract AuthoredHandlers {}\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+
+    // The authored source must survive; only the oversized generated root is dropped.
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["AuthoredHandlers.t.sol"]
+    );
+    assert.doesNotMatch(captured.patch, /recon-corpus-deep/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// An omission that is not recorded is indistinguishable from "the node produced nothing there":
+// `applyWorkspacePatch` verifies both trees under the same exclusions, so every check passes and the
+// dependent silently sees content that was never delivered. That is the failure mode the comments around
+// `stageWorkspaceTree` warn about for tracked paths, and a size rule reintroduces it for untracked ones
+// unless the manifest says what it left behind.
+test("records what the ceiling excluded, so the omission is never silent", () => {
+  const root = fixture();
+  try {
+    const baseline = captureWorkspaceTree(root);
+    mkdirSync(path.join(root, "recon-corpus-deep"), { recursive: true });
+    writeFileSync(path.join(root, "recon-corpus-deep", "coverage.json"), `${"0".repeat(9 * 1024 * 1024)}\n`);
+    writeFileSync(path.join(root, "Authored.t.sol"), "contract Authored {}\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+
+    assert.equal(captured.manifest.excluded_roots?.length, 1);
+    assert.equal(captured.manifest.excluded_roots?.[0]?.path, "recon-corpus-deep");
+    assert.ok((captured.manifest.excluded_roots?.[0]?.bytes ?? 0) > 9 * 1024 * 1024);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // A capture that excluded nothing must not carry the field at all, so its presence always means
+  // something really was left out. Needs its OWN workspace: reusing the one above would still hold the
+  // oversized root, so the field would be present for a reason unrelated to what this asserts.
+  const clean = fixture();
+  try {
+    const baseline = captureWorkspaceTree(clean);
+    writeFileSync(path.join(clean, "Small.t.sol"), "contract Small {}\n");
+    assert.equal(captureWorkspacePatch(clean, baseline).manifest.excluded_roots, undefined);
+  } finally {
+    rmSync(clean, { recursive: true, force: true });
+  }
+});
+
+// The ceiling is deliberately DIRECTORIES only, and that narrowing needs a test or it is just a claim in
+// a comment. A large top-level file is far more plausibly authored than a generated tree is -- a fuzzer
+// writes a corpus directory, not a lone 9 MB file at the repository root -- so dropping one would be the
+// silent loss this rule exists to avoid. Mutation testing caught this: widening the rule to files passed
+// the whole suite until this case existed.
+test("keeps a large untracked top-level FILE, which the ceiling must not touch", () => {
+  const root = fixture();
+  try {
+    const baseline = captureWorkspaceTree(root);
+    writeFileSync(path.join(root, "authored-corpus.json"), `${"0".repeat(9 * 1024 * 1024)}\n`);
+
+    const captured = captureWorkspacePatch(root, baseline);
+
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["authored-corpus.json"]
+    );
+    assert.equal(captured.manifest.excluded_roots, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The ceiling must not become a licence to drop authored work. A small untracked directory with an
+// unfamiliar name is exactly what a node legitimately hands off, and it has to survive.
+test("keeps a small untracked root with an unfamiliar name", () => {
+  const root = fixture();
+  try {
+    const baseline = captureWorkspaceTree(root);
+    mkdirSync(path.join(root, "handlers-generated"), { recursive: true });
+    writeFileSync(path.join(root, "handlers-generated", "Handlers.t.sol"), "contract Handlers {}\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["handlers-generated/Handlers.t.sol"]
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

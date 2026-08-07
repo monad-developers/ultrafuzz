@@ -78,8 +78,50 @@ const WORKSPACE_GENERATED_ROOTS = ["recon-corpus", "echidna", "magic"] as const;
 
 const WORKSPACE_EXCLUDED_ROOTS = [...WORKSPACE_RUNTIME_ROOTS, ...WORKSPACE_GENERATED_ROOTS] as const;
 
+/**
+ * The size ceiling the comment above says a name list cannot substitute for (issue #368).
+ *
+ * R53 died on an image that already carried the #305 exclusion, because the agent wrote its deep
+ * fuzzing pass to `recon-corpus-deep/` and `echidna-deep/` rather than to the three names the list
+ * knows. Those names appear nowhere in the prompts, so they are the agent's own invention, and one file
+ * under `recon-corpus-deep` was >=33.8 MB by itself — over the whole 32 MiB capture buffer before
+ * anything else counted. No spelling-based rule could have predicted them.
+ *
+ * 8 MiB per untracked top-level DIRECTORY. Authored Solidity, JSON manifests and Markdown in this
+ * harness are orders of magnitude below it, while a fuzzer corpus clears it with a single file. It is a
+ * per-root total rather than a per-file one so that a corpus of many small files is caught too.
+ *
+ * Deliberately narrow in three ways:
+ *   - UNTRACKED only, like the name exclusions. Dropping a tracked path would be silent data loss for
+ *     the reason the comment above gives: staging runs after `read-tree <baseline>`, so the index keeps
+ *     the baseline blob and an authored edit vanishes with every check still passing.
+ *   - Directories only. A large top-level FILE is far more plausibly authored than a directory tree is,
+ *     and dropping one is the kind of silent loss this must not introduce.
+ *   - Above a ceiling no authored source in this pipeline approaches, so the common case never reaches
+ *     the rule at all.
+ *
+ * The capture/apply symmetry holds even though the rule reads the filesystem rather than a fixed list:
+ * `applyWorkspacePatch` recomputes trees on the DEPENDENT worktree, where an excluded root was never
+ * delivered by the patch and so does not exist — and excluding an absent root is a no-op. The two sides
+ * therefore agree on the staged set without needing to agree on the decision.
+ */
+const WORKSPACE_UNTRACKED_ROOT_CEILING_BYTES = 8 * 1024 * 1024;
+
 export interface WorkspacePatchFile {
   path: string;
+}
+
+/**
+ * An untracked root left out of the capture for exceeding the ceiling (issue #368).
+ *
+ * Recorded rather than dropped in silence. The whole hazard of a size rule is that an omission looks
+ * identical to "the node produced nothing there": `applyWorkspacePatch` verifies both trees under the
+ * same exclusions, so every check still passes and the dependent simply sees content that was never
+ * delivered. Naming the root and its byte total makes that auditable from the manifest alone.
+ */
+export interface WorkspaceExcludedRoot {
+  path: string;
+  bytes: number;
 }
 
 export interface WorkspacePatchManifest {
@@ -89,6 +131,7 @@ export interface WorkspacePatchManifest {
   result_tree: string;
   patch_sha256: string;
   files: WorkspacePatchFile[];
+  excluded_roots?: WorkspaceExcludedRoot[];
 }
 
 export interface WorkspacePatchCapture {
@@ -111,7 +154,7 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
   const baseCommit = runGit(workspaceRoot, ["rev-parse", "HEAD"]).trim();
   const capture = withTemporaryIndex(workspaceRoot, (index) => {
     runGit(workspaceRoot, ["read-tree", baselineTree], index);
-    stageWorkspaceTree(workspaceRoot, index);
+    const excludedRoots = stageWorkspaceTree(workspaceRoot, index);
     const resultTree = runGit(workspaceRoot, ["write-tree"], index).trim();
     const patch = runGit(
       workspaceRoot,
@@ -158,7 +201,7 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
     if (Buffer.byteLength(patch, "utf8") > MAX_PATCH_BYTES) {
       throw new Error(`workspace patch exceeds ${MAX_PATCH_BYTES} bytes`);
     }
-    return { resultTree, patch, files };
+    return { resultTree, patch, files, excludedRoots };
   });
 
   return {
@@ -169,7 +212,8 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
       base_tree: baselineTree,
       result_tree: capture.resultTree,
       patch_sha256: sha256(capture.patch),
-      files: capture.files
+      files: capture.files,
+      ...(capture.excludedRoots.length === 0 ? {} : { excluded_roots: capture.excludedRoots })
     }
   };
 }
@@ -288,14 +332,14 @@ function parseChangedPaths(raw: string): WorkspacePatchFile[] {
  * in the index and nothing here ever names a root path, so their entries are `treeish` by
  * construction.
  */
-function stageWorkspaceTree(workspaceRoot: string, index: string): void {
+function stageWorkspaceTree(workspaceRoot: string, index: string): WorkspaceExcludedRoot[] {
   // A listed path can vanish before it is staged — agent subprocesses are still running during
   // capture — and `git add --pathspec-from-file` fails the whole invocation when a name matches
   // nothing (`--ignore-errors` does not suppress it). Re-list and retry rather than aborting the
   // run, which is the failure this whole function exists to avoid.
   for (let attempt = 0; ; attempt += 1) {
-    const pathspecs = stageableWorkspacePaths(workspaceRoot, index);
-    if (pathspecs.length === 0) return;
+    const { pathspecs, excluded } = stageableWorkspacePaths(workspaceRoot, index);
+    if (pathspecs.length === 0) return excluded;
     try {
       runGit(
         workspaceRoot,
@@ -303,7 +347,7 @@ function stageWorkspaceTree(workspaceRoot: string, index: string): void {
         index,
         Buffer.concat(pathspecs.flatMap((entry) => [entry, NUL]))
       );
-      return;
+      return excluded;
     } catch (error) {
       const vanished = /did not match any files/u.test(error instanceof Error ? error.message : String(error));
       if (!vanished || attempt >= WORKSPACE_STAGE_ATTEMPTS - 1) throw error;
@@ -313,8 +357,14 @@ function stageWorkspaceTree(workspaceRoot: string, index: string): void {
 
 const WORKSPACE_STAGE_ATTEMPTS = 3;
 
-/** Every path git would stage, minus the runtime roots and any directory entry. */
-function stageableWorkspacePaths(workspaceRoot: string, index: string): Buffer[] {
+/**
+ * Every path git would stage, minus the runtime roots and any directory entry, plus the untracked roots
+ * dropped for exceeding the ceiling so the caller can RECORD them (issue #368).
+ */
+function stageableWorkspacePaths(
+  workspaceRoot: string,
+  index: string
+): { pathspecs: Buffer[]; excluded: WorkspaceExcludedRoot[] } {
   // Two listings rather than one, so the generated-root exclusions apply to UNTRACKED paths only.
   // Excluding a tracked path here would be silent data loss: staging runs after `read-tree <baseline>`,
   // so the index keeps the baseline blob, the agent's edit never reaches the patch, and
@@ -348,6 +398,8 @@ function stageableWorkspacePaths(workspaceRoot: string, index: string): Buffer[]
   // `assertWorkspacePatchPath` and fails closed there as a symlink, which is pre-existing behaviour for
   // any symlink rather than something these exclusions introduce.
   const runtimeRoots = new Set<string>(WORKSPACE_RUNTIME_ROOTS);
+  const oversized = oversizedUntrackedRoots(workspaceRoot, splitNulBuffer(untracked));
+  const oversizedRoots = new Set(oversized.keys());
   const pathspecs: Buffer[] = [];
   for (const entry of splitNulBuffer(listed)) {
     // `ls-files --others` reports an untracked nested repository as a directory. Naming it aborts
@@ -361,9 +413,46 @@ function stageableWorkspacePaths(workspaceRoot: string, index: string): Buffer[]
     // decode into one. Covers a top-level *file* named like a root, which the pathspecs above do not.
     const top = (separator < 0 ? entry : entry.subarray(0, separator)).toString("utf8");
     if (top === ".git" || runtimeRoots.has(top)) continue;
+    // Keyed on the raw bytes, so a non-UTF-8 directory name is matched exactly rather than through a
+    // lossy decode that could collide two distinct roots.
+    if (separator >= 0 && oversizedRoots.has(entry.subarray(0, separator).toString("latin1"))) continue;
     pathspecs.push(entry);
   }
-  return pathspecs;
+  const excluded = [...oversized.entries()]
+    .map(([root, bytes]) => ({ path: root, bytes }))
+    .sort((left, right) => right.bytes - left.bytes || left.path.localeCompare(right.path));
+  return { pathspecs, excluded };
+}
+
+/**
+ * Which untracked top-level directories exceed the ceiling (issue #368).
+ *
+ * Sums the entries git already listed rather than walking the tree, so nothing is stat'd that staging
+ * would not have read anyway, and an entry that disappears between listing and stat is treated as zero
+ * rather than throwing — a fuzzer writing its corpus concurrently is normal, and a capture must not
+ * fail because a scratch file was rotated mid-listing.
+ */
+function oversizedUntrackedRoots(workspaceRoot: string, untrackedEntries: Buffer[]): Map<string, number> {
+  const totals = new Map<string, number>();
+  for (const entry of untrackedEntries) {
+    if (entry[entry.length - 1] === 0x2f) continue;
+    const separator = entry.indexOf(0x2f);
+    if (separator < 0) continue;
+    const root = entry.subarray(0, separator).toString("latin1");
+    let size = 0;
+    try {
+      const stat = lstatSync(path.resolve(workspaceRoot, entry.toString("utf8")));
+      if (stat.isFile()) size = stat.size;
+    } catch {
+      // Vanished or unreadable between listing and stat; count it as nothing.
+    }
+    totals.set(root, (totals.get(root) ?? 0) + size);
+  }
+  const oversized = new Map<string, number>();
+  for (const [root, total] of totals) {
+    if (total > WORKSPACE_UNTRACKED_ROOT_CEILING_BYTES) oversized.set(root, total);
+  }
+  return oversized;
 }
 
 const NUL = Buffer.from([0]);
@@ -467,6 +556,24 @@ function validateManifest(manifest: WorkspacePatchManifest): void {
   assertObjectId(manifest.result_tree, "workspace patch result tree");
   if (!/^[0-9a-f]{64}$/u.test(manifest.patch_sha256)) {
     throw new Error("workspace patch digest is invalid");
+  }
+  if (manifest.excluded_roots !== undefined) {
+    if (!Array.isArray(manifest.excluded_roots)) {
+      throw new Error("workspace patch excluded roots must be an array");
+    }
+    for (const entry of manifest.excluded_roots) {
+      if (
+        entry === null ||
+        typeof entry !== "object" ||
+        typeof entry.path !== "string" ||
+        entry.path.length === 0 ||
+        entry.path.includes("/") ||
+        !Number.isSafeInteger(entry.bytes) ||
+        entry.bytes < 0
+      ) {
+        throw new Error("workspace patch excluded root entry is invalid");
+      }
+    }
   }
   if (!Array.isArray(manifest.files)) throw new Error("workspace patch files must be an array");
   const seen = new Set<string>();
