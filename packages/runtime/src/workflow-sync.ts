@@ -23,6 +23,7 @@ import {
   replayEvents,
   readRunState,
   replayUsageEvents,
+  assertRegularFileInside,
   safeResolveInside,
   stableUsageDimension,
   sha256File,
@@ -3417,16 +3418,22 @@ function isFindingTransformationNode(logicalNodeId: string): boolean {
   return ["dedupe-findings", "triage", "severity-classification", "final-report"].includes(logicalNodeId);
 }
 
-/** Mirrors `currentFindingLifecycleLedger` in the generated workflow template. */
+/**
+ * Mirrors `currentFindingLifecycleLedger` in the generated workflow template,
+ * including its failure behaviour. A corrupt ledger throws rather than falling
+ * back to `undefined`: falling back would re-enter the naive one-expectation-
+ * per-upstream-finding state and report a corrupt required artifact as a
+ * findings-contract violation instead of naming the real problem.
+ */
 function readFindingLifecycleLedger(artifactDir: string): unknown | undefined {
   const ledgerPath = path.resolve(artifactDir, "finding-lifecycle-ledger.json");
   if (!fs.existsSync(ledgerPath)) return undefined;
   const resolvedPath = safeResolveInside(artifactDir, "finding-lifecycle-ledger.json", "finding lifecycle ledger");
-  if (!fs.statSync(resolvedPath).isFile()) return undefined;
+  assertRegularFileInside(artifactDir, resolvedPath, "finding lifecycle ledger");
   try {
     return JSON.parse(fs.readFileSync(resolvedPath, "utf8")) as unknown;
   } catch {
-    return undefined;
+    throw new Error("artifact-contract failure: finding lifecycle ledger must contain valid JSON");
   }
 }
 
@@ -3461,6 +3468,9 @@ function dependencyFindingProvenanceForTask(input: {
       const findingPath = path.resolve(dependencyRoot, fileName);
       if (!fs.existsSync(findingPath)) continue;
       const resolvedPath = safeResolveInside(dependencyRoot, fileName, "dependency findings path");
+      // Reject a symlinked findings file rather than following it out of the
+      // run root, matching the generated template's resolveRegularArtifactFile.
+      assertRegularFileInside(dependencyRoot, resolvedPath, "dependency findings");
       const validation = validateArtifactContract(
         "ultrafuzz/findings@1",
         fs.readFileSync(resolvedPath, "utf8"),

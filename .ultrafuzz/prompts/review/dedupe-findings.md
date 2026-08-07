@@ -209,6 +209,17 @@ object with `schema_version: "1.0"` and a `records` array keyed by
 - `stages`: at least one `raw` stage for each source artifact plus one
   `deduped` stage for the kept record.
 
+Write the record's `dedupe_key` onto the kept finding in
+`deduped-findings.json` as its own `dedupe_key` field, byte-for-byte identical.
+Provenance is matched on finding identity, so a root whose `source_nodes` spans
+more than one upstream node resolves to its ledger record only through that
+shared key; without it the merge is rejected as not preserving the exact
+discovery-source union.
+
+Every upstream finding you read must appear exactly once across all
+`source_artifacts` in the ledger, including the ones you recorded only as a
+duplicate or family variant. A missing or doubly-claimed source fails the node.
+
 After writing the required artifacts, run only a small number of direct JSON
 shape checks, then stop. Do not spend the finalization reserve on broad
 re-verification once the required artifacts are present and parseable.

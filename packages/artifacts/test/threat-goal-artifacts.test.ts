@@ -1074,3 +1074,56 @@ function classGoalPlanFixture(selectedPath: string): Record<string, unknown> {
   };
   return plan;
 }
+
+test("a cross-node dedupe root only resolves through its lifecycle ledger record", () => {
+  // Regression for the workflow-sync path, which rebuilt these expectations
+  // without the ledger. Without it the union expectation does not exist at all,
+  // so a legitimate merge matches nothing and a succeeded node is reported as a
+  // task-output-validation-failure.
+  const upstream = [
+    {
+      node_id: "dynamic:threat:liquidation:overdue",
+      artifact_path: "/runs/r/artifacts/a/findings.json",
+      finding: { id: "f-threat", source_nodes: ["dynamic:threat:liquidation:overdue"] }
+    },
+    {
+      node_id: "dynamic:class:liquidation:fixed-term-before-overdue",
+      artifact_path: "/runs/r/artifacts/b/findings.json",
+      finding: { id: "f-class", source_nodes: ["dynamic:class:liquidation:fixed-term-before-overdue"] }
+    }
+  ];
+  const lifecycleLedger = {
+    schema_version: "1.0",
+    records: [
+      {
+        dedupe_key: "root:fixed-term-overdue",
+        source_artifacts: [
+          { path: "a/findings.json", node_id: "dynamic:threat:liquidation:overdue", finding_id: "f-threat" },
+          {
+            path: "b/findings.json",
+            node_id: "dynamic:class:liquidation:fixed-term-before-overdue",
+            finding_id: "f-class"
+          }
+        ]
+      }
+    ]
+  };
+  const unionOf = (expectations: ReturnType<typeof buildFindingSourceExpectations>): string[][] =>
+    expectations.filter((expectation) => expectation.source_nodes.length > 1).map((e) => [...e.source_nodes].sort());
+
+  assert.deepEqual(unionOf(buildFindingSourceExpectations({ upstream, requireLifecycleCoverage: true })), []);
+  assert.deepEqual(
+    unionOf(buildFindingSourceExpectations({ upstream, lifecycleLedger, requireLifecycleCoverage: true })),
+    [["dynamic:class:liquidation:fixed-term-before-overdue", "dynamic:threat:liquidation:overdue"]]
+  );
+
+  // The ledger keys the union expectation, so the retained finding must carry
+  // that same key. Both prompts now say so explicitly.
+  const withLedger = buildFindingSourceExpectations({ upstream, lifecycleLedger, requireLifecycleCoverage: true });
+  assert.ok(
+    withLedger.some(
+      (expectation) =>
+        expectation.finding_keys.includes("root:fixed-term-overdue") && expectation.source_nodes.length === 2
+    )
+  );
+});

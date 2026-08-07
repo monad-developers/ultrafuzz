@@ -45,5 +45,12 @@ where `node_id` is the producing node exactly as the upstream finding reports
 it and `finding_id` is that finding's own ID. Every upstream finding you read
 must appear exactly once across all records, including the ones you discarded
 as duplicates or speculation; the ledger is checked for exact coverage and a
-missing or doubly-claimed source fails the node. Validate only JSON shape and
-required normalized-finding fields, then stop.
+missing or doubly-claimed source fails the node.
+
+Write each record's `dedupe_key` onto its retained finding in
+`deduped-findings.json` as that finding's own `dedupe_key` field, byte-for-byte
+identical, and make the finding's `source_nodes` exactly the set of `node_id`
+values in that record's `source_artifacts`. Provenance is matched on finding
+identity, so a root that merged more than one upstream node resolves to its
+record only through that shared key. Validate only JSON shape and required
+normalized-finding fields, then stop.

@@ -231,8 +231,10 @@ node at runtime:
 - id: threat-goals
   kind: agentic
   prompt: strategies/goal-hunter.mdx
+  group: goals
   depends_on:
     - goal-plan
+  loops: 1
   dynamic:
     from:
       node: goal-plan
@@ -243,6 +245,8 @@ node at runtime:
     - path: findings.json
       contract: ultrafuzz/findings@1
       primary: true
+    - path: generated-tests.json
+      contract: ultrafuzz/generated-tests@1
 ```
 
 The declaration itself is a join group, not an executable attempt. After

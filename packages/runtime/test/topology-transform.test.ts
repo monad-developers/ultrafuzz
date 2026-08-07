@@ -10,6 +10,75 @@ import { promptTextsForCatalog, transformPromptCatalogForRun, transformTopologyF
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 
+/**
+ * The production topology minus the threat-model workstream. Pinned so that any
+ * topology addition fails the completeness assertion below and forces a
+ * deliberate decision about curated lanes, instead of silently widening them.
+ */
+const EXPECTED_NODES_AFTER_THREAT_MODEL_PRUNE = [
+  "__finish__",
+  "__start__",
+  "actors-flows",
+  "admin-config-boundaries",
+  "aggregate-test-files",
+  "amm-boundary-liquidity",
+  "base-test-setup",
+  "batch-atomicity-unsupported-actions",
+  "boundary-tests",
+  "dedupe-findings",
+  "differential-lane-author",
+  "differential-library-tests",
+  "differential-oracle-planner",
+  "differential-red-triage",
+  "differential-repair-and-report-review",
+  "dynamic-strategy-generator",
+  "encode-decode",
+  "expand-coverage",
+  "external-dependency-boundaries",
+  "externalized-state-accounting",
+  "final-report",
+  "lifecycle-view-boundaries",
+  "market-exhaustion-boundaries",
+  "order-replacement-collateral",
+  "packed-action-parity",
+  "payable-fallback-accounting",
+  "project-discovery",
+  "property-specification-0kn0t",
+  "property-specification-a16z",
+  "property-specification-aviggiano",
+  "property-specification-certora",
+  "property-specification-crytic",
+  "property-specification-fanin",
+  "property-specification-josselin-feist",
+  "property-specification-recon",
+  "property-specification-runtime-verification",
+  "reference-and-lane-auditor",
+  "reference-harness-author",
+  "reference-properties-0kn0t",
+  "reference-properties-a16z-erc4626",
+  "reference-properties-aviggiano",
+  "reference-properties-certora-sanity",
+  "reference-properties-certora-thinking",
+  "reference-properties-crytic",
+  "reference-properties-montyly-rounding",
+  "reference-properties-recon",
+  "reference-properties-runtime-verification",
+  "round-trip",
+  "rounding-direction-audit",
+  "router-exact-accounting",
+  "setup-foundry",
+  "severity-classification",
+  "state-machine-boundaries",
+  "stateful-invariant-campaign",
+  "stateful-invariant-coverage",
+  "stateful-invariant-handlers",
+  "stateful-invariant-implement-properties",
+  "stateful-invariant-setup",
+  "time-warp-sequences",
+  "triage",
+  "workflow-property-based-tests"
+];
+
 function topology(): ProjectTopology {
   return {
     version: 2,
@@ -127,10 +196,17 @@ test("pruning the threat-model workstream leaves a valid, dependency-free produc
     promptTexts: promptTextsForCatalog(prompts)
   });
 
-  // Completeness: if a later change adds another default-on node belonging to
-  // this workstream, it survives the prune and one of these catches it, rather
-  // than every curated lane silently widening.
+  // Completeness. The three shape checks below cannot see a default-on node
+  // added to a pre-existing group such as `setup`, which is exactly where
+  // threat-model and goal-plan live, so pin the surviving node set instead. Any
+  // topology addition fails this and forces a deliberate answer to "should
+  // curated lanes prune this too?" rather than silently widening every one.
   const remaining = transformed.nodes;
+  assert.deepEqual(
+    remaining.map((node) => node.id).sort(),
+    EXPECTED_NODES_AFTER_THREAT_MODEL_PRUNE,
+    "topology changed: decide whether the new node belongs in THREAT_MODEL_GOAL_FANOUT_NODE_IDS, then update this list"
+  );
   assert.deepEqual(
     remaining.filter((node) => node.dynamic !== undefined).map((node) => node.id),
     [],
