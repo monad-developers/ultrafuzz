@@ -175,7 +175,30 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
 }
 
 /** Apply one validated dependency patch to a clean downstream worktree. */
-export function applyWorkspacePatch(workspaceRoot: string, capture: WorkspacePatchCapture): void {
+/**
+ * Every check on a capture that does not depend on the worktree it will be applied to.
+ *
+ * Split out of `applyWorkspacePatch` so a caller that decides NOT to apply a patch can still validate it.
+ * A replaying caller may legitimately skip a patch whose content the worktree already holds (issue #312),
+ * and before this existed, skipping meant the manifest schema, the digest, the object ids and the
+ * sensitive-path rejection were never checked for that dependency at all — so a manifest naming `.env`,
+ * or a `patch_sha256` that does not match its bytes, would be accepted in silence. Worse, the skip
+ * decision itself reads `result_tree`, so an unvalidated field was steering it.
+ *
+ * These are the checks that need nothing but the capture and the repository's `HEAD`. The rest —
+ * `assertPatchPathsMatchManifest`, the empty-patch consistency check and the result-tree verification —
+ * stay in `applyWorkspacePatch` because they are meaningful only against a worktree the patch is being
+ * applied to. So a SKIPPED capture is validated less thoroughly than an applied one: its manifest cannot
+ * name a sensitive path, but nothing cross-checks the paths in its patch BODY against that manifest. That
+ * is acceptable only because the body is never applied, and it is stated here so the guarantee is not
+ * read as broader than it is.
+ *
+ * A caller that validates every capture up front and then applies some of them will validate those twice.
+ * That is deliberate, not an oversight: the skip decision reads `result_tree`, so validation has to
+ * precede the decision, and re-running it inside `applyWorkspacePatch` keeps that function safe for any
+ * caller. Every check here is pure and idempotent; the cost is one extra digest and one extra `rev-parse`.
+ */
+export function validateWorkspacePatchCapture(workspaceRoot: string, capture: WorkspacePatchCapture): void {
   validateManifest(capture.manifest);
   if (Buffer.byteLength(capture.patch, "utf8") > MAX_PATCH_BYTES) {
     throw new Error(`workspace patch exceeds ${MAX_PATCH_BYTES} bytes`);
@@ -183,10 +206,21 @@ export function applyWorkspacePatch(workspaceRoot: string, capture: WorkspacePat
   if (sha256(capture.patch) !== capture.manifest.patch_sha256) {
     throw new Error("workspace patch digest mismatch");
   }
+  if (/\b(?:new|old) file mode (?:120000|160000)\b|\b(?:new|old) mode 160000\b/u.test(capture.patch)) {
+    throw new Error("workspace patch contains a symlink or submodule entry");
+  }
+  // The pinned commit is part of the contract, not of the application: a dependency captured against a
+  // different `HEAD` describes a different target, and that is worth rejecting whether or not this patch
+  // is going to be applied. A caller that skips a patch because the worktree already holds its content
+  // would otherwise never notice the target had been re-pinned between attempts.
   const head = runGit(workspaceRoot, ["rev-parse", "HEAD"]).trim();
   if (head !== capture.manifest.base_commit) {
     throw new Error(`workspace patch base commit mismatch: expected ${capture.manifest.base_commit}, got ${head}`);
   }
+}
+
+export function applyWorkspacePatch(workspaceRoot: string, capture: WorkspacePatchCapture): void {
+  validateWorkspacePatchCapture(workspaceRoot, capture);
   const currentTree = captureWorkspaceTree(workspaceRoot);
   if (currentTree === capture.manifest.result_tree) return;
   if (currentTree !== capture.manifest.base_tree) {
@@ -198,9 +232,6 @@ export function applyWorkspacePatch(workspaceRoot: string, capture: WorkspacePat
       throw new Error("workspace patch is empty but changes are declared");
     }
     return;
-  }
-  if (/\b(?:new|old) file mode (?:120000|160000)\b|\b(?:new|old) mode 160000\b/u.test(capture.patch)) {
-    throw new Error("workspace patch contains a symlink or submodule entry");
   }
   runGit(workspaceRoot, ["apply", "--check", "--binary", "--whitespace=nowarn", "-"], undefined, capture.patch);
   runGit(workspaceRoot, ["apply", "--binary", "--whitespace=nowarn", "-"], undefined, capture.patch);
