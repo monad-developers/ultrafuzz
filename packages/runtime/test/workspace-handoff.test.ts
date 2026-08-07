@@ -6,12 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import {
-  applyWorkspacePatch,
-  captureWorkspacePatch,
-  captureWorkspaceTree,
-  rethrowOversizedGitOutput
-} from "../src/workspace-handoff.js";
+import { rethrowOversizedGitOutput } from "../src/git-capture-diagnostics.js";
+import { applyWorkspacePatch, captureWorkspacePatch, captureWorkspaceTree } from "../src/workspace-handoff.js";
 import * as runtime from "../src/index.js";
 
 function git(cwd: string, args: string[], input?: string): string {
