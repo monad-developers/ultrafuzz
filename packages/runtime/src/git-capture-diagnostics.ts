@@ -24,8 +24,20 @@ export const MAX_GIT_CAPTURE_BYTES = MAX_PATCH_BYTES * 2;
  * "b/caf\303\251.txt"`, changing the separator from ` b/` to `" "b/`. Without them such a file is
  * silently missing from the attribution. Anchoring to line start is what makes this safe against a file
  * whose own CONTENT contains a header line — in a unified diff those arrive prefixed with `+`.
+ *
+ * The `{1,4096}` bound is not cosmetic. An unbounded lazy `(.+?)` pushes one backtrack frame per
+ * iteration, and `.` stops only at line terminators — not at NUL, and not at the end of a path — so on a
+ * capture with no newline for tens of megabytes it overflows the stack and throws `RangeError: Maximum
+ * call stack size exceeded` OUT of the handler, destroying the ENOBUFS it exists to explain and
+ * replacing it with something less actionable than the bare error. Measured at 10 MB: throws in 64 ms.
+ * 4096 is past `PATH_MAX`, so no real path is excluded, and the bounded form is also ~10x faster.
+ *
+ * This bound and the latin1 view below are REDUNDANT: the overflow needs a two-byte string, and either
+ * one alone prevents it. The regression test pins the property — that no `RangeError` escapes — and
+ * removing either guard on its own leaves it green, which was verified by mutation rather than assumed.
+ * Both are kept because the latin1 view is a choice a later change could reverse without noticing this.
  */
-const DIFF_HEADER = /^diff --git "?a\/(.+?)"? "?b\//gmu;
+const DIFF_HEADER = /^diff --git "?a\/(.{1,4096}?)"? "?b\//gmu;
 
 /**
  * Own keys Node hangs off a `spawnSync` error that must not reach a durable failure record: the captured
@@ -39,6 +51,19 @@ const RETAINED_STDERR_BYTES = 2048;
 
 /** How much of it to inline in the message, which lands in logs that are read by eye. */
 const INLINED_STDERR_BYTES = 400;
+
+/**
+ * Distinct roots to keep totals for. The table is the last structure here that grows with the CAPTURE
+ * rather than with a constant, and the capture's root names are whatever the agent wrote to disk, so its
+ * cardinality is not bounded by anything in this repo. Measured on a 51 MB capture of 1.19M headers, all
+ * with distinct roots: holding the capture alone peaks at 454 MB, and the scan added 522 MB on top before
+ * it was streamed, 270 MB after. This runs inside a process that has just been refused an allocation, so
+ * the tail of that distribution is exactly when it must not ask for more.
+ *
+ * Roots past the cap are counted, not silently dropped — a truncated ranking that reads as a complete one
+ * is how an operator gets sent after the wrong directory.
+ */
+const MAX_RANKED_ROOTS = 4096;
 
 /** A string whose UTF-8 encoding is at most `limit` bytes, taken from the head of `buffer`. */
 function truncateUtf8(buffer: Buffer, limit: number): string {
@@ -110,24 +135,27 @@ export function rethrowOversizedGitOutput(args: readonly string[], error: unknow
   const subcommand = args.find((argument) => !argument.startsWith("-")) ?? "git";
   const capturedStdout = (error as { stdout?: unknown }).stdout;
   const capturedStderr = (error as { stderr?: unknown }).stderr;
-  // `latin1`, not `utf8`, when the capture arrived as bytes. It is a byte/code-unit bijection, so a
-  // string offset IS a byte offset and a span below needs no re-encoding estimate at all. `utf8` is
-  // lossy here — `runGitBuffer` leaves the capture undecoded exactly because git's output need not be
-  // valid UTF-8 — and each undecodable byte would come back as U+FFFD worth three, inflating a root's
-  // apparent contribution threefold and ranking a smaller contributor first. `DIFF_HEADER` is pure
-  // ASCII and git quotes non-ASCII paths (`"a/caf\303\251.txt"`), so the choice cannot affect matching.
+  // Work on a `latin1` view of the capture, whatever form it arrived in. Three things fall out of that
+  // one choice, and none of them hold for a `utf8` view:
+  //
+  //   1. latin1 is a byte/code-unit bijection, so a string offset IS a byte offset: `end - start` is the
+  //      exact span, with no re-encoding estimate and no per-header slice allocation.
+  //   2. `utf8` is lossy on a capture Node did not decode — `runGitBuffer` omits `encoding` precisely
+  //      because git's output need not be valid UTF-8 — and each undecodable byte returns as U+FFFD
+  //      worth three, inflating a root's contribution threefold and ranking a smaller one first.
+  //   3. A latin1 string is one-byte internally. `DIFF_HEADER` over a TWO-byte string overflows V8's
+  //      backtrack stack on a capture with no line terminator, throwing `RangeError` out of this
+  //      handler; a single character above U+00FF anywhere in the capture is enough to flip a string to
+  //      two-byte. The bound on the quantifier is the direct fix, but never handing the regex a
+  //      two-byte string removes the precondition as well.
+  //
+  // `DIFF_HEADER` is pure ASCII and git quotes non-ASCII paths (`"a/caf\303\251.txt"`), so the view
+  // cannot affect what matches — only what the offsets mean.
   const diff = Buffer.isBuffer(capturedStdout)
     ? capturedStdout.toString("latin1")
     : typeof capturedStdout === "string"
-      ? capturedStdout
+      ? Buffer.from(capturedStdout, "utf8").toString("latin1")
       : "";
-  // One code unit is one byte in the latin1 case, so the span is exact and costs no allocation. When
-  // Node decoded upstream (`runGit` passes `encoding`) that decode has already happened and cannot be
-  // undone; re-encoding the slice is then exact for everything that round-trips, which is all a string
-  // capture can hold.
-  const spanBytes = Buffer.isBuffer(capturedStdout)
-    ? (start: number, end: number): number => end - start
-    : (start: number, end: number): number => Buffer.byteLength(diff.slice(start, end), "utf8");
   const retainedStderr = truncateUtf8(
     Buffer.isBuffer(capturedStderr)
       ? capturedStderr
@@ -140,9 +168,16 @@ export function rethrowOversizedGitOutput(args: readonly string[], error: unknow
   // already hit an allocation ceiling, and a 32 MB capture of minimal headers holds over a million of
   // them. Only the previous header's root and offset are ever needed.
   const matcher = new RegExp(DIFF_HEADER.source, DIFF_HEADER.flags);
+  let unrankedRoots = 0;
   const record = (root: string, start: number, end: number): void => {
-    const total = totals.get(root) ?? { bytes: 0, files: 0 };
-    totals.set(root, { bytes: total.bytes + spanBytes(start, end), files: total.files + 1 });
+    const total = totals.get(root);
+    if (total === undefined && totals.size >= MAX_RANKED_ROOTS) {
+      unrankedRoots += 1;
+      return;
+    }
+    // `end - start` is exact: `diff` is a latin1 view, so one code unit is one byte.
+    const previous = total ?? { bytes: 0, files: 0 };
+    totals.set(root, { bytes: previous.bytes + (end - start), files: previous.files + 1 });
   };
   let pending: { root: string; start: number } | undefined;
   for (let header = matcher.exec(diff); header !== null; header = matcher.exec(diff)) {
@@ -150,13 +185,17 @@ export function rethrowOversizedGitOutput(args: readonly string[], error: unknow
     pending = { root: (header[1] ?? "").split("/")[0] ?? "", start: header.index };
   }
   if (pending !== undefined) record(pending.root, pending.start, diff.length);
-  const attribution = [...totals.entries()]
+  const ranked = [...totals.entries()]
     .sort((left, right) => right[1].bytes - left[1].bytes)
     .slice(0, 5)
     .map(
       ([root, total]) => `${root} (>=${total.bytes} diff bytes in ${total.files} file${total.files === 1 ? "" : "s"})`
     )
     .join(", ");
+  const attribution =
+    unrankedRoots === 0
+      ? ranked
+      : `${ranked} (and ${unrankedRoots} further file${unrankedRoots === 1 ? "" : "s"} under roots past the ${MAX_RANKED_ROOTS}-root table, not counted above)`;
 
   // ENOBUFS fires on EITHER stream. Saying "the workspace is too large" when git merely wrote a lot of
   // stderr would be a confident lie, so claim it only when stdout is the larger capture. An earlier form

@@ -525,6 +525,25 @@ function enobufs(stdout: string | Buffer, stderr: string | Buffer = ""): Error {
   return error;
 }
 
+/**
+ * The same failure as `enobufs`, but with the captures left as STRINGS.
+ *
+ * This is the shape `runGit` produces, because it passes `encoding: "utf8"` and Node then decodes before
+ * throwing — and `captureWorkspacePatch` takes the diff through `runGit`, so it is the primary production
+ * path, not the exotic one. `enobufs` converts everything to a Buffer, so no test written through it can
+ * reach the string branch at all; both branches looked covered while only one was.
+ */
+function enobufsDecoded(stdout: string, stderr = ""): Error {
+  const error = new Error("spawnSync git ENOBUFS") as Error & Record<string, unknown>;
+  error.code = "ENOBUFS";
+  error.errno = -105;
+  error.stdout = stdout;
+  error.stderr = stderr;
+  error.output = [null, stdout, stderr];
+  error.error = error;
+  return error;
+}
+
 /** A capture holding one hunk per entry, each padded so its span is proportional to `bytes`. */
 function syntheticDiff(entries: ReadonlyArray<{ path: string; bytes: number }>): string {
   return entries
@@ -795,4 +814,105 @@ test("ranks contributors by raw diff bytes when the capture is not valid UTF-8",
       `${entry.root} reported >=${entry.bytes} but really contributed ${truth.get(entry.root)}`
     );
   }
+});
+
+test("survives a capture with no line terminator and a character above U+00FF", () => {
+  // An unbounded lazy `(.+?)` over a TWO-byte string pushes one backtrack frame per iteration, and `.`
+  // stops only at line terminators. A capture that runs megabytes without one therefore overflowed V8's
+  // stack and threw `RangeError: Maximum call stack size exceeded` out of the handler -- discarding the
+  // ENOBUFS this exists to explain and reporting something strictly less actionable than the bare error.
+  // One character above U+00FF anywhere in the capture is enough to flip the string to two-byte.
+  // Through `enobufsDecoded`, because this is the `runGit` string-capture path and `enobufs` would
+  // convert the capture to a Buffer -- which the diagnostic normalises to a one-byte latin1 view, quietly
+  // sidestepping the very condition under test.
+  const capture = `diff --git a/${"x".repeat(10_000_000)}契`;
+  let thrown: unknown;
+  try {
+    rethrowOversizedGitOutput(["diff", "--cached"], enobufsDecoded(capture, ""));
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(thrown instanceof Error, "expected rethrowOversizedGitOutput to throw");
+  assert.ok(
+    !((thrown as Error) instanceof RangeError),
+    `the diagnostic threw out of its own handler: ${(thrown as Error).message}`
+  );
+  assert.match((thrown as Error).message, /^git diff /u, (thrown as Error).message);
+  assert.match((thrown as Error).message, /capture buffer/u, (thrown as Error).message);
+});
+
+test("names the git subcommand, both ceilings, and the prefix caveat", () => {
+  // Each assertion here pins a claim the message makes that nothing else asserts. "no subcommand" is the
+  // opening complaint this diagnostic answers, yet the subcommand could be replaced by any argument and
+  // every test stayed green; likewise the prefix caveat, which is what stops the numbers being read as a
+  // survey of the workspace, and the second ceiling an operator hits after trimming to the first.
+  const message = messageOf(syntheticDiff([{ path: "generated/a.txt", bytes: 4000 }]), "");
+  assert.match(message, /^git diff /u, message);
+  assert.match(message, /workspace is too large to hand off/u, message);
+  assert.match(message, /git emits in path order, so anything past that cutoff is not visible here/u, message);
+});
+
+test("keeps the inlined stderr head far smaller than the retained one", () => {
+  // `INLINED_STDERR_BYTES` is 400 against `RETAINED_STDERR_BYTES` of 2048. Removing the inline bound
+  // entirely left every test green, because the only bound asserted was 4096 -- which the retained head
+  // already satisfies on its own, so the inline constant was behaviourally dead.
+  const message = messageOf("", "warning: git said something at length. ".repeat(200));
+  const inlined = message.slice(message.indexOf("to stderr: ") + "to stderr: ".length);
+  assert.ok(inlined.length > 0, "a head of stderr should be inlined");
+  assert.ok(
+    Buffer.byteLength(inlined, "utf8") <= 400,
+    `inlined stderr head was ${Buffer.byteLength(inlined, "utf8")} bytes, bound is 400`
+  );
+});
+
+test("pins the diff header prefixes against inherited git config", () => {
+  // `diff.noprefix` and `diff.mnemonicPrefix` are read from the system and user config files, and either
+  // rewrites `diff --git a/x b/x` to `diff --git x x` or `diff --git c/x i/x` (git 2.43). Nothing in the
+  // sandbox image guarantees they are unset. Beyond losing the attribution, `git apply` defaults to
+  // `-p1`, so a prefix-less patch does not apply downstream -- the handoff itself breaks, silently.
+  for (const setting of ["diff.noprefix", "diff.mnemonicPrefix"]) {
+    const root = fixture();
+    // Clone for the downstream rather than building a second fixture. Two independently created commits
+    // share a hash only when their timestamps land in the same second, so `base_commit` verification
+    // makes a second fixture pass or fail on wall-clock luck -- measured at one failure in six runs
+    // before this was changed. The existing round-trip test carries the same warning; I reintroduced the
+    // bug it documents.
+    const downstreamParent = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-handoff-prefix-"));
+    const downstream = path.join(downstreamParent, "checkout");
+    git(downstreamParent, ["clone", "--quiet", root, downstream]);
+    try {
+      git(root, ["config", setting, "true"]);
+      // The downstream carries the setting too: a clone does not inherit the source's LOCAL config, and
+      // the point is that neither end may assume the other's git is configured the way it expects.
+      git(downstream, ["config", setting, "true"]);
+      const baseline = captureWorkspaceTree(root);
+      writeFileSync(path.join(root, "Setup.sol"), "contract Setup {}\n");
+      const capture = captureWorkspacePatch(root, baseline);
+      assert.match(capture.patch, /^diff --git a\/Setup\.sol b\/Setup\.sol$/mu, `${setting}: ${capture.patch}`);
+
+      // And it still round-trips: a patch that cannot be applied is worse than one that is unreadable.
+      applyWorkspacePatch(downstream, capture);
+      assert.equal(readFileSync(path.join(downstream, "Setup.sol"), "utf8"), "contract Setup {}\n");
+    } finally {
+      rmSync(downstreamParent, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("bounds the root table and says so instead of truncating silently", () => {
+  // Root names are whatever the agent wrote to disk, so the table's cardinality is not bounded by
+  // anything in this repo. Measured on a 51 MB capture of 1.19M distinct-root headers: holding the
+  // capture alone peaks at 454 MB, and the scan added 522 MB on top before it was bounded, 3 MB after.
+  // The number that matters is not the saving but where it is spent -- inside a handler for a failure
+  // that IS an allocation refusal.
+  const entries = [
+    { path: "culprit/big.txt", bytes: 20_000 },
+    ...Array.from({ length: 5000 }, (_, index) => ({ path: `r${index}/f.txt`, bytes: 60 }))
+  ];
+  const message = messageOf(syntheticDiff(entries), "");
+  // The genuine largest still leads: it is seen before the table fills.
+  assert.match(message, /culprit \(>=\d+ diff bytes in 1 file\)/u, message);
+  // And the shortfall is stated rather than left to look like a complete survey.
+  assert.match(message, /further files under roots past the 4096-root table, not counted above/u, message);
 });

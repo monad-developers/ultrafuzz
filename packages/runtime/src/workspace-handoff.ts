@@ -115,7 +115,21 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
     const resultTree = runGit(workspaceRoot, ["write-tree"], index).trim();
     const patch = runGit(
       workspaceRoot,
-      ["diff", "--cached", "--binary", "--no-ext-diff", "--no-renames", baselineTree],
+      // `--src-prefix`/`--dst-prefix` pin the header format against inherited git config. `git` reads
+      // `diff.noprefix` and `diff.mnemonicPrefix` from the system and user files, and either one changes
+      // `diff --git a/x b/x` to `diff --git x x` or `diff --git c/x i/x` (verified on git 2.43). That is
+      // not only an attribution problem: `git apply` defaults to `-p1`, so a prefix-less patch would not
+      // apply downstream either. Nothing in the sandbox image guarantees these are unset.
+      [
+        "diff",
+        "--cached",
+        "--binary",
+        "--no-ext-diff",
+        "--no-renames",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        baselineTree
+      ],
       index
     );
     const names = runGit(workspaceRoot, ["diff", "--cached", "--name-only", "-z", baselineTree], index);
