@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -27,6 +28,7 @@ import {
   readEventQueryFacade,
   readFindings,
   readRunState,
+  repairTornJsonlTail,
   replayEvents,
   replayUsageEvents,
   safeResolveInside,
@@ -1549,4 +1551,39 @@ test("a duplicated event ID fails closed without rewriting a torn log", () => {
 
   assert.throws(() => ensureEventRecord(layout, record), /duplicates event ID/u);
   assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), contents, "the log must not be rewritten");
+});
+
+test("the torn-tail probe refuses a symlinked log and does not block on a FIFO", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-probe-hostile" });
+  const record = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { step: 1 }
+  });
+
+  // A symlink at the log path must not be written through to its target. Without
+  // O_NOFOLLOW the probe would follow it, and nothing else in the repo plants one, so
+  // a later refactor could drop the flag and stay green.
+  const outside = path.join(path.dirname(layout.eventsPath), "outside.jsonl");
+  fs.writeFileSync(outside, "", "utf8");
+  fs.rmSync(layout.eventsPath, { force: true });
+  fs.symlinkSync(outside, layout.eventsPath);
+  assert.throws(() => appendEventRecord(layout.eventsPath, record), /ELOOP|EMLINK|symbolic/u);
+  assert.equal(fs.readFileSync(outside, "utf8"), "", "the symlink target must not be written through");
+  fs.rmSync(layout.eventsPath);
+
+  // A FIFO must not block the probe. O_NONBLOCK plus the isFile() bail make this
+  // return promptly; without them the read-open waits for a writer forever.
+  const fifo = path.join(path.dirname(layout.eventsPath), "index-fifo.jsonl");
+  execFileSync("mkfifo", [fifo]);
+  try {
+    const started = Date.now();
+    repairTornJsonlTail(fifo);
+    assert.ok(Date.now() - started < 5_000, "the probe must not block on a FIFO");
+    assert.ok(fs.lstatSync(fifo).isFIFO(), "the FIFO must be left untouched");
+  } finally {
+    fs.rmSync(fifo, { force: true });
+  }
 });

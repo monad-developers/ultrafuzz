@@ -18046,6 +18046,48 @@ test("durable-write debris is tolerated only when it really is a regular file", 
     fs.mkdirSync(directory);
     const rejectedDirectory = await preparePlanRun(startInput, { prepareWorkflowStart: true });
     assert.equal(rejectedDirectory.ok, false, "a directory wearing the debris name was admitted");
+    fs.rmSync(directory, { recursive: true });
+
+    // Pin the RUN-ROOT site against a symlink and a FIFO too, not just a directory: a
+    // guard weakened to `!isDirectory()` would re-admit both while a directory-only
+    // fixture stayed green. Assert on the diagnostic so it is the closure check
+    // rejecting them, not some unrelated failure.
+    for (const [name, plant] of [
+      [".evidence.json.tmp-4-4-defabc", (target: string) => fs.symlinkSync(outside, target)],
+      [".evidence.json.tmp-5-5-efabcd", (target: string) => execFileSync("mkfifo", [target])]
+    ] as const) {
+      fs.rmSync(startMarker, { force: true });
+      const planted = path.join(layout.root, name);
+      plant(planted);
+      const rejectedEntry = await preparePlanRun(startInput, { prepareWorkflowStart: true });
+      assert.equal(rejectedEntry.ok, false, `${name} was admitted to the run root`);
+      assert.ok(
+        rejectedEntry.diagnostics.some((diagnostic) => /unexpected entry|is not empty/u.test(diagnostic.message)),
+        `${name}: expected the run-root closure to reject it, got ${JSON.stringify(rejectedEntry.diagnostics)}`
+      );
+      fs.rmSync(planted, { force: true });
+    }
+
+    // Site 1 (`ensureStartPreparationIntent`) is only reached when the run root has NO
+    // durable start intent, so the cases above never exercise it -- reverting it alone
+    // left them green. Empty the root down to just the debris and re-run.
+    for (const [name, plant] of [
+      [".evidence.json.tmp-6-6-fabcde", (target: string) => fs.symlinkSync(outside, target)],
+      [".evidence.json.tmp-7-7-abcdef", (target: string) => execFileSync("mkfifo", [target])]
+    ] as const) {
+      const emptyRun = path.join(path.dirname(layout.root), `debris-intentless-${name.slice(-6)}`);
+      fs.mkdirSync(emptyRun, { recursive: true });
+      plant(path.join(emptyRun, name));
+      const intentless = await preparePlanRun(
+        { projectRoot: project, runId: path.basename(emptyRun), env: fakeSmithersEnv(project) },
+        { prepareWorkflowStart: true }
+      );
+      assert.equal(intentless.ok, false, `${name} was admitted to an intentless run root`);
+      assert.ok(
+        intentless.diagnostics.some((diagnostic) => /is not empty/u.test(diagnostic.message)),
+        `${name}: expected the intent emptiness check to reject it, got ${JSON.stringify(intentless.diagnostics)}`
+      );
+    }
   } finally {
     if (previousXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = previousXdgCacheHome;

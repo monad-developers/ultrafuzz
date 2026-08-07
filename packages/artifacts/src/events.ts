@@ -171,10 +171,16 @@ export function repairTornJsonlTail(eventsPath: string): void {
   // rather than as the performance problem it is.
   let size: number;
   let lastByte: Buffer;
-  // O_NOFOLLOW and O_NONBLOCK match what truncateDurable and appendBytesDurable in this
-  // package already require: a symlink planted at this path must not be followed, and a
-  // FIFO must not block the process forever. That matters more now than when only the
-  // event log used this, because every index append runs it against a per-dimension path.
+  // O_NOFOLLOW and O_NONBLOCK match what `truncateDurable` and `appendBytesDurableAt`
+  // — the two functions this one calls — already require: a symlink planted at this
+  // path must not be followed, and a FIFO must not block THIS probe forever. That
+  // matters more now than when only the event log used this, because every index
+  // append runs the probe against a per-dimension path.
+  //
+  // Scope, so this is not read as a package-wide guarantee: `appendBytesDurable`
+  // (safe-paths.ts) opens O_APPEND|O_CREAT|O_WRONLY|O_NOFOLLOW with no O_NONBLOCK, so a
+  // FIFO planted at an append target still blocks in ITS write-open, after this probe
+  // has returned. That hang predates this branch and is not addressed here.
   const probe = fs.openSync(eventsPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   try {
     const stat = fs.fstatSync(probe);
