@@ -1727,3 +1727,51 @@ function persist(
     expectedTasks
   });
 }
+
+test("retry cleanup skips a root the anchor flip removed and still cleans the surviving one", () => {
+  const repository = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-retry-absent-"));
+  git(repository, ["init"]);
+  git(repository, ["config", "user.name", "Ultrafuzz Test"]);
+  git(repository, ["config", "user.email", "ultrafuzz-test@example.com"]);
+  fs.writeFileSync(path.join(repository, "README.md"), "fixture\n", "utf8");
+  git(repository, ["add", "README.md"]);
+  git(repository, ["commit", "-m", "fixture"]);
+
+  // The surviving root carries prior-attempt output that must be cleaned.
+  fs.mkdirSync(path.join(repository, "tests", "recon"), { recursive: true });
+  const stale = path.join(repository, "tests", "recon", "Stale.t.sol");
+  fs.writeFileSync(stale, "contract Stale {}\n", "utf8");
+
+  // `test/recon` is named but absent: output roots are re-anchored per attempt, so an
+  // agent that renames tests/ to test/ (or back) between attempts leaves the previous
+  // attempt's root gone. A bare lstat here threw ENOENT out of generate() and aborted
+  // the very retry this cleanup exists to enable.
+  assert.doesNotThrow(() => cleanWorkspaceOutputRootsForRetry(repository, ["test/recon", "tests/recon"]));
+  assert.equal(fs.existsSync(stale), false, "the surviving root is still cleaned");
+  assert.equal(fs.readFileSync(path.join(repository, "README.md"), "utf8"), "fixture\n");
+});
+
+test("retry cleanup still fails closed when a named root cannot be inspected", () => {
+  if (process.getuid?.() === 0) return;
+  const repository = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-retry-eacces-"));
+  git(repository, ["init"]);
+  git(repository, ["config", "user.name", "Ultrafuzz Test"]);
+  git(repository, ["config", "user.email", "ultrafuzz-test@example.com"]);
+  fs.writeFileSync(path.join(repository, "README.md"), "fixture\n", "utf8");
+  git(repository, ["add", "README.md"]);
+  git(repository, ["commit", "-m", "fixture"]);
+
+  const blocked = path.join(repository, "blocked");
+  fs.mkdirSync(path.join(blocked, "recon"), { recursive: true });
+  fs.chmodSync(blocked, 0o000);
+  try {
+    // Only ENOENT means "already gone". Anything else must still fail closed rather
+    // than silently skipping a root whose contents were never inspected.
+    assert.throws(
+      () => cleanWorkspaceOutputRootsForRetry(repository, ["blocked/recon"]),
+      /retry output root is unsafe/u
+    );
+  } finally {
+    fs.chmodSync(blocked, 0o700);
+  }
+});

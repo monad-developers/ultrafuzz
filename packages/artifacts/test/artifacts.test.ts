@@ -1470,3 +1470,63 @@ test("a torn index append cannot bury a record from every index reader", () => {
     [first.event_id, second.event_id]
   );
 });
+
+test("a complete record that only lost its newline is terminated, not discarded", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-terminate-branch" });
+  const durable = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { step: 1 }
+  });
+  const unterminated = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-b",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:01.000Z",
+    payload: { step: 2 }
+  });
+  // A fully-written record whose newline was lost. Discarding it would contradict both
+  // the documented policy and ensureExactEventLines, which preserves exactly this case.
+  // Without this test an "always truncate" repair passes the whole suite.
+  fs.writeFileSync(layout.eventsPath, `${JSON.stringify(durable)}\n${JSON.stringify(unterminated)}`, "utf8");
+
+  const next = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-c",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:02.000Z",
+    payload: { step: 3 }
+  });
+  appendEventRecord(layout.eventsPath, next);
+
+  const ids = fs
+    .readFileSync(layout.eventsPath, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => (JSON.parse(line) as { event_id: string }).event_id);
+  assert.deepEqual(ids, [durable.event_id, unterminated.event_id, next.event_id]);
+  assert.equal(replayEvents(layout).malformedRecords, 0);
+});
+
+test("a duplicated event ID fails closed and leaves the log byte-identical", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-duplicate" });
+  const record = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { step: 1 }
+  });
+  const serialized = JSON.stringify(record);
+  const contents = `${serialized}\n${serialized}\n`;
+  fs.writeFileSync(layout.eventsPath, contents, "utf8");
+
+  // Two durable copies of one event ID is a genuine integrity violation, distinct from
+  // unparseable debris: it must fail closed with its own message and must not rewrite
+  // the log. Without this, both `duplicates event ID` branches can be deleted and the
+  // suite stays green, degrading the outcome to a misleading persistence error.
+  assert.throws(() => ensureEventRecord(layout, record), /duplicates event ID/u);
+  assert.equal(fs.readFileSync(layout.eventsPath, "utf8"), contents);
+});

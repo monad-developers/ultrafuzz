@@ -55,8 +55,8 @@ type Helpers = {
   resolvedWorkspaceOutputRoots: (task: TaskLike, root: string) => string[];
   preparedWorkspaceOutputRootsKey: (task: TaskLike, root: string) => string;
   prepareTaskWorkspaceOutputRoots: (task: TaskLike, options?: { replayWorkspacePatches?: boolean }) => void;
+  prepareAnchoredDirectory: (rootPath: string, relativePath: string, failureMessage: string) => string;
   preparedWorkspaceOutputRoots: Map<string, readonly string[]>;
-  anchored: string[];
 };
 
 const bagAnchored: string[] = [];
@@ -70,7 +70,8 @@ function loadHelpers(): Helpers {
     "repositoryAwareWorkspaceOutputRoots",
     "preparedWorkspaceOutputRootsKey",
     "resolvedWorkspaceOutputRoots",
-    "prepareTaskWorkspaceOutputRoots"
+    "prepareTaskWorkspaceOutputRoots",
+    "prepareAnchoredDirectory"
   ]
     .map((name) => sliceTopLevelFunction(source, name))
     .join("\n");
@@ -88,25 +89,19 @@ function loadHelpers(): Helpers {
     preparedWorkspaceOutputRoots: new Map<string, readonly string[]>(),
     // Collaborators of the real writer that are out of scope here. Recording the
     // anchored roots lets a test assert what preparation actually created.
-    anchored: bagAnchored,
-    prepareAnchoredDirectory: (rootPath: string, relativePath: string): string => {
-      const candidate = path.resolve(rootPath, relativePath);
-      fs.mkdirSync(candidate, { recursive: true, mode: 0o700 });
-      bagAnchored.push(relativePath);
-      return fs.realpathSync(candidate);
-    },
+    mkdirSync: fs.mkdirSync,
+    isStrictlyInsideDirectory: (root: string, candidate: string): boolean => candidate.startsWith(`${root}${path.sep}`),
     prepareArtifactMirror: (): void => undefined
   };
   const names = Object.keys(bag);
   const factory = new Function(
     ...names,
-    `${emitted}\nreturn { invariantTestRootName, repositoryAwareWorkspaceOutputRoots, resolvedWorkspaceOutputRoots, preparedWorkspaceOutputRootsKey, prepareTaskWorkspaceOutputRoots };`
+    `${emitted}\nreturn { invariantTestRootName, repositoryAwareWorkspaceOutputRoots, resolvedWorkspaceOutputRoots, preparedWorkspaceOutputRootsKey, prepareTaskWorkspaceOutputRoots, prepareAnchoredDirectory };`
   ) as (...args: unknown[]) => Omit<Helpers, "preparedWorkspaceOutputRoots">;
   const lifted = factory(...names.map((name) => (bag as Record<string, unknown>)[name]));
   return {
     ...lifted,
-    preparedWorkspaceOutputRoots: bag.preparedWorkspaceOutputRoots,
-    anchored: bag.anchored
+    preparedWorkspaceOutputRoots: bag.preparedWorkspaceOutputRoots
   };
 }
 
@@ -372,26 +367,56 @@ test("the real preparation writer pins the roots it creates, keyed by workspace 
   // whose subdirectories were never created.
   helpers.prepareTaskWorkspaceOutputRoots(task);
 
-  assert.deepEqual(helpers.anchored, [
+  const expectedRoots = [
     "artifacts/stateful-invariant-setup",
     "tests/recon",
     "tests/chimera",
     "tests/invariants",
     "tests/foundry/invariants"
-  ]);
+  ];
+  for (const relativeRoot of expectedRoots) {
+    assert.ok(fs.existsSync(path.join(root, relativeRoot)), `${relativeRoot} must have been created`);
+  }
+  assert.equal(fs.existsSync(path.join(root, "test")), false, "no singular tree may be invented");
 
   // The pin must be discoverable under the key the READER computes.
   const pinned = helpers.preparedWorkspaceOutputRoots.get(helpers.preparedWorkspaceOutputRootsKey(task, root));
-  assert.deepEqual(pinned, helpers.anchored);
+  assert.deepEqual(pinned, expectedRoots);
 
   // An ancestor patch then introduces the other root, exactly as base-test-setup does.
   fs.mkdirSync(path.join(root, "test", "foundry"), { recursive: true });
   assert.equal(helpers.invariantTestRootName(root), "test");
 
   // The pin, written by the real writer, still wins.
-  assert.deepEqual(helpers.resolvedWorkspaceOutputRoots(task, root), helpers.anchored);
+  assert.deepEqual(helpers.resolvedWorkspaceOutputRoots(task, root), expectedRoots);
   for (const relativeRoot of helpers.resolvedWorkspaceOutputRoots(task, root)) {
     if (relativeRoot === "artifacts/stateful-invariant-setup") continue;
     assert.ok(fs.existsSync(path.join(root, relativeRoot)), `${relativeRoot} must have been created`);
   }
+});
+
+test("anchoring refuses a symlinked segment, a non-directory segment and an escaping path", () => {
+  const helpers = loadHelpers();
+  const root = workspace(["outside", "real"]);
+  const failure = "artifact-contract failure: unsafe workspace output root";
+
+  // These guards are the only thing stopping an agent that plants a symlink at
+  // `tests/` or `tests/recon` from having output written outside the worktree. Gutting
+  // prepareAnchoredDirectory to a bare recursive mkdirSync previously left the whole
+  // suite green, so nothing detected their removal.
+  fs.symlinkSync(path.join(root, "outside"), path.join(root, "linked"));
+  assert.throws(() => helpers.prepareAnchoredDirectory(root, "linked/recon", failure), /unsafe workspace output root/u);
+
+  fs.writeFileSync(path.join(root, "regular"), "not a directory\n");
+  assert.throws(
+    () => helpers.prepareAnchoredDirectory(root, "regular/recon", failure),
+    /unsafe workspace output root/u
+  );
+
+  assert.throws(() => helpers.prepareAnchoredDirectory(root, "../escape", failure), /unsafe workspace output root/u);
+
+  // A legitimate nested path is still created, with each segment a real directory.
+  const created = helpers.prepareAnchoredDirectory(root, "real/foundry/invariants", failure);
+  assert.equal(created, fs.realpathSync(path.join(root, "real", "foundry", "invariants")));
+  assert.ok(fs.lstatSync(created).isDirectory());
 });

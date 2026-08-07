@@ -9,10 +9,11 @@ import {
   assertPathInside,
   assertRegularFileInside,
   layoutForRunRoot,
+  repairTornJsonlTail,
   replayEvents,
   safeResolveInside,
-  writeJsonDurable,
-  type RunLayout
+  type RunLayout,
+  writeJsonDurable
 } from "@ultrafuzz/artifacts";
 import { fingerprintGraph, type ExpandedGraph } from "@ultrafuzz/topology";
 
@@ -1479,6 +1480,13 @@ function retainedWorkflowExecutionSnapshotRoots(
     }
   }
 
+  // Repair a torn trailing line before judging the evidence. This runs from cancelRun,
+  // pauseRun and submitLifecycleAction BEFORE the workflow mutation lock is taken, so
+  // the append path's own repair and recoverPreparedWorkflowSyncCommit have not run
+  // yet. Without this, the ordinary crash signature -- a process killed mid-append --
+  // makes the run permanently uncancellable and unpausable, which is the exact wedge
+  // this machinery exists to survive.
+  repairTornJsonlTail(layout.eventsPath);
   const replay = replayEvents(layout, Number.MAX_SAFE_INTEGER);
   if (replay.malformedRecords !== 0 || replay.truncatedRecords !== 0) {
     throw new Error("workflow lifecycle event evidence is incomplete for snapshot retention");
