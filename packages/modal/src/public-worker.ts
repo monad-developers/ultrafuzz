@@ -32,6 +32,7 @@ import type { ModalWorkerLineage } from "./launch-state.js";
 import {
   createPublicBenchmarkBundle,
   readPublicBenchmarkBundle,
+  MAX_PUBLIC_BENCHMARK_FILE_BYTES,
   type PublicBenchmarkBundle,
   type PublicBenchmarkBundleSource
 } from "./public-bundle.js";
@@ -102,6 +103,42 @@ export class PublicWorkerCommandInterruptedError extends OperationalDispositionE
   }
 }
 const PUBLIC_EVAL_RUN_ID_MAX_LENGTH = 128;
+
+/**
+ * Run artifacts retained per row when the topology produced them.
+ *
+ * `reporting.artifacts.include` cannot deliver these. It is read only by
+ * `uploadsForManifest` (`packages/evals/src/node-telemetry.ts`), whose output
+ * goes only to `this.input.reporters`; the public worker runs
+ * `eval run --provider none`, and `createEvalReporters` returns `[]` for
+ * `none`. Zero reporters, zero uploads. Nothing else recovers them either:
+ * `MODAL_COLLECT_RESULT_FILES` does not list them, and the run root under
+ * `PUBLIC_WORKSPACE_ROOT` is removed with the sandbox. The bundle is the only
+ * surviving channel, so retention has to happen here.
+ *
+ * Unlike the fixed per-row report set these are strictly optional: a topology
+ * that builds no threat model publishes none of them and the row still passes.
+ * They are published under `reports/<row>/artifacts/<node>/<name>` so a name
+ * produced by more than one node stays attributable and can never collide with
+ * the fixed set.
+ */
+export const PUBLIC_OPTIONAL_ROW_ARTIFACTS = [
+  "THREAT_MODEL.md",
+  "goal-plan.json",
+  "threat-model.json",
+  "vulnerability-db-manifest.json"
+] as const;
+
+/**
+ * Ceiling on optional artifacts published for one row. Four names across a
+ * handful of producers is the expected shape; blowing past this means the
+ * topology changed in a way this retention was not designed for, and failing
+ * loudly beats publishing a silently truncated set into a gate whose whole
+ * purpose is to show the set is complete.
+ */
+export const MAX_PUBLIC_OPTIONAL_ROW_ARTIFACT_FILES = 32;
+
+const SAFE_ARTIFACT_NODE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
 export async function runPublicBenchmarkWorker(input: {
   config: PublicModalBenchmarkConfig;
@@ -1003,8 +1040,58 @@ export function publicBundleSources(
         source: candidate.source
       });
     }
+    sources.push(...optionalRowArtifactSources(record.ultrafuzz_run_root, row.id));
   }
   return sources;
+}
+
+/**
+ * Every `PUBLIC_OPTIONAL_ROW_ARTIFACTS` file the run actually wrote, in a
+ * deterministic order, or an empty list. Absence is never an error: these
+ * artifacts exist only for topologies that build them.
+ */
+export function optionalRowArtifactSources(runRoot: string, rowId: string): PublicBenchmarkBundleSource[] {
+  const artifactsRoot = path.join(runRoot, "artifacts");
+  let nodeIds: string[];
+  try {
+    nodeIds = fs
+      .readdirSync(artifactsRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && SAFE_ARTIFACT_NODE_ID.test(entry.name))
+      .map((entry) => entry.name)
+      .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  } catch {
+    return [];
+  }
+  const sources: PublicBenchmarkBundleSource[] = [];
+  for (const nodeId of nodeIds) {
+    for (const name of PUBLIC_OPTIONAL_ROW_ARTIFACTS) {
+      const source = path.join(artifactsRoot, nodeId, name);
+      if (!publishableOptionalRowArtifact(source)) continue;
+      sources.push({ path: `reports/${rowId}/artifacts/${nodeId}/${name}`, root: runRoot, source });
+    }
+  }
+  if (sources.length > MAX_PUBLIC_OPTIONAL_ROW_ARTIFACT_FILES) {
+    throw new Error(
+      `public benchmark row ${rowId} produced ${sources.length} optional artifacts, above the ${MAX_PUBLIC_OPTIONAL_ROW_ARTIFACT_FILES} the bundle retains`
+    );
+  }
+  return sources;
+}
+
+/**
+ * A candidate is published only if it is a real, non-empty regular file within
+ * the bundle's per-file ceiling. Symlinks are refused rather than followed, and
+ * an oversized artifact is skipped instead of failing the whole publication for
+ * an optional file.
+ */
+function publishableOptionalRowArtifact(source: string): boolean {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(source);
+  } catch {
+    return false;
+  }
+  return stat.isFile() && stat.size > 0 && stat.size <= MAX_PUBLIC_BENCHMARK_FILE_BYTES;
 }
 
 async function mapLimitStable<T>(

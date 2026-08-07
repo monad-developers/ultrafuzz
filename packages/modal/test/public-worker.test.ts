@@ -26,6 +26,8 @@ import {
   assertPublicWorkerBundleLineage,
   checkpointPublicModelWorkStart,
   materializeBakedCandidate,
+  MAX_PUBLIC_OPTIONAL_ROW_ARTIFACT_FILES,
+  PUBLIC_OPTIONAL_ROW_ARTIFACTS,
   PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS,
   PUBLIC_BENCHMARK_MAX_PARALLEL_EVAL_ROWS,
   PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS,
@@ -37,6 +39,7 @@ import {
   publicBenchmarkMaxParallelEvalRows,
   publicBenchmarkWorkRoot,
   publicBundleSources,
+  optionalRowArtifactSources,
   publicEvalCommandTimeoutSeconds,
   publicEvalRunId,
   preparePublicEvalSuite,
@@ -1574,3 +1577,119 @@ function writeGenuineTaskFailureFixture(runRoot: string): void {
     })}\n`
   );
 }
+
+it("retains threat-model, goal-plan and vulnerability-database artifacts per row when the run produced them", () => {
+  // #183 requires the real generated documents to be retrievable. They cannot
+  // reach the bundle any other way: `reporting.artifacts.include` is consumed
+  // only by `uploadsForManifest`, which delivers to `this.input.reporters`, and
+  // the public worker runs `eval run --provider none`, for which
+  // `createEvalReporters` returns `[]`.
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-threat-"));
+  const controlRoot = path.join(root, "control");
+  const evalRunId = "eval-threat-model";
+  const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
+  const runRoot = path.join(root, "target-run");
+  const reportRoot = path.join(runRoot, "artifacts/final-report");
+  const reportPath = path.join(reportRoot, "report.json");
+  fs.mkdirSync(evalRoot, { recursive: true });
+  fs.mkdirSync(reportRoot, { recursive: true });
+  fs.writeFileSync(reportPath, '{"schema_version":"1.0","issues":[]}\n');
+  fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
+  fs.writeFileSync(path.join(reportRoot, "findings.normalized.json"), "[]\n");
+
+  const threatModelRoot = path.join(runRoot, "artifacts/threat-model");
+  fs.mkdirSync(threatModelRoot, { recursive: true });
+  fs.writeFileSync(path.join(threatModelRoot, "THREAT_MODEL.md"), "# Threat model\n");
+  fs.writeFileSync(path.join(threatModelRoot, "threat-model.json"), '{"schema_version":"1.0"}\n');
+  const goalRoot = path.join(runRoot, "artifacts/goal-planner");
+  fs.mkdirSync(goalRoot, { recursive: true });
+  fs.writeFileSync(path.join(goalRoot, "goal-plan.json"), '{"goals":[]}\n');
+  fs.writeFileSync(path.join(goalRoot, "vulnerability-db-manifest.json"), '{"digest":"abc"}\n');
+  // Neither retained nor an error: an unrelated node output stays out.
+  fs.writeFileSync(path.join(goalRoot, "findings.json"), "[]\n");
+  // An empty artifact is not evidence of anything and is skipped.
+  const emptyRoot = path.join(runRoot, "artifacts/empty-producer");
+  fs.mkdirSync(emptyRoot, { recursive: true });
+  fs.writeFileSync(path.join(emptyRoot, "goal-plan.json"), "");
+
+  const record = {
+    schema_version: "ultrafuzz.eval.run.v1",
+    eval_run_id: evalRunId,
+    row_id: "target-a-runner-trial-1",
+    target_id: "target-a",
+    variant_id: "runner",
+    trial_id: "trial-1",
+    run_id: "target-run",
+    ultrafuzz_run_id: "target-run",
+    ultrafuzz_run_root: runRoot,
+    report_json_path: reportPath,
+    status: "launched",
+    final_status: "succeeded",
+    workflow: { status: "succeeded", terminal: true }
+  };
+  fs.writeFileSync(path.join(evalRoot, "runs.jsonl"), `${JSON.stringify(record)}\n`);
+  fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify([{ id: record.row_id }])}\n`);
+  const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
+  fs.writeFileSync(diagnosticsPath, "{}\n");
+
+  const paths = publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath })
+    .filter((source) => source.path.startsWith("reports/"))
+    .map((source) => source.path);
+
+  // The fixed set keeps its exact shape and position; retention is additive.
+  expect(paths.slice(0, 3)).toEqual([
+    "reports/target-a-runner-trial-1/report.json",
+    "reports/target-a-runner-trial-1/report.md",
+    "reports/target-a-runner-trial-1/findings.normalized.json"
+  ]);
+  expect(paths.slice(3)).toEqual([
+    "reports/target-a-runner-trial-1/artifacts/goal-planner/goal-plan.json",
+    "reports/target-a-runner-trial-1/artifacts/goal-planner/vulnerability-db-manifest.json",
+    "reports/target-a-runner-trial-1/artifacts/threat-model/THREAT_MODEL.md",
+    "reports/target-a-runner-trial-1/artifacts/threat-model/threat-model.json"
+  ]);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+it("publishes no optional row artifacts for a run that produced none", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-optional-"));
+  try {
+    // No artifacts directory at all.
+    expect(optionalRowArtifactSources(root, "row-1")).toEqual([]);
+    fs.mkdirSync(path.join(root, "artifacts/final-report"), { recursive: true });
+    fs.writeFileSync(path.join(root, "artifacts/final-report/report.json"), "{}\n");
+    expect(optionalRowArtifactSources(root, "row-1")).toEqual([]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("refuses to follow a symlinked optional row artifact", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-symlink-"));
+  try {
+    const outside = path.join(root, "outside.md");
+    fs.writeFileSync(outside, "# elsewhere\n");
+    const nodeRoot = path.join(root, "artifacts/threat-model");
+    fs.mkdirSync(nodeRoot, { recursive: true });
+    fs.symlinkSync(outside, path.join(nodeRoot, "THREAT_MODEL.md"));
+    expect(optionalRowArtifactSources(root, "row-1")).toEqual([]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("fails loudly rather than truncating an implausible optional artifact set", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-cap-"));
+  try {
+    const producers = Math.ceil((MAX_PUBLIC_OPTIONAL_ROW_ARTIFACT_FILES + 1) / PUBLIC_OPTIONAL_ROW_ARTIFACTS.length);
+    for (let index = 0; index < producers; index += 1) {
+      const nodeRoot = path.join(root, "artifacts", `producer-${String(index).padStart(3, "0")}`);
+      fs.mkdirSync(nodeRoot, { recursive: true });
+      for (const name of PUBLIC_OPTIONAL_ROW_ARTIFACTS) fs.writeFileSync(path.join(nodeRoot, name), "x\n");
+    }
+    expect(() => optionalRowArtifactSources(root, "row-1")).toThrow(/above the 32 the bundle retains/u);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
