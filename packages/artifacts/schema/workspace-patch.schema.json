@@ -34,6 +34,22 @@
           }
         }
       }
+    },
+    "excluded_roots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "bytes"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "allOf": [{ "not": { "pattern": "/" } }, { "not": { "pattern": "^\\.{1,2}$" } }]
+          },
+          "bytes": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+        }
+      }
     }
   }
 }

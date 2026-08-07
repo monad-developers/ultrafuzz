@@ -63,6 +63,40 @@ function isSafeWorkspacePatchPath(value: string): boolean {
 }
 
 export const workspacePatchFileSchema = z.strictObject({ path: workspacePatchPath });
+
+/**
+ * A top-level root the capture left out for exceeding its size ceiling (issue #368).
+ *
+ * Deliberately validated far more loosely than `files`, and the difference is not an oversight. A
+ * `files` path is APPLIED — `applyWorkspacePatch` writes it into the dependent worktree — so every
+ * segment there has to survive `normalizeWorkspacePatchPath`. An `excluded_roots` path is the opposite:
+ * it names something that was NOT delivered and never will be. Nothing opens it, so the charset rules
+ * that keep a written path safe buy nothing here, and imposing them would actively hurt.
+ *
+ * Concretely: the producer keys these roots on their raw bytes and renders them with `toString("latin1")`
+ * (`packages/runtime/src/workspace-handoff.ts`), precisely so that a directory whose name is not valid
+ * UTF-8 is matched exactly instead of through a lossy decode that could collide two distinct roots. Run
+ * `WORKSPACE_PATCH_SEGMENT` over that and a corpus directory with one non-ASCII byte in its name fails
+ * the artifact gate — turning the oversize failure this field exists to report into a contract failure at
+ * the same node. That is the exact trade this change was written to remove, so it must not be
+ * reintroduced here.
+ *
+ * What IS enforced is what makes the record readable as a root: one path segment, non-empty, not a
+ * relative-path token. All three are unreachable from the producer (git never lists a `.` or `..`
+ * component, and the root is by construction the text before the first `/`), so rejecting them cannot
+ * fail a real capture — they guard a hand-written or future producer, not this one.
+ */
+export const workspacePatchExcludedRootSchema = z.strictObject({
+  path: z
+    .string()
+    .min(1)
+    .refine((value) => !value.includes("/"), { message: "Excluded roots must be a single path segment" })
+    .refine((value) => value !== "." && value !== "..", {
+      message: "Excluded roots cannot be a relative path token"
+    }),
+  bytes: z.number().int().nonnegative()
+});
+
 export const workspacePatchSchema = z
   .strictObject({
     schema_version: z.literal(WORKSPACE_PATCH_SCHEMA_VERSION),
@@ -70,7 +104,11 @@ export const workspacePatchSchema = z
     base_tree: gitObjectId,
     result_tree: gitObjectId,
     patch_sha256: sha256,
-    files: z.array(workspacePatchFileSchema)
+    files: z.array(workspacePatchFileSchema),
+    // Optional, and absent rather than empty when nothing was excluded, so its mere presence always
+    // means content really was left out. Adding it as OPTIONAL is what keeps this backward compatible:
+    // every manifest written before #368 stays valid and the schema version does not move.
+    excluded_roots: z.array(workspacePatchExcludedRootSchema).optional()
   })
   .superRefine((manifest, context) => {
     const seen = new Set<string>();
@@ -83,6 +121,19 @@ export const workspacePatchSchema = z
         });
       }
       seen.add(entry.path);
+    }
+    // Same rule as `files`, for the same reason: two rows for one root make the byte totals ambiguous,
+    // and this record is only useful if an operator can read a root's size straight off it.
+    const seenRoots = new Set<string>();
+    for (const [index, entry] of (manifest.excluded_roots ?? []).entries()) {
+      if (seenRoots.has(entry.path)) {
+        context.addIssue({
+          code: "custom",
+          message: `Duplicate workspace patch excluded root ${JSON.stringify(entry.path)}`,
+          path: ["excluded_roots", index, "path"]
+        });
+      }
+      seenRoots.add(entry.path);
     }
   });
 
@@ -132,6 +183,28 @@ export const workspacePatchJsonSchema = {
               { not: { pattern: "(^|/)(?:\\.envrc|\\.npmrc)(?:/|$)" } }
             ]
           }
+        }
+      }
+    },
+    excluded_roots: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["path", "bytes"],
+        properties: {
+          // No charset pattern, unlike `files.items.path` above. See `workspacePatchExcludedRootSchema`:
+          // these roots are recorded from raw bytes and never applied, so a non-UTF-8 corpus directory
+          // name must not fail the gate. `pattern` is a SEARCH in JSON Schema, so `not: {pattern: "/"}`
+          // is "contains no slash" — the single-segment rule — and needs no anchors.
+          path: {
+            type: "string",
+            minLength: 1,
+            allOf: [{ not: { pattern: "/" } }, { not: { pattern: "^\\.{1,2}$" } }]
+          },
+          // Bounded above at `Number.MAX_SAFE_INTEGER`, matching zod's `.int()`, so the two schemas
+          // accept the same set rather than diverging at the top of the range.
+          bytes: { type: "integer", minimum: 0, maximum: 9007199254740991 }
         }
       }
     }
