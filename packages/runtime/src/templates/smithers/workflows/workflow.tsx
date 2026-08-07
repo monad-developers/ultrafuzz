@@ -287,11 +287,12 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
       if (!isStrictlyInsideDirectory(workspaceRoot, foundryParent)) {
         throw new Error(`artifact-contract failure: unsafe generated test parent ${task.attemptId}`);
       }
-      resetTaskArtifactContents(
-        path.join(foundryParent, task.metadata.node.logicalNodeId),
-        task.metadata.node.logicalNodeId,
-        "generated-test"
-      );
+      // Every directory the companion lookup accepts must be cleared, or the
+      // previous attempt's test survives in the one this reset skipped and the
+      // next attempt publishes it as its own.
+      for (const nodeId of generatedTestNodeIds(task)) {
+        resetTaskArtifactContents(path.join(foundryParent, nodeId), nodeId, "generated-test");
+      }
     }
   }
   restoreWorkspacePatchPreparation(task, workspaceRoot);
@@ -2405,22 +2406,33 @@ function materializeGeneratedTestCompanions(task: (typeof taskSpecs)[number]): v
       }
       const entries = (validation.value as { generated_tests?: Array<{ path?: string }> }).generated_tests ?? [];
       for (const entry of entries) {
-        materializeGeneratedTestCompanion(
-          workspaceRoot,
-          candidateRoot,
-          task.metadata.node.concreteNodeId,
-          entry.path ?? ""
-        );
+        materializeGeneratedTestCompanion(workspaceRoot, candidateRoot, generatedTestNodeIds(task), entry.path ?? "");
       }
       break;
     }
   }
 }
 
+/**
+ * Directory names an agent may have used for its generated tests, most
+ * authoritative first.
+ *
+ * `strategy_attempt_test_dir` (`packages/prompts/src/render.ts`) mandates
+ * `<workspace>/test/foundry/<LOGICAL node id>/`, and the retry reset below
+ * clears that same logical directory. Only this lookup used the CONCRETE node
+ * id, so on any node the topology expands (`loops > 1`, model fan-out) the one
+ * directory the prompt named was never searched and an obedient agent's test
+ * failed the contract as missing. Both ids are accepted: the logical id is what
+ * the prompt promises, and the concrete id stays valid for a run that used it.
+ */
+function generatedTestNodeIds(task: (typeof taskSpecs)[number]): string[] {
+  return [...new Set([task.metadata.node.logicalNodeId, task.metadata.node.concreteNodeId])];
+}
+
 function materializeGeneratedTestCompanion(
   workspaceRoot: string,
   artifactRoot: string,
-  nodeId: string,
+  nodeIds: readonly string[],
   relativePath: string
 ): void {
   const generatedPrefix = "generated-tests/";
@@ -2442,10 +2454,14 @@ function materializeGeneratedTestCompanion(
   }
 
   const workspaceRelativePath = relativePath.slice(generatedPrefix.length);
-  const sourceCandidates = INVARIANT_TEST_ROOT_NAMES.flatMap((testRoot) => [
-    path.resolve(workspaceRoot, testRoot, "foundry", workspaceRelativePath),
-    path.resolve(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath)
-  ]);
+  const sourceCandidates = [
+    ...new Set(
+      INVARIANT_TEST_ROOT_NAMES.flatMap((testRoot) => [
+        path.resolve(workspaceRoot, testRoot, "foundry", workspaceRelativePath),
+        ...nodeIds.map((nodeId) => path.resolve(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath))
+      ])
+    )
+  ];
   const existingCandidates = sourceCandidates.filter((candidate) => existsSync(candidate));
   const sourceCandidate = existingCandidates[0] ?? sourceCandidates[0];
   if (existingCandidates.length > 1) {

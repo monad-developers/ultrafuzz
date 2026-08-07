@@ -48,7 +48,7 @@ type TaskSpecLike = {
   dependencyArtifactDirs: string[];
   outputs: Array<{ path: string; contract: string }>;
   metadata: {
-    node: { logicalNodeId: string };
+    node: { logicalNodeId: string; concreteNodeId: string };
     dependencies: { attemptIds: string[] };
     artifacts: { dir: string };
   };
@@ -381,7 +381,7 @@ const COMPANION_HELPERS = [
   "materializeInvariantSuiteCompanions"
 ] as const;
 
-const RETRY_HELPERS = ["invariantTestRoots", "resetTaskArtifactsForRetry"] as const;
+const RETRY_HELPERS = ["invariantTestRoots", "generatedTestNodeIds", "resetTaskArtifactsForRetry"] as const;
 
 const DISCOVERY_HELPERS = [
   "gitTestTreePaths",
@@ -443,7 +443,7 @@ function makeTaskSpec(
     dependencyArtifactDirs: dependencyAttemptIds.map((dependency) => path.join(runRoot, "artifacts", dependency)),
     outputs: [],
     metadata: {
-      node: { logicalNodeId },
+      node: { logicalNodeId, concreteNodeId: attemptId },
       dependencies: { attemptIds: [...directDependencyAttemptIds] },
       artifacts: { dir: artifactDir }
     }
@@ -1631,9 +1631,15 @@ test("#212 retry cleanup resets generated tests under the repository's plural te
     assert.ok(helpers.resetTaskArtifactsForRetry);
     helpers.resetTaskArtifactsForRetry(handlers);
 
+    // Both directories the companion lookup accepts -- the logical node id the
+    // prompt mandates and the concrete id -- have to be cleared, or the previous
+    // attempt's sources survive in whichever one the reset skipped (issue #348).
     assert.deepEqual(
       resetGeneratedTestRoots,
-      [path.join(workspaceRoot, "tests", "foundry", "stateful-invariant-handlers")],
+      [
+        path.join(workspaceRoot, "tests", "foundry", "stateful-invariant-handlers"),
+        path.join(workspaceRoot, "tests", "foundry", "handlers")
+      ],
       "retry cleanup must follow the repository's own Foundry test root, not a hardcoded test/"
     );
     assert.equal(
