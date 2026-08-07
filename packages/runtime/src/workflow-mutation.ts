@@ -25,6 +25,7 @@ import {
   properLockfileCompromiseHandler,
   properLockfileContentionCode,
   properLockfileIsCompromised,
+  properLockfileOwnerMarkerMatches,
   recordLostProperLockfileHold,
   releaseOwnedProperLockfile,
   withProperLockfileReclaimGuard,
@@ -698,6 +699,7 @@ async function acquireOwnedRunLock(
           onCompromised: properLockfileCompromiseHandler(lockPath)
         });
         let publishedOwner: WorkflowRunLockOwner | undefined;
+        let attemptedOwner: WorkflowRunLockOwner | undefined;
         try {
           if (workflowRunLockCancelled(options.signal) || (externallyBounded && Date.now() >= deadline)) {
             throw new WorkflowMutationLockInterruptedError(
@@ -714,16 +716,29 @@ async function acquireOwnedRunLock(
             process_start: processStart,
             acquired_at: new Date().toISOString()
           };
+          attemptedOwner = acquiredOwner;
           writeProperLockfileOwner(lockPath, ownerPath, acquiredOwner, options.label, acquiredIdentity);
           publishedOwner = acquiredOwner;
           beginProperLockfileHold(lockPath);
           return { release: acquiredRelease, owner: acquiredOwner };
         } catch (error) {
           try {
+            // writeProperLockfileOwner can throw with the marker already on disk, so
+            // "publication returned normally" is not the same as "no marker exists":
+            // when the post-publication timestamp restore fails the marker is
+            // deliberately retained. Treating that as never-published would take the
+            // plain release, whose rmdir then fails ENOTEMPTY against our own marker
+            // and strands a lock directory naming a live pid with no heartbeat and no
+            // releaser -- a permanent lockout. Fall back to the on-disk marker.
+            const strandedOwner =
+              publishedOwner ??
+              (attemptedOwner !== undefined && properLockfileOwnerMarkerMatches(ownerPath, attemptedOwner)
+                ? attemptedOwner
+                : undefined);
             // Before the marker exists there is no identity to prove, so the plain
             // proper-lockfile release is the only correct cleanup.
-            if (publishedOwner === undefined) await acquiredRelease();
-            else await releaseOwnedRunLock(layout, lockPath, ownerPath, publishedOwner, options.label, acquiredRelease);
+            if (strandedOwner === undefined) await acquiredRelease();
+            else await releaseOwnedRunLock(layout, lockPath, ownerPath, strandedOwner, options.label, acquiredRelease);
           } catch {
             // Preserve the acquisition/publication failure. If identity-safe
             // cleanup was impossible, retained evidence keeps reclaim fail-closed.

@@ -366,6 +366,31 @@ function writeOwnerWithLexicalTimestampRestore(
   }
 }
 
+/**
+ * Whether an owner marker survives at `ownerPath` carrying exactly `owner`.
+ *
+ * `writeProperLockfileOwner` can throw with the marker already on disk: when the
+ * post-publication timestamp restore fails, `removePublishedOwnerIfLockUnchanged`
+ * deliberately RETAINS the marker and rethrows, so that a lock whose identity may have
+ * changed underneath us fails closed. An acquisition path that treated that as "never
+ * published" would fall back to the plain proper-lockfile release, whose `rmdir` then
+ * fails ENOTEMPTY against our own marker — leaving a lock directory that names a LIVE
+ * pid with no heartbeat and no releaser, which liveness-based reclamation refuses to
+ * touch and staleness can never reclaim. That is a permanent lockout of the run with
+ * no in-product repair, so a failed publication must still be cleaned up by identity.
+ */
+export function properLockfileOwnerMarkerMatches(ownerPath: string, owner: unknown): boolean {
+  try {
+    const stat = fs.lstatSync(ownerPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) return false;
+    // Parse rather than compare bytes: the marker is written through writeJsonDurable,
+    // whose formatting is not this module's to assume.
+    return JSON.stringify(JSON.parse(fs.readFileSync(ownerPath, "utf8")) as unknown) === JSON.stringify(owner);
+  } catch {
+    return false;
+  }
+}
+
 function assertPublishedOwner(ownerPath: string, label: string): fs.Stats {
   const owner = fs.lstatSync(ownerPath);
   if (!owner.isFile() || owner.isSymbolicLink() || owner.nlink !== 1) {

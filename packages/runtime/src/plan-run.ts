@@ -6,31 +6,32 @@ import path from "node:path";
 import lockfile from "proper-lockfile";
 
 import {
+  RUN_LAYOUT_SCHEMA_VERSION,
   appendEvent,
+  artifactContractDefinition,
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
-  createEventRecord,
   createEventQueryFacadeInputs,
+  createEventRecord,
   createInitialRunState,
-  artifactContractDefinition,
   createRunLayout,
   getNodeArtifactDir,
   layoutForRunRoot,
   readRunState,
+  repairTornJsonlTail,
   replayEvents,
-  RUN_LAYOUT_SCHEMA_VERSION,
   safeResolveInside,
   sha256Bytes,
-  validateReferenceExpectationsSchema,
+  type NodeState,
+  type NodeStateInput,
+  type RunLayout,
   updateNodeState,
+  validateReferenceExpectationsSchema,
   validateSafeId,
   writeArtifactManifest,
   writeFileDurable,
-  writeJsonDurable,
-  type NodeState,
-  type NodeStateInput,
-  type RunLayout
+  writeJsonDurable
 } from "@ultrafuzz/artifacts";
 import {
   applyDefaultProfileOverrides,
@@ -90,6 +91,7 @@ import {
   properLockfileCompromiseHandler,
   properLockfileContentionCode,
   properLockfileIsCompromised,
+  properLockfileOwnerMarkerMatches,
   releaseOwnedProperLockfile,
   withProperLockfileReclaimGuard,
   writeProperLockfileOwner
@@ -474,7 +476,22 @@ export async function acquireWorkflowStartPreparationLock(layout: RunLayout): Pr
           beginProperLockfileHold(lockPath);
         } catch (error) {
           try {
-            await acquiredRelease();
+            // writeProperLockfileOwner can throw with the marker already on disk: a
+            // failed post-publication timestamp restore deliberately retains it. The
+            // plain release would then rmdir into ENOTEMPTY against our own marker,
+            // stranding a lock directory that names a live pid with no heartbeat and
+            // no releaser, which reclamation refuses to touch -- a permanent lockout.
+            if (properLockfileOwnerMarkerMatches(ownerPath, acquiredOwner)) {
+              await releaseOwnedProperLockfile({
+                lockPath,
+                ownerPath,
+                label: "workflow start preparation lock",
+                release: acquiredRelease,
+                ownerIsOurs: () => properLockfileOwnerMarkerMatches(ownerPath, acquiredOwner)
+              });
+            } else {
+              await acquiredRelease();
+            }
           } catch {
             // Preserve the owner publication/restoration failure. If identity-safe
             // cleanup was impossible, the retained owner keeps reclaim fail-closed.
@@ -600,6 +617,23 @@ function processStartToken(pid: number): string | null {
   }
 }
 
+/**
+ * Leftovers from this repository's own durable-write protocol.
+ *
+ * `writeFileDurable` creates `.<basename>.tmp-<pid>-<ms>-<rand>` beside its destination
+ * and renames it into place. Its cleanup lives in a `finally`, which covers exceptions
+ * but not SIGKILL, OOM-kill or power loss, so a prepared start that is killed mid-write
+ * can leave one behind. Nothing else removes it, and every closure check below is an
+ * exact allowlist, so an unrecognised temp file made the run id permanently unstartable
+ * -- the precise wedge the crash-safe start protocol exists to avoid. An unrenamed temp
+ * file was never durable, so ignoring it loses nothing.
+ */
+const DURABLE_WRITE_TEMP_ENTRY = /^\..+\.tmp-\d+-\d+-[0-9a-f]+$/u;
+
+function isDurableWriteTempEntry(entry: string): boolean {
+  return DURABLE_WRITE_TEMP_ENTRY.test(entry);
+}
+
 function ensureStartPreparationIntent(input: {
   input: PlanRunInput;
   projectRoot: string;
@@ -615,7 +649,12 @@ function ensureStartPreparationIntent(input: {
   if (!pathEntryExists(intentPath)) {
     const unexpected = fs
       .readdirSync(input.layout.root)
-      .filter((entry) => entry !== START_PREPARATION_LOCK && entry !== START_PREPARATION_RECLAIM_GUARD);
+      .filter(
+        (entry) =>
+          entry !== START_PREPARATION_LOCK &&
+          entry !== START_PREPARATION_RECLAIM_GUARD &&
+          !isDurableWriteTempEntry(entry)
+      );
     if (unexpected.length > 0) {
       throw new Error("existing workflow run root has no durable start intent and is not empty");
     }
@@ -877,6 +916,7 @@ function assertIncompletePreparationRootClosure(layout: RunLayout): void {
     "smithers"
   ]);
   for (const entry of fs.readdirSync(layout.root)) {
+    if (isDurableWriteTempEntry(entry)) continue;
     if (!allowed.has(entry)) throw new Error(`prepared workflow run root contains an unexpected entry: ${entry}`);
   }
   const smithersDir = path.join(layout.root, "smithers");
@@ -896,6 +936,13 @@ function reconcilePreparedReferenceEvents(
   createdAt: string,
   provision: ReferenceExpectationProvision | undefined
 ): void {
+  // Repair a torn trailing line before judging the history. Reference materialization
+  // appends through appendEvent, so a process killed inside the prepare window -- or a
+  // short write that throws -- leaves a partial final line. The append path repairs
+  // itself, but reconciliation runs BEFORE any append, so without this the prepared
+  // root is condemned as malformed on every later planRun and the run id is unusable
+  // forever, which is exactly what the crash-safe start protocol exists to prevent.
+  repairTornJsonlTail(layout.eventsPath);
   const replay = replayEvents(layout, Number.MAX_SAFE_INTEGER);
   if (replay.malformedRecords !== 0 || replay.truncatedRecords !== 0) {
     throw new Error("prepared workflow start contains malformed event evidence");
@@ -957,7 +1004,13 @@ function reconcilePreparedEventIndexes(layout: RunLayout, events: ReturnType<typ
       continue;
     }
     assertRegularFileInside(layout.eventsIndexDir, filePath, "prepared event index");
-    const observed = fs.readFileSync(filePath, "utf8");
+    const raw = fs.readFileSync(filePath, "utf8");
+    // An index written by the same interrupted prepare can end mid-line. Bytes after
+    // the final newline were never a durable line, so drop them before comparing;
+    // otherwise a torn index condemns the prepared root permanently, the same way a
+    // torn event log did. A conflicting COMPLETE prefix still fails closed below.
+    const observed =
+      relativePath === "query-inputs.json" || raw.endsWith("\n") ? raw : raw.slice(0, raw.lastIndexOf("\n") + 1);
     if (observed === expectedContents) continue;
     if (relativePath !== "query-inputs.json" && observed.endsWith("\n") && expectedContents.startsWith(observed)) {
       writeFileDurable(filePath, expectedContents);
@@ -1799,6 +1852,9 @@ function walkPreparedFiles(root: string): string[] {
     const directory = pending.pop()!;
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const candidate = path.join(directory, entry.name);
+      // Skip this module's own unrenamed durable-write leftovers; they were never
+      // durable, and treating them as prepared evidence wedges the run root.
+      if (isDurableWriteTempEntry(entry.name)) continue;
       if (entry.isDirectory()) pending.push(candidate);
       else if (entry.isFile() && !entry.isSymbolicLink()) files.push(candidate);
       else throw new Error(`prepared reference staging contains an unsafe entry: ${candidate}`);

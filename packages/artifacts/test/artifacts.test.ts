@@ -1430,3 +1430,43 @@ test("an interior line that is already fused does not permanently wedge exactly-
   // skipped, exactly as replayEvents already does.
   assert.equal(replayEvents(layout).malformedRecords, 1);
 });
+
+test("a torn index append cannot bury a record from every index reader", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-index-torn" });
+  const first = appendEvent(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { step: 1 }
+  });
+
+  // Tear the run-dimension index the way a killed process would.
+  const indexPath = path.join(layout.eventsIndexDir, "run", `${layout.runId}.jsonl`);
+  fs.appendFileSync(indexPath, '{"event_id":"evt-tor', "utf8");
+
+  const second = appendEvent(layout, {
+    eventType: "node-synced",
+    nodeId: "node-b",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:01.000Z",
+    payload: { step: 2 }
+  });
+
+  // Every index line must stay parseable. Before the repair covered index appends, the
+  // fragment and the new record fused into one unparseable interior line, which buried
+  // the second record from every index reader and made a later ensureEventRecords
+  // append a duplicate copy of it.
+  const lines = fs.readFileSync(indexPath, "utf8").split("\n").filter(Boolean);
+  for (const line of lines) assert.doesNotThrow(() => JSON.parse(line), `unparseable index line: ${line}`);
+  const ids = lines.map((line) => (JSON.parse(line) as { event_id: string }).event_id);
+  assert.deepEqual(ids, [first.event_id, second.event_id]);
+
+  // Recovery must not then add a second copy.
+  ensureEventRecords(layout, [first, second]);
+  const after = fs.readFileSync(indexPath, "utf8").split("\n").filter(Boolean);
+  assert.deepEqual(
+    after.map((line) => (JSON.parse(line) as { event_id: string }).event_id),
+    [first.event_id, second.event_id]
+  );
+});

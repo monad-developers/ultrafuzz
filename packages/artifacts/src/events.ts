@@ -144,7 +144,7 @@ export function createEventRecord(layout: RunLayout, input: AppendEventInput): E
 }
 
 export function appendEventRecord(eventsPath: string, record: EventRecord): void {
-  repairTornEventTail(eventsPath);
+  repairTornJsonlTail(eventsPath);
   appendLineDurable(eventsPath, JSON.stringify({ ...record, payload: redactValue(record.payload) }));
 }
 
@@ -162,7 +162,7 @@ export function appendEventRecord(eventsPath: string, record: EventRecord): void
  * terminate it rather than lose the evidence; anything else was never a durable line,
  * so discard it.
  */
-function repairTornEventTail(eventsPath: string): void {
+export function repairTornJsonlTail(eventsPath: string): void {
   if (!fs.existsSync(eventsPath)) return;
   // Read only the final byte to decide. The log grows without bound over a run and
   // this runs on EVERY append, so reading the whole file here would make appending
@@ -339,6 +339,12 @@ function eventIndexPath(value: string): string[] {
 function appendIndexLine(layout: RunLayout, segments: string[], line: string): void {
   const relativePath = segments.join("/");
   const filePath = prepareSafeFilePath(layout.eventsIndexDir, relativePath);
+  // Repair here too, not only in appendEventRecord. Each event writes three to five
+  // index files against a single log file, so an index is where a torn append is MOST
+  // likely, not least. Without this, a fragment and the next record fuse into one
+  // unparseable interior line that buries a record from every index reader, and a
+  // later ensureIndexLines then appends a second copy of it.
+  repairTornJsonlTail(filePath);
   appendLineDurable(filePath, line);
 }
 
