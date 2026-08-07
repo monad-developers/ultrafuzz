@@ -411,3 +411,44 @@ test("#312 dependencies are replayed in task order regardless of the order they 
     "patch for /dep/stateful-invariant-handlers"
   ]);
 });
+
+test("#328 a contract failure names the field paths and collapses repeated messages", () => {
+  // R51 died three times with `Too small: expected array to have >=1 items` repeated eighty-eight times
+  // and nothing to tell the copies apart, while `validateWithZod` had computed
+  // `properties.0.reference_expectations` for every one of them. Recovering the document from the durable
+  // volume to find that out took about an hour; the paths were in the issues the whole time.
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const start = source.indexOf("\nfunction formatSchemaValidationIssues(");
+  assert.ok(start >= 0, "the template does not declare a top-level formatSchemaValidationIssues");
+  const end = source.indexOf("\n}\n", start);
+  const emitted = ts.transpileModule(`${source.slice(start, end + 3)}\nreturn formatSchemaValidationIssues;`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
+  }).outputText;
+  const format = new Function(emitted)() as (issues: readonly { path: string; message: string }[]) => string;
+
+  // The path has to be present, or the message is undiagnosable.
+  assert.match(
+    format([{ path: "properties.0.reference_expectations", message: "Too small" }]),
+    /properties\.0\.reference_expectations/u
+  );
+
+  // Eighty-eight copies of one sentence is one problem, not eighty-eight. Collapse, list the paths that
+  // vary, and cap the list so a large document cannot render an unreadable durable record.
+  const many = Array.from({ length: 89 }, (_, index) => ({
+    path: `properties.${index}.reference_expectations`,
+    message: "Too small: expected array to have >=1 items"
+  }));
+  const rendered = format(many);
+  assert.equal(rendered.split("Too small").length - 1, 1, `the message must appear once: ${rendered}`);
+  assert.match(rendered, /properties\.0\.reference_expectations/u);
+  assert.match(rendered, /and 84 more/u);
+  assert.ok(rendered.length < 400, `a durable record should stay readable: ${rendered.length} chars`);
+
+  // Distinct messages stay distinct.
+  const mixed = format([
+    { path: "properties.0.property_id", message: "Too small" },
+    { path: "selection.priorities", message: "Invalid input" }
+  ]);
+  assert.match(mixed, /Too small at properties\.0\.property_id/u);
+  assert.match(mixed, /Invalid input at selection\.priorities/u);
+});

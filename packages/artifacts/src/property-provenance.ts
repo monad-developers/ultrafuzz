@@ -19,6 +19,16 @@ export const REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID =
 const nonEmptyString = z.string().min(1);
 const stableLedgerId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
 const nonEmptyStringArray = z.array(nonEmptyString);
+/**
+ * A list of reference-expectation ids, which must name at least one id when it says anything at all.
+ *
+ * Every use of this is `.optional()` (see `optionalReferenceExpectationIds`), so `.min(1)` never guards a
+ * required field — it only decides what an EMPTY list means, and the answer must be "the same as omitting
+ * it". R51 died three times at `stateful-invariant-implement-properties` because its document carried
+ * `reference_expectations: []` on all 89 properties: omitting the field validated, emitting it empty did
+ * not, and the failure text repeated `Too small: expected array to have >=1 items` 88 times without naming
+ * a field (issue #328).
+ */
 const referenceExpectationIdsSchema = z
   .array(nonEmptyString)
   .min(1)
@@ -157,6 +167,18 @@ const propertySourceSchema = z.strictObject({
   source_property_id: nonEmptyString
 });
 
+/**
+ * The optional form: an empty list is normalised to absent rather than rejected.
+ *
+ * Emitting `[]` and omitting the key say the same thing — "no reference expectations" — and a producer has
+ * no way to know the second is required. Normalising rather than relaxing `.min(1)` keeps the meaning of a
+ * PRESENT list intact: if it is there, it names something, and its ids are still de-duplicated.
+ */
+const optionalReferenceExpectationIds = z.preprocess(
+  (value) => (Array.isArray(value) && value.length === 0 ? undefined : value),
+  referenceExpectationIdsSchema.optional()
+);
+
 const referenceExpectationEntrySchema = z.looseObject({ id: nonEmptyString });
 
 export const referenceExpectationsSchema = z.strictObject({
@@ -169,7 +191,7 @@ const lensPropertySchema = z.strictObject({
   description: nonEmptyString,
   category: nonEmptyString,
   priority: propertyPrioritySchema,
-  reference_expectations: referenceExpectationIdsSchema.optional()
+  reference_expectations: optionalReferenceExpectationIds
 });
 
 export const lensPropertiesSchema = z
@@ -196,7 +218,7 @@ const canonicalPropertySchema = z.looseObject({
   description: nonEmptyString,
   category: nonEmptyString,
   priority: propertyPrioritySchema,
-  reference_expectations: referenceExpectationIdsSchema.optional(),
+  reference_expectations: optionalReferenceExpectationIds,
   sources: z.array(propertySourceSchema).min(1),
   ledger_ids: z
     .array(stableLedgerId)
@@ -254,7 +276,7 @@ const implementedPropertySchema = z.looseObject({
   status: z.enum(["implemented", "pending", "deferred", "blocked"]),
   implementation_paths: nonEmptyStringArray,
   test_paths: nonEmptyStringArray,
-  reference_expectations: referenceExpectationIdsSchema.optional(),
+  reference_expectations: optionalReferenceExpectationIds,
   blocker: z
     .strictObject({
       code: nonEmptyString,

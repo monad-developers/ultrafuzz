@@ -468,6 +468,35 @@ function taskPublishesWorkspacePatch(task: (typeof taskSpecs)[number]): boolean 
  * When the prefix is not a chain this returns 0: replay everything, and let `applyWorkspacePatch` raise
  * its base-tree mismatch exactly as it does today. Failing the way we already fail is the safe direction.
  */
+/**
+ * Render schema-validation issues so the failure names WHERE it happened.
+ *
+ * `validateWithZod` computes a path for every issue and both call sites used to map `issue.message` alone,
+ * discarding it. R51 died three times on `implemented-properties.json` and the durable error read
+ * `Too small: expected array to have >=1 items` eighty-eight times with nothing to distinguish them --
+ * while the issues themselves carried `properties.0.reference_expectations` all along (issue #328).
+ *
+ * Identical messages are collapsed with their paths listed, because eighty-eight copies of one sentence is
+ * not eighty-eight problems, and the paths are the only part that varies. Truncated, because a document
+ * with thousands of entries should not turn one failure into an unreadable durable record -- the same
+ * reasoning as the capture-attribution cap in #311.
+ */
+function formatSchemaValidationIssues(issues: readonly { path: string; message: string }[]): string {
+  const byMessage = new Map<string, string[]>();
+  for (const issue of issues) {
+    const paths = byMessage.get(issue.message) ?? [];
+    paths.push(issue.path);
+    byMessage.set(issue.message, paths);
+  }
+  return [...byMessage.entries()]
+    .map(([message, paths]) => {
+      const shown = paths.slice(0, 5).join(", ");
+      const rest = paths.length > 5 ? ` and ${paths.length - 5} more` : "";
+      return `${message} at ${shown}${rest}`;
+    })
+    .join("; ");
+}
+
 function firstDependencyRequiringReplay(
   currentTree: string,
   manifests: readonly { base_tree: string; result_tree: string }[]
@@ -4065,9 +4094,7 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
     const validation = validateArtifactContract(output.contract, contents, output.path);
     if (!validation.ok) {
       throw new Error(
-        `artifact-contract failure for ${output.path} (${output.contract}): ${validation.issues
-          .map((issue) => issue.message)
-          .join("; ")}`
+        `artifact-contract failure for ${output.path} (${output.contract}): ${formatSchemaValidationIssues(validation.issues)}`
       );
     }
     rememberVerifiedPublication(publications, output.path, bytes);
@@ -4300,9 +4327,7 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
   const proofValidation = validateInvariantSourceProofSchema(proof, "invariant-source-proof");
   if (!proofValidation.ok) {
     throw new Error(
-      `artifact-contract failure: invariant source proof is invalid: ${proofValidation.issues
-        .map((issue) => issue.message)
-        .join("; ")}`
+      `artifact-contract failure: invariant source proof is invalid: ${formatSchemaValidationIssues(proofValidation.issues)}`
     );
   }
   const runRoot = realpathSync(path.resolve(process.cwd(), task.metadata.artifacts.dir, "..", ".."));
