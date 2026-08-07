@@ -750,7 +750,10 @@ test("bounds retained stderr in bytes when git's output is not valid UTF-8", () 
       Buffer.concat([Buffer.from("fatal: pathspec '"), Buffer.alloc(4000, 0xe9), Buffer.from("' bad\n")])
     ],
     // A lone surrogate is ill-formed UTF-8 and decodes to one replacement character per byte.
-    ["a lone surrogate run", Buffer.from(Array.from({ length: 3000 }, (_, index) => [0xed, 0xa0, 0x80][index % 3] ?? 0))]
+    [
+      "a lone surrogate run",
+      Buffer.from(Array.from({ length: 3000 }, (_, index) => [0xed, 0xa0, 0x80][index % 3] ?? 0))
+    ]
   ] as ReadonlyArray<[string, Buffer]>) {
     const retained = retainedStderrOf("x".repeat(50), capture);
     assert.ok(retained.length > 0, `a head of stderr should survive ${label}`);

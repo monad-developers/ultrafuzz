@@ -74,7 +74,7 @@ function truncateUtf8(buffer: Buffer, limit: number): string {
   // UTF-8, so this is the ordinary case for it, not a contrived one.
   let take = Math.min(limit, buffer.length);
   let text = buffer.subarray(0, take).toString("utf8");
-  for (let encoded = Buffer.byteLength(text, "utf8"); take > 0 && encoded > limit; ) {
+  for (let encoded = Buffer.byteLength(text, "utf8"); take > 0 && encoded > limit;) {
     // Scale by the observed ratio, but always cut by at least one byte so this terminates. The ratio is
     // at most 3, so the first step lands at or below a third of the limit and one more settles it.
     take = Math.max(0, Math.min(take - 1, Math.floor((take * limit) / encoded)));
