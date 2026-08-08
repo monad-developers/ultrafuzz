@@ -2613,10 +2613,17 @@ function verifyFinalReportImplementationCoverage(
             renderedBlockers.push(line);
           }
         }
-        const expectedRenderedBlockers = expectedBlockerSummaries.map((summary) => `- ${reportPublicProse(summary)}`);
+        // The Markdown must report the same blockers as the JSON. It must not
+        // also require the author to reproduce reportPublicProse character for
+        // character: that function redacts secrets and several relative path
+        // prefixes, escapes eight Markdown characters, and HTML-escapes two
+        // more, and no prose description of it has yet survived review. Accept
+        // the escaped rendering or the summary text as written.
+        const blockerMatches = (rendered: string | undefined, summary: string): boolean =>
+          rendered === `- ${reportPublicProse(summary)}` || rendered === `- ${summary.replace(/\s+/gu, " ").trim()}`;
         if (
-          renderedBlockers.length !== expectedRenderedBlockers.length ||
-          expectedRenderedBlockers.some((summary, index) => renderedBlockers[index] !== summary)
+          renderedBlockers.length !== expectedBlockerSummaries.length ||
+          expectedBlockerSummaries.some((summary, index) => !blockerMatches(renderedBlockers[index], summary))
         ) {
           markdownMismatches.push("blocker_summaries");
         }

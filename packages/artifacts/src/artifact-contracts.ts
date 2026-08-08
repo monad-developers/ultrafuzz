@@ -405,12 +405,15 @@ function expandSchemaIssues(
         .filter((branch) => branch.length > 0);
       // The deepest path is the branch that matched furthest before failing;
       // for `"unavailable" | {...}` given an object, that is the object branch.
-      const deepest = branches.reduce<Array<{ message: string; path: PropertyKey[] }> | undefined>(
-        (best, branch) => (best === undefined || branchDepth(branch) > branchDepth(best) ? branch : best),
-        undefined
-      );
-      if (deepest !== undefined) {
-        return deepest;
+      // On a tie no branch got further than another, and picking one would
+      // assert that its shape was intended: a number here would be reported
+      // only as `expected "unavailable"`, and an author who followed that
+      // advice would pass the contract and then fail the gate that requires an
+      // object. Report every branch instead.
+      const deepest = branches.reduce((best, branch) => Math.max(best, branchDepth(branch)), 0);
+      const closest = branches.filter((branch) => branchDepth(branch) === deepest);
+      if (closest.length > 0) {
+        return closest.flat();
       }
     }
     return [{ message: issue.message, path }];

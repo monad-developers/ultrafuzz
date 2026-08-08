@@ -460,14 +460,14 @@ this exact shape:
 
 ```json
 {
-  "priority_threshold": "high",
-  "priorities": ["high"],
-  "selected_property_ids": ["property-1"],
+  "priority_threshold": "medium",
+  "priorities": ["high", "medium"],
+  "selected_property_ids": ["property-1", "property-2"],
   "implemented_property_ids": ["property-1"],
   "blocked_property_ids": [],
   "pending_property_ids": [],
-  "deferred_property_ids": [],
-  "reference_expected_property_ids": [],
+  "deferred_property_ids": ["property-2"],
+  "reference_expected_property_ids": ["property-1"],
   "reference_expectation_ids": ["scfuzzbench:example:expectation-1"],
   "blocker_summaries": [
     "property-2: The handler cannot observe the premium delta returned by the Hub."
@@ -496,34 +496,38 @@ The Markdown body of `## Property implementation coverage` is compared line by
 line against the JSON above, so write exactly these bullets, in this order, with
 these labels and backticks, and nothing else before the blocker list:
 
+These bullets are the Markdown rendering of exactly the JSON above, so read the
+two together:
+
 ```markdown
-- Priority threshold: `high`
+- Priority threshold: `medium`
 - Included priorities: `high<br>medium`
-- Selected properties: `1`
+- Selected properties: `2`
 - Implemented properties: `1`
 - Blocked properties: `0`
 - Pending properties: `0`
-- Deferred properties: `0`
-- Reference expectation properties: `0`
+- Deferred properties: `1`
+- Reference expectation properties: `1`
 
 Blocker summaries:
 - property-2: The handler cannot observe the premium delta returned by the Hub.
 ```
 
 Join `Included priorities` with `<br>`, and write `unavailable` in the backticks
-when the threshold or priorities are missing. Every count is the length of the
-matching JSON array. Introduce the blocker list with a line reading exactly
-`Blocker summaries:`, then one `- ` bullet per element of `blocker_summaries`,
-in the same order as the JSON, and stop the list at the first line that is not a
+when the threshold or priorities are missing. Each count is the length of the
+JSON array with the matching name, except `Reference expectation properties`,
+which counts `reference_expected_property_ids`. Introduce the blocker list with
+a line reading exactly `Blocker summaries:`, then one `- ` bullet per element of
+`blocker_summaries`, in the same order as the JSON, with no blank line between
+the heading and the first bullet: the list ends at the first line that is not a
 `- ` bullet. Omit the heading and the list entirely when there are no blockers.
 
-Each blocker bullet renders its JSON string as public prose: collapse runs of
-whitespace to single spaces, replace any absolute filesystem path with
-`[redacted-path]`, escape `` \ ``, `` ` ``, `*`, `_`, `[`, `]`, `!`, and `#`
-with a leading backslash, and write `<` and `>` as `&lt;` and `&gt;`. A summary
-naming `_beforeTokenTransfer` therefore appears in Markdown as
-`- property-2: \_beforeTokenTransfer reverts` while the JSON keeps the
-unescaped text.
+Write each blocker bullet as the JSON string itself. Collapsing runs of
+whitespace to single spaces is fine; rewording, truncating, or re-punctuating it
+is not. Markdown-escaping the special characters is accepted but not required,
+so a summary naming `_beforeTokenTransfer` may appear either as
+`- property-2: _beforeTokenTransfer reverts` or as
+`- property-2: \_beforeTokenTransfer reverts`.
 
 Add `## Property provenance` after the implementation coverage section. For every
 property-derived production or non-production finding, render one concise table
