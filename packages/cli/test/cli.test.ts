@@ -993,6 +993,32 @@ test("report regenerates canonical Markdown from structured issues and non-produ
     }),
     "utf8"
   );
+  fs.writeFileSync(
+    path.join(runData.run_root, "artifacts", "stateful-invariant-campaign", "medusa-results.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "medusa",
+      failures: [{ id: "medusa-failure-1", status: "reproduced", property_ids: ["property-report-contract-1"] }]
+    }),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(runData.run_root, "artifacts", "stateful-invariant-campaign", "findings.json"),
+    JSON.stringify([
+      {
+        schema_version: "1.0",
+        id: "finding-stable-1",
+        title: "Structured issue title",
+        status: "reproduced",
+        severity_guess: "Medium",
+        confidence: "high",
+        summary: "The two backend failures share one deduplicated finding.",
+        property_ids: ["property-report-contract-1"],
+        fuzzer_backends: ["medusa", "recon"]
+      }
+    ]),
+    "utf8"
+  );
   fs.writeFileSync(path.join(reportDir, "report.md"), "# Placeholder\n\nunavailable\n", "utf8");
 
   const repaired = await cli(project, ["report", runData.run_id, "--json"]);
@@ -1039,7 +1065,7 @@ test("report regenerates canonical Markdown from structured issues and non-produ
   );
   assert.match(
     markdown,
-    /## Property provenance\n\n\| Finding \| Property IDs \| Source nodes \| Source property IDs \| Implementation\/test paths \| Fuzzer backends \|\n\| --- \| --- \| --- \| --- \| --- \| --- \|\n\| \\\[M-01\\\] - Structured issue title \| property-report-contract-1 \| property-specification-example \| property-specification-example-001 \| src\/Example\.sol<br>test\/ExampleInvariant\.t\.sol \| recon \|/u
+    /## Property provenance\n\n\| Finding \| Property IDs \| Source nodes \| Source property IDs \| Implementation\/test paths \| Fuzzer backends \|\n\| --- \| --- \| --- \| --- \| --- \| --- \|\n\| \\\[M-01\\\] - Structured issue title \| property-report-contract-1 \| property-specification-example \| property-specification-example-001 \| src\/Example\.sol<br>test\/ExampleInvariant\.t\.sol \| medusa<br>recon \|/u
   );
   assert.match(markdown, /## Property implementation coverage\n\n- Priority threshold: `high`/u);
   assert.match(markdown, /- Reference expectation properties: `1`/u);
@@ -1064,7 +1090,7 @@ test("report regenerates canonical Markdown from structured issues and non-produ
   const json = JSON.parse(fs.readFileSync(reportPath, "utf8")) as {
     run_metadata: Record<string, unknown>;
     issues: Array<{ id: string; title: string }>;
-    property_provenance: Array<{ finding_id: string; title: string }>;
+    property_provenance: Array<{ finding_id: string; title: string; fuzzer_backends?: string[] }>;
     property_implementation_coverage: Record<string, unknown>;
   };
   assert.equal(json.run_metadata.tokens_used, "321");
@@ -1077,6 +1103,7 @@ test("report regenerates canonical Markdown from structured issues and non-produ
     json.property_provenance.map(({ finding_id, title }) => ({ finding_id, title })),
     [{ finding_id: "M-01", title: "[M-01] - Structured issue title" }]
   );
+  assert.deepEqual(json.property_provenance[0]?.fuzzer_backends, ["medusa", "recon"]);
   assert.deepEqual(json.property_implementation_coverage, {
     priority_threshold: "high",
     priorities: ["high"],

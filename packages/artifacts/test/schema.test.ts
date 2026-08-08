@@ -33,6 +33,7 @@ import {
   nodeAttemptLedgerJsonSchema,
   propertiesJsonSchema,
   referenceExpectationsJsonSchema,
+  resolveCampaignFindingBackends,
   runStateJsonSchema,
   validateAnalysisBundleManifestSchema,
   usageLedgerJsonSchema,
@@ -55,7 +56,8 @@ import {
   ARTIFACT_CONTRACT_SCHEMA_FILES,
   artifactContractSchemaFile,
   isArtifactContractId,
-  type ArtifactContractId
+  type ArtifactContractId,
+  type PropertyCampaignArtifact
 } from "../src/index.js";
 
 const packageRoot = findPackageRoot(path.dirname(fileURLToPath(import.meta.url)));
@@ -716,6 +718,50 @@ test("property implementation and campaign schemas retain canonical references",
     }).ok,
     false,
     "campaign failure IDs and property references must be unambiguous"
+  );
+});
+
+test("campaign backend resolution prefers finding-owned provenance and only infers an unambiguous legacy backend", () => {
+  const campaigns: PropertyCampaignArtifact[] = [
+    {
+      schema_version: PROPERTY_CAMPAIGN_SCHEMA_VERSION,
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "deduplicated", status: "reproduced" },
+        { id: "legacy-recon", status: "reproduced" },
+        { id: "ambiguous-id", status: "reproduced" }
+      ]
+    },
+    {
+      schema_version: PROPERTY_CAMPAIGN_SCHEMA_VERSION,
+      fuzzer_backend: "medusa",
+      failures: [
+        { id: "medusa-contribution", status: "reproduced" },
+        { id: "ambiguous-id", status: "reproduced" }
+      ]
+    }
+  ];
+  const resolved = resolveCampaignFindingBackends(campaigns, [
+    { id: "deduplicated", fuzzer_backends: ["recon", "medusa"] },
+    { id: "legacy-recon" },
+    { id: "ambiguous-id" }
+  ]);
+
+  assert.deepEqual(resolved.get("deduplicated"), ["medusa", "recon"]);
+  assert.deepEqual(resolved.get("legacy-recon"), ["recon"]);
+  assert.equal(
+    resolved.has("ambiguous-id"),
+    false,
+    "a coincidental cross-backend failure-ID collision must not manufacture multi-backend provenance"
+  );
+
+  const malformedOwner = resolveCampaignFindingBackends(campaigns, [
+    { id: "legacy-recon", fuzzer_backend: "recon", fuzzer_backends: ["medusa", "recon"] }
+  ]);
+  assert.equal(
+    malformedOwner.has("legacy-recon"),
+    false,
+    "present but malformed finding-owned provenance must fail closed instead of falling back"
   );
 });
 

@@ -313,6 +313,7 @@ describe("prompt semantic anchors", () => {
 
   it("keeps the final invariant campaign backend-neutral on the single recon-fuzzer backend", () => {
     const campaign = prompt("strategies/invariants/invariant-testing-campaign.md");
+    const flatCampaign = campaign.replace(/\s+/gu, " ");
     const aggregate = prompt("review/aggregate-test-files.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
     const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
@@ -366,6 +367,10 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toContain("one distinct root cause, not one entry in the backend");
     expect(campaign).toMatch(/single counterexample broke several properties at once/u);
     expect(campaign).toContain("all contributing backend provenance");
+    expect(flatCampaign).toContain("Use the top-level string `fuzzer_backend` when exactly one");
+    expect(flatCampaign).toContain("unique, lexicographically sorted `fuzzer_backends` array when several");
+    expect(flatCampaign).toContain("Never emit both fields");
+    expect(flatCampaign).toContain("Nested detail such as `backend_provenance` may supplement these join fields");
     expect(campaign).toContain("A later pass must never erase");
     expect(campaign).toContain("property_ids");
     expect(campaign).toContain("deterministic Foundry reproducer for every unique failure");
@@ -376,6 +381,10 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toContain("--workers <workers>");
     expect(campaign).toContain("using the literal\nstring `recon`");
     expect(campaign).toContain("{{artifact_dir}}/recon-fuzzer-results.json");
+    expect(flatCampaign).toContain("`failure_counts.pre_deduplication` and `failure_counts.post_deduplication`");
+    expect(flatCampaign).toContain("total number of entries across every sibling backend record's `failures` array");
+    expect(flatCampaign).toContain("total number of objects in `findings.json`, including non-property findings");
+    expect(flatCampaign).toContain("do not prove that every finding is a distinct root cause");
   });
 
   it("publishes runtime-owned workspace patches for every invariant handoff", () => {

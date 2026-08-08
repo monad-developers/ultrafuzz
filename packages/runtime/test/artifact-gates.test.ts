@@ -79,9 +79,11 @@ function plannedNode(paths: string[]): PlannedGraphNode {
                   ? "ultrafuzz/invariant-ledger@1"
                   : ["echidna-results.json", "medusa-results.json", "recon-fuzzer-results.json"].includes(outputPath)
                     ? "ultrafuzz/property-campaign@1"
-                    : outputPath === "report.json"
-                      ? "ultrafuzz/report@1"
-                      : "ultrafuzz/nonempty-markdown@1",
+                    : outputPath === "campaign-summary.json"
+                      ? "ultrafuzz/json-object@1"
+                      : outputPath === "report.json"
+                        ? "ultrafuzz/report@1"
+                        : "ultrafuzz/nonempty-markdown@1",
       contract_digest: "a".repeat(64),
       primary: index === 0
     })),
@@ -4074,8 +4076,24 @@ test("final report gate rejects dangling property references while allowing hist
     JSON.stringify({
       schema_version: "ultrafuzz.property-campaign.v1",
       fuzzer_backend: "medusa",
-      failures: [{ id: "finding-property", status: "reproduced", property_ids: ["property-1"] }]
+      failures: [{ id: "medusa-property", status: "reproduced", property_ids: ["property-1"] }]
     })
+  );
+  writeArtifact(
+    currentLayout,
+    "stateful-invariant-campaign",
+    "findings.json",
+    JSON.stringify([{ ...campaignFinding("finding-property", ["property-1"]), fuzzer_backends: ["echidna", "medusa"] }])
+  );
+  const campaignNode = {
+    ...plannedNode(["echidna-results.json", "medusa-results.json", "findings.json"]),
+    id: "stateful-invariant-campaign",
+    logical_id: "stateful-invariant-campaign"
+  };
+  assert.equal(
+    verifyRequiredArtifactsForAttempt(currentLayout, campaignNode, campaignNode.id).ok,
+    true,
+    "finding-owned provenance must join a deduplicated finding to backends whose failure IDs differ"
   );
   writeArtifact(
     currentLayout,
@@ -4515,6 +4533,79 @@ test("campaign gate accepts the R55 artifact shape: 29 counterexamples over two 
     []
   );
   assert.equal(result.ok, true);
+});
+
+test("campaign gate conditionally reconciles the R55 summary failure counts with every backend failure and finding", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-r55-summary" });
+  campaignPropertyCatalog(layout, ["property-1", "property-3"]);
+  const campaignId = "stateful-invariant-campaign";
+  const failures = Array.from({ length: 29 }, (_value, index) => ({
+    id: `failure-${index + 1}`,
+    status: "reproduced",
+    property_ids: [index + 1 === 25 || index + 1 === 26 ? "property-3" : "property-1"]
+  }));
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([campaignFinding("failure-1", ["property-1"]), campaignFinding("failure-25", ["property-3"])])
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "campaign-summary.json",
+    JSON.stringify({
+      outcome: "partial",
+      failure_counts: { pre_deduplication: 29, post_deduplication: 2, blocked_unreproduced: 0 }
+    })
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, campaignId).ok, true);
+
+  writeArtifact(
+    layout,
+    campaignId,
+    "campaign-summary.json",
+    JSON.stringify({ failure_counts: { pre_deduplication: 0, post_deduplication: 0 } })
+  );
+  const mismatched = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(mismatched.ok, false);
+  assert.deepEqual(
+    mismatched.diagnostics
+      .filter((diagnostic) => diagnostic.code === "CAMPAIGN_SUMMARY_FAILURE_COUNT_MISMATCH")
+      .map((diagnostic) => diagnostic.path?.split(".").at(-1)),
+    ["pre_deduplication", "post_deduplication"]
+  );
+
+  // The node still declares json-object@1, so old summaries that predate the
+  // named block remain readable. Once failure_counts is present, both named
+  // integer fields are gated.
+  writeArtifact(layout, campaignId, "campaign-summary.json", JSON.stringify({ outcome: "partial" }));
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, campaignId).ok, true);
+  writeArtifact(
+    layout,
+    campaignId,
+    "campaign-summary.json",
+    JSON.stringify({ failure_counts: { pre_deduplication: 29 } })
+  );
+  const incomplete = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(incomplete.ok, false);
+  assert.ok(incomplete.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_SUMMARY_FAILURE_COUNT_INVALID"));
 });
 
 test("campaign gate still rejects a property-derived failure no finding covers", () => {

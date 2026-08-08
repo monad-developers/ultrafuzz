@@ -6,11 +6,13 @@ import {
   assertRegularFileInside,
   checkInvariantSourcePinned,
   getNodeArtifactDir,
+  findingFuzzerBackendProvenance,
   invariantPinnedSourceRefExists,
   readArtifactManifest,
   readJsonFile,
   readRunState,
   redactValue,
+  resolveCampaignFindingBackends,
   safeResolveInside,
   sha256Bytes,
   updateNodeState,
@@ -31,6 +33,7 @@ import {
   type InvariantLedgerEntry,
   type InvariantSourceProof,
   type PropertiesArtifact,
+  type PropertyCampaignArtifact,
   type PropertyReferenceInput,
   type RunLayout,
   type RunState
@@ -2301,11 +2304,6 @@ function verifyCampaignPropertyReferences(
   artifactDir: string,
   catalog: PropertiesArtifact
 ): RuntimeDiagnostic[] {
-  const implementation = readImplementedProperties(layout);
-  if (implementation.diagnostics.length > 0 || implementation.value === undefined) {
-    return implementation.diagnostics;
-  }
-
   const findingsPath = path.join(artifactDir, "findings.json");
   const campaignPaths = campaignResultArtifactNames
     .map((artifactName) => path.join(artifactDir, artifactName))
@@ -2322,6 +2320,19 @@ function verifyCampaignPropertyReferences(
     return [];
   }
   const validatedFindings = findings.value;
+  const campaignValues = campaigns.map((campaign) => campaign.value);
+  const summaryDiagnostics =
+    campaigns.length === campaignPaths.length
+      ? campaignSummaryFailureCountDiagnostics(artifactDir, campaignValues, validatedFindings)
+      : [];
+  const backendDiagnostics =
+    campaigns.length === campaignPaths.length
+      ? campaignFindingFuzzerBackendDiagnostics(campaignValues, validatedFindings, findingsPath)
+      : [];
+  const implementation = readImplementedProperties(layout);
+  if (implementation.diagnostics.length > 0 || implementation.value === undefined) {
+    return [...summaryDiagnostics, ...backendDiagnostics, ...implementation.diagnostics];
+  }
   const candidateFindingIds = new Set(
     campaigns.flatMap((campaign) => campaign.value.failures.map((failure) => failure.id))
   );
@@ -2339,6 +2350,8 @@ function verifyCampaignPropertyReferences(
   references.push(...findingPropertyReferences(validatedFindings, findingsPath));
 
   const diagnostics = [
+    ...summaryDiagnostics,
+    ...backendDiagnostics,
     ...propertyReferenceDiagnostics(catalog, references),
     ...campaigns.flatMap((campaign) =>
       campaignFindingReferenceDiagnostics(
@@ -2378,6 +2391,124 @@ function verifyCampaignPropertyReferences(
           path: reference.path
         });
       }
+    }
+  }
+  return diagnostics;
+}
+
+function campaignSummaryFailureCountDiagnostics(
+  artifactDir: string,
+  campaigns: readonly PropertyCampaignArtifact[],
+  findings: readonly Readonly<Record<string, unknown>>[]
+): RuntimeDiagnostic[] {
+  const summaryPath = path.join(artifactDir, "campaign-summary.json");
+  if (!fs.existsSync(summaryPath)) return [];
+  const summary = readJsonFile(summaryPath);
+  if (!isRecord(summary) || !Object.prototype.hasOwnProperty.call(summary, "failure_counts")) return [];
+  if (!isRecord(summary.failure_counts)) {
+    return [
+      {
+        code: "CAMPAIGN_SUMMARY_FAILURE_COUNTS_INVALID",
+        message:
+          "campaign-summary.json failure_counts must be an object containing pre_deduplication and post_deduplication counts",
+        severity: "error",
+        source: "campaign-summary",
+        path: `${summaryPath}#$.failure_counts`
+      }
+    ];
+  }
+
+  const expected = {
+    pre_deduplication: campaigns.reduce((total, campaign) => total + campaign.failures.length, 0),
+    post_deduplication: findings.length
+  } as const;
+  const diagnostics: RuntimeDiagnostic[] = [];
+  for (const field of ["pre_deduplication", "post_deduplication"] as const) {
+    const actual = summary.failure_counts[field];
+    const population =
+      field === "pre_deduplication"
+        ? "total failures across the sibling backend records"
+        : "objects in the sibling findings.json array";
+    if (typeof actual !== "number" || !Number.isSafeInteger(actual) || actual < 0) {
+      diagnostics.push({
+        code: "CAMPAIGN_SUMMARY_FAILURE_COUNT_INVALID",
+        message: `campaign-summary.json failure_counts.${field} must be a non-negative safe integer equal to the ${population}`,
+        severity: "error",
+        source: "campaign-summary",
+        path: `${summaryPath}#$.failure_counts.${field}`
+      });
+      continue;
+    }
+    if (actual !== expected[field]) {
+      diagnostics.push({
+        code: "CAMPAIGN_SUMMARY_FAILURE_COUNT_MISMATCH",
+        message: `campaign-summary.json failure_counts.${field} reports ${actual}, but the ${population} is ${expected[field]}`,
+        severity: "error",
+        source: "campaign-summary",
+        path: `${summaryPath}#$.failure_counts.${field}`
+      });
+    }
+  }
+  return diagnostics;
+}
+
+function campaignFindingFuzzerBackendDiagnostics(
+  campaigns: readonly PropertyCampaignArtifact[],
+  findings: readonly Readonly<Record<string, unknown>>[],
+  findingsPath: string
+): RuntimeDiagnostic[] {
+  const knownBackends = new Set(
+    campaigns.flatMap((campaign) => (campaign.fuzzer_backend === undefined ? [] : [campaign.fuzzer_backend]))
+  );
+  const inferredByFailureId = new Map<string, Set<string>>();
+  for (const campaign of campaigns) {
+    if (campaign.fuzzer_backend === undefined) continue;
+    for (const failure of campaign.failures) {
+      const backends = inferredByFailureId.get(failure.id) ?? new Set<string>();
+      backends.add(campaign.fuzzer_backend);
+      inferredByFailureId.set(failure.id, backends);
+    }
+  }
+
+  const diagnostics: RuntimeDiagnostic[] = [];
+  for (const [findingIndex, finding] of findings.entries()) {
+    const owned = findingFuzzerBackendProvenance(finding);
+    if (owned.present && !owned.valid) {
+      diagnostics.push({
+        code: "PROPERTY_FINDING_FUZZER_BACKEND_INVALID",
+        message:
+          "Campaign findings must use one non-empty fuzzer_backend string or one non-empty unique fuzzer_backends array, never both",
+        severity: "error",
+        source: "property-provenance",
+        path: `${findingsPath}#$[${findingIndex}]`
+      });
+      continue;
+    }
+    if (owned.present) {
+      const unknownBackends = owned.backends.filter((backend) => !knownBackends.has(backend));
+      if (unknownBackends.length > 0) {
+        diagnostics.push({
+          code: "PROPERTY_FINDING_FUZZER_BACKEND_UNKNOWN",
+          message: `Campaign finding ${JSON.stringify(finding.id)} names backends absent from the sibling result records: ${unknownBackends.map((backend) => JSON.stringify(backend)).join(", ")}`,
+          severity: "error",
+          source: "property-provenance",
+          path: `${findingsPath}#$[${findingIndex}].${Array.isArray(finding.fuzzer_backends) ? "fuzzer_backends" : "fuzzer_backend"}`
+        });
+      }
+      continue;
+    }
+    if (
+      typeof finding.id === "string" &&
+      stringArray(finding.property_ids).length > 0 &&
+      (inferredByFailureId.get(finding.id)?.size ?? 0) > 1
+    ) {
+      diagnostics.push({
+        code: "PROPERTY_FINDING_FUZZER_BACKEND_AMBIGUOUS",
+        message: `Campaign finding ${JSON.stringify(finding.id)} matches failures from several backends and must own an explicit fuzzer_backends array`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${findingsPath}#$[${findingIndex}].id`
+      });
     }
   }
   return diagnostics;
@@ -2750,7 +2881,8 @@ function reportPropertyJoinDiagnostics(
 }
 
 function readCampaignFuzzerBackends(layout: RunLayout): ReadonlyMap<string, readonly string[]> {
-  const backendsByFinding = new Map<string, Set<string>>();
+  const campaigns: PropertyCampaignArtifact[] = [];
+  const findings: Array<Record<string, unknown>> = [];
   for (const nodeId of campaignLogicalNodeIds) {
     for (const artifactName of campaignResultArtifactNames) {
       const campaignPath = findLogicalNodeArtifact(layout, nodeId, artifactName);
@@ -2758,17 +2890,18 @@ function readCampaignFuzzerBackends(layout: RunLayout): ReadonlyMap<string, read
         continue;
       }
       const result = validatePropertyCampaignSchema(readJsonFile(campaignPath), campaignPath);
-      if (result.value?.fuzzer_backend === undefined) {
-        continue;
-      }
-      for (const failure of result.value.failures) {
-        const backends = backendsByFinding.get(failure.id) ?? new Set<string>();
-        backends.add(result.value.fuzzer_backend);
-        backendsByFinding.set(failure.id, backends);
+      if (result.ok && result.value !== undefined) {
+        campaigns.push(result.value);
       }
     }
+    const findingsPath = findLogicalNodeArtifact(layout, nodeId, "findings.json");
+    if (findingsPath === undefined) continue;
+    const result = validateFindingsSchema(readJsonFile(findingsPath), findingsPath);
+    if (result.ok && result.value !== undefined) {
+      findings.push(...result.value);
+    }
   }
-  return new Map([...backendsByFinding].map(([findingId, backends]) => [findingId, [...backends].sort()]));
+  return resolveCampaignFindingBackends(campaigns, findings);
 }
 
 function propertySourceKey(source: { source_node_id?: unknown; source_property_id?: unknown }): string {

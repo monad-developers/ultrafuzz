@@ -7,7 +7,9 @@ import {
   layoutForRunRoot,
   readArtifactManifest,
   redactValue,
+  resolveCampaignFindingBackends,
   validateArtifactContract,
+  validateFindingsSchema,
   validateImplementedPropertiesSchema,
   validatePropertiesSchema,
   validatePropertyCampaignSchema,
@@ -494,36 +496,22 @@ function readImplementedPropertiesArtifact(runRoot: string): ImplementedProperti
   return result.ok ? result.value : undefined;
 }
 
-function readCampaignBackends(runRoot: string): Map<string, Set<string>> {
-  const result = new Map<string, Set<string>>();
-  for (const [logicalNodeId, fileName] of [
-    ["stateful-invariant-campaign", "echidna-results.json"],
-    ["stateful-invariant-campaign", "medusa-results.json"],
-    ["stateful-invariant-campaign", "recon-fuzzer-results.json"],
-    ["stateful-invariant-recon-campaign", "recon-fuzzer-results.json"]
-  ] as const) {
-    const artifactPath = logicalArtifactPath(runRoot, logicalNodeId, fileName);
-    if (artifactPath === undefined) {
-      continue;
+function readCampaignBackends(runRoot: string): ReadonlyMap<string, readonly string[]> {
+  const campaigns: PropertyCampaignArtifact[] = [];
+  const findings: Array<Record<string, unknown>> = [];
+  for (const logicalNodeId of ["stateful-invariant-campaign", "stateful-invariant-recon-campaign"] as const) {
+    for (const fileName of ["echidna-results.json", "medusa-results.json", "recon-fuzzer-results.json"] as const) {
+      const artifactPath = logicalArtifactPath(runRoot, logicalNodeId, fileName);
+      if (artifactPath === undefined) continue;
+      const validation = validatePropertyCampaignSchema(readUnknown(runRoot, artifactPath), artifactPath);
+      if (validation.ok && validation.value !== undefined) campaigns.push(validation.value);
     }
-    const validation = validatePropertyCampaignSchema(readUnknown(runRoot, artifactPath), artifactPath);
-    if (!validation.ok || validation.value?.fuzzer_backend === undefined) {
-      continue;
-    }
-    addCampaignBackends(result, validation.value);
+    const findingsPath = logicalArtifactPath(runRoot, logicalNodeId, "findings.json");
+    if (findingsPath === undefined) continue;
+    const validation = validateFindingsSchema(readUnknown(runRoot, findingsPath), findingsPath);
+    if (validation.ok && validation.value !== undefined) findings.push(...validation.value);
   }
-  return result;
-}
-
-function addCampaignBackends(target: Map<string, Set<string>>, campaign: PropertyCampaignArtifact): void {
-  if (campaign.fuzzer_backend === undefined) {
-    return;
-  }
-  for (const failure of campaign.failures) {
-    const backends = target.get(failure.id) ?? new Set<string>();
-    backends.add(campaign.fuzzer_backend);
-    target.set(failure.id, backends);
-  }
+  return resolveCampaignFindingBackends(campaigns, findings);
 }
 
 function logicalArtifactPath(runRoot: string, logicalNodeId: string, fileName: string): string | undefined {

@@ -148,6 +148,96 @@ export interface PropertyCampaignArtifact {
   failures: PropertyCampaignFailure[];
 }
 
+export type FindingFuzzerBackendProvenance =
+  | { present: false; valid: true; backends: readonly [] }
+  | { present: true; valid: false; backends: readonly [] }
+  | { present: true; valid: true; backends: readonly string[] };
+
+/**
+ * Read backend provenance owned by a deduplicated campaign finding. Keeping
+ * this parser beside the campaign artifact contract gives the runtime gate and
+ * report reconciliation one interpretation of the singular/plural fields.
+ */
+export function findingFuzzerBackendProvenance(
+  finding: Readonly<Record<string, unknown>>
+): FindingFuzzerBackendProvenance {
+  const hasBackend = Object.prototype.hasOwnProperty.call(finding, "fuzzer_backend");
+  const hasBackends = Object.prototype.hasOwnProperty.call(finding, "fuzzer_backends");
+  if (!hasBackend && !hasBackends) {
+    return { present: false, valid: true, backends: [] };
+  }
+  if (hasBackend === hasBackends) {
+    return { present: true, valid: false, backends: [] };
+  }
+  if (hasBackend) {
+    return typeof finding.fuzzer_backend === "string" && finding.fuzzer_backend.length > 0
+      ? { present: true, valid: true, backends: [finding.fuzzer_backend] }
+      : { present: true, valid: false, backends: [] };
+  }
+  if (
+    !Array.isArray(finding.fuzzer_backends) ||
+    finding.fuzzer_backends.length === 0 ||
+    !finding.fuzzer_backends.every((backend): backend is string => typeof backend === "string" && backend.length > 0) ||
+    new Set(finding.fuzzer_backends).size !== finding.fuzzer_backends.length
+  ) {
+    return { present: true, valid: false, backends: [] };
+  }
+  return { present: true, valid: true, backends: [...finding.fuzzer_backends].sort() };
+}
+
+/**
+ * Resolve the backend set attached to each campaign finding. A finding's own
+ * provenance is authoritative because deduplication may combine failures with
+ * different IDs. Historical artifacts without those fields retain the old
+ * failure-ID join only when it identifies exactly one backend; a multi-backend
+ * ID collision is ambiguous and is therefore not guessed.
+ */
+export function resolveCampaignFindingBackends(
+  campaigns: readonly PropertyCampaignArtifact[],
+  findings: readonly Readonly<Record<string, unknown>>[]
+): ReadonlyMap<string, readonly string[]> {
+  const knownBackends = new Set<string>();
+  const inferredByFailureId = new Map<string, Set<string>>();
+  for (const campaign of campaigns) {
+    const backend = campaign.fuzzer_backend;
+    if (backend === undefined) continue;
+    knownBackends.add(backend);
+    for (const failure of campaign.failures) {
+      const inferred = inferredByFailureId.get(failure.id) ?? new Set<string>();
+      inferred.add(backend);
+      inferredByFailureId.set(failure.id, inferred);
+    }
+  }
+
+  const ownedByFindingId = new Map<string, Set<string>>();
+  const invalidOwnedFindingIds = new Set<string>();
+  for (const finding of findings) {
+    if (typeof finding.id !== "string" || finding.id.length === 0) continue;
+    const owned = findingFuzzerBackendProvenance(finding);
+    if (!owned.present) continue;
+    if (!owned.valid || owned.backends.some((backend) => !knownBackends.has(backend))) {
+      invalidOwnedFindingIds.add(finding.id);
+      ownedByFindingId.delete(finding.id);
+      continue;
+    }
+    if (invalidOwnedFindingIds.has(finding.id)) continue;
+    const backends = ownedByFindingId.get(finding.id) ?? new Set<string>();
+    for (const backend of owned.backends) backends.add(backend);
+    ownedByFindingId.set(finding.id, backends);
+  }
+
+  const resolved = new Map<string, readonly string[]>();
+  for (const [failureId, inferred] of inferredByFailureId) {
+    if (inferred.size === 1 && !ownedByFindingId.has(failureId) && !invalidOwnedFindingIds.has(failureId)) {
+      resolved.set(failureId, [...inferred]);
+    }
+  }
+  for (const [findingId, owned] of ownedByFindingId) {
+    resolved.set(findingId, [...owned].sort());
+  }
+  return resolved;
+}
+
 export interface PropertyReferenceInput {
   propertyIds: readonly string[];
   path: string;
