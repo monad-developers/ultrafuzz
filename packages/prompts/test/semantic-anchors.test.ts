@@ -326,6 +326,14 @@ describe("prompt semantic anchors", () => {
     expect(campaign).not.toContain("backends/echidna");
     expect(campaign).not.toContain("backends/medusa");
     expect(campaign).toContain("Finalize the backend record before deduplicating failures");
+    // The campaign gate was once written from a sentence that read as one
+    // finding per counterexample, and the node failed for every deduplicated
+    // run until both sides were corrected. Neither side may drift back alone.
+    expect(campaign).toContain("Do not emit one finding per\ncounterexample");
+    expect(campaign).toContain("reuse the ID of one of the failures it covers");
+    expect(campaign).toContain("a finding may\n     only name a property that some backend failure reported");
+    expect(campaign).toContain("one distinct root cause, not one entry in the backend");
+    expect(campaign).toMatch(/single counterexample broke several properties at once/u);
     expect(campaign).toContain("all contributing backend provenance");
     expect(campaign).toContain("A later pass must never erase");
     expect(campaign).toContain("property_ids");
