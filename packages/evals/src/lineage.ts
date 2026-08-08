@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 
 import { EVAL_JUDGE_PROMPT_VERSION } from "./evaluator/adjudicator-prompt.js";
+import { assertGroundTruthSubject, readGroundTruthDocument, type GroundTruthSubject } from "./ground-truth.js";
 import { resolveJudgePanelConfig, resolveRecoveryEquivalencePolicy } from "./suite.js";
 import type {
   EvalCandidateProvenance,
@@ -37,6 +38,7 @@ export function buildEvalRunProvenance(plan: EvalPlanValue, controller: EvalCont
     .map(([id, target]) => ({ id, repo: target.repo, ...resolveTargetProvenance(target.path, target.ref) }))
     .sort((left, right) => left.id.localeCompare(right.id));
   const groundTruthSha256 = groundTruthDigests(plan.matrix);
+  const groundTruthSubjects = collectGroundTruthSubjects(plan.matrix, false);
   const benchmarkControls = benchmarkExecutionControls(plan.matrix);
   const executionPolicyValue = {
     revision: EVAL_EXECUTION_POLICY_REVISION,
@@ -58,6 +60,7 @@ export function buildEvalRunProvenance(plan: EvalPlanValue, controller: EvalCont
     protocol_revision: EVAL_BENCHMARK_PROTOCOL_REVISION,
     targets,
     ground_truth_sha256: groundTruthSha256,
+    ground_truth_subjects: groundTruthSubjects,
     model_controls: modelControls(plan.suite, plan.matrix),
     trials_per_variant: plan.suite.run.trials_per_variant,
     execution_policy_fingerprint: executionPolicy.fingerprint
@@ -76,6 +79,7 @@ export function buildEvalRunProvenance(plan: EvalPlanValue, controller: EvalCont
       cohort_fingerprint: sha256Identity(cohortControls),
       targets,
       ground_truth_sha256: groundTruthSha256,
+      ground_truth_subjects: groundTruthSubjects,
       execution_policy: executionPolicy
     }
   };
@@ -103,6 +107,7 @@ export function buildScoringProvenance(input: {
 }): EvalScoringProvenance {
   const implementation = resolveCandidateProvenance(input.projectRoot);
   const groundTruthSha256 = groundTruthDigests(input.matrix);
+  const groundTruthSubjects = collectGroundTruthSubjects(input.matrix, true);
   const judgeModels = [
     ...new Set(
       input.matrix.map(
@@ -122,7 +127,8 @@ export function buildScoringProvenance(input: {
     judge_prompt_version: EVAL_JUDGE_PROMPT_VERSION,
     judge_models: judgeModels,
     judge_panel: resolveJudgePanelConfig(input.suite.judge_panel),
-    ground_truth_sha256: groundTruthSha256
+    ground_truth_sha256: groundTruthSha256,
+    ground_truth_subjects: groundTruthSubjects
   };
   return { ...identity, fingerprint: sha256Identity(identity) };
 }
@@ -188,6 +194,34 @@ function groundTruthDigests(matrix: EvalMatrixRow[]): Record<string, string> {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([targetId, filePath]) => [targetId, sha256File(filePath)] as const);
   return Object.fromEntries(entries);
+}
+
+function collectGroundTruthSubjects(
+  matrix: EvalMatrixRow[],
+  requirePrivateBinding: boolean
+): Record<string, GroundTruthSubject | "unavailable"> {
+  const subjects = new Map<string, GroundTruthSubject | "unavailable">();
+  for (const [targetId, row] of new Map(matrix.map((candidate) => [candidate.target_id, candidate])).entries()) {
+    try {
+      const document = readGroundTruthDocument(row.target.ground_truth_path, {
+        requireSubject: requirePrivateBinding && row.target.sensitivity === "private"
+      });
+      if (document.subject === undefined) {
+        subjects.set(targetId, "unavailable");
+      } else {
+        subjects.set(
+          targetId,
+          row.target.sensitivity === "private"
+            ? assertGroundTruthSubject(document.subject, { repository: row.target.repo, revision: row.target.ref })
+            : document.subject
+        );
+      }
+    } catch (error) {
+      if (requirePrivateBinding && row.target.sensitivity === "private") throw error;
+      subjects.set(targetId, "unavailable");
+    }
+  }
+  return Object.fromEntries([...subjects.entries()].sort(([left], [right]) => left.localeCompare(right)));
 }
 
 function sha256File(filePath: string): string {

@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
-import { access, appendFile, copyFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { repairMissingRenderedPromptsForRun } from "@ultrafuzz/runtime";
+import { assertGroundTruthSubject, readGroundTruthDocument, type GroundTruthSubject } from "@ultrafuzz/evals";
 
 import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig, type PrivateModalBenchmarkConfig } from "./config.js";
 import { EVAL_WATCH_TIMEOUT_SECONDS, type ModalModelSpec } from "./defaults.js";
@@ -260,6 +261,11 @@ async function resumeExistingEvaluation(
   evalRunId: string;
   terminalDisposition: TerminalDisposition | undefined;
 }> {
+  await verifyPersistedGroundTruthBinding(workspace.target).catch(async (error) => {
+    await rm(WORK_ROOT, { recursive: true, force: true });
+    if (error instanceof CheckpointIncompatibleError) throw error;
+    throw new CheckpointIncompatibleError("persistent ground truth subject binding is incompatible", { cause: error });
+  });
   const repairedPrompts = await repairMissingRenderedPromptsForRun({
     projectRoot: workspace.target,
     runId: workspace.productRunId,
@@ -351,7 +357,7 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
       await mkdir(stagingControl, { recursive: true, mode: 0o700 });
       await mkdir(stagingGroundTruth, { recursive: true, mode: 0o700 });
       const config = privateConfig();
-      await materializePinnedSource({
+      const targetProof = await materializePinnedSource({
         repository: config.target.repo,
         revision: config.target.ref,
         destination: stagingTarget,
@@ -367,7 +373,8 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
       await configureTarget(stagingTarget);
       await materializeGroundTruth(
         path.join(stagingGroundTruthRepo, config.ground_truth.file),
-        path.join(stagingGroundTruth, "findings.yml")
+        path.join(stagingGroundTruth, "findings.yml"),
+        targetProof.commit
       );
       await configureControl(stagingControl, target, groundTruth);
       await rename(stagingRoot, WORK_ROOT);
@@ -381,12 +388,22 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
       });
     }
   }
-  await inspectPinnedSource(target, privateConfig().target.ref, undefined, {
+  const targetProof = await inspectPinnedSource(target, privateConfig().target.ref, undefined, {
     allowDirty: true,
     allowUltrafuzzWorktreeRefs: true
   }).catch((error) => {
     throw new CheckpointIncompatibleError("persistent benchmark source is not pinned", { cause: error });
   });
+  try {
+    const document = readGroundTruthDocument(path.join(groundTruth, "findings.yml"), { requireSubject: true });
+    assertGroundTruthSubject(document.subject, {
+      repository: privateConfig().target.repo,
+      revision: targetProof.commit
+    });
+  } catch (error) {
+    await rm(WORK_ROOT, { recursive: true, force: true });
+    throw new CheckpointIncompatibleError("persistent ground truth subject binding is incompatible", { cause: error });
+  }
   await runChecked(["node", CLI, "references", "sync", "--project", target, "--json"], {
     label: "references sync"
   });
@@ -397,15 +414,33 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
   return { target, control, suitePath, evalRunId: `${RUN_ID}-${MODEL.slug}` };
 }
 
-async function materializeGroundTruth(source: string, destination: string): Promise<void> {
+async function verifyPersistedGroundTruthBinding(target: string): Promise<void> {
+  const targetProof = await inspectPinnedSource(target, privateConfig().target.ref, undefined, {
+    allowDirty: true,
+    allowUltrafuzzWorktreeRefs: true
+  });
+  const document = readGroundTruthDocument(path.join(WORK_ROOT, "ground-truth", "findings.yml"), {
+    requireSubject: true
+  });
+  assertGroundTruthSubject(document.subject, {
+    repository: privateConfig().target.repo,
+    revision: targetProof.commit
+  });
+}
+
+async function materializeGroundTruth(source: string, destination: string, targetRevision: string): Promise<void> {
   const config = privateConfig();
+  const subject: GroundTruthSubject = { repository: config.target.repo, revision: targetRevision };
   if (config.ground_truth.format === "ultrafuzz") {
-    await copyFile(source, destination);
+    const document = readGroundTruthDocument(source, { requireSubject: true });
+    assertGroundTruthSubject(document.subject, subject);
+    await writeFile(destination, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
     return;
   }
   const converted = convertAuditMarkdownGroundTruth(
     await readFile(source, "utf8"),
-    config.ground_truth.expected_findings
+    config.ground_truth.expected_findings,
+    subject
   );
   await writeFile(destination, `${JSON.stringify(converted, null, 2)}\n`, { mode: 0o600 });
 }

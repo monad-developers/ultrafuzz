@@ -97,9 +97,28 @@ The ground-truth file must use the format accepted by `ultrafuzz eval score`.
 The config schema intentionally accepts credential environment-variable names,
 not inline credential values.
 
+For a private benchmark, the ground-truth file must bind the bugs to the target
+codebase, independently of the repository that stores the file:
+
+```yaml
+schema_version: ultrafuzz.eval-ground-truth.v1
+subject:
+  repository: https://example.invalid/subject
+  revision: 0123456789abcdef0123456789abcdef01234567
+bugs: []
+```
+
+`subject.repository` is compared with `target.repo` and `subject.revision` with
+the materialized target commit before model work, before scoring, and when a
+Modal workspace resumes. A storage repository may therefore be a separate
+private repository, but an upstream repository and its fork are different
+subjects. Legacy unbound documents remain usable only for public or historical
+compatibility paths; a new private benchmark fails closed without this binding.
+
 Audit reports with bracketed issue headings can set `ground_truth.format` to
 `audit-markdown` and provide `ground_truth.expected_findings`. Conversion runs
-inside the sandbox, and a count mismatch fails before evaluation starts.
+inside the sandbox, receives the target binding above, and preserves it in the
+converted scorer input. A count mismatch fails before evaluation starts.
 
 For judges that require short-lived credentials, configure an HTTPS
 `braintrust.judge_credential_endpoint`. The worker requests a model-scoped

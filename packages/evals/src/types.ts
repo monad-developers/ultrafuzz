@@ -210,6 +210,7 @@ export interface EvalBenchmarkProvenance {
   cohort_fingerprint: string;
   targets: EvalBenchmarkTargetProvenance[];
   ground_truth_sha256: Record<string, string>;
+  ground_truth_subjects?: Record<string, EvalGroundTruthSubject | "unavailable">;
   execution_policy: EvalExecutionPolicyProvenance;
 }
 
@@ -227,7 +228,13 @@ export interface EvalScoringProvenance {
   /** Historical scoring artifacts may omit the panel identity. */
   judge_panel?: EvalJudgePanelConfig;
   ground_truth_sha256: Record<string, string>;
+  ground_truth_subjects?: Record<string, EvalGroundTruthSubject | "unavailable">;
   fingerprint: string;
+}
+
+export interface EvalGroundTruthSubject {
+  repository: string;
+  revision: string;
 }
 
 export interface EvalSummaryProvenance {
