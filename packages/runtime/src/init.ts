@@ -257,45 +257,54 @@ function staleAgentAdapterDiagnostics(projectRoot: string): RuntimeDiagnostic[] 
   for (const agent of AGENT_TEMPLATES) {
     const relativePath = `.smithers/agents/${agent.file}`;
     const filePath = path.join(projectRoot, relativePath);
-    let lexical: fs.BigIntStats;
     try {
-      lexical = fs.lstatSync(filePath, { bigint: true });
+      const lexical = fs.lstatSync(filePath, { bigint: true });
+      if (lexical.isSymbolicLink() || !lexical.isFile() || lexical.nlink !== 1n) {
+        diagnostics.push(
+          manualAgentAdapterReviewDiagnostic(
+            relativePath,
+            "is not a physical single-link file, so init preserved it without inspection; replace it with an ordinary file"
+          )
+        );
+        continue;
+      }
+      if (lexical.size > BigInt(MAX_STOCK_AGENT_ADAPTER_BYTES)) {
+        diagnostics.push(
+          manualAgentAdapterReviewDiagnostic(
+            relativePath,
+            "is too large to inspect as a generated adapter and was preserved"
+          )
+        );
+        continue;
+      }
+      const source = readStableAgentAdapter(projectRoot, filePath).toString("utf8");
+      if (source.includes("ultrafuzz.toml") && !source.includes("ULTRAFUZZ_CONFIG_PATH")) {
+        diagnostics.push({
+          code: "INIT_AGENT_ADAPTER_UPDATE_REQUIRED",
+          message: `${relativePath} was preserved because it is customized and still reads mutable project ultrafuzz.toml; update it to read process.env.ULTRAFUZZ_CONFIG_PATH and use workflowControlChildEnvironment before spawning a model process`,
+          severity: "warning",
+          source: "runtime",
+          path: relativePath
+        });
+      }
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") continue;
-      throw error;
-    }
-    if (lexical.isSymbolicLink() || !lexical.isFile() || lexical.nlink !== 1n) {
-      diagnostics.push({
-        code: "INIT_AGENT_ADAPTER_UPDATE_REQUIRED",
-        message: `${relativePath} is not a physical single-link file, so init preserved it without inspection; replace it with an ordinary file or verify manually that it reads process.env.ULTRAFUZZ_CONFIG_PATH and removes controller-only variables before spawning a model process`,
-        severity: "warning",
-        source: "runtime",
-        path: relativePath
-      });
-      continue;
-    }
-    if (lexical.size > BigInt(MAX_STOCK_AGENT_ADAPTER_BYTES)) {
-      diagnostics.push({
-        code: "INIT_AGENT_ADAPTER_UPDATE_REQUIRED",
-        message: `${relativePath} is too large to inspect as a generated adapter and was preserved; verify manually that it reads process.env.ULTRAFUZZ_CONFIG_PATH and removes controller-only variables before spawning a model process`,
-        severity: "warning",
-        source: "runtime",
-        path: relativePath
-      });
-      continue;
-    }
-    const source = readStableAgentAdapter(projectRoot, filePath).toString("utf8");
-    if (source.includes("ultrafuzz.toml") && !source.includes("ULTRAFUZZ_CONFIG_PATH")) {
-      diagnostics.push({
-        code: "INIT_AGENT_ADAPTER_UPDATE_REQUIRED",
-        message: `${relativePath} was preserved because it is customized and still reads mutable project ultrafuzz.toml; update it to read process.env.ULTRAFUZZ_CONFIG_PATH and use workflowControlChildEnvironment before spawning a model process`,
-        severity: "warning",
-        source: "runtime",
-        path: relativePath
-      });
+      diagnostics.push(
+        manualAgentAdapterReviewDiagnostic(relativePath, "could not be safely inspected during post-init review")
+      );
     }
   }
   return diagnostics;
+}
+
+function manualAgentAdapterReviewDiagnostic(relativePath: string, reason: string): RuntimeDiagnostic {
+  return {
+    code: "INIT_AGENT_ADAPTER_UPDATE_REQUIRED",
+    message: `${relativePath} ${reason}; verify manually that it reads process.env.ULTRAFUZZ_CONFIG_PATH and removes controller-only variables before spawning a model process`,
+    severity: "warning",
+    source: "runtime",
+    path: relativePath
+  };
 }
 
 // init preserves project-owned files, so a project scaffolded before an agent
@@ -382,7 +391,7 @@ function replaceKnownStockAgentAdapter(
     return false;
   }
 
-  const descriptor = fs.openSync(filePath, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW ?? 0));
+  const descriptor = fs.openSync(filePath, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW);
   try {
     const opened = fs.fstatSync(descriptor, { bigint: true });
     if (!opened.isFile() || opened.nlink !== 1n || !sameStableInitFile(opened, lexicalBefore)) {
@@ -401,37 +410,218 @@ function replaceKnownStockAgentAdapter(
     const digest = crypto.createHash("sha256").update(original).digest("hex");
     if (!knownStockSha256.has(digest)) return false;
 
-    const replacementBytes = Buffer.from(replacement, "utf8");
-    try {
-      writeDescriptorContents(descriptor, replacementBytes);
-    } catch (error) {
-      try {
-        writeDescriptorContents(descriptor, original);
-      } catch {
-        // Preserve the replacement failure after attempting to restore the known stock bytes.
-      }
-      throw error;
-    }
-    const replaced = fs.fstatSync(descriptor, { bigint: true });
-    const lexicalReplaced = fs.lstatSync(filePath, { bigint: true });
-    if (
-      !replaced.isFile() ||
-      replaced.nlink !== 1n ||
-      replaced.dev !== opened.dev ||
-      replaced.ino !== opened.ino ||
-      replaced.mode !== opened.mode ||
-      replaced.size !== BigInt(replacementBytes.byteLength) ||
-      replaced.dev !== lexicalReplaced.dev ||
-      replaced.ino !== lexicalReplaced.ino ||
-      replaced.mode !== lexicalReplaced.mode ||
-      replaced.nlink !== lexicalReplaced.nlink ||
-      replaced.size !== lexicalReplaced.size
-    ) {
-      throw new Error("generated agent adapter changed while it was upgraded");
-    }
+    publishAgentAdapterAtomically(projectRoot, filePath, descriptor, opened, Buffer.from(replacement, "utf8"));
     return true;
   } finally {
     fs.closeSync(descriptor);
+  }
+}
+
+function publishAgentAdapterAtomically(
+  projectRoot: string,
+  filePath: string,
+  originalDescriptor: number,
+  original: fs.BigIntStats,
+  replacement: Buffer
+): void {
+  const directoryPath = path.dirname(filePath);
+  const directoryDescriptor = fs.openSync(
+    directoryPath,
+    fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW
+  );
+  let temporaryPath: string | undefined;
+  let temporaryDescriptor: number | undefined;
+  let temporaryIdentity: fs.BigIntStats | undefined;
+  let published = false;
+  try {
+    const openedDirectory = fs.fstatSync(directoryDescriptor, { bigint: true });
+    const lexicalDirectory = fs.lstatSync(directoryPath, { bigint: true });
+    if (
+      !openedDirectory.isDirectory() ||
+      !lexicalDirectory.isDirectory() ||
+      openedDirectory.dev !== lexicalDirectory.dev ||
+      openedDirectory.ino !== lexicalDirectory.ino ||
+      openedDirectory.dev !== original.dev
+    ) {
+      throw new Error("generated agent adapter directory changed before atomic publication");
+    }
+    const directoryAccessPath = agentAdapterDirectoryDescriptorPath(directoryDescriptor, openedDirectory);
+    const targetAccessPath = path.join(directoryAccessPath, path.basename(filePath));
+
+    const temporary = createAgentAdapterTemporaryFile(directoryAccessPath, path.basename(filePath), original.mode);
+    temporaryPath = temporary.path;
+    temporaryDescriptor = temporary.descriptor;
+    temporaryIdentity = fs.fstatSync(temporaryDescriptor, { bigint: true });
+    if (
+      !temporaryIdentity.isFile() ||
+      temporaryIdentity.nlink !== 1n ||
+      temporaryIdentity.size !== 0n ||
+      temporaryIdentity.dev !== openedDirectory.dev ||
+      temporaryIdentity.uid !== original.uid ||
+      temporaryIdentity.gid !== original.gid
+    ) {
+      throw new Error("generated agent adapter temporary publication file is not a matching regular file");
+    }
+    fs.fchmodSync(temporaryDescriptor, Number(original.mode & 0o7777n));
+    temporaryIdentity = fs.fstatSync(temporaryDescriptor, { bigint: true });
+    if (
+      !temporaryIdentity.isFile() ||
+      temporaryIdentity.nlink !== 1n ||
+      temporaryIdentity.size !== 0n ||
+      temporaryIdentity.dev !== openedDirectory.dev ||
+      temporaryIdentity.mode !== original.mode ||
+      temporaryIdentity.uid !== original.uid ||
+      temporaryIdentity.gid !== original.gid
+    ) {
+      throw new Error("generated agent adapter temporary publication file is not a matching regular file");
+    }
+
+    writeNewDescriptorContents(temporaryDescriptor, replacement);
+    const writtenTemporary = fs.fstatSync(temporaryDescriptor, { bigint: true });
+    if (!isExpectedPublishedAgentAdapter(writtenTemporary, temporaryIdentity, original, replacement.byteLength)) {
+      throw new Error("generated agent adapter temporary publication file changed while it was written");
+    }
+
+    const heldOriginal = fs.fstatSync(originalDescriptor, { bigint: true });
+    const accessedOriginal = fs.lstatSync(targetAccessPath, { bigint: true });
+    const lexicalOriginal = fs.lstatSync(filePath, { bigint: true });
+    const lexicalTemporary = fs.lstatSync(temporaryPath, { bigint: true });
+    const currentDirectory = fs.lstatSync(directoryPath, { bigint: true });
+    if (
+      !sameStableInitFile(original, heldOriginal) ||
+      !sameStableInitFile(original, accessedOriginal) ||
+      !sameStableInitFile(original, lexicalOriginal) ||
+      !isExpectedPublishedAgentAdapter(lexicalTemporary, temporaryIdentity, original, replacement.byteLength) ||
+      !currentDirectory.isDirectory() ||
+      currentDirectory.dev !== openedDirectory.dev ||
+      currentDirectory.ino !== openedDirectory.ino
+    ) {
+      throw new Error("generated agent adapter or its directory changed before atomic publication");
+    }
+    assertNoSymlinkComponents(projectRoot, directoryPath, "generated agent adapter directory");
+
+    fs.renameSync(temporaryPath, targetAccessPath);
+    published = true;
+    fs.fsyncSync(directoryDescriptor);
+    const publishedDirectory = fs.lstatSync(directoryPath, { bigint: true });
+    if (
+      !publishedDirectory.isDirectory() ||
+      publishedDirectory.dev !== openedDirectory.dev ||
+      publishedDirectory.ino !== openedDirectory.ino
+    ) {
+      throw new Error("generated agent adapter directory changed during atomic publication");
+    }
+    verifyPublishedAgentAdapter(targetAccessPath, filePath, temporaryIdentity, original, replacement);
+  } finally {
+    if (temporaryDescriptor !== undefined) fs.closeSync(temporaryDescriptor);
+    if (!published && temporaryPath !== undefined && temporaryIdentity !== undefined) {
+      removeOwnedAgentAdapterTemporaryFile(temporaryPath, temporaryIdentity);
+    }
+    fs.closeSync(directoryDescriptor);
+  }
+}
+
+function agentAdapterDirectoryDescriptorPath(descriptor: number, directory: fs.BigIntStats): string {
+  for (const candidate of [`/proc/self/fd/${descriptor}`, `/dev/fd/${descriptor}`]) {
+    try {
+      const accessed = fs.statSync(candidate, { bigint: true });
+      if (accessed.isDirectory() && accessed.dev === directory.dev && accessed.ino === directory.ino) return candidate;
+    } catch {
+      // Continue to the next descriptor filesystem.
+    }
+  }
+  throw new Error("generated agent adapter directory has no verifiable descriptor path");
+}
+
+function createAgentAdapterTemporaryFile(
+  directoryPath: string,
+  basename: string,
+  mode: bigint
+): { path: string; descriptor: number } {
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const temporaryPath = path.join(
+      directoryPath,
+      `.${basename}.ultrafuzz-init-${process.pid}-${crypto.randomBytes(16).toString("hex")}`
+    );
+    try {
+      return {
+        path: temporaryPath,
+        descriptor: fs.openSync(
+          temporaryPath,
+          fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW,
+          Number(mode & 0o7777n)
+        )
+      };
+    } catch (error) {
+      if (isNodeError(error) && error.code === "EEXIST") continue;
+      throw error;
+    }
+  }
+  throw new Error("unable to reserve a unique generated agent adapter publication file");
+}
+
+function isExpectedPublishedAgentAdapter(
+  candidate: fs.BigIntStats,
+  identity: fs.BigIntStats,
+  original: fs.BigIntStats,
+  byteLength: number
+): boolean {
+  return (
+    candidate.isFile() &&
+    candidate.nlink === 1n &&
+    candidate.dev === identity.dev &&
+    candidate.ino === identity.ino &&
+    candidate.mode === original.mode &&
+    candidate.uid === original.uid &&
+    candidate.gid === original.gid &&
+    candidate.size === BigInt(byteLength)
+  );
+}
+
+function verifyPublishedAgentAdapter(
+  accessPath: string,
+  lexicalPath: string,
+  identity: fs.BigIntStats,
+  original: fs.BigIntStats,
+  replacement: Buffer
+): void {
+  const accessedBefore = fs.lstatSync(accessPath, { bigint: true });
+  const lexicalBefore = fs.lstatSync(lexicalPath, { bigint: true });
+  if (
+    !isExpectedPublishedAgentAdapter(accessedBefore, identity, original, replacement.byteLength) ||
+    !isExpectedPublishedAgentAdapter(lexicalBefore, identity, original, replacement.byteLength)
+  ) {
+    throw new Error("generated agent adapter publication did not retain its prepared identity");
+  }
+  const descriptor = fs.openSync(accessPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const opened = fs.fstatSync(descriptor, { bigint: true });
+    const contents = fs.readFileSync(descriptor);
+    const completed = fs.fstatSync(descriptor, { bigint: true });
+    const accessedCompleted = fs.lstatSync(accessPath, { bigint: true });
+    const lexicalCompleted = fs.lstatSync(lexicalPath, { bigint: true });
+    if (
+      !isExpectedPublishedAgentAdapter(opened, identity, original, replacement.byteLength) ||
+      !sameStableInitFile(opened, completed) ||
+      !sameStableInitFile(opened, accessedCompleted) ||
+      !sameStableInitFile(opened, lexicalCompleted) ||
+      !contents.equals(replacement)
+    ) {
+      throw new Error("generated agent adapter publication failed byte and identity verification");
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function removeOwnedAgentAdapterTemporaryFile(filePath: string, identity: fs.BigIntStats): void {
+  try {
+    const lexical = fs.lstatSync(filePath, { bigint: true });
+    if (lexical.isFile() && lexical.dev === identity.dev && lexical.ino === identity.ino) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {
+    // Cleanup is best effort and never follows or removes a replacement inode.
   }
 }
 
@@ -480,8 +670,7 @@ function sameStableInitFile(left: fs.BigIntStats, right: fs.BigIntStats): boolea
   );
 }
 
-function writeDescriptorContents(descriptor: number, contents: Buffer): void {
-  fs.ftruncateSync(descriptor, 0);
+function writeNewDescriptorContents(descriptor: number, contents: Buffer): void {
   let offset = 0;
   while (offset < contents.byteLength) {
     const written = fs.writeSync(descriptor, contents, offset, contents.byteLength - offset, offset);

@@ -1180,6 +1180,7 @@ test("non-force init upgrades an exact historical stock agent adapter and is ide
   const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
   const environmentPath = path.join(project, ".smithers", "agents", "environment.ts");
   fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+  const historicalStats = fs.statSync(codexPath, { bigint: true });
   fs.unlinkSync(environmentPath);
 
   const upgraded = initProject({ projectRoot: project });
@@ -1192,6 +1193,13 @@ test("non-force init upgrades an exact historical stock agent adapter and is ide
     [".smithers/agents/codex.ts"]
   );
   const upgradedSource = fs.readFileSync(codexPath, "utf8");
+  const upgradedStats = fs.statSync(codexPath, { bigint: true });
+  assert.notEqual(upgradedStats.ino, historicalStats.ino);
+  assert.equal(upgradedStats.mode, historicalStats.mode);
+  assert.equal(
+    fs.readdirSync(path.dirname(codexPath)).some((entry) => entry.includes(".ultrafuzz-init-")),
+    false
+  );
   assert.match(upgradedSource, /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
   assert.match(upgradedSource, /workflowControlChildEnvironment/u);
   assert.equal(fs.existsSync(environmentPath), true);
@@ -1204,6 +1212,80 @@ test("non-force init upgrades an exact historical stock agent adapter and is ide
   );
   assert.equal(fs.readFileSync(codexPath, "utf8"), upgradedSource);
 });
+
+test(
+  "stock adapter migration leaves the original intact when temporary publication fails",
+  { concurrency: false },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const entriesBefore = fs.readdirSync(agentsDirectory).sort();
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "writeSync")!;
+
+    Object.defineProperty(fs, "writeSync", {
+      ...originalDescriptor,
+      value: (..._args: unknown[]) => {
+        throw new Error("induced temporary publication write failure");
+      }
+    });
+    try {
+      const failed = initProject({ projectRoot: project });
+      assert.equal(failed.ok, false);
+      assert.equal(failed.diagnostics[0]?.code, "INIT_PATH_UNSAFE");
+      assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
+      assert.deepEqual(fs.readdirSync(agentsDirectory).sort(), entriesBefore);
+    } finally {
+      Object.defineProperty(fs, "writeSync", originalDescriptor);
+    }
+  }
+);
+
+test(
+  "init converts an adapter inspection failure into a preserved manual-review warning",
+  { concurrency: false },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+    const customized = 'export const customConfig = "ultrafuzz.toml"; // project-owned adapter\n';
+    fs.writeFileSync(codexPath, customized, "utf8");
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
+    const originalOpenSync = fs.openSync;
+    let codexOpenCount = 0;
+
+    Object.defineProperty(fs, "openSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        if (String(args[0]) === codexPath) {
+          codexOpenCount += 1;
+          if (codexOpenCount === 2) {
+            throw Object.assign(new Error("induced sensitive adapter inspection failure"), { code: "EACCES" });
+          }
+        }
+        return Reflect.apply(originalOpenSync, fs, args) as number;
+      }
+    });
+    try {
+      const preserved = initProject({ projectRoot: project });
+      assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+      assert.equal(codexOpenCount, 2);
+      assert.equal(fs.readFileSync(codexPath, "utf8"), customized);
+      const warning = preserved.diagnostics.find(
+        (diagnostic) =>
+          diagnostic.code === "INIT_AGENT_ADAPTER_UPDATE_REQUIRED" && diagnostic.path === ".smithers/agents/codex.ts"
+      );
+      assert.equal(warning?.severity, "warning");
+      assert.match(warning?.message ?? "", /could not be safely inspected/u);
+      assert.match(warning?.message ?? "", /verify manually/u);
+      assert.doesNotMatch(JSON.stringify(preserved.diagnostics), /induced sensitive|EACCES/u);
+    } finally {
+      Object.defineProperty(fs, "openSync", originalDescriptor);
+    }
+  }
+);
 
 test("non-force init preserves a customized stale adapter and force remains explicit", () => {
   const project = tempProject();
