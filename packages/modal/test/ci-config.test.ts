@@ -456,6 +456,10 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.on.push.branches).toEqual(["**"]);
     expect(Object.hasOwn(workflow.on, "pull_request")).toBe(false);
     expect(workflow.on.workflow_dispatch.inputs).toEqual({
+      benchmark_mode: expect.objectContaining({ default: "full", type: "choice" }),
+      smoke_provider: expect.objectContaining({ default: "deepseek", type: "choice" }),
+      smoke_model: expect.objectContaining({ default: "deepseek-v4-flash", type: "string" }),
+      smoke_reasoning: expect.objectContaining({ default: "max", type: "string" }),
       openai_model: expect.objectContaining({ default: "gpt-5.6-luna", type: "string" }),
       openai_reasoning: expect.objectContaining({ default: "high", type: "string" }),
       anthropic_model: expect.objectContaining({ default: "claude-sonnet-5", type: "string" }),
@@ -470,7 +474,9 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.env.BENCHMARK_MODE).toContain("'smoke'");
     expect(workflow.env.BENCHMARK_CANDIDATE).toContain("github.event.after");
     expect(workflow.env.BENCHMARK_CANDIDATE).toContain("github.sha");
-    expect(workflow.concurrency.group).toContain("'full' || 'smoke'");
+    expect(workflow.concurrency.group).toContain("inputs.benchmark_mode");
+    expect(workflow.concurrency.group).toContain("'full'");
+    expect(workflow.concurrency.group).toContain("'smoke'");
     expect(workflow.concurrency.group).toContain("github.ref");
     expect(workflow.concurrency.group).toContain("github.run_id");
     expect(workflow.concurrency.group).not.toContain("pull_request");
