@@ -5,6 +5,8 @@ import path from "node:path";
 import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 
+import { withTransientNpmRegistryRetry } from "@ultrafuzz/runtime";
+
 import { modalAttemptVerificationMarkerName, parseModalNodeSandboxInput } from "./node-provider.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
@@ -73,20 +75,22 @@ async function main(): Promise<void> {
     }
     syncDurableData(projectRoot);
     if (!durableWorkspace.hasCompletedCheckpoint) {
-      await runChecked(
-        "install-smithers",
-        "npm",
-        [
-          "install",
-          "--prefix",
-          path.join(projectRoot, ".smithers"),
-          "--ignore-scripts",
-          "--package-lock=false",
-          "--no-audit",
-          "--no-fund",
-          "--loglevel=error"
-        ],
-        projectRoot
+      await withTransientNpmRegistryRetry(() =>
+        runChecked(
+          "install-smithers",
+          "npm",
+          [
+            "install",
+            "--prefix",
+            path.join(projectRoot, ".smithers"),
+            "--ignore-scripts",
+            "--package-lock=false",
+            "--no-audit",
+            "--no-fund",
+            "--loglevel=error"
+          ],
+          projectRoot
+        )
       );
     }
     const workflowPath = anchoredProjectPath(projectRoot, input.workflow_path);

@@ -21,6 +21,7 @@ import {
   SMITHERS_ORCHESTRATOR_BIN_PATH,
   SMITHERS_ORCHESTRATOR_VERSION
 } from "../src/smithers-package.js";
+import { isTransientNpmRegistryFailure } from "../src/npm-install-retry.js";
 
 import {
   ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS,
@@ -306,7 +307,12 @@ function writeFakePnpmInstalledSmithers(project: string): ReturnType<typeof fake
   return paths;
 }
 
-function writeFakeNpmInstaller(project: string): {
+// `failures` makes the fake npm exit non-zero for its first N invocations, so a test
+// can drive the install retry loop. The npm log doubles as the attempt counter.
+function writeFakeNpmInstaller(
+  project: string,
+  failures: { count: number; stderr: readonly string[] } = { count: 0, stderr: [] }
+): {
   binDir: string;
   npmLogPath: string;
   smithersLogPath: string;
@@ -322,6 +328,14 @@ function writeFakeNpmInstaller(project: string): {
     [
       "#!/bin/sh",
       `printf '%s\\n' "$*" >> ${shellQuote(npmLogPath)}`,
+      ...(failures.count > 0
+        ? [
+            `if [ "$(wc -l < ${shellQuote(npmLogPath)})" -le ${failures.count} ]; then`,
+            ...failures.stderr.map((line) => `  printf '%s\\n' ${shellQuote(line)} >&2`),
+            "  exit 1",
+            "fi"
+          ]
+        : []),
       `mkdir -p ${shellQuote(path.dirname(paths.target))} ${shellQuote(path.dirname(paths.shim))}`,
       `cat > ${shellQuote(paths.packageJson)} <<'EOS'`,
       JSON.stringify({
@@ -4218,6 +4232,98 @@ test("startRun bootstraps target-local Smithers dependencies when missing", asyn
   assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /--package-lock=false/);
   assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /--registry=https:\/\/registry\.npmjs\.org/);
   assert.match(fs.readFileSync(installer.smithersLogPath, "utf8"), /up .*ultrafuzz-bootstrap-smithers-run\.tsx/);
+});
+
+// R54 died 90 seconds in, before its first task node: npm resolved a transitive
+// dependency to a version published two minutes earlier and 404ed on the tarball,
+// which had not reached the registry CDN edge yet.
+test("startRun retries a workflow runner install the registry fails transiently", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const installer = writeFakeNpmInstaller(project, {
+    count: 1,
+    stderr: [
+      "npm error code E404",
+      "npm error 404 Not Found - GET https://registry.npmjs.org/@ai-sdk/provider/-/provider-4.0.7.tgz - Not found"
+    ]
+  });
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "transient-install-run",
+    env: {
+      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_FAKE_LOG: installer.smithersLogPath
+    }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(fs.readFileSync(installer.npmLogPath, "utf8").trimEnd().split("\n").length, 2);
+  assert.match(fs.readFileSync(installer.smithersLogPath, "utf8"), /up .*ultrafuzz-transient-install-run\.tsx/);
+});
+
+test("startRun does not retry a workflow runner install the registry rejects permanently", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  // A 404 on a package name, not on a tarball URL: no amount of waiting publishes it.
+  const installer = writeFakeNpmInstaller(project, {
+    count: 4,
+    stderr: [
+      "npm error code E404",
+      "npm error 404 Not Found - GET https://registry.npmjs.org/@ultrafuzz/does-not-exist - Not found"
+    ]
+  });
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "permanent-install-run",
+    env: {
+      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_FAKE_LOG: installer.smithersLogPath
+    }
+  });
+
+  assert.equal(run.ok, false);
+  assert.equal(fs.readFileSync(installer.npmLogPath, "utf8").trimEnd().split("\n").length, 1);
+});
+
+test("isTransientNpmRegistryFailure separates a waitable registry gap from a real dependency error", () => {
+  const tarball404 = {
+    code: 1,
+    killed: false,
+    stderr:
+      "npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/@ai-sdk/provider/-/provider-4.0.7.tgz - Not found\n"
+  };
+  assert.equal(isTransientNpmRegistryFailure(tarball404), true);
+  assert.equal(isTransientNpmRegistryFailure({ code: 1, stderr: "npm error network socket hang up\n" }), true);
+  assert.equal(
+    isTransientNpmRegistryFailure({ code: 1, stderr: "npm error 503 Service Unavailable - GET .../x.tgz\n" }),
+    true
+  );
+
+  assert.equal(
+    isTransientNpmRegistryFailure({
+      code: 1,
+      stderr: "npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/nope - Not found\n"
+    }),
+    false
+  );
+  assert.equal(
+    isTransientNpmRegistryFailure({
+      code: 1,
+      stderr: "npm error code ERESOLVE\nnpm error ERESOLVE could not resolve\n"
+    }),
+    false
+  );
+  // An abort or a timeout kill is not the registry's doing, and the deadline that
+  // stopped the install has already passed by the time a retry would start.
+  assert.equal(isTransientNpmRegistryFailure({ killed: true, stderr: tarball404.stderr }), false);
+  assert.equal(isTransientNpmRegistryFailure({ name: "AbortError", stderr: tarball404.stderr }), false);
+  assert.equal(isTransientNpmRegistryFailure(undefined), false);
 });
 
 test("startRun migrates the known generated Smithers caret manifest without dropping custom fields", async () => {
