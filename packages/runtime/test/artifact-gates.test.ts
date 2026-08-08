@@ -5004,3 +5004,89 @@ test("coverage Markdown accepts a blocker summary escaped or as written, but not
     )
   );
 });
+
+// #391: a campaign already records which pre-deduplication failures each finding
+// covers, and nothing reads it. These checks are WARNINGS on purpose. The field
+// is volunteered by the producer rather than mandated by the prompt, and every
+// defect this session came from a gate demanding something the prompt never
+// promised, so surfacing over-collapse must not be able to fail a node.
+test("campaign gate reports contributing-failure inconsistencies without failing the node", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-contributing" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [1, 2, 3].map((index) => ({
+        id: `failure-${index}`,
+        status: "reproduced",
+        property_ids: ["property-1"]
+      }))
+    })
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  // failure-3 is left unclaimed, and failure-9 does not exist.
+  const claiming = (id: string, contributing: string[]): Record<string, unknown> => ({
+    ...campaignFinding(id, ["property-1"]),
+    contributing_backend_failures: contributing
+  });
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([claiming("failure-1", ["failure-1", "failure-2", "failure-9"])])
+  );
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, true, "contributing-failure findings must never fail the node");
+  const codes = result.diagnostics.map((diagnostic) => diagnostic.code);
+  assert.ok(codes.includes("PROPERTY_CAMPAIGN_CONTRIBUTING_FAILURE_UNKNOWN"), JSON.stringify(codes));
+  assert.ok(codes.includes("PROPERTY_CAMPAIGN_FAILURE_UNCLAIMED"), JSON.stringify(codes));
+  assert.ok(
+    result.diagnostics
+      .filter(
+        (diagnostic) =>
+          diagnostic.code.startsWith("PROPERTY_CAMPAIGN_CONTRIBUTING") ||
+          diagnostic.code === "PROPERTY_CAMPAIGN_FAILURE_UNCLAIMED"
+      )
+      .every((diagnostic) => diagnostic.severity === "warning")
+  );
+
+  // Two findings claiming the same counterexample is contradictory provenance.
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      claiming("failure-1", ["failure-1", "failure-2"]),
+      claiming("failure-3", ["failure-2", "failure-3"])
+    ])
+  );
+  const doubled = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(doubled.ok, true);
+  assert.ok(
+    doubled.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_CONTRIBUTING_FAILURE_AMBIGUOUS")
+  );
+
+  // The R55 shape: every failure claimed exactly once, nothing invented.
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([claiming("failure-1", ["failure-1", "failure-2", "failure-3"])])
+  );
+  const clean = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(clean.ok, true);
+  assert.deepEqual(
+    clean.diagnostics.filter((diagnostic) => diagnostic.code.startsWith("PROPERTY_CAMPAIGN_")),
+    []
+  );
+});

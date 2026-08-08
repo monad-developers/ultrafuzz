@@ -2345,6 +2345,11 @@ function verifyCampaignPropertyReferences(
       ),
       validatedFindings,
       findingsPath
+    ),
+    ...contributingFailureDiagnostics(
+      campaigns.flatMap((campaign) => campaign.value.failures),
+      validatedFindings,
+      findingsPath
     )
   ];
   const implementedIds = new Set(
@@ -2936,6 +2941,88 @@ function danglingCampaignFindingDiagnostics(
       path: `${findingsPath}#$[${findingIndex}].id`
     });
   }
+  return diagnostics;
+}
+
+/**
+ * Surfaces disagreements between a finding's own `contributing_backend_failures`
+ * and the campaign records, WITHOUT being able to fail the node.
+ *
+ * A campaign already records which pre-deduplication failures each finding
+ * covers, and nothing read it, so nothing related the number of findings to the
+ * number of distinct counterexamples: one finding carrying the union of every
+ * property could absorb an entire campaign silently, and over-collapse shows up
+ * as a false negative when findings are scored against ground truth.
+ *
+ * These are warnings by construction. The field is volunteered by the producer,
+ * not mandated by the prompt, and a gate that demands something the prompt never
+ * promised is exactly the defect this check is descended from.
+ */
+function contributingFailureDiagnostics(
+  failures: Array<{ id: string; property_ids?: string[] }>,
+  findings: Array<Record<string, unknown>>,
+  findingsPath: string
+): RuntimeDiagnostic[] {
+  const diagnostics: RuntimeDiagnostic[] = [];
+  const knownFailureIds = new Set(failures.map((failure) => failure.id));
+  const claimedBy = new Map<string, string[]>();
+  let anyFindingDeclares = false;
+
+  for (const [findingIndex, finding] of findings.entries()) {
+    if (!Array.isArray(finding.contributing_backend_failures)) {
+      continue;
+    }
+    anyFindingDeclares = true;
+    const claimed = finding.contributing_backend_failures.filter(
+      (failureId): failureId is string => typeof failureId === "string"
+    );
+    const unknown = claimed.filter((failureId) => !knownFailureIds.has(failureId));
+    if (unknown.length > 0) {
+      diagnostics.push({
+        code: "PROPERTY_CAMPAIGN_CONTRIBUTING_FAILURE_UNKNOWN",
+        message: `Finding ${JSON.stringify(String(finding.id))} lists contributing failures no campaign record contains: ${unknown.map((failureId) => JSON.stringify(failureId)).join(", ")}`,
+        severity: "warning",
+        source: "property-provenance",
+        path: `${findingsPath}#$[${findingIndex}].contributing_backend_failures`
+      });
+    }
+    for (const failureId of new Set(claimed)) {
+      claimedBy.set(failureId, [...(claimedBy.get(failureId) ?? []), String(finding.id)]);
+    }
+  }
+
+  if (!anyFindingDeclares) {
+    return diagnostics;
+  }
+
+  for (const [failureId, owners] of claimedBy) {
+    if (owners.length > 1) {
+      diagnostics.push({
+        code: "PROPERTY_CAMPAIGN_CONTRIBUTING_FAILURE_AMBIGUOUS",
+        message: `Campaign failure ${JSON.stringify(failureId)} is claimed by more than one finding: ${owners.map((owner) => JSON.stringify(owner)).join(", ")}`,
+        severity: "warning",
+        source: "property-provenance",
+        path: findingsPath
+      });
+    }
+  }
+
+  const unclaimed = failures
+    .filter((failure) => (failure.property_ids ?? []).length > 0 && !claimedBy.has(failure.id))
+    .map((failure) => failure.id);
+  if (unclaimed.length > 0) {
+    diagnostics.push({
+      code: "PROPERTY_CAMPAIGN_FAILURE_UNCLAIMED",
+      message: `${unclaimed.length} property-derived campaign failure(s) are covered by no finding's contributing_backend_failures: ${unclaimed
+        .slice(0, 10)
+        .map((failureId) => JSON.stringify(failureId))
+        .join(", ")}`,
+      severity: "warning",
+      source: "property-provenance",
+      path: findingsPath
+    });
+  }
+
   return diagnostics;
 }
 
