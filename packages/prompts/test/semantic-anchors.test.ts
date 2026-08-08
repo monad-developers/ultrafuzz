@@ -392,6 +392,7 @@ describe("prompt semantic anchors", () => {
     expect(flatCampaign).toContain("must partition every property-derived failure");
     expect(campaign).toContain("`deduplication.pre_dedup_count`");
     expect(flatCampaign).toContain("must be a subset of the finding's `property_ids`");
+    expect(flatCampaign).toContain("must be the exact union across those contributed failures");
     expect(campaign).toContain('{"fuzzer_backend":"<backend>","failure_id":"<id>"}');
   });
 

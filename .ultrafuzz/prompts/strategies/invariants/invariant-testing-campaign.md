@@ -126,7 +126,10 @@ Use this configured invariant testing fuzzer timeout:
    - Put `deduplication.pre_dedup_count` on every property-derived finding and
      set it to the number of entries in that finding's
      `contributing_backend_failures`. Every contributed failure's
-     `property_ids` must be a subset of the finding's `property_ids`.
+     `property_ids` must be a subset of the finding's `property_ids`, and the
+     finding's `property_ids` must be the exact union across those contributed
+     failures. Never borrow a property from a failure assigned to another
+     finding.
    - Put backend provenance directly on every backend-derived object in
      `findings.json`. Use the top-level string `fuzzer_backend` when exactly one
      sibling result record contributed, or omit it and use a top-level unique,

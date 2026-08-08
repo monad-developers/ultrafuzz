@@ -2510,6 +2510,7 @@ function campaignFailurePartitionDiagnostics(
     }
     if (references === undefined) continue;
 
+    const resolvedFailures: PartitionedCampaignFailure[] = [];
     for (const [referenceIndex, reference] of references.entries()) {
       const referencePath = `${contributionPath}[${referenceIndex}]`;
       const candidates =
@@ -2548,6 +2549,7 @@ function campaignFailurePartitionDiagnostics(
         });
         continue;
       }
+      resolvedFailures.push(failure);
 
       const earlierClaim = claimedBy.get(failure.key);
       if (earlierClaim !== undefined) {
@@ -2564,17 +2566,64 @@ function campaignFailurePartitionDiagnostics(
       } else {
         claimedBy.set(failure.key, { findingIndex, referenceIndex });
       }
+    }
 
-      const missingProperties = failure.propertyIds.filter((propertyId) => !propertyIds.includes(propertyId));
-      if (missingProperties.length > 0) {
-        diagnostics.push({
-          code: "PROPERTY_CAMPAIGN_PARTITION_PROPERTY_MISMATCH",
-          message: `Finding ${JSON.stringify(finding.id)} contribution ${JSON.stringify(reference)} reports property_ids absent from the finding: ${missingProperties.map((propertyId) => JSON.stringify(propertyId)).join(", ")}`,
-          severity: "error",
-          source: "property-provenance",
-          path: referencePath
-        });
-      }
+    // Unknown, ambiguous, and non-property references already carry precise
+    // diagnostics above. Do not derive a partial partition from them.
+    if (resolvedFailures.length !== references.length) continue;
+
+    if (typeof finding.id !== "string" || !resolvedFailures.some((failure) => failure.id === finding.id)) {
+      diagnostics.push({
+        code: "PROPERTY_CAMPAIGN_PARTITION_REPRESENTATIVE_MISMATCH",
+        message: `Finding ${JSON.stringify(finding.id)} must use the ID of one failure in its contributing_backend_failures partition`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${findingsPath}#$[${findingIndex}].id`
+      });
+    }
+
+    const contributedPropertyIds = [...new Set(resolvedFailures.flatMap((failure) => failure.propertyIds))];
+    if (!sameStringSet(propertyIds, contributedPropertyIds)) {
+      diagnostics.push({
+        code: "PROPERTY_CAMPAIGN_PARTITION_PROPERTY_MISMATCH",
+        message: `Finding ${JSON.stringify(finding.id)} property_ids must exactly equal the union reported by its contributing_backend_failures`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${findingsPath}#$[${findingIndex}].property_ids`
+      });
+    }
+
+    const missingBackendCount = resolvedFailures.filter((failure) => failure.fuzzerBackend === undefined).length;
+    const contributedBackends = [
+      ...new Set(
+        resolvedFailures.flatMap((failure) => (failure.fuzzerBackend === undefined ? [] : [failure.fuzzerBackend]))
+      )
+    ];
+    const ownedBackends = findingFuzzerBackendProvenance(finding);
+    const hasExpectedBackendShape =
+      contributedBackends.length === 0
+        ? !ownedBackends.present
+        : contributedBackends.length === 1
+          ? Object.prototype.hasOwnProperty.call(finding, "fuzzer_backend")
+          : Object.prototype.hasOwnProperty.call(finding, "fuzzer_backends");
+    const enforceExactBackends = requiredForCurrentPlan || ownedBackends.present;
+    if (
+      ownedBackends.valid &&
+      enforceExactBackends &&
+      (missingBackendCount > 0 ||
+        !hasExpectedBackendShape ||
+        !sameStringSet(ownedBackends.backends, contributedBackends))
+    ) {
+      diagnostics.push({
+        code: "PROPERTY_CAMPAIGN_PARTITION_BACKEND_MISMATCH",
+        message:
+          missingBackendCount > 0
+            ? `Finding ${JSON.stringify(finding.id)} cannot bind backend provenance because ${missingBackendCount} contributing failure record(s) omit fuzzer_backend`
+            : `Finding ${JSON.stringify(finding.id)} fuzzer backend provenance must exactly match its contributing_backend_failures`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${findingsPath}#$[${findingIndex}]`
+      });
     }
   }
 

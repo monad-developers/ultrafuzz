@@ -4468,12 +4468,14 @@ function accountedCampaignFinding(
   id: string,
   propertyIds: string[],
   contributions: CampaignFailureReferenceFixture[],
-  preDedupCount = contributions.length
+  preDedupCount = contributions.length,
+  fuzzerBackends: string[] = ["recon"]
 ): Record<string, unknown> {
   return {
     ...campaignFinding(id, propertyIds),
     contributing_backend_failures: contributions,
-    deduplication: { pre_dedup_count: preDedupCount }
+    deduplication: { pre_dedup_count: preDedupCount },
+    ...(fuzzerBackends.length === 1 ? { fuzzer_backend: fuzzerBackends[0] } : { fuzzer_backends: fuzzerBackends })
   };
 }
 
@@ -4638,6 +4640,15 @@ test("current campaign gate requires partition metadata while historical plans r
       .filter((diagnostic) => diagnostic.code.startsWith("PROPERTY_CAMPAIGN_PARTITION_"))
       .every((diagnostic) => diagnostic.severity === "error")
   );
+
+  const volunteeredHistoricalPartition = accountedCampaignFinding(
+    "failure-1",
+    ["property-1"],
+    ["failure-1", "failure-2"]
+  );
+  delete volunteeredHistoricalPartition.fuzzer_backend;
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([volunteeredHistoricalPartition]));
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, historicalNode, campaignId).ok, true);
 });
 
 test("campaign partition rejects unknown contributions and per-finding count mismatches", () => {
@@ -4722,6 +4733,130 @@ test("campaign partition rejects duplicate claims and property subset mismatches
   );
 });
 
+test("campaign partition requires each finding ID to represent one of its contributions", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partition-representative" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-1"] }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      accountedCampaignFinding("failure-1", ["property-1"], ["failure-2"]),
+      accountedCampaignFinding("failure-2", ["property-1"], ["failure-1"])
+    ])
+  );
+  writeCampaignSummary(layout, campaignId, 2, 2);
+  const node = {
+    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  assert.equal(
+    result.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_REPRESENTATIVE_MISMATCH")
+      .length,
+    2
+  );
+});
+
+test("campaign partition requires a finding's properties to equal its contribution union", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partition-property-union" });
+  campaignPropertyCatalog(layout, ["property-1", "property-2"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-2"] }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      accountedCampaignFinding("failure-1", ["property-1", "property-2"], ["failure-1"]),
+      accountedCampaignFinding("failure-2", ["property-2"], ["failure-2"])
+    ])
+  );
+  writeCampaignSummary(layout, campaignId, 2, 2);
+  const node = {
+    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  assert.equal(
+    result.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_PROPERTY_MISMATCH")
+      .length,
+    1
+  );
+});
+
+test("campaign partition binds finding backend provenance to its exact contributions", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partition-backend-set" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  for (const backend of ["echidna", "medusa"] as const) {
+    writeArtifact(
+      layout,
+      campaignId,
+      `${backend}-results.json`,
+      JSON.stringify({
+        schema_version: "ultrafuzz.property-campaign.v1",
+        fuzzer_backend: backend,
+        failures: [{ id: `failure-${backend}`, status: "reproduced", property_ids: ["property-1"] }]
+      })
+    );
+  }
+  const contributions = [
+    { fuzzer_backend: "echidna", failure_id: "failure-echidna" },
+    { fuzzer_backend: "medusa", failure_id: "failure-medusa" }
+  ];
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([accountedCampaignFinding("failure-echidna", ["property-1"], contributions, 2, ["echidna"])])
+  );
+  writeCampaignSummary(layout, campaignId, 2, 1);
+  const node = {
+    ...currentCampaignNode(["echidna-results.json", "medusa-results.json", "findings.json", "campaign-summary.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_BACKEND_MISMATCH")
+  );
+});
+
 test("campaign partition requires qualified references for colliding cross-backend failure IDs", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partition-qualified" });
   campaignPropertyCatalog(layout, ["property-1"]);
@@ -4739,8 +4874,7 @@ test("campaign partition requires qualified references for colliding cross-backe
     );
   }
   const finding = {
-    ...accountedCampaignFinding("failure-1", ["property-1"], ["failure-1"]),
-    fuzzer_backends: ["echidna", "medusa"]
+    ...accountedCampaignFinding("failure-1", ["property-1"], ["failure-1"], 1, ["echidna", "medusa"])
   };
   writeArtifact(layout, campaignId, "findings.json", JSON.stringify([finding]));
   writeCampaignSummary(layout, campaignId, 2, 1);
