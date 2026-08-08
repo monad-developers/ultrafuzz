@@ -92,22 +92,58 @@ export function modalEvalRunCommand(input: {
   ];
 }
 
-export async function locateModalResumeWorkspace(workRoot: string): Promise<ModalResumeWorkspace> {
+/**
+ * What a volume holds: either a run that can genuinely be resumed, or one that never got far enough to
+ * have anything to resume from.
+ *
+ * `not-started` is deliberately NOT an error. A worker that finds it should build the workspace through
+ * the normal pre-model path instead of failing (#378).
+ */
+export type ModalResumeLookup =
+  | { readonly kind: "resumable"; readonly workspace: ModalResumeWorkspace }
+  | { readonly kind: "not-started"; readonly reason: string };
+
+/**
+ * Decide whether a volume holds a resumable run, WITHOUT treating "nothing to resume" as a failure.
+ *
+ * The distinction this draws is the whole point (#378). A durable run is linked into `runs.jsonl` only
+ * once it exists, but the eval run directory is created earlier, by `eval run` itself
+ * (`packages/evals/src/runner.ts` writes `eval.json`). Anything that kills generation 0 in between —
+ * workflow compilation, workflow submission, a registry hiccup during either — leaves a directory and a
+ * row behind with no `ultrafuzz_run_id` on it. That state is not damage and it is not progress; it means
+ * the run never started, and the only correct response is to start it.
+ *
+ * Zero and many are therefore not symmetric, and are not collapsed into one condition:
+ *   - **zero** linked runs means nothing was ever recorded, so restarting loses nothing by construction;
+ *   - **more than one** means two durable runs are linked to a single evaluation, which no correct
+ *     producer can do. That stays a hard failure, because silently picking a side, or restarting over it,
+ *     would destroy a real run.
+ */
+export async function findModalResumeWorkspace(workRoot: string): Promise<ModalResumeLookup> {
   const target = path.join(workRoot, "target");
   const control = path.join(workRoot, "control");
-  if (!(await isDirectoryNotSymlink(target)) || !(await isDirectoryNotSymlink(control))) {
-    throw new Error("persistent workspace is incomplete");
-  }
   const evalRoot = path.join(control, ".ultrafuzz", "evals", "runs");
+  // Read the eval root BEFORE asserting the workspace is complete. A fresh sandbox has neither, and
+  // checking completeness first would report an empty volume as "incomplete" — damage — rather than as
+  // the ordinary not-started case it is.
+  const names = await readdir(evalRoot).catch(() => [] as string[]);
   const candidates = [];
-  for (const name of await readdir(evalRoot)) {
+  for (const name of names) {
     const root = path.join(evalRoot, name);
     if ((await isDirectoryNotSymlink(root)) && (await isRegularFileNotSymlink(path.join(root, "eval.json")))) {
       candidates.push(name);
     }
   }
-  if (candidates.length !== 1) {
+  if (candidates.length === 0) {
+    return { kind: "not-started", reason: "resume requires exactly one evaluation run, found 0" };
+  }
+  if (candidates.length > 1) {
     throw new Error(`resume requires exactly one evaluation run, found ${candidates.length}`);
+  }
+  // Only now is the workspace claiming to hold an evaluation, so an absent target or control really is
+  // damage rather than an empty volume.
+  if (!(await isDirectoryNotSymlink(target)) || !(await isDirectoryNotSymlink(control))) {
+    throw new Error("persistent workspace is incomplete");
   }
   const evalRunId = candidates[0]!;
   const records = await readRecords(path.join(evalRoot, evalRunId, "runs.jsonl"));
@@ -116,10 +152,20 @@ export async function locateModalResumeWorkspace(workRoot: string): Promise<Moda
       .map((record) => record.ultrafuzz_run_id)
       .filter((value): value is string => typeof value === "string" && value.trim() !== "")
   );
-  if (productRunIds.size !== 1) {
+  if (productRunIds.size === 0) {
+    return { kind: "not-started", reason: "resume requires exactly one linked durable run, found 0" };
+  }
+  if (productRunIds.size > 1) {
     throw new Error(`resume requires exactly one linked durable run, found ${productRunIds.size}`);
   }
-  return { target, control, evalRunId, productRunId: [...productRunIds][0]! };
+  return { kind: "resumable", workspace: { target, control, evalRunId, productRunId: [...productRunIds][0]! } };
+}
+
+/** The strict form: for callers that have already established a run must be resumable. */
+export async function locateModalResumeWorkspace(workRoot: string): Promise<ModalResumeWorkspace> {
+  const found = await findModalResumeWorkspace(workRoot);
+  if (found.kind === "not-started") throw new Error(found.reason);
+  return found.workspace;
 }
 
 export async function repairModalEvalRunRecord(

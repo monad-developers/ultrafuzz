@@ -17,7 +17,7 @@ import {
   resolvePersistentRemoteRoot
 } from "./layout.js";
 import {
-  locateModalResumeWorkspace,
+  findModalResumeWorkspace,
   modalDurableResumeCommand,
   modalDurableRunAdvanced,
   modalDurableRunNeedsResume,
@@ -141,9 +141,13 @@ async function main(): Promise<void> {
       let control: string;
       let evalRunId: string;
       let terminalDisposition: TerminalDisposition | undefined;
-      const existing = await hasExistingEvalWorkspace();
-      if (existing) {
-        const workspace = await locateModalResumeWorkspace(WORK_ROOT);
+      // Route on whether a durable run was actually linked, not on whether an eval run directory exists.
+      // Those are not the same question, and answering the second one stranded R54: a generation-0 failure
+      // during workflow submission leaves the directory behind with nothing linked to it, and every later
+      // generation then died on the resume precondition in ~92s until the no-progress budget ran out (#378).
+      const found = await findModalResumeWorkspace(WORK_ROOT);
+      if (found.kind === "resumable") {
+        const workspace = found.workspace;
         target = workspace.target;
         const resumed = await resumeExistingEvaluation(workspace, writer);
         ({ control, evalRunId, terminalDisposition } = resumed);
@@ -208,11 +212,6 @@ async function main(): Promise<void> {
       return terminalDisposition?.kind === "genuine-task-failures" ? "genuine-evaluation-failure" : "finished";
     }
   });
-}
-
-async function hasExistingEvalWorkspace(): Promise<boolean> {
-  const evalRoot = path.join(WORK_ROOT, "control", ".ultrafuzz", "evals", "runs");
-  return (await readdirIfExists(evalRoot)).length > 0;
 }
 
 async function resumeExistingEvaluation(

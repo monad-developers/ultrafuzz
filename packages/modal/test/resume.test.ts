@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  findModalResumeWorkspace,
   locateModalResumeWorkspace,
   modalDurableResumeCommand,
   modalDurableRunAdvanced,
@@ -154,6 +155,49 @@ describe("Modal durable evaluation resume", () => {
       `${JSON.stringify({ row_id: "row-two", ultrafuzz_run_id: "durable-run-two" })}\n`
     );
     await expect(locateModalResumeWorkspace(value.workRoot)).rejects.toThrow("exactly one linked durable run");
+  });
+
+  it("reports a workspace whose rows were never linked to a durable run as not started (#378)", async () => {
+    const value = fixture();
+    // Exactly how a generation-0 failure between `eval run` starting and a durable run being linked leaves
+    // the volume: the eval run directory and a row both exist, but no `ultrafuzz_run_id` was ever written.
+    // R54 died here three times over, ~92s per recovery generation, until the no-progress budget ran out.
+    fs.writeFileSync(
+      path.join(value.evalDir, "runs.jsonl"),
+      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
+    );
+    const found = await findModalResumeWorkspace(value.workRoot);
+    expect(found.kind).toBe("not-started");
+  });
+
+  it("reports a workspace with no eval run directory at all as not started", async () => {
+    const workRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-resume-fresh-"));
+    // A fresh sandbox must not be mistaken for a corrupt one. Reaching the target/control check here would
+    // report "persistent workspace is incomplete", which is how an empty volume would look like damage.
+    await expect(findModalResumeWorkspace(workRoot)).resolves.toEqual({
+      kind: "not-started",
+      reason: "resume requires exactly one evaluation run, found 0"
+    });
+  });
+
+  it("still resumes a linked durable run, and still rejects ambiguity, through the tolerant lookup", async () => {
+    const value = fixture();
+    // The fix must not turn a real resume into a restart: 1 linked run resumes, >1 stays a hard failure
+    // rather than degrading to "not started", because two linked runs is corruption and not a fresh start.
+    await expect(findModalResumeWorkspace(value.workRoot)).resolves.toEqual({
+      kind: "resumable",
+      workspace: {
+        target: value.target,
+        control: value.control,
+        evalRunId: value.evalRunId,
+        productRunId: "durable-run-one"
+      }
+    });
+    fs.appendFileSync(
+      path.join(value.evalDir, "runs.jsonl"),
+      `${JSON.stringify({ row_id: "row-two", ultrafuzz_run_id: "durable-run-two" })}\n`
+    );
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("exactly one linked durable run");
   });
 
   it("finalizes succeeded and genuine task outcomes without resetting completed nodes", async () => {
