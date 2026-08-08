@@ -7299,14 +7299,17 @@ test("syncRun does not count a retried zero-usage attempt as an unpriced event",
   assert.equal(metadata.accounting?.cumulative?.unpriced_event_count, 0);
   assert.equal(metadata.accounting?.checkpoint?.ledger_event_count, 2);
 
-  const metadataPath = path.join(run.value!.run_root, "run.json");
   const secondWorkflowRunId = "ultrafuzz-retried-zero-usage-relinked";
-  const relinkedMetadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
-    workflow?: { run_id?: string };
-    [key: string]: unknown;
-  };
-  relinkedMetadata.workflow = { ...(relinkedMetadata.workflow ?? {}), run_id: secondWorkflowRunId };
-  fs.writeFileSync(metadataPath, `${JSON.stringify(relinkedMetadata, null, 2)}\n`, "utf8");
+  env.SMITHERS_FAKE_FORKED_RUN_ID = secondWorkflowRunId;
+  const forked = await forkRun({
+    projectRoot: project,
+    runId: "retried-zero-usage",
+    forkFrame: 0,
+    env
+  });
+  assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
+  assert.equal(forked.value?.workflow_run_id, secondWorkflowRunId);
+  const metadataPath = path.join(run.value!.run_root, "run.json");
   fs.writeFileSync(
     path.join(project, "fake-smithers-inspect.json"),
     `${JSON.stringify(
