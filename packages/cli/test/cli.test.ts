@@ -930,10 +930,10 @@ test("report regenerates canonical Markdown from structured issues and non-produ
   );
   fs.mkdirSync(path.join(runData.run_root, "artifacts", "stateful-invariant-campaign"), { recursive: true });
   fs.writeFileSync(
-    path.join(runData.run_root, "artifacts", "stateful-invariant-campaign", "echidna-results.json"),
+    path.join(runData.run_root, "artifacts", "stateful-invariant-campaign", "recon-fuzzer-results.json"),
     JSON.stringify({
       schema_version: "ultrafuzz.property-campaign.v1",
-      fuzzer_backend: "echidna",
+      fuzzer_backend: "recon",
       failures: [{ id: "finding-stable-1", status: "reproduced", property_ids: ["property-report-contract-1"] }]
     }),
     "utf8"
@@ -984,7 +984,7 @@ test("report regenerates canonical Markdown from structured issues and non-produ
   );
   assert.match(
     markdown,
-    /## Property provenance\n\n\| Finding \| Property IDs \| Source nodes \| Source property IDs \| Implementation\/test paths \| Fuzzer backends \|\n\| --- \| --- \| --- \| --- \| --- \| --- \|\n\| \\\[M-01\\\] - Structured issue title \| property-report-contract-1 \| property-specification-example \| property-specification-example-001 \| src\/Example\.sol<br>test\/ExampleInvariant\.t\.sol \| echidna \|/u
+    /## Property provenance\n\n\| Finding \| Property IDs \| Source nodes \| Source property IDs \| Implementation\/test paths \| Fuzzer backends \|\n\| --- \| --- \| --- \| --- \| --- \| --- \|\n\| \\\[M-01\\\] - Structured issue title \| property-report-contract-1 \| property-specification-example \| property-specification-example-001 \| src\/Example\.sol<br>test\/ExampleInvariant\.t\.sol \| recon \|/u
   );
   assert.match(markdown, /## Property implementation coverage\n\n- Priority threshold: `high`/u);
   assert.match(markdown, /- Reference expectation properties: `1`/u);

@@ -2322,6 +2322,9 @@ function verifyCampaignPropertyReferences(
     return [];
   }
   const validatedFindings = findings.value;
+  const candidateFindingIds = new Set(
+    campaigns.flatMap((campaign) => campaign.value.failures.map((failure) => failure.id))
+  );
 
   const references: PropertyReferenceInput[] = campaigns.flatMap((campaign) =>
     campaign.value.failures.flatMap((failure, index) =>
@@ -2338,7 +2341,13 @@ function verifyCampaignPropertyReferences(
   const diagnostics = [
     ...propertyReferenceDiagnostics(catalog, references),
     ...campaigns.flatMap((campaign) =>
-      campaignFindingReferenceDiagnostics(campaign.value.failures, validatedFindings, campaign.path, findingsPath)
+      campaignFindingReferenceDiagnostics(
+        campaign.value.failures,
+        validatedFindings,
+        candidateFindingIds,
+        campaign.path,
+        findingsPath
+      )
     ),
     ...danglingCampaignFindingDiagnostics(
       new Set(campaigns.flatMap((campaign) => campaign.value.failures.map((failure) => failure.id))),
@@ -2821,6 +2830,7 @@ function addReportJoinMismatch(
 function campaignFindingReferenceDiagnostics(
   failures: Array<{ id: string; property_ids?: string[] }>,
   findings: Array<Record<string, unknown>>,
+  candidateFindingIds: ReadonlySet<string>,
   campaignPath: string,
   findingsPath: string
 ): RuntimeDiagnostic[] {
@@ -2840,8 +2850,8 @@ function campaignFindingReferenceDiagnostics(
   // exercised. Coverage is judged per finding, never against the union of all
   // findings: a counterexample that broke two invariants at once is a distinct
   // observation, and two single-property findings do not report it.
-  const findingPropertySets = [...findingsById.values()].flatMap((matches) =>
-    matches.map((match) => new Set(match.propertyIds))
+  const findingPropertySets = [...findingsById.entries()].flatMap(([findingId, matches]) =>
+    candidateFindingIds.has(findingId) ? matches.map((match) => new Set(match.propertyIds)) : []
   );
   const isCovered = (failurePropertyIds: readonly string[]): boolean =>
     findingPropertySets.some((propertySet) => failurePropertyIds.every((propertyId) => propertySet.has(propertyId)));
