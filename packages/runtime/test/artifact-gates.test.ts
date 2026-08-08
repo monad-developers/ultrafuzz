@@ -5004,3 +5004,80 @@ test("coverage Markdown accepts a blocker summary escaped or as written, but not
     )
   );
 });
+
+// #408: the field parser strips a trailing pipe to normalize Markdown table
+// cells, which silently truncates any value that legitimately ENDS with one.
+// R58's property-specification-fanin failed on five consecutive properties whose
+// descriptions quote a row of Aave's docs/overview.md verbatim, as the fan-in
+// prompt requires. Any target documenting parameters in tables hits this.
+test("properties Markdown parity accepts a description that ends with a pipe", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-fanin-trailing-pipe" });
+  // Shaped after R58's property-277: prose, then a verbatim docs table row.
+  const description =
+    "Project discovery evidence evidence-doc-liquidation-targethf-row (bound) at docs/overview.md:line 237; " +
+    "verbatim: | `TargetHealthFactor` | A spoke-wide value set by the Governor. | Must be >= the constant. |";
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [
+        {
+          id: "evidence-doc-liquidation-targethf-row",
+          source_path: "docs/overview.md",
+          source_location: "line 237",
+          kind: "bound",
+          verbatim: "TargetHealthFactor is a per-reserve WAD parameter above the liquidation threshold.",
+          inventory_ids: ["inventory-doc-liquidation-targethf-row"]
+        }
+      ],
+      inventory_rows: [
+        {
+          id: "inventory-doc-liquidation-targethf-row",
+          description: "TargetHealthFactor is a per-reserve WAD parameter.",
+          ledger_ids: ["evidence-doc-liquidation-targethf-row"]
+        }
+      ],
+      scan_probes: []
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-277",
+          description,
+          category: "configuration",
+          priority: "high",
+          sources: [
+            { source_node_id: "project-discovery", source_property_id: "evidence-doc-liquidation-targethf-row" }
+          ],
+          ledger_ids: ["evidence-doc-liquidation-targethf-row"]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    `### Canonical property: property-277\ndescription: ${description}\ncategory: configuration\npriority: high\nsources: project-discovery:evidence-doc-liquidation-targethf-row\nledger_ids: evidence-doc-liquidation-targethf-row\n### End canonical property: property-277\n`
+  );
+  const node = {
+    ...plannedNode(["properties.json", "properties.md"]),
+    id: "property-specification-fanin",
+    logical_id: "property-specification-fanin"
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.deepEqual(
+    result.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING"),
+    []
+  );
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});

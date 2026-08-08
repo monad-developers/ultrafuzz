@@ -1418,14 +1418,20 @@ function normalizeMarkdownFieldValue(value: string): string {
 
 function markdownFieldValues(markdown: string, field: string): string[] {
   const lines = markdown.replace(/\r\n?/gu, "\n").split("\n");
-  const fieldPattern = new RegExp(`^\\s*(?:\\|\\s*)?(?:[-*+]\\s*)?${escapeRegExp(field)}\\s*(?::|\\|)\\s*(.*)$`, "iu");
+  // The leading pipe is what makes a line a table row. Capturing it lets the
+  // trailing-pipe strip below apply only to real cells: a value that merely ENDS
+  // with a pipe -- a description quoting a docs table row verbatim, which the
+  // fan-in prompt requires -- must survive intact, or parity reports the field
+  // as missing on an artifact that is byte-identical to its JSON.
+  const fieldPattern = new RegExp(`^\\s*(\\|\\s*)?(?:[-*+]\\s*)?${escapeRegExp(field)}\\s*(?::|\\|)\\s*(.*)$`, "iu");
   const nextFieldPattern =
     /^\s*(?:\|\s*)?(?:[-*+]\s*)?(?:id|description|category|priority|sources?|ledger[_ -]?ids?|reference[_ -]?expectations?|ledger evidence(?: retained)?)\s*(?::|\|)/iu;
   const values: string[] = [];
   for (let index = 0; index < lines.length; index += 1) {
     const match = fieldPattern.exec(lines[index] ?? "");
-    if (match?.[1] === undefined) continue;
-    const parts = [match[1].replace(/\s*\|\s*$/u, "")];
+    if (match?.[2] === undefined) continue;
+    const openedAsTableRow = match[1] !== undefined;
+    const parts = [openedAsTableRow ? match[2].replace(/\s*\|\s*$/u, "") : match[2]];
     for (let continuation = index + 1; continuation < lines.length; continuation += 1) {
       const line = lines[continuation] ?? "";
       if (
