@@ -86,7 +86,12 @@ nodes:
   );
 }
 
-async function cli(project: string, argv: string[], env: Record<string, string | undefined> = {}): Promise<Capture> {
+async function cli(
+  project: string,
+  argv: string[],
+  env: Record<string, string | undefined> = {},
+  onStdout?: (stdout: string) => void
+): Promise<Capture> {
   let stdout = "";
   let stderr = "";
   const code = await runCli([...argv, "--project", project], {
@@ -95,6 +100,7 @@ async function cli(project: string, argv: string[], env: Record<string, string |
     stdout: {
       write: (chunk: string | Uint8Array) => {
         stdout += String(chunk);
+        onStdout?.(stdout);
         return true;
       }
     },
@@ -441,8 +447,43 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   };
   fs.writeFileSync(statePath, `${JSON.stringify(restored, null, 2)}\n`, "utf8");
 
-  const watching = cli(project, ["status", runData.run_id, "--watch", "--interval", "1", "--json"], env);
-  await new Promise((resolve) => setTimeout(resolve, 400));
+  let resolveFirstStatusLine!: () => void;
+  let rejectFirstStatusLine!: (error: Error) => void;
+  let sawFirstStatusLine = false;
+  const firstStatusLine = new Promise<void>((resolve, reject) => {
+    resolveFirstStatusLine = resolve;
+    rejectFirstStatusLine = reject;
+  });
+  const firstStatusTimeout = setTimeout(
+    () => rejectFirstStatusLine(new Error("status watch did not emit its initial sample")),
+    15_000
+  );
+  const watching = cli(
+    project,
+    ["status", runData.run_id, "--watch", "--interval", "1", "--json"],
+    env,
+    (stdout) => {
+      if (!sawFirstStatusLine && stdout.includes("\n")) {
+        sawFirstStatusLine = true;
+        resolveFirstStatusLine();
+      }
+    }
+  );
+  try {
+    await Promise.race([
+      firstStatusLine,
+      watching.then(() => {
+        throw new Error("status watch completed before emitting its initial sample");
+      })
+    ]);
+  } catch (error) {
+    const terminalState = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(statePath, `${JSON.stringify({ ...terminalState, status: "succeeded" }, null, 2)}\n`, "utf8");
+    await watching;
+    throw error;
+  } finally {
+    clearTimeout(firstStatusTimeout);
+  }
   const terminalState = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
   fs.writeFileSync(statePath, `${JSON.stringify({ ...terminalState, status: "succeeded" }, null, 2)}\n`, "utf8");
   const watched = await watching;
