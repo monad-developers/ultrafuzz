@@ -241,8 +241,31 @@ const definitions = defineContracts([
   }
 ]);
 
+// The checked-in JSON Schema bundle materialized into every task workspace by
+// materializePromptSchemas. A contract appears here only when the bundle ships
+// a schema that describes the whole artifact, so a producer can validate the
+// file it just wrote instead of learning about a bad field from a failed node.
+// Deliberately not part of ArtifactContractDefinition: the contract digest is a
+// hash of that object and is pinned in artifact provenance.
+const contractSchemaFiles: Partial<Record<ArtifactContractId, string>> = {
+  "ultrafuzz/findings@1": "findings.schema.json",
+  "ultrafuzz/generated-tests@1": "generated-tests.schema.json",
+  "ultrafuzz/invariant-ledger@1": "invariant-evidence-ledger.schema.json",
+  "ultrafuzz/properties@1": "properties.schema.json",
+  "ultrafuzz/property-lens@1": "property-lens.schema.json",
+  "ultrafuzz/reference-expectations@1": "reference-expectations.schema.json",
+  "ultrafuzz/workspace-patch@1": "workspace-patch.schema.json"
+};
+
+export const ARTIFACT_CONTRACT_SCHEMA_FILES: Readonly<Partial<Record<ArtifactContractId, string>>> =
+  Object.freeze(contractSchemaFiles);
+
 export function isArtifactContractId(value: unknown): value is ArtifactContractId {
   return typeof value === "string" && (ARTIFACT_CONTRACT_IDS as readonly string[]).includes(value);
+}
+
+export function artifactContractSchemaFile(id: ArtifactContractId): string | undefined {
+  return contractSchemaFiles[id];
 }
 
 export function artifactContractDefinition(id: ArtifactContractId): ArtifactContractDefinition {
