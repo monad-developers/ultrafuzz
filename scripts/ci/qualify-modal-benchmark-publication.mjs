@@ -4,23 +4,10 @@ import { pathToFileURL } from "node:url";
 const FULL_COMMIT = /^[0-9a-f]{40}$/u;
 const PRODUCER_WORKFLOW_PATH = ".github/workflows/eval-benchmarks.yml";
 const SUPPORTED_EVENTS = new Set(["push", "workflow_dispatch"]);
-/**
- * The producer declares its dispatched lane as a `launch` step name, because the
- * `workflow_run` payload carries no dispatch inputs. Reading a step name is the
- * same introspection the producer's own recovery job already performs.
- */
-const LANE_STEP_PREFIX = "Benchmark lane ";
-/**
- * Which lane each trigger is allowed to have produced. Publication is a
- * longitudinal claim about one comparable series, so a lane that is not in this
- * map -- notably the `threat-model` release gate, which runs the production
- * topology and a different execution policy against the same three targets --
- * is deliberately not published into `benchmarks/history.json`. The v0.1.0
- * release owner reviews that cohort directly (#183).
- */
-const PUBLISHABLE_LANES = { push: "smoke", workflow_dispatch: "full" };
+const SUPPORTED_BENCHMARK_MODES = ["smoke", "full"];
+const REQUIRED_ARTIFACT_PREFIXES = ["modal-benchmark-launch", "public-benchmark-results"];
 
-export function qualifyModalBenchmarkPublication(eventValue, jobsValue, repository) {
+export function qualifyModalBenchmarkPublication(eventValue, jobsValue, artifactsValue, repository) {
   const event = record(eventValue);
   const workflowRun = record(event.workflow_run);
   const eventName = string(workflowRun.event);
@@ -46,28 +33,37 @@ export function qualifyModalBenchmarkPublication(eventValue, jobsValue, reposito
     requiredJobs[requiredJob] = matching[0];
   }
 
-  const declaredLanes = stepNames(requiredJobs.launch)
-    .filter((name) => name.startsWith(LANE_STEP_PREFIX))
-    .map((name) => name.slice(LANE_STEP_PREFIX.length));
-  if (declaredLanes.length !== 1) {
-    return ineligible("the producer run did not declare exactly one benchmark lane");
-  }
-  const lane = declaredLanes[0];
-  if (lane !== PUBLISHABLE_LANES[eventName]) {
-    return ineligible(`the ${lane} lane produced by ${eventName} is not published to the longitudinal history`);
-  }
-
   const candidateCommit = FULL_COMMIT.test(workflowRun.head_sha) ? workflowRun.head_sha : undefined;
   if (!candidateCommit) {
     return ineligible("the exact benchmark candidate commit could not be established");
+  }
+  const benchmarkMode = benchmarkModeFromArtifacts(artifactsValue, workflowRun);
+  if (!benchmarkMode) {
+    return ineligible("the completed producer attempt does not have one unambiguous benchmark artifact lane");
   }
 
   return {
     eligible: true,
     candidateCommit,
-    benchmarkMode: lane,
+    benchmarkMode,
     reason: "the exact launch and collect jobs completed successfully"
   };
+}
+
+function benchmarkModeFromArtifacts(value, workflowRun) {
+  const runId = positiveInteger(workflowRun.id);
+  const runAttempt = positiveInteger(workflowRun.run_attempt);
+  if (!runId || !runAttempt) return undefined;
+
+  const availableNames = new Set(
+    artifactRecords(value)
+      .filter((artifact) => artifact.expired === false)
+      .map((artifact) => string(artifact.name))
+  );
+  const matchingModes = SUPPORTED_BENCHMARK_MODES.filter((mode) =>
+    REQUIRED_ARTIFACT_PREFIXES.every((prefix) => availableNames.has(`${prefix}-${mode}-${runId}-${runAttempt}`))
+  );
+  return matchingModes.length === 1 ? matchingModes[0] : undefined;
 }
 
 function jobRecords(value) {
@@ -78,9 +74,12 @@ function jobRecords(value) {
   });
 }
 
-function stepNames(job) {
-  const steps = record(job).steps;
-  return Array.isArray(steps) ? steps.map((step) => string(record(step).name)) : [];
+function artifactRecords(value) {
+  const pages = Array.isArray(value) ? value : [value];
+  return pages.flatMap((page) => {
+    const artifacts = record(page).artifacts;
+    return Array.isArray(artifacts) ? artifacts.map(record) : [];
+  });
 }
 
 function ineligible(reason) {
@@ -95,19 +94,31 @@ function string(value) {
   return typeof value === "string" ? value : "";
 }
 
-function main(args) {
-  if (args.length !== 4) {
+function positiveInteger(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+async function main(args) {
+  if (args.length !== 4 && args.length !== 5) {
     throw new Error(
-      "usage: qualify-modal-benchmark-publication.mjs <event.json> <jobs.json> <github-output> <repository>"
+      "usage: qualify-modal-benchmark-publication.mjs <event.json> <jobs.json> [artifacts.json] <github-output> <repository>"
     );
   }
-  const [eventPath, jobsPath, outputPath, repository] = args;
+  const [eventPath, jobsPath] = args;
+  const artifactsPath = args.length === 5 ? args[2] : undefined;
+  const outputPath = args.length === 5 ? args[3] : args[2];
+  const repository = args.length === 5 ? args[4] : args[3];
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) {
     throw new Error("repository must be an owner/name identifier");
   }
+  const eventValue = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+  const artifactsValue = artifactsPath
+    ? JSON.parse(fs.readFileSync(artifactsPath, "utf8"))
+    : await fetchProducerArtifacts(eventValue, repository);
   const result = qualifyModalBenchmarkPublication(
-    JSON.parse(fs.readFileSync(eventPath, "utf8")),
+    eventValue,
     JSON.parse(fs.readFileSync(jobsPath, "utf8")),
+    artifactsValue,
     repository
   );
   const outputs = [`eligible=${String(result.eligible)}`];
@@ -118,6 +129,28 @@ function main(args) {
   console.log(result.reason);
 }
 
+async function fetchProducerArtifacts(eventValue, repository) {
+  const runId = positiveInteger(record(record(eventValue).workflow_run).id);
+  const token = process.env.GH_TOKEN;
+  if (!runId || !token) {
+    throw new Error("the producer artifact list requires a workflow run ID and GH_TOKEN");
+  }
+  const response = await fetch(
+    `https://api.github.com/repos/${repository}/actions/runs/${runId}/artifacts?per_page=100`,
+    {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        "X-GitHub-Api-Version": "2022-11-28"
+      }
+    }
+  );
+  if (!response.ok) {
+    throw new Error(`could not list producer artifacts: GitHub returned ${response.status}`);
+  }
+  return response.json();
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main(process.argv.slice(2));
+  await main(process.argv.slice(2));
 }

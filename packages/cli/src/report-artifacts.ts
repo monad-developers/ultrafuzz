@@ -602,6 +602,7 @@ function readCampaignBackends(runRoot: string): Map<string, Set<string>> {
   for (const [logicalNodeId, fileName] of [
     ["stateful-invariant-campaign", "echidna-results.json"],
     ["stateful-invariant-campaign", "medusa-results.json"],
+    ["stateful-invariant-campaign", "recon-fuzzer-results.json"],
     ["stateful-invariant-recon-campaign", "recon-fuzzer-results.json"]
   ] as const) {
     const artifactPath = logicalArtifactPath(runRoot, logicalNodeId, fileName);

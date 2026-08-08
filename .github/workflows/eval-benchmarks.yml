@@ -128,9 +128,17 @@ jobs:
           KIMI_API_KEY: ${{ inputs.benchmark_lane == 'full' && secrets.KIMI_API_KEY || inputs.benchmark_lane == 'full' && secrets.MOONSHOT_API_KEY || '' }}
           KIMI_BASE_URL: ${{ inputs.benchmark_lane == 'full' && secrets.KIMI_BASE_URL || inputs.benchmark_lane == 'full' && vars.KIMI_BASE_URL || '' }}
         run: |
+          # The judge profile is always gpt-5.6-sol on CodexAgent, so OPENAI_API_KEY is
+          # required for every lane regardless of which runner provider is selected.
           required=(MODAL_TOKEN_ID MODAL_TOKEN_SECRET OPENAI_API_KEY)
           if [ "$BENCHMARK_MODE" = full ]; then
             required+=(ANTHROPIC_API_KEY KIMI_API_KEY DEEPSEEK_API_KEY)
+          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            case "$BENCHMARK_SMOKE_PROVIDER" in
+              anthropic) required+=(ANTHROPIC_API_KEY) ;;
+              deepseek) required+=(DEEPSEEK_API_KEY) ;;
+              kimi) required+=(KIMI_API_KEY) ;;
+            esac
           fi
           for name in "${required[@]}"; do
             if [ -z "${!name:-}" ]; then
@@ -149,6 +157,9 @@ jobs:
           BENCHMARK_KIMI_REASONING: ${{ inputs.kimi_reasoning || 'max' }}
           BENCHMARK_DEEPSEEK_MODEL: ${{ inputs.deepseek_model || 'deepseek-v4-pro' }}
           BENCHMARK_DEEPSEEK_REASONING: ${{ inputs.deepseek_reasoning || 'max' }}
+          BENCHMARK_SMOKE_PROVIDER: ${{ github.event_name == 'workflow_dispatch' && (inputs.smoke_provider || 'openai') || 'openai' }}
+          BENCHMARK_SMOKE_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke_model || '' }}
+          BENCHMARK_SMOKE_REASONING: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke_reasoning || '' }}
         run: |
           candidate="$(git rev-parse HEAD)"
           generation="${{ github.run_id }}-${{ github.run_attempt }}"
@@ -711,8 +722,21 @@ jobs:
               elif [ "$smoke_model_soft_fail" = true ] && \
                 jq -e "$smoke_soft_fail_filter" "$outcome_file" > /dev/null; then
                 soft_fail_category="$(jq -r '.category' "$outcome_file")"
-                echo "::warning::Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate"
-                echo "Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate" >&2
+                readiness_decision="$(node scripts/ci/describe-smoke-soft-fail.mjs --json \
+                  --ref "$CI_REF_NAME" \
+                  "$BENCHMARK_RESULTS/$pair/$slug/public-eval-diagnostics.json")"
+                readiness="$(jq -r '.detail' <<< "$readiness_decision")"
+                if jq -e '.blocks_gate == true' <<< "$readiness_decision" > /dev/null; then
+                  echo "::error::Modal smoke pair $pair failed operationally as $soft_fail_category; blocking validation-ref smoke gate because scoring readiness is required — $readiness"
+                  echo "Modal smoke pair $pair failed operationally as $soft_fail_category; blocking validation-ref smoke gate because scoring readiness is required — $readiness" >&2
+                  matrix_failed=true
+                elif jq -e '.scoring_ready_required == true' <<< "$readiness_decision" > /dev/null; then
+                  echo "::warning::Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking validation-ref smoke gate because scoring readiness was validated — $readiness"
+                  echo "Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking validation-ref smoke gate because scoring readiness was validated — $readiness" >&2
+                else
+                  echo "::warning::Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate — $readiness"
+                  echo "Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate — $readiness" >&2
+                fi
               else
                 echo "Modal pair $pair did not finish and collect successfully" >&2
                 matrix_failed=true

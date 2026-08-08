@@ -953,10 +953,10 @@ test("report regenerates canonical Markdown from structured issues and non-produ
   );
   fs.mkdirSync(path.join(runData.run_root, "artifacts", "stateful-invariant-campaign"), { recursive: true });
   fs.writeFileSync(
-    path.join(runData.run_root, "artifacts", "stateful-invariant-campaign", "echidna-results.json"),
+    path.join(runData.run_root, "artifacts", "stateful-invariant-campaign", "recon-fuzzer-results.json"),
     JSON.stringify({
       schema_version: "ultrafuzz.property-campaign.v1",
-      fuzzer_backend: "echidna",
+      fuzzer_backend: "recon",
       failures: [{ id: "finding-stable-1", status: "reproduced", property_ids: ["property-report-contract-1"] }]
     }),
     "utf8"
@@ -1007,7 +1007,7 @@ test("report regenerates canonical Markdown from structured issues and non-produ
   );
   assert.match(
     markdown,
-    /## Property provenance\n\n\| Finding \| Property IDs \| Source nodes \| Source property IDs \| Implementation\/test paths \| Fuzzer backends \|\n\| --- \| --- \| --- \| --- \| --- \| --- \|\n\| \\\[M-01\\\] - Structured issue title \| property-report-contract-1 \| property-specification-example \| property-specification-example-001 \| src\/Example\.sol<br>test\/ExampleInvariant\.t\.sol \| echidna \|/u
+    /## Property provenance\n\n\| Finding \| Property IDs \| Source nodes \| Source property IDs \| Implementation\/test paths \| Fuzzer backends \|\n\| --- \| --- \| --- \| --- \| --- \| --- \|\n\| \\\[M-01\\\] - Structured issue title \| property-report-contract-1 \| property-specification-example \| property-specification-example-001 \| src\/Example\.sol<br>test\/ExampleInvariant\.t\.sol \| recon \|/u
   );
   assert.match(markdown, /## Property implementation coverage\n\n- Priority threshold: `high`/u);
   assert.match(markdown, /- Reference expectation properties: `1`/u);
@@ -1586,6 +1586,9 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   const workspaceDir = path.join(runData.run_root, "workspaces", "project-discovery");
   fs.mkdirSync(workspaceDir, { recursive: true });
   fs.writeFileSync(path.join(workspaceDir, "large-cache.txt"), "do not bundle\n", "utf8");
+  const engineLogDir = path.join(runData.run_root, "smithers", "logs");
+  fs.mkdirSync(engineLogDir, { recursive: true });
+  fs.writeFileSync(path.join(engineLogDir, "stream.ndjson"), '{"event":"retry"}\n', "utf8");
 
   const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
   assert.equal(bundled.code, 0, bundled.stderr);
@@ -1620,6 +1623,14 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
     false
   );
   assert.equal(entries.includes("artifacts/final-report/report.json.pre-old"), false);
+  // Engine retry/validation evidence must reach an operator bundle, under a
+  // neutral prefix so the archive never names the orchestration engine.
+  assert.equal(entries.includes("engine-logs/stream.ndjson"), true);
+  assert.equal(zip.readAsText("engine-logs/stream.ndjson"), '{"event":"retry"}\n');
+  assert.equal(
+    entries.some((entry) => /smithers/iu.test(entry)),
+    false
+  );
   const bundledMarkdown = zip.readAsText("artifacts/final-report/report.md");
   assert.doesNotMatch(bundledMarkdown, /Placeholder/iu);
   assert.match(bundledMarkdown, /- Tokens used: `123`/u);

@@ -348,6 +348,84 @@ export function appendLineDurable(filePath: string, line: string, trustedRoot?: 
   fsyncDirectory(directory);
 }
 
+/**
+ * Durably appends at an exact expected end-of-file offset.
+ *
+ * A torn-tail repair decides what to write from an earlier read. Rechecking the
+ * size on the descriptor that performs the positional write prevents a later
+ * durable append from being silently joined to that stale repair decision.
+ */
+export function appendBytesDurableAt(
+  filePath: string,
+  bytes: Uint8Array,
+  options: { expectedSize: number; trustedRoot?: string }
+): void {
+  if (options.trustedRoot !== undefined) {
+    assertNoSymlinkComponents(options.trustedRoot, filePath, "append path");
+  }
+  const fd = fs.openSync(filePath, fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      throw new ArtifactPathError("not-file", `append path must be a regular file: ${filePath}`);
+    }
+    if (stat.nlink !== 1) {
+      throw new ArtifactPathError("not-file", `append path must not be hard-linked: ${filePath}`);
+    }
+    if (stat.size !== options.expectedSize) {
+      throw new ArtifactPathError("not-file", `append path changed size before repair: ${filePath}`);
+    }
+    const contents = Buffer.from(bytes);
+    let offset = 0;
+    while (offset < contents.length) {
+      const written = fs.writeSync(fd, contents, offset, contents.length - offset, options.expectedSize + offset);
+      if (written <= 0) throw new Error(`append write made no progress: ${filePath}`);
+      offset += written;
+    }
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fsyncDirectory(path.dirname(filePath));
+}
+
+/**
+ * Durably discards an unterminated trailing fragment.
+ *
+ * The expected size fences the repair decision against a concurrent append;
+ * hard links are rejected so truncation cannot mutate another named file.
+ */
+export function truncateDurable(
+  filePath: string,
+  length: number,
+  options: { expectedSize: number; trustedRoot?: string }
+): void {
+  if (options.trustedRoot !== undefined) {
+    assertNoSymlinkComponents(options.trustedRoot, filePath, "truncate path");
+  }
+  const fd = fs.openSync(filePath, fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      throw new ArtifactPathError("not-file", `truncate path must be a regular file: ${filePath}`);
+    }
+    if (stat.nlink !== 1) {
+      throw new ArtifactPathError("not-file", `truncate path must not be hard-linked: ${filePath}`);
+    }
+    if (stat.size !== options.expectedSize) {
+      throw new ArtifactPathError("not-file", `truncate path changed size before truncation: ${filePath}`);
+    }
+    if (length > stat.size) {
+      throw new ArtifactPathError("not-file", `truncate length exceeds the file size: ${filePath}`);
+    }
+    fs.ftruncateSync(fd, length);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fsyncDirectory(path.dirname(filePath));
+}
+
 export function readJsonFile<T = unknown>(filePath: string): T {
   return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
 }

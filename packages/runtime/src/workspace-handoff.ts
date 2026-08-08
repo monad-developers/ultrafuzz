@@ -76,7 +76,8 @@ const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "art
  */
 const WORKSPACE_GENERATED_ROOTS = ["recon-corpus", "echidna", "magic"] as const;
 
-const WORKSPACE_EXCLUDED_ROOTS = [...WORKSPACE_RUNTIME_ROOTS, ...WORKSPACE_GENERATED_ROOTS] as const;
+/** The generated roots the prompts expose as CLI flags, and so the only ones an agent renames (#368). */
+const WORKSPACE_GENERATED_ROOT_PREFIXES: readonly string[] = ["recon-corpus", "echidna"];
 
 export interface WorkspacePatchFile {
   path: string;
@@ -335,7 +336,43 @@ function stageableWorkspacePaths(workspaceRoot: string, index: string): Buffer[]
       "--exclude-standard",
       "--",
       ".",
-      ...WORKSPACE_EXCLUDED_ROOTS.map((root) => `:(exclude)${root}/**`)
+      ...WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}/**`),
+      // Prefix for the CLI-configurable corpus roots, exact for the rest (issue #368). R53 died on an
+      // image that already carried the #305 exclusion because the agent wrote its deep fuzzing pass to
+      // `recon-corpus-deep/` and `echidna-deep/`. Those names appear nowhere in the prompts; the agent
+      // invented them, and one file under `recon-corpus-deep` contributed >=33.8 MB of DIFF, over the
+      // whole 32 MiB capture buffer on its own.
+      //
+      // Only `recon-corpus` and `echidna` get the prefix. They are the two the prompts expose as CLI
+      // flags (`--recon-corpus-dir`, `--corpus-dir`), which is the lever the agent actually pulled, and
+      // both observed variants are of the form `<root>-<suffix>`. `magic/` is a fixed destination the
+      // prompts name literally, no variant of it has ever been observed, and `magic` is a common enough
+      // word that widening it would cost authored directories for no evidence. Adding a prefix without
+      // an observation is how a name list acquires collateral damage.
+      //
+      // Reusing the existing pathspec keeps three properties that a bespoke rule would have to re-earn,
+      // and that PR #372's size ceiling lost: it applies to the UNTRACKED listing only, so a tracked
+      // edit can never be dropped; it is root-anchored, so a corpus NESTED inside an authored tree does
+      // not take that tree with it; and it is a fixed string, so capture and apply agree without
+      // consulting the filesystem.
+      //
+      // The cost, stated plainly because it is a real widening: an UNTRACKED top-level directory whose
+      // name merely STARTS with one of these roots is now dropped, silently and with no manifest
+      // record. `echidna-handlers/` and `recon-corpus-notes/` would go. A git pathspec without `:(glob)`
+      // magic also lets `*` cross `/`, so the drop reaches arbitrarily deep inside such a directory.
+      // That is the same class of loss as #372's, narrower but not different in kind, and it is
+      // accepted only because the durable fix is measurement-triggered rather than name-triggered.
+      //
+      // What still escapes, so the limitation list is not read as exhaustive: a differently-named root
+      // (`corpus-deep/`), a corpus nested under an authored tree (`test/recon-corpus/`), a top-level
+      // generated FILE (`recon-corpus-deep.bin` — `/**` cannot match a slash-less path), case variants,
+      // and aggregate overflow across many roots each under the buffer. The durable fix is to retry on
+      // MEASURED overflow using diff-byte ranking; see #368, including a granularity defect recorded
+      // there that the naive form of that design would hit.
+      ...WORKSPACE_GENERATED_ROOT_PREFIXES.map((root) => `:(exclude)${root}*/**`),
+      ...WORKSPACE_GENERATED_ROOTS.filter((root) => !WORKSPACE_GENERATED_ROOT_PREFIXES.includes(root)).map(
+        (root) => `:(exclude)${root}/**`
+      )
     ],
     index
   );

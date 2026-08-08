@@ -11,6 +11,12 @@ import {
 } from "./safe-paths.js";
 
 export const FINDINGS_SCHEMA_VERSION = "1.0";
+// Every sibling artifact versions itself as `ultrafuzz.<name>.v1`, so producers reach for
+// `ultrafuzz.finding.v1` here. There is only one findings schema, and an absent schema_version
+// already normalizes to FINDINGS_SCHEMA_VERSION, so the house-style spelling names the same
+// version rather than a different one. Accept it and canonicalize.
+export const FINDINGS_SCHEMA_VERSION_ALIASES = ["ultrafuzz.finding.v1"] as const;
+export const FINDINGS_SCHEMA_VERSIONS = [FINDINGS_SCHEMA_VERSION, ...FINDINGS_SCHEMA_VERSION_ALIASES] as const;
 export const FINDINGS_FILE = "findings.json";
 export const FINDING_STATUSES = [
   "candidate",
@@ -85,7 +91,9 @@ export class FindingsValidationError extends Error {
 }
 
 export type NormalizedFinding = Record<string, unknown> & {
-  schema_version: string;
+  // normalizeFinding always writes this, but the finding schema validates producer output too, where
+  // the field is optional. Nothing reads it, so the honest type is optional.
+  schema_version?: string;
   id: string;
   title: string;
   status: string;
@@ -211,6 +219,10 @@ export function buildFindingSourceExpectations(input: {
   return expectations;
 }
 
+export function isSupportedFindingsSchemaVersion(value: string): boolean {
+  return (FINDINGS_SCHEMA_VERSIONS as readonly string[]).includes(value);
+}
+
 function resolveFindingsSource(artifactDir: string, relativePath: string): string {
   const findingsPath = safeResolveInside(artifactDir, relativePath, "findings source path");
   rejectSymlinkFindingsSource(findingsPath, relativePath);
@@ -241,14 +253,14 @@ function normalizeFinding(value: unknown, index: number, input: NormalizeFinding
   const nodeId = input.nodeId ?? provenance.nodeId;
   const producerNodeId = provenance.producerNodeId ?? provenance.nodeId ?? input.nodeId;
   const schemaVersion = optionalString(value, "schema_version") ?? FINDINGS_SCHEMA_VERSION;
-  if (schemaVersion !== FINDINGS_SCHEMA_VERSION) {
+  if (!isSupportedFindingsSchemaVersion(schemaVersion)) {
     throw new FindingsValidationError(
       `finding ${index} has unsupported schema_version ${JSON.stringify(schemaVersion)}`
     );
   }
 
   const normalized: Record<string, unknown> = { ...value };
-  normalized.schema_version = schemaVersion;
+  normalized.schema_version = FINDINGS_SCHEMA_VERSION;
   normalized.id =
     optionalString(value, "id") ?? `${nodeId === undefined ? "finding" : validateSafeId(nodeId, "node ID")}-${index}`;
   normalized.title = requiredString(value, "title", index);

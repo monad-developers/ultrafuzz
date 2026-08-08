@@ -1,4 +1,5 @@
 import { z } from "zod/v4";
+import { MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "@ultrafuzz/artifacts";
 
 import { BENCHMARK_LANE_NAMES } from "./benchmark-manifest.js";
 import { boundedEvalId } from "./utils.js";
@@ -62,7 +63,13 @@ const failedNodeSchema = z
     status: failedNodeStatus,
     timed_out: z.boolean(),
     failure_category: failureCategory.optional(),
-    failure_code: failureCode.optional()
+    failure_code: failureCode.optional(),
+    failure_message: z
+      .string()
+      .min(1)
+      .max(MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES)
+      .refine((value) => Buffer.byteLength(value, "utf8") <= MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES)
+      .optional()
   })
   .refine((node) => node.timed_out === (node.status === "timed-out"), {
     message: "failed node timeout flag does not match its status"
@@ -193,6 +200,9 @@ export function parsePublicEvalDiagnostics(value: unknown): PublicEvalDiagnostic
   return parsed;
 }
 
+// A zero-row set is never scoreable: an eval that planned nothing has nothing to
+// score. Both readiness conjuncts hold vacuously over `[]`, so guard on the count
+// rather than letting `every` and a zero failed-target count report readiness.
 export function summarizePublicEvalDiagnosticsRows(rows: PublicEvalDiagnosticsRow[]): PublicEvalDiagnostics["summary"] {
   return {
     planned: rows.length,
@@ -204,7 +214,8 @@ export function summarizePublicEvalDiagnosticsRows(rows: PublicEvalDiagnosticsRo
     workflow_nonterminal: rows.filter((row) => !row.workflow_terminal).length,
     genuine_task_failure_rows: rows.filter((row) => row.terminal_disposition === "genuine-task-failures").length,
     terminal_reports_present: rows.filter((row) => row.terminal_report_present).length,
-    scoring_ready: rows.every((row) => row.scoring_ready) && publicEvalDiagnosticsFailedTargetCount(rows) <= 1
+    scoring_ready:
+      rows.length > 0 && rows.every((row) => row.scoring_ready) && publicEvalDiagnosticsFailedTargetCount(rows) <= 1
   };
 }
 
@@ -219,7 +230,7 @@ function summarizeLegacyPublicEvalDiagnosticsRows(rows: PublicEvalDiagnosticsRow
     workflow_nonterminal: rows.filter((row) => !row.workflow_terminal).length,
     genuine_task_failure_rows: rows.filter((row) => row.terminal_disposition === "genuine-task-failures").length,
     terminal_reports_present: rows.filter((row) => row.terminal_report_present).length,
-    scoring_ready: rows.every((row) => row.scoring_ready)
+    scoring_ready: rows.length > 0 && rows.every((row) => row.scoring_ready)
   };
 }
 

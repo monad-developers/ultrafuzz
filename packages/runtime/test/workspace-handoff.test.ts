@@ -1135,3 +1135,156 @@ test("leaves an ordinary git failure's captures as strings", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// R53's `stateful-invariant-handlers` died here (issue #368) on an image that ALREADY carried the #305
+// exclusion. That exclusion is an exact-name list -- `recon-corpus`, `echidna`, `magic` -- and the agent
+// wrote its deep fuzzing pass to `recon-corpus-deep/` and `echidna-deep/` instead. Grepping the invariant
+// prompts for `-deep` returns nothing, so the agent invented those names; one file under
+// `recon-corpus-deep` was >=33.8 MB by itself, over the whole 32 MiB capture buffer:
+//
+//   git diff produced more than the 33554432-byte capture buffer ... Largest contributors ...:
+//   recon-corpus-deep (>=33865139 diff bytes in 1 file), echidna-deep (>=37453 diff bytes in 15 files)
+test("excludes agent-chosen variants of the generated corpus roots", () => {
+  const root = fixture();
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\ncache/\nout/\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "ignore build output"]);
+    const baseline = captureWorkspaceTree(root);
+
+    // The two variants R53 actually produced. Deliberately NOT gitignored and NOT in the name list,
+    // exactly as on the real target.
+    for (const generated of ["recon-corpus-deep", "echidna-deep"]) {
+      mkdirSync(path.join(root, generated, "build-snapshot"), { recursive: true });
+      writeFileSync(path.join(root, generated, "build-snapshot", "0b7f82b3.json"), `{"g":"${generated}"}\n`);
+    }
+    writeFileSync(path.join(root, "AuthoredHandlers.t.sol"), "contract AuthoredHandlers {}\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["AuthoredHandlers.t.sol"]
+    );
+    assert.doesNotMatch(captured.patch, /recon-corpus-deep|echidna-deep/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The prefix must stay ROOT-ANCHORED: a `test/` tree containing a NESTED corpus must never be dropped
+// wholesale. That granularity failure is what closed the size-ceiling attempt in PR #372, where an
+// entire authored suite vanished because a corpus sat under the same first path segment.
+//
+// Note what this does NOT claim. An authored top-level directory whose name merely STARTS with a
+// generated root IS dropped -- `echidna-handlers/` would go, and because a pathspec without `:(glob)`
+// lets `*` cross `/`, so would everything beneath it. That is the accepted cost of the prefix, recorded
+// on the constant; it is not a property this test protects.
+test("keeps an authored tree that merely contains a nested corpus", () => {
+  const root = fixture();
+  try {
+    const baseline = captureWorkspaceTree(root);
+    // Nested corpus under an authored test root: the authored Solidity beside it MUST survive.
+    mkdirSync(path.join(root, "test", "recon", "recon-corpus"), { recursive: true });
+    writeFileSync(path.join(root, "test", "recon", "Handlers.t.sol"), "contract Handlers {}\n");
+    writeFileSync(path.join(root, "test", "recon", "recon-corpus", "seed.bin"), "seed\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+
+    assert.deepEqual(captured.manifest.files.map((entry) => entry.path).sort(), [
+      "test/recon/Handlers.t.sol",
+      "test/recon/recon-corpus/seed.bin"
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A TRACKED file under a corpus-prefixed path must never be dropped. This pins the TRACKED half only:
+// the untracked half of that same directory IS dropped, deliberately, as the constant records. PR #372
+// asserted this very property in a comment while applying its rule to the merged tracked+untracked list
+// and silently dropped tracked edits, so it is asserted here rather than inferred from the shape.
+test("keeps a tracked file under a corpus-prefixed path", () => {
+  const root = fixture();
+  try {
+    mkdirSync(path.join(root, "echidna-config"), { recursive: true });
+    writeFileSync(path.join(root, "echidna-config", "Authored.sol"), "contract Authored {}\n");
+    git(root, ["add", "echidna-config"]);
+    git(root, ["commit", "--quiet", "-m", "tracked config"]);
+    const baseline = captureWorkspaceTree(root);
+    writeFileSync(path.join(root, "echidna-config", "Authored.sol"), "contract Authored { uint256 v = 2; }\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["echidna-config/Authored.sol"]
+    );
+    assert.match(captured.patch, /uint256 v = 2/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// `magic` stays an EXACT match while the other two get the prefix, and that asymmetry is evidence-based
+// rather than stylistic. R53 produced `recon-corpus-deep/` and `echidna-deep/` and nothing else; those
+// two roots are the ones the prompts expose as CLI flags (`--recon-corpus-dir`, `--corpus-dir`), which is
+// the lever the agent pulled. `magic/` is a fixed destination the prompts name literally, no variant has
+// ever been observed, and `magic` is a common enough word that widening it would drop authored
+// directories to protect against nothing. Widening a name list without an observation is how it acquires
+// collateral damage, so this pins that we did not.
+test("does not widen a generated root that no agent has ever renamed", () => {
+  const root = fixture();
+  try {
+    const baseline = captureWorkspaceTree(root);
+    mkdirSync(path.join(root, "magic-numbers"), { recursive: true });
+    mkdirSync(path.join(root, "magic"), { recursive: true });
+    writeFileSync(path.join(root, "magic-numbers", "Authored.sol"), "contract Authored {}\n");
+    writeFileSync(path.join(root, "magic", "recon-coverage.json"), "{}\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+
+    // The authored lookalike survives; the exact generated root is still excluded.
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["magic-numbers/Authored.sol"]
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The cost of the prefix, made VISIBLE rather than left in prose. A NEW (untracked) authored file under a
+// prefix-named top-level directory is dropped, silently, with a manifest that still validates and a
+// result tree that still matches -- even when git already tracks that directory. Both reviews of this PR
+// raised it, and a comment alone would let the next reader discover it from a production failure instead
+// of from here.
+//
+// It is accepted, not endorsed: the blast radius is one top-level root whose NAME carries a generated
+// prefix, versus PR #372's loss of an entire `test/` tree, and the durable measurement-based fix on #368
+// removes the need for name matching altogether. If that fix lands, this test should start failing and
+// should then be deleted -- that is the intended signal, not a regression.
+test("documents the prefix's cost: a new untracked file under a prefixed root is dropped", () => {
+  const root = fixture();
+  try {
+    mkdirSync(path.join(root, "echidna-config"), { recursive: true });
+    writeFileSync(path.join(root, "echidna-config", "base.yaml"), "seed: 1\n");
+    git(root, ["add", "echidna-config"]);
+    git(root, ["commit", "--quiet", "-m", "tracked config"]);
+    const baseline = captureWorkspaceTree(root);
+
+    // Same directory, three edits, two outcomes -- decided purely by tracked-vs-untracked.
+    writeFileSync(path.join(root, "echidna-config", "base.yaml"), "seed: 2\n");
+    writeFileSync(path.join(root, "echidna-config", "NewAuthored.sol"), "contract NewAuthored {}\n");
+    writeFileSync(path.join(root, "Keep.t.sol"), "contract Keep {}\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+    const paths = captured.manifest.files.map((entry) => entry.path).sort();
+
+    assert.deepEqual(paths, ["Keep.t.sol", "echidna-config/base.yaml"]);
+    // The new file is gone and nothing reports it. This assertion is the documentation.
+    assert.ok(!paths.includes("echidna-config/NewAuthored.sol"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

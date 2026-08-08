@@ -3,6 +3,8 @@ import { lstat, mkdir, open, readFile, readdir, rename, unlink } from "node:fs/p
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
+import { layoutForRunRoot } from "@ultrafuzz/artifacts";
+
 import { EVAL_WATCH_TIMEOUT_SECONDS } from "./defaults.js";
 import type { TerminalDisposition } from "./terminal-disposition.js";
 
@@ -92,34 +94,288 @@ export function modalEvalRunCommand(input: {
   ];
 }
 
-export async function locateModalResumeWorkspace(workRoot: string): Promise<ModalResumeWorkspace> {
+/**
+ * What a volume holds: either a run that can genuinely be resumed, or one that never got far enough to
+ * have anything to resume from.
+ *
+ * `not-started` is deliberately NOT an error. A worker that finds it should build the workspace through
+ * the normal pre-model path instead of failing (#378).
+ */
+export type ModalResumeLookup =
+  | { readonly kind: "resumable"; readonly workspace: ModalResumeWorkspace }
+  | {
+      readonly kind: "not-started";
+      readonly reason: string;
+      readonly staleEvalRunIds?: readonly string[];
+      /** Run roots that exist but can never be resumed, so a restart must clear them (`RUN_ALREADY_EXISTS`). */
+      readonly staleRunRootIds?: readonly string[];
+    };
+
+/**
+ * Decide whether a volume holds a resumable run, WITHOUT treating "nothing to resume" as a failure.
+ *
+ * The problem this solves (#378): `runs.jsonl` is the journal that links an evaluation row to the durable
+ * run executing it, and that link is appended only AFTER the launcher returns. `startRun` creates the run
+ * root, writes `state.json`, compiles the workflow and submits it before returning. So there is a wide
+ * window — the whole of compilation and submission — in which a real durable run exists on disk, with real
+ * completed nodes, and nothing in the journal points at it. Reading the journal alone, that is
+ * indistinguishable from "never started", and the worker used to reject it outright and wedge the run
+ * permanently, because the state is on a durable volume and so recurs every generation.
+ *
+ * The journal is therefore treated as a cache, not as the source of truth. When it holds no link, the
+ * durable run directory is consulted directly:
+ *
+ *   - **a run linked to a workflow exists** -> resumable. Its journal link is missing, not the run.
+ *     `repairModalEvalRunRecord` writes that link back when the run finalizes. Restarting here would
+ *     abandon completed work, and would fail anyway: row run ids are deterministic, so `planRun` would
+ *     refuse with `RUN_ALREADY_EXISTS`.
+ *   - **no linked run exists** -> genuinely not started. Both ids involved are deterministic, so the caller
+ *     is told what to clear before restarting: `staleEvalRunIds` for eval run directories
+ *     (`EVAL_RUN_ALREADY_EXISTS`) and `staleRunRootIds` for unlinked run roots (`RUN_ALREADY_EXISTS`).
+ *
+ * Counts of linked runs stay asymmetric: more than one durable run linked to a single evaluation is
+ * corruption no correct producer can create, and silently picking a side would destroy a real run.
+ */
+export async function findModalResumeWorkspace(workRoot: string): Promise<ModalResumeLookup> {
   const target = path.join(workRoot, "target");
   const control = path.join(workRoot, "control");
+  const evalRoot = path.join(control, ".ultrafuzz", "evals", "runs");
+  // Only a genuinely absent directory means "nothing here". EACCES, EIO or ESTALE on a durable volume are
+  // faults, and reading them as "the run never started" is how a transient mount problem would become a
+  // restart over live work.
+  const names = await readdirIfMissing(evalRoot);
+  const directories = [];
+  const candidates = [];
+  const unclassifiableEvalEntries = [];
+  for (const name of names) {
+    const root = path.join(evalRoot, name);
+    // Same reasoning as the run-root loop below: `runEvalSuite` refuses on `fs.existsSync`, which follows
+    // symlinks and does not care about entry type, so an entry skipped silently here would still block a
+    // restart. Report it instead of dropping it into invisibility.
+    if (!(await isDirectoryNotSymlink(root))) {
+      unclassifiableEvalEntries.push(name);
+      continue;
+    }
+    // Tracked separately from `candidates`: `runEvalSuite` refuses to reuse an id whose DIRECTORY exists,
+    // and it creates that directory before writing `eval.json`. A kill in between leaves a directory that
+    // is not a candidate but still blocks reuse, so a restart has to be told to clear it.
+    directories.push(name);
+    if (await isRegularFileNotSymlink(path.join(root, "eval.json"))) candidates.push(name);
+  }
+  // Assert the shape of whatever IS present before deciding anything, including in the zero-candidate case.
+  // A path that exists but is a symlink is damage at any candidate count, and the rest of this file is
+  // careful to refuse symlinks everywhere; skipping that here would let a symlinked `control` through.
+  await assertWorkspaceShape(target);
+  await assertWorkspaceShape(control);
+  if (candidates.length === 0) {
+    const durable = await durableRunsOnDisk(target);
+    if (durable.resumable.length > 0) {
+      // A linked run with no evaluation to attach it to is damage, not a fresh start. Restarting would
+      // abandon it and deleting it is exactly what this function exists to avoid, so refuse instead.
+      throw new Error(`workspace has ${durable.resumable.length} linked durable run(s) but no evaluation run`);
+    }
+    assertNoDamagedRunRoots(durable.damaged);
+    assertNoUnclassifiableEvalEntries(unclassifiableEvalEntries);
+    return {
+      kind: "not-started",
+      reason: "resume requires exactly one evaluation run, found 0",
+      ...(directories.length === 0 ? {} : { staleEvalRunIds: directories }),
+      ...(durable.orphaned.length === 0 ? {} : { staleRunRootIds: durable.orphaned })
+    };
+  }
+  if (candidates.length > 1) {
+    throw new Error(`resume requires exactly one evaluation run, found ${candidates.length}`);
+  }
+  // The workspace now claims to hold an evaluation, so target and control must both actually be there.
   if (!(await isDirectoryNotSymlink(target)) || !(await isDirectoryNotSymlink(control))) {
     throw new Error("persistent workspace is incomplete");
   }
-  const evalRoot = path.join(control, ".ultrafuzz", "evals", "runs");
-  const candidates = [];
-  for (const name of await readdir(evalRoot)) {
-    const root = path.join(evalRoot, name);
-    if ((await isDirectoryNotSymlink(root)) && (await isRegularFileNotSymlink(path.join(root, "eval.json")))) {
-      candidates.push(name);
-    }
-  }
-  if (candidates.length !== 1) {
-    throw new Error(`resume requires exactly one evaluation run, found ${candidates.length}`);
-  }
   const evalRunId = candidates[0]!;
-  const records = await readRecords(path.join(evalRoot, evalRunId, "runs.jsonl"));
+  // A missing journal is the earliest form of the same window: `eval.json` is written before the first
+  // append, so a kill in between leaves no file at all. That is a state to classify, not to crash on.
+  const records = await readRecordsIfMissing(path.join(evalRoot, evalRunId, "runs.jsonl"));
   const productRunIds = new Set(
     records
       .map((record) => record.ultrafuzz_run_id)
       .filter((value): value is string => typeof value === "string" && value.trim() !== "")
   );
-  if (productRunIds.size !== 1) {
+  if (productRunIds.size > 1) {
     throw new Error(`resume requires exactly one linked durable run, found ${productRunIds.size}`);
   }
-  return { target, control, evalRunId, productRunId: [...productRunIds][0]! };
+  if (productRunIds.size === 1) {
+    return { kind: "resumable", workspace: { target, control, evalRunId, productRunId: [...productRunIds][0]! } };
+  }
+  const durable = await durableRunsOnDisk(target);
+  if (durable.resumable.length > 1) {
+    throw new Error(`resume requires exactly one durable run on disk, found ${durable.resumable.length}`);
+  }
+  if (durable.resumable.length === 1) {
+    return { kind: "resumable", workspace: { target, control, evalRunId, productRunId: durable.resumable[0]! } };
+  }
+  // Damage only matters on the branch that would restart: a damaged root blocks `planRun`, but it must not
+  // preempt resuming a run that is perfectly good. This applies to the `damaged` LIST only — a read fault
+  // or malformed metadata raised while classifying some other root still propagates from the loop above and
+  // will preempt a resume. That is deliberate (it fails closed and never deletes), but it is not what this
+  // deferral promises.
+  assertNoDamagedRunRoots(durable.damaged);
+  assertNoUnclassifiableEvalEntries(unclassifiableEvalEntries);
+  return {
+    kind: "not-started",
+    reason: "resume requires exactly one linked durable run, found 0",
+    // Every eval run directory, not just the candidate: `runEvalSuite` refuses any id whose directory
+    // exists, so naming only the candidate would leave a non-candidate directory blocking the restart.
+    staleEvalRunIds: directories,
+    ...(durable.orphaned.length === 0 ? {} : { staleRunRootIds: durable.orphaned })
+  };
+}
+
+/**
+ * Run roots on disk, split by whether `resume` could actually resume them.
+ *
+ * The line is the workflow link in the run metadata, whose path is taken from `layoutForRunRoot` and never
+ * restated here — see `hasLinkedWorkflow`. `persistSmithersEvidence` writes that link immediately
+ * after the workflow compiles and BEFORE it is submitted, and `readLinkedWorkflowEvidence` refuses any run
+ * without it (`WORKFLOW_RUN_ID_MISSING`). So the two halves of the failure window differ:
+ *
+ *   - compiled, then failed to submit -> linked, and genuinely resumable. This is the R54 case.
+ *   - died during compilation, or with only a partial run layout -> no link, and `resume` refuses it
+ *     forever. Calling that resumable only relocates the wedge; it has to be cleared instead, or a restart
+ *     trips `RUN_ALREADY_EXISTS` on its deterministic run id.
+ *
+ * `state.json` alone is not the test: `createRunLayout` writes it well before compilation, so requiring
+ * only that would classify a run nothing can resume as resumable.
+ */
+async function durableRunsOnDisk(
+  target: string
+): Promise<{ resumable: string[]; orphaned: string[]; damaged: string[] }> {
+  const runsRoot = path.join(target, ".ultrafuzz", "runs");
+  const resumable = [];
+  const orphaned = [];
+  const damaged = [];
+  for (const name of await readdirIfMissing(runsRoot)) {
+    const root = path.join(runsRoot, name);
+    // An entry this function cannot classify is reported, never skipped. `planRun` refuses on
+    // `existsSync`, which follows symlinks and does not care whether the name is layout-addressable, so
+    // anything dropped here silently would still block a restart — invisibly, which is the whole subject
+    // of #378.
+    if (!(await isDirectoryNotSymlink(root)) || !isLayoutAddressable(root)) {
+      damaged.push(name);
+      continue;
+    }
+    const linked = await hasLinkedWorkflow(root);
+    const hasState = await isRegularFileNotSymlink(path.join(root, "state.json"));
+    // `orphaned` is a POSITIVE determination — the metadata was read and carries no workflow link — and not
+    // merely "not resumable". The difference is destructive: the caller deletes orphaned roots, and the
+    // link is written before submission, so a root that HAS a link is one a workflow may have run from.
+    // Missing its state is damage to report, never something to delete.
+    if (!linked) orphaned.push(name);
+    else if (hasState) resumable.push(name);
+    else damaged.push(name);
+  }
+  return { resumable: resumable.sort(), orphaned: orphaned.sort(), damaged: damaged.sort() };
+}
+
+/**
+ * Whether the runtime's own layout helper can address this run root.
+ *
+ * Derived by asking the helper rather than restating its id rule. A name it rejects would otherwise throw
+ * out of the lookup on every generation, with nothing able to clear it — one stray directory would strand
+ * the run permanently.
+ */
+function isLayoutAddressable(runRoot: string): boolean {
+  try {
+    layoutForRunRoot(runRoot);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether the run metadata carries the workflow link `resume` requires.
+ *
+ * The path comes from `layoutForRunRoot`, the same helper the runtime writes and reads it through, and is
+ * deliberately not restated here. An earlier revision named the file itself and named it wrongly, which
+ * classified every real run root as unresumable — and because the caller deletes unresumable roots, that
+ * turned this predicate into a destructive one while leaving #378 unfixed.
+ *
+ * Errors are NOT swallowed. Absence means the link was never written; EACCES or EIO on a durable volume
+ * mean the answer is unknown, and answering "unlinked" to an unknown is how a read fault becomes a
+ * deletion. Only ENOENT/ENOTDIR count as absence, matching `readdirIfMissing`.
+ */
+async function hasLinkedWorkflow(runRoot: string): Promise<boolean> {
+  const text = await readFile(layoutForRunRoot(runRoot).runMetadataPath, "utf8").catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+      throw error;
+    }
+  );
+  if (text === undefined) return false;
+  let metadata: { workflow?: { run_id?: unknown; workflowRunId?: unknown }; smithers?: { workflowRunId?: unknown } };
+  try {
+    metadata = JSON.parse(text) as typeof metadata;
+  } catch (error) {
+    // Failing closed is the decision here, not an oversight: reading unparseable metadata as "unlinked"
+    // would route the root to deletion. Name the file so the refusal is diagnosable from the volume.
+    throw new Error(`run metadata at ${layoutForRunRoot(runRoot).runMetadataPath} is not valid JSON`, {
+      cause: error
+    });
+  }
+  const runId = metadata.workflow?.run_id ?? metadata.workflow?.workflowRunId ?? metadata.smithers?.workflowRunId;
+  return typeof runId === "string" && runId.length > 0;
+}
+
+/**
+ * Refuse to restart over an eval run entry that is not a directory. Deleting something we cannot classify
+ * would be worse, and ignoring it hands the restart an `EVAL_RUN_ALREADY_EXISTS` it cannot clear.
+ */
+function assertNoUnclassifiableEvalEntries(entries: readonly string[]): void {
+  if (entries.length === 0) return;
+  throw new Error(
+    `evaluation run entr(ies) ${[...entries].sort().join(", ")} are not directories and would block a restart; ` +
+      `resolve them on the volume`
+  );
+}
+
+/**
+ * Refuse to restart over a run root that cannot be classified, rather than deleting it or ignoring it.
+ *
+ * Sorted so the message is deterministic when there is more than one.
+ */
+function assertNoDamagedRunRoots(damaged: readonly string[]): void {
+  if (damaged.length === 0) return;
+  throw new Error(
+    `durable run root(s) ${damaged.join(", ")} cannot be classified as resumable or unstarted; ` +
+      `resolve them on the volume before this run can restart`
+  );
+}
+
+/** Refuse a path that exists but is not a real directory. An absent path is the ordinary fresh case. */
+async function assertWorkspaceShape(directoryPath: string): Promise<void> {
+  const stat = await lstat(directoryPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+    throw error;
+  });
+  if (stat !== undefined && !stat.isDirectory()) {
+    throw new Error("persistent workspace is incomplete");
+  }
+}
+
+async function readdirIfMissing(directoryPath: string): Promise<string[]> {
+  return readdir(directoryPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return [] as string[];
+    throw error;
+  });
+}
+
+/**
+ * The strict form. Retained for tests and for any caller that has already established the run must be
+ * resumable; `worker.ts` deliberately uses the tolerant lookup above instead.
+ */
+export async function locateModalResumeWorkspace(workRoot: string): Promise<ModalResumeWorkspace> {
+  const found = await findModalResumeWorkspace(workRoot);
+  if (found.kind === "not-started") throw new Error(found.reason);
+  return found.workspace;
 }
 
 export async function repairModalEvalRunRecord(
@@ -136,12 +392,41 @@ export async function repairModalEvalRunRecord(
   }
   const evalDir = path.join(workspace.control, ".ultrafuzz", "evals", "runs", workspace.evalRunId);
   const recordsPath = path.join(evalDir, "runs.jsonl");
-  const records = await readRecords(recordsPath);
-  const linked = records.filter((record) => record.ultrafuzz_run_id === state.run_id);
+  const records = await readRecordsIfMissing(recordsPath);
+  let linked: Array<Record<string, unknown>> = records.filter((record) => record.ultrafuzz_run_id === state.run_id);
+  // #378: the journal may never have recorded the link, because it is appended only after the launcher
+  // returns. The run itself is the evidence it existed, so write the link the journal is missing rather
+  // than refuse a run that plainly ran. Only safe when NOTHING is linked: a journal that points at some
+  // other durable run is a genuine mismatch and must still be refused.
+  const linkageMissing = linked.length === 0 && !records.some((record) => isLinked(record));
+  if (linkageMissing) {
+    linked = [{ ...(records[records.length - 1] ?? {}), row_id: await soleRowId(evalDir, records) }];
+  }
   if (linked.length === 0) throw new Error(`evaluation run does not reference durable run ${state.run_id}`);
   const rowIds = new Set(linked.map((record) => record.row_id));
   if (rowIds.size !== 1) throw new Error("evaluation run has ambiguous linked rows");
-  const record = linked[linked.length - 1]!;
+  // A repaired row has to be the row a successful launch would have written, not the failed row with a link
+  // stamped on it. `scoreEvalRun` resolves the terminal report through `ultrafuzz_run_root`, and without it
+  // falls back to a path built from `row.run_id` — a different directory from the bounded run id actually on
+  // disk — so the run would drive to success and then fail scoring, wedging one step further downstream.
+  // `status` matters for the same reason: efficiency and status reporting read it, and would otherwise call
+  // a launch failed for a run that succeeded.
+  const record: Record<string, unknown> = {
+    ...linked[linked.length - 1]!,
+    ultrafuzz_run_id: state.run_id,
+    ...(linkageMissing
+      ? {
+          ultrafuzz_run_root: path.join(workspace.target, ".ultrafuzz", "runs", state.run_id),
+          status: "launched",
+          launcher: {
+            ...(typeof (linked[linked.length - 1] as Record<string, unknown> | undefined)?.launcher === "object"
+              ? ((linked[linked.length - 1] as Record<string, unknown>).launcher as Record<string, unknown>)
+              : {}),
+            status: "succeeded"
+          }
+        }
+      : {})
+  };
   const finalStatus = state.status;
   const currentWorkflow =
     typeof record.workflow === "object" && record.workflow !== null && !Array.isArray(record.workflow)
@@ -167,7 +452,9 @@ export async function repairModalEvalRunRecord(
     currentWorkflow?.finished_at === workflow.finished_at
       ? record
       : { ...record, final_status: finalStatus, workflow, finished_at: finishedAt };
-  if (updated !== record) await appendLineDurable(recordsPath, `${JSON.stringify(updated)}\n`);
+  // A repaired link must reach the journal even when nothing else about the row changed, otherwise the
+  // next generation would have to rediscover it from disk all over again.
+  if (updated !== record || linkageMissing) await appendLineDurable(recordsPath, `${JSON.stringify(updated)}\n`);
   await writeJsonAtomic(path.join(evalDir, "run-summary.json"), {
     eval_run_id: workspace.evalRunId,
     launched: 1,
@@ -177,8 +464,52 @@ export async function repairModalEvalRunRecord(
   });
 }
 
+function isLinked(record: Record<string, unknown>): boolean {
+  return typeof record.ultrafuzz_run_id === "string" && record.ultrafuzz_run_id.trim() !== "";
+}
+
+/**
+ * The one evaluation row a repaired link belongs to.
+ *
+ * Prefers the journal, and falls back to `matrix.json` for the case where the journal was never written at
+ * all. Refuses anything ambiguous: attaching a durable run to the wrong row would misreport which
+ * configuration produced the result, which is worse than failing to repair.
+ */
+async function soleRowId(evalDir: string, records: Array<Record<string, unknown>>): Promise<string> {
+  const journalRowIds = new Set(
+    records.map((record) => record.row_id).filter((value): value is string => typeof value === "string")
+  );
+  if (journalRowIds.size === 1) return [...journalRowIds][0]!;
+  if (journalRowIds.size > 1) throw new Error("evaluation run has ambiguous linked rows");
+  const matrix = (await readFile(path.join(evalDir, "matrix.json"), "utf8").then(
+    (text) => JSON.parse(text) as unknown,
+    () => undefined
+  )) as Array<{ id?: unknown }> | undefined;
+  const matrixRowIds = Array.isArray(matrix)
+    ? matrix.map((row) => row?.id).filter((value): value is string => typeof value === "string")
+    : [];
+  if (matrixRowIds.length !== 1) {
+    throw new Error(`evaluation run has no unambiguous row to link, found ${matrixRowIds.length}`);
+  }
+  return matrixRowIds[0]!;
+}
+
 function timestamp(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() !== "" && Number.isFinite(Date.parse(value)) ? value : undefined;
+}
+
+/**
+ * Records, treating an absent journal as no records.
+ *
+ * A malformed line still throws, deliberately. `appendJsonLine` does not fsync, so a torn final line is
+ * possible on a durable volume — and a torn line may be the very line carrying the durable run link.
+ * Dropping it silently would read as "never linked" and could strand a live run, so this stays loud.
+ */
+async function readRecordsIfMissing(filePath: string): Promise<Array<Record<string, unknown>>> {
+  return readRecords(filePath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return [];
+    throw error;
+  });
 }
 
 async function readRecords(filePath: string): Promise<Array<Record<string, unknown>>> {

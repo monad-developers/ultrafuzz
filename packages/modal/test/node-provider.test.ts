@@ -2534,9 +2534,13 @@ function fakeClient(options: { listed?: Sandbox[]; created?: Sandbox }) {
       fromName: vi.fn(async () => ({}))
     },
     volumes: {
-      fromName: vi.fn(async () => ({})),
+      fromName: vi.fn(async () => ({ volumeId: "vo-node" })),
       delete: vi.fn(async () => undefined)
     },
+    cpClient: {
+      volumeGetOrCreate: vi.fn(async () => ({ volumeId: "vo-node", metadata: { version: 2 } }))
+    },
+    environmentName: vi.fn((environment?: string) => environment ?? "main"),
     secrets: {
       fromObject: vi.fn(async () => ({}))
     },

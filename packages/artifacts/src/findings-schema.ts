@@ -1,6 +1,6 @@
 import { z } from "zod/v4";
 
-import { FINDINGS_SCHEMA_VERSION, TRIAGE_CLASSIFICATIONS, type NormalizedFinding } from "./findings.js";
+import { FINDINGS_SCHEMA_VERSIONS, TRIAGE_CLASSIFICATIONS, type NormalizedFinding } from "./findings.js";
 import { NODE_REFERENCE_PATTERN } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
@@ -39,7 +39,10 @@ const evidenceEntrySchema = z.union([
 ]);
 
 export const findingSchema = z.looseObject({
-  schema_version: z.literal(FINDINGS_SCHEMA_VERSION),
+  // Optional: nothing reads a finding's schema_version, there is only one findings schema, and
+  // normalizeFinding already defaults an absent value to FINDINGS_SCHEMA_VERSION. A present value is
+  // still checked against the accepted spellings so a genuinely different version cannot slip in.
+  schema_version: z.literal(FINDINGS_SCHEMA_VERSIONS).optional(),
   id: nonEmptyString,
   title: nonEmptyString,
   status: nonEmptyString,
@@ -72,10 +75,10 @@ export const findingJsonSchema = {
   $id: FINDING_JSON_SCHEMA_ID,
   title: "Ultrafuzz normalized finding",
   type: "object",
-  required: ["schema_version", "id", "title", "status", "severity_guess", "confidence", "summary"],
+  required: ["id", "title", "status", "severity_guess", "confidence", "summary"],
   additionalProperties: true,
   properties: {
-    schema_version: { const: FINDINGS_SCHEMA_VERSION },
+    schema_version: { enum: [...FINDINGS_SCHEMA_VERSIONS] },
     id: { type: "string", minLength: 1 },
     title: { type: "string", minLength: 1 },
     status: { type: "string", minLength: 1 },

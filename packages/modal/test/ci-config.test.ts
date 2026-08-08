@@ -904,8 +904,10 @@ describe("public Modal benchmark configuration", () => {
       (step) => step.name === "Qualify the exact completed producer attempt"
     )?.run;
     expect(qualification).toContain("/attempts/$PRODUCER_RUN_ATTEMPT/jobs?per_page=100");
+    expect(qualification).toContain("/actions/runs/$PRODUCER_RUN_ID/artifacts?per_page=100");
     expect(qualification).toContain("qualify-modal-benchmark-publication.mjs");
     expect(qualification).toContain('"$GITHUB_EVENT_PATH"');
+    expect(qualification).toContain('"$artifacts_path"');
     expect(qualification).toContain('"$GITHUB_OUTPUT"');
 
     const automatic = publication.jobs.publish_modal_benchmark!;
@@ -1103,6 +1105,12 @@ describe("public Modal benchmark configuration", () => {
     expect(finalGate.run).toContain('[ "$CI_EVENT_NAME" = push ]');
     expect(finalGate.run).toContain('[ "$CI_REF_NAME" != "$CI_DEFAULT_BRANCH" ]');
     expect(finalGate.run).toContain("not blocking non-default branch smoke gate");
+    expect(finalGate.run).toContain("describe-smoke-soft-fail.mjs --json");
+    expect(finalGate.run).toContain('--ref "$CI_REF_NAME"');
+    expect(finalGate.run).toContain(".blocks_gate == true");
+    expect(finalGate.run).toContain(".scoring_ready_required == true");
+    expect(finalGate.run).toContain("blocking validation-ref smoke gate because scoring readiness is required");
+    expect(finalGate.run).toContain("not blocking validation-ref smoke gate because scoring readiness was validated");
     expect(finalGate.run).toContain("exit 1");
 
     // The soft-fail rule lives in exactly one jq filter, and the gate applies

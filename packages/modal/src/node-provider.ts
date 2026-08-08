@@ -23,6 +23,7 @@ import {
   type Volume
 } from "modal";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
+import { getOrCreateModalV2Volume, type ModalV2VolumeClient } from "./volume.js";
 
 const PROVIDER_ID = "ultrafuzz-modal-node";
 const REMOTE_PROJECT_ARCHIVE = "/tmp/ultrafuzz-node-project.tgz";
@@ -161,6 +162,11 @@ interface ModalNodeClient {
     fromName(name: string, params: { createIfMissing: boolean }): Promise<Volume>;
     delete(name: string): Promise<void>;
   };
+  // Required by getOrCreateModalV2Volume. Every node sandbox in a run mounts the
+  // same named volume at /data, so the filesystem version must be pinned rather
+  // than left to whatever the control plane defaults to.
+  cpClient: ModalV2VolumeClient["cpClient"];
+  environmentName: ModalV2VolumeClient["environmentName"];
   secrets: {
     fromObject(values: Record<string, string>): Promise<Secret>;
   };
@@ -215,7 +221,9 @@ async function runModalNodeSandbox(
       input.execution_generation,
       modalNodeDispatchFingerprint(input)
     );
-    const volume = await client.volumes.fromName(modalNodeVolumeName(request.runId), { createIfMissing: true });
+    const volume = await getOrCreateModalV2Volume(client, modalNodeVolumeName(request.runId), {
+      createIfMissing: true
+    });
     sandbox = await findLiveSandbox(client, app, tags);
     let result: ModalNodeResult | undefined;
     if (sandbox === undefined) {

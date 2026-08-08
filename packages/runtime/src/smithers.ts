@@ -20,12 +20,20 @@ import { invariantPropertyPrioritySelection, resolveExecutionResources, type Res
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
+import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
 import { renderRuntimeTemplate } from "./runtime-template.js";
+import {
+  acquireSmithersExecutableAnchor,
+  bindSmithersExecutableCapability,
+  smithersExecutableCapability,
+  type SmithersExecutableAnchor
+} from "./smithers-executable-capability.js";
 import {
   assertSmithersPackageManifest,
   migrateLegacySmithersPackageManifest,
   SMITHERS_ORCHESTRATOR_BIN_PATH,
-  SMITHERS_ORCHESTRATOR_VERSION
+  SMITHERS_ORCHESTRATOR_VERSION,
+  smithersDependencyInstallArgs
 } from "./smithers-package.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
 import { DEFERRED_PROMPT_TEMPLATE_DIR, sha256Stable } from "./utils.js";
@@ -834,11 +842,29 @@ export async function streamSmithersCommand(input: {
       stderr: ""
     };
   }
-  await ensureSmithersDependencies(input.projectRoot, input.env, { signal: input.signal });
-  const child = spawn(smithersExecutable(input.projectRoot, input.env), command, {
-    cwd: input.projectRoot,
-    env: smithersCommandEnv(input.projectRoot, input.env),
-    stdio: ["ignore", "pipe", "pipe"]
+  const commandEnvironment = await prepareSmithersExecutableEnvironment(input.projectRoot, input.env, {
+    signal: input.signal
+  });
+  const executableAnchor = acquireSmithersExecutableAnchor(commandEnvironment);
+  const child = (() => {
+    try {
+      return spawn(
+        executableAnchor?.executable ?? smithersExecutable(input.projectRoot, commandEnvironment),
+        [...(executableAnchor?.argumentPrefix ?? []), ...command],
+        {
+          cwd: input.projectRoot,
+          env: smithersCommandEnv(input.projectRoot, commandEnvironment),
+          stdio: ["ignore", "pipe", "pipe"]
+        }
+      );
+    } catch (error) {
+      assertAndCloseSmithersExecutableAnchor(executableAnchor);
+      throw error;
+    }
+  })();
+  const childClosed = new Promise<void>((resolve) => {
+    child.once("error", () => resolve());
+    child.once("close", () => resolve());
   });
   const reader = createInterface({ input: child.stdout, crlfDelay: Number.POSITIVE_INFINITY });
   let lines = 0;
@@ -932,10 +958,17 @@ export async function streamSmithersCommand(input: {
       stderr: redactedEvidenceText(stderr)
     };
   } finally {
-    input.signal?.removeEventListener("abort", onAbort);
-    stopStreaming();
-    if (killTimer !== undefined) {
-      clearTimeout(killTimer);
+    try {
+      input.signal?.removeEventListener("abort", onAbort);
+      stopStreaming();
+      // The descriptor paths belong to this controller process. Keep them open
+      // until a stopped or failed child can no longer resolve either path.
+      await childClosed;
+      if (killTimer !== undefined) {
+        clearTimeout(killTimer);
+      }
+    } finally {
+      assertAndCloseSmithersExecutableAnchor(executableAnchor);
     }
   }
 }
@@ -1049,7 +1082,7 @@ export async function runSmithersLifecycleCommand(input: {
   force?: boolean;
   retryFailed?: boolean;
   label?: string;
-  resumeRecovery?: {
+  relaunchPaths?: {
     runRoot: string;
     inputPath: string;
     logsDir: string;
@@ -1066,19 +1099,33 @@ export async function runSmithersLifecycleCommand(input: {
   recoveredMissingRun?: boolean;
   alreadyRunning?: boolean;
 }> {
+  // Every `up` invocation has to name the run-scoped log directory. Without `--log-dir` the
+  // orchestrator falls back to `<projectRoot>/.smithers/executions/<runId>/logs`, so a relaunched
+  // run stops appending to `<runRoot>/smithers/logs/stream.ndjson` and the `NodeFailed` events for
+  // every attempt after the first — the only record carrying a node's real error payload — land
+  // outside the run directory the evidence layout owns.
+  const workflowLogDirArgs = (): readonly string[] => {
+    const paths = input.relaunchPaths;
+    if (paths === undefined) {
+      return [];
+    }
+    assertPathInside(paths.runRoot, paths.logsDir, "workflow log directory");
+    fs.mkdirSync(paths.logsDir, { recursive: true });
+    assertNoSymlinkComponents(paths.runRoot, paths.logsDir, "workflow log directory");
+    return ["--log-dir", paths.logsDir];
+  };
+
   let preResumeStderr = "";
-  if (input.action === "resume" && input.resumeRecovery !== undefined) {
+  if (input.action === "resume" && input.relaunchPaths !== undefined) {
     const inspection = await runSmithersInspectionCommand({
       args: ["inspect", input.smithersRunId, "--format", "json"],
       projectRoot: input.projectRoot,
       env: input.env
     });
     if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND") || smithersSnapshotHasMissingRunHistory(inspection)) {
-      assertRegularFileInside(input.resumeRecovery.runRoot, input.resumeRecovery.inputPath, "persisted workflow input");
-      assertPathInside(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
-      fs.mkdirSync(input.resumeRecovery.logsDir, { recursive: true });
-      assertNoSymlinkComponents(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
-      const inputJson = fs.readFileSync(input.resumeRecovery.inputPath, "utf8");
+      assertRegularFileInside(input.relaunchPaths.runRoot, input.relaunchPaths.inputPath, "persisted workflow input");
+      const recoveryLogDirArgs = workflowLogDirArgs();
+      const inputJson = fs.readFileSync(input.relaunchPaths.inputPath, "utf8");
       const recoveryCommand = [
         "up",
         input.workflowPath,
@@ -1088,8 +1135,7 @@ export async function runSmithersLifecycleCommand(input: {
         ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
         "--root",
         input.projectRoot,
-        "--log-dir",
-        input.resumeRecovery.logsDir,
+        ...recoveryLogDirArgs,
         "--input",
         inputJson,
         "--format",
@@ -1103,7 +1149,7 @@ export async function runSmithersLifecycleCommand(input: {
         environmentVariableNames: input.environmentVariableNames,
         keepWorkspaces: input.keepWorkspaces
       });
-      writeJsonDurable(path.join(path.dirname(input.resumeRecovery.inputPath), "recovery-submission.json"), {
+      writeJsonDurable(path.join(path.dirname(input.relaunchPaths.inputPath), "recovery-submission.json"), {
         schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
         smithers_run_id: input.smithersRunId,
         recovery: "missing-workflow-run",
@@ -1172,13 +1218,11 @@ export async function runSmithersLifecycleCommand(input: {
         smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED") &&
         !isCompatibleSmithersRunId(input.smithersRunId)
       ) {
-        const resumeRecovery = input.resumeRecovery;
-        assertRegularFileInside(resumeRecovery.runRoot, resumeRecovery.inputPath, "persisted workflow input");
-        assertPathInside(resumeRecovery.runRoot, resumeRecovery.logsDir, "workflow log directory");
-        fs.mkdirSync(resumeRecovery.logsDir, { recursive: true });
-        assertNoSymlinkComponents(resumeRecovery.runRoot, resumeRecovery.logsDir, "workflow log directory");
+        const relaunchPaths = input.relaunchPaths;
+        assertRegularFileInside(relaunchPaths.runRoot, relaunchPaths.inputPath, "persisted workflow input");
+        const replacementLogDirArgs = workflowLogDirArgs();
         const replacementRunId = compatibleRecoveryRunId(input.smithersRunId);
-        const replacementInputJson = fs.readFileSync(resumeRecovery.inputPath, "utf8");
+        const replacementInputJson = fs.readFileSync(relaunchPaths.inputPath, "utf8");
         const replacementArgs = (adoptExisting: boolean) => [
           "up",
           input.workflowPath,
@@ -1190,8 +1234,7 @@ export async function runSmithersLifecycleCommand(input: {
           ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
           "--root",
           input.projectRoot,
-          "--log-dir",
-          resumeRecovery.logsDir,
+          ...replacementLogDirArgs,
           "--input",
           replacementInputJson,
           "--format",
@@ -1226,7 +1269,7 @@ export async function runSmithersLifecycleCommand(input: {
           });
           appliedRecovery = "incompatible-workflow-run-id-adopted";
         }
-        writeJsonDurable(path.join(path.dirname(resumeRecovery.inputPath), "recovery-submission.json"), {
+        writeJsonDurable(path.join(path.dirname(relaunchPaths.inputPath), "recovery-submission.json"), {
           schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
           smithers_run_id: replacementRunId,
           recovery: appliedRecovery,
@@ -1242,9 +1285,9 @@ export async function runSmithersLifecycleCommand(input: {
 
   if (input.action === "resume" && input.resetNode !== undefined) {
     const resetMarkerPath =
-      input.resumeRecovery === undefined
+      input.relaunchPaths === undefined
         ? undefined
-        : path.join(path.dirname(input.resumeRecovery.inputPath), "reset-node-applied.json");
+        : path.join(path.dirname(input.relaunchPaths.inputPath), "reset-node-applied.json");
     let resetStderr = "";
     if (!resetNodeMarkerMatches(resetMarkerPath, input.smithersRunId, input.resetNode)) {
       const resetResult = await execSmithersCli({
@@ -1274,7 +1317,7 @@ export async function runSmithersLifecycleCommand(input: {
           node_id: input.resetNode,
           applied_at: appliedAt
         });
-        writeJsonDurable(path.join(path.dirname(input.resumeRecovery!.inputPath), "cloud-execution-generation.json"), {
+        writeJsonDurable(path.join(path.dirname(input.relaunchPaths!.inputPath), "cloud-execution-generation.json"), {
           schema_version: "ultrafuzz.cloud.execution-generation.v1",
           generation: crypto.randomUUID(),
           reset_node: input.resetNode,
@@ -1295,6 +1338,7 @@ export async function runSmithersLifecycleCommand(input: {
           "--force",
           "--detach",
           ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+          ...workflowLogDirArgs(),
           "--format",
           "json",
           ...supervisorCommandArgs(input.controllerLeaseSeconds)
@@ -1356,6 +1400,7 @@ export async function runSmithersLifecycleCommand(input: {
       "--force",
       "--detach",
       ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+      ...workflowLogDirArgs(),
       "--format",
       "json",
       ...supervisorCommandArgs(input.controllerLeaseSeconds)
@@ -1387,6 +1432,7 @@ export async function runSmithersLifecycleCommand(input: {
           ...(input.force === true ? ["--force"] : []),
           "--detach",
           ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+          ...workflowLogDirArgs(),
           "--format",
           "json",
           ...supervisorCommandArgs(input.controllerLeaseSeconds)
@@ -1613,21 +1659,30 @@ async function execSmithersCli(input: {
 }): Promise<{ stdout: string; stderr: string; command: string[]; exitCode: number }> {
   const command = [...input.args];
   const executionDeadline = input.timeoutMs === undefined ? undefined : Date.now() + input.timeoutMs;
-  await ensureSmithersDependencies(input.projectRoot, input.env, {
+  const commandEnvironment = await prepareSmithersExecutableEnvironment(input.projectRoot, input.env, {
     signal: input.signal,
     timeoutMs: input.timeoutMs
   });
   const commandTimeoutMs =
     executionDeadline === undefined ? undefined : Math.max(1, Math.ceil(executionDeadline - Date.now()));
-  const executable = smithersExecutable(input.projectRoot, input.env);
+  const executableAnchor = acquireSmithersExecutableAnchor(commandEnvironment);
   try {
-    const { stdout, stderr } = await execFileAsync(executable, command, {
-      cwd: input.projectRoot,
-      env: smithersCommandEnv(input.projectRoot, input.env, input.environmentVariableNames, input.keepWorkspaces),
-      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-      ...(commandTimeoutMs === undefined ? {} : { timeout: commandTimeoutMs })
-    });
+    const { stdout, stderr } = await execFileAsync(
+      executableAnchor?.executable ?? smithersExecutable(input.projectRoot, commandEnvironment),
+      [...(executableAnchor?.argumentPrefix ?? []), ...command],
+      {
+        cwd: input.projectRoot,
+        env: smithersCommandEnv(
+          input.projectRoot,
+          commandEnvironment,
+          input.environmentVariableNames,
+          input.keepWorkspaces
+        ),
+        maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+        ...(commandTimeoutMs === undefined ? {} : { timeout: commandTimeoutMs })
+      }
+    );
     return { stdout, stderr, command: smithersDisplayCommand(command), exitCode: 0 };
   } catch (error) {
     const record =
@@ -1641,6 +1696,8 @@ async function execSmithersCli(input: {
       };
     }
     throw error;
+  } finally {
+    assertAndCloseSmithersExecutableAnchor(executableAnchor);
   }
 }
 
@@ -1746,6 +1803,28 @@ function truncateDiagnosticText(value: string): string {
   return value.length > limit ? `${value.slice(0, limit)}\n[truncated ${value.length - limit} bytes]` : value;
 }
 
+async function prepareSmithersExecutableEnvironment(
+  projectRoot: string,
+  env: Record<string, string | undefined> | undefined,
+  control: { signal?: AbortSignal; timeoutMs?: number } = {}
+): Promise<Record<string, string | undefined> | undefined> {
+  await ensureSmithersDependencies(projectRoot, env, control);
+  if (smithersExecutableCapability(env) !== undefined || explicitSmithersExecutable(env) !== undefined) {
+    return env;
+  }
+  const local = localSmithersExecutable(projectRoot);
+  if (!fs.existsSync(local)) return env;
+
+  // Dependency verification above pins the package version, validates the
+  // command shim, and applies every compatibility patch before this authority
+  // is granted. Execute the package's real script rather than attesting a
+  // platform-specific .bin shim, which also keeps the capability portable to
+  // Windows where the shim is a command file without a shebang.
+  const packageRoot = resolveInstalledSmithersPackageRoot(projectRoot);
+  const executable = path.join(packageRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
+  return bindSmithersExecutableCapability({ ...(env ?? {}) }, executable);
+}
+
 async function ensureSmithersDependencies(
   projectRoot: string,
   env: Record<string, string | undefined> | undefined,
@@ -1802,26 +1881,20 @@ async function ensureSmithersDependencies(
       repairCause = error;
     }
   }
-  await execFileAsync(
-    "npm",
-    [
-      "install",
-      "--prefix",
-      packageRoot,
-      "--ignore-scripts",
-      "--package-lock=false",
-      "--registry=https://registry.npmjs.org",
-      "--no-audit",
-      "--no-fund",
-      "--loglevel=error"
-    ],
-    {
-      cwd: projectRoot,
-      env: smithersCommandEnv(projectRoot, env),
-      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
-      ...(control.signal === undefined ? {} : { signal: control.signal }),
-      ...(control.timeoutMs === undefined ? {} : { timeout: control.timeoutMs })
-    }
+  await withTransientNpmRegistryRetry(
+    () =>
+      execFileAsync(
+        "npm",
+        smithersDependencyInstallArgs({ prefix: packageRoot, registry: "https://registry.npmjs.org" }),
+        {
+          cwd: projectRoot,
+          env: smithersCommandEnv(projectRoot, env),
+          maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
+          ...(control.signal === undefined ? {} : { signal: control.signal }),
+          ...(control.timeoutMs === undefined ? {} : { timeout: control.timeoutMs })
+        }
+      ),
+    control.signal === undefined ? {} : { signal: control.signal }
   );
   const validationError = installedSmithersValidationError(projectRoot);
   if (validationError !== undefined) {
@@ -2032,6 +2105,15 @@ function resolveInstalledSmithersPackageRoot(projectRoot: string): string {
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertAndCloseSmithersExecutableAnchor(anchor: SmithersExecutableAnchor | undefined): void {
+  if (anchor === undefined) return;
+  try {
+    anchor.assertCurrent();
+  } finally {
+    anchor.close();
+  }
 }
 
 function smithersExecutable(projectRoot: string, env: Record<string, string | undefined> | undefined): string {

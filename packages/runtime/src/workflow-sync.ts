@@ -20,6 +20,7 @@ import {
   layoutForRunRoot,
   normalizeFindings,
   manifestDigest,
+  normalizeNodeAttemptFailureMessage,
   queryNodeAttempts,
   replayEvents,
   readRunState,
@@ -57,6 +58,7 @@ import { refreshVerifiedArtifactDigest, verifyRequiredArtifactsForAttempt } from
 import {
   ArtifactReconciliationInterruptedError,
   isRetryableArtifactReconciliationError,
+  onlyTransientArtifactDiagnostics,
   reconcileRequiredArtifactsFromWorkspace
 } from "./artifact-reconciliation.js";
 import {
@@ -175,6 +177,7 @@ interface TerminalWorkflowAttempt {
   finishedAt: string;
   outcome: NodeAttemptOutcome;
   failureCategory?: NodeAttemptFailureCategory;
+  failureMessage?: string;
   executorRetryId?: string;
   checkpointGenerationId?: string;
   workflowExecutionId?: string;
@@ -2138,16 +2141,6 @@ function artifactReconciliationGraceExpired(grace: ArtifactReconciliationGrace, 
   return nowMs >= Date.parse(grace.deadline_at) || grace.attempts >= ARTIFACT_RECONCILIATION_MAX_ATTEMPTS;
 }
 
-function onlyTransientArtifactDiagnostics(diagnostics: RuntimeDiagnostic[]): boolean {
-  const transientCodes = new Set([
-    "REQUIRED_ARTIFACT_MISSING",
-    "REQUIRED_ARTIFACT_EMPTY",
-    "GENERATED_TEST_FILE_MISSING",
-    "GENERATED_TEST_FILE_EMPTY"
-  ]);
-  return diagnostics.length > 0 && diagnostics.every((diagnostic) => transientCodes.has(diagnostic.code));
-}
-
 async function finalizeTerminalTask(input: {
   layout: RunLayout;
   node: PlannedGraphNode;
@@ -2287,6 +2280,12 @@ async function finalizeTerminalTask(input: {
     !artifactReconciliationGraceExpired(grace, input.nowMs);
 
   if (gracePending) {
+    // Carry the gate's non-fatal diagnostics through. Two of them fire only on
+    // the pass that actually mutates -- a re-sealed verification marker and a
+    // sanitized lens output -- and node patches persist no diagnostics, so
+    // returning early without them is the only sync that would ever have
+    // reported a security-relevant edit, and it would report nothing.
+    diagnostics.push(...gate.diagnostics.filter((diagnostic) => diagnostic.severity !== "error"));
     diagnostics.push({
       code: "REQUIRED_ARTIFACT_GRACE_PENDING",
       message:
@@ -2613,6 +2612,7 @@ function appendTerminalTaskAttempts(input: {
     }
     let outcome = attempt.outcome;
     let failureCategory = attempt.failureCategory;
+    let failureMessage = attempt.failureMessage;
     let outputDigest = outcome === "succeeded" ? outputManifestDigest : undefined;
     if (
       attempt === currentTerminalAttempt &&
@@ -2626,6 +2626,9 @@ function appendTerminalTaskAttempts(input: {
     } else if (outcome === "succeeded" && outputDigest === undefined) {
       outcome = "failed";
       failureCategory = "artifact-validation";
+    }
+    if (attempt === currentTerminalAttempt && ["failed", "timed-out", "canceled"].includes(outcome)) {
+      failureMessage = input.finalization.lastError ?? failureMessage;
     }
     const reuseSource =
       outcome === "reused"
@@ -2644,6 +2647,8 @@ function appendTerminalTaskAttempts(input: {
     }
     const reuse =
       reuseSource === undefined ? undefined : { status: "reused" as const, sourceAttemptId: reuseSource.attemptId };
+    const normalizedFailureMessage =
+      failureMessage === undefined ? undefined : normalizeNodeAttemptFailureMessage(failureMessage);
     const appendInput: AppendNodeAttemptInput = {
       nodeId: input.task.concreteNodeId,
       strategyAttemptId: input.task.attemptId,
@@ -2657,7 +2662,8 @@ function appendTerminalTaskAttempts(input: {
       inputManifestDigest,
       ...(outputDigest === undefined ? {} : { outputManifestDigest: outputDigest }),
       ...(reuse === undefined ? {} : { reuse }),
-      ...(failureCategory === undefined ? {} : { failureCategory })
+      ...(failureCategory === undefined ? {} : { failureCategory }),
+      ...(normalizedFailureMessage === undefined ? {} : { failureMessage: normalizedFailureMessage })
     };
     const preparedAttempt = {
       isCurrent: attempt === currentTerminalAttempt,
@@ -2742,6 +2748,7 @@ function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAtte
       current.startedSequence ??= event.sequence;
       current.outcome = terminal.outcome;
       current.failureCategory = terminal.failureCategory;
+      current.failureMessage = terminal.failureMessage;
     }
   }
   return attempts
@@ -2769,20 +2776,30 @@ function latestWorkflowAttempt(
   return undefined;
 }
 
-function terminalOutcomeForEvent(
-  event: WorkflowEvent
-): { outcome: NodeAttemptOutcome; failureCategory?: NodeAttemptFailureCategory } | undefined {
+function terminalOutcomeForEvent(event: WorkflowEvent):
+  | {
+      outcome: NodeAttemptOutcome;
+      failureCategory?: NodeAttemptFailureCategory;
+      failureMessage?: string;
+    }
+  | undefined {
   switch (event.type) {
     case "NodeFinished":
       return { outcome: "succeeded" };
     case "TaskHeartbeatTimeout":
-      return { outcome: "timed-out", failureCategory: "timeout" };
-    case "NodeFailed":
+      return {
+        outcome: "timed-out",
+        failureCategory: "timeout",
+        failureMessage: stringField(event.payload, "message") ?? "workflow task timed out"
+      };
+    case "NodeFailed": {
+      const failureMessage = errorText(event.payload?.error);
       return errorLooksLikeTimeout(event.payload?.error)
-        ? { outcome: "timed-out", failureCategory: "timeout" }
-        : { outcome: "failed", failureCategory: "executor-error" };
+        ? { outcome: "timed-out", failureCategory: "timeout", ...(failureMessage ? { failureMessage } : {}) }
+        : { outcome: "failed", failureCategory: "executor-error", ...(failureMessage ? { failureMessage } : {}) };
+    }
     case "NodeCancelled":
-      return { outcome: "canceled", failureCategory: "canceled" };
+      return { outcome: "canceled", failureCategory: "canceled", failureMessage: "workflow task was cancelled" };
     case "NodeSkipped":
       return { outcome: "skipped" };
     default:

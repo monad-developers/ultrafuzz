@@ -32,6 +32,11 @@ const TOP_LEVEL_RUN_FILES = [
 
 const INCLUDED_DIRECTORIES = ["artifacts", "review", "events.index"] as const;
 
+// Engine logs carry the per-attempt retry and validation evidence that explains
+// why a node failed, which nothing else in the run root records. They ship under
+// a neutral archive prefix so the bundle does not name the orchestration engine.
+const RENAMED_DIRECTORIES = [{ source: "smithers/logs", archive: "engine-logs" }] as const;
+
 interface BundleData {
   zip_path: string;
   bytes: number;
@@ -106,7 +111,11 @@ export default class ReportBundle extends Command {
         schema_version: "ultrafuzz.report_bundle.v1",
         run_id: runId,
         created_at: new Date().toISOString(),
-        included_roots: [...TOP_LEVEL_RUN_FILES, ...INCLUDED_DIRECTORIES],
+        included_roots: [
+          ...TOP_LEVEL_RUN_FILES,
+          ...INCLUDED_DIRECTORIES,
+          ...RENAMED_DIRECTORIES.map((entry) => entry.archive)
+        ],
         excluded_roots: ["workspaces"],
         excluded_patterns: ["artifacts/final-report/report.json.pre-*"],
         entry_count_without_manifest: files.length
@@ -119,7 +128,11 @@ export default class ReportBundle extends Command {
         bytes: fs.statSync(outputPath).size,
         sha256: sha256File(outputPath),
         entry_count: files.length + 1,
-        included_roots: [...TOP_LEVEL_RUN_FILES, ...INCLUDED_DIRECTORIES],
+        included_roots: [
+          ...TOP_LEVEL_RUN_FILES,
+          ...INCLUDED_DIRECTORIES,
+          ...RENAMED_DIRECTORIES.map((entry) => entry.archive)
+        ],
         excluded_roots: ["workspaces"]
       };
 
@@ -202,14 +215,30 @@ function collectBundleFiles(runRoot: string, diagnostics: RuntimeDiagnostic[]): 
     }
   }
 
+  for (const renamed of RENAMED_DIRECTORIES) {
+    const absoluteDirectory = path.join(runRoot, ...renamed.source.split("/"));
+    if (fs.existsSync(absoluteDirectory)) {
+      collectDirectory(runRoot, absoluteDirectory, files, diagnostics, {
+        sourceRoot: absoluteDirectory,
+        archiveRoot: renamed.archive
+      });
+    }
+  }
+
   return files.sort((left, right) => left.archivePath.localeCompare(right.archivePath));
+}
+
+interface ArchiveRename {
+  sourceRoot: string;
+  archiveRoot: string;
 }
 
 function collectDirectory(
   runRoot: string,
   absoluteDirectory: string,
   files: BundleFile[],
-  diagnostics: RuntimeDiagnostic[]
+  diagnostics: RuntimeDiagnostic[],
+  rename?: ArchiveRename
 ): void {
   assertPathInside(runRoot, absoluteDirectory, "bundle directory");
   assertNoSymlinkComponents(runRoot, absoluteDirectory, "bundle directory");
@@ -220,11 +249,14 @@ function collectDirectory(
       continue;
     }
     if (entry.isDirectory()) {
-      collectDirectory(runRoot, absolutePath, files, diagnostics);
+      collectDirectory(runRoot, absolutePath, files, diagnostics, rename);
       continue;
     }
     if (entry.isFile()) {
-      const archivePath = displayRelativePath(runRoot, absolutePath);
+      const archivePath =
+        rename === undefined
+          ? displayRelativePath(runRoot, absolutePath)
+          : `${rename.archiveRoot}/${displayRelativePath(rename.sourceRoot, absolutePath)}`;
       if (shouldExcludeArchivePath(archivePath)) {
         continue;
       }

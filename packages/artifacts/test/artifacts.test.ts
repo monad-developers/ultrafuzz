@@ -16,6 +16,8 @@ import {
   normalizeFindings,
   normalizeSafeRelativePath,
   manifestDigest,
+  MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
+  normalizeNodeAttemptFailureMessage,
   publishFileDurableExclusive,
   queryNodeAttempts,
   queryEvents,
@@ -200,7 +202,8 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
     finishedAt: "2026-07-18T10:01:00.000Z",
     outcome: "failed" as const,
     inputManifestDigest: inputDigest,
-    failureCategory: "executor-error" as const
+    failureCategory: "executor-error" as const,
+    failureMessage: `executor failed with token=private-secret ${"🙂".repeat(600)}`
   };
 
   const first = appendNodeAttempt(layout, firstInput);
@@ -208,6 +211,10 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
   assert.equal(first.appended, true);
   assert.equal(replayedFirst.appended, false);
   assert.equal(replayedFirst.entry.attempt_id, first.entry.attempt_id);
+  assert.equal(first.entry.failure_message, replayedFirst.entry.failure_message);
+  assert.ok(Buffer.byteLength(first.entry.failure_message ?? "", "utf8") <= MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES);
+  assert.match(first.entry.failure_message ?? "", /<redacted>/u);
+  assert.doesNotMatch(first.entry.failure_message ?? "", /private-secret/u);
 
   const second = appendNodeAttempt(layout, {
     ...firstInput,
@@ -220,7 +227,8 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
     finishedAt: "2026-07-18T10:03:00.000Z",
     outcome: "succeeded",
     outputManifestDigest: outputDigest,
-    failureCategory: undefined
+    failureCategory: undefined,
+    failureMessage: undefined
   });
   appendNodeAttempt(layout, {
     ...firstInput,
@@ -235,7 +243,8 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
     outcome: "reused",
     reuse: { status: "reused", sourceAttemptId: second.entry.attempt_id },
     outputManifestDigest: outputDigest,
-    failureCategory: undefined
+    failureCategory: undefined,
+    failureMessage: undefined
   });
 
   assert.equal(queryNodeAttempts(layout, { checkpointGenerationId: "checkpoint-1" }).length, 1);
@@ -256,6 +265,7 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
     controller_invocations: 2
   });
   assert.equal(fs.readFileSync(layout.attemptLedgerPath, "utf8").trim().split("\n").length, 3);
+  assert.equal(normalizeNodeAttemptFailureMessage("  first\nsecond  "), "first second");
 });
 
 test("node attempt ledger preserves human dynamic producer IDs", () => {
@@ -909,6 +919,67 @@ test("initial dynamic findings round-trip through the downstream dedupe provenan
 
   assert.deepEqual(deduped.findings[0]!.source_nodes, ["dynamic:threat:liquidation:overdue"]);
   assert.equal(deduped.findings[0]!.source_node_id, "dynamic:threat:liquidation:overdue");
+});
+
+test("findings normalize the house-style schema_version alias to the canonical literal", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
+  const nodeDir = getNodeArtifactDir(layout, "stateful-invariant-campaign", { create: true });
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        schema_version: "ultrafuzz.finding.v1",
+        id: "failure-1",
+        title: "Harness drawn-rate sync assertion ignores elapsed-time precondition",
+        status: "confirmed",
+        severity_guess: "low",
+        confidence: "high",
+        summary: "The stored drawn rate lags the recalculated one after time advances."
+      }
+    ])
+  );
+
+  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "stateful-invariant-campaign" });
+
+  assert.equal(report.count, 1);
+  assert.equal(report.findings[0]!.schema_version, "1.0");
+  assert.equal(report.findings[0]!.id, "failure-1");
+  assert.equal(readFindings(nodeDir)[0]!.schema_version, "1.0", "the alias is rewritten on disk, not preserved");
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([{ schema_version: "ultrafuzz.finding.v2", id: "failure-1", title: "t", status: "confirmed" }])
+  );
+  assert.throws(
+    () => normalizeFindings({ artifactDir: nodeDir, nodeId: "stateful-invariant-campaign" }),
+    /unsupported schema_version/u
+  );
+});
+
+test("findings that omit schema_version normalize to the canonical literal", () => {
+  // The contract no longer requires the field, so the normalizer is what makes every finding on disk
+  // carry the same version regardless of whether the producer wrote one.
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
+  const nodeDir = getNodeArtifactDir(layout, "stateful-invariant-campaign", { create: true });
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        id: "failure-1",
+        title: "Harness drawn-rate sync assertion ignores elapsed-time precondition",
+        status: "confirmed",
+        severity_guess: "low",
+        confidence: "high",
+        summary: "The stored drawn rate lags the recalculated one after time advances."
+      }
+    ])
+  );
+
+  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "stateful-invariant-campaign" });
+
+  assert.equal(report.count, 1);
+  assert.equal(report.findings[0]!.schema_version, "1.0");
+  assert.equal(readFindings(nodeDir)[0]!.schema_version, "1.0", "an absent version is filled in on disk");
 });
 
 test("findings normalize bounded numeric confidence to its canonical string representation", () => {
