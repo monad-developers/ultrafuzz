@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { layoutForRunRoot } from "@ultrafuzz/artifacts";
 import { evalRunRoot } from "@ultrafuzz/evals";
 
 import {
@@ -26,9 +27,14 @@ function writeRunRoot(target: string, runId: string, options: { linked: boolean 
   fs.mkdirSync(runRoot, { recursive: true });
   fs.writeFileSync(path.join(runRoot, "state.json"), JSON.stringify({ run_id: runId, nodes: {} }));
   if (options.linked) {
-    // The workflow link `resume` requires. Written right after the workflow compiles and before it is
-    // submitted, so its presence is what separates "failed to submit" from "died while compiling".
-    fs.writeFileSync(path.join(runRoot, "run-metadata.json"), JSON.stringify({ workflow: { run_id: "wf-1" } }));
+    // The workflow link `resume` requires, at the path the RUNTIME writes it to. Derived from
+    // `layoutForRunRoot`, never spelled out: an earlier revision invented the filename here and in the
+    // source, so the suite agreed with the bug and all tests passed while every real run root was
+    // misclassified as unresumable -- and therefore deletable.
+    fs.writeFileSync(
+      layoutForRunRoot(runRoot).runMetadataPath,
+      JSON.stringify({ workflow: { run_id: "wf-1", path: "workflow.tsx" } })
+    );
   }
   return runRoot;
 }
@@ -203,7 +209,7 @@ describe("Modal durable evaluation resume", () => {
     expect(found.kind).toBe("not-started");
     // Naming it is the point: eval run ids are deterministic and `runEvalSuite` refuses to reuse one, so a
     // caller that restarts without clearing this hits EVAL_RUN_ALREADY_EXISTS forever.
-    expect(found.kind === "not-started" && found.staleEvalRunId).toBe(value.evalRunId);
+    expect(found.kind === "not-started" && found.staleEvalRunIds).toEqual([value.evalRunId]);
   });
 
   it("classifies a journal that was never written, rather than crashing on it (#378)", async () => {
@@ -226,7 +232,7 @@ describe("Modal durable evaluation resume", () => {
     // A fresh sandbox must not be mistaken for a corrupt one.
     const found = await findModalResumeWorkspace(workRoot);
     expect(found.kind).toBe("not-started");
-    expect(found.kind === "not-started" && found.staleEvalRunId).toBeUndefined();
+    expect(found.kind === "not-started" && found.staleEvalRunIds).toBeUndefined();
   });
 
   it("still refuses a symlinked control even when it holds no evaluation run", async () => {
@@ -248,7 +254,7 @@ describe("Modal durable evaluation resume", () => {
     fs.writeFileSync(evalRoot, "not a directory\n");
     const found = await findModalResumeWorkspace(value.workRoot);
     expect(found.kind).toBe("not-started");
-    expect(found.kind === "not-started" && found.staleEvalRunId).toBeUndefined();
+    expect(found.kind === "not-started" && found.staleEvalRunIds).toBeUndefined();
     expect(found.kind === "not-started" && found.staleRunRootIds).toBeUndefined();
   });
 
@@ -342,7 +348,7 @@ describe("Modal durable evaluation resume", () => {
     );
     const found = await findModalResumeWorkspace(value.workRoot);
     expect(found.kind).toBe("not-started");
-    const stale = found.kind === "not-started" ? found.staleEvalRunId : undefined;
+    const stale = found.kind === "not-started" ? found.staleEvalRunIds?.[0] : undefined;
     expect(stale).toBeDefined();
     // This is the coupling that made the first attempt at this fix a no-op. `runEvalSuite` throws
     // EVAL_RUN_ALREADY_EXISTS when `evalRunRoot(control, evalRunId)` exists, and eval run ids are
@@ -353,6 +359,52 @@ describe("Modal durable evaluation resume", () => {
     expect(fs.existsSync(refusedByRunner)).toBe(true);
     fs.rmSync(refusedByRunner, { recursive: true, force: true });
     expect(fs.existsSync(refusedByRunner)).toBe(false);
+  });
+
+  it("reads the workflow link from the path the runtime actually writes it to (#378)", async () => {
+    const value = fixture();
+    fs.writeFileSync(
+      path.join(value.evalDir, "runs.jsonl"),
+      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
+    );
+    const runRoot = writeRunRoot(value.target, "durable-run-one", { linked: true });
+    // Pin the coupling itself, not just the behaviour. The metadata file is `run.json`, and the only reason
+    // this predicate is trustworthy is that it derives the path instead of naming it -- when it named it,
+    // it named it wrongly and the caller deleted every real run root.
+    expect(path.basename(layoutForRunRoot(runRoot).runMetadataPath)).toBe("run.json");
+    expect(fs.existsSync(path.join(runRoot, "run.json"))).toBe(true);
+    await expect(findModalResumeWorkspace(value.workRoot)).resolves.toMatchObject({ kind: "resumable" });
+  });
+
+  it("names an eval run directory with no eval.json for clearing (#378)", async () => {
+    const value = fixture();
+    // `runEvalSuite` creates the directory and only then writes eval.json, and it refuses to reuse an id
+    // whose DIRECTORY exists. A kill in that window leaves a directory that is not a candidate but still
+    // blocks reuse, so failing to name it wedges on EVAL_RUN_ALREADY_EXISTS just as surely.
+    fs.rmSync(path.join(value.evalDir, "eval.json"));
+    const found = await findModalResumeWorkspace(value.workRoot);
+    expect(found.kind).toBe("not-started");
+    expect(found.kind === "not-started" && found.staleEvalRunIds).toEqual([value.evalRunId]);
+  });
+
+  it("reports a linked run with no state as damage rather than deleting it (#378)", async () => {
+    const value = fixture();
+    fs.writeFileSync(
+      path.join(value.evalDir, "runs.jsonl"),
+      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
+    );
+    const runRoot = writeRunRoot(value.target, "durable-run-one", { linked: true });
+    fs.rmSync(path.join(runRoot, "state.json"));
+    // The link is written before submission, so a linked root is one a workflow may have run from. It must
+    // never be named for deletion merely because it is not resumable.
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("has no run state");
+  });
+
+  it("refuses a linked durable run that has no evaluation run to attach it to", async () => {
+    const value = fixture();
+    fs.rmSync(value.evalDir, { recursive: true });
+    writeRunRoot(value.target, "durable-run-one", { linked: true });
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("no evaluation run");
   });
 
   it("finalizes succeeded and genuine task outcomes without resetting completed nodes", async () => {

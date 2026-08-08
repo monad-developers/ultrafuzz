@@ -158,11 +158,12 @@ async function main(): Promise<void> {
         // `planRun` refuses an existing run root (`RUN_ALREADY_EXISTS`).
         //
         // This is the only destructive step, so it is bounded by what the lookup proved: it names a run root
-        // here only when that root carries no workflow link, which means `resume` could never have used it
-        // and no workflow was ever submitted from it. A run that compiled — the R54 case — is linked, and so
-        // is resumed above and never reaches this branch.
-        if (found.staleEvalRunId !== undefined) {
-          await rm(path.join(WORK_ROOT, "control", ".ultrafuzz", "evals", "runs", found.staleEvalRunId), {
+        // here after successfully reading its metadata and finding no workflow link, which means no workflow
+        // was ever submitted from it. A root that IS linked but is missing its state is reported as damage
+        // rather than named here. A run that compiled — the R54 case — is linked, so it resumes above and
+        // never reaches this branch.
+        for (const staleEvalRunId of found.staleEvalRunIds ?? []) {
+          await rm(path.join(WORK_ROOT, "control", ".ultrafuzz", "evals", "runs", staleEvalRunId), {
             recursive: true,
             force: true
           });
