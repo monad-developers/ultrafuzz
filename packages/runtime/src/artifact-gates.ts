@@ -2798,29 +2798,48 @@ function addReportJoinMismatch(
   }
 }
 
+/**
+ * Joins one campaign failure to the finding that explains it. The backend record
+ * is finalized before deduplication, so a finding legitimately explains several
+ * pre-deduplication failures: it reuses one contributing failure's ID and names
+ * the rest in `contributing_backend_failures`. `deduplicated` records which of
+ * those two joins applies, because a merged finding may cover more properties
+ * than any single contributing failure does.
+ */
+type CampaignFindingJoin = { index: number; propertyIds: string[]; deduplicated: boolean };
+
+function campaignFindingJoins(findings: Array<Record<string, unknown>>): Map<string, CampaignFindingJoin[]> {
+  const joinsByFailureId = new Map<string, CampaignFindingJoin[]>();
+  for (const [findingIndex, finding] of findings.entries()) {
+    const contributingFailureIds = stringArray(finding.contributing_backend_failures);
+    const join: CampaignFindingJoin = {
+      index: findingIndex,
+      propertyIds: stringArray(finding.property_ids),
+      deduplicated: contributingFailureIds.length > 0
+    };
+    const failureIds = new Set(contributingFailureIds);
+    if (typeof finding.id === "string") {
+      failureIds.add(finding.id);
+    }
+    for (const failureId of failureIds) {
+      joinsByFailureId.set(failureId, [...(joinsByFailureId.get(failureId) ?? []), join]);
+    }
+  }
+  return joinsByFailureId;
+}
+
 function campaignFindingReferenceDiagnostics(
   failures: Array<{ id: string; property_ids?: string[] }>,
   findings: Array<Record<string, unknown>>,
   campaignPath: string,
   findingsPath: string
 ): RuntimeDiagnostic[] {
-  const findingsById = new Map<string, Array<{ index: number; propertyIds: string[] }>>();
-  for (const [findingIndex, finding] of findings.entries()) {
-    if (typeof finding.id !== "string") {
-      continue;
-    }
-    const propertyIds = Array.isArray(finding.property_ids)
-      ? finding.property_ids.filter((propertyId): propertyId is string => typeof propertyId === "string")
-      : [];
-    const matches = findingsById.get(finding.id) ?? [];
-    matches.push({ index: findingIndex, propertyIds });
-    findingsById.set(finding.id, matches);
-  }
+  const joinsByFailureId = campaignFindingJoins(findings);
 
   const diagnostics: RuntimeDiagnostic[] = [];
   for (const [failureIndex, failure] of failures.entries()) {
     const failurePropertyIds = failure.property_ids ?? [];
-    const matchingFindings = findingsById.get(failure.id) ?? [];
+    const matchingFindings = joinsByFailureId.get(failure.id) ?? [];
     if (
       matchingFindings.length > 1 &&
       (failurePropertyIds.length > 0 || matchingFindings.some((finding) => finding.propertyIds.length > 0))
@@ -2838,17 +2857,29 @@ function campaignFindingReferenceDiagnostics(
     if (failurePropertyIds.length > 0 && matchingFinding === undefined) {
       diagnostics.push({
         code: "PROPERTY_FINDING_REFERENCE_MISSING",
-        message: `Property-derived campaign failure ${JSON.stringify(failure.id)} has no resulting finding with the same ID`,
+        message: `Property-derived campaign failure ${JSON.stringify(failure.id)} has no resulting finding carrying that ID or listing it in contributing_backend_failures`,
         severity: "error",
         source: "property-provenance",
         path: `${campaignPath}#$.failures[${failureIndex}].id`
       });
       continue;
     }
-    if (matchingFinding !== undefined && !sameStringSet(failurePropertyIds, matchingFinding.propertyIds)) {
+    if (matchingFinding === undefined) {
+      continue;
+    }
+    const propertyIdsJoin = matchingFinding.deduplicated
+      ? {
+          matches: containsEveryString(matchingFinding.propertyIds, failurePropertyIds),
+          message: `Deduplicated finding for campaign failure ${JSON.stringify(failure.id)} must carry every property_id of its contributing failures`
+        }
+      : {
+          matches: sameStringSet(failurePropertyIds, matchingFinding.propertyIds),
+          message: `Campaign failure ${JSON.stringify(failure.id)} and its resulting finding must carry the same property_ids`
+        };
+    if (!propertyIdsJoin.matches) {
       diagnostics.push({
         code: "PROPERTY_FINDING_REFERENCE_MISMATCH",
-        message: `Campaign failure ${JSON.stringify(failure.id)} and its resulting finding must carry the same property_ids`,
+        message: propertyIdsJoin.message,
         severity: "error",
         source: "property-provenance",
         path: `${findingsPath}#$[${matchingFinding.index}].property_ids`
@@ -2875,6 +2906,9 @@ function danglingCampaignFindingDiagnostics(
     if (typeof finding.id !== "string" || failureIds.has(finding.id)) {
       continue;
     }
+    if (stringArray(finding.contributing_backend_failures).some((failureId) => failureIds.has(failureId))) {
+      continue;
+    }
     const propertyIds = Array.isArray(finding.property_ids)
       ? finding.property_ids.filter((propertyId): propertyId is string => typeof propertyId === "string")
       : [];
@@ -2883,7 +2917,7 @@ function danglingCampaignFindingDiagnostics(
     }
     diagnostics.push({
       code: "PROPERTY_CAMPAIGN_REFERENCE_MISSING",
-      message: `Property-derived finding ${JSON.stringify(finding.id)} has no campaign failure with the same ID`,
+      message: `Property-derived finding ${JSON.stringify(finding.id)} has no campaign failure carrying that ID or listed in contributing_backend_failures`,
       severity: "error",
       source: "property-provenance",
       path: `${findingsPath}#$[${findingIndex}].id`
@@ -2895,6 +2929,11 @@ function danglingCampaignFindingDiagnostics(
 function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
   const rightSet = new Set(right);
   return new Set(left).size === rightSet.size && left.every((value) => rightSet.has(value));
+}
+
+function containsEveryString(container: readonly string[], required: readonly string[]): boolean {
+  const containerSet = new Set(container);
+  return required.every((value) => containerSet.has(value));
 }
 
 function readCanonicalPropertyCatalog(layout: RunLayout): {

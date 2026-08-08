@@ -3699,6 +3699,145 @@ test("campaign gate accepts non-property findings and validates property-derived
   assert.ok(unknown.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
 });
 
+test("campaign gate joins deduplicated findings to every contributing backend failure", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-dedupe" });
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-1",
+          description: "Balances remain conserved",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }]
+        },
+        {
+          id: "property-3",
+          description: "Hub assets cover spoke assets",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-3" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: []
+        },
+        {
+          property_id: "property-3",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: []
+        }
+      ]
+    })
+  );
+  const campaignId = "stateful-invariant-campaign";
+  // The backend record is finalized before deduplication, so three raw
+  // property-1 failures collapse into one finding that reuses the first
+  // contributing failure's ID.
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-3", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-4", status: "reproduced", property_ids: ["property-3"] }
+      ]
+    })
+  );
+  const deduplicatedFinding = {
+    schema_version: "1.0",
+    id: "failure-1",
+    title: "Hub total owed exceeded Hub added assets",
+    status: "reproduced",
+    severity_guess: "high",
+    confidence: "high",
+    summary: "Three Recon sequences falsify the same property.",
+    property_ids: ["property-1"],
+    contributing_backend_failures: ["failure-1", "failure-2", "failure-3"]
+  };
+  const soleFinding = {
+    schema_version: "1.0",
+    id: "failure-4",
+    title: "Hub added assets exceeded summed Spoke assets",
+    status: "reproduced",
+    severity_guess: "high",
+    confidence: "high",
+    summary: "One Recon sequence falsifies the property.",
+    property_ids: ["property-3"]
+  };
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([deduplicatedFinding, soleFinding]));
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, campaignId).ok, true);
+
+  // A raw failure no finding claims is still unexplained.
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([{ ...deduplicatedFinding, contributing_backend_failures: ["failure-1", "failure-2"] }, soleFinding])
+  );
+  const unclaimed = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(unclaimed.ok, false);
+  assert.ok(unclaimed.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING"));
+
+  // Two findings claiming the same raw failure leave the join undecidable.
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      deduplicatedFinding,
+      { ...soleFinding, contributing_backend_failures: ["failure-3", "failure-4"], property_ids: ["property-3"] }
+    ])
+  );
+  const ambiguous = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(ambiguous.ok, false);
+  assert.ok(ambiguous.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_AMBIGUOUS"));
+
+  // A deduplicated finding must still cover every contributing failure's properties.
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      {
+        ...deduplicatedFinding,
+        contributing_backend_failures: ["failure-1", "failure-2", "failure-3", "failure-4"]
+      }
+    ])
+  );
+  const dropped = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(dropped.ok, false);
+  assert.ok(dropped.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISMATCH"));
+});
+
 test("campaign gate accepts a partial dual-backend campaign where one backend saw nothing", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-partial-dual" });
   writeArtifact(

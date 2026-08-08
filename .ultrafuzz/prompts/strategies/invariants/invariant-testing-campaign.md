@@ -116,11 +116,19 @@ Use this configured invariant testing fuzzer timeout:
      deduplicated finding.
    - When an implemented invariant property caused a failure, copy its exact
      canonical ID from `implemented-properties.json` into a non-empty
-     `property_ids` array on the backend failure and resulting finding. Use the
-     same stable failure ID in the backend record and in the final deduplicated
-     finding so runtime validation can prove the joins. Omit `property_ids` for
-     setup, harness, and other failures that did not originate from a catalog
-     property. Never invent or silently drop a property reference.
+     `property_ids` array on the backend failure and resulting finding. Omit
+     `property_ids` for setup, harness, and other failures that did not
+     originate from a catalog property. Never invent or silently drop a property
+     reference.
+   - Keep the backend record's failure IDs joinable to the findings so runtime
+     validation can prove the joins. A finding that came from a single backend
+     failure reuses that failure's ID. A finding that deduplicates several
+     backend failures reuses one contributing failure's ID and lists every
+     contributing pre-deduplication failure ID, including its own, in a
+     `contributing_backend_failures` array. Every property-derived backend
+     failure must be reachable from exactly one finding by one of those two
+     joins, and a deduplicated finding's `property_ids` must cover every
+     property ID carried by its contributing failures.
 
 5. Reproduce and classify every unique failure.
    - Attempt a deterministic Foundry reproducer for every unique failure. Put
@@ -187,8 +195,10 @@ Use this exact top-level shape for the backend record:
 Record the exact backend in `fuzzer_backend` when it ran, using the literal
 string `recon` so the final report join matches; omit that field when the
 backend was unavailable. Every failure needs a non-empty `id` and `status`. Use an
-empty `failures` array when none were observed. A failure and its final
-deduplicated finding must share the same ID. Property IDs are optional only for
+empty `failures` array when none were observed. A failure and its final finding
+share the same ID unless the finding deduplicates several failures, in which
+case the finding reuses one contributing failure's ID and names all of them in
+`contributing_backend_failures`. Property IDs are optional only for
 failures not caused by an implemented catalog property. References to an
 unknown or non-implemented canonical property fail artifact validation.
 

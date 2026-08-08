@@ -258,7 +258,11 @@ and `implementation_paths` and `test_paths` arrays. The invariant campaign's
 `recon-fuzzer-results.json` uses `ultrafuzz.property-campaign.v1`; failure
 records caused by implemented catalog properties carry `property_ids`.
 Property-derived `findings.json` entries carry the same optional
-`property_ids` and use the raw failure's ID. Setup or harness findings that do
+`property_ids` and use the raw failure's ID. The backend record is finalized
+before deduplication, so a finding may explain several raw failures: it reuses
+one contributing failure's ID and lists every contributing pre-deduplication
+failure ID in `contributing_backend_failures`, and its `property_ids` must cover
+every property ID carried by those failures. Setup or harness findings that do
 not originate from a catalog property omit the field.
 
 Current invariant implementation runs also emit a `selection` object with the
