@@ -8622,7 +8622,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(
     commands,
-    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --detach --max-concurrency 8 --format json/
+    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
   );
   assert.match(
     commands,
@@ -8630,7 +8630,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --force --detach --max-concurrency 8 --format json/
+    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
   );
   assert.match(commands, /replay .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --format json/);
   assert.match(
@@ -8639,8 +8639,15 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --max-concurrency 8 --format json/
+    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
   );
+  const runLogsDir = path.join(run.value!.run_root, "smithers", "logs");
+  for (const relaunch of commands.split("\n").filter((line) => line.startsWith("up ") && line.includes("--resume "))) {
+    assert.ok(
+      relaunch.includes(`--log-dir ${runLogsDir} `),
+      `a relaunched workflow must keep streaming into the run's own log directory: ${relaunch}`
+    );
+  }
 });
 
 test("resume refuses to invoke Smithers when a persisted rendered prompt was modified", async () => {
@@ -8699,7 +8706,7 @@ test("resume keeps an already-running linked workflow attached without launching
   const forcedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(
     forcedCommands,
-    /up .*ultrafuzz-active-lifecycle-run\.tsx --resume ultrafuzz-active-lifecycle-run --run-id ultrafuzz-active-lifecycle-run --force --detach --max-concurrency 8 --format json/u
+    /up .*ultrafuzz-active-lifecycle-run\.tsx --resume ultrafuzz-active-lifecycle-run --run-id ultrafuzz-active-lifecycle-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -8741,7 +8748,7 @@ test("resume retries one failed workflow task before continuing a terminal unfin
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-terminal-retry-run\.tsx --resume ultrafuzz-terminal-retry-run --run-id ultrafuzz-terminal-retry-run --force --detach --max-concurrency 8 --format json/u
+    /up .*ultrafuzz-terminal-retry-run\.tsx --resume ultrafuzz-terminal-retry-run --run-id ultrafuzz-terminal-retry-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -8788,7 +8795,7 @@ test("resume retries failed tasks reported inside a successful terminal workflow
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-terminal-row-retry-run\.tsx --resume ultrafuzz-terminal-row-retry-run --run-id ultrafuzz-terminal-row-retry-run --force --detach --max-concurrency 8 --format json/u
+    /up .*ultrafuzz-terminal-row-retry-run\.tsx --resume ultrafuzz-terminal-row-retry-run --run-id ultrafuzz-terminal-row-retry-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -8839,7 +8846,7 @@ test("resume retries one failed workflow task before continuing a stale unfinish
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-stale-retry-run\.tsx --resume ultrafuzz-stale-retry-run --run-id ultrafuzz-stale-retry-run --force --detach --max-concurrency 8 --format json/u
+    /up .*ultrafuzz-stale-retry-run\.tsx --resume ultrafuzz-stale-retry-run --run-id ultrafuzz-stale-retry-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -8878,7 +8885,7 @@ test("resume continues a run-level render failure in place without a no-op rewin
   assert.doesNotMatch(commands, /timeline|rewind|retry-task/u);
   assert.match(
     commands,
-    /up .*ultrafuzz-render-recovery-run\.tsx --resume ultrafuzz-render-recovery-run --run-id ultrafuzz-render-recovery-run --force --detach --max-concurrency 8 --format json/u
+    /up .*ultrafuzz-render-recovery-run\.tsx --resume ultrafuzz-render-recovery-run --run-id ultrafuzz-render-recovery-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -9158,7 +9165,7 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   assert.doesNotMatch(retriedCommands, /^timetravel /mu, "retry must not repeat the destructive reset");
   assert.match(
     retriedCommands,
-    /up .*ultrafuzz-reset-lifecycle-run\.tsx --resume ultrafuzz-reset-lifecycle-run --run-id ultrafuzz-reset-lifecycle-run --force --detach( --max-concurrency \d+)? --format json/u
+    /up .*ultrafuzz-reset-lifecycle-run\.tsx --resume ultrafuzz-reset-lifecycle-run --run-id ultrafuzz-reset-lifecycle-run --force --detach( --max-concurrency \d+)? --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
