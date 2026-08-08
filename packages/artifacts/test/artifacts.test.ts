@@ -706,6 +706,41 @@ test("findings normalize schema-versioned findings arrays", () => {
   ]);
 });
 
+test("findings normalize the house-style schema_version alias to the canonical literal", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
+  const nodeDir = getNodeArtifactDir(layout, "stateful-invariant-campaign", { create: true });
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        schema_version: "ultrafuzz.finding.v1",
+        id: "failure-1",
+        title: "Harness drawn-rate sync assertion ignores elapsed-time precondition",
+        status: "confirmed",
+        severity_guess: "low",
+        confidence: "high",
+        summary: "The stored drawn rate lags the recalculated one after time advances."
+      }
+    ])
+  );
+
+  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "stateful-invariant-campaign" });
+
+  assert.equal(report.count, 1);
+  assert.equal(report.findings[0]!.schema_version, "1.0");
+  assert.equal(report.findings[0]!.id, "failure-1");
+  assert.equal(readFindings(nodeDir)[0]!.schema_version, "1.0", "the alias is rewritten on disk, not preserved");
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([{ schema_version: "ultrafuzz.finding.v2", id: "failure-1", title: "t", status: "confirmed" }])
+  );
+  assert.throws(
+    () => normalizeFindings({ artifactDir: nodeDir, nodeId: "stateful-invariant-campaign" }),
+    /unsupported schema_version/u
+  );
+});
+
 test("findings normalize bounded numeric confidence to its canonical string representation", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
   const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
