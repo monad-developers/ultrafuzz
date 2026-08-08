@@ -22,6 +22,12 @@ import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultraf
 import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
 import { renderRuntimeTemplate } from "./runtime-template.js";
 import {
+  acquireSmithersExecutableAnchor,
+  bindSmithersExecutableCapability,
+  smithersExecutableCapability,
+  type SmithersExecutableAnchor
+} from "./smithers-executable-capability.js";
+import {
   assertSmithersPackageManifest,
   migrateLegacySmithersPackageManifest,
   SMITHERS_ORCHESTRATOR_BIN_PATH,
@@ -708,11 +714,29 @@ export async function streamSmithersCommand(input: {
       stderr: ""
     };
   }
-  await ensureSmithersDependencies(input.projectRoot, input.env, { signal: input.signal });
-  const child = spawn(smithersExecutable(input.projectRoot, input.env), command, {
-    cwd: input.projectRoot,
-    env: smithersCommandEnv(input.projectRoot, input.env),
-    stdio: ["ignore", "pipe", "pipe"]
+  const commandEnvironment = await prepareSmithersExecutableEnvironment(input.projectRoot, input.env, {
+    signal: input.signal
+  });
+  const executableAnchor = acquireSmithersExecutableAnchor(commandEnvironment);
+  const child = (() => {
+    try {
+      return spawn(
+        executableAnchor?.executable ?? smithersExecutable(input.projectRoot, commandEnvironment),
+        [...(executableAnchor?.argumentPrefix ?? []), ...command],
+        {
+          cwd: input.projectRoot,
+          env: smithersCommandEnv(input.projectRoot, commandEnvironment),
+          stdio: ["ignore", "pipe", "pipe"]
+        }
+      );
+    } catch (error) {
+      assertAndCloseSmithersExecutableAnchor(executableAnchor);
+      throw error;
+    }
+  })();
+  const childClosed = new Promise<void>((resolve) => {
+    child.once("error", () => resolve());
+    child.once("close", () => resolve());
   });
   const reader = createInterface({ input: child.stdout, crlfDelay: Number.POSITIVE_INFINITY });
   let lines = 0;
@@ -806,10 +830,17 @@ export async function streamSmithersCommand(input: {
       stderr: redactedEvidenceText(stderr)
     };
   } finally {
-    input.signal?.removeEventListener("abort", onAbort);
-    stopStreaming();
-    if (killTimer !== undefined) {
-      clearTimeout(killTimer);
+    try {
+      input.signal?.removeEventListener("abort", onAbort);
+      stopStreaming();
+      // The descriptor paths belong to this controller process. Keep them open
+      // until a stopped or failed child can no longer resolve either path.
+      await childClosed;
+      if (killTimer !== undefined) {
+        clearTimeout(killTimer);
+      }
+    } finally {
+      assertAndCloseSmithersExecutableAnchor(executableAnchor);
     }
   }
 }
@@ -1500,21 +1531,30 @@ async function execSmithersCli(input: {
 }): Promise<{ stdout: string; stderr: string; command: string[]; exitCode: number }> {
   const command = [...input.args];
   const executionDeadline = input.timeoutMs === undefined ? undefined : Date.now() + input.timeoutMs;
-  await ensureSmithersDependencies(input.projectRoot, input.env, {
+  const commandEnvironment = await prepareSmithersExecutableEnvironment(input.projectRoot, input.env, {
     signal: input.signal,
     timeoutMs: input.timeoutMs
   });
   const commandTimeoutMs =
     executionDeadline === undefined ? undefined : Math.max(1, Math.ceil(executionDeadline - Date.now()));
-  const executable = smithersExecutable(input.projectRoot, input.env);
+  const executableAnchor = acquireSmithersExecutableAnchor(commandEnvironment);
   try {
-    const { stdout, stderr } = await execFileAsync(executable, command, {
-      cwd: input.projectRoot,
-      env: smithersCommandEnv(input.projectRoot, input.env, input.environmentVariableNames, input.keepWorkspaces),
-      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-      ...(commandTimeoutMs === undefined ? {} : { timeout: commandTimeoutMs })
-    });
+    const { stdout, stderr } = await execFileAsync(
+      executableAnchor?.executable ?? smithersExecutable(input.projectRoot, commandEnvironment),
+      [...(executableAnchor?.argumentPrefix ?? []), ...command],
+      {
+        cwd: input.projectRoot,
+        env: smithersCommandEnv(
+          input.projectRoot,
+          commandEnvironment,
+          input.environmentVariableNames,
+          input.keepWorkspaces
+        ),
+        maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+        ...(commandTimeoutMs === undefined ? {} : { timeout: commandTimeoutMs })
+      }
+    );
     return { stdout, stderr, command: smithersDisplayCommand(command), exitCode: 0 };
   } catch (error) {
     const record =
@@ -1528,6 +1568,8 @@ async function execSmithersCli(input: {
       };
     }
     throw error;
+  } finally {
+    assertAndCloseSmithersExecutableAnchor(executableAnchor);
   }
 }
 
@@ -1631,6 +1673,28 @@ function scrubWorkflowRunnerText(value: string): string {
 function truncateDiagnosticText(value: string): string {
   const limit = 12000;
   return value.length > limit ? `${value.slice(0, limit)}\n[truncated ${value.length - limit} bytes]` : value;
+}
+
+async function prepareSmithersExecutableEnvironment(
+  projectRoot: string,
+  env: Record<string, string | undefined> | undefined,
+  control: { signal?: AbortSignal; timeoutMs?: number } = {}
+): Promise<Record<string, string | undefined> | undefined> {
+  await ensureSmithersDependencies(projectRoot, env, control);
+  if (smithersExecutableCapability(env) !== undefined || explicitSmithersExecutable(env) !== undefined) {
+    return env;
+  }
+  const local = localSmithersExecutable(projectRoot);
+  if (!fs.existsSync(local)) return env;
+
+  // Dependency verification above pins the package version, validates the
+  // command shim, and applies every compatibility patch before this authority
+  // is granted. Execute the package's real script rather than attesting a
+  // platform-specific .bin shim, which also keeps the capability portable to
+  // Windows where the shim is a command file without a shebang.
+  const packageRoot = resolveInstalledSmithersPackageRoot(projectRoot);
+  const executable = path.join(packageRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
+  return bindSmithersExecutableCapability({ ...(env ?? {}) }, executable);
 }
 
 async function ensureSmithersDependencies(
@@ -1913,6 +1977,15 @@ function resolveInstalledSmithersPackageRoot(projectRoot: string): string {
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertAndCloseSmithersExecutableAnchor(anchor: SmithersExecutableAnchor | undefined): void {
+  if (anchor === undefined) return;
+  try {
+    anchor.assertCurrent();
+  } finally {
+    anchor.close();
+  }
 }
 
 function smithersExecutable(projectRoot: string, env: Record<string, string | undefined> | undefined): string {

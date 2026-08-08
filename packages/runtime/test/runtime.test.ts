@@ -264,7 +264,7 @@ function writeFakeInstalledSmithers(
   );
   fs.writeFileSync(
     paths.target,
-    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SMITHERS_FAKE_LOG\"\nprintf '%s\\n' '{\"ok\":true}'\n",
+    '#!/bin/sh\nif [ -n "$SMITHERS_FAKE_EXECUTED_AS_LOG" ]; then printf \'%s\\n\' "$0" > "$SMITHERS_FAKE_EXECUTED_AS_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n',
     "utf8"
   );
   fs.chmodSync(paths.target, 0o755);
@@ -4012,16 +4012,23 @@ test("startRun resolves the target-local Smithers binary when it is not on PATH"
   writeSmallTopology(project);
 
   const logPath = path.join(project, "local-smithers.log");
-  writeFakeInstalledSmithers(project);
+  const executedAsLogPath = path.join(project, "local-smithers-executed-as.log");
+  const installed = writeFakeInstalledSmithers(project);
 
   const run = await startRun({
     projectRoot: project,
     runId: "local-smithers-run",
-    env: { PATH: "", SMITHERS_FAKE_LOG: logPath }
+    env: { PATH: "", SMITHERS_FAKE_LOG: logPath, SMITHERS_FAKE_EXECUTED_AS_LOG: executedAsLogPath }
   });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-local-smithers-run\.tsx/);
+  const executedAs = fs.readFileSync(executedAsLogPath, "utf8").trim();
+  if (process.platform !== "win32" && fs.existsSync("/proc/self/fd")) {
+    assert.match(executedAs, /^\/proc\/\d+\/fd\/\d+$/u);
+  } else {
+    assert.equal(executedAs, fs.realpathSync(installed.target));
+  }
 });
 
 test("startRun patches every described runner compatibility workaround", async () => {
