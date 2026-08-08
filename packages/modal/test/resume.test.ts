@@ -397,7 +397,7 @@ describe("Modal durable evaluation resume", () => {
     fs.rmSync(path.join(runRoot, "state.json"));
     // The link is written before submission, so a linked root is one a workflow may have run from. It must
     // never be named for deletion merely because it is not resumable.
-    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("has no run state");
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("cannot be classified");
   });
 
   it("refuses a linked durable run that has no evaluation run to attach it to", async () => {
@@ -405,6 +405,50 @@ describe("Modal durable evaluation resume", () => {
     fs.rmSync(value.evalDir, { recursive: true });
     writeRunRoot(value.target, "durable-run-one", { linked: true });
     await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("no evaluation run");
+  });
+
+  it("does not let a damaged run root preempt resuming a perfectly good one (#378)", async () => {
+    const value = fixture();
+    fs.writeFileSync(
+      path.join(value.evalDir, "runs.jsonl"),
+      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
+    );
+    writeRunRoot(value.target, "durable-run-one", { linked: true });
+    const broken = writeRunRoot(value.target, "durable-run-two", { linked: true });
+    fs.rmSync(path.join(broken, "state.json"));
+    // Damage blocks a RESTART, because `planRun` would trip over it. It must not block a resume: refusing
+    // here would strand a run that is ready to continue.
+    await expect(findModalResumeWorkspace(value.workRoot)).resolves.toMatchObject({
+      kind: "resumable",
+      workspace: { productRunId: "durable-run-one" }
+    });
+  });
+
+  it("refuses a run root whose name the runtime layout cannot address, instead of throwing forever", async () => {
+    const value = fixture();
+    fs.writeFileSync(
+      path.join(value.evalDir, "runs.jsonl"),
+      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
+    );
+    // `layoutForRunRoot` rejects ids outside its safe-id rule. Letting that throw escape would strand the
+    // run permanently, since the lookup would fail before naming anything a restart could clear.
+    fs.mkdirSync(path.join(value.target, ".ultrafuzz", "runs", ".tmp-junk"), { recursive: true });
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("cannot be classified");
+  });
+
+  it("names every eval run directory that would block a restart, not just the candidate", async () => {
+    const value = fixture();
+    fs.writeFileSync(
+      path.join(value.evalDir, "runs.jsonl"),
+      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
+    );
+    // A directory with no eval.json is not a candidate, but `runEvalSuite` still refuses to reuse its id.
+    fs.mkdirSync(path.join(value.control, ".ultrafuzz", "evals", "runs", "leftover-run"), { recursive: true });
+    const found = await findModalResumeWorkspace(value.workRoot);
+    expect(found.kind).toBe("not-started");
+    expect(found.kind === "not-started" && [...(found.staleEvalRunIds ?? [])].sort()).toEqual(
+      [value.evalRunId, "leftover-run"].sort()
+    );
   });
 
   it("finalizes succeeded and genuine task outcomes without resetting completed nodes", async () => {

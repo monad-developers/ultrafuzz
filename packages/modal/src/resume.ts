@@ -167,6 +167,7 @@ export async function findModalResumeWorkspace(workRoot: string): Promise<ModalR
       // abandon it and deleting it is exactly what this function exists to avoid, so refuse instead.
       throw new Error(`workspace has ${durable.resumable.length} linked durable run(s) but no evaluation run`);
     }
+    assertNoDamagedRunRoots(durable.damaged);
     return {
       kind: "not-started",
       reason: "resume requires exactly one evaluation run, found 0",
@@ -203,10 +204,15 @@ export async function findModalResumeWorkspace(workRoot: string): Promise<ModalR
   if (durable.resumable.length === 1) {
     return { kind: "resumable", workspace: { target, control, evalRunId, productRunId: durable.resumable[0]! } };
   }
+  // Damage only matters on the branch that would restart: a damaged root blocks `planRun`, but it must not
+  // preempt resuming a run that is perfectly good.
+  assertNoDamagedRunRoots(durable.damaged);
   return {
     kind: "not-started",
     reason: "resume requires exactly one linked durable run, found 0",
-    staleEvalRunIds: [evalRunId],
+    // Every eval run directory, not just the candidate: `runEvalSuite` refuses any id whose directory
+    // exists, so naming only the candidate would leave a non-candidate directory blocking the restart.
+    staleEvalRunIds: directories,
     ...(durable.orphaned.length === 0 ? {} : { staleRunRootIds: durable.orphaned })
   };
 }
@@ -214,7 +220,8 @@ export async function findModalResumeWorkspace(workRoot: string): Promise<ModalR
 /**
  * Run roots on disk, split by whether `resume` could actually resume them.
  *
- * The line is the workflow link in `run-metadata.json`. `persistSmithersEvidence` writes it immediately
+ * The line is the workflow link in the run metadata, whose path is taken from `layoutForRunRoot` and never
+ * restated here — see `hasLinkedWorkflow`. `persistSmithersEvidence` writes that link immediately
  * after the workflow compiles and BEFORE it is submitted, and `readLinkedWorkflowEvidence` refuses any run
  * without it (`WORKFLOW_RUN_ID_MISSING`). So the two halves of the failure window differ:
  *
@@ -226,14 +233,23 @@ export async function findModalResumeWorkspace(workRoot: string): Promise<ModalR
  * `state.json` alone is not the test: `createRunLayout` writes it well before compilation, so requiring
  * only that would classify a run nothing can resume as resumable.
  */
-async function durableRunsOnDisk(target: string): Promise<{ resumable: string[]; orphaned: string[] }> {
+async function durableRunsOnDisk(
+  target: string
+): Promise<{ resumable: string[]; orphaned: string[]; damaged: string[] }> {
   const runsRoot = path.join(target, ".ultrafuzz", "runs");
   const resumable = [];
   const orphaned = [];
   const damaged = [];
   for (const name of await readdirIfMissing(runsRoot)) {
     const root = path.join(runsRoot, name);
-    if (!(await isDirectoryNotSymlink(root))) continue;
+    // An entry this function cannot classify is reported, never skipped. `planRun` refuses on
+    // `existsSync`, which follows symlinks and does not care whether the name is layout-addressable, so
+    // anything dropped here silently would still block a restart — invisibly, which is the whole subject
+    // of #378.
+    if (!(await isDirectoryNotSymlink(root)) || !isLayoutAddressable(root)) {
+      damaged.push(name);
+      continue;
+    }
     const linked = await hasLinkedWorkflow(root);
     const hasState = await isRegularFileNotSymlink(path.join(root, "state.json"));
     // `orphaned` is a POSITIVE determination — the metadata was read and carries no workflow link — and not
@@ -244,10 +260,23 @@ async function durableRunsOnDisk(target: string): Promise<{ resumable: string[];
     else if (hasState) resumable.push(name);
     else damaged.push(name);
   }
-  if (damaged.length > 0) {
-    throw new Error(`durable run ${damaged[0]!} is linked to a workflow but has no run state`);
+  return { resumable: resumable.sort(), orphaned: orphaned.sort(), damaged: damaged.sort() };
+}
+
+/**
+ * Whether the runtime's own layout helper can address this run root.
+ *
+ * Derived by asking the helper rather than restating its id rule. A name it rejects would otherwise throw
+ * out of the lookup on every generation, with nothing able to clear it — one stray directory would strand
+ * the run permanently.
+ */
+function isLayoutAddressable(runRoot: string): boolean {
+  try {
+    layoutForRunRoot(runRoot);
+    return true;
+  } catch {
+    return false;
   }
-  return { resumable: resumable.sort(), orphaned: orphaned.sort() };
 }
 
 /**
@@ -270,12 +299,31 @@ async function hasLinkedWorkflow(runRoot: string): Promise<boolean> {
     }
   );
   if (text === undefined) return false;
-  const metadata = JSON.parse(text) as {
-    workflow?: { run_id?: unknown; workflowRunId?: unknown };
-    smithers?: { workflowRunId?: unknown };
-  };
+  let metadata: { workflow?: { run_id?: unknown; workflowRunId?: unknown }; smithers?: { workflowRunId?: unknown } };
+  try {
+    metadata = JSON.parse(text) as typeof metadata;
+  } catch (error) {
+    // Failing closed is the decision here, not an oversight: reading unparseable metadata as "unlinked"
+    // would route the root to deletion. Name the file so the refusal is diagnosable from the volume.
+    throw new Error(`run metadata at ${layoutForRunRoot(runRoot).runMetadataPath} is not valid JSON`, {
+      cause: error
+    });
+  }
   const runId = metadata.workflow?.run_id ?? metadata.workflow?.workflowRunId ?? metadata.smithers?.workflowRunId;
   return typeof runId === "string" && runId.length > 0;
+}
+
+/**
+ * Refuse to restart over a run root that cannot be classified, rather than deleting it or ignoring it.
+ *
+ * Sorted so the message is deterministic when there is more than one.
+ */
+function assertNoDamagedRunRoots(damaged: readonly string[]): void {
+  if (damaged.length === 0) return;
+  throw new Error(
+    `durable run root(s) ${damaged.join(", ")} cannot be classified as resumable or unstarted; ` +
+      `resolve them on the volume before this run can restart`
+  );
 }
 
 /** Refuse a path that exists but is not a real directory. An absent path is the ordinary fresh case. */
