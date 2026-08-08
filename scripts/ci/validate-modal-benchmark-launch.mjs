@@ -21,7 +21,7 @@ import {
   publicBenchmarkMaxRuntimeSeconds
 } from "../../packages/modal/dist/public-worker.js";
 
-import { readAutomaticPublicationManifest, validateAutomaticPairConfig } from "./prepare-eval-history-publication.mjs";
+import { readBenchmarkControlManifest, validateAutomaticPairConfig } from "./prepare-eval-history-publication.mjs";
 
 const MAX_CONTROL_FILE_BYTES = 1024 * 1024;
 const SAFE_BASENAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -57,7 +57,7 @@ export function validateModalBenchmarkLaunch(input) {
   const dimensions = modalBenchmarkPolicyDimensions(policyRoot, mode);
   assertConfiguredTargetCoverage(rawManifest, manifestPath, dimensions);
   const [producerRunId, producerRunAttempt] = generationParts(rawManifest.generation, manifestPath);
-  const manifest = readAutomaticPublicationManifest(manifestPath, {
+  const manifest = readBenchmarkControlManifest(manifestPath, {
     candidateCommit,
     repository: rawManifest.repository,
     producerRunId,
