@@ -547,6 +547,9 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("`severity_guess`, `severity`, `impact`, and");
     expect(markdown).toContain("canonical `strategy` field a non-empty");
     expect(markdown).toContain("structured `strategy_provenance` object");
+    expect(markdown).toContain("non-empty `detection_rates` or `strategies` array");
+    expect(markdown).toContain("Use exactly one of\nthese array keys; never emit both");
+    expect(markdown).toContain("omit both `fuzzer_backend` and `fuzzer_backends`");
   });
 
   it("keeps the empty findings array contract in prompt-owned templates", () => {
@@ -559,6 +562,8 @@ describe("prompt semantic anchors", () => {
     // The contract accepts findings without a schema_version, so the template must not demand one.
     expect(template).not.toContain('Use `schema_version: "1.0"`');
     expect(template).toContain("`schema_version` is optional");
+    expect(template).toContain("exactly `High`, `Medium`, or `Low`");
+    expect(template).toContain("including findings that are or may become non-production records");
   });
 
   it("keeps Vyper target setup guidance concrete for Foundry harnesses", () => {
