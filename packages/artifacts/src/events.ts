@@ -8,10 +8,12 @@ import { z } from "zod/v4";
 import { type RunLayout } from "./run-layout.js";
 import {
   SAFE_ID_PATTERN,
+  appendBytesDurableAt,
   appendLineDurable,
   prepareSafeFilePath,
   readJsonFile,
   safeResolveInside,
+  truncateDurable,
   validateSafeId,
   writeJsonDurable
 } from "./safe-paths.js";
@@ -107,7 +109,49 @@ export function createEventRecord(layout: RunLayout, input: AppendEventInput): E
 }
 
 export function appendEventRecord(eventsPath: string, record: EventRecord): void {
+  repairTornJsonlTail(eventsPath);
   appendLineDurable(eventsPath, JSON.stringify({ ...record, payload: redactValue(record.payload) }));
+}
+
+/**
+ * Restores a JSONL file to a newline-terminated boundary before its next append.
+ *
+ * A complete trailing object is preserved and terminated. Any other trailing
+ * bytes were never a durable JSONL record and are truncated. The ordinary path
+ * reads one byte; only an unterminated file pays for a full read.
+ */
+export function repairTornJsonlTail(eventsPath: string): void {
+  if (!fs.existsSync(eventsPath)) return;
+  let size: number;
+  let lastByte: Buffer;
+  const probe = fs.openSync(eventsPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    const stat = fs.fstatSync(probe);
+    if (!stat.isFile()) return;
+    size = stat.size;
+    if (size === 0) return;
+    lastByte = Buffer.alloc(1);
+    fs.readSync(probe, lastByte, 0, 1, size - 1);
+  } finally {
+    fs.closeSync(probe);
+  }
+  if (lastByte[0] === 0x0a) return;
+
+  const contents = fs.readFileSync(eventsPath);
+  if (contents.length === 0 || contents[contents.length - 1] === 0x0a) return;
+  const finalNewline = contents.lastIndexOf(0x0a);
+  const tail = contents.subarray(finalNewline + 1);
+  let parsedTail: unknown;
+  try {
+    parsedTail = JSON.parse(tail.toString("utf8")) as unknown;
+  } catch {
+    parsedTail = undefined;
+  }
+  if (typeof parsedTail === "object" && parsedTail !== null && !Array.isArray(parsedTail)) {
+    appendBytesDurableAt(eventsPath, Buffer.from("\n"), { expectedSize: contents.length });
+    return;
+  }
+  truncateDurable(eventsPath, finalNewline + 1, { expectedSize: contents.length });
 }
 
 export function replayEvents(layoutOrPath: RunLayout | string, limit = DEFAULT_EVENT_REPLAY_LIMIT): EventReplay {
@@ -235,6 +279,7 @@ function eventIndexPath(value: string): string[] {
 function appendIndexLine(layout: RunLayout, segments: string[], line: string): void {
   const relativePath = segments.join("/");
   const filePath = prepareSafeFilePath(layout.eventsIndexDir, relativePath);
+  repairTornJsonlTail(filePath);
   appendLineDurable(filePath, line);
 }
 
