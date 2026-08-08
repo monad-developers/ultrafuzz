@@ -235,14 +235,15 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       force: input.force,
       retryFailed: input.retryFailed,
       label: input.label,
-      resumeRecovery:
-        action === "resume"
-          ? {
-              runRoot: evidence.layout.root,
-              inputPath: path.join(evidence.layout.root, "smithers", "input.json"),
-              logsDir: path.join(evidence.layout.root, "smithers", "logs")
-            }
-          : undefined,
+      // Supplied for every lifecycle verb, not just `resume`: whichever way the workflow is
+      // relaunched it keeps writing into this run's evidence layout, so it has to be handed the
+      // run-scoped log directory too. Only the recovery paths read `inputPath`, and those stay
+      // gated on `resume`.
+      relaunchPaths: {
+        runRoot: evidence.layout.root,
+        inputPath: path.join(evidence.layout.root, "smithers", "input.json"),
+        logsDir: path.join(evidence.layout.root, "smithers", "logs")
+      },
       keepWorkspaces: resolved.config.run.keepWorkspaces,
       controllerLeaseSeconds: resolved.config.run.controllerLeaseSeconds,
       env: forgeGuard.env,
