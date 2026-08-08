@@ -6,9 +6,11 @@ import test from "node:test";
 
 import { createRunLayout, getNodeArtifactDir, getNodeWorkspaceDir } from "@ultrafuzz/artifacts";
 
-import { reconcileRequiredArtifactsFromWorkspace } from "../src/artifact-reconciliation.js";
+import {
+  onlyTransientArtifactDiagnostics,
+  reconcileRequiredArtifactsFromWorkspace
+} from "../src/artifact-reconciliation.js";
 import { verifyRequiredArtifactsForAttempt } from "../src/artifact-gates.js";
-import { onlyTransientArtifactDiagnostics } from "../src/workflow-sync.js";
 import type { PlannedGraphNode } from "../src/types.js";
 
 function tempProject(): string {
@@ -332,4 +334,17 @@ test("a warning does not collapse the artifact reconciliation grace", () => {
   );
   assert.equal(onlyTransientArtifactDiagnostics([warning]), false, "warnings alone are not a transient artifact miss");
   assert.equal(onlyTransientArtifactDiagnostics([]), false, "an empty list is not a transient artifact miss");
+  // The one direction in which the new rule is stricter, pinned so the contract
+  // is complete: a transient CODE at a non-fatal severity is not a reason to
+  // hold the grace, because nothing is failing.
+  assert.equal(
+    onlyTransientArtifactDiagnostics([{ ...transient, severity: "warning" as const }]),
+    false,
+    "a transient code at warning severity is not a gate failure to wait out"
+  );
+  assert.equal(
+    onlyTransientArtifactDiagnostics([transient, { ...warning, severity: "info" as const }]),
+    true,
+    "info severity must not collapse the grace either"
+  );
 });
