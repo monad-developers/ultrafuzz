@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -405,6 +406,18 @@ describe("longitudinal eval history", () => {
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
         observations: [
           observation({
+            schema_version: "ultrafuzz.eval.history.observation.v4",
+            status: "failed",
+            target_publication: { ...observation().target_publication!, status: "failed" }
+          })
+        ]
+      })
+    ).not.toThrow();
+    expect(() =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [
+          observation({
             schema_version: "ultrafuzz.eval.history.observation.v3",
             status: "failed",
             target_publication: { ...observation().target_publication!, status: "failed" }
@@ -414,18 +427,76 @@ describe("longitudinal eval history", () => {
     ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
   });
 
-  it("rejects malformed history and inconsistent completeness", () => {
+  it("enforces the complete, partial, and unavailable value/reason matrix for current observations", () => {
+    const statuses = ["complete", "partial", "unavailable"] as const;
+    const values = [1.25, null] as const;
+    const reasonSets = [[], ["pricing-incomplete"]] as const;
+    for (const status of statuses) {
+      for (const cost_usd of values) {
+        for (const reasons of reasonSets) {
+          const valid =
+            (status === "complete" && cost_usd !== null && reasons.length === 0) ||
+            (status === "partial" && cost_usd !== null && reasons.length > 0) ||
+            (status === "unavailable" && cost_usd === null && reasons.length > 0);
+          const parse = () =>
+            parseEvalHistory({
+              schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+              observations: [
+                observation({
+                  cost_usd,
+                  cost_completeness: { status, reasons: [...reasons] }
+                })
+              ]
+            });
+          if (valid) expect(parse).not.toThrow();
+          else expect(parse).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+        }
+      }
+    }
+  });
+
+  it("preserves the v4 partial-null contract while requiring v5 for partial values", () => {
+    const partialNullV4 = observation({
+      schema_version: "ultrafuzz.eval.history.observation.v4",
+      cost_usd: null,
+      cost_completeness: { status: "partial", reasons: ["pricing-incomplete"] }
+    });
+    expect(() =>
+      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations: [partialNullV4] })
+    ).not.toThrow();
+    expect(() =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [{ ...partialNullV4, cost_usd: 1.25 }]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
     expect(() =>
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
         observations: [
           observation({
-            wall_clock_seconds: null,
-            wall_clock_completeness: { status: "complete", reasons: [] }
+            cost_usd: 1.25,
+            cost_completeness: { status: "partial", reasons: ["pricing-incomplete"] }
           })
         ]
       })
-    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    ).not.toThrow();
+  });
+
+  it("continues to parse the checked-in history containing the legacy Flash partial-null row", () => {
+    const checkedIn = JSON.parse(fs.readFileSync(path.join(REPOSITORY_ROOT, "benchmarks", "history.json"), "utf8"));
+    const parsed = parseEvalHistory(checkedIn, "benchmarks/history.json");
+    const charts = renderEvalHistoryCharts(parsed);
+    expect(charts.get("performance-cost.svg")).toContain(
+      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="2" data-expected-target-count="3"'
+    );
+    expect(charts.get("performance-cost.svg")).toContain(
+      'deepseek-v4-flash</tspan><tspan fill="#6b7280"> · median 23.7% · $0.41 · n=1 · targets 2/3 · partial'
+    );
+    expect(charts.get("cost.svg")).toContain('data-status="partial" data-available-count="0" data-expected-count="1"');
+  });
+
+  it("rejects malformed history", () => {
     expect(() => parseEvalHistory({ schema_version: "unknown", observations: [] })).toThrowError(
       expect.objectContaining({ code: "EVAL_HISTORY_INVALID" })
     );
@@ -753,6 +824,100 @@ describe("longitudinal eval history", () => {
     ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_GENERATION_INCOMPLETE" }));
   });
 
+  it("retains every known trial value in partial efficiency aggregates and reserves null for unavailable", () => {
+    const suite = testSuite("/tmp/ground-truth", {
+      model_profiles: {
+        "benchmark-smoke": { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" },
+        judge: { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" }
+      },
+      targets: [
+        {
+          id: "target-a",
+          repo: "https://example.com/target-a",
+          ref: TARGET_REVISION,
+          sensitivity: "private",
+          ground_truth: "target-a.yml"
+        }
+      ],
+      run: { runner_model_profile: "benchmark-smoke", judge_model_profile: "judge", trials_per_variant: 3 }
+    });
+    const first = testRow(suite, {
+      id: "target-a-baseline-trial-1",
+      trial_id: "trial-1",
+      run_id: "run-trial-1",
+      runner_model_profile: "benchmark-smoke",
+      runner_model: "gpt-5.6-luna",
+      runner_reasoning: "high"
+    });
+    const matrix: EvalMatrixRow[] = [
+      first,
+      { ...first, id: "target-a-baseline-trial-2", trial_id: "trial-2", run_id: "run-trial-2" },
+      { ...first, id: "target-a-baseline-trial-3", trial_id: "trial-3", run_id: "run-trial-3" }
+    ];
+    const efficiency = matrix.map((row, index) => {
+      const base = rowScore(row.id, { trial_id: row.trial_id });
+      if (index === 0) return base;
+      if (index === 1) {
+        return {
+          ...base,
+          efficiency: {
+            ...base.efficiency,
+            cost_usd: 0.25,
+            cost: { status: "partial" as const, reason: "pricing-incomplete" as const }
+          }
+        };
+      }
+      return {
+        ...base,
+        efficiency: {
+          ...base.efficiency,
+          cost_usd: null,
+          cost: { status: "unavailable" as const, reason: "pricing-unavailable" as const }
+        }
+      };
+    });
+    const matched = new Map(matrix.map((row) => [row.id, new Set(["bug-a", "bug-b"])]));
+    const generate = (rows: EvalRowScore[]) =>
+      createEvalHistoryObservations({
+        benchmark: "evmbench",
+        lane: "smoke",
+        runTimestamp: "2026-07-19T00:00:00Z",
+        candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
+        sourceArtifact: "artifact-1",
+        publicationUrl: PUBLICATION_URL,
+        suite,
+        matrix,
+        summary: summary(rows),
+        matchedGroundTruthByRow: matched
+      });
+
+    expect(generate(efficiency)).toMatchObject([
+      {
+        schema_version: EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION,
+        cost_usd: 0.75,
+        cost_completeness: {
+          status: "partial",
+          reasons: ["pricing-incomplete", "pricing-unavailable"]
+        }
+      }
+    ]);
+
+    const unavailable = efficiency.map((score) => ({
+      ...score,
+      efficiency: {
+        ...score.efficiency,
+        cost_usd: null,
+        cost: { status: "unavailable" as const, reason: "pricing-unavailable" as const }
+      }
+    }));
+    expect(generate(unavailable)).toMatchObject([
+      {
+        cost_usd: null,
+        cost_completeness: { status: "unavailable", reasons: ["pricing-unavailable"] }
+      }
+    ]);
+  });
+
   it("requires the exact public target, variant, and trial matrix", () => {
     const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json"));
     const lanes = loadBenchmarkLanesManifest(path.join(REPOSITORY_ROOT, "benchmarks", "lanes.json"));
@@ -850,7 +1015,63 @@ describe("longitudinal eval history", () => {
         cumulative_unique_true_positives: 3,
         ground_truth_bug_count: 6,
         wall_clock_seconds: 180,
-        cost_usd: 3.25
+        wall_clock_completeness: { status: "complete", reasons: [] },
+        wall_clock_available_target_count: 2,
+        cost_usd: 3.25,
+        cost_completeness: { status: "complete", reasons: [] },
+        cost_available_target_count: 2
+      }
+    ]);
+
+    expect(
+      aggregateEvalHistoryBenchmarkRuns([
+        targetA,
+        {
+          ...targetB,
+          cost_completeness: { status: "partial", reasons: ["pricing-incomplete"] }
+        }
+      ])
+    ).toMatchObject([
+      {
+        cost_usd: 3.25,
+        cost_completeness: { status: "partial", reasons: ["pricing-incomplete"] },
+        cost_available_target_count: 2,
+        target_count: 2
+      }
+    ]);
+
+    expect(
+      aggregateEvalHistoryBenchmarkRuns([
+        targetA,
+        {
+          ...targetB,
+          cost_usd: null,
+          cost_completeness: { status: "unavailable", reasons: ["pricing-unavailable"] }
+        }
+      ])
+    ).toMatchObject([
+      {
+        cost_usd: 1.25,
+        cost_completeness: { status: "partial", reasons: ["pricing-unavailable"] },
+        cost_available_target_count: 1,
+        target_count: 2
+      }
+    ]);
+
+    expect(
+      aggregateEvalHistoryBenchmarkRuns(
+        [targetA, targetB].map((target) => ({
+          ...target,
+          cost_usd: null,
+          cost_completeness: { status: "unavailable" as const, reasons: ["pricing-unavailable"] }
+        }))
+      )
+    ).toMatchObject([
+      {
+        cost_usd: null,
+        cost_completeness: { status: "unavailable", reasons: ["pricing-unavailable"] },
+        cost_available_target_count: 0,
+        target_count: 2
       }
     ]);
   });
@@ -890,18 +1111,44 @@ describe("longitudinal eval history", () => {
       ["luna-5", "2026-07-31T18:52:13.635Z", "6", 0.5, 18],
       ["luna-6", "2026-07-31T19:52:13.635Z", "7", 0.6, 20]
     ] as const;
+    const legacyFlash = completeRun({
+      id: "legacy-flash",
+      timestamp: "2026-08-01T12:00:00.000Z",
+      commitCharacter: "c",
+      model: "deepseek-v4-flash",
+      f1: 0.25,
+      costUsd: 0.4
+    }).map((entry, index) =>
+      index === 0
+        ? entry
+        : {
+            ...entry,
+            schema_version: "ultrafuzz.eval.history.observation.v4" as const,
+            cost_usd: null,
+            cost_completeness: { status: "partial" as const, reasons: ["pricing-incomplete"] }
+          }
+    );
+    const partialDeepseek = completeRun({
+      id: "deepseek",
+      timestamp: "2026-08-01T00:00:00.000Z",
+      commitCharacter: "8",
+      model: "deepseek-v4-pro",
+      f1: 0.1,
+      costUsd: 1.25
+    }).map((entry, index) =>
+      index === 0
+        ? entry
+        : {
+            ...entry,
+            cost_completeness: { status: "partial" as const, reasons: ["pricing-incomplete"] }
+          }
+    );
     const observations = [
       ...lunaRuns.flatMap(([id, timestamp, commitCharacter, f1, costUsd]) =>
         completeRun({ id, timestamp, commitCharacter, model: "gpt-5.6-luna", f1, costUsd })
       ),
-      ...completeRun({
-        id: "deepseek",
-        timestamp: "2026-08-01T00:00:00.000Z",
-        commitCharacter: "8",
-        model: "deepseek-v4-pro",
-        f1: 0.1,
-        costUsd: 1.25
-      }),
+      ...partialDeepseek,
+      ...legacyFlash,
       ...completeRun({
         id: "kimi",
         timestamp: "2026-08-02T00:00:00.000Z",
@@ -915,14 +1162,32 @@ describe("longitudinal eval history", () => {
 
     expect(summaries).toMatchObject([
       {
+        model: "deepseek-v4-flash",
+        runCount: 1,
+        expectedRunCount: 1,
+        availableTargetCount: 1,
+        expectedTargetCount: 2,
+        costCompleteness: { status: "partial", reasons: ["pricing-incomplete"] },
+        costUsd: { q1: 0.2, median: 0.2, q3: 0.2 },
+        f1: { q1: 0.25, median: 0.25, q3: 0.25 }
+      },
+      {
         model: "deepseek-v4-pro",
         runCount: 1,
+        expectedRunCount: 1,
+        availableTargetCount: 2,
+        expectedTargetCount: 2,
+        costCompleteness: { status: "partial", reasons: ["pricing-incomplete"] },
         costUsd: { q1: 1.25, median: 1.25, q3: 1.25 },
         f1: { q1: 0.1, median: 0.1, q3: 0.1 }
       },
       {
         model: "gpt-5.6-luna",
         runCount: 6,
+        expectedRunCount: 6,
+        availableTargetCount: 12,
+        expectedTargetCount: 12,
+        costCompleteness: { status: "complete", reasons: [] },
         firstRunTimestamp: "2026-07-31T14:52:13.635Z",
         costUsd: { q1: 12.5, median: 15, q3: 17.5 },
         f1: { q1: 0.225, median: 0.35, q3: 0.475 }
@@ -932,10 +1197,22 @@ describe("longitudinal eval history", () => {
     const svg = renderEvalHistoryCharts(
       parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations })
     ).get("performance-cost.svg")!;
-    expect(svg).toContain('data-model="gpt-5.6-luna" data-run-count="6"');
+    expect(svg).toContain('data-model="gpt-5.6-luna" data-status="complete" data-run-count="6"');
     expect(svg).toContain('data-cost-q1="12.5" data-cost-median="15" data-cost-q3="17.5"');
     expect(svg).toContain('data-f1-q1="0.225" data-f1-median="0.35" data-f1-q3="0.475"');
-    expect(svg).toContain("Not plotted · kimi-k3 · median 40.0% · n=1 · cost unavailable");
+    expect(svg).toContain("Not plotted · kimi-k3 · median 40.0% · n=1 · cost unavailable · targets 0/2");
+    expect(svg).toContain(
+      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="1" data-expected-target-count="2"'
+    );
+    expect(svg).toContain('data-completeness-marker="partial"');
+    expect(svg).toContain(
+      'deepseek-v4-flash</tspan><tspan fill="#6b7280"> · median 25.0% · $0.20 · n=1 · targets 1/2 · partial'
+    );
+    const costSvg = renderEvalHistoryCharts(
+      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations: legacyFlash })
+    ).get("cost.svg")!;
+    expect(costSvg).toContain('data-status="partial" data-available-count="0" data-expected-count="1"');
+    expect(costSvg).toContain("partial (value unavailable) (pricing-incomplete)");
     const deepseek = /<g data-model="deepseek-v4-pro"[\s\S]+?<\/g>/u.exec(svg)?.[0];
     expect(deepseek).toBeDefined();
     expect(deepseek).not.toContain('data-iqr="');
@@ -963,7 +1240,9 @@ describe("longitudinal eval history", () => {
         ]
       })
     ).get("performance-cost.svg")!;
-    expect(currentUnpricedLuna).toContain("Not plotted · gpt-5.6-luna · median 20.0% · n=1 · cost unavailable");
+    expect(currentUnpricedLuna).toContain(
+      "Not plotted · gpt-5.6-luna · median 20.0% · n=1 · cost unavailable · targets 0/2"
+    );
     expect(currentUnpricedLuna).not.toContain("median 55.0% · n=2");
   });
 
