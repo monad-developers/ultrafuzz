@@ -724,10 +724,21 @@ jobs:
               elif [ "$smoke_model_soft_fail" = true ] && \
                 jq -e "$smoke_soft_fail_filter" "$outcome_file" > /dev/null; then
                 soft_fail_category="$(jq -r '.category' "$outcome_file")"
-                readiness="$(node scripts/ci/describe-smoke-soft-fail.mjs \
+                readiness_decision="$(node scripts/ci/describe-smoke-soft-fail.mjs --json \
+                  --ref "$CI_REF_NAME" \
                   "$BENCHMARK_RESULTS/$pair/$slug/public-eval-diagnostics.json")"
-                echo "::warning::Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate — $readiness"
-                echo "Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate — $readiness" >&2
+                readiness="$(jq -r '.detail' <<< "$readiness_decision")"
+                if jq -e '.blocks_gate == true' <<< "$readiness_decision" > /dev/null; then
+                  echo "::error::Modal smoke pair $pair failed operationally as $soft_fail_category; blocking validation-ref smoke gate because scoring readiness is required — $readiness"
+                  echo "Modal smoke pair $pair failed operationally as $soft_fail_category; blocking validation-ref smoke gate because scoring readiness is required — $readiness" >&2
+                  matrix_failed=true
+                elif jq -e '.scoring_ready_required == true' <<< "$readiness_decision" > /dev/null; then
+                  echo "::warning::Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking validation-ref smoke gate because scoring readiness was validated — $readiness"
+                  echo "Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking validation-ref smoke gate because scoring readiness was validated — $readiness" >&2
+                else
+                  echo "::warning::Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate — $readiness"
+                  echo "Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate — $readiness" >&2
+                fi
               else
                 echo "Modal pair $pair did not finish and collect successfully" >&2
                 matrix_failed=true

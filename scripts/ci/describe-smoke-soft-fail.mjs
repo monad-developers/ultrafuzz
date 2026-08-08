@@ -45,6 +45,24 @@ export function describeSmokeSoftFail(diagnosticsPath) {
   };
 }
 
+// The hatch exists to keep an unrelated feature branch from being held
+// hostage by the benchmark plane. Release-validation refs have the opposite
+// purpose, so they may only use the hatch when the collected diagnostics prove
+// the failed pair was still scoreable.
+export function smokeSoftFailRequiresScoringReady(refName) {
+  return refName.startsWith("release/") || refName === "test/v0.1.0-ultrafuzz-bench";
+}
+
+export function decideSmokeSoftFail(diagnosticsPath, refName) {
+  const readiness = describeSmokeSoftFail(diagnosticsPath);
+  const scoringReadyRequired = smokeSoftFailRequiresScoringReady(refName);
+  return {
+    ...readiness,
+    scoring_ready_required: scoringReadyRequired,
+    blocks_gate: scoringReadyRequired && !readiness.validated
+  };
+}
+
 function reasonSummary(rows) {
   const reasons = new Set();
   for (const row of rows) {
@@ -76,10 +94,31 @@ function record(value) {
 }
 
 function main(args) {
-  if (args.length !== 1) {
-    throw new Error("usage: describe-smoke-soft-fail.mjs <public-eval-diagnostics.json>");
+  let json = false;
+  let refName;
+  let diagnosticsPath;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--json") {
+      json = true;
+    } else if (argument === "--ref" && args[index + 1] !== undefined) {
+      refName = args[index + 1];
+      index += 1;
+    } else if (!argument.startsWith("--") && diagnosticsPath === undefined) {
+      diagnosticsPath = argument;
+    } else {
+      throw usageError();
+    }
   }
-  console.log(describeSmokeSoftFail(args[0]).detail);
+  if (diagnosticsPath === undefined) throw usageError();
+
+  const result =
+    refName === undefined ? describeSmokeSoftFail(diagnosticsPath) : decideSmokeSoftFail(diagnosticsPath, refName);
+  console.log(json ? JSON.stringify(result) : result.detail);
+}
+
+function usageError() {
+  return new Error("usage: describe-smoke-soft-fail.mjs [--json] [--ref <ref-name>] <public-eval-diagnostics.json>");
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
