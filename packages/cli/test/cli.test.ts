@@ -1455,6 +1455,9 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   const workspaceDir = path.join(runData.run_root, "workspaces", "project-discovery");
   fs.mkdirSync(workspaceDir, { recursive: true });
   fs.writeFileSync(path.join(workspaceDir, "large-cache.txt"), "do not bundle\n", "utf8");
+  const engineLogDir = path.join(runData.run_root, "smithers", "logs");
+  fs.mkdirSync(engineLogDir, { recursive: true });
+  fs.writeFileSync(path.join(engineLogDir, "stream.ndjson"), '{"event":"retry"}\n', "utf8");
 
   const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
   assert.equal(bundled.code, 0, bundled.stderr);
@@ -1488,6 +1491,14 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
     false
   );
   assert.equal(entries.includes("artifacts/final-report/report.json.pre-old"), false);
+  // Engine retry/validation evidence must reach an operator bundle, under a
+  // neutral prefix so the archive never names the orchestration engine.
+  assert.equal(entries.includes("engine-logs/stream.ndjson"), true);
+  assert.equal(zip.readAsText("engine-logs/stream.ndjson"), '{"event":"retry"}\n');
+  assert.equal(
+    entries.some((entry) => /smithers/iu.test(entry)),
+    false
+  );
   const bundledMarkdown = zip.readAsText("artifacts/final-report/report.md");
   assert.doesNotMatch(bundledMarkdown, /Placeholder/iu);
   assert.match(bundledMarkdown, /- Tokens used: `123`/u);

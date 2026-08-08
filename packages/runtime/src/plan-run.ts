@@ -9,6 +9,7 @@ import {
   assertRegularFileInside,
   createInitialRunState,
   artifactContractDefinition,
+  artifactContractSchemaFile,
   createRunLayout,
   getNodeArtifactDir,
   layoutForRunRoot,
@@ -901,12 +902,14 @@ function promptLogicalNodes(graph: PlannedGraph, layout: PlanRunValue["layout"])
       dependsOn: dependencies,
       outputs: node.outputs.map((output) => {
         const definition = artifactContractDefinition(output.contract);
+        const schemaFile = artifactContractSchemaFile(output.contract);
         return {
           path: output.path,
           contract: output.contract,
           primary: output.primary,
           description: definition.description,
-          ...(definition.validEmptyExample === undefined ? {} : { validEmptyExample: definition.validEmptyExample })
+          ...(definition.validEmptyExample === undefined ? {} : { validEmptyExample: definition.validEmptyExample }),
+          ...(schemaFile === undefined ? {} : { schemaFile })
         };
       }),
       artifactDirs,

@@ -51,7 +51,11 @@ import {
   validatePropertyReferences,
   validateRunStateSchema,
   validateUsageLedgerEntry,
-  materializePromptSchemas
+  materializePromptSchemas,
+  ARTIFACT_CONTRACT_SCHEMA_FILES,
+  artifactContractSchemaFile,
+  isArtifactContractId,
+  type ArtifactContractId
 } from "../src/index.js";
 
 const packageRoot = findPackageRoot(path.dirname(fileURLToPath(import.meta.url)));
@@ -71,6 +75,31 @@ test("materializes the checked-in JSON schema bundle into a task-local directory
     assert.equal(statSync(path.join(destination, "reference-expectations.schema.json")).isFile(), true);
     assert.equal(statSync(path.join(destination, "property-lens.schema.json")).mode & 0o777, 0o400);
     assert.equal(statSync(destination).mode & 0o777, 0o700);
+  } finally {
+    for (const file of readdirSync(path.join(root, "workspace", ".ultrafuzz", "schemas"))) {
+      fs.chmodSync(path.join(root, "workspace", ".ultrafuzz", "schemas", file), 0o600);
+    }
+    fs.chmodSync(path.join(root, "workspace", ".ultrafuzz", "schemas"), 0o700);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("every contract-to-schema mapping names a file the bundle actually materializes", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-map-"));
+  try {
+    const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
+    materializePromptSchemas(destination);
+    const materialized = new Set(readdirSync(destination));
+
+    const mapped = Object.entries(ARTIFACT_CONTRACT_SCHEMA_FILES);
+    assert.ok(mapped.length > 0);
+    for (const [contract, schemaFile] of mapped) {
+      // A stale entry would hand every producer of this contract a path that
+      // does not exist, which is worse than saying nothing about schemas.
+      assert.equal(materialized.has(schemaFile as string), true, `${contract} -> ${String(schemaFile)}`);
+      assert.equal(isArtifactContractId(contract), true, contract);
+      assert.equal(artifactContractSchemaFile(contract as ArtifactContractId), schemaFile);
+    }
   } finally {
     for (const file of readdirSync(path.join(root, "workspace", ".ultrafuzz", "schemas"))) {
       fs.chmodSync(path.join(root, "workspace", ".ultrafuzz", "schemas", file), 0o600);
