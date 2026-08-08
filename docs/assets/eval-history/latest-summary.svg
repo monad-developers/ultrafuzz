@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="960" height="176" viewBox="0 0 960 176" role="img" aria-labelledby="title desc">
 <title id="title">Latest UltrafuzzBench run</title>
-<desc id="desc">Latest complete ultrafuzz-bench smoke run with 1 model profile. deepseek-v4-flash max: UltrafuzzBench Score 23.7%, 4 of 31 bugs found.</desc>
+<desc id="desc">Latest complete ultrafuzz-bench smoke run with 1 model profile. deepseek-v4-flash max: UltrafuzzBench Score 23.7%, 4 of 31 bugs found, cost $0.41 · partial 2/3, wall clock 26m 40s · partial 2/3.</desc>
 <rect width="960" height="176" rx="12" fill="#f9fafb"/>
 <text x="40" y="36" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">Latest UltrafuzzBench run</text>
 <text x="40" y="62" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">ultrafuzz-bench · smoke · 1 profile · 3 targets each · 2026-08-08</text>
@@ -16,6 +16,6 @@
 <text x="52" y="135" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#111827"><title>smoke · benchmark-smoke-deepseek-v4-flash-max</title>deepseek-v4-flash · max</text>
 <text x="400" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#0f766e">23.7%</text>
 <text x="600" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">4 / 31</text>
-<text x="760" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">n/a</text>
-<text x="920" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">n/a</text>
+<text data-metric="cost_usd" data-status="partial" data-available-target-count="2" data-expected-target-count="3" x="760" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" fill="#374151"><title>Cost: $0.41 · partial 2/3 (pricing-incomplete)</title>$0.41 · partial 2/3</text>
+<text data-metric="wall_clock_seconds" data-status="partial" data-available-target-count="2" data-expected-target-count="3" x="920" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" fill="#374151"><title>Wall clock: 26m 40s · partial 2/3 (node-attempt-timestamps-unavailable)</title>26m 40s · partial 2/3</text>
 </svg>

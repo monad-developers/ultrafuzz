@@ -146,7 +146,7 @@ describe("terminal eval efficiency", () => {
     expect(summary.efficiency.wait_time_seconds).toBe(3);
   });
 
-  it("does not report complete active time when retry attempt intervals are unavailable", () => {
+  it("keeps wall-clock and final-attempt timing as explicitly partial when a node retried", () => {
     const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-retried-node-"));
     writeTerminalRun(runRoot);
     const statePath = path.join(runRoot, "state.json");
@@ -158,12 +158,12 @@ describe("terminal eval efficiency", () => {
 
     const summary = summarizeEvalTerminal(terminalRecord(runRoot));
     expect(summary.efficiency.runtime).toEqual({
-      status: "unavailable",
-      reason: "node-attempt-timestamps-unavailable"
+      status: "partial",
+      reason: "node-attempt-timestamps-final-attempt-only"
     });
-    expect(summary.efficiency.wall_time_seconds).toBeNull();
-    expect(summary.efficiency.active_time_seconds).toBeNull();
-    expect(summary.efficiency.wait_time_seconds).toBeNull();
+    expect(summary.efficiency.wall_time_seconds).toBe(10);
+    expect(summary.efficiency.active_time_seconds).toBe(7);
+    expect(summary.efficiency.wait_time_seconds).toBe(3);
   });
 
   it("does not assume malformed retry metadata means zero retries", () => {
@@ -240,6 +240,32 @@ describe("terminal eval efficiency", () => {
     expect(summary.efficiency.usage).toEqual({ status: "unavailable", reason: "usage-incomplete" });
     expect(summary.efficiency.cost_usd).toBe(0.4);
     expect(summary.efficiency.cost).toEqual({ status: "partial", reason: "pricing-incomplete" });
+  });
+
+  it("keeps a known completely priced retry cost independent from incomplete usage", () => {
+    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-priced-retry-"));
+    writeTerminalRun(runRoot);
+    fs.writeFileSync(
+      path.join(runRoot, "run.json"),
+      JSON.stringify({
+        accounting: {
+          cumulative: {
+            total_tokens: 123,
+            estimated_spend_usd: 0.4,
+            usage_complete: false,
+            pricing_complete: true,
+            partial_pricing: false
+          }
+        }
+      }),
+      "utf8"
+    );
+
+    const summary = summarizeEvalTerminal(terminalRecord(runRoot));
+    expect(summary.efficiency.total_tokens).toBeNull();
+    expect(summary.efficiency.usage).toEqual({ status: "unavailable", reason: "usage-incomplete" });
+    expect(summary.efficiency.cost_usd).toBe(0.4);
+    expect(summary.efficiency.cost).toEqual({ status: "complete", reason: null });
   });
 
   it("publishes Kimi token and cost fields from independent component accounting", () => {

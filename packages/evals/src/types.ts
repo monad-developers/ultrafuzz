@@ -273,6 +273,7 @@ export type EvalEfficiencyReason =
   | "node-timestamps-unavailable"
   | "node-timestamps-invalid"
   | "node-attempt-timestamps-unavailable"
+  | "node-attempt-timestamps-final-attempt-only"
   | "accounting-unavailable"
   | "usage-incomplete"
   | "pricing-unavailable"

@@ -539,15 +539,18 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
 
 function fakeLifecycleSmithersEnv(
   project: string,
-  input: { inspect: unknown; events?: string; inspectMarkerPath?: string; timeline?: unknown }
+  input: { inspect: unknown; events?: string; tokenEvents?: string; inspectMarkerPath?: string; timeline?: unknown }
 ): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const inspectPath = path.join(project, "fake-smithers-inspect.json");
   const eventsPath = path.join(project, "fake-smithers-events.ndjson");
+  const tokenEventsPath =
+    input.tokenEvents === undefined ? eventsPath : path.join(project, "fake-smithers-token-events.ndjson");
   const timelinePath = path.join(project, "fake-smithers-timeline.json");
   fs.writeFileSync(inspectPath, `${JSON.stringify(input.inspect, null, 2)}\n`, "utf8");
   fs.writeFileSync(eventsPath, input.events ?? "", "utf8");
+  if (input.tokenEvents !== undefined) fs.writeFileSync(tokenEventsPath, input.tokenEvents, "utf8");
   fs.writeFileSync(
     timelinePath,
     `${JSON.stringify(input.timeline ?? { timeline: { frames: [] } }, null, 2)}\n`,
@@ -571,7 +574,11 @@ function fakeLifecycleSmithersEnv(
       "    exit 2",
       "    ;;",
       "  events)",
-      '    cat "$SMITHERS_FAKE_EVENTS"',
+      '    if [ "$3" = "--type" ] && [ "$4" = "token" ]; then',
+      '      cat "$SMITHERS_FAKE_TOKEN_EVENTS"',
+      "    else",
+      '      cat "$SMITHERS_FAKE_EVENTS"',
+      "    fi",
       "    ;;",
       "  timeline)",
       '    cat "$SMITHERS_FAKE_TIMELINE"',
@@ -617,6 +624,7 @@ function fakeLifecycleSmithersEnv(
     SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
     SMITHERS_FAKE_INSPECT: inspectPath,
     SMITHERS_FAKE_EVENTS: eventsPath,
+    SMITHERS_FAKE_TOKEN_EVENTS: tokenEventsPath,
     SMITHERS_FAKE_TIMELINE: timelinePath,
     ULTRAFUZZ_PRICING_CATALOG_URL: "off"
   };
@@ -7184,6 +7192,330 @@ test("syncRun persists cumulative token accounting and partial pricing from work
   assert.deepEqual(metadata.accounting?.cumulative?.source_run_ids, ["source-accounting"]);
 });
 
+test("syncRun does not count a retried zero-usage attempt as an unpriced event", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-retried-zero-usage";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: { iteration: 0, model: "deepseek-v4-flash", agent: "deepseek" }
+      },
+      {
+        type: "NodeFailed",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        error: { message: "failed before model usage" },
+        extra: { iteration: 0 }
+      },
+      { type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 2, extra: { iteration: 0 } },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 2, extra: { iteration: 0 } },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 2,
+        extra: {
+          iteration: 0,
+          inputTokens: 10,
+          outputTokens: 5,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reasoningTokens: 0,
+          totalTokens: 15,
+          costUsd: 0.25,
+          model: "deepseek-v4-flash",
+          agent: "deepseek"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 2, extra: { iteration: 0 } },
+      { type: "RunFinished" }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    deepseek: {
+      models: {
+        "deepseek-v4-flash": {
+          cost: { input: 1, output: 2, cache_read: 0.5, cache_write: 0 }
+        }
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId: "retried-zero-usage", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "retried-zero-usage", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: {
+        total_tokens?: number;
+        estimated_spend_usd?: number;
+        usage_complete?: boolean;
+        usage_incomplete_reasons?: Array<{ code?: string }>;
+        pricing_complete?: boolean;
+        pricing_incomplete_reasons?: unknown[];
+        partial_pricing?: boolean;
+        event_count?: number;
+        priced_event_count?: number;
+        unpriced_event_count?: number;
+      };
+      cumulative?: {
+        estimated_spend_usd?: number;
+        pricing_complete?: boolean;
+        partial_pricing?: boolean;
+        unpriced_event_count?: number;
+      };
+      checkpoint?: { ledger_event_count?: number };
+    };
+  };
+  assert.equal(metadata.accounting?.current?.total_tokens, 15);
+  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 0.25);
+  assert.equal(metadata.accounting?.current?.usage_complete, false);
+  assert.deepEqual(
+    metadata.accounting?.current?.usage_incomplete_reasons?.map((reason) => reason.code),
+    ["usage-missing"]
+  );
+  assert.equal(metadata.accounting?.current?.pricing_complete, true);
+  assert.deepEqual(metadata.accounting?.current?.pricing_incomplete_reasons, []);
+  assert.equal(metadata.accounting?.current?.partial_pricing, false);
+  assert.equal(metadata.accounting?.current?.event_count, 1);
+  assert.equal(metadata.accounting?.current?.priced_event_count, 1);
+  assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
+  assert.equal(metadata.accounting?.cumulative?.estimated_spend_usd, 0.25);
+  assert.equal(metadata.accounting?.cumulative?.pricing_complete, true);
+  assert.equal(metadata.accounting?.cumulative?.partial_pricing, false);
+  assert.equal(metadata.accounting?.cumulative?.unpriced_event_count, 0);
+  assert.equal(metadata.accounting?.checkpoint?.ledger_event_count, 2);
+
+  const secondWorkflowRunId = "ultrafuzz-retried-zero-usage-relinked";
+  env.SMITHERS_FAKE_FORKED_RUN_ID = secondWorkflowRunId;
+  const forked = await forkRun({
+    projectRoot: project,
+    runId: "retried-zero-usage",
+    forkFrame: 0,
+    env
+  });
+  assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
+  assert.equal(forked.value?.workflow_run_id, secondWorkflowRunId);
+  const metadataPath = path.join(run.value!.run_root, "run.json");
+  fs.writeFileSync(
+    path.join(project, "fake-smithers-inspect.json"),
+    `${JSON.stringify(
+      workflowInspect({
+        workflowRunId: secondWorkflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(project, "fake-smithers-events.ndjson"),
+    workflowEvents(secondWorkflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 4,
+          outputTokens: 2,
+          costUsd: 0.1,
+          model: "deepseek-v4-flash",
+          agent: "deepseek"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      { type: "RunFinished" }
+    ]),
+    "utf8"
+  );
+
+  const relinked = await syncRun({ projectRoot: project, runId: "retried-zero-usage", env });
+  assert.equal(relinked.ok, true, JSON.stringify(relinked.diagnostics));
+  const afterRelink = fs.readFileSync(metadataPath, "utf8");
+  const replayed = await syncRun({ projectRoot: project, runId: "retried-zero-usage", env });
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.equal(fs.readFileSync(metadataPath, "utf8"), afterRelink, "accounting replay must be byte-idempotent");
+
+  const finalMetadata = JSON.parse(afterRelink) as {
+    accounting?: {
+      segments?: Array<{
+        workflow_run_id?: string;
+        pricing_complete?: boolean;
+        event_count?: number;
+        priced_event_count?: number;
+        unpriced_event_count?: number;
+      }>;
+      cumulative?: {
+        pricing_complete?: boolean;
+        partial_pricing?: boolean;
+        event_count?: number;
+        priced_event_count?: number;
+        unpriced_event_count?: number;
+      };
+      checkpoint?: { failed_zero_usage_source_event_ids?: string[] };
+    };
+  };
+  assert.deepEqual(
+    finalMetadata.accounting?.segments?.map((segment) => [
+      segment.workflow_run_id,
+      segment.pricing_complete,
+      segment.event_count,
+      segment.priced_event_count,
+      segment.unpriced_event_count
+    ]),
+    [
+      [workflowRunId, true, 1, 1, 0],
+      [secondWorkflowRunId, true, 1, 1, 0]
+    ]
+  );
+  assert.equal(finalMetadata.accounting?.cumulative?.pricing_complete, true);
+  assert.equal(finalMetadata.accounting?.cumulative?.partial_pricing, false);
+  assert.equal(finalMetadata.accounting?.cumulative?.event_count, 2);
+  assert.equal(finalMetadata.accounting?.cumulative?.priced_event_count, 2);
+  assert.equal(finalMetadata.accounting?.cumulative?.unpriced_event_count, 0);
+  assert.equal(finalMetadata.accounting?.checkpoint?.failed_zero_usage_source_event_ids?.length, 1);
+});
+
+test("syncRun does not confuse restarted retry counters across checkpoint generations", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-restarted-zero-usage";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      {
+        type: "NodeStarted",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        sequence: 0,
+        extra: { iteration: 0, checkpointGenerationId: "checkpoint-1" }
+      },
+      {
+        type: "NodeFailed",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        sequence: 2,
+        error: { message: "failed before model usage" },
+        extra: { iteration: 0 }
+      },
+      {
+        type: "NodeStarted",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        sequence: 3,
+        extra: { iteration: 0, checkpointGenerationId: "checkpoint-2" }
+      },
+      {
+        type: "NodeFinished",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        sequence: 5,
+        extra: { iteration: 0 }
+      },
+      { type: "RunFinished", sequence: 6 }
+    ]),
+    tokenEvents: workflowEvents(workflowRunId, [
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        sequence: 1,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: "checkpoint-1",
+          model: "deepseek-v4-flash",
+          agent: "deepseek"
+        }
+      },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        sequence: 4,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: "checkpoint-2",
+          model: "deepseek-v4-flash",
+          agent: "deepseek"
+        }
+      }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    deepseek: {
+      models: {
+        "deepseek-v4-flash": {
+          cost: { input: 1, output: 2, cache_read: 0.5, cache_write: 0 }
+        }
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId: "restarted-zero-usage", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "restarted-zero-usage", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: {
+        checkpoint_generation_id?: string;
+        pricing_complete?: boolean;
+        partial_pricing?: boolean;
+        event_count?: number;
+        unpriced_event_count?: number;
+      };
+      segments?: Array<{
+        checkpoint_generation_id?: string;
+        pricing_complete?: boolean;
+        event_count?: number;
+        unpriced_event_count?: number;
+      }>;
+      checkpoint?: { ledger_event_count?: number };
+    };
+  };
+  assert.deepEqual(
+    metadata.accounting?.segments?.map((segment) => [
+      segment.checkpoint_generation_id,
+      segment.pricing_complete,
+      segment.event_count,
+      segment.unpriced_event_count
+    ]),
+    [
+      ["checkpoint-1", true, 0, 0],
+      ["checkpoint-2", false, 1, 1]
+    ]
+  );
+  assert.equal(metadata.accounting?.current?.checkpoint_generation_id, "checkpoint-2");
+  assert.equal(metadata.accounting?.current?.pricing_complete, false);
+  assert.equal(metadata.accounting?.current?.partial_pricing, true);
+  assert.equal(metadata.accounting?.current?.event_count, 1);
+  assert.equal(metadata.accounting?.current?.unpriced_event_count, 1);
+  assert.equal(metadata.accounting?.checkpoint?.ledger_event_count, 2);
+});
+
 test("syncRun preserves generated usage across checkpoint generations and replays idempotently", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -7274,6 +7606,9 @@ test("syncRun preserves generated usage across checkpoint generations and replay
         usage_complete?: boolean;
         usage_incomplete_reasons?: Array<{ code?: string }>;
         pricing_complete?: boolean;
+        pricing_incomplete_reasons?: Array<{ code?: string }>;
+        event_count?: number;
+        unpriced_event_count?: number;
       };
       segments?: Array<{
         checkpoint_generation_id?: string;
@@ -7306,6 +7641,12 @@ test("syncRun preserves generated usage across checkpoint generations and replay
     new Set(["usage-malformed", "usage-missing"])
   );
   assert.equal(metadata.accounting?.current?.pricing_complete, false);
+  assert.equal(metadata.accounting?.current?.event_count, 2);
+  assert.equal(metadata.accounting?.current?.unpriced_event_count, 2);
+  assert.deepEqual(
+    metadata.accounting?.current?.pricing_incomplete_reasons?.map((reason) => reason.code),
+    ["price-unavailable", "price-unavailable"]
+  );
   assert.equal(metadata.accounting?.cumulative?.usage_complete, false);
   assert.equal(metadata.accounting?.checkpoint?.ledger_event_count, 4);
   assert.equal(metadata.accounting?.checkpoint?.checkpoint_generation_id, "generation-3");
