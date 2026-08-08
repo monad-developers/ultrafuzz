@@ -50,6 +50,109 @@ const UNOVERRIDDEN_SMITHERS_DEPENDENCIES = {
   devDependencies: REQUIRED_SMITHERS_DEPENDENCIES.devDependencies
 } as const;
 
+// When each pinned version above reached npm. This is the input to the
+// resolution cutoff below, and the reason a pin bump cannot silently leave the
+// cutoff behind: `assertSmithersResolutionCutoff`, which the suite runs, demands
+// an entry for every `name@version` the manifest pins, so raising a pin without
+// recording its publish instant fails the build rather than a launch.
+const SMITHERS_PIN_PUBLISH_TIMES: Readonly<Record<string, string>> = {
+  "@effect/opentelemetry@4.0.0-beta.102": "2026-07-26T22:24:29.050Z",
+  "@effect/platform-bun@4.0.0-beta.102": "2026-07-26T22:24:35.293Z",
+  "@effect/platform-node-shared@4.0.0-beta.102": "2026-07-26T22:24:39.301Z",
+  "@effect/sql-sqlite-bun@4.0.0-beta.102": "2026-07-26T22:24:42.599Z",
+  "@moonshot-ai/kimi-code@0.29.1": "2026-07-24T05:27:08.545Z",
+  "effect@4.0.0-beta.102": "2026-07-26T22:24:42.705Z",
+  "smithers-orchestrator@0.32.0": "2026-08-01T05:00:25.735Z",
+  "typescript@6.0.3": "2026-04-16T23:38:27.905Z",
+  "zod@4.4.3": "2026-05-04T07:06:40.819Z"
+};
+
+// The pin list above closes the hazard one package at a time, and only for
+// packages that have already broken a run. What it cannot cover is the rest of
+// the transitive closure: the generated workspace installs with
+// `--package-lock=false`, so every open range below the pins re-resolves against
+// whatever npm holds at that instant. Two costs follow. A version published
+// minutes ago can be selected before its tarball has propagated to the CDN edge
+// the container talks to, and npm reports that gap as a hard E404 -- R54 lost a
+// whole generation at workflow submission to `@ai-sdk/provider@4.0.7`, published
+// 2m08s earlier. Quieter but worse, two runs from the *same* image launched hours
+// apart install different trees, so a benchmark comparing runs against a fixed
+// ground truth is not comparing like with like.
+//
+// The general rule, in place of extending the pin list a name at a time: resolve
+// the whole tree as of a fixed instant. `npm install --before` ignores every
+// version published after it, so resolution depends on the manifest and this
+// constant, not on the wall clock -- which is exactly what an in-flight resume
+// needs, and it needs no lockfile in the run workspace, so `--package-lock=false`
+// and the migration path in `migrateLegacySmithersPackageManifest` are untouched.
+//
+// The rule for moving it: the next UTC midnight after the newest pin above. It
+// must never precede a pinned version's own publish instant -- npm would fail to
+// find the pin at all -- and dating it a day back keeps every selectable tarball
+// well past propagation.
+export const SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF = "2026-08-02T00:00:00Z";
+
+/**
+ * Fails when a pinned version has no recorded publish instant, or when the
+ * resolution cutoff predates one -- either way `npm install --before` could not
+ * install the pin it was handed.
+ */
+export function assertSmithersResolutionCutoff(): void {
+  const cutoff = Date.parse(SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF);
+  if (Number.isNaN(cutoff)) {
+    throw new Error(
+      `Smithers dependency resolution cutoff is not a valid instant: ${SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF}`
+    );
+  }
+  for (const [name, version] of pinnedSmithersVersions()) {
+    const published = SMITHERS_PIN_PUBLISH_TIMES[`${name}@${version}`];
+    if (published === undefined) {
+      throw new Error(
+        `pinned Smithers dependency ${name}@${version} has no recorded publish instant; record it and move SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF past it`
+      );
+    }
+    if (Date.parse(published) > cutoff) {
+      throw new Error(
+        `SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF ${SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF} predates ${name}@${version}, published ${published}`
+      );
+    }
+  }
+}
+
+function* pinnedSmithersVersions(): Generator<readonly [string, string]> {
+  for (const section of Object.values(REQUIRED_SMITHERS_DEPENDENCIES)) {
+    for (const [name, version] of Object.entries(section)) {
+      yield [name, version] as const;
+    }
+  }
+}
+
+export interface SmithersInstallCommandOptions {
+  /** Directory holding the generated workspace manifest, passed to `npm --prefix`. */
+  readonly prefix: string;
+  /** Registry to install from; omitted, npm uses the ambient configuration. */
+  readonly registry?: string;
+}
+
+/**
+ * The argv both installers of the generated workspace run. Shared so the
+ * resolution cutoff cannot be present on one path and missing on the other.
+ */
+export function smithersDependencyInstallArgs({ prefix, registry }: SmithersInstallCommandOptions): string[] {
+  return [
+    "install",
+    "--prefix",
+    prefix,
+    "--ignore-scripts",
+    "--package-lock=false",
+    `--before=${SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF}`,
+    ...(registry === undefined ? [] : [`--registry=${registry}`]),
+    "--no-audit",
+    "--no-fund",
+    "--loglevel=error"
+  ];
+}
+
 /** Manifest sections keyed by name, so one comparison covers deps and overrides. */
 type SmithersManifestSections = Readonly<Record<string, Readonly<Record<string, string>>>>;
 

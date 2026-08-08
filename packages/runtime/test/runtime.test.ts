@@ -14,12 +14,15 @@ import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/ref
 
 import {
   assertSmithersPackageManifest,
+  assertSmithersResolutionCutoff,
   KIMI_CODE_VERSION,
   renderSmithersPackageJson,
   REQUIRED_SMITHERS_OVERRIDES,
+  SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF,
   SMITHERS_EFFECT_VERSION,
   SMITHERS_ORCHESTRATOR_BIN_PATH,
-  SMITHERS_ORCHESTRATOR_VERSION
+  SMITHERS_ORCHESTRATOR_VERSION,
+  smithersDependencyInstallArgs
 } from "../src/smithers-package.js";
 
 import {
@@ -4218,6 +4221,64 @@ test("startRun bootstraps target-local Smithers dependencies when missing", asyn
   assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /--package-lock=false/);
   assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /--registry=https:\/\/registry\.npmjs\.org/);
   assert.match(fs.readFileSync(installer.smithersLogPath, "utf8"), /up .*ultrafuzz-bootstrap-smithers-run\.tsx/);
+});
+
+test("startRun resolves the generated workspace as of a fixed instant, not the launch clock", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const installer = writeFakeNpmInstaller(project);
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "pinned-resolution-run",
+    env: {
+      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_FAKE_LOG: installer.smithersLogPath
+    }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  // Without `--before`, npm re-resolves every open range below the pins against
+  // whatever the registry holds at that instant. R54 died at workflow submission
+  // because that landed on `@ai-sdk/provider@4.0.7`, published 2m08s earlier and
+  // not yet on the CDN edge the container reached.
+  const npmLog = fs.readFileSync(installer.npmLogPath, "utf8");
+  assert.equal(npmLog.includes(`--before=${SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF} `), true, npmLog);
+});
+
+test("both installers of the generated workspace share one resolution cutoff", () => {
+  const local = smithersDependencyInstallArgs({
+    prefix: "/tmp/local/.smithers",
+    registry: "https://registry.npmjs.org"
+  });
+  const cloud = smithersDependencyInstallArgs({ prefix: "/tmp/cloud/.smithers" });
+
+  for (const args of [local, cloud]) {
+    assert.equal(args.includes(`--before=${SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF}`), true, args.join(" "));
+    // The cutoff makes resolution reproducible; it does not relax the hardening
+    // the install already carried, and it must not introduce a lockfile into the
+    // run workspace that an in-flight resume would then have to reconcile.
+    assert.equal(args.includes("--ignore-scripts"), true, args.join(" "));
+    assert.equal(args.includes("--package-lock=false"), true, args.join(" "));
+  }
+  // The cloud node worker installs against the sandbox's ambient npm
+  // configuration, so it must not be handed the local path's registry.
+  assert.equal(local.includes("--registry=https://registry.npmjs.org"), true, local.join(" "));
+  assert.equal(
+    cloud.some((arg) => arg.startsWith("--registry=")),
+    false,
+    cloud.join(" ")
+  );
+});
+
+test("the resolution cutoff cannot fall behind a pinned dependency", () => {
+  // Guards the rule rather than one more package name: a pin raised without
+  // moving the cutoff past its publish instant would leave `--before` unable to
+  // see the very version the manifest demands.
+  assertSmithersResolutionCutoff();
+  assert.equal(Date.parse(SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF) < Date.now(), true);
 });
 
 test("startRun migrates the known generated Smithers caret manifest without dropping custom fields", async () => {
