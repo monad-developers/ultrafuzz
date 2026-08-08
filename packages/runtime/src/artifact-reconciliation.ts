@@ -15,6 +15,7 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import type { PlannedGraphNode } from "./types.js";
+import type { RuntimeDiagnostic } from "./types.js";
 
 export interface ArtifactReconciliationResult {
   materialized: string[];
@@ -410,4 +411,33 @@ function isAlreadyExistsError(error: unknown): boolean {
 
 function isBenignCleanupError(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ELOOP");
+}
+
+/**
+ * Whether a gate failure is only the benign "the durable volume has not caught
+ * up yet" case, and so should wait out the bounded reconciliation grace rather
+ * than failing the node.
+ *
+ * Judged on FATAL diagnostics only. A warning cannot fail a node, so letting one
+ * decide that a transient miss is non-transient turned a five-minute retry into
+ * an immediate artifact-contract failure with a consumed retry. `gate.ok` is
+ * false only when at least one error exists, so filtering to errors changes
+ * nothing except that case.
+ *
+ * Lives here rather than in `workflow-sync.ts` for the reason
+ * `git-capture-diagnostics.ts` records: that module is re-exported wholesale by
+ * the package index, so anything exported from it becomes public API, and an
+ * `@internal` tag does not stop `export *`. This file is not re-exported, so the
+ * predicate stays importable by its tests and by `workflow-sync.ts` without
+ * widening what the package promises.
+ */
+export function onlyTransientArtifactDiagnostics(diagnostics: RuntimeDiagnostic[]): boolean {
+  const transientCodes = new Set([
+    "REQUIRED_ARTIFACT_MISSING",
+    "REQUIRED_ARTIFACT_EMPTY",
+    "GENERATED_TEST_FILE_MISSING",
+    "GENERATED_TEST_FILE_EMPTY"
+  ]);
+  const fatal = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+  return fatal.length > 0 && fatal.every((diagnostic) => transientCodes.has(diagnostic.code));
 }

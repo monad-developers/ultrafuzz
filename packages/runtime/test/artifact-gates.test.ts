@@ -13,6 +13,7 @@ import {
   writeArtifact,
   writeArtifactManifest
 } from "@ultrafuzz/artifacts";
+import { loadBuiltInPromptAssets } from "@ultrafuzz/prompts";
 
 import {
   CAMPAIGN_LOGICAL_NODE_IDS,
@@ -4388,4 +4389,618 @@ test("dependency gates reject reused descendants after an ancestor manifest chan
     reason: "node consumer cannot reuse descendants after a prerequisite manifest changed",
     blocked_by: ["reused"]
   });
+});
+
+// Regression: https://github.com/.../issues/386 — the campaign gate demanded a
+// finding sharing each raw counterexample's ID, so a campaign that correctly
+// deduplicated many counterexamples of one property into one finding failed.
+function campaignPropertyCatalog(layout: ReturnType<typeof createRunLayout>, propertyIds: string[]): void {
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: propertyIds.map((propertyId) => ({
+        id: propertyId,
+        description: `Invariant ${propertyId}`,
+        category: "accounting",
+        priority: "high",
+        sources: [{ source_node_id: "property-specification-certora", source_property_id: `certora-${propertyId}` }]
+      }))
+    })
+  );
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      properties: propertyIds.map((propertyId) => ({
+        property_id: propertyId,
+        status: "implemented",
+        implementation_paths: ["test/recon/Properties.sol"],
+        test_paths: []
+      }))
+    })
+  );
+}
+
+function campaignFinding(id: string, propertyIds: string[]): Record<string, unknown> {
+  const finding: Record<string, unknown> = {
+    schema_version: "1.0",
+    id,
+    title: propertyIds.length > 0 ? `Violation of ${propertyIds.join(", ")}` : "Harness observation",
+    status: "reproduced",
+    severity_guess: "medium",
+    confidence: "high",
+    summary: "The property failed."
+  };
+  // A finding with no property provenance omits the key entirely; an empty
+  // array is not how the campaign nodes express "no properties".
+  if (propertyIds.length > 0) {
+    finding.property_ids = propertyIds;
+  }
+  return finding;
+}
+
+test("campaign gate accepts many counterexamples of one property deduplicated into one finding", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-dedup" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [1, 2, 3].map((index) => ({
+        id: `failure-${index}`,
+        status: "reproduced",
+        property_ids: ["property-1"]
+      }))
+    })
+  );
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-1", ["property-1"])]));
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.deepEqual(
+    result.diagnostics.filter((diagnostic) => diagnostic.source === "property-provenance"),
+    []
+  );
+  assert.equal(result.ok, true);
+});
+
+test("campaign gate accepts the R55 artifact shape: 29 counterexamples over two properties, two findings", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-r55" });
+  campaignPropertyCatalog(layout, ["property-1", "property-3"]);
+  const campaignId = "stateful-invariant-campaign";
+  // 27 counterexamples of property-1 and 2 of property-3, exactly as R55 produced.
+  const failures = Array.from({ length: 29 }, (_value, index) => ({
+    id: `failure-${index + 1}`,
+    status: "reproduced",
+    property_ids: [index + 1 === 25 || index + 1 === 26 ? "property-3" : "property-1"]
+  }));
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([campaignFinding("failure-1", ["property-1"]), campaignFinding("failure-25", ["property-3"])])
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.deepEqual(
+    result.diagnostics.filter((diagnostic) => diagnostic.source === "property-provenance"),
+    []
+  );
+  assert.equal(result.ok, true);
+});
+
+test("campaign gate still rejects a property-derived failure no finding covers", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-uncovered" });
+  campaignPropertyCatalog(layout, ["property-1", "property-2"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-2"] }
+      ]
+    })
+  );
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-1", ["property-1"])]));
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  const missing = result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING");
+  assert.ok(missing);
+  assert.match(missing?.path ?? "", /failures\[1\]/u);
+});
+
+test("campaign gate names only the genuinely uncovered property of a partially covered failure", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partial" });
+  campaignPropertyCatalog(layout, ["property-1", "property-2"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1", "property-2"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-1"] }
+      ]
+    })
+  );
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-2", ["property-1"])]));
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  const missing = result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING");
+  assert.ok(missing);
+  assert.match(missing?.message ?? "", /property-2/u);
+  // property-1 is covered by the finding, so naming it would send the retry
+  // after an artifact that is already correct.
+  assert.doesNotMatch(missing?.message ?? "", /property-1/u);
+});
+
+test("campaign gate keeps flagging ambiguous and mismatched same-ID findings", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-ambiguous" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-1"] }
+      ]
+    })
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([campaignFinding("failure-1", ["property-1"]), campaignFinding("failure-1", ["property-1"])])
+  );
+  const ambiguous = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(ambiguous.ok, false);
+  assert.ok(ambiguous.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_AMBIGUOUS"));
+
+  // A finding that claims a failure's ID must still carry that failure's properties,
+  // even though other failures may now be covered by a different finding.
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([campaignFinding("failure-1", []), campaignFinding("failure-2", ["property-1"])])
+  );
+  const mismatched = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(mismatched.ok, false);
+  assert.ok(mismatched.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISMATCH"));
+});
+
+test("campaign gate rejects a failure whose property combination no single finding claims", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-combination" });
+  campaignPropertyCatalog(layout, ["property-1", "property-2"]);
+  const campaignId = "stateful-invariant-campaign";
+  // The counterexample that broke both invariants at once is the most
+  // interesting one in the file; per-property coverage alone would drop it.
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-2"] },
+        { id: "failure-3", status: "reproduced", property_ids: ["property-1", "property-2"] }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([campaignFinding("failure-1", ["property-1"]), campaignFinding("failure-2", ["property-2"])])
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  const missing = result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING");
+  assert.ok(missing);
+  assert.match(missing?.message ?? "", /failure-3/u);
+});
+
+test("campaign gate accepts a deduplicated finding that unions the properties of the failures it covers", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-union" });
+  campaignPropertyCatalog(layout, ["property-1", "property-3"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-1", "property-3"] }
+      ]
+    })
+  );
+  // The campaign prompt says to reuse a stable failure ID on the deduplicated
+  // finding, so the finding that collapses both failures carries failure-1's ID
+  // while carrying the union of their properties.
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([campaignFinding("failure-1", ["property-1", "property-3"])])
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.deepEqual(
+    result.diagnostics.filter((diagnostic) => diagnostic.source === "property-provenance"),
+    []
+  );
+  assert.equal(result.ok, true);
+});
+
+test("campaign gate rejects a finding that claims a property no failure ever reported", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-invented" });
+  campaignPropertyCatalog(layout, ["property-1", "property-2"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
+    })
+  );
+  // property-2 is implemented and in the catalog, so only the campaign join can
+  // catch it: no counterexample anywhere reported it.
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([campaignFinding("failure-1", ["property-1", "property-2"])])
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  const unobserved = result.diagnostics.find(
+    (diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PROPERTY_UNOBSERVED"
+  );
+  assert.ok(unobserved);
+  assert.match(unobserved?.message ?? "", /property-2/u);
+  assert.doesNotMatch(unobserved?.message ?? "", /property-1/u);
+});
+
+test("campaign gate rejects a property claim anchored to a failure that reported no property", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-harness-anchor" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  // A harness defect legitimately omits property_ids. A finding may not borrow
+  // its ID and then attribute a catalog property to it.
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [{ id: "failure-1", status: "reproduced" }]
+    })
+  );
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-1", ["property-1"])]));
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PROPERTY_UNOBSERVED"),
+    `expected an unobserved-property diagnostic, got ${JSON.stringify(result.diagnostics.map((d) => d.code))}`
+  );
+});
+
+// The coverage block's JSON and Markdown examples in final-report.md drifted
+// apart -- the JSON said one included priority while the Markdown rendered two,
+// and the Markdown reported zero deferred properties beside a blocker summary
+// that only a deferred property can produce. A model copying them could not
+// pass the gate. Run the prompt's own examples through the gate rather than
+// restating them here, so they cannot drift again.
+function fencedBlockAfter(markdown: string, anchor: string, language: string): string {
+  const anchorIndex = markdown.indexOf(anchor);
+  assert.ok(anchorIndex >= 0, `final-report.md no longer contains ${JSON.stringify(anchor)}`);
+  const fence = "```" + language + "\n";
+  const start = markdown.indexOf(fence, anchorIndex);
+  assert.ok(start >= 0, `no ${language} block follows ${JSON.stringify(anchor)}`);
+  const bodyStart = start + fence.length;
+  const end = markdown.indexOf("\n```", bodyStart);
+  assert.ok(end >= 0, `unterminated ${language} block after ${JSON.stringify(anchor)}`);
+  return markdown.slice(bodyStart, end);
+}
+
+test("the coverage examples in final-report.md satisfy the coverage gate", () => {
+  const finalReport = loadBuiltInPromptAssets().find((asset) => asset.relativePath === "review/final-report.md");
+  assert.ok(finalReport, "missing built-in prompt review/final-report.md");
+  const coverageJson = JSON.parse(
+    fencedBlockAfter(finalReport.markdown, "emit `property_implementation_coverage` with", "json")
+  ) as Record<string, unknown>;
+  const coverageMarkdown = fencedBlockAfter(
+    finalReport.markdown,
+    "These bullets are the Markdown rendering",
+    "markdown"
+  );
+
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-prompt-coverage-example",
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "medium"\n'
+  });
+  const node = {
+    ...plannedNode(["report.md", "report.json"]),
+    id: "final-report",
+    logical_id: "final-report"
+  };
+  // The handoff the prompt's example describes: one implemented high-priority
+  // property carrying a reference expectation, and one deferred medium one.
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-1",
+          description: "The accounting relation holds.",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "hub-total" }],
+          reference_expectations: ["scfuzzbench:example:expectation-1"]
+        },
+        {
+          id: "property-2",
+          description: "The premium delta is conserved.",
+          category: "accounting",
+          priority: "medium",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "premium-delta" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      selection: {
+        priority_threshold: "medium",
+        priorities: ["high", "medium"],
+        property_ids: ["property-1", "property-2"]
+      },
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: ["test/foundry/Property1.t.sol"],
+          reference_expectations: ["scfuzzbench:example:expectation-1"]
+        },
+        {
+          property_id: "property-2",
+          status: "deferred",
+          implementation_paths: [],
+          test_paths: [],
+          blocker: {
+            code: "transition-oracle-deferred",
+            summary: "The handler cannot observe the premium delta returned by the Hub.",
+            next_action: "Add property-scoped snapshots around the handler."
+          }
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    node.id,
+    "report.json",
+    JSON.stringify({
+      schema_version: "1.0",
+      run_metadata: {},
+      issues: [],
+      non_production_outcomes: [],
+      property_implementation_coverage: coverageJson
+    })
+  );
+  writeArtifact(
+    layout,
+    node.id,
+    "report.md",
+    `# Ultrafuzz report\n\n## Property implementation coverage\n\n${coverageMarkdown}\n`
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics, null, 2));
+});
+
+test("coverage Markdown accepts a blocker summary escaped or as written, but not reworded", () => {
+  const summary = "The handler cannot observe _beforeTokenTransfer deltas *at all*.";
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-blocker-escaping",
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
+  });
+  const node = {
+    ...plannedNode(["report.md", "report.json"]),
+    id: "final-report",
+    logical_id: "final-report"
+  };
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-1",
+          description: "The premium delta is conserved.",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "premium-delta" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
+      properties: [
+        {
+          property_id: "property-1",
+          status: "deferred",
+          implementation_paths: [],
+          test_paths: [],
+          blocker: {
+            code: "transition-oracle-deferred",
+            summary,
+            next_action: "Add property-scoped snapshots around the handler."
+          }
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    node.id,
+    "report.json",
+    JSON.stringify({
+      schema_version: "1.0",
+      run_metadata: {},
+      issues: [],
+      non_production_outcomes: [],
+      property_implementation_coverage: {
+        priority_threshold: "high",
+        priorities: ["high"],
+        selected_property_ids: ["property-1"],
+        implemented_property_ids: [],
+        blocked_property_ids: [],
+        pending_property_ids: [],
+        deferred_property_ids: ["property-1"],
+        reference_expected_property_ids: [],
+        reference_expectation_ids: [],
+        blocker_summaries: [`property-1: ${summary}`]
+      }
+    })
+  );
+  const counts =
+    "- Priority threshold: `high`\n- Included priorities: `high`\n- Selected properties: `1`\n" +
+    "- Implemented properties: `0`\n- Blocked properties: `0`\n- Pending properties: `0`\n" +
+    "- Deferred properties: `1`\n- Reference expectation properties: `0`\n";
+  const withBlocker = (bullet: string): string =>
+    `# Ultrafuzz report\n\n## Property implementation coverage\n\n${counts}\nBlocker summaries:\n${bullet}\n`;
+
+  writeArtifact(layout, node.id, "report.md", withBlocker(`- property-1: ${summary}`));
+  const plain = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(plain.ok, true, JSON.stringify(plain.diagnostics));
+
+  writeArtifact(
+    layout,
+    node.id,
+    "report.md",
+    withBlocker("- property-1: The handler cannot observe \\_beforeTokenTransfer deltas \\*at all\\*.")
+  );
+  const escaped = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(escaped.ok, true, JSON.stringify(escaped.diagnostics));
+
+  // Relaxing the escaping must not relax the join: the Markdown still has to
+  // report the same blocker the JSON does.
+  writeArtifact(layout, node.id, "report.md", withBlocker("- property-1: Something else entirely."));
+  const reworded = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(reworded.ok, false);
+  assert.ok(
+    reworded.diagnostics.some(
+      (diagnostic) => diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISMATCH"
+    )
+  );
 });

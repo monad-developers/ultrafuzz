@@ -1,6 +1,6 @@
 import { z } from "zod/v4";
 
-import { FINDINGS_SCHEMA_VERSION, TRIAGE_CLASSIFICATIONS, type NormalizedFinding } from "./findings.js";
+import { FINDINGS_SCHEMA_VERSIONS, TRIAGE_CLASSIFICATIONS, type NormalizedFinding } from "./findings.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 export const FINDING_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/finding" as const;
@@ -31,7 +31,7 @@ const evidenceEntrySchema = z.union([
 ]);
 
 export const findingSchema = z.looseObject({
-  schema_version: z.literal(FINDINGS_SCHEMA_VERSION),
+  schema_version: z.literal(FINDINGS_SCHEMA_VERSIONS),
   id: nonEmptyString,
   title: nonEmptyString,
   status: nonEmptyString,
@@ -64,7 +64,7 @@ export const findingJsonSchema = {
   required: ["schema_version", "id", "title", "status", "severity_guess", "confidence", "summary"],
   additionalProperties: true,
   properties: {
-    schema_version: { const: FINDINGS_SCHEMA_VERSION },
+    schema_version: { enum: [...FINDINGS_SCHEMA_VERSIONS] },
     id: { type: "string", minLength: 1 },
     title: { type: "string", minLength: 1 },
     status: { type: "string", minLength: 1 },

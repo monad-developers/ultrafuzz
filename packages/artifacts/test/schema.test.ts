@@ -199,6 +199,89 @@ test("artifact contract registry validates structured, empty, and malformed outp
     false,
     "coverage ID arrays must be unique"
   );
+  // R55 emitted blocker_summaries as the typed handoff objects and the whole
+  // report was discarded at the last node in the pipeline. Pin both sides of
+  // the shape the prompt now documents.
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
+        schema_version: "1.0",
+        run_metadata: {},
+        issues: [],
+        non_production_outcomes: [],
+        property_implementation_coverage: {
+          priority_threshold: "high",
+          priorities: ["high"],
+          selected_property_ids: ["property-1"],
+          implemented_property_ids: [],
+          blocked_property_ids: [],
+          pending_property_ids: [],
+          deferred_property_ids: ["property-1"],
+          blocker_summaries: [
+            {
+              property_id: "property-1",
+              status: "deferred",
+              code: "transition-oracle-deferred",
+              summary: "The handler cannot observe the premium delta.",
+              next_action: "Add property-scoped snapshots around the handler."
+            }
+          ]
+        }
+      })
+    ).ok,
+    false,
+    "blocker_summaries must be strings, not the typed handoff objects"
+  );
+  // R55 failed with `Invalid input at report.json#property_implementation_coverage`,
+  // which named neither the field nor the reason, because the union hid the
+  // object branch's issues. The diagnostic must point at the offending element.
+  const blockerObjectIssues = validateArtifactContract(
+    "ultrafuzz/report@1",
+    JSON.stringify({
+      schema_version: "1.0",
+      run_metadata: {},
+      issues: [],
+      non_production_outcomes: [],
+      property_implementation_coverage: {
+        priority_threshold: "high",
+        priorities: ["high"],
+        selected_property_ids: ["property-1"],
+        implemented_property_ids: [],
+        blocked_property_ids: [],
+        pending_property_ids: [],
+        deferred_property_ids: ["property-1"],
+        blocker_summaries: [{ property_id: "property-1", summary: "The handler cannot observe the delta." }]
+      }
+    })
+  ).issues;
+  assert.ok(
+    blockerObjectIssues.some((issue) => issue.path?.includes("property_implementation_coverage.blocker_summaries")),
+    `expected a diagnostic naming blocker_summaries, got ${JSON.stringify(blockerObjectIssues.map((issue) => issue.path))}`
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
+        schema_version: "1.0",
+        run_metadata: {},
+        issues: [],
+        non_production_outcomes: [],
+        property_implementation_coverage: {
+          priority_threshold: "high",
+          priorities: ["high"],
+          selected_property_ids: ["property-1"],
+          implemented_property_ids: [],
+          blocked_property_ids: [],
+          pending_property_ids: [],
+          deferred_property_ids: ["property-1"],
+          blocker_summaries: ["property-1: the handler cannot observe the premium delta"]
+        }
+      })
+    ).ok,
+    true,
+    "the documented string form is accepted"
+  );
   assert.equal(
     validateArtifactContract(
       "ultrafuzz/report@1",
@@ -720,6 +803,37 @@ test("unknown canonical property references produce a clear diagnostic", () => {
   ]);
 });
 
+test("the findings contract accepts the house-style schema_version and states the literal it wants", () => {
+  // R56's stateful-invariant-campaign produced two complete findings and lost the run because it
+  // spelled the version the way every sibling artifact spells it.
+  const campaignFindings = [
+    {
+      schema_version: "ultrafuzz.finding.v1",
+      id: "failure-1",
+      title: "Harness drawn-rate sync assertion ignores elapsed-time precondition",
+      status: "confirmed",
+      severity_guess: "low",
+      confidence: "high",
+      summary: "The stored drawn rate lags the recalculated one after time advances.",
+      property_ids: ["property-99"]
+    }
+  ];
+  assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify(campaignFindings)).ok, true);
+  assert.equal(validateFindingsSchema(campaignFindings).ok, true);
+  assert.equal(validateFindingSchema(campaignFindings[0]).ok, true);
+  assert.equal(
+    validateFindingSchema({ ...campaignFindings[0], schema_version: "ultrafuzz.finding.v2" }).ok,
+    false,
+    "an unknown version is still rejected"
+  );
+
+  const description = artifactContractDefinition("ultrafuzz/findings@1").description;
+  assert.ok(
+    description.includes(`"${FINDINGS_SCHEMA_VERSION}"`),
+    "the contract must state the literal, since its empty example is [] and cannot carry one"
+  );
+});
+
 test("finding and report schemas accept non-property and historical artifacts", () => {
   const nonPropertyFinding = {
     schema_version: FINDINGS_SCHEMA_VERSION,
@@ -1097,9 +1211,10 @@ test("artifact schema snapshots are present and aligned with exported schema con
   const usageLedgerSnapshot = readSchemaSnapshot("usage-ledger.schema.json");
   const workspacePatchSnapshot = readSchemaSnapshot("workspace-patch.schema.json");
 
-  assert.equal(findingSnapshot.$id, findingJsonSchema.$id);
   assert.deepEqual(analysisBundleSnapshot, analysisBundleManifestJsonSchema);
-  assert.deepEqual(findingSnapshot.required, findingJsonSchema.required);
+  // Checking only $id and required let the published finding snapshot keep "const": "1.0" after the
+  // exported schema had moved on, so the snapshot is compared whole like its siblings.
+  assert.deepEqual(findingSnapshot, findingJsonSchema);
   assert.deepEqual(generatedTestsSnapshot, generatedTestsJsonSchema);
   assert.deepEqual(invariantLedgerSnapshot, invariantLedgerJsonSchema);
   assert.deepEqual(invariantSourceProofSnapshot, invariantSourceProofJsonSchema);

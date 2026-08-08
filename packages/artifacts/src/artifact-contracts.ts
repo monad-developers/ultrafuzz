@@ -143,7 +143,7 @@ const definitions = defineContracts([
     id: "ultrafuzz/findings@1",
     format: "json",
     description:
-      "A JSON array of findings. Every entry must satisfy the Ultrafuzz finding schema, including schema_version, id, title, status, severity_guess, confidence, and summary.",
+      'A JSON array of findings. Every entry must satisfy the Ultrafuzz finding schema, including schema_version, id, title, status, severity_guess, confidence, and summary. Unlike most Ultrafuzz artifacts, a finding\'s schema_version is the literal "1.0"; the alias "ultrafuzz.finding.v1" is also accepted. A populated entry looks like {"schema_version":"1.0","id":"finding-0","title":"...","status":"candidate","severity_guess":"medium","confidence":"low","summary":"..."}.',
     validEmptyExample: "[]"
   },
   {
@@ -363,7 +363,7 @@ export function validateArtifactContract(
   if (!result.success) {
     return {
       ok: false,
-      issues: result.error.issues.map((issue) => ({
+      issues: expandSchemaIssues(result.error.issues).map((issue) => ({
         code: "TERMINAL_REPORT_SCHEMA_INVALID",
         message: issue.message,
         path: `${artifactPath}#${issue.path.join(".")}`
@@ -379,6 +379,49 @@ export function validateArtifactContract(
     };
   }
   return { ok: true, issues: [], value: result.data };
+}
+
+/**
+ * Flattens union failures down to the branch the value came closest to matching.
+ *
+ * A union reports one `invalid_union` issue at the union node itself and buries
+ * the per-branch reasons inside it, so a bad field within an object branch is
+ * reported only as "Invalid input" at the object's own path. A report whose
+ * `property_implementation_coverage.blocker_summaries` held the wrong element
+ * type failed a whole run with nothing more specific than
+ * `Invalid input at report.json#property_implementation_coverage`, which named
+ * neither the field nor the reason.
+ */
+function expandSchemaIssues(
+  issues: readonly { code?: string; message: string; path: PropertyKey[]; errors?: unknown }[],
+  basePath: PropertyKey[] = []
+): Array<{ message: string; path: PropertyKey[] }> {
+  return issues.flatMap((issue) => {
+    const path = [...basePath, ...issue.path];
+    if (issue.code === "invalid_union" && Array.isArray(issue.errors)) {
+      const branches = issue.errors
+        .filter((branch): branch is typeof issues => Array.isArray(branch))
+        .map((branch) => expandSchemaIssues(branch, path))
+        .filter((branch) => branch.length > 0);
+      // The deepest path is the branch that matched furthest before failing;
+      // for `"unavailable" | {...}` given an object, that is the object branch.
+      // On a tie no branch got further than another, and picking one would
+      // assert that its shape was intended: a number here would be reported
+      // only as `expected "unavailable"`, and an author who followed that
+      // advice would pass the contract and then fail the gate that requires an
+      // object. Report every branch instead.
+      const deepest = branches.reduce((best, branch) => Math.max(best, branchDepth(branch)), 0);
+      const closest = branches.filter((branch) => branchDepth(branch) === deepest);
+      if (closest.length > 0) {
+        return closest.flat();
+      }
+    }
+    return [{ message: issue.message, path }];
+  });
+}
+
+function branchDepth(branch: Array<{ path: PropertyKey[] }>): number {
+  return branch.reduce((deepest, issue) => Math.max(deepest, issue.path.length), 0);
 }
 
 function defineContracts(

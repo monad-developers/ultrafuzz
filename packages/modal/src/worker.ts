@@ -17,7 +17,7 @@ import {
   resolvePersistentRemoteRoot
 } from "./layout.js";
 import {
-  locateModalResumeWorkspace,
+  findModalResumeWorkspace,
   modalDurableResumeCommand,
   modalDurableRunAdvanced,
   modalDurableRunNeedsResume,
@@ -141,13 +141,36 @@ async function main(): Promise<void> {
       let control: string;
       let evalRunId: string;
       let terminalDisposition: TerminalDisposition | undefined;
-      const existing = await hasExistingEvalWorkspace();
-      if (existing) {
-        const workspace = await locateModalResumeWorkspace(WORK_ROOT);
+      // Route on whether a durable run actually exists, not on whether an eval run directory exists. Those
+      // are not the same question, and answering the second one stranded R54: a generation-0 failure during
+      // workflow submission leaves the directory behind with nothing linked to it, and every later
+      // generation then died on the resume precondition in ~92s until the no-progress budget ran out (#378).
+      const found = await findModalResumeWorkspace(WORK_ROOT);
+      if (found.kind === "resumable") {
+        const workspace = found.workspace;
         target = workspace.target;
         const resumed = await resumeExistingEvaluation(workspace, writer);
         ({ control, evalRunId, terminalDisposition } = resumed);
       } else {
+        // Nothing resumable exists, but a previous attempt may have left state that a restart would trip
+        // over. Both ids involved are deterministic, so leaving either behind only moves the permanent
+        // failure: `runEvalSuite` refuses an existing eval run directory (`EVAL_RUN_ALREADY_EXISTS`), and
+        // `planRun` refuses an existing run root (`RUN_ALREADY_EXISTS`).
+        //
+        // This is the only destructive step, and it is bounded by what the lookup proved: a run root is
+        // named here only when its metadata is absent or carries no workflow link. That link is written
+        // before submission, so either way no workflow was ever submitted from that root. A root that IS
+        // linked but is missing its state is reported as damage rather than named here. A run that
+        // compiled — the R54 case — is linked, so it resumes above and never reaches this branch.
+        for (const staleEvalRunId of found.staleEvalRunIds ?? []) {
+          await rm(path.join(WORK_ROOT, "control", ".ultrafuzz", "evals", "runs", staleEvalRunId), {
+            recursive: true,
+            force: true
+          });
+        }
+        for (const runRootId of found.staleRunRootIds ?? []) {
+          await rm(path.join(WORK_ROOT, "target", ".ultrafuzz", "runs", runRootId), { recursive: true, force: true });
+        }
         const prepared = await prepareWorkspace();
         target = prepared.target;
         ({ control, evalRunId } = prepared);
@@ -210,11 +233,6 @@ async function main(): Promise<void> {
   });
 }
 
-async function hasExistingEvalWorkspace(): Promise<boolean> {
-  const evalRoot = path.join(WORK_ROOT, "control", ".ultrafuzz", "evals", "runs");
-  return (await readdirIfExists(evalRoot)).length > 0;
-}
-
 async function resumeExistingEvaluation(
   workspace: ModalResumeWorkspace,
   writer: WorkerResultWriter
@@ -229,10 +247,14 @@ async function resumeExistingEvaluation(
     runRoot: path.join(workspace.target, ".ultrafuzz", "runs", workspace.productRunId)
   });
   if (repairedPrompts > 0) await flushVolume();
-  modelWorkStarted = true;
   await writer.writePartial(await readWorkerCheckpoint(workspace.target));
   let state = await durableRunState(workspace.target, workspace.productRunId);
   if (state === undefined) throw new CheckpointIncompatibleError("persistent workspace is missing durable run state");
+  // Claim model work only once the durable run is known to be readable. Claiming it earlier costs the tight
+  // pre-model retry bound: an attempt reporting model work resets the streak `MODAL_PRE_MODEL_RETRY_LIMIT`
+  // counts, so a run that cannot even load its state would burn the whole no-progress budget instead of
+  // failing after three attempts with an accurate diagnosis.
+  modelWorkStarted = true;
   let disposition = await terminalDispositionForState(workspace, state);
   const checkpoint = await readWorkerCheckpoint(workspace.target);
   if (modalDurableRunNeedsResume(state, checkpoint.counts)) {

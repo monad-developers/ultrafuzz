@@ -7,7 +7,7 @@
   "additionalProperties": true,
   "properties": {
     "schema_version": {
-      "const": "1.0"
+      "enum": ["1.0", "ultrafuzz.finding.v1"]
     },
     "id": {
       "type": "string",

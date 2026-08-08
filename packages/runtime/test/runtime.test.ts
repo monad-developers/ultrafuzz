@@ -14,12 +14,15 @@ import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/ref
 
 import {
   assertSmithersPackageManifest,
+  assertSmithersResolutionCutoff,
   KIMI_CODE_VERSION,
   renderSmithersPackageJson,
   REQUIRED_SMITHERS_OVERRIDES,
+  SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF,
   SMITHERS_EFFECT_VERSION,
   SMITHERS_ORCHESTRATOR_BIN_PATH,
-  SMITHERS_ORCHESTRATOR_VERSION
+  SMITHERS_ORCHESTRATOR_VERSION,
+  smithersDependencyInstallArgs
 } from "../src/smithers-package.js";
 import { isTransientNpmRegistryFailure } from "../src/npm-install-retry.js";
 
@@ -4324,6 +4327,64 @@ test("isTransientNpmRegistryFailure separates a waitable registry gap from a rea
   assert.equal(isTransientNpmRegistryFailure({ killed: true, stderr: tarball404.stderr }), false);
   assert.equal(isTransientNpmRegistryFailure({ name: "AbortError", stderr: tarball404.stderr }), false);
   assert.equal(isTransientNpmRegistryFailure(undefined), false);
+});
+
+test("startRun resolves the generated workspace as of a fixed instant, not the launch clock", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const installer = writeFakeNpmInstaller(project);
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "pinned-resolution-run",
+    env: {
+      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_FAKE_LOG: installer.smithersLogPath
+    }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  // Without `--before`, npm re-resolves every open range below the pins against
+  // whatever the registry holds at that instant. R54 died at workflow submission
+  // because that landed on `@ai-sdk/provider@4.0.7`, published 2m08s earlier and
+  // not yet on the CDN edge the container reached.
+  const npmLog = fs.readFileSync(installer.npmLogPath, "utf8");
+  assert.equal(npmLog.includes(`--before=${SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF} `), true, npmLog);
+});
+
+test("both installers of the generated workspace share one resolution cutoff", () => {
+  const local = smithersDependencyInstallArgs({
+    prefix: "/tmp/local/.smithers",
+    registry: "https://registry.npmjs.org"
+  });
+  const cloud = smithersDependencyInstallArgs({ prefix: "/tmp/cloud/.smithers" });
+
+  for (const args of [local, cloud]) {
+    assert.equal(args.includes(`--before=${SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF}`), true, args.join(" "));
+    // The cutoff makes resolution reproducible; it does not relax the hardening
+    // the install already carried, and it must not introduce a lockfile into the
+    // run workspace that an in-flight resume would then have to reconcile.
+    assert.equal(args.includes("--ignore-scripts"), true, args.join(" "));
+    assert.equal(args.includes("--package-lock=false"), true, args.join(" "));
+  }
+  // The cloud node worker installs against the sandbox's ambient npm
+  // configuration, so it must not be handed the local path's registry.
+  assert.equal(local.includes("--registry=https://registry.npmjs.org"), true, local.join(" "));
+  assert.equal(
+    cloud.some((arg) => arg.startsWith("--registry=")),
+    false,
+    cloud.join(" ")
+  );
+});
+
+test("the resolution cutoff cannot fall behind a pinned dependency", () => {
+  // Guards the rule rather than one more package name: a pin raised without
+  // moving the cutoff past its publish instant would leave `--before` unable to
+  // see the very version the manifest demands.
+  assertSmithersResolutionCutoff();
+  assert.equal(Date.parse(SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF) < Date.now(), true);
 });
 
 test("startRun migrates the known generated Smithers caret manifest without dropping custom fields", async () => {
@@ -8728,7 +8789,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(
     commands,
-    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --detach --max-concurrency 8 --format json/
+    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
   );
   assert.match(
     commands,
@@ -8736,7 +8797,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --force --detach --max-concurrency 8 --format json/
+    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
   );
   assert.match(commands, /replay .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --format json/);
   assert.match(
@@ -8745,8 +8806,15 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --max-concurrency 8 --format json/
+    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
   );
+  const runLogsDir = path.join(run.value!.run_root, "smithers", "logs");
+  for (const relaunch of commands.split("\n").filter((line) => line.startsWith("up ") && line.includes("--resume "))) {
+    assert.ok(
+      relaunch.includes(`--log-dir ${runLogsDir} `),
+      `a relaunched workflow must keep streaming into the run's own log directory: ${relaunch}`
+    );
+  }
 });
 
 test("resume refuses to invoke Smithers when a persisted rendered prompt was modified", async () => {
@@ -8805,7 +8873,7 @@ test("resume keeps an already-running linked workflow attached without launching
   const forcedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(
     forcedCommands,
-    /up .*ultrafuzz-active-lifecycle-run\.tsx --resume ultrafuzz-active-lifecycle-run --run-id ultrafuzz-active-lifecycle-run --force --detach --max-concurrency 8 --format json/u
+    /up .*ultrafuzz-active-lifecycle-run\.tsx --resume ultrafuzz-active-lifecycle-run --run-id ultrafuzz-active-lifecycle-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -8847,7 +8915,7 @@ test("resume retries one failed workflow task before continuing a terminal unfin
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-terminal-retry-run\.tsx --resume ultrafuzz-terminal-retry-run --run-id ultrafuzz-terminal-retry-run --force --detach --max-concurrency 8 --format json/u
+    /up .*ultrafuzz-terminal-retry-run\.tsx --resume ultrafuzz-terminal-retry-run --run-id ultrafuzz-terminal-retry-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -8894,7 +8962,7 @@ test("resume retries failed tasks reported inside a successful terminal workflow
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-terminal-row-retry-run\.tsx --resume ultrafuzz-terminal-row-retry-run --run-id ultrafuzz-terminal-row-retry-run --force --detach --max-concurrency 8 --format json/u
+    /up .*ultrafuzz-terminal-row-retry-run\.tsx --resume ultrafuzz-terminal-row-retry-run --run-id ultrafuzz-terminal-row-retry-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -8945,7 +9013,7 @@ test("resume retries one failed workflow task before continuing a stale unfinish
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-stale-retry-run\.tsx --resume ultrafuzz-stale-retry-run --run-id ultrafuzz-stale-retry-run --force --detach --max-concurrency 8 --format json/u
+    /up .*ultrafuzz-stale-retry-run\.tsx --resume ultrafuzz-stale-retry-run --run-id ultrafuzz-stale-retry-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -8984,7 +9052,7 @@ test("resume continues a run-level render failure in place without a no-op rewin
   assert.doesNotMatch(commands, /timeline|rewind|retry-task/u);
   assert.match(
     commands,
-    /up .*ultrafuzz-render-recovery-run\.tsx --resume ultrafuzz-render-recovery-run --run-id ultrafuzz-render-recovery-run --force --detach --max-concurrency 8 --format json/u
+    /up .*ultrafuzz-render-recovery-run\.tsx --resume ultrafuzz-render-recovery-run --run-id ultrafuzz-render-recovery-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -9264,7 +9332,7 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   assert.doesNotMatch(retriedCommands, /^timetravel /mu, "retry must not repeat the destructive reset");
   assert.match(
     retriedCommands,
-    /up .*ultrafuzz-reset-lifecycle-run\.tsx --resume ultrafuzz-reset-lifecycle-run --run-id ultrafuzz-reset-lifecycle-run --force --detach( --max-concurrency \d+)? --format json/u
+    /up .*ultrafuzz-reset-lifecycle-run\.tsx --resume ultrafuzz-reset-lifecycle-run --run-id ultrafuzz-reset-lifecycle-run --force --detach( --max-concurrency \d+)? --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 

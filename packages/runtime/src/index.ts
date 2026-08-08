@@ -9,6 +9,7 @@ export * from "./plan-run.js";
 export * from "./references.js";
 export * from "./run-progress.js";
 export * from "./severity-matrix.js";
+export * from "./smithers-package.js";
 export * from "./start-run.js";
 export * from "./state-export.js";
 export * from "./types.js";
