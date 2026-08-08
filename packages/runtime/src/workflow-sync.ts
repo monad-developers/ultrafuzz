@@ -146,6 +146,7 @@ interface WorkflowInspect {
 interface WorkflowEvent {
   type: string;
   sequence?: number;
+  globalSequence?: number;
   sourceEventId?: string;
   timestampMs?: number;
   payload?: Record<string, unknown>;
@@ -509,6 +510,7 @@ export async function synchronizeLinkedWorkflowRun(
     workflowRunId: evidence.smithersRunId,
     events: tokenEvents,
     tasks: loaded.tasks,
+    attemptEvents: events,
     control,
     env: input.env ?? process.env
   });
@@ -713,6 +715,7 @@ async function synchronizeWorkflowAccounting(input: {
   workflowRunId: string;
   events: WorkflowEvent[];
   tasks: readonly StoredWorkflowTask[];
+  attemptEvents: WorkflowEvent[];
   env?: Record<string, string | undefined>;
   control: WorkflowSynchronizationControl;
 }): Promise<{
@@ -771,18 +774,54 @@ async function synchronizeWorkflowAccounting(input: {
     live: livePricing?.metadata
   });
   const cacheReadRatio = configuredCacheReadRatio(input.env?.ULTRAFUZZ_CACHE_READ_RATIO);
+  const observedFailedZeroUsageSourceEvents = failedZeroUsageSourceEventIds(
+    input.workflowRunId,
+    input.events,
+    input.attemptEvents,
+    stateNodeIdsByWorkflowTaskId(input.tasks)
+  );
+  const exemptionCandidateSourceEventIds = new Set(
+    usageReplay.entries
+      .filter((entry) => usageLedgerEntryIsZeroUsageExemptionCandidate(entry))
+      .map((entry) => entry.source_event_id)
+  );
+  const failedZeroUsageSourceEvents = new Set(
+    [
+      ...stringArrayField(recordField(storedAccounting, "checkpoint"), "failed_zero_usage_source_event_ids"),
+      ...observedFailedZeroUsageSourceEvents
+    ].filter((sourceEventId) => exemptionCandidateSourceEventIds.has(sourceEventId))
+  );
+  const seenPersistedFailedZeroUsageSourceEventIds = new Set<string>();
+  const persistedFailedZeroUsageSourceEventIds = usageReplay.entries.flatMap((entry) => {
+    const sourceEventId = entry.source_event_id;
+    if (
+      !failedZeroUsageSourceEvents.has(sourceEventId) ||
+      seenPersistedFailedZeroUsageSourceEventIds.has(sourceEventId)
+    ) {
+      return [];
+    }
+    seenPersistedFailedZeroUsageSourceEventIds.add(sourceEventId);
+    return [sourceEventId];
+  });
   const segments = accountingSegmentsFromUsageLedger(
     usageReplay.entries,
     resolvedPricing,
     cacheReadRatio,
-    usageReplay.malformedEntries
+    usageReplay.malformedEntries,
+    failedZeroUsageSourceEvents
   );
   const current =
     segments.at(-1) ??
-    accountingSummaryWithCompleteness(undefined, [], usageReplay.malformedEntries, {
-      checkpointGenerationId: stableUsageDimension("checkpoint", [input.workflowRunId, "malformed"]),
-      workflowRunId: input.workflowRunId
-    });
+    accountingSummaryWithCompleteness(
+      undefined,
+      [],
+      usageReplay.malformedEntries,
+      {
+        checkpointGenerationId: stableUsageDimension("checkpoint", [input.workflowRunId, "malformed"]),
+        workflowRunId: input.workflowRunId
+      },
+      failedZeroUsageSourceEvents
+    );
   const accountingSegments = segments.length === 0 && usageReplay.malformedEntries > 0 ? [current] : segments;
 
   const sourceRunId = stringField(metadata, "source_run_id") ?? readRunState(input.layout).source_run_id;
@@ -806,6 +845,9 @@ async function synchronizeWorkflowAccounting(input: {
       ledger_event_count: usageReplay.entries.length,
       malformed_entry_count: usageReplay.malformedEntries,
       duplicate_entry_count: usageReplay.duplicateEntries,
+      ...(persistedFailedZeroUsageSourceEventIds.length === 0
+        ? {}
+        : { failed_zero_usage_source_event_ids: persistedFailedZeroUsageSourceEventIds }),
       ...(lastUsageEvent === undefined
         ? {}
         : {
@@ -1098,6 +1140,76 @@ function normalizedUsageLedgerInput(
   };
 }
 
+function failedZeroUsageSourceEventIds(
+  workflowRunId: string,
+  usageEvents: readonly WorkflowEvent[],
+  attemptEvents: readonly WorkflowEvent[],
+  stateNodeIdByWorkflowTask: ReadonlyMap<string, string>
+): ReadonlySet<string> {
+  const observedUsageSourceEventIds = new Set(
+    usageEvents
+      .filter((event) => event.type === "TokenUsageReported")
+      .map((event) => normalizedUsageLedgerInput(workflowRunId, event, stateNodeIdByWorkflowTask).sourceEventId)
+  );
+  const activeAttempts = new Map<string, { usageSourceEventIds: Set<string> }>();
+  const failedUsageSourceEventIds = new Set<string>();
+  // Smithers excludes token events from its default lifecycle query. Merge the
+  // dedicated token query back into that stream by the raw, globally stable
+  // event sequence before correlating usage with an attempt occurrence.
+  const mergedEvents = [
+    ...attemptEvents.filter((event) => event.type !== "TokenUsageReported"),
+    ...usageEvents.filter((event) => event.type === "TokenUsageReported")
+  ];
+  const globalSequenceCounts = new Map<number, number>();
+  for (const event of mergedEvents) {
+    if (event.globalSequence === undefined) continue;
+    globalSequenceCounts.set(event.globalSequence, (globalSequenceCounts.get(event.globalSequence) ?? 0) + 1);
+  }
+  const correlatedEvents = mergedEvents
+    .filter(
+      (event): event is WorkflowEvent & { globalSequence: number } =>
+        event.globalSequence !== undefined && globalSequenceCounts.get(event.globalSequence) === 1
+    )
+    .sort((left, right) => left.globalSequence - right.globalSequence);
+  for (const event of correlatedEvents) {
+    const identity = workflowEventAttemptIdentity(event.payload ?? {});
+    if (identity === undefined) continue;
+
+    if (event.type === "NodeStarted") {
+      // Retry counters can restart across workflow continuations. A new start
+      // therefore begins a distinct lifecycle occurrence even when its tuple
+      // matches an earlier attempt exactly.
+      activeAttempts.set(identity, { usageSourceEventIds: new Set() });
+      continue;
+    }
+
+    const active = activeAttempts.get(identity);
+    if (active === undefined) continue;
+    if (event.type === "TokenUsageReported") {
+      const sourceEventId = normalizedUsageLedgerInput(workflowRunId, event, stateNodeIdByWorkflowTask).sourceEventId;
+      if (observedUsageSourceEventIds.has(sourceEventId)) active.usageSourceEventIds.add(sourceEventId);
+      continue;
+    }
+
+    const terminal = terminalOutcomeForEvent(event);
+    if (terminal === undefined) continue;
+    if (["failed", "timed-out", "canceled"].includes(terminal.outcome)) {
+      for (const sourceEventId of active.usageSourceEventIds) failedUsageSourceEventIds.add(sourceEventId);
+    }
+    activeAttempts.delete(identity);
+  }
+  return failedUsageSourceEventIds;
+}
+
+function workflowEventAttemptIdentity(payload: Record<string, unknown>): string | undefined {
+  const nodeId = stringField(payload, "nodeId") ?? stringField(payload, "node_id");
+  const attempt = firstNonNegativeIntegerField(payload, ["attempt"]);
+  const iteration = firstNonNegativeIntegerField(payload, ["iteration"]);
+  return nodeId === undefined || iteration === undefined || attempt === undefined
+    ? undefined
+    : JSON.stringify([nodeId, iteration, attempt]);
+}
+
 function checkpointGenerationId(payload: Record<string, unknown>, workflowRunId: string): string | undefined {
   const explicit =
     stringField(payload, "checkpointGenerationId") ??
@@ -1152,7 +1264,8 @@ function accountingSegmentsFromUsageLedger(
   entries: readonly UsageLedgerEntry[],
   modelPricing: ReadonlyMap<string, ModelPricing>,
   cacheReadRatio: number | undefined,
-  malformedEntries: number
+  malformedEntries: number,
+  failedZeroUsageSourceEvents: ReadonlySet<string>
 ): AccountingSegment[] {
   const grouped = new Map<string, { entries: UsageLedgerEntry[]; lastLedgerIndex: number }>();
   for (const [ledgerIndex, entry] of entries.entries()) {
@@ -1173,7 +1286,8 @@ function accountingSegmentsFromUsageLedger(
       {
         checkpointGenerationId: firstEntry.checkpoint_generation_id,
         workflowRunId: firstEntry.workflow_run_id
-      }
+      },
+      failedZeroUsageSourceEvents
     );
   });
 }
@@ -1182,7 +1296,8 @@ function accountingSummaryWithCompleteness(
   summary: AccountingSummary | undefined,
   entries: readonly UsageLedgerEntry[],
   malformedEntries: number,
-  identity: { checkpointGenerationId: string; workflowRunId: string }
+  identity: { checkpointGenerationId: string; workflowRunId: string },
+  failedZeroUsageSourceEvents: ReadonlySet<string>
 ): AccountingSegment {
   const base = summary ?? emptyAccountingSummary();
   const usageIncompleteReasons: UsageCompletenessMarker[] = [
@@ -1199,13 +1314,21 @@ function accountingSummaryWithCompleteness(
     usageIncompleteReasons.push({ code: "ledger-entry-malformed" });
   }
 
-  const ignoredIncompleteEntries = entries.filter(
-    (entry) => !usageLedgerEntryHasAccountingValue(entry) && !entry.usage_complete
+  // A typed usage-missing record tied to a terminally failed attempt has no
+  // observed spend to price. Preserve its usage-incomplete evidence, but do not
+  // let it make the priced retry partial. Other incomplete zero-value records
+  // remain conservative: malformed telemetry or a successful attempt with no
+  // usage could conceal spend and therefore stays unpriced.
+  const unpricedIncompleteEntries = entries.filter(
+    (entry) =>
+      !usageLedgerEntryHasAccountingValue(entry) &&
+      !entry.usage_complete &&
+      !(failedZeroUsageSourceEvents.has(entry.source_event_id) && usageLedgerEntryIsZeroUsageExemptionCandidate(entry))
   );
-  const unpricedEventCount = base.unpriced_event_count + ignoredIncompleteEntries.length + malformedEntries;
+  const unpricedEventCount = base.unpriced_event_count + unpricedIncompleteEntries.length + malformedEntries;
   const pricingIncompleteReasons: PricingCompletenessMarker[] = [...base.pricing_incomplete_reasons];
   pricingIncompleteReasons.push(
-    ...ignoredIncompleteEntries.map((entry) => ({
+    ...unpricedIncompleteEntries.map((entry) => ({
       code: "price-unavailable" as const,
       event_id: entry.event_id,
       checkpoint_generation_id: entry.checkpoint_generation_id
@@ -1225,7 +1348,10 @@ function accountingSummaryWithCompleteness(
     pricing_complete: !partialPricing,
     pricing_incomplete_reasons: uniquePricingReasons,
     partial_pricing: partialPricing,
-    event_count: entries.length + malformedEntries,
+    // accountingFromWorkflowEvents excludes zero-usage/no-cost records, so
+    // preserve the priced + unpriced partition required by the public bundle.
+    // The ledger checkpoint separately retains the full record count.
+    event_count: base.event_count + unpricedIncompleteEntries.length + malformedEntries,
     unpriced_event_count: unpricedEventCount,
     checkpoint_generation_id: identity.checkpointGenerationId,
     workflow_run_id: identity.workflowRunId,
@@ -1236,29 +1362,20 @@ function accountingSummaryWithCompleteness(
 
 function usageLedgerEntryHasAccountingValue(entry: UsageLedgerEntry): boolean {
   const usage = entry.usage;
-  const tokenCount = usageTokenCount({
-    inputTokens: usage.input_tokens,
-    outputTokens: usage.output_tokens,
-    cacheReadTokens: usage.cache_read_tokens,
-    cacheWriteTokens: usage.cache_write_tokens,
-    reasoningTokens: usage.reasoning_tokens,
-    explicitTotal: usage.total_tokens
-  });
+  const detailedInputTokens = (usage.cache_read_tokens ?? 0) + (usage.cache_write_tokens ?? 0);
+  const effectiveInputTokens = Math.max(usage.input_tokens ?? 0, detailedInputTokens);
+  const effectiveOutputTokens = Math.max(usage.output_tokens ?? 0, usage.reasoning_tokens ?? 0);
+  const tokenCount = Math.max(usage.total_tokens ?? 0, effectiveInputTokens + effectiveOutputTokens);
   return tokenCount > 0 || usage.cost_usd !== undefined;
 }
 
-function usageTokenCount(input: {
-  inputTokens: number | undefined;
-  outputTokens: number | undefined;
-  cacheReadTokens: number | undefined;
-  cacheWriteTokens: number | undefined;
-  reasoningTokens: number | undefined;
-  explicitTotal: number | undefined;
-}): number {
-  const detailedInputTokens = (input.cacheReadTokens ?? 0) + (input.cacheWriteTokens ?? 0);
-  const effectiveInputTokens = Math.max(input.inputTokens ?? 0, detailedInputTokens);
-  const effectiveOutputTokens = Math.max(input.outputTokens ?? 0, input.reasoningTokens ?? 0);
-  return Math.max(input.explicitTotal ?? 0, effectiveInputTokens + effectiveOutputTokens);
+function usageLedgerEntryIsZeroUsageExemptionCandidate(entry: UsageLedgerEntry): boolean {
+  return (
+    !usageLedgerEntryHasAccountingValue(entry) &&
+    !entry.usage_complete &&
+    entry.usage_incomplete_reasons.length === 1 &&
+    entry.usage_incomplete_reasons[0]?.code === "usage-missing"
+  );
 }
 
 function emptyAccountingSummary(): AccountingSummary {
@@ -3531,9 +3648,11 @@ function parseWorkflowEvents(stdout: string): WorkflowEvent[] {
       if (type === undefined) {
         continue;
       }
+      const globalSequence = numberField(parsed, "seq") ?? numberField(payload, "seq");
       events.push({
         type,
-        sequence: numberField(parsed, "seq") ?? numberField(payload, "seq") ?? events.length,
+        sequence: globalSequence ?? events.length,
+        ...(globalSequence === undefined ? {} : { globalSequence }),
         sourceEventId:
           stringField(parsed, "eventId") ??
           stringField(parsed, "event_id") ??

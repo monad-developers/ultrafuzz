@@ -208,18 +208,21 @@ equal weight. Macro precision and recall use the same equal-target weighting.
 Precision and recall remain available in `benchmarks/history.json` but are omitted
 from the overview charts.
 
-The latest-result summary sums target cost and uses the slowest target as the
-parallel run's wall clock. If any target lacks complete cost or runtime
-evidence, that summary value is unavailable. When the latest run contains
-multiple model profiles, the summary shows every profile instead of choosing
-one by identifier order. The quality overview shows at most the 12 latest
-complete candidate runs, gives each model profile a distinct marker color and
-shape, and breaks lines when the cohort or execution policy changes. Solid line
-segments connect identical scoring identities. Because an exact scoring
-identity records the candidate commit itself, dashed segments provide a visual
-guide across scoring-identity changes without claiming strict comparability.
-Exact scoring identities remain available in point tooltips and continue to
-gate strict `eval compare` compatibility.
+The latest-result summary sums recorded target cost and uses the slowest
+recorded target as the parallel run's wall clock. Complete values appear
+without a qualifier. If only part of the target evidence is usable, the known
+subtotal or maximum remains visible and is labeled `partial` with its target
+coverage (for example, `2/3`); it is not presented as a complete-run total. If
+no usable value exists, the summary renders `n/a` with its recorded status.
+When the latest run contains multiple model profiles, the summary shows every
+profile instead of choosing one by identifier order. The quality overview
+shows at most the 12 latest complete candidate runs, gives each model profile a
+distinct marker color and shape, and breaks lines when the cohort or execution
+policy changes. Solid line segments connect identical scoring identities.
+Because an exact scoring identity records the candidate commit itself, dashed
+segments provide a visual guide across scoring-identity changes without
+claiming strict comparability. Exact scoring identities remain available in
+point tooltips and continue to gate strict `eval compare` compatibility.
 
 The performance × cost overview uses the same complete-run aggregation for the
 smoke lane: its vertical value is target-macro F1 and its horizontal value is
@@ -228,17 +231,32 @@ median of each metric, and draws horizontal cost and vertical F1 bands from
 Type-7 first and third quartiles. These bands describe observed run dispersion,
 not confidence intervals. To avoid mixing Luna's old and current prices, its
 comparison starts at the first run in the non-overlapping current-price regime,
-`2026-07-31T14:52:13.635Z`; other models use all complete priced smoke runs. A
-run with any unavailable target cost is excluded from the bivariate summary
-rather than treated as zero. Models with no priced run retain their median F1
-and sample count in an explicit unplotted annotation; a one-run model has a dot
-and a collapsed IQR.
+`2026-07-31T14:52:13.635Z`; other models use all priced smoke runs. A complete
+target cohort with a known partial cost remains in the bivariate summary, with
+the model point and legend explicitly marked `partial` and target coverage
+shown. Missing targets are never treated as zero. A run with no usable cost is
+not plotted; models with no priced run retain their median F1 and sample count
+in an explicit unplotted annotation. A one-run model has a dot and a collapsed
+IQR.
 
-`eval history` consumes complete scored generations, stores aggregate
-metrics plus immutable candidate, cohort, execution-policy, and scoring lineage
-in `benchmarks/history.json`, and renders the README SVGs without network or
-model calls. Efficiency values that are not complete remain `null` with typed
-reasons and render as unavailable.
+`eval history` consumes complete scored generations, stores aggregate metrics
+plus immutable candidate, cohort, execution-policy, and scoring lineage in
+`benchmarks/history.json`, and renders the README SVGs without network or model
+calls. A known partial efficiency value remains numeric and renders with a
+partial marker and typed reasons. An unavailable value remains `null` and
+renders with an `n/a` cross. Legacy partial observations whose numeric value was
+not recorded remain `null`, but use a distinct dashed-ring `partial n/a` marker
+so they cannot be mistaken for unavailable data.
+
+The history's top-level `supersessions` ledger can name an immutable source run
+and the source run that replaces it, with a bounded reason and repository issue
+URL. A pending entry does not hide data. An identity-compatible subset of the
+replacement may arrive without invalidating history; activation waits for exact
+per-target observation cardinality parity. At that point renderers exclude the
+old source run while retaining its observations in the append-only file. The
+replacement must match the old run's benchmark identity and target revisions;
+over-counted targets, duplicate ledger entries, self-references, and chains are
+rejected.
 
 EVMBench and Ultrafuzz-bench reports are non-sensitive public benchmark output.
 The Modal publication bundle therefore includes the scored generation and the

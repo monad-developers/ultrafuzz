@@ -189,8 +189,10 @@ ultrafuzz eval history --check
 `--check` is the ordinary-CI path: it validates history and reports stale or
 missing charts without writing them. If publication fails, inspect the scored
 run for a complete `summary.json`, `scores.jsonl`, terminal-success lifecycle,
-and available candidate, cohort, and scoring provenance. Missing timing or cost
-is allowed and renders as unavailable; it is never converted to zero.
+and available candidate, cohort, and scoring provenance. A known but incomplete
+timing or cost value is retained and visibly labeled `partial` with its target
+coverage. A value with no usable evidence renders as `n/a` and `unavailable`;
+neither case is converted to zero.
 
 Every non-deletion push to a branch in this repository launches the real
 three-target Ultrafuzz-bench smoke as detached Modal work, including pushes to
