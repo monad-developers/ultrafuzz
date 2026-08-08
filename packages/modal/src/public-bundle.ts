@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { assertFindingsSchema, assertRegularFileInside } from "@ultrafuzz/artifacts";
 import {
+  BENCHMARK_LANE_NAMES,
   MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
   PUBLIC_EVAL_DIAGNOSTICS_FILE,
   parsePublicEvalDiagnostics,
@@ -99,7 +100,7 @@ const bundleLineageSchema = z.strictObject({
 
 const bundleShape = {
   benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
-  lane: z.enum(["smoke", "full"]),
+  lane: z.enum(BENCHMARK_LANE_NAMES),
   model_slug: safeId,
   model: z.string().min(1).max(256),
   reasoning: z.string().min(1).max(64),

@@ -3,7 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadBenchmarkCohortManifest, loadBenchmarkLanesManifest } from "../../packages/evals/dist/index.js";
+import {
+  BENCHMARK_LANE_COHORTS,
+  BENCHMARK_LANE_NAMES,
+  benchmarkLaneSelectedTargetIds,
+  loadBenchmarkCohortManifest,
+  loadBenchmarkLanesManifest
+} from "../../packages/evals/dist/index.js";
 import { parseModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
 import {
   PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS,
@@ -39,29 +45,33 @@ if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository
   throw new Error("candidate repository must be a canonical public GitHub URL");
 }
 if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(generation ?? "")) throw new Error("generation is invalid");
-if (mode !== "smoke" && mode !== "full") throw new Error("benchmark mode must be smoke or full");
+if (!BENCHMARK_LANE_NAMES.includes(mode)) {
+  throw new Error(`benchmark mode must be one of ${BENCHMARK_LANE_NAMES.join(", ")}`);
+}
 if (!outputDirectory) throw new Error("output directory is required");
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const benchmark = mode === "smoke" ? "ultrafuzz-bench" : "evmbench";
+const benchmark = BENCHMARK_LANE_COHORTS[mode];
 const cohort = loadBenchmarkCohortManifest(
   path.join(repositoryRoot, "benchmarks", benchmark === "evmbench" ? "evmbench-detect.json" : "ultrafuzz-bench.json")
 );
 const lanes = loadBenchmarkLanesManifest(path.join(repositoryRoot, "benchmarks/lanes.json"));
 const lane = lanes[mode];
-const selectedTargets =
-  mode === "smoke"
-    ? cohort.smoke_targets.map((id) => cohort.targets.find((target) => target.id === id))
-    : cohort.targets;
+const selectedTargets = benchmarkLaneSelectedTargetIds(mode, cohort).map((id) =>
+  cohort.targets.find((target) => target.id === id)
+);
 if (selectedTargets.some((target) => target === undefined)) {
   throw new Error(`${mode} benchmark cohort contains an unknown selected target`);
 }
+// Both Ultrafuzz-bench lanes run the same immutable three-framework cohort from
+// #83. The threat-model gate is a topology change, not a cohort change, so it is
+// held to the identical selection.
 if (
-  mode === "smoke" &&
+  benchmark === "ultrafuzz-bench" &&
   JSON.stringify(selectedTargets.map((target) => target.framework).sort()) !==
     JSON.stringify(["foundry", "hardhat", "vyper"])
 ) {
-  throw new Error("smoke benchmark must select exactly one Foundry, one Hardhat, and one Vyper target");
+  throw new Error(`${mode} benchmark must select exactly one Foundry, one Hardhat, and one Vyper target`);
 }
 const targets = selectedTargets.map((target) => ({
   id: target.id,
@@ -184,14 +194,16 @@ function benchmarkModels(benchmarkMode, checkedInProfiles) {
   if (!Array.isArray(requested)) throw new Error("BENCHMARK_MODELS_JSON must be an array");
 
   const validated = requested.map((entry, index) => validateModelEntry(entry, index));
-  const expectedProviders =
-    benchmarkMode === "smoke" && configured !== undefined && configured !== ""
+  // Every lane but `full` is single-runner: one provider, chosen by the lane's
+  // one checked-in model profile. Only `full` fans out across all four vendors.
+  const singleRunnerLane = benchmarkMode !== "full";
+  const expectedProviders = !singleRunnerLane
+    ? ["openai", "anthropic", "kimi", "deepseek"]
+    : configured !== undefined && configured !== ""
       ? validated.length === 1
         ? [validated[0].provider]
         : []
-      : benchmarkMode === "smoke"
-        ? ["openai"]
-        : ["openai", "anthropic", "kimi", "deepseek"];
+      : ["openai"];
   const providers = validated.map((entry) => entry.provider);
   if (
     providers.length !== expectedProviders.length ||

@@ -6,9 +6,11 @@ import { assertRegularFileInside } from "@ultrafuzz/artifacts";
 import { z } from "zod/v4";
 
 import {
+  BENCHMARK_LANE_NAMES,
   adaptBenchmarkManifestToEvalSuite,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
+  type BenchmarkLaneName,
   type BenchmarkModelProfileManifest
 } from "./benchmark-manifest.js";
 import {
@@ -36,7 +38,7 @@ const EVAL_HISTORY_PUBLIC_BUNDLE_FILE = "public-results.json";
 const EVAL_HISTORY_PUBLIC_REPORT_FILES = ["report.md", "report.json", "findings.normalized.json"] as const;
 
 export type EvalHistoryBenchmark = "evmbench" | "ultrafuzz-bench";
-export type EvalHistoryLane = "smoke" | "full";
+export type EvalHistoryLane = BenchmarkLaneName;
 
 export interface EvalHistoryCompleteness {
   status: "complete" | "partial" | "unavailable";
@@ -180,7 +182,7 @@ const legacyTargetPublicationSchema = z.strictObject({
 const observationBaseShape = {
   id: safeText,
   benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
-  lane: z.enum(["smoke", "full"]),
+  lane: z.enum(BENCHMARK_LANE_NAMES),
   target: safeText,
   variant: safeText,
   trial_count: positiveInteger,

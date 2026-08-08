@@ -4,6 +4,21 @@ import { pathToFileURL } from "node:url";
 const FULL_COMMIT = /^[0-9a-f]{40}$/u;
 const PRODUCER_WORKFLOW_PATH = ".github/workflows/eval-benchmarks.yml";
 const SUPPORTED_EVENTS = new Set(["push", "workflow_dispatch"]);
+/**
+ * The producer declares its dispatched lane as a `launch` step name, because the
+ * `workflow_run` payload carries no dispatch inputs. Reading a step name is the
+ * same introspection the producer's own recovery job already performs.
+ */
+const LANE_STEP_PREFIX = "Benchmark lane ";
+/**
+ * Which lane each trigger is allowed to have produced. Publication is a
+ * longitudinal claim about one comparable series, so a lane that is not in this
+ * map -- notably the `threat-model` release gate, which runs the production
+ * topology and a different execution policy against the same three targets --
+ * is deliberately not published into `benchmarks/history.json`. The v0.1.0
+ * release owner reviews that cohort directly (#183).
+ */
+const PUBLISHABLE_LANES = { push: "smoke", workflow_dispatch: "full" };
 
 export function qualifyModalBenchmarkPublication(eventValue, jobsValue, repository) {
   const event = record(eventValue);
@@ -22,11 +37,24 @@ export function qualifyModalBenchmarkPublication(eventValue, jobsValue, reposito
     return ineligible("the completed run is not an eligible default-branch benchmark producer");
   }
   const jobs = jobRecords(jobsValue);
+  const requiredJobs = {};
   for (const requiredJob of ["launch", "collect"]) {
     const matching = jobs.filter((job) => job.name === requiredJob);
     if (matching.length !== 1 || matching[0]?.conclusion !== "success") {
       return ineligible(`the ${requiredJob} job did not complete successfully`);
     }
+    requiredJobs[requiredJob] = matching[0];
+  }
+
+  const declaredLanes = stepNames(requiredJobs.launch)
+    .filter((name) => name.startsWith(LANE_STEP_PREFIX))
+    .map((name) => name.slice(LANE_STEP_PREFIX.length));
+  if (declaredLanes.length !== 1) {
+    return ineligible("the producer run did not declare exactly one benchmark lane");
+  }
+  const lane = declaredLanes[0];
+  if (lane !== PUBLISHABLE_LANES[eventName]) {
+    return ineligible(`the ${lane} lane produced by ${eventName} is not published to the longitudinal history`);
   }
 
   const candidateCommit = FULL_COMMIT.test(workflowRun.head_sha) ? workflowRun.head_sha : undefined;
@@ -37,7 +65,7 @@ export function qualifyModalBenchmarkPublication(eventValue, jobsValue, reposito
   return {
     eligible: true,
     candidateCommit,
-    benchmarkMode: eventName === "workflow_dispatch" ? "full" : "smoke",
+    benchmarkMode: lane,
     reason: "the exact launch and collect jobs completed successfully"
   };
 }
@@ -48,6 +76,11 @@ function jobRecords(value) {
     const jobs = record(page).jobs;
     return Array.isArray(jobs) ? jobs.map(record) : [];
   });
+}
+
+function stepNames(job) {
+  const steps = record(job).steps;
+  return Array.isArray(steps) ? steps.map((step) => string(record(step).name)) : [];
 }
 
 function ineligible(reason) {

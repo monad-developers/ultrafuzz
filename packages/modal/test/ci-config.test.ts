@@ -456,6 +456,11 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.on.push.branches).toEqual(["**"]);
     expect(Object.hasOwn(workflow.on, "pull_request")).toBe(false);
     expect(workflow.on.workflow_dispatch.inputs).toEqual({
+      benchmark_lane: expect.objectContaining({
+        default: "full",
+        type: "choice",
+        options: ["full", "threat-model"]
+      }),
       openai_model: expect.objectContaining({ default: "gpt-5.6-luna", type: "string" }),
       openai_reasoning: expect.objectContaining({ default: "high", type: "string" }),
       anthropic_model: expect.objectContaining({ default: "claude-sonnet-5", type: "string" }),
@@ -466,11 +471,11 @@ describe("public Modal benchmark configuration", () => {
       deepseek_reasoning: expect.objectContaining({ default: "max", type: "string" })
     });
     expect(workflow.env.BENCHMARK_MODE).toContain("github.event_name == 'workflow_dispatch'");
-    expect(workflow.env.BENCHMARK_MODE).toContain("'full'");
+    expect(workflow.env.BENCHMARK_MODE).toContain("inputs.benchmark_lane");
     expect(workflow.env.BENCHMARK_MODE).toContain("'smoke'");
     expect(workflow.env.BENCHMARK_CANDIDATE).toContain("github.event.after");
     expect(workflow.env.BENCHMARK_CANDIDATE).toContain("github.sha");
-    expect(workflow.concurrency.group).toContain("'full' || 'smoke'");
+    expect(workflow.concurrency.group).toContain("inputs.benchmark_lane || 'smoke'");
     expect(workflow.concurrency.group).toContain("github.ref");
     expect(workflow.concurrency.group).toContain("github.run_id");
     expect(workflow.concurrency.group).not.toContain("pull_request");
@@ -504,6 +509,15 @@ describe("public Modal benchmark configuration", () => {
     expect(prepare?.run).toContain('{provider: "kimi", model: $kimi_model, reasoning: $kimi_reasoning}');
     expect(prepare?.run).toContain('{provider: "deepseek", model: $deepseek_model, reasoning: $deepseek_reasoning}');
     expect(prepare?.run).toContain('"$BENCHMARK_MODE"');
+    // The release gate must not be retunable from the dispatch form: it takes the
+    // checked-in lane profile from benchmarks/lanes.json instead of a models matrix.
+    expect(prepare?.run).toContain('if [ "$BENCHMARK_MODE" = threat-model ]; then\n  BENCHMARK_MODELS_JSON=""');
+    // The publication qualifier reads the dispatched lane from this step name.
+    const laneMarkers = (workflow.jobs.launch?.steps ?? []).filter((step) =>
+      String(step.name ?? "").startsWith("Benchmark lane ")
+    );
+    expect(laneMarkers).toHaveLength(1);
+    expect(laneMarkers[0]?.name).toContain("inputs.benchmark_lane || 'smoke'");
     for (const jobName of ["launch", "collect", "cleanup_incomplete_run"]) {
       const checkout = workflow.jobs[jobName]?.steps.find((step) =>
         String(step.with?.ref ?? "").includes("BENCHMARK_CANDIDATE")

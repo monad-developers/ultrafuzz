@@ -9,10 +9,40 @@ export const EVMBENCH_COHORT_SCHEMA_VERSION = "ultrafuzz.evmbench.cohort.v1" as 
 export const ULTRAFUZZ_BENCH_COHORT_SCHEMA_VERSION = "ultrafuzz.benchmark.cohort.v1" as const;
 export const BENCHMARK_LANES_SCHEMA_VERSION = "ultrafuzz.benchmark.lanes.v1" as const;
 export const DEFAULT_BENCHMARK_TRIALS_PER_VARIANT = 1;
+
+/**
+ * Every lane name the benchmark plane accepts, in manifest order. `threat-model`
+ * is the v0.1.0 release gate: the only lane that runs the PRODUCTION topology
+ * against the pinned Ultrafuzz-bench cohort. `smoke` runs that cohort through a
+ * dedicated reduced graph and `full` forces the EVMbench cohort, so before this
+ * lane existed the three pinned targets never saw the production topology at all.
+ */
+export const BENCHMARK_LANE_NAMES = ["smoke", "threat-model", "full"] as const;
+export type BenchmarkLaneName = (typeof BENCHMARK_LANE_NAMES)[number];
+
+/**
+ * The cohort each lane is allowed to run. A lane and a cohort are one decision:
+ * mixing them silently changes what a published observation means.
+ */
+export const BENCHMARK_LANE_COHORTS: Record<BenchmarkLaneName, "evmbench" | "ultrafuzz-bench"> = {
+  smoke: "ultrafuzz-bench",
+  "threat-model": "ultrafuzz-bench",
+  full: "evmbench"
+};
+
 export const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 3;
 export const BENCHMARK_FULL_MAX_PARALLEL_RUNS = 20;
 export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 4;
 export const BENCHMARK_FULL_MAX_PARALLEL_TARGETS = 8;
+/** One sandbox row per pinned target: the whole cohort runs as a single wave. */
+export const BENCHMARK_THREAT_MODEL_MAX_PARALLEL_RUNS = 3;
+/**
+ * The goal fanout can queue one child per structured threat and per applicable
+ * vulnerability class, so the lane needs real in-workflow concurrency to
+ * demonstrate that a large ready queue is scheduled rather than collapsed into
+ * one opaque agent node. Eight matches the production full-lane bound.
+ */
+export const BENCHMARK_THREAT_MODEL_MAX_PARALLEL_TARGETS = 8;
 export const BENCHMARK_SMOKE_WORKFLOW_PATH = "benchmarks/smoke-benchmark.yml" as const;
 export const BENCHMARK_SMOKE_WORKFLOW_PROFILE = "smoke-benchmark-v1" as const;
 export const BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS = [
@@ -74,6 +104,35 @@ export const THREAT_MODEL_GOAL_FANOUT_NODE_IDS = [
   ...BENCHMARK_GOAL_FANOUT_EXCLUDED_NODE_IDS
 ] as const;
 
+/**
+ * The generated-node-ID prefix each fanout group renders, keyed by the group node.
+ * These are the literal halves of the `dynamic:<kind>:{{ item.id }}` templates in
+ * `.ultrafuzz/topology.yml`, and the same spelling the `ultrafuzz/goal-plan@1`
+ * contract pins per goal (`node_id === "dynamic:threat:" + id`). The release gate
+ * asserts generated IDs against these rather than restating the literal, so a
+ * topology or contract respelling fails the lane instead of drifting past it.
+ */
+export const BENCHMARK_DYNAMIC_GOAL_NODE_ID_PREFIXES: Record<
+  (typeof BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS)[number],
+  string
+> = {
+  "threat-goals": "dynamic:threat:",
+  "class-goals": "dynamic:class:"
+};
+
+/**
+ * The artifacts the release gate must retain from every run, beyond the report
+ * bundle every lane already uploads. #183 requires the real threat model, the
+ * real plan, and the pinned database provenance to be human-reviewable after
+ * the fact, because its automated assertions are deliberately structural.
+ */
+export const BENCHMARK_THREAT_MODEL_RETAINED_ARTIFACTS = [
+  "THREAT_MODEL.md",
+  "threat-model.json",
+  "goal-plan.json",
+  "vulnerability-db-manifest.json"
+] as const;
+
 export const BENCHMARK_DYNAMIC_EXCLUDED_NODE_IDS = [
   "dynamic-strategy-generator",
   ...BENCHMARK_GOAL_FANOUT_EXCLUDED_NODE_IDS
@@ -97,19 +156,26 @@ export const BENCHMARK_SMOKE_EXCLUDED_NODE_IDS = [
   ...BENCHMARK_DYNAMIC_EXCLUDED_NODE_IDS
 ] as const;
 
-export function benchmarkLaneConcurrency(lane: "smoke" | "full"): {
+export function benchmarkLaneConcurrency(lane: BenchmarkLaneName): {
   max_parallel_runs: number;
   max_parallel_targets: number;
 } {
-  return lane === "smoke"
-    ? {
-        max_parallel_runs: BENCHMARK_SMOKE_MAX_PARALLEL_RUNS,
-        max_parallel_targets: BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS
-      }
-    : {
-        max_parallel_runs: BENCHMARK_FULL_MAX_PARALLEL_RUNS,
-        max_parallel_targets: BENCHMARK_FULL_MAX_PARALLEL_TARGETS
-      };
+  if (lane === "smoke") {
+    return {
+      max_parallel_runs: BENCHMARK_SMOKE_MAX_PARALLEL_RUNS,
+      max_parallel_targets: BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS
+    };
+  }
+  if (lane === "threat-model") {
+    return {
+      max_parallel_runs: BENCHMARK_THREAT_MODEL_MAX_PARALLEL_RUNS,
+      max_parallel_targets: BENCHMARK_THREAT_MODEL_MAX_PARALLEL_TARGETS
+    };
+  }
+  return {
+    max_parallel_runs: BENCHMARK_FULL_MAX_PARALLEL_RUNS,
+    max_parallel_targets: BENCHMARK_FULL_MAX_PARALLEL_TARGETS
+  };
 }
 
 export interface BenchmarkTargetManifest {
@@ -157,11 +223,9 @@ export interface BenchmarkLaneManifest {
   judge_profile: BenchmarkModelProfileManifest;
 }
 
-export interface BenchmarkLanesManifest {
+export type BenchmarkLanesManifest = {
   schema_version: typeof BENCHMARK_LANES_SCHEMA_VERSION;
-  smoke: BenchmarkLaneManifest;
-  full: BenchmarkLaneManifest;
-}
+} & Record<BenchmarkLaneName, BenchmarkLaneManifest>;
 
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
 const fullSha = z.string().regex(/^[0-9a-f]{40}$/u);
@@ -212,6 +276,7 @@ const laneSchema = z.strictObject({
 const lanesSchema = z.strictObject({
   schema_version: z.literal(BENCHMARK_LANES_SCHEMA_VERSION),
   smoke: laneSchema,
+  "threat-model": laneSchema,
   full: laneSchema
 });
 
@@ -230,20 +295,16 @@ export function loadBenchmarkLanesManifest(filePath: string): BenchmarkLanesMani
   const parsed = lanesSchema.safeParse(readJson(filePath));
   if (!parsed.success) throw manifestError(filePath, parsed.error.issues);
   const manifest = parsed.data as BenchmarkLanesManifest;
-  assertUnique(
-    manifest.smoke.model_profiles.map((profile) => profile.id),
-    "smoke model profile",
-    filePath
-  );
-  assertUnique(
-    manifest.full.model_profiles.map((profile) => profile.id),
-    "full model profile",
-    filePath
-  );
-  for (const [laneName, lane] of [
-    ["smoke", manifest.smoke],
-    ["full", manifest.full]
-  ] as const) {
+  for (const laneName of BENCHMARK_LANE_NAMES) {
+    assertUnique(
+      manifest[laneName].model_profiles.map((profile) => profile.id),
+      `${laneName} model profile`,
+      filePath
+    );
+  }
+  for (const [laneName, lane] of BENCHMARK_LANE_NAMES.map(
+    (name) => [name, manifest[name]] as [BenchmarkLaneName, BenchmarkLaneManifest]
+  )) {
     assertUnique(
       [...lane.model_profiles.map((profile) => profile.id), lane.judge_profile.id],
       `${laneName} runner and judge profile`,
@@ -273,6 +334,21 @@ export function loadBenchmarkLanesManifest(filePath: string): BenchmarkLanesMani
       "full lane must use one strategy loop and include invariant tests, differential tests, and dynamic strategies"
     );
   }
+  // The release gate exists to run the production topology whole. Any disable_*
+  // flag here prunes real nodes -- `disable_dynamic_strategies` prunes the goal
+  // fanout the gate is built to exercise -- so the lane is only meaningful with
+  // all three off.
+  if (
+    manifest["threat-model"].strategy_loops !== 1 ||
+    manifest["threat-model"].disable_invariant_tests ||
+    manifest["threat-model"].disable_differential_tests ||
+    manifest["threat-model"].disable_dynamic_strategies
+  ) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_MANIFEST_INVALID",
+      "threat-model lane must use one strategy loop and run the whole production topology: no invariant, differential, or dynamic-strategy exclusion"
+    );
+  }
   return manifest;
 }
 
@@ -296,7 +372,7 @@ export function benchmarkLaneTopologyExclusions(
   };
 }
 
-function assertFixedBenchmarkProfiles(laneName: "smoke" | "full", lane: BenchmarkLaneManifest): void {
+function assertFixedBenchmarkProfiles(laneName: BenchmarkLaneName, lane: BenchmarkLaneManifest): void {
   const expectedRunners: BenchmarkModelProfileManifest[] = [
     {
       id: `benchmark-${laneName}-gpt-5-6-luna-high`,
@@ -304,7 +380,7 @@ function assertFixedBenchmarkProfiles(laneName: "smoke" | "full", lane: Benchmar
       model: "gpt-5.6-luna",
       reasoning: "high"
     },
-    ...(laneName === "smoke"
+    ...(laneName !== "full"
       ? []
       : [
           {
@@ -339,9 +415,9 @@ function assertFixedBenchmarkProfiles(laneName: "smoke" | "full", lane: Benchmar
   ) {
     throw new EvalError(
       "EVAL_BENCHMARK_MANIFEST_INVALID",
-      laneName === "smoke"
-        ? "smoke lane must use exactly the gpt-5.6-luna high runner with the gpt-5.6-sol xhigh judge"
-        : "full lane must use exactly gpt-5.6-luna high, claude-sonnet-5 high, kimi-k3 max, and deepseek-v4-pro max runners with the gpt-5.6-sol xhigh judge"
+      laneName === "full"
+        ? "full lane must use exactly gpt-5.6-luna high, claude-sonnet-5 high, kimi-k3 max, and deepseek-v4-pro max runners with the gpt-5.6-sol xhigh judge"
+        : `${laneName} lane must use exactly the gpt-5.6-luna high runner with the gpt-5.6-sol xhigh judge`
     );
   }
 }
@@ -385,20 +461,17 @@ function manifestError(filePath: string, issues: z.core.$ZodIssue[]): EvalError 
 
 export function adaptBenchmarkManifestToEvalSuite(input: {
   benchmark: "evmbench" | "ultrafuzz-bench";
-  lane: "smoke" | "full";
+  lane: BenchmarkLaneName;
   cohort: BenchmarkCohortManifest;
   lanes: BenchmarkLanesManifest;
   runnerModelProfileId?: string;
   runnerModelProfileOverride?: BenchmarkModelProfileManifest;
   selectedTargetIds?: string[];
 }): EvalSuiteSpec {
-  if (
-    (input.lane === "smoke" && input.benchmark !== "ultrafuzz-bench") ||
-    (input.lane === "full" && input.benchmark !== "evmbench")
-  ) {
+  if (input.benchmark !== BENCHMARK_LANE_COHORTS[input.lane]) {
     throw new EvalError(
       "EVAL_BENCHMARK_MANIFEST_INVALID",
-      "smoke requires the Ultrafuzz-bench cohort and full requires the EVMBench cohort"
+      "smoke and threat-model require the Ultrafuzz-bench cohort and full requires the EVMBench cohort"
     );
   }
   if (input.benchmark === "evmbench" && input.cohort.schema_version !== EVMBENCH_COHORT_SCHEMA_VERSION) {
@@ -412,6 +485,18 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
   }
   const lane = input.lanes[input.lane];
   const topologyExclusions = benchmarkLaneTopologyExclusions(lane);
+  if (input.lane === "threat-model") {
+    // The gate's whole subject is the threat-model workstream's own nodes. A lane
+    // that prunes any of them still produces a green run and proves nothing, so
+    // refuse to compile the suite rather than publish a hollow observation.
+    const pruned = THREAT_MODEL_GOAL_FANOUT_NODE_IDS.filter((id) => topologyExclusions.excluded_node_ids.includes(id));
+    if (pruned.length > 0) {
+      throw new EvalError(
+        "EVAL_BENCHMARK_MANIFEST_INVALID",
+        `threat-model lane cannot exclude the nodes it exists to exercise: ${pruned.join(", ")}`
+      );
+    }
+  }
   const selectedTargets = resolveBenchmarkTargets(input);
   if (input.runnerModelProfileId !== undefined && input.runnerModelProfileOverride !== undefined) {
     throw new EvalError(
@@ -486,6 +571,9 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
           // production-topology exclusions would be unknown-node errors here.
           // Keeping the list empty also keeps the lane's execution-policy
           // fingerprint identical to the one its published observations carry.
+          // The threat-model lane disables nothing, so this is already empty; it
+          // stays derived rather than hard-coded so a lane edit that starts
+          // pruning is caught by the guard above instead of by a silent no-op.
           excluded_node_ids: input.lane === "smoke" ? [] : topologyExclusions.excluded_node_ids
         }
       }
@@ -520,14 +608,17 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
   };
 }
 
+export function benchmarkLaneSelectedTargetIds(lane: BenchmarkLaneName, cohort: BenchmarkCohortManifest): string[] {
+  // Only the EVMbench full lane runs a cohort wider than its curated selection.
+  return lane === "full" ? cohort.targets.map((target) => target.id) : [...cohort.smoke_targets];
+}
+
 function resolveBenchmarkTargets(input: {
-  lane: "smoke" | "full";
+  lane: BenchmarkLaneName;
   cohort: BenchmarkCohortManifest;
   selectedTargetIds?: string[];
 }): BenchmarkTargetManifest[] {
-  const ids =
-    input.selectedTargetIds ??
-    (input.lane === "smoke" ? input.cohort.smoke_targets : input.cohort.targets.map((target) => target.id));
+  const ids = input.selectedTargetIds ?? benchmarkLaneSelectedTargetIds(input.lane, input.cohort);
   assertUnique(ids, "selected target", "benchmark suite input");
   const targetsById = new Map(input.cohort.targets.map((target) => [target.id, target]));
   return ids.map((id) => {

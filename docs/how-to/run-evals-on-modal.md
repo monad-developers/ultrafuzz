@@ -161,35 +161,70 @@ Repository variable `BENCHMARK_SMOKE_OPENAI_MODEL` can override the
 smoke model without changing its single OpenAI/Codex provider, fixed
 high/medium reasoning split, or target and topology limits.
 
-A manual `workflow_dispatch` runs the full lane instead. It evaluates every
-checked-in EVMBench target with GPT-5.6 Luna at `high`, Claude Sonnet 5 at
-`high`, Kimi K3 at `max`, and DeepSeek V4 Pro at `max` by default. Dispatch
-inputs `openai_model`, `openai_reasoning`, `anthropic_model`,
+A manual `workflow_dispatch` chooses between the two paid lanes with the
+`benchmark_lane` input. Push events can never select either one.
+
+`full` evaluates every checked-in EVMBench target with GPT-5.6 Luna at `high`,
+Claude Sonnet 5 at `high`, Kimi K3 at `max`, and DeepSeek V4 Pro at `max` by
+default. Dispatch inputs `openai_model`, `openai_reasoning`, `anthropic_model`,
 `anthropic_reasoning`, `kimi_model`, `kimi_reasoning`, `deepseek_model`, and
 `deepseek_reasoning` provide explicit overrides. The full lane retains the
 production strategy set, including invariant, differential, and dynamic
-strategies, with all three disable flags set to `false`. Push events can never
-select this lane.
+strategies, with all three disable flags set to `false`.
 
-Both lanes use the standard Modal benchmark resources described above. Each
+### The `threat-model` release gate
+
+`threat-model` is the v0.1.0 release gate. It is the only lane that runs the
+**production** `.ultrafuzz/topology.yml` against the pinned three-target
+Ultrafuzz-bench cohort, and it exists because neither existing lane can: smoke
+substitutes the reduced `benchmarks/smoke-benchmark.yml` graph, and full is
+bound to the EVMBench cohort. Without it, the `threat-model`, `goal-plan`,
+`threat-goals` and `class-goals` nodes never meet a real pinned protocol.
+
+The lane sets all three `disable_*` flags to `false` and passes an empty
+exclusion list, so nothing is pruned. `loadBenchmarkLanesManifest` rejects a
+checked-in lane that turns any of them on, and
+`adaptBenchmarkManifestToEvalSuite` refuses to compile a suite whose exclusions
+would remove a node the gate exists to exercise. It ignores the model dispatch
+inputs entirely and takes its runner from `benchmarks/lanes.json`
+(GPT-5.6 Luna at `high`, one trial), so no dispatch-form value can retune the
+gate's model identity. Beyond the usual report bundle it retains
+`THREAT_MODEL.md`, `threat-model.json`, `goal-plan.json`, and
+`vulnerability-db-manifest.json` from every row, because its automated
+assertions are deliberately structural and the prose has to stay reviewable.
+
+Gate results are **not** appended to `benchmarks/history.json`. Publication is a
+longitudinal claim about one comparable series, and this lane runs a different
+topology and execution policy against the same targets; the publication
+qualifier reads the dispatched lane from the producer's `Benchmark lane <name>`
+step and declines it explicitly. The v0.1.0 release owner reviews the retained
+cohort directly.
+
+The gate costs real money on every dispatch. Confirm a named owner and a
+compute budget with a number attached before selecting it.
+
+All three lanes use the standard Modal benchmark resources described above. Each
 smoke target row has a 15,000-second model-work watchdog: the smoke graph's four
 sequential agent stages may each use two 1,800-second attempts, with ten minutes
-left for workflow transitions and final synchronization. Full-lane rows retain
-the 3,600-second bound. The smoke admits all three
-rows at a time; the full lane admits 20, keeping each checked-in cohort to two row
-waves. Smoke uses four-way workflow concurrency; full uses eight-way concurrency
-so production rows can progress without serializing their agent work.
+left for workflow transitions and final synchronization. Gate rows take the same
+15,000-second bound, which is the hard ceiling `public_benchmark.max_runtime_seconds`
+accepts. Full-lane rows retain the 3,600-second bound. The smoke and the gate
+admit all three rows at a time; the full lane admits 20, keeping each checked-in
+cohort to two row waves. Smoke uses four-way workflow concurrency; the gate and
+full use eight-way concurrency so production rows -- and, for the gate, a large
+dynamic goal-fanout ready queue -- progress without serializing their agent work.
 Scoring remains independent of the runner and always uses GPT-5.6 Sol at
 `xhigh`.
 
-`trials_per_variant` defaults to `1` when it is omitted, and both checked-in
+`trials_per_variant` defaults to `1` when it is omitted, and all three checked-in
 lanes resolve to one trial. Increase it only deliberately: benchmark work and
 cost multiply across every selected target, runner model, and trial.
 
 Configure `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, and `OPENAI_API_KEY` as
-Actions secrets. Full dispatches additionally require `ANTHROPIC_API_KEY` and
-either `KIMI_API_KEY` or `MOONSHOT_API_KEY`, plus `DEEPSEEK_API_KEY`; automatic
-smoke runs do not.
+Actions secrets. Only `full` dispatches additionally require `ANTHROPIC_API_KEY`
+and either `KIMI_API_KEY` or `MOONSHOT_API_KEY`, plus `DEEPSEEK_API_KEY`;
+automatic smoke runs and `threat-model` gate dispatches do not, and the workflow
+does not hand those credentials to them.
 Set `KIMI_BASE_URL` as an Actions secret or variable only when the Kimi run
 should use a compatible non-default HTTPS endpoint.
 Public rows score from their local artifacts and do not require a Braintrust

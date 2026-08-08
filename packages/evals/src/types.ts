@@ -371,6 +371,8 @@ export interface EvalGoalLaneObservation {
   kind: string;
   /** Node IDs the planner assigned to this lane. */
   planned_node_ids: string[];
+  /** Planned node IDs that resolved to at least one run-state node. */
+  observed_planned_node_ids: string[];
   /** State nodes matched to those planned IDs, by node ID or recorded producer. */
   observed_node_ids: string[];
   observed_node_count: number;
