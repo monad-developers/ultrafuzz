@@ -35,6 +35,11 @@ import {
   privateJudgeApiKeyEnv,
   renderPrivateEvalConfigSection
 } from "./private-reporting.js";
+import {
+  checkpointPrivateModelWorkStart,
+  privateEvalModelWorkEvidence,
+  runWithPrivateModelWorkCorroboration
+} from "./private-model-work.js";
 import { renderPrivateEvalSuite } from "./private-suite.js";
 import {
   canScoreBenchmarkRow,
@@ -175,23 +180,37 @@ async function main(): Promise<void> {
         target = prepared.target;
         ({ control, evalRunId } = prepared);
         await flushVolume();
-        modelWorkStarted = true;
-        await writer.writePartial(await readWorkerCheckpoint(target));
-        terminalDisposition = await runBenchmarkExecutionOnce(
-          () =>
-            runEval(
-              modalEvalRunCommand({
-                cliPath: CLI,
-                controlRoot: control,
-                suitePath: prepared.suitePath,
-                evalRunId,
-                provider: privateEvalProvider(privateConfig())
-              }),
-              target!,
-              writer
+        await checkpointPrivateModelWorkStart({
+          markStarted: () => {
+            modelWorkStarted = true;
+          },
+          checkpoint: () => reportProgress(target!, writer),
+          flush: flushVolume
+        });
+        terminalDisposition = await runWithPrivateModelWorkCorroboration({
+          run: () =>
+            runBenchmarkExecutionOnce(
+              () =>
+                runEval(
+                  modalEvalRunCommand({
+                    cliPath: CLI,
+                    controlRoot: control,
+                    suitePath: prepared.suitePath,
+                    evalRunId,
+                    provider: privateEvalProvider(privateConfig())
+                  }),
+                  target!,
+                  writer
+                ),
+              () => inspectTerminalDisposition(target!)
             ),
-          () => inspectTerminalDisposition(target!)
-        );
+          evidence: () => privateEvalModelWorkEvidence(target!),
+          clearStarted: () => {
+            modelWorkStarted = false;
+          },
+          checkpoint: () => reportProgress(target!, writer),
+          flush: flushVolume
+        });
       }
 
       const evalDir = path.join(control, ".ultrafuzz/evals/runs", evalRunId);
