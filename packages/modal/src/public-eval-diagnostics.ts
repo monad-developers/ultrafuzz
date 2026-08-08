@@ -83,7 +83,12 @@ const recordInputSchema = z.looseObject({
   ultrafuzz_run_root: z.string().optional(),
   report_json_path: z.string().optional()
 });
-const runSummaryInputSchema = z.looseObject({ records: z.array(recordInputSchema).min(1).max(MAX_ROWS) });
+// An eval that stopped before recording any row leaves no records at all. Every
+// planned row is then reported as `run_status: "missing"`, so the document still
+// describes the run rather than refusing to exist. The matrix itself still has to
+// be non-empty: a benchmark that planned nothing is an integrity failure, and an
+// empty row set would summarize as scoring-ready.
+const runSummaryInputSchema = z.looseObject({ records: z.array(recordInputSchema).max(MAX_ROWS) });
 const failedNodeStatus = z.enum(PUBLIC_EVAL_FAILED_NODE_STATUSES);
 const failureCategory = z.enum(PUBLIC_EVAL_FAILURE_CATEGORIES);
 const failureCode = z.enum(PUBLIC_EVAL_FAILURE_CODES);
@@ -134,16 +139,48 @@ export function createPublicEvalDiagnostics(input: {
   const matrixIds = new Set(matrix.map((row) => row.id));
   if (matrixIds.size !== matrix.length) throw new Error("public eval diagnostics matrix contains duplicate rows");
   const recordsByRow = new Map(runSummary.records.map((record) => [record.row_id, record]));
-  if (
-    recordsByRow.size !== runSummary.records.length ||
-    recordsByRow.size !== matrix.length ||
-    [...recordsByRow].some(([rowId]) => !matrixIds.has(rowId))
-  ) {
+  // A duplicated record, or one for a row the matrix never planned, is a lineage
+  // integrity failure and stays fatal. A planned row with no record is not: it is
+  // what an eval that stopped early leaves behind, and `run_status: "missing"`
+  // with the `run-record-missing` reason code exists to describe exactly that.
+  if (recordsByRow.size !== runSummary.records.length || [...recordsByRow].some(([rowId]) => !matrixIds.has(rowId))) {
     throw new Error("public eval diagnostics row set does not match the matrix");
   }
 
   const rows = matrix.map((matrixRow): PublicEvalDiagnosticsRow => {
-    const record = recordsByRow.get(matrixRow.id)!;
+    const record = recordsByRow.get(matrixRow.id);
+    if (record === undefined) {
+      const readiness = {
+        run_status: "missing",
+        final_status: "unavailable",
+        workflow_status: "unavailable",
+        workflow_terminal: false,
+        terminal_disposition: "unavailable",
+        terminal_report_present: false,
+        workflow_ids: []
+      } as const satisfies Pick<
+        PublicEvalDiagnosticsRow,
+        | "run_status"
+        | "final_status"
+        | "workflow_status"
+        | "workflow_terminal"
+        | "terminal_disposition"
+        | "terminal_report_present"
+        | "workflow_ids"
+      >;
+      return {
+        row_id: matrixRow.id,
+        target_id: matrixRow.target_id,
+        variant_id: matrixRow.variant_id,
+        trial_id: matrixRow.trial_id,
+        ...readiness,
+        workflow_ids: [],
+        diagnostic_codes: [],
+        failed_nodes: [],
+        scoring_ready: false,
+        reason_codes: publicEvalDiagnosticsReadinessReasonCodes(readiness)
+      };
+    }
     if (
       record.target_id !== matrixRow.target_id ||
       record.variant_id !== matrixRow.variant_id ||
