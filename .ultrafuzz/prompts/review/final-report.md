@@ -453,9 +453,7 @@ human-readable Strategy section. Do not call this metric Temperature.
 
 Add `## Property implementation coverage` after the production issue entries
 and before `## Property provenance`. Read the implementation handoff's
-`selection` object and property records. When it is present, render the
-configured priority threshold, included priorities, selected/implemented/
-blocked/pending/deferred counts, and a concise list of blocker summaries. When
+`selection` object and property records. When
 the handoff is historical or lacks `selection`, render `unavailable` instead
 of guessing. In `report.json`, emit `property_implementation_coverage` with
 this exact shape:
@@ -470,8 +468,10 @@ this exact shape:
   "pending_property_ids": [],
   "deferred_property_ids": [],
   "reference_expected_property_ids": [],
-  "reference_expectation_ids": [],
-  "blocker_summaries": ["property-2: the handler cannot observe the premium delta"]
+  "reference_expectation_ids": ["scfuzzbench:example:expectation-1"],
+  "blocker_summaries": [
+    "property-2: The handler cannot observe the premium delta returned by the Hub."
+  ]
 }
 ```
 
@@ -485,10 +485,45 @@ the configured threshold.
 Include `blocker_summaries` for selected records whose status is `blocked`,
 `pending`, or `deferred`. Every element is a plain string, never an object:
 write each one as `<property-id>: <the record's blocker summary text>`, in
-canonical catalog order. The typed blocker's other fields stay in the handoff
-record; do not copy the blocker object into the report.
+canonical catalog order. Copy that summary text verbatim from the handoff
+record's `blocker.summary` — do not shorten, rephrase, re-punctuate, or
+re-case it. The typed blocker's other fields stay in the handoff record; do not
+copy the blocker object into the report.
 If selection metadata is unavailable, use the string `"unavailable"` in
 `report.json` and write `unavailable` in Markdown.
+
+The Markdown body of `## Property implementation coverage` is compared line by
+line against the JSON above, so write exactly these bullets, in this order, with
+these labels and backticks, and nothing else before the blocker list:
+
+```markdown
+- Priority threshold: `high`
+- Included priorities: `high<br>medium`
+- Selected properties: `1`
+- Implemented properties: `1`
+- Blocked properties: `0`
+- Pending properties: `0`
+- Deferred properties: `0`
+- Reference expectation properties: `0`
+
+Blocker summaries:
+- property-2: The handler cannot observe the premium delta returned by the Hub.
+```
+
+Join `Included priorities` with `<br>`, and write `unavailable` in the backticks
+when the threshold or priorities are missing. Every count is the length of the
+matching JSON array. Introduce the blocker list with a line reading exactly
+`Blocker summaries:`, then one `- ` bullet per element of `blocker_summaries`,
+in the same order as the JSON, and stop the list at the first line that is not a
+`- ` bullet. Omit the heading and the list entirely when there are no blockers.
+
+Each blocker bullet renders its JSON string as public prose: collapse runs of
+whitespace to single spaces, replace any absolute filesystem path with
+`[redacted-path]`, escape `` \ ``, `` ` ``, `*`, `_`, `[`, `]`, `!`, and `#`
+with a leading backslash, and write `<` and `>` as `&lt;` and `&gt;`. A summary
+naming `_beforeTokenTransfer` therefore appears in Markdown as
+`- property-2: \_beforeTokenTransfer reverts` while the JSON keeps the
+unescaped text.
 
 Add `## Property provenance` after the implementation coverage section. For every
 property-derived production or non-production finding, render one concise table
