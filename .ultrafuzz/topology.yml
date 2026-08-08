@@ -5,6 +5,8 @@ groups:
   setup:
     label: Setup
     color: "#2563eb"
+    defaults:
+      timeout_seconds: 7200
   properties:
     label: Properties
     color: "#a16207"

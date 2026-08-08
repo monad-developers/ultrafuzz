@@ -910,6 +910,8 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(init.ok, true);
   assert.equal(init.value?.preserved.includes("ultrafuzz.toml"), true);
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "topology.yml")), true);
+  const topologyText = fs.readFileSync(path.join(project, ".ultrafuzz", "topology.yml"), "utf8");
+  assert.match(topologyText, /setup:\n    label: Setup\n    color: "#2563eb"\n    defaults:\n      timeout_seconds: 7200/u);
   assert.equal(fs.existsSync(path.join(project, "topology.yml")), false);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/index.ts")), true);
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz/prompts/setup/project-discovery.md")), true);
