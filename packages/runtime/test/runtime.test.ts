@@ -1043,6 +1043,17 @@ Current findings: {{output_findings_path}}
   );
 }
 
+const V0_0_2_STOCK_CODEX_ADAPTER = [
+  'import { CodexAgent as SmithersCodexAgent } from "smithers-orchestrator";',
+  "",
+  "export const CodexAgent = new SmithersCodexAgent({",
+  '  model: "gpt-5.5",',
+  "  skipGitRepoCheck: true,",
+  "  apiKey: process.env.OPENAI_API_KEY,",
+  "});",
+  ""
+].join("\n");
+
 test("init preserves existing project-owned files and validate exposes launch posture", async () => {
   const project = tempProject();
   fs.writeFileSync(path.join(project, "ultrafuzz.toml"), "# custom\n", "utf8");
@@ -1157,6 +1168,118 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(validate.value?.resolved_config?.default_agent, "CodexAgent");
   assert.equal(validate.value?.resolved_config?.default_model, "gpt-5.5");
   assert.equal(validate.value?.resolved_config?.default_reasoning, "xhigh");
+});
+
+test("non-force init upgrades an exact historical stock agent adapter and is idempotent", () => {
+  assert.equal(
+    crypto.createHash("sha256").update(V0_0_2_STOCK_CODEX_ADAPTER).digest("hex"),
+    "26dae14e43c09dbe7901aa731cd552b282d502d86cea8cc6726e4a8579cd3236"
+  );
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+  const environmentPath = path.join(project, ".smithers", "agents", "environment.ts");
+  fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+  fs.unlinkSync(environmentPath);
+
+  const upgraded = initProject({ projectRoot: project });
+
+  assert.equal(upgraded.ok, true, JSON.stringify(upgraded.diagnostics));
+  assert.deepEqual(
+    upgraded.diagnostics
+      .filter((diagnostic) => diagnostic.code === "INIT_STOCK_AGENT_ADAPTER_UPGRADED")
+      .map((diagnostic) => diagnostic.path),
+    [".smithers/agents/codex.ts"]
+  );
+  const upgradedSource = fs.readFileSync(codexPath, "utf8");
+  assert.match(upgradedSource, /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+  assert.match(upgradedSource, /workflowControlChildEnvironment/u);
+  assert.equal(fs.existsSync(environmentPath), true);
+
+  const repeated = initProject({ projectRoot: project });
+  assert.equal(repeated.ok, true, JSON.stringify(repeated.diagnostics));
+  assert.equal(
+    repeated.diagnostics.some((diagnostic) => diagnostic.code === "INIT_STOCK_AGENT_ADAPTER_UPGRADED"),
+    false
+  );
+  assert.equal(fs.readFileSync(codexPath, "utf8"), upgradedSource);
+});
+
+test("non-force init preserves a customized stale adapter and force remains explicit", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+  const customized = [
+    'import { readFileSync } from "node:fs";',
+    'import path from "node:path";',
+    'export const customConfig = readFileSync(path.join(process.cwd(), "ultrafuzz.toml"), "utf8");',
+    "// project-owned customization",
+    ""
+  ].join("\n");
+  fs.writeFileSync(codexPath, customized, "utf8");
+
+  const preserved = initProject({ projectRoot: project });
+
+  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+  assert.equal(fs.readFileSync(codexPath, "utf8"), customized);
+  const warning = preserved.diagnostics.find(
+    (diagnostic) =>
+      diagnostic.code === "INIT_AGENT_ADAPTER_UPDATE_REQUIRED" && diagnostic.path === ".smithers/agents/codex.ts"
+  );
+  assert.equal(warning?.severity, "warning");
+  assert.match(warning?.message ?? "", /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+  assert.match(warning?.message ?? "", /workflowControlChildEnvironment/u);
+
+  const forced = initProject({ projectRoot: project, force: true });
+  assert.equal(forced.ok, true, JSON.stringify(forced.diagnostics));
+  assert.notEqual(fs.readFileSync(codexPath, "utf8"), customized);
+  assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+});
+
+test("non-force init never follows or overwrites linked stock adapter paths", () => {
+  for (const linkKind of ["symbolic", "hard"] as const) {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+    const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), `ufz-init-${linkKind}-`));
+    const outsidePath = path.join(outsideRoot, "codex.ts");
+    fs.writeFileSync(outsidePath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    fs.unlinkSync(codexPath);
+    if (linkKind === "symbolic") {
+      fs.symlinkSync(outsidePath, codexPath);
+    } else {
+      fs.linkSync(outsidePath, codexPath);
+    }
+
+    const preserved = initProject({ projectRoot: project });
+
+    assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+    assert.equal(fs.readFileSync(outsidePath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
+    assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
+    assert.equal(fs.lstatSync(codexPath).isSymbolicLink(), linkKind === "symbolic");
+    if (linkKind === "hard") assert.equal(fs.statSync(codexPath).nlink, 2);
+    const warning = preserved.diagnostics.find(
+      (diagnostic) =>
+        diagnostic.code === "INIT_AGENT_ADAPTER_UPDATE_REQUIRED" && diagnostic.path === ".smithers/agents/codex.ts"
+    );
+    assert.match(warning?.message ?? "", /preserved it without inspection/u);
+  }
+});
+
+test("startRun gives manual upgrade guidance for a customized stale adapter", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+  fs.writeFileSync(codexPath, 'export const customConfig = "ultrafuzz.toml"; // project-owned adapter\n', "utf8");
+
+  const run = await startRun({ projectRoot: project, runId: "stale-custom-agent", env: fakeSmithersEnv(project) });
+
+  assert.equal(run.ok, false);
+  assert.equal(run.diagnostics[0]?.code, "WORKFLOW_SUBMISSION_FAILED");
+  assert.match(run.diagnostics[0]?.message ?? "", /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+  assert.match(run.diagnostics[0]?.message ?? "", /rerun ultrafuzz init/u);
+  assert.match(run.diagnostics[0]?.message ?? "", /update this customized adapter manually/u);
 });
 
 test(
@@ -9875,6 +9998,70 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
       relaunch.includes(`--log-dir ${runLogsDir} `),
       `a relaunched workflow must keep streaming into the run's own log directory: ${relaunch}`
     );
+  }
+});
+
+test("legacy workflow evidence gaps fail closed without reconstructing trust", async () => {
+  const cases = [
+    {
+      runId: "legacy-missing-control-seal",
+      relativePath: path.join("smithers", "control-integrity.json"),
+      code: "WORKFLOW_CONTROL_SEAL_MISSING",
+      message: /control seal.*cannot be safely upgraded in place.*new run ID/u
+    },
+    {
+      runId: "legacy-missing-link-journal",
+      relativePath: path.join("smithers", "workflow-run-link-journal.json"),
+      code: "WORKFLOW_RUN_LINK_JOURNAL_MISSING",
+      message: /workflow-link journal.*cannot be safely upgraded in place.*new run ID/u
+    }
+  ] as const;
+
+  for (const entry of cases) {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    writeSmallTopology(project);
+    const env = fakeSmithersEnv(project);
+    const run = await startRun({ projectRoot: project, runId: entry.runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    const missingPath = path.join(run.value!.run_root, entry.relativePath);
+    fs.unlinkSync(missingPath);
+    fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+    const evidence = await readLinkedWorkflowEvidence(project, entry.runId);
+
+    assert.equal(evidence.ok, false);
+    if (!evidence.ok) {
+      assert.equal(evidence.diagnostics[0]?.code, entry.code);
+      assert.equal(evidence.diagnostics[0]?.path, missingPath);
+      assert.match(evidence.diagnostics[0]?.message ?? "", entry.message);
+    }
+    const resumed = await resumeRun({ projectRoot: project, runId: entry.runId, env });
+    assert.equal(resumed.ok, false);
+    assert.equal(resumed.diagnostics[0]?.code, entry.code);
+    assert.equal(fs.existsSync(missingPath), false, "legacy evidence must never be synthesized");
+    assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
+  }
+});
+
+test("a symlinked control seal remains invalid evidence rather than being labeled legacy", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const runId = "symlinked-control-seal";
+  const run = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const sealPath = path.join(run.value!.run_root, "smithers", "control-integrity.json");
+  const retainedPath = `${sealPath}.retained`;
+  fs.renameSync(sealPath, retainedPath);
+  fs.symlinkSync(retainedPath, sealPath);
+
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+
+  assert.equal(evidence.ok, false);
+  if (!evidence.ok) {
+    assert.equal(evidence.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+    assert.notEqual(evidence.diagnostics[0]?.code, "WORKFLOW_CONTROL_SEAL_MISSING");
   }
 });
 

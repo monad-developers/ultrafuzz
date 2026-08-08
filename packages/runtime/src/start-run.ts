@@ -43,6 +43,7 @@ import {
   materializeWorkflowExecutionSnapshot,
   sealWorkflowControlFiles,
   verifyWorkflowControlSnapshot,
+  workflowControlPaths,
   type MaterializedWorkflowExecutionSnapshot,
   type VerifiedWorkflowControlSnapshot
 } from "./workflow-integrity.js";
@@ -52,6 +53,7 @@ import {
   verifyCommittedWorkflowRunLink,
   verifyWorkflowRunLinkAuthorization,
   verifyWorkflowRunLinkHistory,
+  workflowRunLinkJournalPath,
   type WorkflowRunLinkAction,
   type WorkflowRunLinkJournalEntry
 } from "./workflow-run-link.js";
@@ -509,6 +511,10 @@ export async function readLinkedWorkflowEvidence(
   let releaseControlLock: (() => Promise<void>) | undefined;
   try {
     releaseControlLock = await acquireWorkflowControlLock(layout);
+    const missingEvidence = missingLinkedWorkflowEvidenceDiagnostic(resolvedProjectRoot, layout);
+    if (missingEvidence !== undefined) {
+      return { ok: false, diagnostics: [missingEvidence] };
+    }
     reconcilePendingWorkflowRunLink(resolvedProjectRoot, layout);
     const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
       run_id?: unknown;
@@ -635,6 +641,43 @@ export async function readLinkedWorkflowEvidence(
     };
   } finally {
     await releaseControlLock?.();
+  }
+}
+
+function missingLinkedWorkflowEvidenceDiagnostic(
+  projectRoot: string,
+  layout: RunLayout
+): RuntimeDiagnostic | undefined {
+  const controlSealPath = workflowControlPaths(projectRoot, layout).integrityPath;
+  if (pathIsMissing(controlSealPath)) {
+    return {
+      code: "WORKFLOW_CONTROL_SEAL_MISSING",
+      message: `run ${layout.runId} lacks the required workflow control seal; it may predate sealed runs or be incomplete and cannot be safely upgraded in place. Preserve its stored artifacts and start a new run with a new run ID`,
+      severity: "error",
+      source: "workflow",
+      path: controlSealPath
+    };
+  }
+  const linkJournalPath = workflowRunLinkJournalPath(layout);
+  if (pathIsMissing(linkJournalPath)) {
+    return {
+      code: "WORKFLOW_RUN_LINK_JOURNAL_MISSING",
+      message: `run ${layout.runId} lacks the required authenticated workflow-link journal; it may predate authenticated lifecycle links or be incomplete and cannot be safely upgraded in place. Preserve its stored artifacts and start a new run with a new run ID`,
+      severity: "error",
+      source: "workflow",
+      path: linkJournalPath
+    };
+  }
+  return undefined;
+}
+
+function pathIsMissing(filePath: string): boolean {
+  try {
+    fs.lstatSync(filePath);
+    return false;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return true;
+    throw error;
   }
 }
 

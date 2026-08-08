@@ -3,9 +3,17 @@
 Ultrafuzz is a TypeScript workspace managed with `pnpm`.
 
 The supported host runtime is Node.js `22.19` or newer. This satisfies the
-pinned pnpm 11 toolchain, the pinned Smithers release's Node 22 declaration, and the exact
-Kimi Code 0.29.1 CLI used by the adapter contract tests. Smithers' executable
-and those contract tests run with Bun 1.3+. The Modal image uses Node.js 22.23.
+pinned pnpm 11 toolchain, the pinned Smithers release's Node 22 declaration, and
+the exact Kimi Code 0.29.1 CLI used by the adapter contract tests. Smithers'
+executable and those contract tests run with Bun 1.3+. The Modal image uses
+Node.js 22.23.
+
+Workflow execution is supported on Linux with procfs mounted at `/proc`.
+Sealed workflow controls are opened through directory descriptors, and the
+Smithers child receives the held generation as
+`/proc/<controller-pid>/fd/<descriptor>`. A self-process `/dev/fd` alias does
+not provide that cross-process execution path. Windows and macOS execution are
+not currently supported by this hardened boundary.
 
 ## Workspace Checks
 

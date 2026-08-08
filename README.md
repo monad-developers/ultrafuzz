@@ -16,6 +16,14 @@ local dashboard plus final report for review.
 > review generated artifacts before copying anything into your project. See
 > [Security](docs/security.md) for details.
 
+## Requirements
+
+Campaign execution is supported on Linux with procfs mounted and accessible at
+`/proc`. Ultrafuzz holds each sealed workflow generation open and gives the
+Smithers child a `/proc/<controller-pid>/fd/<descriptor>` path, so containers
+and custom worker images must not hide or unmount procfs. The supported host
+runtime is Node.js 22.19 or newer; Smithers execution also requires Bun 1.3+.
+
 ## Operator Flow
 
 1. `ultrafuzz init --project <project>`

@@ -266,6 +266,23 @@ test("init and validate emit schema-versioned launch JSON", async () => {
   assert.equal("repository_mutation" in posture, false);
 });
 
+test("plain init surfaces a customized stale agent adapter diagnostic", async () => {
+  const project = tempProject();
+  const initial = await cli(project, ["init", "--force"]);
+  assert.equal(initial.code, 0, initial.stderr);
+
+  const adapterPath = path.join(project, ".smithers", "agents", "codex.ts");
+  const customAdapter = 'export const customConfigPath = "ultrafuzz.toml";\n';
+  fs.writeFileSync(adapterPath, customAdapter, "utf8");
+
+  const result = await cli(project, ["init"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.match(result.stdout, /warning: INIT_AGENT_ADAPTER_UPDATE_REQUIRED:/u);
+  assert.match(result.stdout, /ULTRAFUZZ_CONFIG_PATH/u);
+  assert.equal(fs.readFileSync(adapterPath, "utf8"), customAdapter);
+});
+
 test("run exposes the trusted reference expectation catalog option", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
