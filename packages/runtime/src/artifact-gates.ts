@@ -2843,9 +2843,7 @@ function campaignFindingReferenceDiagnostics(
       // property into one finding, so a failure need not have a finding sharing
       // its ID. What it must have is a finding covering each of its properties;
       // an uncovered property means a violation was observed and then dropped.
-      const uncoveredPropertyIds = failurePropertyIds.filter(
-        (propertyId) => !coveredPropertyIds.has(propertyId)
-      );
+      const uncoveredPropertyIds = failurePropertyIds.filter((propertyId) => !coveredPropertyIds.has(propertyId));
       if (uncoveredPropertyIds.length > 0) {
         diagnostics.push({
           code: "PROPERTY_FINDING_REFERENCE_MISSING",

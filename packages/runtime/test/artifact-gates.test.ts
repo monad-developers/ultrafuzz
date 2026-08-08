@@ -4542,9 +4542,7 @@ test("campaign gate still rejects a property-derived failure no finding covers",
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  const missing = result.diagnostics.find(
-    (diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING"
-  );
+  const missing = result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING");
   assert.ok(missing);
   assert.match(missing?.path ?? "", /failures\[1\]/u);
 });
@@ -4575,9 +4573,7 @@ test("campaign gate reports every uncovered property of a partially covered fail
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  const missing = result.diagnostics.find(
-    (diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING"
-  );
+  const missing = result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING");
   assert.ok(missing);
   assert.match(missing?.message ?? "", /property-2/u);
 });
@@ -4613,9 +4609,7 @@ test("campaign gate keeps flagging ambiguous and mismatched same-ID findings", (
   );
   const ambiguous = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(ambiguous.ok, false);
-  assert.ok(
-    ambiguous.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_AMBIGUOUS")
-  );
+  assert.ok(ambiguous.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_AMBIGUOUS"));
 
   // A finding that claims a failure's ID must still carry that failure's properties,
   // even though other failures may now be covered by a different finding.
@@ -4627,7 +4621,5 @@ test("campaign gate keeps flagging ambiguous and mismatched same-ID findings", (
   );
   const mismatched = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(mismatched.ok, false);
-  assert.ok(
-    mismatched.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISMATCH")
-  );
+  assert.ok(mismatched.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISMATCH"));
 });
