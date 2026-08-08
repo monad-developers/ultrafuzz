@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Event and event-index appends now repair a torn trailing JSONL fragment through size-fenced, no-follow durable mutations, preserving a complete object that lost only its newline without fusing partial evidence into the next record (#165).
 - Failed node attempts now retain a bounded, redacted error message beside their failure category in the durable attempt ledger, and the same safe diagnostic is included in public eval `failed_nodes`, so CI artifacts explain contract failures without Modal volume access (#361).
 - The private Modal worker now corroborates its pre-raised model-work flag against model-node durable state after `eval run` returns, so reference-only and other pre-model failures use the bounded three-attempt recovery lane without relaunching ambiguous active work (#383).
 - Release validation refs (`release/*` and `test/v0.1.0-ultrafuzz-bench`) now require internally consistent `scoring_ready: true` diagnostics before an operational smoke failure can use the non-default-branch hatch; feature branches keep the hatch (#370).
