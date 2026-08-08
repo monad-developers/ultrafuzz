@@ -1093,6 +1093,12 @@ describe("public Modal benchmark configuration", () => {
     expect(finalGate.run).toContain('[ "$CI_EVENT_NAME" = push ]');
     expect(finalGate.run).toContain('[ "$CI_REF_NAME" != "$CI_DEFAULT_BRANCH" ]');
     expect(finalGate.run).toContain("not blocking non-default branch smoke gate");
+    expect(finalGate.run).toContain("describe-smoke-soft-fail.mjs --json");
+    expect(finalGate.run).toContain('--ref "$CI_REF_NAME"');
+    expect(finalGate.run).toContain(".blocks_gate == true");
+    expect(finalGate.run).toContain(".scoring_ready_required == true");
+    expect(finalGate.run).toContain("blocking validation-ref smoke gate because scoring readiness is required");
+    expect(finalGate.run).toContain("not blocking validation-ref smoke gate because scoring readiness was validated");
     expect(finalGate.run).toContain("exit 1");
 
     // The soft-fail rule lives in exactly one jq filter, and the gate applies
