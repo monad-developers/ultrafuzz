@@ -4389,3 +4389,245 @@ test("dependency gates reject reused descendants after an ancestor manifest chan
     blocked_by: ["reused"]
   });
 });
+
+// Regression: https://github.com/.../issues/386 — the campaign gate demanded a
+// finding sharing each raw counterexample's ID, so a campaign that correctly
+// deduplicated many counterexamples of one property into one finding failed.
+function campaignPropertyCatalog(layout: ReturnType<typeof createRunLayout>, propertyIds: string[]): void {
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: propertyIds.map((propertyId) => ({
+        id: propertyId,
+        description: `Invariant ${propertyId}`,
+        category: "accounting",
+        priority: "high",
+        sources: [{ source_node_id: "property-specification-certora", source_property_id: `certora-${propertyId}` }]
+      }))
+    })
+  );
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      properties: propertyIds.map((propertyId) => ({
+        property_id: propertyId,
+        status: "implemented",
+        implementation_paths: ["test/recon/Properties.sol"],
+        test_paths: []
+      }))
+    })
+  );
+}
+
+function campaignFinding(id: string, propertyIds: string[]): Record<string, unknown> {
+  const finding: Record<string, unknown> = {
+    schema_version: "1.0",
+    id,
+    title: propertyIds.length > 0 ? `Violation of ${propertyIds.join(", ")}` : "Harness observation",
+    status: "reproduced",
+    severity_guess: "medium",
+    confidence: "high",
+    summary: "The property failed."
+  };
+  // A finding with no property provenance omits the key entirely; an empty
+  // array is not how the campaign nodes express "no properties".
+  if (propertyIds.length > 0) {
+    finding.property_ids = propertyIds;
+  }
+  return finding;
+}
+
+test("campaign gate accepts many counterexamples of one property deduplicated into one finding", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-dedup" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [1, 2, 3].map((index) => ({
+        id: `failure-${index}`,
+        status: "reproduced",
+        property_ids: ["property-1"]
+      }))
+    })
+  );
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-1", ["property-1"])]));
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.deepEqual(
+    result.diagnostics.filter((diagnostic) => diagnostic.source === "property-provenance"),
+    []
+  );
+  assert.equal(result.ok, true);
+});
+
+test("campaign gate accepts the R55 artifact shape: 29 counterexamples over two properties, two findings", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-r55" });
+  campaignPropertyCatalog(layout, ["property-1", "property-3"]);
+  const campaignId = "stateful-invariant-campaign";
+  // 27 counterexamples of property-1 and 2 of property-3, exactly as R55 produced.
+  const failures = Array.from({ length: 29 }, (_value, index) => ({
+    id: `failure-${index + 1}`,
+    status: "reproduced",
+    property_ids: [index + 1 === 25 || index + 1 === 26 ? "property-3" : "property-1"]
+  }));
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([campaignFinding("failure-1", ["property-1"]), campaignFinding("failure-25", ["property-3"])])
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.deepEqual(
+    result.diagnostics.filter((diagnostic) => diagnostic.source === "property-provenance"),
+    []
+  );
+  assert.equal(result.ok, true);
+});
+
+test("campaign gate still rejects a property-derived failure no finding covers", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-uncovered" });
+  campaignPropertyCatalog(layout, ["property-1", "property-2"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-2"] }
+      ]
+    })
+  );
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-1", ["property-1"])]));
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  const missing = result.diagnostics.find(
+    (diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING"
+  );
+  assert.ok(missing);
+  assert.match(missing?.path ?? "", /failures\[1\]/u);
+});
+
+test("campaign gate reports every uncovered property of a partially covered failure", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partial" });
+  campaignPropertyCatalog(layout, ["property-1", "property-2"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1", "property-2"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-1"] }
+      ]
+    })
+  );
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-2", ["property-1"])]));
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  const missing = result.diagnostics.find(
+    (diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING"
+  );
+  assert.ok(missing);
+  assert.match(missing?.message ?? "", /property-2/u);
+});
+
+test("campaign gate keeps flagging ambiguous and mismatched same-ID findings", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-ambiguous" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-1"] }
+      ]
+    })
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([campaignFinding("failure-1", ["property-1"]), campaignFinding("failure-1", ["property-1"])])
+  );
+  const ambiguous = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(ambiguous.ok, false);
+  assert.ok(
+    ambiguous.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_AMBIGUOUS")
+  );
+
+  // A finding that claims a failure's ID must still carry that failure's properties,
+  // even though other failures may now be covered by a different finding.
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([campaignFinding("failure-1", []), campaignFinding("failure-2", ["property-1"])])
+  );
+  const mismatched = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(mismatched.ok, false);
+  assert.ok(
+    mismatched.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISMATCH")
+  );
+});
