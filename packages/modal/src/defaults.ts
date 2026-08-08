@@ -4,6 +4,7 @@ export const MODAL_RECOVERY_STATE_SCHEMA_VERSION = "ultrafuzz.modal.recovery-sta
 export const MODAL_WORKER_LINEAGE_SCHEMA_VERSION = "ultrafuzz.modal.worker-lineage.v1" as const;
 export const MODAL_WORKER_STATUS_SCHEMA_VERSION = "ultrafuzz.modal.worker-status.v2" as const;
 export const MODAL_MAX_SANDBOX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+export const MODAL_PUBLIC_SANDBOX_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 export const MODAL_RECOVERY_SANDBOX_TIMEOUT_MS = MODAL_MAX_SANDBOX_TIMEOUT_MS;
 export const MODAL_OVERSEER_POLL_MS = 60 * 1000;
 // Consecutive poll ticks in which EVERY supervised job threw before the overseer gives up loudly.

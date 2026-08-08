@@ -36,6 +36,7 @@ import {
   type SubscriptionAuthCopyEntry
 } from "./auth.js";
 import {
+  configuredModalSandboxTimeoutMs,
   fingerprintModalConfigFile,
   fingerprintModalModel,
   isPublicModalBenchmarkConfig,
@@ -53,7 +54,6 @@ import {
   MODAL_PRE_MODEL_RETRY_LIMIT,
   MODAL_RECOVERY_LEASE_TIMEOUT_MS,
   MODAL_RECOVERY_SANDBOX_TIMEOUT_MS,
-  MODAL_SANDBOX_TIMEOUT_MS,
   type ModalLaunchMode,
   type ModalModelSpec,
   type ModelProvider
@@ -398,7 +398,7 @@ export async function launchModalBenchmark(input: {
           app: config.app_name,
           image: config.image_name,
           imageId: image.imageId,
-          timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
+          timeoutMs: configuredModalSandboxTimeoutMs(config),
           sourceRevision: candidateRevision,
           fingerprints
         });
@@ -443,7 +443,7 @@ export async function launchModalBenchmark(input: {
           app: config.app_name,
           image: config.image_name,
           imageId: image.imageId,
-          timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
+          timeoutMs: configuredModalSandboxTimeoutMs(config),
           sourceRevision: candidateRevision,
           fingerprints,
           attemptHistory: history,
@@ -760,14 +760,13 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       }
       sandbox = orphans[0];
       if (sandbox === undefined) {
-        sandbox = await createModalBenchmarkSandbox(input.modal.sandboxes, input.app, input.image, {
+        sandbox = await createModalLaunchSandbox(input.modal.sandboxes, input.app, input.image, input.state, {
           name: modalSandboxName(input.state.logical_run_id, record),
           command: [
             "bash",
             "-lc",
             modalWorkerEntrypointCommand(input.auth === undefined ? undefined : input.model.provider)
           ],
-          timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
           workdir: "/opt/ultrafuzz",
           env: {
             ULTRAFUZZ_MODAL_RUN_ID: input.state.logical_run_id,
@@ -839,6 +838,19 @@ export function createModalBenchmarkSandbox(
     ...params,
     ...MODAL_BENCHMARK_SANDBOX_RESOURCES
   });
+}
+
+type ModalLaunchSandboxCreateParams = Omit<ModalBenchmarkSandboxCreateParams, "timeoutMs">;
+
+/** Create a primary worker with the timeout already committed to launch provenance. */
+export function createModalLaunchSandbox(
+  sandboxes: Pick<ModalClient["sandboxes"], "create">,
+  app: App,
+  image: Image,
+  state: Pick<ModalLaunchState, "timeout_ms">,
+  params: ModalLaunchSandboxCreateParams
+): Promise<Sandbox> {
+  return createModalBenchmarkSandbox(sandboxes, app, image, { ...params, timeoutMs: state.timeout_ms });
 }
 
 async function recoverExistingSandboxLaunch(

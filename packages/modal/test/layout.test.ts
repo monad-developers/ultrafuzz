@@ -4,6 +4,8 @@ import {
   EVAL_POST_WATCH_MARGIN_MS,
   EVAL_WATCH_TIMEOUT_SECONDS,
   MODAL_MAX_SANDBOX_TIMEOUT_MS,
+  MODAL_PUBLIC_SANDBOX_TIMEOUT_MS,
+  MODAL_RECOVERY_SANDBOX_TIMEOUT_MS,
   MODAL_SANDBOX_TIMEOUT_MS
 } from "../src/defaults.js";
 import {
@@ -42,6 +44,8 @@ describe("Modal storage layout", () => {
   it("keeps the bounded eval watch below the sandbox maximum with a fixed completion margin", () => {
     expect(MODAL_SANDBOX_TIMEOUT_MS).toBe(MODAL_MAX_SANDBOX_TIMEOUT_MS);
     expect(MODAL_MAX_SANDBOX_TIMEOUT_MS).toBe(24 * 60 * 60 * 1000);
+    expect(MODAL_PUBLIC_SANDBOX_TIMEOUT_MS).toBe(6 * 60 * 60 * 1000);
+    expect(MODAL_RECOVERY_SANDBOX_TIMEOUT_MS).toBe(MODAL_MAX_SANDBOX_TIMEOUT_MS);
     expect(EVAL_POST_WATCH_MARGIN_MS).toBe(2 * 60 * 60 * 1000);
     expect(EVAL_WATCH_TIMEOUT_SECONDS * 1000).toBe(MODAL_SANDBOX_TIMEOUT_MS - EVAL_POST_WATCH_MARGIN_MS);
     expect(EVAL_WATCH_TIMEOUT_SECONDS * 1000).toBeLessThan(MODAL_SANDBOX_TIMEOUT_MS);
