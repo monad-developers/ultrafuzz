@@ -4548,6 +4548,37 @@ test("campaign gate still rejects a property-derived failure no finding covers",
   assert.match(missing?.path ?? "", /failures\[1\]/u);
 });
 
+test("campaign gate does not let an unrelated finding cover a campaign failure", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-unrelated-coverage" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([campaignFinding("unrelated-finding", ["property-1"])])
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING"));
+});
+
 test("campaign gate names only the genuinely uncovered property of a partially covered failure", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partial" });
   campaignPropertyCatalog(layout, ["property-1", "property-2"]);
