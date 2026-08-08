@@ -1326,6 +1326,54 @@ test(
 );
 
 test(
+  "stock adapter migration recovers after process death immediately after marker creation",
+  { concurrency: false, skip: process.platform === "win32" },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    const recoveryMarkerPath = path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-recovery");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const runtimeUrl = new URL("../../dist/index.js", import.meta.url).href;
+    const crashScript = String.raw`
+      import fs from "node:fs";
+      const project = process.argv[1];
+      const runtimeUrl = process.argv[2];
+      const { initProject } = await import(runtimeUrl);
+      const originalOpenSync = fs.openSync;
+      Object.defineProperty(fs, "openSync", {
+        ...Object.getOwnPropertyDescriptor(fs, "openSync"),
+        value: (...args) => {
+          const descriptor = Reflect.apply(originalOpenSync, fs, args);
+          if (String(args[0]).endsWith(".codex.ts.ultrafuzz-init-recovery")) process.exit(86);
+          return descriptor;
+        }
+      });
+      initProject({ projectRoot: project });
+      process.exit(87);
+    `;
+
+    const crashed = spawnSync(process.execPath, ["--input-type=module", "-e", crashScript, project, runtimeUrl], {
+      encoding: "utf8"
+    });
+    assert.equal(crashed.status, 86, crashed.stderr);
+    assert.equal(fs.statSync(recoveryMarkerPath).size, 0);
+    assert.equal(fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-prepared")), true);
+    assert.equal(fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-previous")), true);
+
+    const recovered = initProject({ projectRoot: project });
+
+    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+    assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+    assert.equal(
+      fs.readdirSync(agentsDirectory).some((entry) => entry.includes(".ultrafuzz-init-")),
+      false
+    );
+  }
+);
+
+test(
   "stock adapter migration leaves the original intact when temporary publication fails",
   { concurrency: false },
   () => {
