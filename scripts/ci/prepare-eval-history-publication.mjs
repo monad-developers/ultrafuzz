@@ -73,8 +73,20 @@ function smokeProviderName(value) {
 }
 
 export function validateAutomaticPublicationManifest(value, context) {
+  if (context.mode !== "smoke" && context.mode !== "full") {
+    throw new Error("automatic publication mode must be smoke or full");
+  }
+  return validateBenchmarkControlManifest(value, context);
+}
+
+/**
+ * Validate immutable pre-compute control for every recoverable lane. Unlike
+ * automatic publication, this boundary admits the non-publishable threat-model
+ * release gate so trusted default-branch cleanup can authenticate its plan.
+ */
+export function validateBenchmarkControlManifest(value, context) {
   const manifest = strictRecord(value, "benchmark manifest", ROOT_KEYS);
-  const expected = publicationExpectations(
+  const expected = benchmarkControlExpectations(
     context.mode === "smoke" && context.smokeProvider === undefined
       ? { ...context, smokeProvider: smokeProviderFromManifest(manifest) }
       : context
@@ -170,6 +182,10 @@ export function readAutomaticPublicationManifest(filePath, context) {
     readJsonRegular(filePath, MAX_MANIFEST_BYTES, "benchmark manifest"),
     context
   );
+}
+
+export function readBenchmarkControlManifest(filePath, context) {
+  return validateBenchmarkControlManifest(readJsonRegular(filePath, MAX_MANIFEST_BYTES, "benchmark manifest"), context);
 }
 
 export function validateBenchmarkPolicyFiles(input) {
@@ -331,12 +347,20 @@ export async function prepareAutomaticPublication(input) {
 }
 
 function publicationExpectations(input) {
+  if (input.mode !== "smoke" && input.mode !== "full") throw new Error("benchmark mode must be smoke or full");
+  return benchmarkControlExpectations(input);
+}
+
+function benchmarkControlExpectations(input) {
   const candidateCommit = fullCommit(input.candidateCommit, "candidate commit");
   const repository = canonicalRepository(input.repository);
   const producerRunId = positiveDecimal(input.producerRunId, "producer run ID");
   const producerRunAttempt = positiveDecimal(input.producerRunAttempt, "producer run attempt");
-  if (input.mode !== "smoke" && input.mode !== "full") throw new Error("benchmark mode must be smoke or full");
+  if (input.mode !== "smoke" && input.mode !== "full" && input.mode !== "threat-model") {
+    throw new Error("benchmark control mode must be smoke, full, or threat-model");
+  }
   const smoke = input.mode === "smoke";
+  const full = input.mode === "full";
   const targets = input.targets === undefined ? undefined : validatedTargets(input.targets);
   const explicitTargetIds = input.targetIds === undefined ? undefined : validatedTargetIds(input.targetIds);
   const targetIds = explicitTargetIds ?? targets?.map((target) => target.id);
@@ -348,7 +372,7 @@ function publicationExpectations(input) {
     throw new Error("benchmark target IDs do not match the expected target metadata");
   }
   const targetCount = positiveSafeInteger(
-    input.targetCount ?? targets?.length ?? targetIds?.length ?? (smoke ? 3 : 40),
+    input.targetCount ?? targets?.length ?? targetIds?.length ?? (full ? 40 : 3),
     "benchmark target count"
   );
   if (targetIds !== undefined && targetIds.length !== targetCount) {
@@ -357,7 +381,7 @@ function publicationExpectations(input) {
   const trialsPerVariant = positiveSafeInteger(input.trialsPerVariant ?? 1, "benchmark trials per variant");
   const matrixRowsPerPair = checkedProduct(targetCount, trialsPerVariant, "benchmark matrix row count");
   const maxParallelEvalRows = positiveSafeInteger(
-    input.maxParallelEvalRows ?? (smoke ? 3 : 20),
+    input.maxParallelEvalRows ?? (full ? 20 : 3),
     "maximum parallel eval rows"
   );
   const maxParallelWorkflowNodes = positiveSafeInteger(
@@ -374,7 +398,11 @@ function publicationExpectations(input) {
     "benchmark control timeout"
   );
   const maxLiveRowsPerPair = Math.min(matrixRowsPerPair, maxParallelEvalRows);
-  const providers = smoke ? [smokeProviderName(input.smokeProvider)] : ["openai", "anthropic", "kimi", "deepseek"];
+  const providers = full
+    ? ["openai", "anthropic", "kimi", "deepseek"]
+    : smoke
+      ? [smokeProviderName(input.smokeProvider)]
+      : ["openai"];
   return {
     candidateCommit,
     repository,
@@ -382,7 +410,7 @@ function publicationExpectations(input) {
     producerRunAttempt,
     generation: `${producerRunId}-${producerRunAttempt}`,
     mode: input.mode,
-    benchmark: smoke ? "ultrafuzz-bench" : "evmbench",
+    benchmark: full ? "evmbench" : "ultrafuzz-bench",
     providers,
     targetIds,
     targets,
@@ -713,7 +741,7 @@ function defaultControlTimeoutSeconds(matrixRowsPerPair, maxParallelEvalRows, ma
 }
 
 function defaultMaxRuntimeSeconds(mode) {
-  return mode === "smoke" ? 4 * 60 * 60 + 10 * 60 : 60 * 60;
+  return mode === "full" ? 60 * 60 : 4 * 60 * 60 + 10 * 60;
 }
 
 function positiveSafeInteger(value, label) {

@@ -30,7 +30,6 @@ jobs:
     env:
       SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
       SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
-      BENCHMARK_MODE: ${{ github.event.workflow_run.event == 'workflow_dispatch' && 'full' || 'smoke' }}
       BENCHMARK_CANDIDATE: ${{ github.event.workflow_run.head_sha }}
 
     steps:
@@ -38,7 +37,6 @@ jobs:
         id: incomplete_plan
         env:
           GH_TOKEN: ${{ github.token }}
-          PLAN_ARTIFACT_NAME: modal-benchmark-plan-${{ env.BENCHMARK_MODE }}-${{ env.SOURCE_RUN_ID }}-${{ env.SOURCE_RUN_ATTEMPT }}
         run: |
           artifact_index="$RUNNER_TEMP/incomplete-modal-artifacts.json"
           job_index="$RUNNER_TEMP/incomplete-modal-jobs.json"
@@ -52,9 +50,20 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/attempts/$SOURCE_RUN_ATTEMPT/jobs?per_page=100" \
             > "$job_index"
-          plan_count="$(jq --arg name "$PLAN_ARTIFACT_NAME" \
-            '[.artifacts[] | select(.name == $name)] | length' \
-            "$artifact_index")"
+          plan_count=0
+          plan_mode=
+          plan_artifact_name=
+          for mode in smoke full threat-model; do
+            candidate_name="modal-benchmark-plan-$mode-$SOURCE_RUN_ID-$SOURCE_RUN_ATTEMPT"
+            candidate_count="$(jq --arg name "$candidate_name" \
+              '[.artifacts[] | select(.name == $name)] | length' \
+              "$artifact_index")"
+            if [ "$candidate_count" -gt 0 ]; then
+              plan_count=$((plan_count + candidate_count))
+              plan_mode="$mode"
+              plan_artifact_name="$candidate_name"
+            fi
+          done
           if [ "$plan_count" -eq 0 ]; then
             total_job_count="$(jq '.jobs | length' "$job_index")"
             launch_job_count="$(jq '[.jobs[] | select(.name == "launch")] | length' "$job_index")"
@@ -94,13 +103,15 @@ jobs:
             echo "No immutable plan exists and the exact attempt never reached a Modal compute step."
             echo "available=false" >> "$GITHUB_OUTPUT"
           elif [ "$plan_count" -eq 1 ]; then
-            if ! jq -e --arg name "$PLAN_ARTIFACT_NAME" \
+            if ! jq -e --arg name "$plan_artifact_name" \
               '.artifacts[] | select(.name == $name and .expired == false)' \
               "$artifact_index" > /dev/null; then
               echo "The exact immutable plan exists but is no longer downloadable." >&2
               exit 1
             fi
             echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "benchmark_mode=$plan_mode" >> "$GITHUB_OUTPUT"
+            echo "plan_artifact_name=$plan_artifact_name" >> "$GITHUB_OUTPUT"
           else
             echo "Expected at most one exact immutable plan, found $plan_count" >&2
             exit 1
@@ -147,7 +158,7 @@ jobs:
         if: steps.incomplete_plan.outputs.available == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: modal-benchmark-plan-${{ env.BENCHMARK_MODE }}-${{ env.SOURCE_RUN_ID }}-${{ env.SOURCE_RUN_ATTEMPT }}
+          name: ${{ steps.incomplete_plan.outputs.plan_artifact_name }}
           path: ${{ runner.temp }}/incomplete-modal-benchmark-plan
           run-id: ${{ env.SOURCE_RUN_ID }}
           github-token: ${{ github.token }}
@@ -161,6 +172,7 @@ jobs:
           CANDIDATE_SOURCE: ${{ github.workspace }}/candidate-source
           CLEANUP_PAIR_LIST: ${{ runner.temp }}/incomplete-modal-pairs.tsv
           EXPECTED_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+          BENCHMARK_MODE: ${{ steps.incomplete_plan.outputs.benchmark_mode }}
         run: |
           actual_candidate="$(git -C "$CANDIDATE_SOURCE" rev-parse HEAD)"
           tracked_changes="$(git -C "$CANDIDATE_SOURCE" status --porcelain=v1 --untracked-files=no)"

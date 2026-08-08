@@ -439,7 +439,7 @@ describe("public Modal benchmark configuration", () => {
       on: {
         push: { branches: string[] };
         workflow_dispatch: {
-          inputs: Record<string, { default: string; type: string }>;
+          inputs: Record<string, { default: string; type: string; options?: string[] }>;
         };
       };
       env: { BENCHMARK_MODE: string; BENCHMARK_CANDIDATE: string };
@@ -722,7 +722,7 @@ describe("public Modal benchmark configuration", () => {
       path.join(workspace, "scripts/ci/prepare-modal-benchmark-cleanup.mjs"),
       "utf8"
     );
-    expect(cleanupPreparation).toContain("readAutomaticPublicationManifest");
+    expect(cleanupPreparation).toContain("readBenchmarkControlManifest");
     expect(cleanupPreparation).toContain("validateAutomaticPairConfig");
     expect(cleanupPreparation).toContain("CONFIG_KEYS");
     expect(cleanupPreparation).toContain("MODEL_KEYS");
@@ -794,6 +794,7 @@ describe("public Modal benchmark configuration", () => {
     expect(cleanup.if).toContain("github.event.workflow_run.event == 'push'");
     expect(cleanup.if).toContain("github.event.workflow_run.event == 'workflow_dispatch'");
     expect(cleanup.env?.BENCHMARK_CANDIDATE).toBe("${{ github.event.workflow_run.head_sha }}");
+    expect(cleanup.env).not.toHaveProperty("BENCHMARK_MODE");
     expect(cleanup["timeout-minutes"]).toBeGreaterThanOrEqual(75);
 
     const checkouts = cleanup.steps.filter((step) => step.uses?.startsWith("actions/checkout@"));
@@ -810,19 +811,23 @@ describe("public Modal benchmark configuration", () => {
 
     const plan = cleanup.steps.find((step) => step.name === "Restore the incomplete run's immutable pre-compute plan")!;
     expect(plan["continue-on-error"]).toBeUndefined();
-    expect(plan.with?.name).toContain("${{ env.SOURCE_RUN_ID }}-${{ env.SOURCE_RUN_ATTEMPT }}");
+    expect(plan.with?.name).toBe("${{ steps.incomplete_plan.outputs.plan_artifact_name }}");
     expect(plan.with?.["run-id"]).toBe("${{ env.SOURCE_RUN_ID }}");
     expect(plan.with?.["github-token"]).toBe("${{ github.token }}");
     expect(plan.with?.path).toContain("${{ runner.temp }}");
     const discovery = cleanup.steps.find((step) => step.name === "Discover the exact pre-compute benchmark plan")!;
     expect(discovery.run).toContain("attempts/$SOURCE_RUN_ATTEMPT/jobs");
     expect(discovery.run).toContain("compute_may_have_started");
+    expect(discovery.run).toContain("for mode in smoke full threat-model");
+    expect(discovery.run).toContain('echo "benchmark_mode=$plan_mode"');
+    expect(discovery.run).toContain('echo "plan_artifact_name=$plan_artifact_name"');
 
     const validation = cleanup.steps.find(
       (step) => step.name === "Validate incomplete-run identity and termination scopes"
     );
     expect(validation?.run).toContain("prepare-modal-benchmark-cleanup.mjs");
     expect(validation?.run).toContain('git -C "$CANDIDATE_SOURCE" rev-parse HEAD');
+    expect(validation?.env?.BENCHMARK_MODE).toBe("${{ steps.incomplete_plan.outputs.benchmark_mode }}");
     const cleanupInvocation = validation?.run?.match(
       /node scripts\/ci\/prepare-modal-benchmark-cleanup\.mjs[\s\S]*$/u
     )?.[0];
