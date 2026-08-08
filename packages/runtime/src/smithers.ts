@@ -24,7 +24,8 @@ import {
   assertSmithersPackageManifest,
   migrateLegacySmithersPackageManifest,
   SMITHERS_ORCHESTRATOR_BIN_PATH,
-  SMITHERS_ORCHESTRATOR_VERSION
+  SMITHERS_ORCHESTRATOR_VERSION,
+  smithersDependencyInstallArgs
 } from "./smithers-package.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
 
@@ -1689,17 +1690,7 @@ async function ensureSmithersDependencies(
   }
   await execFileAsync(
     "npm",
-    [
-      "install",
-      "--prefix",
-      packageRoot,
-      "--ignore-scripts",
-      "--package-lock=false",
-      "--registry=https://registry.npmjs.org",
-      "--no-audit",
-      "--no-fund",
-      "--loglevel=error"
-    ],
+    smithersDependencyInstallArgs({ prefix: packageRoot, registry: "https://registry.npmjs.org" }),
     {
       cwd: projectRoot,
       env: smithersCommandEnv(projectRoot, env),

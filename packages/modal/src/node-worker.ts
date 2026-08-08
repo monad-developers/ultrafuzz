@@ -5,6 +5,8 @@ import path from "node:path";
 import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 
+import { smithersDependencyInstallArgs } from "@ultrafuzz/runtime";
+
 import { modalAttemptVerificationMarkerName, parseModalNodeSandboxInput } from "./node-provider.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
@@ -76,16 +78,7 @@ async function main(): Promise<void> {
       await runChecked(
         "install-smithers",
         "npm",
-        [
-          "install",
-          "--prefix",
-          path.join(projectRoot, ".smithers"),
-          "--ignore-scripts",
-          "--package-lock=false",
-          "--no-audit",
-          "--no-fund",
-          "--loglevel=error"
-        ],
+        smithersDependencyInstallArgs({ prefix: path.join(projectRoot, ".smithers") }),
         projectRoot
       );
     }
