@@ -96,20 +96,27 @@ function positiveInteger(value) {
   return Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
-function main(args) {
-  if (args.length !== 5) {
+async function main(args) {
+  if (args.length !== 4 && args.length !== 5) {
     throw new Error(
-      "usage: qualify-modal-benchmark-publication.mjs <event.json> <jobs.json> <artifacts.json> <github-output> <repository>"
+      "usage: qualify-modal-benchmark-publication.mjs <event.json> <jobs.json> [artifacts.json] <github-output> <repository>"
     );
   }
-  const [eventPath, jobsPath, artifactsPath, outputPath, repository] = args;
+  const [eventPath, jobsPath] = args;
+  const artifactsPath = args.length === 5 ? args[2] : undefined;
+  const outputPath = args.length === 5 ? args[3] : args[2];
+  const repository = args.length === 5 ? args[4] : args[3];
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) {
     throw new Error("repository must be an owner/name identifier");
   }
+  const eventValue = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+  const artifactsValue = artifactsPath
+    ? JSON.parse(fs.readFileSync(artifactsPath, "utf8"))
+    : await fetchProducerArtifacts(eventValue, repository);
   const result = qualifyModalBenchmarkPublication(
-    JSON.parse(fs.readFileSync(eventPath, "utf8")),
+    eventValue,
     JSON.parse(fs.readFileSync(jobsPath, "utf8")),
-    JSON.parse(fs.readFileSync(artifactsPath, "utf8")),
+    artifactsValue,
     repository
   );
   const outputs = [`eligible=${String(result.eligible)}`];
@@ -120,6 +127,28 @@ function main(args) {
   console.log(result.reason);
 }
 
+async function fetchProducerArtifacts(eventValue, repository) {
+  const runId = positiveInteger(record(record(eventValue).workflow_run).id);
+  const token = process.env.GH_TOKEN;
+  if (!runId || !token) {
+    throw new Error("the producer artifact list requires a workflow run ID and GH_TOKEN");
+  }
+  const response = await fetch(
+    `https://api.github.com/repos/${repository}/actions/runs/${runId}/artifacts?per_page=100`,
+    {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        "X-GitHub-Api-Version": "2022-11-28"
+      }
+    }
+  );
+  if (!response.ok) {
+    throw new Error(`could not list producer artifacts: GitHub returned ${response.status}`);
+  }
+  return response.json();
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main(process.argv.slice(2));
+  await main(process.argv.slice(2));
 }
