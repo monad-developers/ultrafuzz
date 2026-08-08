@@ -173,6 +173,12 @@ describe("prompt semantic anchors", () => {
     expect(finalReport).toContain("reference_expected_property_ids");
     expect(finalReport).toContain("reference_expectation_ids");
     expect(finalReport).toMatch(/Preserve these arrays even when the property priority is below/iu);
+    // The report contract takes blocker_summaries as strings. The prompt used to
+    // show only an empty array and say "using each typed blocker summary", so a
+    // run emitted the typed objects and the contract discarded the whole report.
+    expect(finalReport).toContain("Every element is a plain string, never an object");
+    expect(finalReport).toContain("<property-id>: <the record's blocker summary text>");
+    expect(finalReport).toContain('"blocker_summaries": ["property-2: ');
   });
 
   it("keeps protocol failures observable during invariant handler execution", () => {

@@ -471,7 +471,7 @@ this exact shape:
   "deferred_property_ids": [],
   "reference_expected_property_ids": [],
   "reference_expectation_ids": [],
-  "blocker_summaries": []
+  "blocker_summaries": ["property-2: the handler cannot observe the premium delta"]
 }
 ```
 
@@ -483,7 +483,10 @@ every distinct expectation identifier in `reference_expectation_ids`, in
 catalog order. Preserve these arrays even when the property priority is below
 the configured threshold.
 Include `blocker_summaries` for selected records whose status is `blocked`,
-`pending`, or `deferred`, using each typed blocker summary.
+`pending`, or `deferred`. Every element is a plain string, never an object:
+write each one as `<property-id>: <the record's blocker summary text>`, in
+canonical catalog order. The typed blocker's other fields stay in the handoff
+record; do not copy the blocker object into the report.
 If selection metadata is unavailable, use the string `"unavailable"` in
 `report.json` and write `unavailable` in Markdown.
 
