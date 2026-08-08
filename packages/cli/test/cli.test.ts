@@ -353,12 +353,14 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assertNoSmithersSurface(inspectBody);
   const inspectData = inspectBody.data as {
     metadata: { workflow: { run_id: string } };
+    state: { provenance?: { workflow?: Record<string, unknown> } };
     workflow: { run_id: string; inspect: { ok: boolean }; events: { ok: boolean } };
   };
   assert.equal(inspectData.metadata.workflow.run_id, "ultrafuzz-cli-run");
   assert.equal(inspectData.workflow.run_id, "ultrafuzz-cli-run");
   assert.equal(inspectData.workflow.inspect.ok, true);
   assert.equal(inspectData.workflow.events.ok, true);
+  assert.equal(Object.hasOwn(inspectData.state.provenance?.workflow ?? {}, "executionSnapshot"), false);
 
   const status = await cli(project, ["status", runData.run_id, "--window", "5", "--json"], env);
   assert.equal(status.code, 0, status.stderr);
@@ -627,8 +629,8 @@ test("status --watch --json keeps a failing poll on one NDJSON line", async () =
   const run = await cli(project, ["run", "--run-id", "watch-failure-run", "--json"], env);
   assert.equal(run.code, 0, run.stderr);
   const runRoot = (parseJson(run).data as { run_root: string }).run_root;
-  // A corrupt state.json makes the poll throw rather than return a failure
-  // result; the stream must stay newline-delimited for `jq` consumers.
+  // A corrupt state.json now fails closed while verifying sealed control
+  // evidence; the typed failure must stay newline-delimited for `jq` consumers.
   fs.writeFileSync(path.join(runRoot, "state.json"), "{ not json", "utf8");
 
   const watched = await cli(project, ["status", "watch-failure-run", "--watch", "--json"], env);
@@ -639,7 +641,7 @@ test("status --watch --json keeps a failing poll on one NDJSON line", async () =
   const body = JSON.parse(lines[0]!) as Record<string, unknown>;
   assert.equal(body.ok, false);
   assert.equal(body.command, "status");
-  assert.equal((body.diagnostics as Array<{ code: string }>)[0]?.code, "RUN_STATUS_FAILED");
+  assert.equal((body.diagnostics as Array<{ code: string }>)[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
 });
 
 test("old commands and backend flags are rejected instead of aliased or shimmed", async () => {
