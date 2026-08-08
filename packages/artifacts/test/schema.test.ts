@@ -908,6 +908,18 @@ test("the findings contract accepts the house-style schema_version and states th
     description.includes(`"${FINDINGS_SCHEMA_VERSION}"`),
     "the contract must state the literal, since its empty example is [] and cannot carry one"
   );
+  assert.match(description, /severity_guess to exactly "High", "Medium", or "Low"/u);
+  assert.match(description, /including one that is or may become a non-production record/u);
+  assert.match(description, /"severity_guess":"Medium"/u);
+  assert.doesNotMatch(description, /"severity_guess":"medium"/u);
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/findings@1",
+      JSON.stringify([{ ...campaignFindings[0], severity_guess: "low" }])
+    ).ok,
+    true,
+    "the producer guidance may tighten without making historical lowercase artifacts unreadable"
+  );
 });
 
 test("the findings contract does not require schema_version, and still rejects malformed findings", () => {

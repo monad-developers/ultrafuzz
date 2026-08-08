@@ -143,7 +143,7 @@ const definitions = defineContracts([
     id: "ultrafuzz/findings@1",
     format: "json",
     description:
-      'A JSON array of findings. Every entry must satisfy the Ultrafuzz finding schema, including id, title, status, severity_guess, confidence, and summary. schema_version is optional; when present it must be the literal "1.0" or the alias "ultrafuzz.finding.v1". A populated entry looks like {"id":"finding-0","title":"...","status":"candidate","severity_guess":"medium","confidence":"low","summary":"..."}.',
+      'A JSON array of findings. Every entry must satisfy the Ultrafuzz finding schema, including id, title, status, severity_guess, confidence, and summary. Every finding, including one that is or may become a non-production record, must set severity_guess to exactly "High", "Medium", or "Low"; do not emit lowercase or any other severity vocabulary. schema_version is optional; when present it must be the literal "1.0" or the alias "ultrafuzz.finding.v1". A populated entry looks like {"id":"finding-0","title":"...","status":"candidate","severity_guess":"Medium","confidence":"low","summary":"..."}.',
     validEmptyExample: "[]"
   },
   {
