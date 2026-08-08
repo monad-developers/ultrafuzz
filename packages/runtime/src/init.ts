@@ -16,6 +16,8 @@ const DEFAULT_TOPOLOGY = loadDefaultTopology();
 
 const AGENT_REGISTRY_FILE = ".smithers/agents/index.ts";
 const MAX_STOCK_AGENT_ADAPTER_BYTES = 256 * 1024;
+const MAX_AGENT_REGISTRY_BYTES = 256 * 1024;
+const AGENT_ADAPTER_RECOVERY_SCHEMA_VERSION = 1;
 const AGENT_TEMPLATES = [
   {
     file: "claude.ts",
@@ -277,7 +279,12 @@ function staleAgentAdapterDiagnostics(projectRoot: string): RuntimeDiagnostic[] 
         );
         continue;
       }
-      const source = readStableAgentAdapter(projectRoot, filePath).toString("utf8");
+      const source = readStableInitReviewFile(
+        projectRoot,
+        filePath,
+        MAX_STOCK_AGENT_ADAPTER_BYTES,
+        "generated agent adapter"
+      ).toString("utf8");
       if (source.includes("ultrafuzz.toml") && !source.includes("ULTRAFUZZ_CONFIG_PATH")) {
         diagnostics.push({
           code: "INIT_AGENT_ADAPTER_UPDATE_REQUIRED",
@@ -313,21 +320,66 @@ function manualAgentAdapterReviewDiagnostic(relativePath: string, reason: string
 // instead of leaving the mismatch silent.
 function staleAgentRegistryDiagnostics(projectRoot: string): RuntimeDiagnostic[] {
   const registryPath = path.join(projectRoot, AGENT_REGISTRY_FILE);
-  if (!fs.existsSync(registryPath)) {
-    return [];
+  let registryText: string;
+  try {
+    const lexical = fs.lstatSync(registryPath, { bigint: true });
+    if (lexical.isSymbolicLink() || !lexical.isFile() || lexical.nlink !== 1n) {
+      return [
+        manualAgentRegistryReviewDiagnostic(
+          "is not a physical single-link file, so init preserved it without inspection; replace it with an ordinary file"
+        )
+      ];
+    }
+    if (lexical.size > BigInt(MAX_AGENT_REGISTRY_BYTES)) {
+      return [
+        manualAgentRegistryReviewDiagnostic("is too large to inspect as a generated agent registry and was preserved")
+      ];
+    }
+    registryText = readStableInitReviewFile(
+      projectRoot,
+      registryPath,
+      MAX_AGENT_REGISTRY_BYTES,
+      "generated agent registry"
+    ).toString("utf8");
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return [];
+    return [manualAgentRegistryReviewDiagnostic("could not be safely inspected during post-init review")];
   }
-  const registryText = fs.readFileSync(registryPath, "utf8");
-  return AGENT_TEMPLATES.filter(
-    (agent) =>
-      fs.existsSync(path.join(projectRoot, ".smithers", "agents", agent.file)) &&
-      !registersAgentFactory(registryText, agent.ref)
-  ).map((agent) => ({
-    code: "INIT_AGENT_REGISTRY_STALE",
-    message: `${AGENT_REGISTRY_FILE} does not register ${agent.ref} in agentFactories, so runs cannot select it; rerun ultrafuzz init --force to regenerate the registry, or add the entry by hand`,
-    severity: "warning" as const,
+  try {
+    return AGENT_TEMPLATES.filter(
+      (agent) =>
+        namedPathExistsNoFollow(path.join(projectRoot, ".smithers", "agents", agent.file)) &&
+        !registersAgentFactory(registryText, agent.ref)
+    ).map((agent) => ({
+      code: "INIT_AGENT_REGISTRY_STALE",
+      message: `${AGENT_REGISTRY_FILE} does not register ${agent.ref} in agentFactories, so runs cannot select it; rerun ultrafuzz init --force to regenerate the registry, or add the entry by hand`,
+      severity: "warning" as const,
+      source: "runtime",
+      path: AGENT_REGISTRY_FILE
+    }));
+  } catch {
+    return [manualAgentRegistryReviewDiagnostic("could not be safely inspected during post-init review")];
+  }
+}
+
+function manualAgentRegistryReviewDiagnostic(reason: string): RuntimeDiagnostic {
+  return {
+    code: "INIT_AGENT_REGISTRY_REVIEW_REQUIRED",
+    message: `${AGENT_REGISTRY_FILE} ${reason}; verify manually that agentFactories registers every generated agent before starting a run`,
+    severity: "warning",
     source: "runtime",
     path: AGENT_REGISTRY_FILE
-  }));
+  };
+}
+
+function namedPathExistsNoFollow(filePath: string): boolean {
+  try {
+    fs.lstatSync(filePath);
+    return true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 // Generated adapters export only their factory, so agentFactories is the sole
@@ -350,6 +402,9 @@ function writeProjectFile(
   knownStockSha256?: ReadonlySet<string>
 ): boolean {
   const filePath = path.join(projectRoot, relativePath);
+  if (!force && knownStockSha256 !== undefined) {
+    recoverInterruptedStockAgentAdapterPublication(projectRoot, filePath, knownStockSha256);
+  }
   const existed = fs.existsSync(filePath);
   if (existed && !force) {
     if (
@@ -374,6 +429,224 @@ function writeProjectFile(
   return false;
 }
 
+function recoverInterruptedStockAgentAdapterPublication(
+  projectRoot: string,
+  filePath: string,
+  knownStockSha256: ReadonlySet<string>
+): void {
+  const directoryPath = path.dirname(filePath);
+  assertNoSymlinkComponents(projectRoot, directoryPath, "generated agent adapter recovery directory");
+  const directoryDescriptor = fs.openSync(
+    directoryPath,
+    fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | (fs.constants.O_NOFOLLOW ?? 0)
+  );
+  let failure: unknown;
+  try {
+    const directory = fs.fstatSync(directoryDescriptor, { bigint: true });
+    const lexicalDirectory = fs.lstatSync(directoryPath, { bigint: true });
+    if (
+      !directory.isDirectory() ||
+      !lexicalDirectory.isDirectory() ||
+      directory.dev !== lexicalDirectory.dev ||
+      directory.ino !== lexicalDirectory.ino
+    ) {
+      throw new Error("generated agent adapter recovery directory changed while it was opened");
+    }
+    const directoryAccessPath = agentAdapterDirectoryDescriptorPath(directoryDescriptor, directory);
+    const basename = path.basename(filePath);
+    const targetAccessPath = path.join(directoryAccessPath, basename);
+    const preparedBasename = agentAdapterPreparedBasename(basename);
+    const preparedAccessPath = path.join(directoryAccessPath, preparedBasename);
+    const displacementBasename = agentAdapterDisplacementBasename(basename);
+    const markerBasename = agentAdapterRecoveryMarkerBasename(basename);
+    const displacementPath = path.join(directoryPath, displacementBasename);
+    const displacementAccessPath = path.join(directoryAccessPath, displacementBasename);
+    const markerPath = path.join(directoryPath, markerBasename);
+    const markerAccessPath = path.join(directoryAccessPath, markerBasename);
+    const markerIdentity = lstatIfPresent(markerAccessPath);
+    const displacementIdentity = lstatIfPresent(displacementAccessPath);
+    const orphanedPreparedIdentity = lstatIfPresent(preparedAccessPath);
+    if (markerIdentity !== undefined || displacementIdentity !== undefined || orphanedPreparedIdentity !== undefined) {
+      if (markerIdentity === undefined) {
+        const targetIdentity = lstatIfPresent(targetAccessPath);
+        if (targetIdentity === undefined) {
+          throw new Error("generated agent adapter recovery reservation is incomplete");
+        }
+        if (displacementIdentity !== undefined) {
+          if (
+            !displacementIdentity.isFile() ||
+            displacementIdentity.nlink !== 1n ||
+            displacementIdentity.size !== 0n ||
+            !removeOwnedAgentAdapterTemporaryFile(displacementAccessPath, displacementIdentity)
+          ) {
+            throw new Error("generated agent adapter recovery reservation is incomplete");
+          }
+        }
+        if (orphanedPreparedIdentity !== undefined) {
+          if (
+            !orphanedPreparedIdentity.isFile() ||
+            !removeOwnedAgentAdapterTemporaryFile(preparedAccessPath, orphanedPreparedIdentity)
+          ) {
+            throw new Error("generated agent adapter prepared recovery file is unsafe");
+          }
+        }
+        if (displacementIdentity !== undefined || orphanedPreparedIdentity !== undefined) {
+          fs.fsyncSync(directoryDescriptor);
+        } else {
+          throw new Error("generated agent adapter recovery reservation is incomplete");
+        }
+      } else {
+        if (!markerIdentity.isFile() || markerIdentity.nlink !== 1n || markerIdentity.size > 4096n) {
+          throw new Error("generated agent adapter recovery marker is unsafe");
+        }
+        const marker = parseAgentAdapterRecoveryMarker(
+          readStableInitReviewFile(projectRoot, markerPath, 4096, "generated agent adapter recovery marker"),
+          basename
+        );
+
+        let targetIdentity = lstatIfPresent(targetAccessPath);
+        if (targetIdentity === undefined) {
+          if (
+            displacementIdentity === undefined ||
+            !displacementIdentity.isFile() ||
+            displacementIdentity.nlink !== 1n ||
+            displacementIdentity.size > BigInt(MAX_STOCK_AGENT_ADAPTER_BYTES)
+          ) {
+            throw new Error("generated agent adapter recovery source is unavailable or unsafe");
+          }
+          try {
+            fs.linkSync(displacementAccessPath, targetAccessPath);
+          } catch (error) {
+            if (!isNodeError(error) || error.code !== "EEXIST") throw error;
+          }
+          targetIdentity = fs.lstatSync(targetAccessPath, { bigint: true });
+          if (!sameInitFileIdentity(targetIdentity, displacementIdentity)) {
+            throw new Error("generated agent adapter recovery destination was concurrently replaced");
+          }
+          if (!removeOwnedAgentAdapterTemporaryFile(displacementAccessPath, displacementIdentity)) {
+            throw new Error("generated agent adapter recovery source could not be removed");
+          }
+          fs.fsyncSync(directoryDescriptor);
+        } else if (displacementIdentity !== undefined) {
+          if (sameInitFileIdentity(targetIdentity, displacementIdentity)) {
+            if (!removeOwnedAgentAdapterTemporaryFile(displacementAccessPath, displacementIdentity)) {
+              throw new Error("generated agent adapter recovery source could not be removed");
+            }
+          } else {
+            if (
+              !displacementIdentity.isFile() ||
+              displacementIdentity.nlink !== 1n ||
+              displacementIdentity.size > BigInt(MAX_STOCK_AGENT_ADAPTER_BYTES)
+            ) {
+              throw new Error("generated agent adapter recovery source is unsafe");
+            }
+            const displaced = readStableInitReviewFile(
+              projectRoot,
+              displacementPath,
+              MAX_STOCK_AGENT_ADAPTER_BYTES,
+              "generated agent adapter recovery source"
+            );
+            const displacedDigest = crypto.createHash("sha256").update(displaced).digest("hex");
+            if (displaced.byteLength !== 0 && !knownStockSha256.has(displacedDigest)) {
+              throw new Error("generated agent adapter recovery retained a concurrent customization");
+            }
+            if (!removeOwnedAgentAdapterTemporaryFile(displacementAccessPath, displacementIdentity)) {
+              throw new Error("generated agent adapter recovery source could not be removed");
+            }
+          }
+        }
+
+        const markedPreparedAccessPath = path.join(directoryAccessPath, marker.temporary_basename);
+        const preparedIdentity = lstatIfPresent(markedPreparedAccessPath);
+        if (preparedIdentity !== undefined) {
+          if (
+            preparedIdentity.dev.toString() !== marker.temporary_dev ||
+            preparedIdentity.ino.toString() !== marker.temporary_ino ||
+            !removeOwnedAgentAdapterTemporaryFile(markedPreparedAccessPath, preparedIdentity)
+          ) {
+            throw new Error("generated agent adapter recovery temporary file is unsafe");
+          }
+        }
+        const currentMarker = fs.lstatSync(markerAccessPath, { bigint: true });
+        if (
+          !sameInitFileIdentity(currentMarker, markerIdentity) ||
+          !removeOwnedAgentAdapterTemporaryFile(markerAccessPath, markerIdentity)
+        ) {
+          throw new Error("generated agent adapter recovery marker could not be removed");
+        }
+        fs.fsyncSync(directoryDescriptor);
+        assertStableInitDirectory(directoryPath, directory, "generated agent adapter recovery directory changed");
+      }
+    }
+  } catch (error) {
+    failure = error;
+  }
+  try {
+    closeDescriptorReliably(directoryDescriptor, "generated agent adapter recovery directory");
+  } catch (error) {
+    failure ??= error;
+  }
+  if (failure !== undefined) throw failure;
+}
+
+function agentAdapterDisplacementBasename(basename: string): string {
+  return `.${basename}.ultrafuzz-init-previous`;
+}
+
+function agentAdapterPreparedBasename(basename: string): string {
+  return `.${basename}.ultrafuzz-init-prepared`;
+}
+
+function agentAdapterRecoveryMarkerBasename(basename: string): string {
+  return `.${basename}.ultrafuzz-init-recovery`;
+}
+
+function lstatIfPresent(filePath: string): fs.BigIntStats | undefined {
+  try {
+    return fs.lstatSync(filePath, { bigint: true });
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function parseAgentAdapterRecoveryMarker(
+  contents: Buffer,
+  targetBasename: string
+): { temporary_basename: string; temporary_dev: string; temporary_ino: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents.toString("utf8"));
+  } catch {
+    throw new Error("generated agent adapter recovery marker is malformed");
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("schema_version" in parsed) ||
+    parsed.schema_version !== AGENT_ADAPTER_RECOVERY_SCHEMA_VERSION ||
+    !("target_basename" in parsed) ||
+    parsed.target_basename !== targetBasename ||
+    !("temporary_basename" in parsed) ||
+    typeof parsed.temporary_basename !== "string" ||
+    path.basename(parsed.temporary_basename) !== parsed.temporary_basename ||
+    !parsed.temporary_basename.startsWith(`.${targetBasename}.ultrafuzz-init-`) ||
+    !("temporary_dev" in parsed) ||
+    typeof parsed.temporary_dev !== "string" ||
+    !/^\d+$/u.test(parsed.temporary_dev) ||
+    !("temporary_ino" in parsed) ||
+    typeof parsed.temporary_ino !== "string" ||
+    !/^\d+$/u.test(parsed.temporary_ino)
+  ) {
+    throw new Error("generated agent adapter recovery marker is malformed");
+  }
+  return {
+    temporary_basename: parsed.temporary_basename,
+    temporary_dev: parsed.temporary_dev,
+    temporary_ino: parsed.temporary_ino
+  };
+}
+
 function replaceKnownStockAgentAdapter(
   projectRoot: string,
   filePath: string,
@@ -391,13 +664,16 @@ function replaceKnownStockAgentAdapter(
     return false;
   }
 
-  const descriptor = fs.openSync(filePath, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW);
+  const descriptor = fs.openSync(
+    filePath,
+    fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0)
+  );
   try {
     const opened = fs.fstatSync(descriptor, { bigint: true });
     if (!opened.isFile() || opened.nlink !== 1n || !sameStableInitFile(opened, lexicalBefore)) {
       throw new Error("generated agent adapter changed while it was opened");
     }
-    const original = fs.readFileSync(descriptor);
+    const original = readBoundedDescriptor(descriptor, MAX_STOCK_AGENT_ADAPTER_BYTES, "generated agent adapter");
     const readCompleted = fs.fstatSync(descriptor, { bigint: true });
     const lexicalCompleted = fs.lstatSync(filePath, { bigint: true });
     if (
@@ -410,10 +686,17 @@ function replaceKnownStockAgentAdapter(
     const digest = crypto.createHash("sha256").update(original).digest("hex");
     if (!knownStockSha256.has(digest)) return false;
 
-    publishAgentAdapterAtomically(projectRoot, filePath, descriptor, opened, Buffer.from(replacement, "utf8"));
+    publishAgentAdapterAtomically(
+      projectRoot,
+      filePath,
+      descriptor,
+      opened,
+      original,
+      Buffer.from(replacement, "utf8")
+    );
     return true;
   } finally {
-    fs.closeSync(descriptor);
+    closeDescriptorReliably(descriptor, "generated agent adapter");
   }
 }
 
@@ -422,6 +705,7 @@ function publishAgentAdapterAtomically(
   filePath: string,
   originalDescriptor: number,
   original: fs.BigIntStats,
+  originalContents: Buffer,
   replacement: Buffer
 ): void {
   const directoryPath = path.dirname(filePath);
@@ -432,7 +716,19 @@ function publishAgentAdapterAtomically(
   let temporaryPath: string | undefined;
   let temporaryDescriptor: number | undefined;
   let temporaryIdentity: fs.BigIntStats | undefined;
+  let displacementPath: string | undefined;
+  let displacementDescriptor: number | undefined;
+  let displacementIdentity: fs.BigIntStats | undefined;
+  let recoveryMarkerPath: string | undefined;
+  let recoveryMarkerDescriptor: number | undefined;
+  let recoveryMarkerIdentity: fs.BigIntStats | undefined;
+  let displacedIdentity: fs.BigIntStats | undefined;
+  let displacedWasOriginal = false;
+  let targetMoved = false;
+  let targetLinked = false;
+  let targetAccessPath: string | undefined;
   let published = false;
+  let failure: unknown;
   try {
     const openedDirectory = fs.fstatSync(directoryDescriptor, { bigint: true });
     const lexicalDirectory = fs.lstatSync(directoryPath, { bigint: true });
@@ -446,11 +742,14 @@ function publishAgentAdapterAtomically(
       throw new Error("generated agent adapter directory changed before atomic publication");
     }
     const directoryAccessPath = agentAdapterDirectoryDescriptorPath(directoryDescriptor, openedDirectory);
-    const targetAccessPath = path.join(directoryAccessPath, path.basename(filePath));
+    targetAccessPath = path.join(directoryAccessPath, path.basename(filePath));
 
-    const temporary = createAgentAdapterTemporaryFile(directoryAccessPath, path.basename(filePath), original.mode);
-    temporaryPath = temporary.path;
-    temporaryDescriptor = temporary.descriptor;
+    temporaryPath = path.join(directoryAccessPath, agentAdapterPreparedBasename(path.basename(filePath)));
+    temporaryDescriptor = fs.openSync(
+      temporaryPath,
+      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW,
+      Number(original.mode & 0o7777n)
+    );
     temporaryIdentity = fs.fstatSync(temporaryDescriptor, { bigint: true });
     if (
       !temporaryIdentity.isFile() ||
@@ -482,16 +781,65 @@ function publishAgentAdapterAtomically(
       throw new Error("generated agent adapter temporary publication file changed while it was written");
     }
 
+    displacementPath = path.join(directoryAccessPath, agentAdapterDisplacementBasename(path.basename(filePath)));
+    displacementDescriptor = fs.openSync(
+      displacementPath,
+      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW,
+      Number(original.mode & 0o7777n)
+    );
+    displacementIdentity = fs.fstatSync(displacementDescriptor, { bigint: true });
+    if (
+      !displacementIdentity.isFile() ||
+      displacementIdentity.nlink !== 1n ||
+      displacementIdentity.size !== 0n ||
+      displacementIdentity.dev !== openedDirectory.dev
+    ) {
+      throw new Error("generated agent adapter displacement reservation is unsafe");
+    }
+    recoveryMarkerPath = path.join(directoryAccessPath, agentAdapterRecoveryMarkerBasename(path.basename(filePath)));
+    recoveryMarkerDescriptor = fs.openSync(
+      recoveryMarkerPath,
+      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW,
+      0o600
+    );
+    writeNewDescriptorContents(
+      recoveryMarkerDescriptor,
+      Buffer.from(
+        `${JSON.stringify({
+          schema_version: AGENT_ADAPTER_RECOVERY_SCHEMA_VERSION,
+          target_basename: path.basename(filePath),
+          temporary_basename: path.basename(temporaryPath),
+          temporary_dev: temporaryIdentity.dev.toString(),
+          temporary_ino: temporaryIdentity.ino.toString()
+        })}\n`,
+        "utf8"
+      )
+    );
+    recoveryMarkerIdentity = fs.fstatSync(recoveryMarkerDescriptor, { bigint: true });
+    if (
+      !recoveryMarkerIdentity.isFile() ||
+      recoveryMarkerIdentity.nlink !== 1n ||
+      recoveryMarkerIdentity.size > 4096n ||
+      recoveryMarkerIdentity.dev !== openedDirectory.dev
+    ) {
+      throw new Error("generated agent adapter recovery marker is unsafe");
+    }
+    fs.fsyncSync(directoryDescriptor);
+
     const heldOriginal = fs.fstatSync(originalDescriptor, { bigint: true });
     const accessedOriginal = fs.lstatSync(targetAccessPath, { bigint: true });
     const lexicalOriginal = fs.lstatSync(filePath, { bigint: true });
     const lexicalTemporary = fs.lstatSync(temporaryPath, { bigint: true });
+    const lexicalDisplacement = fs.lstatSync(displacementPath, { bigint: true });
+    const lexicalRecoveryMarker = fs.lstatSync(recoveryMarkerPath, { bigint: true });
     const currentDirectory = fs.lstatSync(directoryPath, { bigint: true });
     if (
       !sameStableInitFile(original, heldOriginal) ||
       !sameStableInitFile(original, accessedOriginal) ||
       !sameStableInitFile(original, lexicalOriginal) ||
       !isExpectedPublishedAgentAdapter(lexicalTemporary, temporaryIdentity, original, replacement.byteLength) ||
+      !sameStableInitFile(displacementIdentity, lexicalDisplacement) ||
+      !sameStableInitFile(recoveryMarkerIdentity, lexicalRecoveryMarker) ||
       !currentDirectory.isDirectory() ||
       currentDirectory.dev !== openedDirectory.dev ||
       currentDirectory.ino !== openedDirectory.ino
@@ -500,24 +848,150 @@ function publishAgentAdapterAtomically(
     }
     assertNoSymlinkComponents(projectRoot, directoryPath, "generated agent adapter directory");
 
-    fs.renameSync(temporaryPath, targetAccessPath);
-    published = true;
+    // Node does not expose renameat2(RENAME_EXCHANGE). Move the named target
+    // into an owned reservation first, then validate the displaced inode. If a
+    // concurrent customization won the race, restore it with link(2), whose
+    // EEXIST behavior is the no-replace primitive used for both rollback and
+    // publication. The target can be absent for this bounded synchronous
+    // section, but a competing installer is never overwritten.
+    fs.renameSync(targetAccessPath, displacementPath);
+    targetMoved = true;
+    displacedIdentity = fs.lstatSync(displacementPath, { bigint: true });
+    const heldAfterMove = fs.fstatSync(originalDescriptor, { bigint: true });
+    const heldContentsAfterMove = readBoundedDescriptor(
+      originalDescriptor,
+      MAX_STOCK_AGENT_ADAPTER_BYTES,
+      "generated agent adapter"
+    );
+    displacedWasOriginal =
+      sameInitFileAcrossRename(original, heldAfterMove) &&
+      sameStableInitFile(heldAfterMove, displacedIdentity) &&
+      heldContentsAfterMove.equals(originalContents);
+    if (!displacedWasOriginal) {
+      if (restoreDisplacedAgentAdapterNoReplace(displacementPath, targetAccessPath, displacedIdentity)) {
+        displacementPath = undefined;
+      }
+      throw new Error("generated agent adapter changed during compare-and-swap publication");
+    }
+
+    try {
+      fs.linkSync(temporaryPath, targetAccessPath);
+      targetLinked = true;
+    } catch (error) {
+      if (isNodeError(error) && error.code === "EEXIST") {
+        throw new Error("generated agent adapter destination was concurrently replaced before publication", {
+          cause: error
+        });
+      }
+      throw error;
+    }
+
+    verifyPublishedAgentAdapter(targetAccessPath, filePath, temporaryIdentity, original, replacement, 2n);
+    if (!removeOwnedAgentAdapterTemporaryFile(temporaryPath, temporaryIdentity)) {
+      throw new Error("generated agent adapter temporary publication file could not be removed");
+    }
+    temporaryPath = undefined;
+    verifyPublishedAgentAdapter(targetAccessPath, filePath, temporaryIdentity, original, replacement, 1n);
+    if (!removeOwnedAgentAdapterTemporaryFile(displacementPath, displacedIdentity)) {
+      throw new Error("generated agent adapter displaced stock file could not be removed");
+    }
+    displacementPath = undefined;
+    if (!removeOwnedAgentAdapterTemporaryFile(recoveryMarkerPath, recoveryMarkerIdentity)) {
+      throw new Error("generated agent adapter recovery marker could not be removed");
+    }
+    recoveryMarkerPath = undefined;
     fs.fsyncSync(directoryDescriptor);
-    const publishedDirectory = fs.lstatSync(directoryPath, { bigint: true });
-    if (
-      !publishedDirectory.isDirectory() ||
-      publishedDirectory.dev !== openedDirectory.dev ||
-      publishedDirectory.ino !== openedDirectory.ino
-    ) {
-      throw new Error("generated agent adapter directory changed during atomic publication");
+    assertStableInitDirectory(
+      directoryPath,
+      openedDirectory,
+      "generated agent adapter directory changed during publication"
+    );
+    verifyPublishedAgentAdapter(targetAccessPath, filePath, temporaryIdentity, original, replacement, 1n);
+    published = true;
+  } catch (error) {
+    failure = error;
+  }
+
+  const cleanupFailures: unknown[] = [];
+  const cleanup = (action: () => void): void => {
+    try {
+      action();
+    } catch (error) {
+      cleanupFailures.push(error);
     }
-    verifyPublishedAgentAdapter(targetAccessPath, filePath, temporaryIdentity, original, replacement);
-  } finally {
-    if (temporaryDescriptor !== undefined) fs.closeSync(temporaryDescriptor);
-    if (!published && temporaryPath !== undefined && temporaryIdentity !== undefined) {
-      removeOwnedAgentAdapterTemporaryFile(temporaryPath, temporaryIdentity);
+  };
+
+  if (!published && targetLinked && temporaryIdentity !== undefined && targetAccessPath !== undefined) {
+    const targetIdentity = temporaryIdentity;
+    const anchoredTargetPath = targetAccessPath;
+    cleanup(() => {
+      if (!removeOwnedAgentAdapterTemporaryFile(anchoredTargetPath, targetIdentity)) {
+        const current = lstatIfPresent(anchoredTargetPath);
+        if (current !== undefined && sameInitFileIdentity(current, targetIdentity)) {
+          throw new Error("generated agent adapter incomplete destination could not be removed");
+        }
+      }
+    });
+  }
+  if (
+    targetMoved &&
+    displacementPath !== undefined &&
+    displacedIdentity !== undefined &&
+    targetAccessPath !== undefined
+  ) {
+    if (displacedWasOriginal) {
+      const anchoredTargetPath = targetAccessPath;
+      cleanup(() => {
+        if (!restoreDisplacedAgentAdapterNoReplace(displacementPath!, anchoredTargetPath, displacedIdentity!)) {
+          throw new Error("generated agent adapter stock source could not be restored without replacement");
+        }
+        displacementPath = undefined;
+      });
     }
-    fs.closeSync(directoryDescriptor);
+    // A mismatching displaced inode is a concurrent customization. If another
+    // writer also occupied the target before restoration, retain this random
+    // recovery path rather than deleting project-owned bytes.
+  } else if (!targetMoved && displacementPath !== undefined) {
+    cleanup(() => {
+      displacementIdentity ??= fs.fstatSync(displacementDescriptor!, { bigint: true });
+      if (!removeOwnedAgentAdapterTemporaryFile(displacementPath!, displacementIdentity)) {
+        throw new Error("generated agent adapter displacement reservation could not be removed");
+      }
+      displacementPath = undefined;
+    });
+  }
+  if (temporaryPath !== undefined) {
+    cleanup(() => {
+      temporaryIdentity ??= fs.fstatSync(temporaryDescriptor!, { bigint: true });
+      if (!removeOwnedAgentAdapterTemporaryFile(temporaryPath!, temporaryIdentity)) {
+        throw new Error("generated agent adapter temporary publication file could not be removed");
+      }
+      temporaryPath = undefined;
+    });
+  }
+  if (recoveryMarkerPath !== undefined && displacementPath === undefined && temporaryPath === undefined) {
+    cleanup(() => {
+      recoveryMarkerIdentity ??= fs.fstatSync(recoveryMarkerDescriptor!, { bigint: true });
+      if (!removeOwnedAgentAdapterTemporaryFile(recoveryMarkerPath!, recoveryMarkerIdentity)) {
+        throw new Error("generated agent adapter recovery marker could not be removed");
+      }
+      recoveryMarkerPath = undefined;
+    });
+  }
+  if (temporaryDescriptor !== undefined) {
+    cleanup(() => closeDescriptorReliably(temporaryDescriptor!, "generated agent adapter publication file"));
+  }
+  if (displacementDescriptor !== undefined) {
+    cleanup(() => closeDescriptorReliably(displacementDescriptor!, "generated agent adapter displacement file"));
+  }
+  if (recoveryMarkerDescriptor !== undefined) {
+    cleanup(() => closeDescriptorReliably(recoveryMarkerDescriptor!, "generated agent adapter recovery marker"));
+  }
+  cleanup(() => closeDescriptorReliably(directoryDescriptor, "generated agent adapter directory"));
+
+  if (failure !== undefined) throw failure;
+  if (cleanupFailures.length > 0) {
+    throw new Error("generated agent adapter publication cleanup failed", { cause: cleanupFailures[0] });
   }
 }
 
@@ -533,42 +1007,16 @@ function agentAdapterDirectoryDescriptorPath(descriptor: number, directory: fs.B
   throw new Error("generated agent adapter directory has no verifiable descriptor path");
 }
 
-function createAgentAdapterTemporaryFile(
-  directoryPath: string,
-  basename: string,
-  mode: bigint
-): { path: string; descriptor: number } {
-  for (let attempt = 0; attempt < 32; attempt += 1) {
-    const temporaryPath = path.join(
-      directoryPath,
-      `.${basename}.ultrafuzz-init-${process.pid}-${crypto.randomBytes(16).toString("hex")}`
-    );
-    try {
-      return {
-        path: temporaryPath,
-        descriptor: fs.openSync(
-          temporaryPath,
-          fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW,
-          Number(mode & 0o7777n)
-        )
-      };
-    } catch (error) {
-      if (isNodeError(error) && error.code === "EEXIST") continue;
-      throw error;
-    }
-  }
-  throw new Error("unable to reserve a unique generated agent adapter publication file");
-}
-
 function isExpectedPublishedAgentAdapter(
   candidate: fs.BigIntStats,
   identity: fs.BigIntStats,
   original: fs.BigIntStats,
-  byteLength: number
+  byteLength: number,
+  expectedLinks = 1n
 ): boolean {
   return (
     candidate.isFile() &&
-    candidate.nlink === 1n &&
+    candidate.nlink === expectedLinks &&
     candidate.dev === identity.dev &&
     candidate.ino === identity.ino &&
     candidate.mode === original.mode &&
@@ -583,13 +1031,14 @@ function verifyPublishedAgentAdapter(
   lexicalPath: string,
   identity: fs.BigIntStats,
   original: fs.BigIntStats,
-  replacement: Buffer
+  replacement: Buffer,
+  expectedLinks: bigint
 ): void {
   const accessedBefore = fs.lstatSync(accessPath, { bigint: true });
   const lexicalBefore = fs.lstatSync(lexicalPath, { bigint: true });
   if (
-    !isExpectedPublishedAgentAdapter(accessedBefore, identity, original, replacement.byteLength) ||
-    !isExpectedPublishedAgentAdapter(lexicalBefore, identity, original, replacement.byteLength)
+    !isExpectedPublishedAgentAdapter(accessedBefore, identity, original, replacement.byteLength, expectedLinks) ||
+    !isExpectedPublishedAgentAdapter(lexicalBefore, identity, original, replacement.byteLength, expectedLinks)
   ) {
     throw new Error("generated agent adapter publication did not retain its prepared identity");
   }
@@ -601,7 +1050,7 @@ function verifyPublishedAgentAdapter(
     const accessedCompleted = fs.lstatSync(accessPath, { bigint: true });
     const lexicalCompleted = fs.lstatSync(lexicalPath, { bigint: true });
     if (
-      !isExpectedPublishedAgentAdapter(opened, identity, original, replacement.byteLength) ||
+      !isExpectedPublishedAgentAdapter(opened, identity, original, replacement.byteLength, expectedLinks) ||
       !sameStableInitFile(opened, completed) ||
       !sameStableInitFile(opened, accessedCompleted) ||
       !sameStableInitFile(opened, lexicalCompleted) ||
@@ -610,36 +1059,66 @@ function verifyPublishedAgentAdapter(
       throw new Error("generated agent adapter publication failed byte and identity verification");
     }
   } finally {
-    fs.closeSync(descriptor);
+    closeDescriptorReliably(descriptor, "published generated agent adapter");
   }
 }
 
-function removeOwnedAgentAdapterTemporaryFile(filePath: string, identity: fs.BigIntStats): void {
+function restoreDisplacedAgentAdapterNoReplace(
+  displacedPath: string,
+  targetPath: string,
+  displacedIdentity: fs.BigIntStats
+): boolean {
+  try {
+    fs.linkSync(displacedPath, targetPath);
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "EEXIST") throw error;
+    try {
+      const current = fs.lstatSync(targetPath, { bigint: true });
+      if (!sameInitFileIdentity(current, displacedIdentity)) return false;
+    } catch {
+      return false;
+    }
+  }
+  const restored = fs.lstatSync(targetPath, { bigint: true });
+  if (!sameInitFileIdentity(restored, displacedIdentity)) return false;
+  return removeOwnedAgentAdapterTemporaryFile(displacedPath, displacedIdentity);
+}
+
+function removeOwnedAgentAdapterTemporaryFile(filePath: string, identity: fs.BigIntStats): boolean {
   try {
     const lexical = fs.lstatSync(filePath, { bigint: true });
     if (lexical.isFile() && lexical.dev === identity.dev && lexical.ino === identity.ino) {
       fs.unlinkSync(filePath);
+      return true;
     }
+    return false;
   } catch {
     // Cleanup is best effort and never follows or removes a replacement inode.
+    return false;
   }
 }
 
-function readStableAgentAdapter(projectRoot: string, filePath: string): Buffer {
-  assertNoSymlinkComponents(projectRoot, path.dirname(filePath), "generated agent adapter directory");
+function readStableInitReviewFile(projectRoot: string, filePath: string, maxBytes: number, label: string): Buffer {
+  assertNoSymlinkComponents(projectRoot, path.dirname(filePath), `${label} directory`);
   const lexicalBefore = fs.lstatSync(filePath, { bigint: true });
   if (
     lexicalBefore.isSymbolicLink() ||
     !lexicalBefore.isFile() ||
     lexicalBefore.nlink !== 1n ||
-    lexicalBefore.size > BigInt(MAX_STOCK_AGENT_ADAPTER_BYTES)
+    lexicalBefore.size > BigInt(maxBytes)
   ) {
-    throw new Error("generated agent adapter is not a bounded physical single-link file");
+    throw new Error(`${label} is not a bounded physical single-link file`);
   }
-  const descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  const descriptor = fs.openSync(
+    filePath,
+    fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0)
+  );
   try {
     const opened = fs.fstatSync(descriptor, { bigint: true });
-    const contents = fs.readFileSync(descriptor);
+    if (!opened.isFile() || opened.nlink !== 1n || opened.size > BigInt(maxBytes)) {
+      throw new Error(`${label} is not a bounded physical single-link file`);
+    }
+    const contents = readBoundedDescriptor(descriptor, maxBytes, label);
     const completed = fs.fstatSync(descriptor, { bigint: true });
     const lexicalCompleted = fs.lstatSync(filePath, { bigint: true });
     if (
@@ -650,11 +1129,61 @@ function readStableAgentAdapter(projectRoot: string, filePath: string): Buffer {
       !sameStableInitFile(opened, completed) ||
       !sameStableInitFile(opened, lexicalCompleted)
     ) {
-      throw new Error("generated agent adapter changed while it was inspected");
+      throw new Error(`${label} changed while it was inspected`);
     }
     return contents;
   } finally {
+    closeDescriptorReliably(descriptor, label);
+  }
+}
+
+function readBoundedDescriptor(descriptor: number, maxBytes: number, label: string): Buffer {
+  const chunks: Buffer[] = [];
+  let offset = 0;
+  while (offset <= maxBytes) {
+    const remaining = maxBytes + 1 - offset;
+    const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+    const bytesRead = fs.readSync(descriptor, chunk, 0, chunk.byteLength, offset);
+    if (bytesRead === 0) return Buffer.concat(chunks, offset);
+    chunks.push(chunk.subarray(0, bytesRead));
+    offset += bytesRead;
+  }
+  throw new Error(`${label} exceeds the safe inspection limit`);
+}
+
+function closeDescriptorReliably(descriptor: number, label: string): void {
+  try {
     fs.closeSync(descriptor);
+  } catch (error) {
+    // POSIX leaves descriptor state unspecified when close(2) reports an
+    // error. Retrying can close an unrelated descriptor if the number was
+    // already recycled, so callers aggregate this error while continuing all
+    // other independent cleanup steps.
+    throw new Error(`${label} descriptor could not be closed`, { cause: error });
+  }
+}
+
+function sameInitFileIdentity(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameInitFileAcrossRename(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
+  return (
+    sameInitFileIdentity(left, right) &&
+    left.isFile() === right.isFile() &&
+    left.mode === right.mode &&
+    left.nlink === right.nlink &&
+    left.size === right.size &&
+    left.uid === right.uid &&
+    left.gid === right.gid &&
+    left.mtimeNs === right.mtimeNs
+  );
+}
+
+function assertStableInitDirectory(directoryPath: string, expected: fs.BigIntStats, message: string): void {
+  const current = fs.lstatSync(directoryPath, { bigint: true });
+  if (!current.isDirectory() || current.dev !== expected.dev || current.ino !== expected.ino) {
+    throw new Error(message);
   }
 }
 
