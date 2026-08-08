@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Workflow submissions and lifecycle inspections now execute from a sealed, content-addressed snapshot of workflow controls and their dependency closure, with immutable generation binding and controller-only capabilities withheld from model subprocesses (#165, #413).
 - Pinned local workflow-runner commands now bind the runner and its shebang interpreter to inode, size, and SHA-256 identities, invoke them through held descriptors where available, and reject replacement observed at the controller command boundary (#165).
 - Event and event-index appends now repair a torn trailing JSONL fragment through size-fenced, no-follow durable mutations, preserving a complete object that lost only its newline without fusing partial evidence into the next record (#165).
 - Failed node attempts now retain a bounded, redacted error message beside their failure category in the durable attempt ledger, and the same safe diagnostic is included in public eval `failed_nodes`, so CI artifacts explain contract failures without Modal volume access (#361).

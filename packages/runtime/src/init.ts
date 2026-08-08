@@ -119,6 +119,15 @@ export function initProject(input: InitProjectInput) {
       preserved,
       overwritten
     );
+    writeProjectFile(
+      projectRoot,
+      ".smithers/agents/environment.ts",
+      loadRuntimeTemplate("smithers/agents/environment.tsx"),
+      input.force === true,
+      created,
+      preserved,
+      overwritten
+    );
     for (const agent of AGENT_TEMPLATES) {
       writeProjectFile(
         projectRoot,

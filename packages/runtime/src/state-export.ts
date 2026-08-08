@@ -25,13 +25,15 @@ import type {
 import { summarizeRunProgress } from "./run-progress.js";
 import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import { runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
-import { readLinkedWorkflowEvidence } from "./start-run.js";
+import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
 import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
 import { runsRootForProject } from "./validate.js";
 
 export async function listRuns(input: { projectRoot: string; env?: Record<string, string | undefined> }) {
   const projectRoot = path.resolve(input.projectRoot);
   const runsRoot = await runsRootForProject(projectRoot);
+  // Project-global discovery has no single linked run whose control snapshot
+  // can authorize it. Every run-specific command below is snapshot-bound.
   const workflowSnapshot = await runSmithersInspectionCommand({
     args: ["ps", "--all", "--format", "json"],
     projectRoot,
@@ -93,25 +95,25 @@ export async function getRunStatus(input: {
         ...diagnostic,
         severity: "warning" as const
       }));
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
   const base = readRunListEntry(layout.root, layout.runId);
   const state = fs.existsSync(layout.statePath) ? readRunState(layout) : undefined;
   const events = fs.existsSync(layout.eventsPath)
     ? fs.readFileSync(layout.eventsPath, "utf8").split(/\r?\n/u).filter(Boolean).length
     : 0;
   const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath);
-  const workflowRunId = linkedWorkflowRunId(base, metadata);
-  const workflowSnapshots = workflowRunId
+  const workflowSnapshots = evidence.ok
     ? {
-        run_id: workflowRunId,
+        run_id: evidence.smithersRunId,
         inspect: await runSmithersInspectionCommand({
-          args: ["inspect", workflowRunId, "--format", "json", "--full-output"],
+          args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],
           projectRoot,
-          env: input.env
+          env: linkedWorkflowExecutionEnvironment(evidence, input.env)
         }),
         events: await runSmithersInspectionCommand({
-          args: ["events", workflowRunId, "--limit", "200", "--format", "json"],
+          args: ["events", evidence.smithersRunId, "--limit", "200", "--format", "json"],
           projectRoot,
-          env: input.env
+          env: linkedWorkflowExecutionEnvironment(evidence, input.env)
         })
       }
     : undefined;
@@ -126,13 +128,16 @@ export async function getRunStatus(input: {
       metadata: publicRunMetadata(metadata),
       ...(workflowSnapshots ? { workflow: workflowSummary(workflowSnapshots) } : {})
     },
-    workflowSnapshots
+    evidence.ok
       ? [
           ...syncDiagnostics,
-          ...diagnosticsForWorkflowSnapshot(workflowSnapshots.inspect, "WORKFLOW_INSPECT_FAILED"),
-          ...diagnosticsForWorkflowSnapshot(workflowSnapshots.events, "WORKFLOW_EVENTS_FAILED")
+          ...diagnosticsForWorkflowSnapshot(workflowSnapshots!.inspect, "WORKFLOW_INSPECT_FAILED"),
+          ...diagnosticsForWorkflowSnapshot(workflowSnapshots!.events, "WORKFLOW_EVENTS_FAILED")
         ]
-      : syncDiagnostics
+      : [
+          ...syncDiagnostics,
+          ...evidence.diagnostics.map((diagnostic) => ({ ...diagnostic, severity: "warning" as const }))
+        ]
   );
 }
 
@@ -170,7 +175,7 @@ export async function getRunHealth(input: {
       "json"
     ],
     projectRoot,
-    env: input.env
+    env: linkedWorkflowExecutionEnvironment(evidence, input.env)
   });
   if (!snapshot.ok) {
     return runtimeFailure<RunHealthValue>([
@@ -279,28 +284,6 @@ function readRunListEntry(runRoot: string, runId: string): RunListEntry {
     ...(state?.source_run_id ? { source_run_id: state.source_run_id } : {}),
     workflow_ids: workflowIdsFromMetadata(metadata)
   };
-}
-
-function linkedWorkflowRunId(entry: RunListEntry, metadata: Record<string, unknown> | undefined): string | undefined {
-  const workflow = metadata?.workflow;
-  if (workflow && typeof workflow === "object") {
-    const runId =
-      stringField(workflow as Record<string, unknown>, "run_id") ??
-      stringField(workflow as Record<string, unknown>, "workflowRunId");
-    if (runId !== undefined) {
-      return runId;
-    }
-  }
-  const smithers = metadata?.smithers;
-  if (
-    smithers &&
-    typeof smithers === "object" &&
-    "workflowRunId" in smithers &&
-    typeof smithers.workflowRunId === "string"
-  ) {
-    return smithers.workflowRunId;
-  }
-  return entry.workflow_ids[0];
 }
 
 function workflowRunsWithProductEvidence(workflowJson: unknown, productRuns: RunListEntry[]): RunListValue["runs"] {

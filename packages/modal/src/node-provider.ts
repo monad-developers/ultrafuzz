@@ -24,7 +24,13 @@ const REMOTE_WORKER = "/opt/ultrafuzz/packages/modal/dist/node-worker.js";
 const REMOTE_DATA_ROOT = "/data/ultrafuzz-nodes";
 const MAX_RESULT_WAIT_MS = 24 * 60 * 60 * 1000;
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
+const EXECUTION_DEPENDENCY_MANIFEST = "dependencies/manifest.json";
+const EXECUTION_DEPENDENCY_SCHEMA_VERSION = "ultrafuzz.workflow-execution-dependencies.v1";
+const MAX_HANDOFF_SNAPSHOT_ENTRIES = 100_000;
+const MAX_HANDOFF_SNAPSHOT_FILE_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_HANDOFF_SNAPSHOT_TOTAL_BYTES = 8 * 1024 * 1024 * 1024;
 const SAFE_ATTEMPT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const SNAPSHOT_GENERATION_PATTERN = /^[0-9a-f]{64}$/u;
 
 export function isSafeModalAttemptId(value: string): boolean {
   return SAFE_ATTEMPT_ID_PATTERN.test(value);
@@ -83,6 +89,7 @@ export interface ModalNodeSandboxInput {
   task_id: string;
   attempt_id: string;
   execution_generation: string;
+  execution_snapshot_root: string;
   workflow_path: string;
   prompt_path?: string;
   run_root: string;
@@ -98,6 +105,8 @@ export interface ModalNodeSandboxInput {
   agent_credential_env: string[];
   operator_prompt?: string;
 }
+
+export type ModalNodeWorkerInput = ModalNodeSandboxInput;
 
 interface ModalNodeClient {
   apps: {
@@ -150,7 +159,7 @@ async function runModalNodeSandbox(
   let client: ModalNodeClient | undefined;
   let sandbox: Sandbox | undefined;
   try {
-    fs.writeFileSync(requestFile, `${JSON.stringify({ ...input, project_archive_sha256: archive.sha256 })}\n`, {
+    fs.writeFileSync(requestFile, `${JSON.stringify(modalNodeWorkerInput(input, archive.sha256))}\n`, {
       mode: 0o600
     });
     client =
@@ -302,6 +311,27 @@ export async function cleanupModalNodeRun(
 }
 
 export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInput {
+  return parseModalNodeInput(value);
+}
+
+export function parseModalNodeWorkerInput(value: unknown): ModalNodeWorkerInput {
+  if (isRecord(value) && "execution_snapshot_source_root" in value) {
+    throw new Error("cloud node worker input contains a local snapshot descriptor");
+  }
+  return parseModalNodeInput(value);
+}
+
+export function modalNodeWorkerInput(
+  input: ModalNodeSandboxInput,
+  projectArchiveSha256?: string
+): ModalNodeWorkerInput {
+  return parseModalNodeWorkerInput({
+    ...input,
+    ...(projectArchiveSha256 === undefined ? {} : { project_archive_sha256: projectArchiveSha256 })
+  });
+}
+
+function parseModalNodeInput(value: unknown): ModalNodeSandboxInput {
   if (!isRecord(value) || value.schema_version !== "ultrafuzz.modal.node.v1") {
     throw new Error("cloud node input is invalid");
   }
@@ -321,6 +351,7 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
     "task_id",
     "attempt_id",
     "execution_generation",
+    "execution_snapshot_root",
     "workflow_path",
     "run_root",
     "artifact_dir",
@@ -385,16 +416,18 @@ export async function createModalNodeHandoffArchive(
   input: ModalNodeSandboxInput
 ): Promise<{ path: string; sha256: string; cleanup: () => void }> {
   const root = fs.realpathSync(path.resolve(projectRoot));
-  const workflowPath = checkedPath(root, input.workflow_path, "workflow path");
   const runRoot = checkedPath(root, input.run_root, "run root");
+  const executionSnapshotRoot = checkedPath(root, input.execution_snapshot_root, "execution snapshot root");
+  const workflowPath = checkedPath(root, input.workflow_path, "workflow path");
   const promptPath =
     input.prompt_path === undefined ? undefined : checkedPath(root, input.prompt_path, "rendered prompt path");
   const dependencyArtifactDirs = input.dependency_artifact_dirs.map((value) =>
     checkedPath(root, value, "dependency artifact directory")
   );
   const artifactDir = checkedPath(root, input.artifact_dir, "artifact directory", false);
-  assertChildPath(runRoot, workflowPath, "workflow path");
-  if (promptPath !== undefined) assertChildPath(runRoot, promptPath, "rendered prompt path");
+  assertExecutionSnapshotRoot(runRoot, executionSnapshotRoot);
+  assertChildPath(executionSnapshotRoot, workflowPath, "workflow path");
+  if (promptPath !== undefined) assertChildPath(executionSnapshotRoot, promptPath, "rendered prompt path");
   for (const dependencyArtifactDir of dependencyArtifactDirs) {
     assertChildPath(runRoot, dependencyArtifactDir, "dependency artifact directory");
   }
@@ -422,28 +455,23 @@ export async function createModalNodeHandoffArchive(
 
     fs.mkdirSync(path.join(staging, path.relative(root, runRoot)), { recursive: true, mode: 0o700 });
     materializePromptSchemas(path.join(staging, ".ultrafuzz", "schemas"));
-    copyFileChecked(root, workflowPath, path.join(staging, path.relative(root, workflowPath)));
-    if (promptPath !== undefined) {
-      copyFileChecked(root, promptPath, path.join(staging, path.relative(root, promptPath)));
-    }
+    fs.mkdirSync(path.join(staging, path.relative(root, path.dirname(executionSnapshotRoot))), {
+      recursive: true,
+      mode: 0o700
+    });
+    copyExecutionSnapshotChecked(
+      executionSnapshotRoot,
+      path.join(staging, path.relative(root, executionSnapshotRoot)),
+      runRoot,
+      executionSnapshotRoot,
+      workflowPath
+    );
+    copyWorkflowControlSealChecked(root, runRoot, executionSnapshotRoot, staging);
     for (const dependencyArtifactDir of dependencyArtifactDirs) {
       copyTreeChecked(dependencyArtifactDir, path.join(staging, path.relative(root, dependencyArtifactDir)));
     }
     copyDependencyVerificationMarkers(root, runRoot, dependencyArtifactDirs, staging);
     fs.mkdirSync(path.join(staging, path.relative(root, artifactDir)), { recursive: true, mode: 0o700 });
-    for (const relative of [
-      ".smithers/package.json",
-      ".smithers/agents/index.ts",
-      ".smithers/agents/codex.ts",
-      ".smithers/agents/claude.ts",
-      ".smithers/agents/kimi.ts",
-      ".smithers/agents/toml.ts"
-    ]) {
-      const source = path.join(root, relative);
-      if (fs.existsSync(source)) {
-        copyFileChecked(root, source, path.join(staging, relative));
-      }
-    }
     assertSafeTree(staging);
     execFileSync("tar", ["-czf", archive, "-C", staging, "."]);
     fs.chmodSync(archive, 0o600);
@@ -580,6 +608,7 @@ async function validateDurableCheckpoint(
     checkpoint.storage_lineage !== lineage ||
     checkpoint.workspace_path !== workspacePath ||
     checkpoint.run_root !== input.run_root ||
+    checkpoint.execution_snapshot_root !== input.execution_snapshot_root ||
     checkpoint.handoff_archive !== handoffArchive
   ) {
     throw new Error("cloud node durable checkpoint is invalid");
@@ -590,6 +619,7 @@ async function validateDurableCheckpoint(
     index.storage_lineage !== lineage ||
     index.workspace_path !== workspacePath ||
     index.run_root !== input.run_root ||
+    index.execution_snapshot_root !== input.execution_snapshot_root ||
     index.handoff_archive !== handoffArchive ||
     !Array.isArray(index.checkpoints) ||
     !index.checkpoints.some(
@@ -747,6 +777,837 @@ function assertChildPath(parent: string, child: string, label: string): void {
   if (child === parent || !child.startsWith(`${parent}${path.sep}`)) {
     throw new Error(`${label} must stay inside the run root`);
   }
+}
+
+function assertExecutionSnapshotRoot(runRoot: string, snapshotRoot: string): void {
+  assertChildPath(runRoot, snapshotRoot, "execution snapshot root");
+  const expectedParent = path.join(runRoot, "smithers", "execution-snapshots");
+  if (path.dirname(snapshotRoot) !== expectedParent || !SNAPSHOT_GENERATION_PATTERN.test(path.basename(snapshotRoot))) {
+    throw new Error("execution snapshot root is not a retained workflow generation");
+  }
+}
+
+interface ModalExecutionDependencyTarget {
+  id: string;
+  name: string;
+  snapshotPath: string;
+}
+
+export interface ModalExecutionDependencyClosure {
+  links: ReadonlyMap<string, string>;
+  executablePaths: ReadonlySet<string>;
+  smithersBin: string;
+}
+
+/**
+ * Reads the dependency map retained inside an execution snapshot. The map is
+ * the authority for the snapshot's otherwise-disallowed node_modules links;
+ * no link discovered by walking the tree is accepted unless it is derived
+ * from one of these exact issuer edges.
+ */
+export function readModalExecutionDependencyClosure(
+  snapshotRoot: string,
+  expectedManifest?: { sha256: string; size: bigint }
+): ModalExecutionDependencyClosure {
+  const root = path.resolve(snapshotRoot);
+  const contents = readStableSnapshotRelativeFile(
+    root,
+    EXECUTION_DEPENDENCY_MANIFEST,
+    16 * 1024 * 1024,
+    "execution dependency manifest"
+  );
+  if (
+    expectedManifest !== undefined &&
+    (BigInt(contents.byteLength) !== expectedManifest.size ||
+      crypto.createHash("sha256").update(contents).digest("hex") !== expectedManifest.sha256)
+  ) {
+    throw new Error("execution dependency manifest does not match the workflow control seal");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents.toString("utf8")) as unknown;
+  } catch (error) {
+    throw new Error("execution dependency manifest is invalid JSON", { cause: error });
+  }
+  if (
+    !isRecord(parsed) ||
+    parsed.schema_version !== EXECUTION_DEPENDENCY_SCHEMA_VERSION ||
+    !Array.isArray(parsed.modules) ||
+    !Array.isArray(parsed.packages) ||
+    !Array.isArray(parsed.issuers) ||
+    !Array.isArray(parsed.executable_paths) ||
+    typeof parsed.smithers_bin !== "string"
+  ) {
+    throw new Error("execution dependency manifest is invalid");
+  }
+
+  const modules = parsed.modules.map((value) => parseModalExecutionTarget(value, true));
+  const packages = parsed.packages.map((value, index) => {
+    const target = parseModalExecutionTarget(value, false);
+    if (
+      !isRecord(value) ||
+      typeof value.version !== "string" ||
+      value.version.length === 0 ||
+      target.id !== `package:${String(index + 1).padStart(6, "0")}` ||
+      target.snapshotPath !== `dependencies/packages/${String(index + 1).padStart(6, "0")}`
+    ) {
+      throw new Error("execution dependency manifest package is invalid");
+    }
+    return target;
+  });
+  const targets = [...modules, ...packages];
+  const targetsById = new Map(targets.map((target) => [target.id, target]));
+  if (
+    targetsById.size !== targets.length ||
+    new Set(targets.map((target) => target.snapshotPath)).size !== targets.length
+  ) {
+    throw new Error("execution dependency manifest targets are duplicated");
+  }
+
+  const links = new Map<string, string>();
+  const issuerIds = new Set<string>();
+  for (const value of parsed.issuers) {
+    if (
+      !isRecord(value) ||
+      typeof value.id !== "string" ||
+      typeof value.snapshot_path !== "string" ||
+      !isRecord(value.dependencies) ||
+      issuerIds.has(value.id)
+    ) {
+      throw new Error("execution dependency manifest issuer is invalid");
+    }
+    issuerIds.add(value.id);
+    const issuerRoot =
+      value.id === "root" && value.snapshot_path === "."
+        ? ""
+        : checkedSnapshotRelativePath(value.snapshot_path, "dependency issuer path");
+    for (const [name, targetId] of Object.entries(value.dependencies)) {
+      const target = typeof targetId === "string" ? targetsById.get(targetId) : undefined;
+      if (!isModalDependencyName(name) || target === undefined) {
+        throw new Error("execution dependency manifest edge is invalid");
+      }
+      const link = checkedSnapshotRelativePath(
+        path.posix.join(issuerRoot, "node_modules", name),
+        "dependency link path"
+      );
+      if (links.has(link)) throw new Error("execution dependency manifest link is duplicated");
+      links.set(link, target.snapshotPath);
+    }
+  }
+  const expectedIssuerIds = new Set(["root", ...targets.map((target) => target.id)]);
+  if (
+    issuerIds.size !== expectedIssuerIds.size ||
+    [...expectedIssuerIds].some((issuerId) => !issuerIds.has(issuerId))
+  ) {
+    throw new Error("execution dependency manifest issuers are incomplete");
+  }
+
+  const executablePaths = new Set<string>();
+  for (const value of parsed.executable_paths) {
+    if (typeof value !== "string") throw new Error("execution dependency executable path is invalid");
+    const executable = checkedSnapshotRelativePath(value, "dependency executable path");
+    if (executablePaths.has(executable)) throw new Error("execution dependency executable path is duplicated");
+    executablePaths.add(executable);
+  }
+  const smithersBin = checkedSnapshotRelativePath(parsed.smithers_bin, "sealed Smithers executable");
+  if (!executablePaths.has(smithersBin)) {
+    throw new Error("sealed Smithers executable is not declared executable");
+  }
+  return { links, executablePaths, smithersBin };
+}
+
+function parseModalExecutionTarget(value: unknown, module: boolean): ModalExecutionDependencyTarget {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.name !== "string" ||
+    !isModalDependencyName(value.name) ||
+    typeof value.snapshot_path !== "string"
+  ) {
+    throw new Error("execution dependency manifest target is invalid");
+  }
+  const snapshotPath = checkedSnapshotRelativePath(value.snapshot_path, "dependency target path");
+  if (
+    module &&
+    (value.id !== `module:${value.name}` ||
+      !value.name.startsWith("@ultrafuzz/") ||
+      snapshotPath !== path.posix.join("modules", value.name))
+  ) {
+    throw new Error("execution dependency manifest module is invalid");
+  }
+  return { id: value.id, name: value.name, snapshotPath };
+}
+
+function isModalDependencyName(value: string): boolean {
+  return /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)$/iu.test(value);
+}
+
+function checkedSnapshotRelativePath(value: string, label: string): string {
+  if (
+    value.length === 0 ||
+    value.length > 1_024 ||
+    value.includes("\0") ||
+    value.includes("\\") ||
+    path.posix.isAbsolute(value) ||
+    path.posix.normalize(value) !== value ||
+    value === "." ||
+    value.startsWith("../")
+  ) {
+    throw new Error(`${label} is invalid`);
+  }
+  return value;
+}
+
+function readStableSnapshotRelativeFile(
+  snapshotRoot: string,
+  relativePath: string,
+  maximumBytes: number,
+  label: string
+): Buffer {
+  const checked = checkedSnapshotRelativePath(relativePath, label);
+  const parts = checked.split("/");
+  const descriptors: Array<{
+    descriptor: number;
+    opened: fs.BigIntStats;
+    pathname: string;
+    pathnameFollowsDescriptor: boolean;
+  }> = [];
+  const rootDescriptor = fs.openSync(snapshotRoot, fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0));
+  try {
+    const rootOpened = fs.fstatSync(rootDescriptor, { bigint: true });
+    const rootPathStat = fs.statSync(snapshotRoot, { bigint: true });
+    if (!rootOpened.isDirectory() || !sameBigIntFileIdentity(rootOpened, rootPathStat)) {
+      throw new Error(`${label} snapshot root changed while opening`);
+    }
+    descriptors.push({
+      descriptor: rootDescriptor,
+      opened: rootOpened,
+      pathname: snapshotRoot,
+      pathnameFollowsDescriptor: true
+    });
+    let parentAccess = openedDescriptorPath(rootDescriptor, rootOpened) ?? snapshotRoot;
+    for (const part of parts.slice(0, -1)) {
+      const pathname = path.join(parentAccess, part);
+      const lexical = fs.lstatSync(pathname, { bigint: true });
+      if (!lexical.isDirectory() || lexical.isSymbolicLink()) {
+        throw new Error(`${label} crosses an unsafe snapshot directory`);
+      }
+      const descriptor = fs.openSync(
+        pathname,
+        fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0)
+      );
+      const opened = fs.fstatSync(descriptor, { bigint: true });
+      if (!opened.isDirectory() || !sameBigIntFileIdentity(opened, lexical)) {
+        fs.closeSync(descriptor);
+        throw new Error(`${label} snapshot directory changed while opening`);
+      }
+      descriptors.push({ descriptor, opened, pathname, pathnameFollowsDescriptor: false });
+      parentAccess = openedDescriptorPath(descriptor, opened) ?? pathname;
+    }
+    const contents = readStableRegularFile(path.join(parentAccess, parts.at(-1)!), maximumBytes, label);
+    for (const directory of [...descriptors].reverse()) {
+      const completed = fs.fstatSync(directory.descriptor, { bigint: true });
+      const pathnameStat = directory.pathnameFollowsDescriptor
+        ? fs.statSync(directory.pathname, { bigint: true })
+        : fs.lstatSync(directory.pathname, { bigint: true });
+      if (
+        !sameBigIntStableStat(directory.opened, completed) ||
+        !sameBigIntFileIdentity(directory.opened, pathnameStat)
+      ) {
+        throw new Error(`${label} snapshot directory changed while reading`);
+      }
+    }
+    return contents;
+  } finally {
+    for (const directory of descriptors.slice(1).reverse()) fs.closeSync(directory.descriptor);
+    fs.closeSync(rootDescriptor);
+  }
+}
+
+function readStableRegularFile(filePath: string, maximumBytes: number, label: string): Buffer {
+  const descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  try {
+    const before = fs.fstatSync(descriptor, { bigint: true });
+    const lexicalBefore = fs.lstatSync(filePath, { bigint: true });
+    if (
+      !before.isFile() ||
+      !lexicalBefore.isFile() ||
+      lexicalBefore.isSymbolicLink() ||
+      before.nlink !== 1n ||
+      !sameBigIntFileIdentity(before, lexicalBefore) ||
+      before.size > BigInt(maximumBytes)
+    ) {
+      throw new Error(`${label} is not a bounded regular unlinked file`);
+    }
+    const contents = readDescriptorContents(descriptor, Number(before.size));
+    const repeated = readDescriptorContents(descriptor, Number(before.size));
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    const lexicalAfter = fs.lstatSync(filePath, { bigint: true });
+    if (
+      !contents.equals(repeated) ||
+      !sameBigIntStableStat(before, after) ||
+      !sameBigIntFileIdentity(before, lexicalAfter)
+    ) {
+      throw new Error(`${label} changed while it was read`);
+    }
+    return contents;
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function readDescriptorContents(descriptor: number, size: number): Buffer {
+  const contents = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const bytes = fs.readSync(descriptor, contents, offset, size - offset, offset);
+    if (bytes === 0) throw new Error("execution snapshot file changed size while reading");
+    offset += bytes;
+  }
+  return contents;
+}
+
+interface ExpectedSnapshotFile {
+  sha256: string;
+  size: bigint;
+}
+
+function readExpectedExecutionSnapshotFiles(
+  runRoot: string,
+  snapshotRoot: string,
+  workflowPath: string
+): Map<string, ExpectedSnapshotFile> {
+  const sealPath = path.join(runRoot, "smithers", "control-integrity.json");
+  const sealContents = readStableRegularFile(sealPath, 64 * 1024 * 1024, "workflow control seal");
+  const generation = crypto.createHash("sha256").update(sealContents).digest("hex");
+  if (generation !== path.basename(snapshotRoot)) {
+    throw new Error("execution snapshot generation does not match its workflow control seal");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(sealContents.toString("utf8")) as unknown;
+  } catch (error) {
+    throw new Error("workflow control seal is invalid JSON", { cause: error });
+  }
+  if (
+    !isRecord(parsed) ||
+    parsed.schema_version !== "ultrafuzz.workflow-control-integrity.v2" ||
+    !isRecord(parsed.files) ||
+    !isRecord(parsed.files.workflow) ||
+    !Array.isArray(parsed.execution_files)
+  ) {
+    throw new Error("workflow control seal cannot define the execution snapshot closure");
+  }
+  const expected = new Map<string, ExpectedSnapshotFile>();
+  for (const value of parsed.execution_files) {
+    if (!isRecord(value) || typeof value.snapshot_path !== "string") {
+      throw new Error("workflow control seal execution file is invalid");
+    }
+    const relativePath = checkedSnapshotRelativePath(value.snapshot_path, "sealed execution file path");
+    if (expected.has(relativePath)) throw new Error("workflow control seal execution files are duplicated");
+    expected.set(relativePath, parseExpectedSnapshotFile(value, "sealed execution file"));
+  }
+  const relativeWorkflow = path.relative(snapshotRoot, workflowPath).split(path.sep).join("/");
+  const checkedWorkflow = checkedSnapshotRelativePath(relativeWorkflow, "sealed workflow path");
+  if (!checkedWorkflow.startsWith(".smithers/workflows/") || expected.has(checkedWorkflow)) {
+    throw new Error("sealed workflow path is invalid or duplicated");
+  }
+  expected.set(checkedWorkflow, parseExpectedSnapshotFile(parsed.files.workflow, "sealed workflow"));
+  if (expected.size === 0) throw new Error("workflow control seal has an empty execution closure");
+  return expected;
+}
+
+function copyWorkflowControlSealChecked(
+  projectRoot: string,
+  runRoot: string,
+  snapshotRoot: string,
+  staging: string
+): void {
+  const source = path.join(runRoot, "smithers", "control-integrity.json");
+  const contents = readStableRegularFile(source, 64 * 1024 * 1024, "workflow control seal");
+  if (crypto.createHash("sha256").update(contents).digest("hex") !== path.basename(snapshotRoot)) {
+    throw new Error("workflow control seal does not match the execution snapshot generation");
+  }
+  const destination = path.join(staging, path.relative(projectRoot, source));
+  fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(destination, contents, { flag: "wx", mode: 0o600 });
+}
+
+/** Verifies an extracted or durable snapshot against its generation-bound control seal. */
+export function verifyModalExecutionSnapshotClosure(
+  projectRoot: string,
+  input: Pick<ModalNodeSandboxInput, "run_root" | "execution_snapshot_root" | "workflow_path" | "prompt_path">,
+  options: { requireSealedPermissions?: boolean; snapshotAccessRoot?: string } = {}
+): void {
+  const root = fs.realpathSync(path.resolve(projectRoot));
+  const runRoot = checkedPath(root, input.run_root, "run root");
+  const snapshotRoot = checkedPath(root, input.execution_snapshot_root, "execution snapshot root");
+  const workflowPath = checkedPath(root, input.workflow_path, "workflow path");
+  assertExecutionSnapshotRoot(runRoot, snapshotRoot);
+  assertChildPath(snapshotRoot, workflowPath, "workflow path");
+  if (input.prompt_path !== undefined) {
+    assertChildPath(snapshotRoot, checkedPath(root, input.prompt_path, "rendered prompt path"), "rendered prompt path");
+  }
+  const snapshotAccessRoot = options.snapshotAccessRoot ?? snapshotRoot;
+  const canonicalSnapshotIdentity = fs.lstatSync(snapshotRoot, { bigint: true });
+  const accessSnapshotIdentity = fs.statSync(snapshotAccessRoot, { bigint: true });
+  if (
+    !canonicalSnapshotIdentity.isDirectory() ||
+    canonicalSnapshotIdentity.isSymbolicLink() ||
+    !accessSnapshotIdentity.isDirectory() ||
+    !sameBigIntFileIdentity(canonicalSnapshotIdentity, accessSnapshotIdentity)
+  ) {
+    throw new Error("cloud execution snapshot descriptor does not match its canonical generation");
+  }
+  const expectedFiles = readExpectedExecutionSnapshotFiles(runRoot, snapshotRoot, workflowPath);
+  const dependencyClosure = readModalExecutionDependencyClosure(snapshotAccessRoot);
+  const expectedLinks = dependencyClosure.links;
+  const expectedDirectories = expectedSnapshotDirectories(expectedFiles, expectedLinks);
+  const observedFiles = new Set<string>();
+  const observedLinks = new Set<string>();
+  const snapshotStat = fs.statSync(snapshotAccessRoot);
+  if (options.requireSealedPermissions === true && (snapshotStat.mode & 0o777) !== 0o500) {
+    throw new Error("cloud execution snapshot root permissions are not sealed");
+  }
+  const pending: Array<{ absolute: string; relative: string }> = [{ absolute: snapshotAccessRoot, relative: "" }];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    for (const entry of fs.readdirSync(current.absolute, { withFileTypes: true })) {
+      const absolute = path.join(current.absolute, entry.name);
+      const relative = current.relative === "" ? entry.name : `${current.relative}/${entry.name}`;
+      const stat = fs.lstatSync(absolute);
+      if (entry.isDirectory() && !stat.isSymbolicLink()) {
+        if (
+          !expectedDirectories.has(relative) ||
+          (options.snapshotAccessRoot === undefined && fs.realpathSync(absolute) !== absolute) ||
+          (options.requireSealedPermissions === true && (stat.mode & 0o777) !== 0o500)
+        ) {
+          throw new Error(`cloud execution snapshot contains an unexpected directory: ${relative}`);
+        }
+        pending.push({ absolute, relative });
+      } else if (entry.isFile() && !stat.isSymbolicLink()) {
+        const expected = expectedFiles.get(relative);
+        const observed = stableSnapshotFileDigest(absolute);
+        const expectedMode = dependencyClosure.executablePaths.has(relative) ? 0o500 : 0o400;
+        if (
+          expected === undefined ||
+          observed.size !== expected.size ||
+          observed.sha256 !== expected.sha256 ||
+          (options.requireSealedPermissions === true && observed.mode !== expectedMode)
+        ) {
+          throw new Error(`cloud execution snapshot file is unsealed: ${relative}`);
+        }
+        observedFiles.add(relative);
+      } else if (entry.isSymbolicLink()) {
+        const target = expectedLinks.get(relative);
+        const targetPath = target === undefined ? undefined : path.join(snapshotAccessRoot, ...target.split("/"));
+        const expectedTarget = targetPath === undefined ? undefined : path.relative(path.dirname(absolute), targetPath);
+        if (
+          expectedTarget === undefined ||
+          fs.readlinkSync(absolute) !== expectedTarget ||
+          !sameBigIntFileIdentity(fs.statSync(absolute, { bigint: true }), fs.statSync(targetPath!, { bigint: true }))
+        ) {
+          throw new Error(`cloud execution snapshot contains an unexpected link: ${relative}`);
+        }
+        observedLinks.add(relative);
+      } else {
+        throw new Error(`cloud execution snapshot contains a special filesystem entry: ${relative}`);
+      }
+    }
+  }
+  if (
+    observedFiles.size !== expectedFiles.size ||
+    [...expectedFiles].some(([relative]) => !observedFiles.has(relative)) ||
+    observedLinks.size !== expectedLinks.size ||
+    [...expectedLinks].some(([relative]) => !observedLinks.has(relative))
+  ) {
+    throw new Error("cloud execution snapshot closure is incomplete");
+  }
+  const completedCanonicalIdentity = fs.lstatSync(snapshotRoot, { bigint: true });
+  const completedAccessIdentity = fs.statSync(snapshotAccessRoot, { bigint: true });
+  if (
+    !sameBigIntFileIdentity(canonicalSnapshotIdentity, completedCanonicalIdentity) ||
+    !sameBigIntFileIdentity(accessSnapshotIdentity, completedAccessIdentity) ||
+    !sameBigIntFileIdentity(completedCanonicalIdentity, completedAccessIdentity)
+  ) {
+    throw new Error("cloud execution snapshot generation changed while verifying");
+  }
+}
+
+function stableSnapshotFileDigest(filePath: string): { size: bigint; sha256: string; mode: number } {
+  const descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  try {
+    const before = fs.fstatSync(descriptor, { bigint: true });
+    const lexical = fs.lstatSync(filePath, { bigint: true });
+    if (
+      !before.isFile() ||
+      before.nlink !== 1n ||
+      before.size > BigInt(MAX_HANDOFF_SNAPSHOT_FILE_BYTES) ||
+      !sameBigIntFileIdentity(before, lexical)
+    ) {
+      throw new Error("cloud execution snapshot file is unsafe");
+    }
+    const first = sha256Descriptor(descriptor, Number(before.size));
+    const second = sha256Descriptor(descriptor, Number(before.size));
+    const completed = fs.fstatSync(descriptor, { bigint: true });
+    const lexicalCompleted = fs.lstatSync(filePath, { bigint: true });
+    if (
+      first !== second ||
+      !sameBigIntStableStat(before, completed) ||
+      !sameBigIntFileIdentity(before, lexicalCompleted)
+    ) {
+      throw new Error("cloud execution snapshot file changed while verifying");
+    }
+    return { size: before.size, sha256: first, mode: Number(before.mode & 0o777n) };
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function parseExpectedSnapshotFile(value: Record<string, unknown>, label: string): ExpectedSnapshotFile {
+  if (
+    typeof value.sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(value.sha256) ||
+    !Number.isSafeInteger(value.size_bytes) ||
+    (value.size_bytes as number) < 0 ||
+    (value.size_bytes as number) > MAX_HANDOFF_SNAPSHOT_FILE_BYTES
+  ) {
+    throw new Error(`${label} seal is invalid`);
+  }
+  return { sha256: value.sha256, size: BigInt(value.size_bytes as number) };
+}
+
+function expectedSnapshotDirectories(
+  expectedFiles: ReadonlyMap<string, ExpectedSnapshotFile>,
+  expectedLinks: ReadonlyMap<string, string>
+): Set<string> {
+  const directories = new Set<string>();
+  for (const relativePath of [...expectedFiles.keys(), ...expectedLinks.keys()]) {
+    let current = path.posix.dirname(relativePath);
+    while (current !== ".") {
+      directories.add(current);
+      current = path.posix.dirname(current);
+    }
+  }
+  return directories;
+}
+
+function copyExecutionSnapshotChecked(
+  source: string,
+  destination: string,
+  runRoot: string,
+  canonicalRoot: string,
+  workflowPath: string
+): void {
+  const root = path.resolve(source);
+  const rootLexical = fs.lstatSync(root, { bigint: true });
+  if (
+    !rootLexical.isDirectory() ||
+    rootLexical.isSymbolicLink() ||
+    (rootLexical.mode & 0o222n) !== 0n ||
+    root !== canonicalRoot ||
+    fs.realpathSync(root) !== canonicalRoot
+  ) {
+    throw new Error("execution snapshot root is unsafe");
+  }
+  const rootDescriptor = fs.openSync(
+    root,
+    fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0)
+  );
+  const context: SnapshotCopyContext = {
+    accessRoot: root,
+    expectedLinks: new Map(),
+    expectedFiles: new Map(),
+    expectedDirectories: new Set(),
+    observedLinks: new Set(),
+    observedFiles: new Set(),
+    entries: 0,
+    totalBytes: 0n
+  };
+  try {
+    const opened = fs.fstatSync(rootDescriptor, { bigint: true });
+    if (!opened.isDirectory() || !sameBigIntFileIdentity(opened, rootLexical)) {
+      throw new Error("execution snapshot root changed while it was opened");
+    }
+    const accessRoot = openedDescriptorPath(rootDescriptor, opened) ?? root;
+    context.accessRoot = accessRoot;
+    context.expectedFiles = readExpectedExecutionSnapshotFiles(runRoot, canonicalRoot, workflowPath);
+    const expectedDependencyManifest = context.expectedFiles.get(EXECUTION_DEPENDENCY_MANIFEST);
+    if (expectedDependencyManifest === undefined) {
+      throw new Error("workflow control seal is missing the execution dependency manifest");
+    }
+    const dependencyClosure = readModalExecutionDependencyClosure(accessRoot, expectedDependencyManifest);
+    context.expectedLinks = new Map(dependencyClosure.links);
+    context.expectedDirectories = expectedSnapshotDirectories(context.expectedFiles, context.expectedLinks);
+    if (fs.existsSync(destination)) throw new Error("execution snapshot collides with committed cloud source");
+    copySnapshotDirectory(accessRoot, destination, "", rootDescriptor, opened, context, false);
+    if (
+      context.observedLinks.size !== context.expectedLinks.size ||
+      [...context.expectedLinks].some(([link]) => !context.observedLinks.has(link)) ||
+      context.observedFiles.size !== context.expectedFiles.size ||
+      [...context.expectedFiles].some(([file]) => !context.observedFiles.has(file))
+    ) {
+      throw new Error("execution snapshot closure is incomplete");
+    }
+    const copiedManifest = fs.readFileSync(path.join(destination, ...EXECUTION_DEPENDENCY_MANIFEST.split("/")));
+    const sourceManifest = readStableSnapshotRelativeFile(
+      accessRoot,
+      EXECUTION_DEPENDENCY_MANIFEST,
+      16 * 1024 * 1024,
+      "execution dependency manifest"
+    );
+    if (!copiedManifest.equals(sourceManifest)) {
+      throw new Error("execution dependency manifest changed during cloud handoff");
+    }
+    const current = fs.lstatSync(root, { bigint: true });
+    const canonicalCurrent = fs.lstatSync(canonicalRoot, { bigint: true });
+    if (
+      !sameBigIntFileIdentity(opened, current) ||
+      !canonicalCurrent.isDirectory() ||
+      canonicalCurrent.isSymbolicLink() ||
+      !sameBigIntFileIdentity(opened, canonicalCurrent) ||
+      fs.realpathSync(root) !== canonicalRoot ||
+      fs.realpathSync(canonicalRoot) !== canonicalRoot ||
+      !sameBigIntStableStat(opened, fs.fstatSync(rootDescriptor, { bigint: true }))
+    ) {
+      throw new Error("execution snapshot root changed during cloud handoff");
+    }
+  } finally {
+    fs.closeSync(rootDescriptor);
+  }
+}
+
+interface SnapshotCopyContext {
+  accessRoot: string;
+  expectedLinks: Map<string, string>;
+  expectedFiles: Map<string, ExpectedSnapshotFile>;
+  expectedDirectories: Set<string>;
+  observedLinks: Set<string>;
+  observedFiles: Set<string>;
+  entries: number;
+  totalBytes: bigint;
+}
+
+function copySnapshotDirectory(
+  source: string,
+  destination: string,
+  relativeDirectory: string,
+  descriptor: number,
+  opened: fs.BigIntStats,
+  context: SnapshotCopyContext,
+  closeDescriptor: boolean
+): void {
+  try {
+    context.entries += 1;
+    if (context.entries > MAX_HANDOFF_SNAPSHOT_ENTRIES) {
+      throw new Error("execution snapshot contains too many entries");
+    }
+    fs.mkdirSync(destination, { recursive: false, mode: 0o700 });
+    const access = openedDescriptorPath(descriptor, opened) ?? source;
+    const beforeNames = fs.readdirSync(access).sort(comparePathNames);
+    for (const name of beforeNames) {
+      const sourcePath = path.join(access, name);
+      const destinationPath = path.join(destination, name);
+      const relativePath = relativeDirectory === "" ? name : `${relativeDirectory}/${name}`;
+      const lexical = fs.lstatSync(sourcePath, { bigint: true });
+      if (lexical.isSymbolicLink()) {
+        validateSnapshotDependencyLink(access, name, relativePath, context);
+        continue;
+      }
+      if (context.expectedLinks.has(relativePath)) {
+        throw new Error(`execution snapshot dependency link was replaced: ${relativePath}`);
+      }
+      if (lexical.isDirectory()) {
+        if (!context.expectedDirectories.has(relativePath) || (lexical.mode & 0o222n) !== 0n) {
+          throw new Error(`execution snapshot directory is unexpected or writable: ${relativePath}`);
+        }
+        const childDescriptor = fs.openSync(
+          sourcePath,
+          fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0)
+        );
+        const childOpened = fs.fstatSync(childDescriptor, { bigint: true });
+        if (!childOpened.isDirectory() || !sameBigIntFileIdentity(lexical, childOpened)) {
+          fs.closeSync(childDescriptor);
+          throw new Error(`execution snapshot directory changed while opening: ${relativePath}`);
+        }
+        copySnapshotDirectory(sourcePath, destinationPath, relativePath, childDescriptor, childOpened, context, true);
+        continue;
+      }
+      if (lexical.isFile()) {
+        if (!context.expectedFiles.has(relativePath)) {
+          throw new Error(`execution snapshot contains an unexpected file: ${relativePath}`);
+        }
+        copySnapshotFile(sourcePath, destinationPath, relativePath, context);
+        continue;
+      }
+      throw new Error(`execution snapshot contains a special filesystem entry: ${relativePath}`);
+    }
+    const afterNames = fs.readdirSync(access).sort(comparePathNames);
+    const completed = fs.fstatSync(descriptor, { bigint: true });
+    const lexicalCompleted = fs.statSync(source, { bigint: true });
+    if (
+      JSON.stringify(afterNames) !== JSON.stringify(beforeNames) ||
+      !sameBigIntStableStat(opened, completed) ||
+      !sameBigIntFileIdentity(opened, lexicalCompleted)
+    ) {
+      throw new Error(`execution snapshot directory changed while copying: ${relativeDirectory || "."}`);
+    }
+  } finally {
+    if (closeDescriptor) fs.closeSync(descriptor);
+  }
+}
+
+function validateSnapshotDependencyLink(
+  parentAccess: string,
+  name: string,
+  relativePath: string,
+  context: SnapshotCopyContext
+): void {
+  const targetRelative = context.expectedLinks.get(relativePath);
+  if (targetRelative === undefined) {
+    throw new Error(`execution snapshot contains an unexpected link: ${relativePath}`);
+  }
+  const sourcePath = path.join(parentAccess, name);
+  const expectedLink = path.posix.relative(path.posix.dirname(relativePath), targetRelative);
+  const firstTarget = fs.readlinkSync(sourcePath);
+  const targetPath = path.join(context.accessRoot, ...targetRelative.split("/"));
+  const followed = fs.statSync(sourcePath, { bigint: true });
+  const target = fs.statSync(targetPath, { bigint: true });
+  const secondTarget = fs.readlinkSync(sourcePath);
+  if (
+    firstTarget !== expectedLink ||
+    secondTarget !== expectedLink ||
+    !followed.isDirectory() ||
+    !target.isDirectory() ||
+    !sameBigIntFileIdentity(followed, target)
+  ) {
+    throw new Error(`execution snapshot dependency link is unsafe: ${relativePath}`);
+  }
+  context.entries += 1;
+  if (context.entries > MAX_HANDOFF_SNAPSHOT_ENTRIES) {
+    throw new Error("execution snapshot contains too many entries");
+  }
+  context.observedLinks.add(relativePath);
+}
+
+function copySnapshotFile(
+  source: string,
+  destination: string,
+  relativePath: string,
+  context: SnapshotCopyContext
+): void {
+  const expected = context.expectedFiles.get(relativePath);
+  if (expected === undefined) throw new Error(`execution snapshot contains an unexpected file: ${relativePath}`);
+  context.entries += 1;
+  if (context.entries > MAX_HANDOFF_SNAPSHOT_ENTRIES) {
+    throw new Error("execution snapshot contains too many entries");
+  }
+  const sourceDescriptor = fs.openSync(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  let destinationDescriptor: number | undefined;
+  try {
+    const before = fs.fstatSync(sourceDescriptor, { bigint: true });
+    const lexical = fs.lstatSync(source, { bigint: true });
+    if (
+      !before.isFile() ||
+      !lexical.isFile() ||
+      lexical.isSymbolicLink() ||
+      before.nlink !== 1n ||
+      (before.mode & 0o222n) !== 0n ||
+      !sameBigIntFileIdentity(before, lexical) ||
+      before.size > BigInt(MAX_HANDOFF_SNAPSHOT_FILE_BYTES) ||
+      before.size !== expected.size
+    ) {
+      throw new Error(`execution snapshot file is unsafe: ${relativePath}`);
+    }
+    context.totalBytes += before.size;
+    if (context.totalBytes > BigInt(MAX_HANDOFF_SNAPSHOT_TOTAL_BYTES)) {
+      throw new Error("execution snapshot exceeds the total size limit");
+    }
+    destinationDescriptor = fs.openSync(
+      destination,
+      fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL,
+      Number(before.mode & 0o111n) === 0 ? 0o600 : 0o700
+    );
+    const copiedDigest = crypto.createHash("sha256");
+    const chunk = Buffer.allocUnsafe(1024 * 1024);
+    let offset = 0;
+    while (BigInt(offset) < before.size) {
+      const remaining = Number(
+        before.size - BigInt(offset) > BigInt(chunk.length) ? BigInt(chunk.length) : before.size - BigInt(offset)
+      );
+      const bytes = fs.readSync(sourceDescriptor, chunk, 0, remaining, offset);
+      if (bytes === 0) throw new Error(`execution snapshot file changed size: ${relativePath}`);
+      copiedDigest.update(chunk.subarray(0, bytes));
+      let written = 0;
+      while (written < bytes) {
+        const count = fs.writeSync(destinationDescriptor, chunk, written, bytes - written);
+        if (count === 0) throw new Error(`cloud handoff write made no progress: ${relativePath}`);
+        written += count;
+      }
+      offset += bytes;
+    }
+    fs.fsyncSync(destinationDescriptor);
+    const completed = fs.fstatSync(sourceDescriptor, { bigint: true });
+    const lexicalCompleted = fs.lstatSync(source, { bigint: true });
+    const repeatedDigest = sha256Descriptor(sourceDescriptor, Number(before.size));
+    const destinationDigest = sha256Descriptor(destinationDescriptor, Number(before.size));
+    const copiedSha256 = copiedDigest.digest("hex");
+    if (
+      !sameBigIntStableStat(before, completed) ||
+      !sameBigIntFileIdentity(before, lexicalCompleted) ||
+      copiedSha256 !== repeatedDigest ||
+      repeatedDigest !== destinationDigest ||
+      destinationDigest !== expected.sha256
+    ) {
+      throw new Error(`execution snapshot file changed while copying: ${relativePath}`);
+    }
+    context.observedFiles.add(relativePath);
+  } finally {
+    if (destinationDescriptor !== undefined) fs.closeSync(destinationDescriptor);
+    fs.closeSync(sourceDescriptor);
+  }
+}
+
+function sha256Descriptor(descriptor: number, size: number): string {
+  const digest = crypto.createHash("sha256");
+  const chunk = Buffer.allocUnsafe(1024 * 1024);
+  let offset = 0;
+  while (offset < size) {
+    const bytes = fs.readSync(descriptor, chunk, 0, Math.min(chunk.length, size - offset), offset);
+    if (bytes === 0) throw new Error("execution snapshot file changed size while hashing");
+    digest.update(chunk.subarray(0, bytes));
+    offset += bytes;
+  }
+  return digest.digest("hex");
+}
+
+function openedDescriptorPath(descriptor: number, expected: fs.BigIntStats): string | undefined {
+  for (const candidate of [`/proc/self/fd/${descriptor}`, `/dev/fd/${descriptor}`]) {
+    try {
+      const stat = fs.statSync(candidate, { bigint: true });
+      if (sameBigIntFileIdentity(stat, expected)) return candidate;
+    } catch {
+      // Lexical fallback below retains the same pre/post identity checks.
+    }
+  }
+  return undefined;
+}
+
+function sameBigIntFileIdentity(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode && left.nlink === right.nlink;
+}
+
+function sameBigIntStableStat(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
+  return (
+    sameBigIntFileIdentity(left, right) &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+function comparePathNames(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function copyDependencyVerificationMarkers(

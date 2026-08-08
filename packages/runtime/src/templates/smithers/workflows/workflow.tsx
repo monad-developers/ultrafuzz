@@ -17,6 +17,7 @@ import {
   writeFileSync
 } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Fragment } from "react";
 import { createSmithers, type AgentLike } from "smithers-orchestrator";
 import { z } from "zod/v4";
@@ -100,14 +101,73 @@ type AgentFactory = (options: { model?: string; reasoningEffort?: string; addDir
 const agentFactories =
   (projectAgents as unknown as { agentFactories?: Record<string, AgentFactory> }).agentFactories ?? {};
 const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
+const loadedWorkflowPath = fileURLToPath(import.meta.url);
+const loadedExecutionSnapshotRoot = workflowExecutionSnapshotRoot(loadedWorkflowPath);
+const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
+const persistedExecutionSnapshotRoot =
+  persistedWorkflowPath === undefined ? undefined : workflowExecutionSnapshotRoot(persistedWorkflowPath);
+if (
+  persistedWorkflowPath !== undefined &&
+  (loadedExecutionSnapshotRoot === undefined ||
+    persistedExecutionSnapshotRoot === undefined ||
+    realpathSync(loadedWorkflowPath) !== realpathSync(persistedWorkflowPath))
+) {
+  throw new Error("persisted workflow path does not identify the loaded execution snapshot");
+}
 const taskSpecs = serializedTaskSpecs.map((task) => ({
   ...task,
-  promptPath: task.promptPath === undefined ? undefined : path.resolve(process.cwd(), task.promptPath),
+  promptPath:
+    task.promptPath === undefined
+      ? undefined
+      : (sealedTaskPromptPath(
+          task.attemptId,
+          task.execution.mode === "cloud" && persistedExecutionSnapshotRoot !== undefined
+            ? persistedExecutionSnapshotRoot
+            : (loadedExecutionSnapshotRoot ?? persistedExecutionSnapshotRoot)
+        ) ?? path.resolve(process.cwd(), task.promptPath)),
+  workflowPath:
+    loadedExecutionSnapshotRoot === undefined && persistedExecutionSnapshotRoot === undefined
+      ? path.resolve(process.cwd(), task.workflowPath)
+      : task.execution.mode === "cloud" && persistedExecutionSnapshotRoot !== undefined
+        ? persistedWorkflowPath!
+        : loadedWorkflowPath,
+  executionSnapshotRoot: task.execution.mode === "cloud" ? persistedExecutionSnapshotRoot : loadedExecutionSnapshotRoot,
   workspaceRelativePath: task.workspacePath,
   workspacePath: path.resolve(process.cwd(), task.workspacePath),
   artifactRelativeDir: task.artifactDir,
   artifactDir: path.resolve(process.cwd(), task.artifactDir)
 }));
+
+function workflowExecutionSnapshotRoot(workflowPath: string): string | undefined {
+  if (!path.isAbsolute(workflowPath)) return undefined;
+  const workflows = path.dirname(workflowPath);
+  const smithers = path.dirname(workflows);
+  const candidate = path.dirname(smithers);
+  if (
+    path.basename(workflows) !== "workflows" ||
+    path.basename(smithers) !== ".smithers" ||
+    !existsSync(path.join(candidate, "dependencies", "manifest.json")) ||
+    !existsSync(path.join(candidate, "controls", "plan.json"))
+  ) {
+    return undefined;
+  }
+  return candidate;
+}
+
+function sealedTaskPromptPath(attemptId: string, snapshotRoot: string | undefined): string | undefined {
+  if (snapshotRoot === undefined) return undefined;
+  const promptPath = path.join(snapshotRoot, "controls", "rendered-prompts", `${attemptId}.md`);
+  if (!existsSync(promptPath)) throw new Error(`sealed rendered prompt is missing for ${attemptId}`);
+  return promptPath;
+}
+
+function cloudSnapshotRelativePath(value: string, label: string): string {
+  const relative = path.relative(process.cwd(), value);
+  if (relative === "" || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`${label} must stay inside the cloud handoff project`);
+  }
+  return relative.split(path.sep).join("/");
+}
 const usesCloudExecution = taskSpecs.some((task) => task.execution.mode === "cloud");
 const isCloudWorkerProcess = process.env.ULTRAFUZZ_CLOUD_WORKER === "1";
 const modalModule =
@@ -4788,6 +4848,9 @@ export default smithers((ctx) => {
             if (cloudProvider === undefined || task.execution.provider !== "modal") {
               throw new Error("cloud execution provider is unavailable");
             }
+            if (task.executionSnapshotRoot === undefined) {
+              throw new Error("cloud execution requires a sealed workflow execution snapshot");
+            }
             return (
               <Fragment key={task.id}>
                 <Sandbox
@@ -4799,8 +4862,14 @@ export default smithers((ctx) => {
                     task_id: task.id,
                     attempt_id: task.attemptId,
                     execution_generation: cloudExecutionGeneration,
-                    workflow_path: task.workflowPath,
-                    ...(task.promptPath === undefined ? {} : { prompt_path: task.promptPath }),
+                    execution_snapshot_root: cloudSnapshotRelativePath(
+                      task.executionSnapshotRoot,
+                      "workflow execution snapshot"
+                    ),
+                    workflow_path: cloudSnapshotRelativePath(task.workflowPath, "workflow path"),
+                    ...(task.promptPath === undefined
+                      ? {}
+                      : { prompt_path: cloudSnapshotRelativePath(task.promptPath, "rendered prompt path") }),
                     run_root: task.runRoot,
                     artifact_dir: task.artifactRelativeDir,
                     workspace_dir: task.workspaceRelativePath,
