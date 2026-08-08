@@ -1639,7 +1639,7 @@ function verifyPropertyProvenanceArtifacts(
     ];
   }
 
-  return verifyCampaignPropertyReferences(layout, artifactDir, catalog.value);
+  return verifyCampaignPropertyReferences(layout, artifactDir, catalog.value, node);
 }
 
 /**
@@ -2302,7 +2302,8 @@ function readReferenceExpectationEnforcement(layout: RunLayout): "warn" | "fail"
 function verifyCampaignPropertyReferences(
   layout: RunLayout,
   artifactDir: string,
-  catalog: PropertiesArtifact
+  catalog: PropertiesArtifact,
+  node: PlannedGraphNode
 ): RuntimeDiagnostic[] {
   const findingsPath = path.join(artifactDir, "findings.json");
   const campaignPaths = campaignResultArtifactNames
@@ -2329,9 +2330,20 @@ function verifyCampaignPropertyReferences(
     campaigns.length === campaignPaths.length
       ? campaignFindingFuzzerBackendDiagnostics(campaignValues, validatedFindings, findingsPath)
       : [];
+  const partitionDiagnostics =
+    campaigns.length === campaignPaths.length
+      ? campaignFailurePartitionDiagnostics(
+          campaigns,
+          validatedFindings,
+          findingsPath,
+          node.outputs.some(
+            (output) => output.path === "campaign-summary.json" && output.contract === "ultrafuzz/campaign-summary@1"
+          )
+        )
+      : [];
   const implementation = readImplementedProperties(layout);
   if (implementation.diagnostics.length > 0 || implementation.value === undefined) {
-    return [...summaryDiagnostics, ...backendDiagnostics, ...implementation.diagnostics];
+    return [...summaryDiagnostics, ...backendDiagnostics, ...partitionDiagnostics, ...implementation.diagnostics];
   }
   const candidateFindingIds = new Set(
     campaigns.flatMap((campaign) => campaign.value.failures.map((failure) => failure.id))
@@ -2352,6 +2364,7 @@ function verifyCampaignPropertyReferences(
   const diagnostics = [
     ...summaryDiagnostics,
     ...backendDiagnostics,
+    ...partitionDiagnostics,
     ...propertyReferenceDiagnostics(catalog, references),
     ...campaigns.flatMap((campaign) =>
       campaignFindingReferenceDiagnostics(
@@ -2394,6 +2407,211 @@ function verifyCampaignPropertyReferences(
     }
   }
   return diagnostics;
+}
+
+type CampaignFailureReference = string | { fuzzer_backend: string; failure_id: string };
+
+interface PartitionedCampaignFailure {
+  key: string;
+  id: string;
+  fuzzerBackend?: string;
+  propertyIds: readonly string[];
+  path: string;
+}
+
+/**
+ * Proves the producer-owned failure-to-finding partition introduced for #391.
+ * Current plans are identified by their typed campaign-summary contract;
+ * persisted plans with the historical json-object contract keep the #388
+ * coverage fallback unless they volunteer partition metadata themselves.
+ */
+function campaignFailurePartitionDiagnostics(
+  campaigns: readonly { path: string; value: PropertyCampaignArtifact }[],
+  findings: readonly Readonly<Record<string, unknown>>[],
+  findingsPath: string,
+  requiredForCurrentPlan: boolean
+): RuntimeDiagnostic[] {
+  const failures: PartitionedCampaignFailure[] = campaigns.flatMap((campaign, campaignIndex) =>
+    campaign.value.failures.map((failure, failureIndex) => ({
+      key: `${campaignIndex}\u0000${failureIndex}`,
+      id: failure.id,
+      ...(campaign.value.fuzzer_backend === undefined ? {} : { fuzzerBackend: campaign.value.fuzzer_backend }),
+      propertyIds: failure.property_ids ?? [],
+      path: `${campaign.path}#$.failures[${failureIndex}].id`
+    }))
+  );
+  const failuresById = new Map<string, PartitionedCampaignFailure[]>();
+  const failuresByBackendAndId = new Map<string, PartitionedCampaignFailure[]>();
+  for (const failure of failures) {
+    const byId = failuresById.get(failure.id) ?? [];
+    byId.push(failure);
+    failuresById.set(failure.id, byId);
+    if (failure.fuzzerBackend !== undefined) {
+      const qualifiedKey = campaignBackendFailureKey(failure.fuzzerBackend, failure.id);
+      const qualified = failuresByBackendAndId.get(qualifiedKey) ?? [];
+      qualified.push(failure);
+      failuresByBackendAndId.set(qualifiedKey, qualified);
+    }
+  }
+
+  const partitionDeclared = findings.some(
+    (finding) =>
+      Object.prototype.hasOwnProperty.call(finding, "contributing_backend_failures") ||
+      Object.prototype.hasOwnProperty.call(finding, "deduplication")
+  );
+  if (!requiredForCurrentPlan && !partitionDeclared) {
+    return [];
+  }
+
+  const diagnostics: RuntimeDiagnostic[] = [];
+  const claimedBy = new Map<string, { findingIndex: number; referenceIndex: number }>();
+  for (const [findingIndex, finding] of findings.entries()) {
+    const propertyIds = Array.isArray(finding.property_ids)
+      ? finding.property_ids.filter((propertyId): propertyId is string => typeof propertyId === "string")
+      : [];
+    const hasContributions = Object.prototype.hasOwnProperty.call(finding, "contributing_backend_failures");
+    const hasDeduplication = Object.prototype.hasOwnProperty.call(finding, "deduplication");
+    const mustAccount =
+      (propertyIds.length > 0 && (requiredForCurrentPlan || partitionDeclared)) || hasContributions || hasDeduplication;
+    if (!mustAccount) continue;
+
+    const contributionPath = `${findingsPath}#$[${findingIndex}].contributing_backend_failures`;
+    const deduplicationPath = `${findingsPath}#$[${findingIndex}].deduplication`;
+    if (!hasContributions) {
+      diagnostics.push({
+        code: "PROPERTY_CAMPAIGN_PARTITION_REQUIRED",
+        message: `Finding ${JSON.stringify(finding.id)} must declare contributing_backend_failures`,
+        severity: "error",
+        source: "property-provenance",
+        path: contributionPath
+      });
+    }
+    if (!hasDeduplication) {
+      diagnostics.push({
+        code: "PROPERTY_CAMPAIGN_PARTITION_REQUIRED",
+        message: `Finding ${JSON.stringify(finding.id)} must declare deduplication.pre_dedup_count`,
+        severity: "error",
+        source: "property-provenance",
+        path: deduplicationPath
+      });
+    }
+
+    const references = campaignFailureReferences(finding.contributing_backend_failures);
+    const deduplication = isRecord(finding.deduplication) ? finding.deduplication : undefined;
+    const preDedupCount = deduplication?.pre_dedup_count;
+    if (references !== undefined && typeof preDedupCount === "number" && preDedupCount !== references.length) {
+      diagnostics.push({
+        code: "PROPERTY_CAMPAIGN_PARTITION_COUNT_MISMATCH",
+        message: `Finding ${JSON.stringify(finding.id)} reports deduplication.pre_dedup_count ${preDedupCount}, but contributing_backend_failures contains ${references.length} entries`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${deduplicationPath}.pre_dedup_count`
+      });
+    }
+    if (references === undefined) continue;
+
+    for (const [referenceIndex, reference] of references.entries()) {
+      const referencePath = `${contributionPath}[${referenceIndex}]`;
+      const candidates =
+        typeof reference === "string"
+          ? (failuresById.get(reference) ?? [])
+          : (failuresByBackendAndId.get(campaignBackendFailureKey(reference.fuzzer_backend, reference.failure_id)) ??
+            []);
+      if (candidates.length === 0) {
+        diagnostics.push({
+          code: "PROPERTY_CAMPAIGN_PARTITION_REFERENCE_UNKNOWN",
+          message: `Finding ${JSON.stringify(finding.id)} names unknown contributing backend failure ${JSON.stringify(reference)}`,
+          severity: "error",
+          source: "property-provenance",
+          path: referencePath
+        });
+        continue;
+      }
+      if (candidates.length > 1) {
+        diagnostics.push({
+          code: "PROPERTY_CAMPAIGN_PARTITION_REFERENCE_AMBIGUOUS",
+          message: `Finding ${JSON.stringify(finding.id)} uses an ambiguous contributing backend failure ${JSON.stringify(reference)}; qualify it with fuzzer_backend and failure_id`,
+          severity: "error",
+          source: "property-provenance",
+          path: referencePath
+        });
+        continue;
+      }
+      const failure = candidates[0]!;
+      if (failure.propertyIds.length === 0) {
+        diagnostics.push({
+          code: "PROPERTY_CAMPAIGN_PARTITION_REFERENCE_UNKNOWN",
+          message: `Finding ${JSON.stringify(finding.id)} contribution ${JSON.stringify(reference)} does not name a property-derived failure`,
+          severity: "error",
+          source: "property-provenance",
+          path: referencePath
+        });
+        continue;
+      }
+
+      const earlierClaim = claimedBy.get(failure.key);
+      if (earlierClaim !== undefined) {
+        diagnostics.push({
+          code: "PROPERTY_CAMPAIGN_PARTITION_DUPLICATE",
+          message: `Property-derived failure ${JSON.stringify(failure.id)} is claimed more than once across findings`,
+          severity: "error",
+          source: "property-provenance",
+          path: referencePath,
+          details: {
+            first_claim: `${findingsPath}#$[${earlierClaim.findingIndex}].contributing_backend_failures[${earlierClaim.referenceIndex}]`
+          }
+        });
+      } else {
+        claimedBy.set(failure.key, { findingIndex, referenceIndex });
+      }
+
+      const missingProperties = failure.propertyIds.filter((propertyId) => !propertyIds.includes(propertyId));
+      if (missingProperties.length > 0) {
+        diagnostics.push({
+          code: "PROPERTY_CAMPAIGN_PARTITION_PROPERTY_MISMATCH",
+          message: `Finding ${JSON.stringify(finding.id)} contribution ${JSON.stringify(reference)} reports property_ids absent from the finding: ${missingProperties.map((propertyId) => JSON.stringify(propertyId)).join(", ")}`,
+          severity: "error",
+          source: "property-provenance",
+          path: referencePath
+        });
+      }
+    }
+  }
+
+  for (const failure of failures) {
+    if (failure.propertyIds.length === 0 || claimedBy.has(failure.key)) continue;
+    diagnostics.push({
+      code: "PROPERTY_CAMPAIGN_PARTITION_UNCLAIMED",
+      message: `Property-derived campaign failure ${JSON.stringify(failure.id)} is not claimed by any finding's contributing_backend_failures`,
+      severity: "error",
+      source: "property-provenance",
+      path: failure.path
+    });
+  }
+  return diagnostics;
+}
+
+function campaignFailureReferences(value: unknown): CampaignFailureReference[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const references: CampaignFailureReference[] = [];
+  for (const reference of value) {
+    if (typeof reference === "string") {
+      references.push(reference);
+      continue;
+    }
+    if (
+      isRecord(reference) &&
+      typeof reference.fuzzer_backend === "string" &&
+      typeof reference.failure_id === "string"
+    ) {
+      references.push({ fuzzer_backend: reference.fuzzer_backend, failure_id: reference.failure_id });
+    }
+  }
+  return references;
+}
+
+function campaignBackendFailureKey(fuzzerBackend: string, failureId: string): string {
+  return JSON.stringify([fuzzerBackend, failureId]);
 }
 
 function campaignSummaryFailureCountDiagnostics(

@@ -319,7 +319,7 @@ describe("prompt semantic anchors", () => {
     const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
     const topologySource = readFileSync(topologyPath, "utf8");
     const topology = YAML.parse(topologySource) as {
-      nodes: { id: string; depends_on?: string[]; outputs?: Array<{ path: string }> }[];
+      nodes: { id: string; depends_on?: string[]; outputs?: Array<{ path: string; contract: string }> }[];
     };
     const campaignNode = topology.nodes.find((node) => node.id === "stateful-invariant-campaign");
 
@@ -335,6 +335,9 @@ describe("prompt semantic anchors", () => {
     );
     expect(campaignNode?.outputs?.map((output) => output.path)).not.toContain("echidna-results.json");
     expect(campaignNode?.outputs?.map((output) => output.path)).not.toContain("medusa-results.json");
+    expect(campaignNode?.outputs?.find((output) => output.path === "campaign-summary.json")?.contract).toBe(
+      "ultrafuzz/campaign-summary@1"
+    );
     expect(topology.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).toContain(
       "stateful-invariant-campaign"
     );
@@ -385,6 +388,11 @@ describe("prompt semantic anchors", () => {
     expect(flatCampaign).toContain("total number of entries across every sibling backend record's `failures` array");
     expect(flatCampaign).toContain("total number of objects in `findings.json`, including non-property findings");
     expect(flatCampaign).toContain("do not prove that every finding is a distinct root cause");
+    expect(campaign).toContain("`contributing_backend_failures` array");
+    expect(flatCampaign).toContain("must partition every property-derived failure");
+    expect(campaign).toContain("`deduplication.pre_dedup_count`");
+    expect(flatCampaign).toContain("must be a subset of the finding's `property_ids`");
+    expect(campaign).toContain('{"fuzzer_backend":"<backend>","failure_id":"<id>"}');
   });
 
   it("publishes runtime-owned workspace patches for every invariant handoff", () => {

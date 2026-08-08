@@ -114,6 +114,19 @@ Use this configured invariant testing fuzzer timeout:
      originating backend and raw record reference on every pre-deduplication
      failure and preserve all contributing backend provenance on the final
      deduplicated finding.
+   - On every property-derived finding, put the exact failures it deduplicates
+     in a non-empty top-level `contributing_backend_failures` array. Across all
+     property-derived findings, these arrays must partition every
+     property-derived failure from the sibling backend result records exactly
+     once: do not omit a failure or claim it in more than one finding. For the
+     shipped single-backend campaign, use each failure's exact `id` string. In
+     a project-owned multi-backend campaign, a plain ID is valid only when it is
+     unique across every sibling result record; otherwise use
+     `{"fuzzer_backend":"<backend>","failure_id":"<id>"}` to disambiguate it.
+   - Put `deduplication.pre_dedup_count` on every property-derived finding and
+     set it to the number of entries in that finding's
+     `contributing_backend_failures`. Every contributed failure's
+     `property_ids` must be a subset of the finding's `property_ids`.
    - Put backend provenance directly on every backend-derived object in
      `findings.json`. Use the top-level string `fuzzer_backend` when exactly one
      sibling result record contributed, or omit it and use a top-level unique,
@@ -175,7 +188,8 @@ Use this configured invariant testing fuzzer timeout:
      total number of objects in `findings.json`, including non-property
      findings. These are artifact-population accounting counts. They make
      omissions visible but do not prove that every finding is a distinct root
-     cause or that the deduplication partition is correct.
+     cause. The `contributing_backend_failures` arrays provide the separately
+     validated deduplication partition.
 
 ## Required Outputs
 
@@ -249,6 +263,22 @@ Write structured findings to:
 The findings file must be a JSON array. Use an empty array only when the
 backend record is finalized and the campaign observed no fuzzer failures or
 deterministic reproducers.
+
+Every property-derived finding must include this accounting shape (the values
+below are illustrative):
+
+```json
+{
+  "id": "failure-1",
+  "property_ids": ["property-1"],
+  "contributing_backend_failures": ["failure-1", "failure-2"],
+  "deduplication": {
+    "pre_dedup_count": 2
+  }
+}
+```
+
+Compute the array and count from this run. Do not copy the example values.
 
 If you changed files in the isolated workspace, save a patch at:
 

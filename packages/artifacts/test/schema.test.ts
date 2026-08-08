@@ -961,6 +961,74 @@ test("the findings contract does not require schema_version, and still rejects m
   assert.equal(validateFindingSchema({ ...withoutVersion[0], property_ids: ["property-99", "property-99"] }).ok, false);
 });
 
+test("the findings schema recognizes typed campaign deduplication accounting without imposing it globally", () => {
+  const finding = {
+    id: "failure-1",
+    title: "Accounting invariant violation",
+    status: "reproduced",
+    severity_guess: "medium",
+    confidence: "high",
+    summary: "The accounting invariant failed.",
+    property_ids: ["property-1"],
+    contributing_backend_failures: [
+      "failure-1",
+      { fuzzer_backend: "medusa", failure_id: "failure-2", raw_result_ref: "medusa-results.json" }
+    ],
+    deduplication: { pre_dedup_count: 2, basis: "same root cause" }
+  };
+  assert.equal(validateFindingSchema(finding).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([finding])).ok, true);
+  assert.equal(
+    validateFindingSchema({
+      ...finding,
+      contributing_backend_failures: ["failure-1", "failure-1"]
+    }).ok,
+    false,
+    "a finding cannot repeat the same unqualified contribution"
+  );
+  assert.equal(
+    validateFindingSchema({
+      ...finding,
+      contributing_backend_failures: [{ fuzzer_backend: "medusa" }]
+    }).ok,
+    false,
+    "qualified contributions need both identity fields"
+  );
+  assert.equal(validateFindingSchema({ ...finding, deduplication: { pre_dedup_count: 0 } }).ok, false);
+  assert.equal(validateFindingSchema({ ...finding, deduplication: {} }).ok, false);
+
+  const historical = { ...finding } as Record<string, unknown>;
+  delete historical.contributing_backend_failures;
+  delete historical.deduplication;
+  assert.equal(validateFindingSchema(historical).ok, true, "generic and historical findings remain readable");
+  assert.ok("contributing_backend_failures" in findingJsonSchema.properties);
+  assert.ok("deduplication" in findingJsonSchema.properties);
+});
+
+test("the current campaign summary contract requires the persisted-plan accounting marker", () => {
+  const summary = {
+    outcome: "partial",
+    failure_counts: { pre_deduplication: 29, post_deduplication: 2 }
+  };
+  assert.equal(validateArtifactContract("ultrafuzz/campaign-summary@1", JSON.stringify(summary)).ok, true);
+  assert.equal(
+    validateArtifactContract("ultrafuzz/campaign-summary@1", JSON.stringify({ outcome: "partial" })).ok,
+    false
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/campaign-summary@1",
+      JSON.stringify({ failure_counts: { pre_deduplication: -1, post_deduplication: 2 } })
+    ).ok,
+    false
+  );
+  assert.equal(
+    validateArtifactContract("ultrafuzz/json-object@1", JSON.stringify({ outcome: "partial" })).ok,
+    true,
+    "persisted plans with the historical generic contract stay readable"
+  );
+});
+
 test("finding and report schemas accept non-property and historical artifacts", () => {
   const nonPropertyFinding = {
     schema_version: FINDINGS_SCHEMA_VERSION,
