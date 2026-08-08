@@ -141,9 +141,9 @@ async function main(): Promise<void> {
       let control: string;
       let evalRunId: string;
       let terminalDisposition: TerminalDisposition | undefined;
-      // Route on whether a durable run was actually linked, not on whether an eval run directory exists.
-      // Those are not the same question, and answering the second one stranded R54: a generation-0 failure
-      // during workflow submission leaves the directory behind with nothing linked to it, and every later
+      // Route on whether a durable run actually exists, not on whether an eval run directory exists. Those
+      // are not the same question, and answering the second one stranded R54: a generation-0 failure during
+      // workflow submission leaves the directory behind with nothing linked to it, and every later
       // generation then died on the resume precondition in ~92s until the no-progress budget ran out (#378).
       const found = await findModalResumeWorkspace(WORK_ROOT);
       if (found.kind === "resumable") {
@@ -152,6 +152,17 @@ async function main(): Promise<void> {
         const resumed = await resumeExistingEvaluation(workspace, writer);
         ({ control, evalRunId, terminalDisposition } = resumed);
       } else {
+        // Nothing ran, but a previous attempt may still have left the eval run directory behind. Eval run
+        // ids are deterministic, and `runEvalSuite` refuses to reuse an existing one, so leaving it here
+        // would simply trade one permanent failure for `EVAL_RUN_ALREADY_EXISTS`. Removing it is safe only
+        // because `findModalResumeWorkspace` has already established that no durable run exists on disk —
+        // this must never be reached while one does.
+        if (found.staleEvalRunId !== undefined) {
+          await rm(path.join(WORK_ROOT, "control", ".ultrafuzz", "evals", "runs", found.staleEvalRunId), {
+            recursive: true,
+            force: true
+          });
+        }
         const prepared = await prepareWorkspace();
         target = prepared.target;
         ({ control, evalRunId } = prepared);

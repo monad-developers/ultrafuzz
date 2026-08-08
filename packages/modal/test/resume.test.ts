@@ -4,6 +4,8 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { evalRunRoot } from "@ultrafuzz/evals";
+
 import {
   findModalResumeWorkspace,
   locateModalResumeWorkspace,
@@ -157,33 +159,93 @@ describe("Modal durable evaluation resume", () => {
     await expect(locateModalResumeWorkspace(value.workRoot)).rejects.toThrow("exactly one linked durable run");
   });
 
-  it("reports a workspace whose rows were never linked to a durable run as not started (#378)", async () => {
+  it("resumes a durable run that exists on disk but was never linked in the journal (#378)", async () => {
     const value = fixture();
-    // Exactly how a generation-0 failure between `eval run` starting and a durable run being linked leaves
-    // the volume: the eval run directory and a row both exist, but no `ultrafuzz_run_id` was ever written.
-    // R54 died here three times over, ~92s per recovery generation, until the no-progress budget ran out.
+    // The R54 state, and the one that matters most: the launcher created the run, wrote state.json,
+    // compiled and submitted -- and died before the link was appended. Nine nodes had already succeeded.
+    // Reading the journal alone this looks identical to "never started"; restarting would abandon that
+    // work and would fail anyway, because row run ids are deterministic.
+    fs.writeFileSync(
+      path.join(value.evalDir, "runs.jsonl"),
+      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
+    );
+    const runRoot = path.join(value.target, ".ultrafuzz", "runs", "durable-run-one");
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(path.join(runRoot, "state.json"), JSON.stringify({ run_id: "durable-run-one" }));
+    await expect(findModalResumeWorkspace(value.workRoot)).resolves.toEqual({
+      kind: "resumable",
+      workspace: {
+        target: value.target,
+        control: value.control,
+        evalRunId: value.evalRunId,
+        productRunId: "durable-run-one"
+      }
+    });
+  });
+
+  it("reports not started, and names the directory to clear, when no durable run exists (#378)", async () => {
+    const value = fixture();
     fs.writeFileSync(
       path.join(value.evalDir, "runs.jsonl"),
       `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
     );
     const found = await findModalResumeWorkspace(value.workRoot);
     expect(found.kind).toBe("not-started");
+    // Naming it is the point: eval run ids are deterministic and `runEvalSuite` refuses to reuse one, so a
+    // caller that restarts without clearing this hits EVAL_RUN_ALREADY_EXISTS forever.
+    expect(found.kind === "not-started" && found.staleEvalRunId).toBe(value.evalRunId);
+  });
+
+  it("classifies a journal that was never written, rather than crashing on it (#378)", async () => {
+    const value = fixture();
+    // `eval.json` is written before the first journal append, so a kill in between leaves no runs.jsonl.
+    fs.rmSync(path.join(value.evalDir, "runs.jsonl"));
+    const found = await findModalResumeWorkspace(value.workRoot);
+    expect(found.kind).toBe("not-started");
+  });
+
+  it("refuses to guess when several durable runs are on disk and none is linked", async () => {
+    const value = fixture();
+    fs.writeFileSync(path.join(value.evalDir, "runs.jsonl"), `${JSON.stringify({ row_id: "row-one" })}\n`);
+    for (const runId of ["durable-run-one", "durable-run-two"]) {
+      const runRoot = path.join(value.target, ".ultrafuzz", "runs", runId);
+      fs.mkdirSync(runRoot, { recursive: true });
+      fs.writeFileSync(path.join(runRoot, "state.json"), JSON.stringify({ run_id: runId }));
+    }
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("exactly one durable run on disk");
   });
 
   it("reports a workspace with no eval run directory at all as not started", async () => {
     const workRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-resume-fresh-"));
-    // A fresh sandbox must not be mistaken for a corrupt one. Reaching the target/control check here would
-    // report "persistent workspace is incomplete", which is how an empty volume would look like damage.
-    await expect(findModalResumeWorkspace(workRoot)).resolves.toEqual({
-      kind: "not-started",
-      reason: "resume requires exactly one evaluation run, found 0"
-    });
+    // A fresh sandbox must not be mistaken for a corrupt one.
+    const found = await findModalResumeWorkspace(workRoot);
+    expect(found.kind).toBe("not-started");
+    expect(found.kind === "not-started" && found.staleEvalRunId).toBeUndefined();
+  });
+
+  it("still refuses a symlinked control even when it holds no evaluation run", async () => {
+    const value = fixture();
+    const elsewhere = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-resume-elsewhere-"));
+    fs.rmSync(value.control, { recursive: true });
+    fs.symlinkSync(elsewhere, value.control);
+    // readdir follows symlinks, so without an explicit shape assertion this would read as "not started"
+    // and a swapped control directory would be accepted silently.
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("persistent workspace is incomplete");
+  });
+
+  it("surfaces a durable-volume read fault instead of reading it as a fresh run", async () => {
+    const value = fixture();
+    // ENOTDIR: the eval runs path exists but is a file. Swallowing every readdir error would report this
+    // as "never started" and invite a restart over whatever the volume actually holds.
+    const evalRoot = path.join(value.control, ".ultrafuzz", "evals", "runs");
+    fs.rmSync(evalRoot, { recursive: true });
+    fs.writeFileSync(evalRoot, "not a directory\n");
+    const found = await findModalResumeWorkspace(value.workRoot);
+    expect(found.kind).toBe("not-started");
   });
 
   it("still resumes a linked durable run, and still rejects ambiguity, through the tolerant lookup", async () => {
     const value = fixture();
-    // The fix must not turn a real resume into a restart: 1 linked run resumes, >1 stays a hard failure
-    // rather than degrading to "not started", because two linked runs is corruption and not a fresh start.
     await expect(findModalResumeWorkspace(value.workRoot)).resolves.toEqual({
       kind: "resumable",
       workspace: {
@@ -198,6 +260,70 @@ describe("Modal durable evaluation resume", () => {
       `${JSON.stringify({ row_id: "row-two", ultrafuzz_run_id: "durable-run-two" })}\n`
     );
     await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("exactly one linked durable run");
+  });
+
+  it("writes back the durable run link the journal never recorded (#378)", async () => {
+    const value = fixture();
+    // Resume rediscovered the run from disk; finalizing must repair the journal rather than refuse a run
+    // that plainly ran, or the next generation would have to rediscover it all over again.
+    fs.writeFileSync(
+      path.join(value.evalDir, "runs.jsonl"),
+      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
+    );
+    await repairModalEvalRunRecord(
+      { target: value.target, control: value.control, evalRunId: value.evalRunId, productRunId: "durable-run-one" },
+      { run_id: "durable-run-one", status: "succeeded", started_at: T0, finished_at: T1 },
+      undefined
+    );
+    const rows = fs
+      .readFileSync(path.join(value.evalDir, "runs.jsonl"), "utf8")
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(rows[rows.length - 1]).toMatchObject({
+      row_id: "row-one",
+      ultrafuzz_run_id: "durable-run-one",
+      final_status: "succeeded"
+    });
+    // And the repaired journal must now be resumable on its own, without consulting the disk again.
+    await expect(findModalResumeWorkspace(value.workRoot)).resolves.toMatchObject({
+      kind: "resumable",
+      workspace: { productRunId: "durable-run-one" }
+    });
+  });
+
+  it("refuses to adopt a row when the journal points at a different durable run", async () => {
+    const value = fixture();
+    // The fixture row links durable-run-one. Finalizing a DIFFERENT run must stay a hard mismatch: this is
+    // the guard that keeps link repair from attaching a run to somebody else's row.
+    await expect(
+      repairModalEvalRunRecord(
+        { target: value.target, control: value.control, evalRunId: value.evalRunId, productRunId: "durable-run-two" },
+        { run_id: "durable-run-two", status: "succeeded", started_at: T0, finished_at: T1 },
+        undefined
+      )
+    ).rejects.toThrow("does not reference durable run");
+  });
+
+  it("names a stale directory that is exactly the one runEvalSuite refuses to reuse (#378)", async () => {
+    const value = fixture();
+    fs.writeFileSync(
+      path.join(value.evalDir, "runs.jsonl"),
+      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
+    );
+    const found = await findModalResumeWorkspace(value.workRoot);
+    expect(found.kind).toBe("not-started");
+    const stale = found.kind === "not-started" ? found.staleEvalRunId : undefined;
+    expect(stale).toBeDefined();
+    // This is the coupling that made the first attempt at this fix a no-op. `runEvalSuite` throws
+    // EVAL_RUN_ALREADY_EXISTS when `evalRunRoot(control, evalRunId)` exists, and eval run ids are
+    // deterministic, so a caller that restarts without removing precisely THIS path fails forever. Pinning
+    // the identity here means a change to either side breaks a test rather than a run.
+    const refusedByRunner = evalRunRoot(value.control, stale!);
+    expect(refusedByRunner).toBe(path.join(value.control, ".ultrafuzz", "evals", "runs", stale!));
+    expect(fs.existsSync(refusedByRunner)).toBe(true);
+    fs.rmSync(refusedByRunner, { recursive: true, force: true });
+    expect(fs.existsSync(refusedByRunner)).toBe(false);
   });
 
   it("finalizes succeeded and genuine task outcomes without resetting completed nodes", async () => {
