@@ -2008,14 +2008,29 @@ function artifactReconciliationGraceExpired(grace: ArtifactReconciliationGrace, 
   return nowMs >= Date.parse(grace.deadline_at) || grace.attempts >= ARTIFACT_RECONCILIATION_MAX_ATTEMPTS;
 }
 
-function onlyTransientArtifactDiagnostics(diagnostics: RuntimeDiagnostic[]): boolean {
+/**
+ * Whether a gate failure is only the benign "the durable volume has not caught
+ * up yet" case, and so should wait out the bounded reconciliation grace rather
+ * than failing the node.
+ *
+ * Judged on FATAL diagnostics only. A warning cannot fail a node, so letting one
+ * decide that a transient miss is non-transient turned a five-minute retry into
+ * an immediate artifact-contract failure with a consumed retry. `gate.ok` is
+ * false only when at least one error exists, so filtering to errors changes
+ * nothing except that case.
+ *
+ * Exported for tests: the wiring is covered by the grace integration tests, and
+ * this predicate is where the severity rule has to hold.
+ */
+export function onlyTransientArtifactDiagnostics(diagnostics: RuntimeDiagnostic[]): boolean {
   const transientCodes = new Set([
     "REQUIRED_ARTIFACT_MISSING",
     "REQUIRED_ARTIFACT_EMPTY",
     "GENERATED_TEST_FILE_MISSING",
     "GENERATED_TEST_FILE_EMPTY"
   ]);
-  return diagnostics.length > 0 && diagnostics.every((diagnostic) => transientCodes.has(diagnostic.code));
+  const fatal = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+  return fatal.length > 0 && fatal.every((diagnostic) => transientCodes.has(diagnostic.code));
 }
 
 async function finalizeTerminalTask(input: {

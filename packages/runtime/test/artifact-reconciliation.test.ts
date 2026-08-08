@@ -8,6 +8,7 @@ import { createRunLayout, getNodeArtifactDir, getNodeWorkspaceDir } from "@ultra
 
 import { reconcileRequiredArtifactsFromWorkspace } from "../src/artifact-reconciliation.js";
 import { verifyRequiredArtifactsForAttempt } from "../src/artifact-gates.js";
+import { onlyTransientArtifactDiagnostics } from "../src/workflow-sync.js";
 import type { PlannedGraphNode } from "../src/types.js";
 
 function tempProject(): string {
@@ -289,4 +290,46 @@ test("reconciles a missing generated companion when the canonical manifest alrea
 
   assert.deepEqual(result.materialized, ["generated-tests/Example.t.sol"]);
   assert.equal(verifyRequiredArtifactsForAttempt(fixture.layout, fixture.node, "strategy-a").ok, true);
+});
+
+// #398: the reconciliation grace decides whether a gate failure is the benign
+// "artifacts have not landed on the durable volume yet" case. It judged the
+// whole diagnostic list against a code allowlist with no severity filter, so a
+// warning -- which by construction cannot fail a node -- collapsed the grace and
+// turned a transient miss into an immediate artifact-contract failure with a
+// consumed retry. Reachable today on property-lens nodes, which are the only
+// ones that can currently emit a warning.
+test("a warning does not collapse the artifact reconciliation grace", () => {
+  const transient = {
+    code: "REQUIRED_ARTIFACT_MISSING",
+    message: "required artifact is not yet visible",
+    severity: "error" as const,
+    source: "artifact-gate"
+  };
+  const warning = {
+    code: "PROPERTY_REFERENCE_EXPECTATION_SANITIZED",
+    message: "the lens output was sanitized",
+    severity: "warning" as const,
+    source: "property-provenance"
+  };
+  const fatal = {
+    code: "PROPERTY_FINDING_REFERENCE_MISSING",
+    message: "a real contract failure",
+    severity: "error" as const,
+    source: "property-provenance"
+  };
+
+  assert.equal(onlyTransientArtifactDiagnostics([transient]), true, "a lone transient miss keeps the grace");
+  assert.equal(
+    onlyTransientArtifactDiagnostics([transient, warning]),
+    true,
+    "a warning alongside a transient miss must not collapse the grace"
+  );
+  assert.equal(
+    onlyTransientArtifactDiagnostics([transient, fatal]),
+    false,
+    "a genuine contract error must still skip the grace"
+  );
+  assert.equal(onlyTransientArtifactDiagnostics([warning]), false, "warnings alone are not a transient artifact miss");
+  assert.equal(onlyTransientArtifactDiagnostics([]), false, "an empty list is not a transient artifact miss");
 });
