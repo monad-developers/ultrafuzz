@@ -9,6 +9,7 @@ import os from "node:os";
 import {
   ANALYSIS_BUNDLE_SCHEMA_VERSION,
   FINDINGS_SCHEMA_VERSION,
+  FINDINGS_SCHEMA_VERSIONS,
   GENERATED_TESTS_SCHEMA_VERSION,
   INVARIANT_LEDGER_SCHEMA_VERSION,
   INVARIANT_SOURCE_PROOF_SCHEMA_VERSION,
@@ -832,6 +833,45 @@ test("the findings contract accepts the house-style schema_version and states th
     description.includes(`"${FINDINGS_SCHEMA_VERSION}"`),
     "the contract must state the literal, since its empty example is [] and cannot carry one"
   );
+});
+
+test("the findings contract does not require schema_version, and still rejects malformed findings", () => {
+  // There is one findings schema, nothing reads the field, and normalizeFinding already defaults an
+  // absent value. A version string that no reader consults must not be able to end a run.
+  const withoutVersion = [
+    {
+      id: "failure-1",
+      title: "Harness drawn-rate sync assertion ignores elapsed-time precondition",
+      status: "confirmed",
+      severity_guess: "low",
+      confidence: "high",
+      summary: "The stored drawn rate lags the recalculated one after time advances.",
+      property_ids: ["property-99"]
+    }
+  ];
+  assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify(withoutVersion)).ok, true);
+  assert.equal(validateFindingsSchema(withoutVersion).ok, true);
+  assert.equal(validateFindingSchema(withoutVersion[0]).ok, true);
+
+  assert.ok(
+    !(findingJsonSchema.required as readonly string[]).includes("schema_version"),
+    "the published JSON Schema must agree with the Zod schema that the field is optional"
+  );
+  assert.deepEqual([...findingJsonSchema.properties.schema_version.enum], [...FINDINGS_SCHEMA_VERSIONS]);
+
+  // Optional does not mean unconstrained: a present value is still checked, and every field the
+  // pipeline actually consumes is still required.
+  assert.equal(validateFindingSchema({ ...withoutVersion[0], schema_version: "2.0" }).ok, false);
+  assert.equal(validateFindingSchema({ ...withoutVersion[0], schema_version: 1 }).ok, false);
+  const missingSummary = { ...withoutVersion[0] };
+  delete (missingSummary as Partial<typeof missingSummary>).summary;
+  assert.equal(validateFindingSchema(missingSummary).ok, false);
+  assert.equal(
+    validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([missingSummary])).ok,
+    false,
+    "an otherwise malformed finding still fails the contract"
+  );
+  assert.equal(validateFindingSchema({ ...withoutVersion[0], property_ids: ["property-99", "property-99"] }).ok, false);
 });
 
 test("finding and report schemas accept non-property and historical artifacts", () => {
