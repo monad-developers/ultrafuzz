@@ -116,11 +116,18 @@ Use this configured invariant testing fuzzer timeout:
      deduplicated finding.
    - When an implemented invariant property caused a failure, copy its exact
      canonical ID from `implemented-properties.json` into a non-empty
-     `property_ids` array on the backend failure and resulting finding. Use the
-     same stable failure ID in the backend record and in the final deduplicated
-     finding so runtime validation can prove the joins. Omit `property_ids` for
+     `property_ids` array on that backend failure. Omit `property_ids` for
      setup, harness, and other failures that did not originate from a catalog
-     property. Never invent or silently drop a property reference.
+     property. Never invent or silently drop a property reference: a finding may
+     only name a property that some backend failure reported.
+   - Give the finding that deduplicates a group of failures the ID of one of the
+     failures in that group, so runtime validation can prove the joins. Findings
+     are one per unique failure, never one per counterexample, so most backend
+     failure IDs will not appear as a finding ID.
+   - When a single counterexample broke several properties at once, that is one
+     observation and one finding must claim the whole set. Splitting it across
+     findings that each name one property loses the fact that they broke
+     together.
 
 5. Reproduce and classify every unique failure.
    - Attempt a deterministic Foundry reproducer for every unique failure. Put
@@ -130,7 +137,9 @@ Use this configured invariant testing fuzzer timeout:
      them in `generated-tests.json`.
    - If shrinking or reproduction fails, preserve the raw sequence or corpus
      packet and classify it as `blocked-unreproduced`; never discard it.
-   - For each unique failure, write one finding object in `findings.json` and
+   - A unique failure is one distinct root cause, not one entry in the backend
+     record: a fuzzer reports the same violation many times while shrinking. For
+     each unique failure, write one finding object in `findings.json` and
    include `stateful_failure_classification=<classification>` in `notes`,
      using exactly one of `production-bug`, `harness-defect`,
      `incomplete-spec`, `false-positive`, or `blocked-unreproduced`.
@@ -189,9 +198,9 @@ string `recon` so the final report join matches; omit that field when the
 backend was unavailable. Every failure needs a non-empty `id` and `status`. Use an
 empty `failures` array when none were observed. Each deduplicated finding must
 reuse the ID of one of the failures it covers, and must carry every property ID
-those failures reported. Do not emit one finding per counterexample: a fuzzer
-reports the same violation many times, and the backend record already preserves
-every one of them. Property IDs are optional only for
+those failures reported and no others. Do not emit one finding per
+counterexample: a fuzzer reports the same violation many times, and the backend
+record already preserves every one of them. Property IDs are optional only for
 failures not caused by an implemented catalog property. References to an
 unknown or non-implemented canonical property fail artifact validation.
 

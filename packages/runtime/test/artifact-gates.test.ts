@@ -4547,7 +4547,7 @@ test("campaign gate still rejects a property-derived failure no finding covers",
   assert.match(missing?.path ?? "", /failures\[1\]/u);
 });
 
-test("campaign gate reports every uncovered property of a partially covered failure", () => {
+test("campaign gate names only the genuinely uncovered property of a partially covered failure", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partial" });
   campaignPropertyCatalog(layout, ["property-1", "property-2"]);
   const campaignId = "stateful-invariant-campaign";
@@ -4576,6 +4576,9 @@ test("campaign gate reports every uncovered property of a partially covered fail
   const missing = result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING");
   assert.ok(missing);
   assert.match(missing?.message ?? "", /property-2/u);
+  // property-1 is covered by the finding, so naming it would send the retry
+  // after an artifact that is already correct.
+  assert.doesNotMatch(missing?.message ?? "", /property-1/u);
 });
 
 test("campaign gate keeps flagging ambiguous and mismatched same-ID findings", () => {
@@ -4701,4 +4704,73 @@ test("campaign gate accepts a deduplicated finding that unions the properties of
     []
   );
   assert.equal(result.ok, true);
+});
+
+test("campaign gate rejects a finding that claims a property no failure ever reported", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-invented" });
+  campaignPropertyCatalog(layout, ["property-1", "property-2"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
+    })
+  );
+  // property-2 is implemented and in the catalog, so only the campaign join can
+  // catch it: no counterexample anywhere reported it.
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([campaignFinding("failure-1", ["property-1", "property-2"])])
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  const unobserved = result.diagnostics.find(
+    (diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PROPERTY_UNOBSERVED"
+  );
+  assert.ok(unobserved);
+  assert.match(unobserved?.message ?? "", /property-2/u);
+  assert.doesNotMatch(unobserved?.message ?? "", /property-1/u);
+});
+
+test("campaign gate rejects a property claim anchored to a failure that reported no property", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-harness-anchor" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  // A harness defect legitimately omits property_ids. A finding may not borrow
+  // its ID and then attribute a catalog property to it.
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [{ id: "failure-1", status: "reproduced" }]
+    })
+  );
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-1", ["property-1"])]));
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PROPERTY_UNOBSERVED"),
+    `expected an unobserved-property diagnostic, got ${JSON.stringify(result.diagnostics.map((d) => d.code))}`
+  );
 });

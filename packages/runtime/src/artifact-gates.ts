@@ -2338,6 +2338,13 @@ function verifyCampaignPropertyReferences(
       new Set(campaigns.flatMap((campaign) => campaign.value.failures.map((failure) => failure.id))),
       validatedFindings,
       findingsPath
+    ),
+    ...unobservedFindingPropertyDiagnostics(
+      new Set(
+        campaigns.flatMap((campaign) => campaign.value.failures.flatMap((failure) => failure.property_ids ?? []))
+      ),
+      validatedFindings,
+      findingsPath
     )
   ];
   const implementedIds = new Set(
@@ -2850,9 +2857,20 @@ function campaignFindingReferenceDiagnostics(
       // its ID. What it must have is a finding that claims everything it broke;
       // otherwise a violation was observed and then dropped.
       if (!isCovered(failurePropertyIds)) {
+        // Name what is actually wrong. Saying "no finding covers property-1,
+        // property-2" when property-1 is covered sends the retry after the
+        // wrong artifact, and the node fails again the same way.
+        const unclaimed = failurePropertyIds.filter(
+          (propertyId) => !findingPropertySets.some((propertySet) => propertySet.has(propertyId))
+        );
+        const quoted = (propertyIds: readonly string[]): string =>
+          propertyIds.map((propertyId) => JSON.stringify(propertyId)).join(", ");
         diagnostics.push({
           code: "PROPERTY_FINDING_REFERENCE_MISSING",
-          message: `Property-derived campaign failure ${JSON.stringify(failure.id)} has no resulting finding covering ${failurePropertyIds.map((propertyId) => JSON.stringify(propertyId)).join(", ")}`,
+          message:
+            unclaimed.length > 0
+              ? `Property-derived campaign failure ${JSON.stringify(failure.id)} has no resulting finding covering ${quoted(unclaimed)}`
+              : `Property-derived campaign failure ${JSON.stringify(failure.id)} broke ${quoted(failurePropertyIds)} together, and no single resulting finding claims that combination`,
           severity: "error",
           source: "property-provenance",
           path: `${campaignPath}#$.failures[${failureIndex}].id`
@@ -2909,6 +2927,39 @@ function danglingCampaignFindingDiagnostics(
       severity: "error",
       source: "property-provenance",
       path: `${findingsPath}#$[${findingIndex}].id`
+    });
+  }
+  return diagnostics;
+}
+
+/**
+ * Reports findings that attribute a property no counterexample ever reported.
+ * A deduplicated finding may carry more properties than the single failure whose
+ * ID it reuses, so the failure-to-finding join cannot judge this; without a
+ * separate check the campaign could invent a violation the fuzzer never
+ * observed. Like the dangling check this is judged once against the union of
+ * every campaign record in the node.
+ */
+function unobservedFindingPropertyDiagnostics(
+  observedPropertyIds: ReadonlySet<string>,
+  findings: Array<Record<string, unknown>>,
+  findingsPath: string
+): RuntimeDiagnostic[] {
+  const diagnostics: RuntimeDiagnostic[] = [];
+  for (const [findingIndex, finding] of findings.entries()) {
+    const propertyIds = Array.isArray(finding.property_ids)
+      ? finding.property_ids.filter((propertyId): propertyId is string => typeof propertyId === "string")
+      : [];
+    const unobserved = propertyIds.filter((propertyId) => !observedPropertyIds.has(propertyId));
+    if (unobserved.length === 0) {
+      continue;
+    }
+    diagnostics.push({
+      code: "PROPERTY_CAMPAIGN_PROPERTY_UNOBSERVED",
+      message: `Finding ${JSON.stringify(finding.id)} claims ${unobserved.map((propertyId) => JSON.stringify(propertyId)).join(", ")}, which no campaign failure reported`,
+      severity: "error",
+      source: "property-provenance",
+      path: `${findingsPath}#$[${findingIndex}].property_ids`
     });
   }
   return diagnostics;
