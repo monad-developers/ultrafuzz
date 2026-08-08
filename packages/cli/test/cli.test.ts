@@ -458,17 +458,12 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     () => rejectFirstStatusLine(new Error("status watch did not emit its initial sample")),
     15_000
   );
-  const watching = cli(
-    project,
-    ["status", runData.run_id, "--watch", "--interval", "1", "--json"],
-    env,
-    (stdout) => {
-      if (!sawFirstStatusLine && stdout.includes("\n")) {
-        sawFirstStatusLine = true;
-        resolveFirstStatusLine();
-      }
+  const watching = cli(project, ["status", runData.run_id, "--watch", "--interval", "1", "--json"], env, (stdout) => {
+    if (!sawFirstStatusLine && stdout.includes("\n")) {
+      sawFirstStatusLine = true;
+      resolveFirstStatusLine();
     }
-  );
+  });
   try {
     await Promise.race([
       firstStatusLine,
