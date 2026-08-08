@@ -892,8 +892,10 @@ describe("public Modal benchmark configuration", () => {
       (step) => step.name === "Qualify the exact completed producer attempt"
     )?.run;
     expect(qualification).toContain("/attempts/$PRODUCER_RUN_ATTEMPT/jobs?per_page=100");
+    expect(qualification).toContain("/actions/runs/$PRODUCER_RUN_ID/artifacts?per_page=100");
     expect(qualification).toContain("qualify-modal-benchmark-publication.mjs");
     expect(qualification).toContain('"$GITHUB_EVENT_PATH"');
+    expect(qualification).toContain('"$artifacts_path"');
     expect(qualification).toContain('"$GITHUB_OUTPUT"');
 
     const automatic = publication.jobs.publish_modal_benchmark!;
