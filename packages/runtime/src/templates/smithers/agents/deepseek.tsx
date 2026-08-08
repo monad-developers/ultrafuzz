@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smithers-orchestrator";
+import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
 import { readStringTable, stringField } from "./toml";
 
 type DeepSeekAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
@@ -43,6 +44,7 @@ export function createDeepSeekAgent(options: DeepSeekTaskOptions = {}): Smithers
     ...(reasoningEffort === undefined ? {} : { extraArgs: ["--effort", reasoningEffort] }),
     ...(options.addDir === undefined ? {} : { addDir: options.addDir }),
     permissionMode: "bypassPermissions",
+    env: workflowControlChildEnvironment(),
     ...deepSeekAuthOptions()
   });
 }
@@ -83,7 +85,7 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
     const opts = this.opts as DeepSeekAgentOptions;
     return {
       ...command,
-      env: {
+      env: workflowControlChildEnvironment({
         ...command.env,
         // Claude Code's documented custom-provider credential is
         // ANTHROPIC_AUTH_TOKEN. Clear the first-party key explicitly so a host
@@ -120,7 +122,7 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
         // Claude treats an empty secure-storage override as "use the default".
         // Point it at the same isolated root as the rest of its session state.
         CLAUDE_SECURESTORAGE_CONFIG_DIR: opts.configDir
-      }
+      })
     };
   }
 
@@ -160,7 +162,7 @@ function deepSeekAuthOptions(): DeepSeekAuthOptions {
 }
 
 function readDeepSeekAuthConfig(): DeepSeekAuthConfig {
-  const configPath = path.join(process.cwd(), "ultrafuzz.toml");
+  const configPath = process.env.ULTRAFUZZ_CONFIG_PATH ?? path.join(process.cwd(), "ultrafuzz.toml");
   const deepseek = readStringTable(readFileSync(configPath, "utf8"), "agents.DeepSeekAgent");
   return {
     auth: stringField(deepseek, "auth"),
@@ -174,7 +176,7 @@ function requiredEnv(name: string): string {
   if (value === undefined || value.trim() === "") {
     throw new Error(`agents.DeepSeekAgent auth is api-key, but ${name} is not set`);
   }
-  return value;
+  return workflowControlCredentialValue(value, name);
 }
 
 function resolveConfigDir(value: string): string {

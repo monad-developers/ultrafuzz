@@ -11,7 +11,10 @@ import {
   modalAttemptVerificationMarkerName,
   modalNodeDispatchFingerprint,
   modalNodeHandoffContentFingerprint,
-  parseModalNodeSandboxInput
+  parseModalNodeSandboxInput,
+  parseModalNodeWorkerInput,
+  readModalExecutionDependencyClosure,
+  verifyModalExecutionSnapshotClosure
 } from "./node-provider.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
@@ -46,6 +49,7 @@ interface DurableCheckpointRecord {
   logical_dispatch_fingerprint: string;
   workspace_path: string;
   run_root: string;
+  execution_snapshot_root: string;
   handoff_archive: string;
   project_archive_sha256: string;
   restored_from?: string;
@@ -58,6 +62,7 @@ interface DurableCheckpointIndex {
   logical_dispatch_fingerprint: string;
   workspace_path: string;
   run_root: string;
+  execution_snapshot_root: string;
   handoff_archive: string;
   project_archive_sha256: string;
   checkpoints: Array<
@@ -68,7 +73,7 @@ interface DurableCheckpointIndex {
 export interface DurableNodeWorkspace {
   projectRoot: string;
   checkpointIndex: string;
-  input: ReturnType<typeof parseModalNodeSandboxInput>;
+  input: ReturnType<typeof parseModalNodeWorkerInput>;
   hasCompletedCheckpoint: boolean;
   recordCheckpoint(stage: DurableCheckpointStage, error?: unknown): DurableCheckpointRecord;
 }
@@ -77,7 +82,7 @@ async function main(): Promise<void> {
   const requestPath = requiredOption("--request");
   const archivePath = requiredOption("--project-archive");
   const dataRoot = requiredOption("--data-root");
-  const requestedInput = parseModalNodeSandboxInput(JSON.parse(fs.readFileSync(requestPath, "utf8")) as unknown);
+  const requestedInput = parseModalNodeWorkerInput(JSON.parse(fs.readFileSync(requestPath, "utf8")) as unknown);
   let durableWorkspace: DurableNodeWorkspace | undefined;
   let publishing: string | undefined;
   try {
@@ -88,23 +93,11 @@ async function main(): Promise<void> {
       durableWorkspace.recordCheckpoint("prepared");
     }
     syncDurableData(projectRoot);
-    if (!durableWorkspace.hasCompletedCheckpoint) {
-      await withTransientNpmRegistryRetry(() =>
-        runChecked(
-          "install-smithers",
-          "npm",
-          smithersDependencyInstallArgs({ prefix: path.join(projectRoot, ".smithers") }),
-          projectRoot
-        )
-      );
-    }
-    const workflowPath = anchoredProjectPath(projectRoot, input.workflow_path);
     const localRunId = `${input.run_id}-${crypto.createHash("sha256").update(input.task_id).digest("hex").slice(0, 12)}`;
-    const smithers = path.join(projectRoot, ".smithers", "node_modules", ".bin", "smithers");
     if (!durableWorkspace.hasCompletedCheckpoint) {
       durableWorkspace.recordCheckpoint("running");
       syncDurableData(projectRoot);
-      await runDurableWorkflow(smithers, workflowPath, projectRoot, localRunId, input);
+      await runDurableWorkflow(projectRoot, localRunId, input);
     }
 
     const artifactDir = anchoredProjectPath(projectRoot, input.artifact_dir);
@@ -244,6 +237,357 @@ export function workerResultPublicationMode(
   return "verified-v2";
 }
 
+function sealedSmithersExecutable(snapshotRoot: string): string {
+  const closure = readModalExecutionDependencyClosure(snapshotRoot);
+  const smithers = regularSnapshotFile(snapshotRoot, closure.smithersBin, "sealed Smithers executable");
+  const stat = fs.lstatSync(smithers);
+  if ((stat.mode & 0o111) === 0) throw new Error("sealed Smithers executable is not executable");
+  return smithers;
+}
+
+function sealedSnapshotModuleUrl(snapshotRoot: string, name: "artifacts" | "runtime"): string {
+  return pathToFileURL(
+    regularSnapshotFile(
+      snapshotRoot,
+      path.posix.join("modules", "@ultrafuzz", name, "dist", "index.js"),
+      `sealed ${name} module`
+    )
+  ).href;
+}
+
+function regularSnapshotFile(snapshotRoot: string, relativePath: string, label: string): string {
+  const candidate = snapshotRelativePath(snapshotRoot, relativePath, label);
+  let parent = snapshotRoot;
+  for (const part of relativePath.split("/").slice(0, -1)) {
+    parent = path.join(parent, part);
+    const parentStat = fs.lstatSync(parent);
+    if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) {
+      throw new Error(`${label} crosses an unsafe snapshot directory`);
+    }
+  }
+  const stat = fs.lstatSync(candidate);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+    throw new Error(`${label} is unsafe`);
+  }
+  return candidate;
+}
+
+function snapshotRelativePath(snapshotRoot: string, relativePath: string, label: string): string {
+  if (
+    relativePath.length === 0 ||
+    relativePath.includes("\0") ||
+    relativePath.includes("\\") ||
+    path.posix.isAbsolute(relativePath) ||
+    path.posix.normalize(relativePath) !== relativePath ||
+    relativePath === "." ||
+    relativePath.startsWith("../")
+  ) {
+    throw new Error(`${label} path is invalid`);
+  }
+  const root = path.resolve(snapshotRoot);
+  const candidate = path.resolve(root, ...relativePath.split("/"));
+  if (candidate === root || !candidate.startsWith(`${root}${path.sep}`)) {
+    throw new Error(`${label} path escapes the execution snapshot`);
+  }
+  return candidate;
+}
+
+function materializeExecutionSnapshotLinks(
+  projectRoot: string,
+  input: ReturnType<typeof parseModalNodeWorkerInput>
+): void {
+  const snapshotRoot = anchoredProjectPath(projectRoot, input.execution_snapshot_root);
+  const closure = readModalExecutionDependencyClosure(snapshotRoot);
+  const root = openWorkerSnapshotRoot(snapshotRoot);
+  try {
+    for (const [relativeLink, relativeTarget] of [...closure.links].sort(([left], [right]) =>
+      left < right ? -1 : left > right ? 1 : 0
+    )) {
+      const parent = openWorkerSnapshotDirectory(root, path.posix.dirname(relativeLink), "snapshot dependency parent");
+      let target: ReturnType<typeof openWorkerSnapshotDirectory> | undefined;
+      try {
+        target = openWorkerSnapshotDirectory(root, relativeTarget, "snapshot dependency target");
+        parent.assertCurrent();
+        target.assertCurrent();
+        const linkPath = path.join(parent.directory.accessPath, path.posix.basename(relativeLink));
+        const expectedTarget = path.posix.relative(path.posix.dirname(relativeLink), relativeTarget);
+        const existing = lstatWorkerPath(linkPath);
+        if (existing === undefined) fs.symlinkSync(expectedTarget, linkPath, "dir");
+        const linkStat = fs.lstatSync(linkPath, { bigint: true });
+        const followed = fs.statSync(linkPath, { bigint: true });
+        if (
+          !linkStat.isSymbolicLink() ||
+          fs.readlinkSync(linkPath) !== expectedTarget ||
+          !sameWorkerIdentity(followed, target.directory.opened)
+        ) {
+          throw new Error(`snapshot dependency link is unsafe: ${relativeLink}`);
+        }
+      } finally {
+        target?.close();
+        parent.close();
+      }
+    }
+    assertWorkerSnapshotRootCurrent(root);
+  } finally {
+    fs.closeSync(root.descriptor);
+  }
+}
+
+function sealCloudExecutionSnapshot(projectRoot: string, input: ReturnType<typeof parseModalNodeWorkerInput>): void {
+  const snapshotRoot = anchoredProjectPath(projectRoot, input.execution_snapshot_root);
+  const executablePaths = readModalExecutionDependencyClosure(snapshotRoot).executablePaths;
+  const root = openWorkerSnapshotRoot(snapshotRoot);
+  try {
+    sealOpenedSnapshotDirectory(root, "", executablePaths);
+    assertWorkerSnapshotRootCurrent(root);
+  } finally {
+    fs.closeSync(root.descriptor);
+  }
+}
+
+interface OpenedWorkerSnapshotDirectory {
+  descriptor: number;
+  accessPath: string;
+  pathname: string;
+  opened: fs.BigIntStats;
+  rootPath: string;
+}
+
+function openWorkerSnapshotRoot(snapshotRoot: string): OpenedWorkerSnapshotDirectory {
+  const rootPath = path.resolve(snapshotRoot);
+  const lexical = fs.lstatSync(rootPath, { bigint: true });
+  if (!lexical.isDirectory() || lexical.isSymbolicLink() || fs.realpathSync(rootPath) !== rootPath) {
+    throw new Error("cloud execution snapshot root is unsafe");
+  }
+  const descriptor = fs.openSync(
+    rootPath,
+    fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0)
+  );
+  const opened = fs.fstatSync(descriptor, { bigint: true });
+  if (!opened.isDirectory() || !sameWorkerIdentity(opened, lexical)) {
+    fs.closeSync(descriptor);
+    throw new Error("cloud execution snapshot root changed while opening");
+  }
+  try {
+    return {
+      descriptor,
+      accessPath: workerDirectoryDescriptorPath(descriptor, opened),
+      pathname: rootPath,
+      opened,
+      rootPath
+    };
+  } catch (error) {
+    fs.closeSync(descriptor);
+    throw error;
+  }
+}
+
+function openWorkerSnapshotDirectory(
+  root: OpenedWorkerSnapshotDirectory,
+  relativePath: string,
+  label: string
+): { directory: OpenedWorkerSnapshotDirectory; assertCurrent(): void; close(): void } {
+  if (relativePath === ".") {
+    return { directory: root, assertCurrent: () => assertWorkerSnapshotRootCurrent(root), close: () => undefined };
+  }
+  const openedDirectories: OpenedWorkerSnapshotDirectory[] = [];
+  let parent = root;
+  try {
+    for (const part of relativePath.split("/")) {
+      if (!/^[A-Za-z0-9@][A-Za-z0-9@._-]*$/u.test(part)) throw new Error(`${label} path is invalid`);
+      const pathname = path.join(parent.accessPath, part);
+      const lexical = fs.lstatSync(pathname, { bigint: true });
+      if (!lexical.isDirectory() || lexical.isSymbolicLink()) throw new Error(`${label} is unsafe`);
+      const descriptor = fs.openSync(
+        pathname,
+        fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0)
+      );
+      const opened = fs.fstatSync(descriptor, { bigint: true });
+      if (!opened.isDirectory() || !sameWorkerIdentity(opened, lexical)) {
+        fs.closeSync(descriptor);
+        throw new Error(`${label} changed while opening`);
+      }
+      let directory: OpenedWorkerSnapshotDirectory;
+      try {
+        directory = {
+          descriptor,
+          accessPath: workerDirectoryDescriptorPath(descriptor, opened),
+          pathname,
+          opened,
+          rootPath: root.rootPath
+        };
+      } catch (error) {
+        fs.closeSync(descriptor);
+        throw error;
+      }
+      openedDirectories.push(directory);
+      parent = directory;
+    }
+    return {
+      directory: parent,
+      assertCurrent: () => {
+        assertWorkerSnapshotRootCurrent(root);
+        for (const directory of openedDirectories) assertOpenedWorkerDirectoryCurrent(directory);
+      },
+      close: () => {
+        for (const directory of openedDirectories.reverse()) fs.closeSync(directory.descriptor);
+      }
+    };
+  } catch (error) {
+    for (const directory of openedDirectories.reverse()) fs.closeSync(directory.descriptor);
+    throw error;
+  }
+}
+
+function sealOpenedSnapshotDirectory(
+  directory: OpenedWorkerSnapshotDirectory,
+  relativeDirectory: string,
+  executablePaths: ReadonlySet<string>
+): void {
+  assertOpenedWorkerDirectoryCurrent(directory);
+  const beforeNames = fs.readdirSync(directory.accessPath).sort();
+  for (const name of beforeNames) {
+    assertOpenedWorkerDirectoryCurrent(directory);
+    const pathname = path.join(directory.accessPath, name);
+    const relative = relativeDirectory === "" ? name : `${relativeDirectory}/${name}`;
+    const lexical = fs.lstatSync(pathname, { bigint: true });
+    if (lexical.isDirectory() && !lexical.isSymbolicLink()) {
+      const descriptor = fs.openSync(
+        pathname,
+        fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0)
+      );
+      const opened = fs.fstatSync(descriptor, { bigint: true });
+      if (!opened.isDirectory() || !sameWorkerIdentity(opened, lexical)) {
+        fs.closeSync(descriptor);
+        throw new Error(`cloud execution snapshot directory changed while opening: ${relative}`);
+      }
+      let child: OpenedWorkerSnapshotDirectory;
+      try {
+        child = {
+          descriptor,
+          accessPath: workerDirectoryDescriptorPath(descriptor, opened),
+          pathname,
+          opened,
+          rootPath: directory.rootPath
+        };
+      } catch (error) {
+        fs.closeSync(descriptor);
+        throw error;
+      }
+      try {
+        sealOpenedSnapshotDirectory(child, relative, executablePaths);
+      } finally {
+        fs.closeSync(descriptor);
+      }
+    } else if (lexical.isFile() && !lexical.isSymbolicLink()) {
+      sealOpenedSnapshotFile(pathname, lexical, executablePaths.has(relative) ? 0o500 : 0o400, relative);
+    } else if (!lexical.isSymbolicLink()) {
+      throw new Error(`cloud execution snapshot contains a special entry: ${relative}`);
+    }
+  }
+  if (JSON.stringify(fs.readdirSync(directory.accessPath).sort()) !== JSON.stringify(beforeNames)) {
+    throw new Error(`cloud execution snapshot directory changed while sealing: ${relativeDirectory || "."}`);
+  }
+  assertOpenedWorkerDirectoryCurrent(directory);
+  fs.fchmodSync(directory.descriptor, 0o500);
+  const completed = fs.fstatSync(directory.descriptor, { bigint: true });
+  const lexicalCompleted = fs.lstatSync(directory.pathname, { bigint: true });
+  if (
+    !sameWorkerIdentity(completed, directory.opened) ||
+    !sameWorkerIdentity(completed, lexicalCompleted) ||
+    (completed.mode & 0o777n) !== 0o500n
+  ) {
+    throw new Error(`cloud execution snapshot directory changed while sealing: ${relativeDirectory || "."}`);
+  }
+}
+
+function sealOpenedSnapshotFile(pathname: string, lexical: fs.BigIntStats, mode: number, relativePath: string): void {
+  const descriptor = fs.openSync(pathname, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = fs.fstatSync(descriptor, { bigint: true });
+    const current = fs.lstatSync(pathname, { bigint: true });
+    if (
+      !opened.isFile() ||
+      opened.nlink !== 1n ||
+      !sameWorkerIdentity(opened, lexical) ||
+      !sameWorkerIdentity(opened, current)
+    ) {
+      throw new Error(`cloud execution snapshot file changed while opening: ${relativePath}`);
+    }
+    fs.fchmodSync(descriptor, mode);
+    const completed = fs.fstatSync(descriptor, { bigint: true });
+    const lexicalCompleted = fs.lstatSync(pathname, { bigint: true });
+    if (
+      !sameWorkerIdentity(completed, opened) ||
+      !sameWorkerIdentity(completed, lexicalCompleted) ||
+      (completed.mode & 0o777n) !== BigInt(mode)
+    ) {
+      throw new Error(`cloud execution snapshot file changed while sealing: ${relativePath}`);
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function assertOpenedWorkerDirectoryCurrent(directory: OpenedWorkerSnapshotDirectory): void {
+  const completed = fs.fstatSync(directory.descriptor, { bigint: true });
+  const lexical = fs.lstatSync(directory.pathname, { bigint: true });
+  if (
+    !completed.isDirectory() ||
+    !sameWorkerIdentity(completed, directory.opened) ||
+    !sameWorkerIdentity(completed, lexical)
+  ) {
+    throw new Error("cloud execution snapshot directory changed during descriptor ownership");
+  }
+}
+
+function assertWorkerSnapshotRootCurrent(root: OpenedWorkerSnapshotDirectory): void {
+  assertOpenedWorkerDirectoryCurrent(root);
+  if (fs.realpathSync(root.rootPath) !== root.rootPath) {
+    throw new Error("cloud execution snapshot root changed during descriptor ownership");
+  }
+}
+
+function workerDirectoryDescriptorPath(descriptor: number, expected: fs.BigIntStats): string {
+  for (const candidate of [`/proc/self/fd/${descriptor}`, `/dev/fd/${descriptor}`]) {
+    try {
+      if (sameWorkerIdentity(fs.statSync(candidate, { bigint: true }), expected)) return candidate;
+    } catch {
+      // Try the next platform descriptor path.
+    }
+  }
+  throw new Error("cloud execution snapshot has no descriptor anchor");
+}
+
+function workerProcessDirectoryDescriptorPath(descriptor: number, expected: fs.BigIntStats): string {
+  const candidate = `/proc/${process.pid}/fd/${descriptor}`;
+  try {
+    const lexical = fs.lstatSync(candidate, { bigint: true });
+    const followed = fs.statSync(candidate, { bigint: true });
+    if (lexical.isSymbolicLink() && sameWorkerIdentity(followed, expected)) return candidate;
+  } catch {
+    // Modal's node worker is Linux-based and requires procfs for a child-visible descriptor anchor.
+  }
+  throw new Error("cloud execution snapshot has no child-visible descriptor anchor");
+}
+
+function sameWorkerIdentity(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.nlink === right.nlink;
+}
+
+function lstatWorkerPath(pathname: string): fs.BigIntStats | undefined {
+  try {
+    return fs.lstatSync(pathname, { bigint: true });
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
 function cleanupStalePublicationDirectories(dataRoot: string): void {
   const now = Date.now();
   for (const entry of fs.readdirSync(dataRoot, { withFileTypes: true })) {
@@ -260,42 +604,72 @@ function cleanupStalePublicationDirectories(dataRoot: string): void {
 }
 
 export async function runDurableWorkflow(
-  smithers: string,
-  workflowPath: string,
   projectRoot: string,
   localRunId: string,
-  input: ReturnType<typeof parseModalNodeSandboxInput>
+  input: ReturnType<typeof parseModalNodeWorkerInput>
 ): Promise<void> {
-  const environment = {
-    ULTRAFUZZ_CLOUD_WORKER: "1",
-    ULTRAFUZZ_ARTIFACTS_MODULE: "file:///opt/ultrafuzz/packages/artifacts/dist/index.js",
-    ULTRAFUZZ_RUNTIME_MODULE: "file:///opt/ultrafuzz/packages/runtime/dist/index.js"
-  };
+  const canonicalSnapshotRoot = anchoredProjectPath(projectRoot, input.execution_snapshot_root);
+  const canonicalWorkflowPath = anchoredProjectPath(projectRoot, input.workflow_path);
+  const workflowRelativePath = path.relative(canonicalSnapshotRoot, canonicalWorkflowPath).split(path.sep).join("/");
+  const openedSnapshotRoot = openWorkerSnapshotRoot(canonicalSnapshotRoot);
   try {
-    await runChecked(
-      "resume-workflow",
-      smithers,
-      workflowCommandArguments(workflowPath, projectRoot, localRunId, input, true),
-      projectRoot,
-      environment
+    const snapshotAccessRoot = workerProcessDirectoryDescriptorPath(
+      openedSnapshotRoot.descriptor,
+      openedSnapshotRoot.opened
     );
-  } catch (error) {
-    if (!isMissingWorkflowRun(error)) throw error;
-    await runChecked(
-      "run-workflow",
-      smithers,
-      workflowCommandArguments(workflowPath, projectRoot, localRunId, input, false),
-      projectRoot,
-      environment
-    );
+    verifyOpenedExecutionSnapshot(openedSnapshotRoot, snapshotAccessRoot, projectRoot, input);
+    const smithers = sealedSmithersExecutable(snapshotAccessRoot);
+    const workflowPath = regularSnapshotFile(snapshotAccessRoot, workflowRelativePath, "sealed cloud workflow");
+    const environment = {
+      ULTRAFUZZ_CLOUD_WORKER: "1",
+      ULTRAFUZZ_ARTIFACTS_MODULE: sealedSnapshotModuleUrl(snapshotAccessRoot, "artifacts"),
+      ULTRAFUZZ_RUNTIME_MODULE: sealedSnapshotModuleUrl(snapshotAccessRoot, "runtime"),
+      ULTRAFUZZ_CONFIG_PATH: regularSnapshotFile(snapshotAccessRoot, "controls/ultrafuzz.toml", "sealed cloud config"),
+      ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: workflowPath
+    };
+    try {
+      await runChecked(
+        "resume-workflow",
+        smithers,
+        workflowCommandArguments(workflowPath, projectRoot, localRunId, input, true),
+        projectRoot,
+        environment
+      );
+    } catch (error) {
+      if (!isMissingWorkflowRun(error)) throw error;
+      await runChecked(
+        "run-workflow",
+        smithers,
+        workflowCommandArguments(workflowPath, projectRoot, localRunId, input, false),
+        projectRoot,
+        environment
+      );
+    }
+    verifyOpenedExecutionSnapshot(openedSnapshotRoot, snapshotAccessRoot, projectRoot, input);
+  } finally {
+    fs.closeSync(openedSnapshotRoot.descriptor);
   }
+}
+
+function verifyOpenedExecutionSnapshot(
+  openedSnapshotRoot: OpenedWorkerSnapshotDirectory,
+  snapshotAccessRoot: string,
+  projectRoot: string,
+  input: ReturnType<typeof parseModalNodeWorkerInput>
+): void {
+  assertWorkerSnapshotRootCurrent(openedSnapshotRoot);
+  verifyModalExecutionSnapshotClosure(projectRoot, input, {
+    requireSealedPermissions: true,
+    snapshotAccessRoot
+  });
+  assertWorkerSnapshotRootCurrent(openedSnapshotRoot);
 }
 
 export function workflowCommandArguments(
   workflowPath: string,
   projectRoot: string,
   localRunId: string,
-  input: ReturnType<typeof parseModalNodeSandboxInput>,
+  input: ReturnType<typeof parseModalNodeWorkerInput>,
   resume: boolean
 ): string[] {
   return [
@@ -335,8 +709,11 @@ function isMissingWorkflowRun(error: unknown): boolean {
 export async function initializeDurableNodeWorkspace(
   dataRoot: string,
   archivePath: string,
-  requestedInput: ReturnType<typeof parseModalNodeSandboxInput>
+  requestedInput: ReturnType<typeof parseModalNodeWorkerInput>
 ): Promise<DurableNodeWorkspace> {
+  const descriptorFreeInput = { ...requestedInput } as Record<string, unknown>;
+  delete descriptorFreeInput.execution_snapshot_source_root;
+  requestedInput = parseModalNodeWorkerInput(descriptorFreeInput);
   const root = resolveDurableDataRoot(dataRoot);
   const projectRoot = path.join(root, DURABLE_WORKSPACE_DIRECTORY);
   const handoffDirectory = path.join(root, DURABLE_INPUT_DIRECTORY);
@@ -384,24 +761,30 @@ export async function initializeDurableNodeWorkspace(
   const hadDurableWorkspace = fs.existsSync(projectRoot);
   if (hadDurableWorkspace) {
     assertDurableDirectory(projectRoot, "durable workspace");
+    materializeExecutionSnapshotLinks(projectRoot, input);
   } else {
     const staging = path.join(root, `.workspace-publishing-${crypto.randomUUID()}`);
     fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
     try {
       await extractSafeTarArchive(handoffArchive, staging, { gzip: true, label: "cloud handoff" });
       assertSafeTree(staging);
+      materializeExecutionSnapshotLinks(staging, input);
       fs.renameSync(staging, projectRoot);
     } catch (error) {
       fs.rmSync(staging, { recursive: true, force: true });
       throw error;
     }
   }
+  verifyModalExecutionSnapshotClosure(projectRoot, input);
+  sealCloudExecutionSnapshot(projectRoot, input);
+  verifyModalExecutionSnapshotClosure(projectRoot, input, { requireSealedPermissions: true });
 
   const index = loadDurableCheckpointIndex(checkpointIndex, {
     storageLineage,
     logicalDispatchFingerprint,
     projectRoot,
     runRoot: input.run_root,
+    executionSnapshotRoot: input.execution_snapshot_root,
     handoffArchive,
     archiveSha256: projectArchiveSha256
   });
@@ -434,6 +817,7 @@ export async function initializeDurableNodeWorkspace(
         logical_dispatch_fingerprint: logicalDispatchFingerprint,
         workspace_path: projectRoot,
         run_root: input.run_root,
+        execution_snapshot_root: input.execution_snapshot_root,
         handoff_archive: handoffArchive,
         project_archive_sha256: projectArchiveSha256,
         ...(restoredFrom === undefined ? {} : { restored_from: restoredFrom }),
@@ -455,8 +839,8 @@ export async function initializeDurableNodeWorkspace(
 
 function validateFreshHandoff(
   archivePath: string,
-  input: ReturnType<typeof parseModalNodeSandboxInput>
-): ReturnType<typeof parseModalNodeSandboxInput> & { project_archive_sha256: string } {
+  input: ReturnType<typeof parseModalNodeWorkerInput>
+): ReturnType<typeof parseModalNodeWorkerInput> & { project_archive_sha256: string } {
   if (
     input.project_content_sha256 === undefined ||
     input.project_archive_sha256 === undefined ||
@@ -464,19 +848,19 @@ function validateFreshHandoff(
   ) {
     throw new Error("cloud handoff archive digest mismatch");
   }
-  return input as ReturnType<typeof parseModalNodeSandboxInput> & { project_archive_sha256: string };
+  return input as ReturnType<typeof parseModalNodeWorkerInput> & { project_archive_sha256: string };
 }
 
 function readDurableInput(
   durableRequest: string,
-  requestedInput: ReturnType<typeof parseModalNodeSandboxInput>
+  requestedInput: ReturnType<typeof parseModalNodeWorkerInput>
 ): {
-  input: ReturnType<typeof parseModalNodeSandboxInput> & { project_archive_sha256: string };
+  input: ReturnType<typeof parseModalNodeWorkerInput> & { project_archive_sha256: string };
   needsContentFingerprintMigration: boolean;
 } {
-  let persistedInput: ReturnType<typeof parseModalNodeSandboxInput>;
+  let persistedInput: ReturnType<typeof parseModalNodeWorkerInput>;
   try {
-    persistedInput = parseModalNodeSandboxInput(JSON.parse(fs.readFileSync(durableRequest, "utf8")) as unknown);
+    persistedInput = parseModalNodeWorkerInput(JSON.parse(fs.readFileSync(durableRequest, "utf8")) as unknown);
   } catch (error) {
     throw new Error("durable cloud handoff request is unavailable", { cause: error });
   }
@@ -493,7 +877,7 @@ function readDurableInput(
     throw new Error("durable workspace request does not match this cloud node attempt");
   }
   return {
-    input: persistedInput as ReturnType<typeof parseModalNodeSandboxInput> & { project_archive_sha256: string },
+    input: persistedInput as ReturnType<typeof parseModalNodeWorkerInput> & { project_archive_sha256: string },
     needsContentFingerprintMigration
   };
 }
@@ -581,17 +965,17 @@ function readRestoreMarker(markerPath: string, allowedParent: string): string | 
 function restorePriorAttemptOutputs(
   currentRoot: string,
   projectRoot: string,
-  input: ReturnType<typeof parseModalNodeSandboxInput>
+  input: ReturnType<typeof parseModalNodeWorkerInput>
 ): string | undefined {
   const parent = path.dirname(currentRoot);
-  const candidates: Array<{ root: string; mtimeMs: number; input: ReturnType<typeof parseModalNodeSandboxInput> }> = [];
+  const candidates: Array<{ root: string; mtimeMs: number; input: ReturnType<typeof parseModalNodeWorkerInput> }> = [];
   for (const entry of fs.readdirSync(parent, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
     const candidateRoot = path.join(parent, entry.name);
     if (candidateRoot === currentRoot) continue;
     const requestPath = path.join(candidateRoot, DURABLE_INPUT_DIRECTORY, "request.json");
     try {
-      const persisted = parseModalNodeSandboxInput(JSON.parse(fs.readFileSync(requestPath, "utf8")) as unknown);
+      const persisted = parseModalNodeWorkerInput(JSON.parse(fs.readFileSync(requestPath, "utf8")) as unknown);
       if (
         persisted.project_archive_sha256 !== undefined &&
         persisted.execution_generation !== input.execution_generation &&
@@ -661,7 +1045,7 @@ function priorAttemptRecordedLogicalDispatch(
   }
 }
 
-function priorAttemptHasEvidence(candidateRoot: string, input: ReturnType<typeof parseModalNodeSandboxInput>): boolean {
+function priorAttemptHasEvidence(candidateRoot: string, input: ReturnType<typeof parseModalNodeWorkerInput>): boolean {
   const projectRoot = path.join(candidateRoot, DURABLE_WORKSPACE_DIRECTORY);
   const candidates: string[] = [];
   for (const relative of [
@@ -705,6 +1089,7 @@ function loadDurableCheckpointIndex(
     logicalDispatchFingerprint: string;
     projectRoot: string;
     runRoot: string;
+    executionSnapshotRoot: string;
     handoffArchive: string;
     archiveSha256: string;
   }
@@ -716,6 +1101,7 @@ function loadDurableCheckpointIndex(
       logical_dispatch_fingerprint: identity.logicalDispatchFingerprint,
       workspace_path: identity.projectRoot,
       run_root: identity.runRoot,
+      execution_snapshot_root: identity.executionSnapshotRoot,
       handoff_archive: identity.handoffArchive,
       project_archive_sha256: identity.archiveSha256,
       checkpoints: []
@@ -733,6 +1119,7 @@ function loadDurableCheckpointIndex(
       parsed.logical_dispatch_fingerprint !== identity.logicalDispatchFingerprint) ||
     parsed.workspace_path !== identity.projectRoot ||
     parsed.run_root !== identity.runRoot ||
+    parsed.execution_snapshot_root !== identity.executionSnapshotRoot ||
     parsed.handoff_archive !== identity.handoffArchive ||
     parsed.project_archive_sha256 !== identity.archiveSha256 ||
     !Array.isArray(parsed.checkpoints)

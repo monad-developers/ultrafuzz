@@ -13,6 +13,7 @@ import {
   createRunLayout,
   getNodeArtifactDir,
   layoutForRunRoot,
+  publishFileDurableExclusive,
   safeResolveInside,
   sha256Bytes,
   validateReferenceExpectationsSchema,
@@ -351,6 +352,102 @@ export async function repairMissingRenderedPromptsForRun(input: {
   }
 }
 
+/**
+ * Restores presentation copies of missing rendered prompts from the already
+ * authenticated execution generation. Existing mutable artifact copies are
+ * deliberately ignored: Smithers consumes the retained snapshot, so they are
+ * neither an execution input nor allowed to veto lifecycle recovery.
+ */
+export async function repairMissingRenderedPromptsFromExecutionSnapshot(input: {
+  projectRoot: string;
+  runId: string;
+  runRoot: string;
+  executionFiles: readonly { snapshotPath: string; contents: Buffer }[];
+}): Promise<number> {
+  const projectRoot = path.resolve(input.projectRoot);
+  const layout = layoutForRunRoot(path.resolve(input.runRoot), input.runId);
+  const rootStat = fs.lstatSync(layout.root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error("cannot repair rendered prompts from an unsafe run root");
+  }
+  const release = await lockfile.lock(layout.root, {
+    lockfilePath: path.join(layout.root, PROMPT_REPAIR_LOCK),
+    realpath: false,
+    stale: 300_000,
+    update: 60_000,
+    retries: {
+      retries: 120,
+      factor: 1,
+      minTimeout: 250,
+      maxTimeout: 1_000
+    }
+  });
+  try {
+    const sealedPlan = input.executionFiles.find((file) => file.snapshotPath === "controls/plan.json");
+    if (sealedPlan === undefined) throw new Error("sealed execution snapshot is missing its run plan");
+    const plan = parsePersistedPromptPlan(sealedPlan.contents.toString("utf8"));
+    if (plan.run_id !== input.runId) {
+      throw new Error("cannot repair rendered prompts from incompatible sealed run metadata");
+    }
+    const promptsBySnapshotPath = new Map(input.executionFiles.map((file) => [file.snapshotPath, file.contents]));
+    const attempts = new Set<string>();
+    const repairs: Array<{ attemptId: string; promptPath: string; contents: string; digest: string }> = [];
+    for (const expected of plan.rendered_prompts) {
+      if (attempts.has(expected.attempt_id)) throw new Error("sealed run plan contains duplicate prompt attempts");
+      attempts.add(expected.attempt_id);
+      const promptPath = path.join(getNodeArtifactDir(layout, expected.attempt_id), RENDERED_PROMPT_FILE);
+      const projectRelativePromptPath = path.relative(projectRoot, promptPath);
+      const persistedPromptPath = path.normalize(expected.rendered_prompt_path);
+      if (
+        path.isAbsolute(projectRelativePromptPath) ||
+        projectRelativePromptPath.startsWith(`..${path.sep}`) ||
+        (persistedPromptPath !== projectRelativePromptPath &&
+          !persistedPromptPath.endsWith(`${path.sep}${projectRelativePromptPath}`))
+      ) {
+        throw new Error(`persisted rendered prompt path is incompatible for ${expected.attempt_id}`);
+      }
+      if (expected.rendered_prompt_digest === undefined) {
+        throw new Error(`sealed rendered prompt lacks a digest for ${expected.attempt_id}`);
+      }
+      if (fs.existsSync(promptPath)) continue;
+      assertNoSymlinkComponents(layout.root, promptPath, `rendered prompt for ${expected.attempt_id}`);
+      const sealedPrompt = promptsBySnapshotPath.get(`controls/rendered-prompts/${expected.attempt_id}.md`);
+      if (sealedPrompt === undefined) {
+        throw new Error(`sealed execution snapshot is missing the rendered prompt for ${expected.attempt_id}`);
+      }
+      const contents = sealedPrompt.toString("utf8");
+      if (sha256Stable(contents) !== expected.rendered_prompt_digest) {
+        throw new Error(`sealed rendered prompt does not match persisted task metadata for ${expected.attempt_id}`);
+      }
+      repairs.push({
+        attemptId: expected.attempt_id,
+        promptPath,
+        contents,
+        digest: expected.rendered_prompt_digest
+      });
+    }
+
+    let repaired = 0;
+    for (const repair of repairs) {
+      if (fs.existsSync(repair.promptPath)) continue;
+      const relativePromptPath = path.relative(layout.root, repair.promptPath).split(path.sep).join("/");
+      const publication = publishFileDurableExclusive(layout.root, relativePromptPath, repair.contents);
+      validateRenderedPromptFile(layout, repair.promptPath, repair.digest, repair.attemptId);
+      if (publication.created) repaired += 1;
+    }
+    if (repaired > 0) {
+      appendEvent(layout, {
+        eventType: "rendered-prompts-repaired",
+        status: "succeeded",
+        payload: { count: repaired, source: "sealed-execution-snapshot" }
+      });
+    }
+    return repaired;
+  } finally {
+    await release();
+  }
+}
+
 function repairRenderedPromptsForRun(input: { projectRoot: string; runId: string; layout: RunLayout }): number {
   const { projectRoot, layout } = input;
   readPersistedPlannedGraph(layout.graphPath);
@@ -443,7 +540,15 @@ function readPersistedPromptPlan(planPath: string): {
   config_fingerprint: string;
   rendered_prompts: PersistedPromptPlanEntry[];
 } {
-  const value = JSON.parse(fs.readFileSync(planPath, "utf8")) as Record<string, unknown>;
+  return parsePersistedPromptPlan(fs.readFileSync(planPath, "utf8"));
+}
+
+function parsePersistedPromptPlan(contents: string): {
+  run_id: string;
+  config_fingerprint: string;
+  rendered_prompts: PersistedPromptPlanEntry[];
+} {
+  const value = JSON.parse(contents) as Record<string, unknown>;
   if (
     typeof value.run_id !== "string" ||
     typeof value.config_fingerprint !== "string" ||

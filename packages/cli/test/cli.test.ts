@@ -86,7 +86,12 @@ nodes:
   );
 }
 
-async function cli(project: string, argv: string[], env: Record<string, string | undefined> = {}): Promise<Capture> {
+async function cli(
+  project: string,
+  argv: string[],
+  env: Record<string, string | undefined> = {},
+  onStdout?: (stdout: string) => void
+): Promise<Capture> {
   let stdout = "";
   let stderr = "";
   const code = await runCli([...argv, "--project", project], {
@@ -95,6 +100,7 @@ async function cli(project: string, argv: string[], env: Record<string, string |
     stdout: {
       write: (chunk: string | Uint8Array) => {
         stdout += String(chunk);
+        onStdout?.(stdout);
         return true;
       }
     },
@@ -285,6 +291,23 @@ test("init and validate emit schema-versioned launch JSON", async () => {
   assert.match(tampered.stdout + tampered.stderr, /absent\.database/u);
 });
 
+test("plain init surfaces a customized stale agent adapter diagnostic", async () => {
+  const project = tempProject();
+  const initial = await cli(project, ["init", "--force"]);
+  assert.equal(initial.code, 0, initial.stderr);
+
+  const adapterPath = path.join(project, ".smithers", "agents", "codex.ts");
+  const customAdapter = 'export const customConfigPath = "ultrafuzz.toml";\n';
+  fs.writeFileSync(adapterPath, customAdapter, "utf8");
+
+  const result = await cli(project, ["init"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.match(result.stdout, /warning: INIT_AGENT_ADAPTER_UPDATE_REQUIRED:/u);
+  assert.match(result.stdout, /ULTRAFUZZ_CONFIG_PATH/u);
+  assert.equal(fs.readFileSync(adapterPath, "utf8"), customAdapter);
+});
+
 test("run exposes the trusted reference expectation catalog option", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
@@ -355,12 +378,14 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assertNoSmithersSurface(inspectBody);
   const inspectData = inspectBody.data as {
     metadata: { workflow: { run_id: string } };
+    state: { provenance?: { workflow?: Record<string, unknown> } };
     workflow: { run_id: string; inspect: { ok: boolean }; events: { ok: boolean } };
   };
   assert.equal(inspectData.metadata.workflow.run_id, "ultrafuzz-cli-run");
   assert.equal(inspectData.workflow.run_id, "ultrafuzz-cli-run");
   assert.equal(inspectData.workflow.inspect.ok, true);
   assert.equal(inspectData.workflow.events.ok, true);
+  assert.equal(Object.hasOwn(inspectData.state.provenance?.workflow ?? {}, "executionSnapshot"), false);
 
   const status = await cli(project, ["status", runData.run_id, "--window", "5", "--json"], env);
   assert.equal(status.code, 0, status.stderr);
@@ -441,8 +466,38 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   };
   fs.writeFileSync(statePath, `${JSON.stringify(restored, null, 2)}\n`, "utf8");
 
-  const watching = cli(project, ["status", runData.run_id, "--watch", "--interval", "1", "--json"], env);
-  await new Promise((resolve) => setTimeout(resolve, 400));
+  let resolveFirstStatusLine!: () => void;
+  let rejectFirstStatusLine!: (error: Error) => void;
+  let sawFirstStatusLine = false;
+  const firstStatusLine = new Promise<void>((resolve, reject) => {
+    resolveFirstStatusLine = resolve;
+    rejectFirstStatusLine = reject;
+  });
+  const firstStatusTimeout = setTimeout(
+    () => rejectFirstStatusLine(new Error("status watch did not emit its initial sample")),
+    15_000
+  );
+  const watching = cli(project, ["status", runData.run_id, "--watch", "--interval", "1", "--json"], env, (stdout) => {
+    if (!sawFirstStatusLine && stdout.includes("\n")) {
+      sawFirstStatusLine = true;
+      resolveFirstStatusLine();
+    }
+  });
+  try {
+    await Promise.race([
+      firstStatusLine,
+      watching.then(() => {
+        throw new Error("status watch completed before emitting its initial sample");
+      })
+    ]);
+  } catch (error) {
+    const terminalState = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(statePath, `${JSON.stringify({ ...terminalState, status: "succeeded" }, null, 2)}\n`, "utf8");
+    await watching;
+    throw error;
+  } finally {
+    clearTimeout(firstStatusTimeout);
+  }
   const terminalState = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
   fs.writeFileSync(statePath, `${JSON.stringify({ ...terminalState, status: "succeeded" }, null, 2)}\n`, "utf8");
   const watched = await watching;
@@ -629,8 +684,8 @@ test("status --watch --json keeps a failing poll on one NDJSON line", async () =
   const run = await cli(project, ["run", "--run-id", "watch-failure-run", "--json"], env);
   assert.equal(run.code, 0, run.stderr);
   const runRoot = (parseJson(run).data as { run_root: string }).run_root;
-  // A corrupt state.json makes the poll throw rather than return a failure
-  // result; the stream must stay newline-delimited for `jq` consumers.
+  // A corrupt state.json now fails closed while verifying sealed control
+  // evidence; the typed failure must stay newline-delimited for `jq` consumers.
   fs.writeFileSync(path.join(runRoot, "state.json"), "{ not json", "utf8");
 
   const watched = await cli(project, ["status", "watch-failure-run", "--watch", "--json"], env);
@@ -641,7 +696,7 @@ test("status --watch --json keeps a failing poll on one NDJSON line", async () =
   const body = JSON.parse(lines[0]!) as Record<string, unknown>;
   assert.equal(body.ok, false);
   assert.equal(body.command, "status");
-  assert.equal((body.diagnostics as Array<{ code: string }>)[0]?.code, "RUN_STATUS_FAILED");
+  assert.equal((body.diagnostics as Array<{ code: string }>)[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
 });
 
 test("old commands and backend flags are rejected instead of aliased or shimmed", async () => {

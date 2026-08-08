@@ -20,4 +20,5 @@ export * from "./validate.js";
 export * from "./vulnerability-database.js";
 export * from "./workflow-sync.js";
 export * from "./workflow-control.js";
+export * from "./workflow-integrity.js";
 export * from "./workspace-handoff.js";
