@@ -25,8 +25,9 @@ Per-node findings are normalized arrays in `findings.json` files:
 .ultrafuzz/runs/<run-id>/artifacts/<node-id>/findings.json
 ```
 
-Each finding should include fields such as `schema_version`, `id`, `title`,
-`status`, `severity_guess`, `confidence`, and `summary`. Status values include
+Each finding should include fields such as `id`, `title`, `status`,
+`severity_guess`, `confidence`, and `summary`. `schema_version` is optional;
+when present it must be `"1.0"` or the alias `"ultrafuzz.finding.v1"`. Status values include
 `candidate`, `needs-review`, `duplicate`, `false-positive`, `confirmed`,
 `fixed`, and `wont-fix`; agent-produced lifecycle statuses may also appear.
 Evidence may be recorded as non-empty string references or as metadata objects

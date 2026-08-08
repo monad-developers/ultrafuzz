@@ -3,7 +3,7 @@
   "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/finding",
   "title": "Ultrafuzz normalized finding",
   "type": "object",
-  "required": ["schema_version", "id", "title", "status", "severity_guess", "confidence", "summary"],
+  "required": ["id", "title", "status", "severity_guess", "confidence", "summary"],
   "additionalProperties": true,
   "properties": {
     "schema_version": {

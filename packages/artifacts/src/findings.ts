@@ -66,7 +66,9 @@ export class FindingsValidationError extends Error {
 }
 
 export type NormalizedFinding = Record<string, unknown> & {
-  schema_version: string;
+  // normalizeFinding always writes this, but the finding schema validates producer output too, where
+  // the field is optional. Nothing reads it, so the honest type is optional.
+  schema_version?: string;
   id: string;
   title: string;
   status: string;
