@@ -4,7 +4,13 @@ import fs from "node:fs";
 import { z } from "zod/v4";
 
 import { type RunLayout } from "./run-layout.js";
-import { SAFE_ID_PATTERN, appendLineDurable, assertRegularFileInside, validateSafeId } from "./safe-paths.js";
+import {
+  NODE_REFERENCE_PATTERN,
+  SAFE_ID_PATTERN,
+  appendLineDurable,
+  assertRegularFileInside,
+  validateSafeId
+} from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 export const USAGE_LEDGER_SCHEMA_VERSION = "1.0" as const;
@@ -48,6 +54,18 @@ export interface UsageLedgerEntry {
   workflow_run_id: string;
   source_event_id: string;
   attempt_id: string;
+  /**
+   * The identity `state.json` keys this entry's node under, when the writer could resolve one.
+   *
+   * `attempt_id` cannot serve as this join key: it is `sha256(workflow run, node, iteration,
+   * attempt)`, so it names an attempt and nothing outside this file can reconstruct it without
+   * copying the hash rule. Readers that need per-node or per-lane cost join on `node_id`.
+   *
+   * Optional on purpose. `usage.jsonl` is durable and append-only: every ledger written before this
+   * field existed has no `node_id`, and those entries must still parse. A reader that finds it
+   * absent has an unjoinable entry, which is evidence to report, not a value to invent.
+   */
+  node_id?: string;
   checkpoint_generation_id: string;
   observed_at: string;
   usage: NormalizedUsage;
@@ -60,7 +78,14 @@ export interface AppendUsageEventInput {
   sourceEventId: string;
   checkpointGenerationId: string;
   observedAt: string;
+  /** Attempt identity only: this feeds `attempt_id`'s digest and is never written out verbatim. */
   nodeId?: string;
+  /**
+   * The node identity `state.json` keys this node under, recorded as `node_id`. Callers resolve it
+   * from their own task table; the workflow task ID that carries usage (`node:<attempt>`) is not
+   * that identity, so the ledger cannot derive it here.
+   */
+  stateNodeId?: string;
   iteration?: number;
   attempt?: number;
   usage: NormalizedUsage;
@@ -112,6 +137,7 @@ export const usageLedgerEntrySchema = z
     workflow_run_id: dimensionId,
     source_event_id: dimensionId,
     attempt_id: dimensionId,
+    node_id: z.string().regex(NODE_REFERENCE_PATTERN).optional(),
     checkpoint_generation_id: dimensionId,
     observed_at: z.string().datetime({ offset: true }),
     usage: normalizedUsageSchema,
@@ -189,6 +215,7 @@ export const usageLedgerJsonSchema = {
       maxLength: DIMENSION_ID_MAX_LENGTH,
       pattern: DIMENSION_ID_PATTERN.source
     },
+    node_id: { type: "string", pattern: NODE_REFERENCE_PATTERN.source },
     checkpoint_generation_id: {
       type: "string",
       minLength: 1,
@@ -289,6 +316,13 @@ export function createUsageLedgerEntry(
     workflow_run_id: workflowRunId,
     source_event_id: sourceEventId,
     attempt_id: attemptId,
+    // Recorded only when the caller resolved an identity the ledger can safely carry. A node ID
+    // that does not parse as a node reference is dropped rather than thrown on: usage accounting is
+    // observability, and an odd identifier must not abort the run that produced it. The reader then
+    // sees an entry with no join key, which it reports as unjoinable.
+    ...(input.stateNodeId !== undefined && NODE_REFERENCE_PATTERN.test(input.stateNodeId)
+      ? { node_id: input.stateNodeId }
+      : {}),
     checkpoint_generation_id: checkpointGenerationId,
     observed_at: input.observedAt,
     usage: input.usage,
@@ -314,7 +348,7 @@ export function appendUsageEvents(
     const entry = createUsageLedgerEntry(layout, input);
     const existing = byId.get(entry.event_id);
     if (existing !== undefined) {
-      if (JSON.stringify(existing) !== JSON.stringify(entry)) {
+      if (!sameImmutableUsageData(existing, entry)) {
         throw new Error(`usage event ${entry.event_id} was already recorded with different immutable data`);
       }
       entries.push(existing);
@@ -380,6 +414,22 @@ export function replayUsageEvents(
     }
   }
   return { entries, malformedEntries, duplicateEntries };
+}
+
+/**
+ * Whether a re-observed usage event agrees with the entry already on disk.
+ *
+ * Byte equality everywhere except one case: an entry recorded before `node_id` existed carries none,
+ * and the same event re-observed by a newer writer now carries one. That is an addition to a record
+ * whose immutable data is unchanged, not a contradiction, so a run resumed across the upgrade must
+ * not fail its own replay. A `node_id` that *disagrees* with a recorded one still fails.
+ */
+function sameImmutableUsageData(existing: UsageLedgerEntry, candidate: UsageLedgerEntry): boolean {
+  if (existing.node_id === undefined && candidate.node_id !== undefined) {
+    const { node_id: _added, ...withoutNodeId } = candidate;
+    return JSON.stringify(existing) === JSON.stringify(withoutNodeId);
+  }
+  return JSON.stringify(existing) === JSON.stringify(candidate);
 }
 
 export function stableUsageDimension(prefix: string, parts: readonly unknown[]): string {

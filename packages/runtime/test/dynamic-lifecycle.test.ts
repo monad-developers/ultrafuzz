@@ -323,6 +323,13 @@ function readState(fixture: DynamicFixture): RunState {
   return JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "state.json"), "utf8")) as RunState;
 }
 
+function readUsageLedger(fixture: DynamicFixture): Array<{ attempt_id?: string; node_id?: string }> {
+  const ledgerPath = path.join(fixture.runRoot, "usage.jsonl");
+  if (!fs.existsSync(ledgerPath)) return [];
+  const text = fs.readFileSync(ledgerPath, "utf8").trim();
+  return text === "" ? [] : text.split("\n").map((line) => JSON.parse(line) as { attempt_id?: string });
+}
+
 function readLedger(fixture: DynamicFixture): Array<Record<string, unknown>> {
   const ledgerPath = path.join(fixture.runRoot, "attempts.jsonl");
   if (!fs.existsSync(ledgerPath)) return [];
@@ -377,6 +384,25 @@ test("dynamic child success is resumable, idempotent, provenance-safe, and opens
   const state = readState(fixture);
   assert.equal(state.nodes[fixture.storageId!]?.status, "succeeded");
   assert.equal(state.nodes[fixture.storageId!]?.provenance?.producer_node_id, fixture.generatedNodeId);
+  // `source_node_id` is the one key both sides must agree on (#364): it is the term #183 uses and
+  // exactly what the eval reader looks for on a dynamic node's provenance. The nested camelCase
+  // record stays alongside it for the expansion key, item digest and manifest path.
+  assert.equal(state.nodes[fixture.storageId!]?.provenance?.source_node_id, "planner");
+  assert.equal(
+    (state.nodes[fixture.storageId!]?.provenance?.dynamic as { sourceNodeId?: string } | undefined)?.sourceNodeId,
+    "planner"
+  );
+  // A static node was never expanded from anything, so it must not claim a source.
+  assert.equal(state.nodes.planner?.provenance?.source_node_id, undefined);
+
+  // Per-lane cost is a join from the usage ledger onto `state.json`, so the ledger this real sync
+  // wrote must carry the identity `state.json` is keyed by. `attempt_id` cannot serve: it is a
+  // digest, and the usage event names the workflow task (`node:<attempt>`), not the state node.
+  const usageLedger = readUsageLedger(fixture);
+  assert.equal(usageLedger.length, 1);
+  assert.match(usageLedger[0]?.attempt_id ?? "", /^usage-attempt-[0-9a-f]{32}$/u);
+  assert.equal(usageLedger[0]?.node_id, fixture.storageId);
+  assert.ok(state.nodes[usageLedger[0]?.node_id ?? ""] !== undefined);
   assert.equal(state.nodes.fanout?.status, "succeeded");
   assert.equal(state.nodes["strict-join"]?.wait_reason, "ready");
   assert.match(fs.readFileSync(generated.renderedPromptPath!, "utf8"), /persisted liquidation threat model/u);

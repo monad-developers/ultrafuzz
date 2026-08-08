@@ -10,6 +10,7 @@ import {
   GOAL_PLAN_SCHEMA_VERSION,
   THREAT_MODEL_SCHEMA_VERSION,
   buildFindingSourceExpectations,
+  goalPlanExpansionFacts,
   materializeCanonicalThreatModelMarkdown,
   renderThreatModelMarkdown,
   normalizeFindings,
@@ -24,6 +25,28 @@ import {
 import { isNamespacedDynamicReplacementKey, promptTemplateOccurrences } from "@ultrafuzz/prompts";
 
 const digest = "a".repeat(64);
+
+/** The limit these fixtures plan under; large enough that no fixture is near it. */
+const FIXTURE_MAX_DYNAMIC_NODES = 2048;
+
+/**
+ * Fill in the planner-recorded expansion facts for a fixture whose goals have just changed.
+ *
+ * Fixtures exercise other properties of the contract, so they record the facts the same way the
+ * planner does rather than restating them by hand. The dedicated cardinality tests below assert the
+ * literal values instead, so this convenience never stands in for the assertion.
+ */
+function sealGoalPlanCardinality(plan: Record<string, unknown>): Record<string, unknown> {
+  return Object.assign(
+    plan,
+    goalPlanExpansionFacts({
+      threat_goals: plan.threat_goals as Array<{ id: string; node_id: string }>,
+      class_goals: plan.class_goals as Array<{ id: string; node_id: string }>,
+      roaming_goal: plan.roaming_goal as { node_id: string },
+      max_dynamic_nodes: FIXTURE_MAX_DYNAMIC_NODES
+    })
+  );
+}
 
 function threatModelFixture(): Record<string, unknown> {
   const evidence = [{ path: "src/Pool.sol", line: 10, symbol: "liquidate" }];
@@ -171,7 +194,7 @@ function goalPlanFixture(threatCount = 1): Record<string, unknown> {
     },
     selection_rationale: "The additive policy runs every modeled threat."
   }));
-  return {
+  return sealGoalPlanCardinality({
     schema_version: GOAL_PLAN_SCHEMA_VERSION,
     policy: GOAL_PLAN_POLICY,
     threat_model_sha256: digest,
@@ -200,7 +223,7 @@ function goalPlanFixture(threatCount = 1): Record<string, unknown> {
       dynamic_goals: threatCount,
       total_goals: threatCount + 1
     }
-  };
+  });
 }
 
 test("threat model validates evidence-backed capability states and renders canonical Markdown", () => {
@@ -302,6 +325,7 @@ test("goal-plan applicability evidence uses the strict repository-path contract"
     dynamic_goals: 1,
     total_goals: 2
   };
+  sealGoalPlanCardinality(plan);
   assert.equal(validateGoalPlan(plan).ok, true);
 
   for (const invalidPath of [
@@ -349,6 +373,84 @@ test("additive goal plans preserve all 100 threats plus the fixed roaming goal",
   assert.equal(validateArtifactContract("ultrafuzz/goal-plan@1", JSON.stringify(plan)).ok, true);
 });
 
+test("goal plans record their own expected dynamic-child cardinality and name every goal lane", () => {
+  // #364: the planner writes the expectation down so the eval side can compare against the run
+  // without recomputing the rule. The rule is `threats + applicable classes`; the fixed roaming node
+  // is a static topology node, so it is a named lane but never a dynamic child.
+  const plan = goalPlanFixture(3);
+  const result = validateGoalPlan(plan);
+  assert.equal(result.ok, true, JSON.stringify(result.issues));
+  assert.equal(result.value?.threat_count, 3);
+  assert.equal(result.value?.applicable_class_count, 0);
+  assert.equal(result.value?.expected_child_count, 3);
+  assert.equal(result.value?.max_dynamic_nodes, FIXTURE_MAX_DYNAMIC_NODES);
+  assert.deepEqual(
+    result.value?.goal_lanes.map((lane) => [lane.kind, lane.lane_id, ...lane.node_ids]),
+    [
+      ["threat", "liquidation:overdue", "dynamic:threat:liquidation:overdue"],
+      ["threat", "surface:threat-001", "dynamic:threat:surface:threat-001"],
+      ["threat", "surface:threat-002", "dynamic:threat:surface:threat-002"],
+      ["roaming", "goal-roaming", "goal-roaming"]
+    ]
+  );
+
+  for (const field of [
+    "expected_child_count",
+    "threat_count",
+    "applicable_class_count",
+    "max_dynamic_nodes"
+  ] as const) {
+    const missing = structuredClone(plan);
+    delete missing[field];
+    assert.equal(validateGoalPlan(missing).ok, false, `${field} must be required`);
+  }
+  const missingLanes = structuredClone(plan);
+  delete missingLanes.goal_lanes;
+  assert.equal(validateGoalPlan(missingLanes).ok, false, "goal_lanes must be required");
+
+  // A number that disagrees with the plan it sits in is rejected here, so the eval side can trust
+  // that a mismatch it reports is between the planner and the runtime, not inside the plan.
+  const understated = structuredClone(plan);
+  understated.expected_child_count = 2;
+  const understatedResult = validateGoalPlan(understated);
+  assert.equal(understatedResult.ok, false);
+  assert.ok(understatedResult.issues.some((issue) => /expected_child_count must equal 3/u.test(issue.message)));
+
+  const wrongThreatCount = structuredClone(plan);
+  wrongThreatCount.threat_count = 2;
+  assert.equal(validateGoalPlan(wrongThreatCount).ok, false);
+
+  // A plan that expects more children than the run is configured to create can only abort the
+  // expansion, so it fails as a plan rather than at expansion time.
+  const oversized = structuredClone(plan);
+  oversized.max_dynamic_nodes = 2;
+  const oversizedResult = validateGoalPlan(oversized);
+  assert.equal(oversizedResult.ok, false);
+  assert.ok(oversizedResult.issues.some((issue) => /exceeding max_dynamic_nodes=2/u.test(issue.message)));
+
+  const droppedLane = structuredClone(plan);
+  (droppedLane.goal_lanes as unknown[]).pop();
+  assert.equal(validateGoalPlan(droppedLane).ok, false, "a lane must exist for every goal");
+
+  const renamedLane = structuredClone(plan);
+  (renamedLane.goal_lanes as Array<Record<string, unknown>>)[0]!.node_ids = ["dynamic:threat:not-the-goal"];
+  assert.equal(validateGoalPlan(renamedLane).ok, false, "a lane must own the node ID its goal declares");
+});
+
+test("goal-plan lanes cover applicable class goals alongside their threat goals", () => {
+  const plan = classGoalPlanFixture("vulnerability-db/selected/accounting/share-inflation.md");
+  const result = validateGoalPlan(plan);
+  assert.equal(result.ok, true, JSON.stringify(result.issues));
+  assert.equal(result.value?.threat_count, 1);
+  assert.equal(result.value?.applicable_class_count, 1);
+  assert.equal(result.value?.expected_child_count, 2);
+  assert.deepEqual(
+    result.value?.goal_lanes.map((lane) => lane.kind),
+    ["threat", "class", "roaming"]
+  );
+  assert.deepEqual(result.value?.goal_lanes[1]?.node_ids, ["dynamic:class:accounting:share-inflation"]);
+});
+
 test("goal plans bind to the exact upstream threat-model JSON bytes", () => {
   const threatModelBytes = Buffer.from(`${JSON.stringify(threatModelFixture(), null, 2)}\n`, "utf8");
   const plan = goalPlanFixture();
@@ -385,6 +487,7 @@ test("goal plans decide every planner-catalog class exactly once", () => {
     dynamic_goals: 1,
     total_goals: 2
   };
+  sealGoalPlanCardinality(plan);
   assert.equal(validateGoalPlan(plan).ok, true);
 
   const missing = structuredClone(plan);
@@ -455,6 +558,7 @@ test("goal plans retain exact item-scoped MDX replacements for threat and class 
     dynamic_goals: 2,
     total_goals: 3
   };
+  sealGoalPlanCardinality(plan);
 
   const result = validateGoalPlan(plan);
   assert.equal(result.ok, true, JSON.stringify(result.issues));
@@ -535,6 +639,7 @@ test("goal-plan dynamic provenance IDs retain valid dotted threat and class segm
     dynamic_goals: 2,
     total_goals: 3
   };
+  sealGoalPlanCardinality(plan);
 
   const result = validateGoalPlan(plan);
   assert.equal(result.ok, true, JSON.stringify(result.issues));
@@ -610,6 +715,7 @@ test("an applicable class remains planned when no explicit threat maps to it", (
     dynamic_goals: 2,
     total_goals: 3
   };
+  sealGoalPlanCardinality(plan);
 
   const result = validateGoalPlan(plan);
   assert.equal(result.ok, true, JSON.stringify(result.issues));
@@ -897,6 +1003,7 @@ test("selected vulnerability-class snapshots are manifest-backed exact artifacts
     dynamic_goals: 2,
     total_goals: 3
   };
+  sealGoalPlanCardinality(plan);
 
   const snapshots = verifyGoalPlanSelectedRecordSnapshots(artifactDir, plan);
   assert.deepEqual(
@@ -1072,6 +1179,7 @@ function classGoalPlanFixture(selectedPath: string): Record<string, unknown> {
     dynamic_goals: 2,
     total_goals: 3
   };
+  sealGoalPlanCardinality(plan);
   return plan;
 }
 

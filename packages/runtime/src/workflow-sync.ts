@@ -85,6 +85,17 @@ import {
 import { runsRootForProject } from "./validate.js";
 import { projectWorkflowControlState } from "./workflow-control.js";
 
+/** Runtime lineage a dynamic child carries from its expansion manifest. */
+interface StoredWorkflowTaskDynamicLineage {
+  groupNodeId?: string;
+  sourceNodeId?: string;
+  sourceAttemptId?: string;
+  sourceDigest?: string;
+  expansionKey?: string;
+  itemDigest?: string;
+  manifestPath?: string;
+}
+
 interface StoredWorkflowTask {
   attemptId: string;
   concreteNodeId: string;
@@ -100,15 +111,7 @@ interface StoredWorkflowTask {
       logicalNodeId?: string;
       producerNodeId?: string;
       storageId?: string;
-      dynamic?: {
-        groupNodeId?: string;
-        sourceNodeId?: string;
-        sourceAttemptId?: string;
-        sourceDigest?: string;
-        expansionKey?: string;
-        itemDigest?: string;
-        manifestPath?: string;
-      };
+      dynamic?: StoredWorkflowTaskDynamicLineage;
     };
     loop?: {
       attemptIndex?: number;
@@ -499,6 +502,7 @@ export async function synchronizeLinkedWorkflowRun(
     layout,
     workflowRunId: evidence.smithersRunId,
     events: tokenEvents,
+    tasks: loaded.tasks,
     control,
     env: input.env ?? process.env
   });
@@ -702,6 +706,7 @@ async function synchronizeWorkflowAccounting(input: {
   layout: RunLayout;
   workflowRunId: string;
   events: WorkflowEvent[];
+  tasks: readonly StoredWorkflowTask[];
   env?: Record<string, string | undefined>;
   control: WorkflowSynchronizationControl;
 }): Promise<{
@@ -709,7 +714,7 @@ async function synchronizeWorkflowAccounting(input: {
   available: boolean;
   budgetDiagnostic?: RuntimeDiagnostic;
 }> {
-  const usageReplay = appendWorkflowUsageEvents(input.layout, input.workflowRunId, input.events);
+  const usageReplay = appendWorkflowUsageEvents(input.layout, input.workflowRunId, input.events, input.tasks);
   if (usageReplay.entries.length === 0 && usageReplay.malformedEntries === 0) {
     return { changed: false, available: false };
   }
@@ -942,19 +947,23 @@ function accountingFromWorkflowEvents(
 function appendWorkflowUsageEvents(
   layout: RunLayout,
   workflowRunId: string,
-  events: WorkflowEvent[]
+  events: WorkflowEvent[],
+  tasks: readonly StoredWorkflowTask[]
 ): UsageLedgerReplay {
   const replay = replayUsageEvents(layout);
   const usageEvents = events.filter((event) => event.type === "TokenUsageReported");
   if (usageEvents.length === 0) {
     return replay;
   }
+  const stateNodeIdByWorkflowTask = stateNodeIdsByWorkflowTaskId(tasks);
   const existingGenerationBySourceEvent = new Map(
     replay.entries
       .filter((entry) => entry.workflow_run_id === workflowRunId)
       .map((entry) => [entry.source_event_id, entry.checkpoint_generation_id])
   );
-  const candidates = usageEvents.map((event) => normalizedUsageLedgerInput(workflowRunId, event));
+  const candidates = usageEvents.map((event) =>
+    normalizedUsageLedgerInput(workflowRunId, event, stateNodeIdByWorkflowTask)
+  );
   const firstUnseenImplicitCandidate = candidates.find(
     (candidate) =>
       candidate.checkpointGenerationId === undefined && !existingGenerationBySourceEvent.has(candidate.sourceEventId)
@@ -976,9 +985,33 @@ function appendWorkflowUsageEvents(
   ).replay;
 }
 
+/**
+ * Workflow task ID to the identity `state.json` keys that task's node under.
+ *
+ * A usage event names the workflow task that spent the tokens (`node:<attempt>`, and its
+ * `verify:`/`prepare:` wrappers), which is not the identity the run state is keyed by. Only the task
+ * table knows the mapping, so the ledger's `node_id` is resolved here rather than by any reader
+ * re-deriving the naming rule.
+ */
+function stateNodeIdsByWorkflowTaskId(tasks: readonly StoredWorkflowTask[]): Map<string, string> {
+  const byTaskId = new Map<string, string>();
+  for (const task of tasks) {
+    for (const taskId of [
+      task.smithersNodeId,
+      task.verifierSmithersNodeId,
+      preparationSmithersNodeIdForAttempt(task.attemptId),
+      task.attemptId
+    ]) {
+      if (!byTaskId.has(taskId)) byTaskId.set(taskId, task.attemptId);
+    }
+  }
+  return byTaskId;
+}
+
 function normalizedUsageLedgerInput(
   workflowRunId: string,
-  event: WorkflowEvent
+  event: WorkflowEvent,
+  stateNodeIdByWorkflowTask: ReadonlyMap<string, string>
 ): Omit<AppendUsageEventInput, "checkpointGenerationId"> & { checkpointGenerationId?: string } {
   const payload = event.payload ?? {};
   const fields = [
@@ -1028,6 +1061,9 @@ function normalizedUsageLedgerInput(
     usageIncompleteReasons.push({ code: "usage-missing" });
   }
   const nodeId = stringField(payload, "nodeId") ?? stringField(payload, "node_id");
+  // The run-state identity behind the reported workflow task, when the task table knows it. An
+  // unrecognized task leaves it absent, which readers report as an unjoinable entry.
+  const stateNodeId = nodeId === undefined ? undefined : stateNodeIdByWorkflowTask.get(nodeId);
   const iteration = firstNonNegativeIntegerField(payload, ["iteration"]);
   const attempt = firstNonNegativeIntegerField(payload, ["attempt"]);
   if (nodeId === undefined || iteration === undefined || attempt === undefined) {
@@ -1047,6 +1083,7 @@ function normalizedUsageLedgerInput(
     ...(explicitGeneration === undefined ? {} : { checkpointGenerationId: explicitGeneration }),
     observedAt: new Date(event.timestampMs ?? 0).toISOString(),
     ...(nodeId === undefined ? {} : { nodeId }),
+    ...(stateNodeId === undefined ? {} : { stateNodeId }),
     ...(iteration === undefined ? {} : { iteration }),
     ...(attempt === undefined ? {} : { attempt }),
     usage,
@@ -3723,6 +3760,25 @@ function isStrictlyInsideDirectory(root: string, candidate: string): boolean {
   return candidate !== root && candidate.startsWith(`${root}${path.sep}`);
 }
 
+/**
+ * Durable lineage for a node the run added in flight.
+ *
+ * `source_node_id` is the fixed cross-component key for dynamic-node lineage (#364): the eval side
+ * reads exactly this key off `NodeState.provenance` to name the node that produced a dynamic child,
+ * and it is the term #183 uses. The nested camelCase `dynamic` record stays alongside it because the
+ * expansion key, item digest and manifest path are how a child is traced back to its manifest.
+ */
+function dynamicNodeLineage(
+  dynamic: StoredWorkflowTaskDynamicLineage | undefined,
+  fallbackSourceNodeId?: string
+): Record<string, unknown> {
+  const sourceNodeId = dynamic?.sourceNodeId ?? fallbackSourceNodeId;
+  return {
+    ...(sourceNodeId === undefined ? {} : { source_node_id: sourceNodeId }),
+    ...(dynamic === undefined ? {} : { dynamic })
+  };
+}
+
 function ensureWorkflowTaskStateRecords(
   layout: RunLayout,
   graph: PlannedGraph,
@@ -3756,7 +3812,7 @@ function ensureWorkflowTaskStateRecords(
         ? {}
         : { producer_node_id: task.metadata.node.producerNodeId }),
       ...(task.metadata?.node?.storageId === undefined ? {} : { storage_id: task.metadata.node.storageId }),
-      ...(task.metadata?.node?.dynamic === undefined ? {} : { dynamic: task.metadata.node.dynamic })
+      ...dynamicNodeLineage(task.metadata?.node?.dynamic)
     };
     changed = true;
   }
@@ -3785,7 +3841,7 @@ function ensureWorkflowTaskStateRecords(
     state.nodes[storageId]!.provenance = {
       producer_node_id: node.id,
       storage_id: storageId,
-      ...(task.metadata?.node?.dynamic === undefined ? {} : { dynamic: task.metadata.node.dynamic })
+      ...dynamicNodeLineage(task.metadata?.node?.dynamic, node.dynamic_generated?.source_node_id)
     };
     changed = true;
   }
