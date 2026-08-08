@@ -199,6 +199,89 @@ test("artifact contract registry validates structured, empty, and malformed outp
     false,
     "coverage ID arrays must be unique"
   );
+  // R55 emitted blocker_summaries as the typed handoff objects and the whole
+  // report was discarded at the last node in the pipeline. Pin both sides of
+  // the shape the prompt now documents.
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
+        schema_version: "1.0",
+        run_metadata: {},
+        issues: [],
+        non_production_outcomes: [],
+        property_implementation_coverage: {
+          priority_threshold: "high",
+          priorities: ["high"],
+          selected_property_ids: ["property-1"],
+          implemented_property_ids: [],
+          blocked_property_ids: [],
+          pending_property_ids: [],
+          deferred_property_ids: ["property-1"],
+          blocker_summaries: [
+            {
+              property_id: "property-1",
+              status: "deferred",
+              code: "transition-oracle-deferred",
+              summary: "The handler cannot observe the premium delta.",
+              next_action: "Add property-scoped snapshots around the handler."
+            }
+          ]
+        }
+      })
+    ).ok,
+    false,
+    "blocker_summaries must be strings, not the typed handoff objects"
+  );
+  // R55 failed with `Invalid input at report.json#property_implementation_coverage`,
+  // which named neither the field nor the reason, because the union hid the
+  // object branch's issues. The diagnostic must point at the offending element.
+  const blockerObjectIssues = validateArtifactContract(
+    "ultrafuzz/report@1",
+    JSON.stringify({
+      schema_version: "1.0",
+      run_metadata: {},
+      issues: [],
+      non_production_outcomes: [],
+      property_implementation_coverage: {
+        priority_threshold: "high",
+        priorities: ["high"],
+        selected_property_ids: ["property-1"],
+        implemented_property_ids: [],
+        blocked_property_ids: [],
+        pending_property_ids: [],
+        deferred_property_ids: ["property-1"],
+        blocker_summaries: [{ property_id: "property-1", summary: "The handler cannot observe the delta." }]
+      }
+    })
+  ).issues;
+  assert.ok(
+    blockerObjectIssues.some((issue) => issue.path?.includes("property_implementation_coverage.blocker_summaries")),
+    `expected a diagnostic naming blocker_summaries, got ${JSON.stringify(blockerObjectIssues.map((issue) => issue.path))}`
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
+        schema_version: "1.0",
+        run_metadata: {},
+        issues: [],
+        non_production_outcomes: [],
+        property_implementation_coverage: {
+          priority_threshold: "high",
+          priorities: ["high"],
+          selected_property_ids: ["property-1"],
+          implemented_property_ids: [],
+          blocked_property_ids: [],
+          pending_property_ids: [],
+          deferred_property_ids: ["property-1"],
+          blocker_summaries: ["property-1: the handler cannot observe the premium delta"]
+        }
+      })
+    ).ok,
+    true,
+    "the documented string form is accepted"
+  );
   assert.equal(
     validateArtifactContract(
       "ultrafuzz/report@1",

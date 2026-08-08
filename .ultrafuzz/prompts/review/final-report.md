@@ -453,25 +453,25 @@ human-readable Strategy section. Do not call this metric Temperature.
 
 Add `## Property implementation coverage` after the production issue entries
 and before `## Property provenance`. Read the implementation handoff's
-`selection` object and property records. When it is present, render the
-configured priority threshold, included priorities, selected/implemented/
-blocked/pending/deferred counts, and a concise list of blocker summaries. When
+`selection` object and property records. When
 the handoff is historical or lacks `selection`, render `unavailable` instead
 of guessing. In `report.json`, emit `property_implementation_coverage` with
 this exact shape:
 
 ```json
 {
-  "priority_threshold": "high",
-  "priorities": ["high"],
-  "selected_property_ids": ["property-1"],
+  "priority_threshold": "medium",
+  "priorities": ["high", "medium"],
+  "selected_property_ids": ["property-1", "property-2"],
   "implemented_property_ids": ["property-1"],
   "blocked_property_ids": [],
   "pending_property_ids": [],
-  "deferred_property_ids": [],
-  "reference_expected_property_ids": [],
-  "reference_expectation_ids": [],
-  "blocker_summaries": []
+  "deferred_property_ids": ["property-2"],
+  "reference_expected_property_ids": ["property-1"],
+  "reference_expectation_ids": ["scfuzzbench:example:expectation-1"],
+  "blocker_summaries": [
+    "property-2: The handler cannot observe the premium delta returned by the Hub."
+  ]
 }
 ```
 
@@ -483,9 +483,51 @@ every distinct expectation identifier in `reference_expectation_ids`, in
 catalog order. Preserve these arrays even when the property priority is below
 the configured threshold.
 Include `blocker_summaries` for selected records whose status is `blocked`,
-`pending`, or `deferred`, using each typed blocker summary.
+`pending`, or `deferred`. Every element is a plain string, never an object:
+write each one as `<property-id>: <the record's blocker summary text>`, in
+canonical catalog order. Copy that summary text verbatim from the handoff
+record's `blocker.summary` — do not shorten, rephrase, re-punctuate, or
+re-case it. The typed blocker's other fields stay in the handoff record; do not
+copy the blocker object into the report.
 If selection metadata is unavailable, use the string `"unavailable"` in
 `report.json` and write `unavailable` in Markdown.
+
+The Markdown body of `## Property implementation coverage` is compared line by
+line against the JSON above, so write exactly these bullets, in this order, with
+these labels and backticks, and nothing else before the blocker list:
+
+These bullets are the Markdown rendering of exactly the JSON above, so read the
+two together:
+
+```markdown
+- Priority threshold: `medium`
+- Included priorities: `high<br>medium`
+- Selected properties: `2`
+- Implemented properties: `1`
+- Blocked properties: `0`
+- Pending properties: `0`
+- Deferred properties: `1`
+- Reference expectation properties: `1`
+
+Blocker summaries:
+- property-2: The handler cannot observe the premium delta returned by the Hub.
+```
+
+Join `Included priorities` with `<br>`, and write `unavailable` in the backticks
+when the threshold or priorities are missing. Each count is the length of the
+JSON array with the matching name, except `Reference expectation properties`,
+which counts `reference_expected_property_ids`. Introduce the blocker list with
+a line reading exactly `Blocker summaries:`, then one `- ` bullet per element of
+`blocker_summaries`, in the same order as the JSON, with no blank line between
+the heading and the first bullet: the list ends at the first line that is not a
+`- ` bullet. Omit the heading and the list entirely when there are no blockers.
+
+Write each blocker bullet as the JSON string itself. Collapsing runs of
+whitespace to single spaces is fine; rewording, truncating, or re-punctuating it
+is not. Markdown-escaping the special characters is accepted but not required,
+so a summary naming `_beforeTokenTransfer` may appear either as
+`- property-2: _beforeTokenTransfer reverts` or as
+`- property-2: \_beforeTokenTransfer reverts`.
 
 Add `## Property provenance` after the implementation coverage section. For every
 property-derived production or non-production finding, render one concise table

@@ -173,6 +173,37 @@ describe("prompt semantic anchors", () => {
     expect(finalReport).toContain("reference_expected_property_ids");
     expect(finalReport).toContain("reference_expectation_ids");
     expect(finalReport).toMatch(/Preserve these arrays even when the property priority is below/iu);
+    // The report contract takes blocker_summaries as strings. The prompt used to
+    // show only an empty array and say "using each typed blocker summary", so a
+    // run emitted the typed objects and the contract discarded the whole report.
+    expect(finalReport).toContain("Every element is a plain string, never an object");
+    expect(finalReport).toContain("<property-id>: <the record's blocker summary text>");
+    expect(finalReport).toMatch(/in\s+canonical catalog order/u);
+    // The gate compares blocker_summaries byte-for-byte with
+    // `${propertyId}: ${record.blocker.summary}`, so a paraphrase fails it just
+    // as surely as an object does.
+    expect(finalReport).toContain("Copy that summary text verbatim");
+    // The Markdown half of the same coverage block is compared line by line and
+    // was documented nowhere. Pin every label the gate matches on, not a sample.
+    for (const label of [
+      "Priority threshold",
+      "Included priorities",
+      "Selected properties",
+      "Implemented properties",
+      "Blocked properties",
+      "Pending properties",
+      "Deferred properties",
+      "Reference expectation properties"
+    ]) {
+      expect(finalReport).toContain(`- ${label}: \``);
+    }
+    expect(finalReport).toMatch(/a line reading exactly\s+`Blocker summaries:`/u);
+    expect(finalReport).toMatch(/no blank line between\s+the heading and the first bullet/u);
+    expect(finalReport).toMatch(/Reference expectation properties`,\s+which counts `reference_expected_property_ids`/u);
+    // The gate accepts the summary as written or Markdown-escaped. Describing
+    // reportPublicProse in prose was tried and was wrong in three ways, so the
+    // prompt must keep promising the laxer contract the gate actually applies.
+    expect(finalReport).toMatch(/Markdown-escaping the special characters is accepted but not\s+required/u);
   });
 
   it("keeps protocol failures observable during invariant handler execution", () => {
