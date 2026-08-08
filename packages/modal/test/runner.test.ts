@@ -67,7 +67,6 @@ import {
   readOptionalModalSandboxText,
   publicEvalDiagnosticsDroppedFromEvidence,
   reclaimStoppedForeignKimiStageLock,
-  runningRecoverySandbox,
   replaceSanitizedModalCollectedFiles,
   runningRecoverySandbox,
   selectModalCollectedEvidence,
