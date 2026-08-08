@@ -48,34 +48,61 @@ describe("public eval diagnostics summary", () => {
     expect(summary.scoring_ready).toBe(true);
   });
 
+  it("accepts a bounded failed-node message and rejects an oversized one", () => {
+    const row = {
+      ...scoreableRow("target-alpha"),
+      failed_nodes: [
+        {
+          node_id: "dedupe-findings",
+          status: "failed",
+          timed_out: false,
+          failure_category: "artifact-contract",
+          failure_message: "findings.json violated the artifact contract"
+        }
+      ]
+    } satisfies PublicEvalDiagnosticsRow;
+    const document = diagnosticsDocument([row]);
+
+    expect(parsePublicEvalDiagnostics(document).rows[0]?.failed_nodes[0]?.failure_message).toContain(
+      "artifact contract"
+    );
+    const oversized = structuredClone(document);
+    oversized.rows[0]!.failed_nodes[0]!.failure_message = "🙂".repeat(251);
+    expect(() => parsePublicEvalDiagnostics(oversized)).toThrow();
+  });
+
   it("rejects a document that describes no rows at all", () => {
     const rows: PublicEvalDiagnosticsRow[] = [];
-    const document = {
-      schema_version: PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION,
-      stage: "post-eval-pre-score",
-      benchmark: "ultrafuzz-bench",
-      lane: "smoke",
-      model_slug: MODEL_SLUG,
-      model: "synthetic-model",
-      reasoning: "high",
-      candidate_commit: "0".repeat(40),
-      eval_run_id: boundedEvalId([LOGICAL_RUN_ID, MODEL_SLUG], 128),
-      created_at: "2026-08-07T21:57:32.733Z",
-      lineage: {
-        logical_run_id: LOGICAL_RUN_ID,
-        generation: 1,
-        attempt: 1,
-        attempt_id: "attempt-0001",
-        config_fingerprint: FINGERPRINT,
-        source_fingerprint: FINGERPRINT,
-        image_fingerprint: FINGERPRINT,
-        model_fingerprint: FINGERPRINT
-      },
-      summary: summarizePublicEvalDiagnosticsRows(rows),
-      rows
-    };
+    const document = diagnosticsDocument(rows);
 
     expect(document.summary.scoring_ready).toBe(false);
     expect(() => parsePublicEvalDiagnostics(document)).toThrow();
   });
 });
+
+function diagnosticsDocument(rows: PublicEvalDiagnosticsRow[]) {
+  return {
+    schema_version: PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION,
+    stage: "post-eval-pre-score",
+    benchmark: "ultrafuzz-bench",
+    lane: "smoke",
+    model_slug: MODEL_SLUG,
+    model: "synthetic-model",
+    reasoning: "high",
+    candidate_commit: "0".repeat(40),
+    eval_run_id: boundedEvalId([LOGICAL_RUN_ID, MODEL_SLUG], 128),
+    created_at: "2026-08-07T21:57:32.733Z",
+    lineage: {
+      logical_run_id: LOGICAL_RUN_ID,
+      generation: 1,
+      attempt: 1,
+      attempt_id: "attempt-0001",
+      config_fingerprint: FINGERPRINT,
+      source_fingerprint: FINGERPRINT,
+      image_fingerprint: FINGERPRINT,
+      model_fingerprint: FINGERPRINT
+    },
+    summary: summarizePublicEvalDiagnosticsRows(rows),
+    rows
+  };
+}
