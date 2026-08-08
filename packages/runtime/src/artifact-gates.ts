@@ -2816,9 +2816,15 @@ function campaignFindingReferenceDiagnostics(
     matches.push({ index: findingIndex, propertyIds });
     findingsById.set(finding.id, matches);
   }
-  const coveredPropertyIds = new Set(
-    [...findingsById.values()].flatMap((matches) => matches.flatMap((match) => match.propertyIds))
+  // A finding covers a failure when it claims every property that failure
+  // exercised. Coverage is judged per finding, never against the union of all
+  // findings: a counterexample that broke two invariants at once is a distinct
+  // observation, and two single-property findings do not report it.
+  const findingPropertySets = [...findingsById.values()].flatMap((matches) =>
+    matches.map((match) => new Set(match.propertyIds))
   );
+  const isCovered = (failurePropertyIds: readonly string[]): boolean =>
+    findingPropertySets.some((propertySet) => failurePropertyIds.every((propertyId) => propertySet.has(propertyId)));
 
   const diagnostics: RuntimeDiagnostic[] = [];
   for (const [failureIndex, failure] of failures.entries()) {
@@ -2841,13 +2847,12 @@ function campaignFindingReferenceDiagnostics(
     if (failurePropertyIds.length > 0 && matchingFinding === undefined) {
       // A campaign legitimately deduplicates many counterexamples of the same
       // property into one finding, so a failure need not have a finding sharing
-      // its ID. What it must have is a finding covering each of its properties;
-      // an uncovered property means a violation was observed and then dropped.
-      const uncoveredPropertyIds = failurePropertyIds.filter((propertyId) => !coveredPropertyIds.has(propertyId));
-      if (uncoveredPropertyIds.length > 0) {
+      // its ID. What it must have is a finding that claims everything it broke;
+      // otherwise a violation was observed and then dropped.
+      if (!isCovered(failurePropertyIds)) {
         diagnostics.push({
           code: "PROPERTY_FINDING_REFERENCE_MISSING",
-          message: `Property-derived campaign failure ${JSON.stringify(failure.id)} has no resulting finding covering ${uncoveredPropertyIds.map((propertyId) => JSON.stringify(propertyId)).join(", ")}`,
+          message: `Property-derived campaign failure ${JSON.stringify(failure.id)} has no resulting finding covering ${failurePropertyIds.map((propertyId) => JSON.stringify(propertyId)).join(", ")}`,
           severity: "error",
           source: "property-provenance",
           path: `${campaignPath}#$.failures[${failureIndex}].id`
@@ -2855,10 +2860,17 @@ function campaignFindingReferenceDiagnostics(
       }
       continue;
     }
-    if (matchingFinding !== undefined && !sameStringSet(failurePropertyIds, matchingFinding.propertyIds)) {
+    // A deduplicated finding reuses one of its failures' IDs, so it may carry
+    // more properties than that one failure did. It may never carry fewer:
+    // dropping a property from the finding that anchors a failure loses the
+    // violation just as surely as omitting the finding.
+    const anchorCovers =
+      matchingFinding !== undefined &&
+      failurePropertyIds.every((propertyId) => matchingFinding.propertyIds.includes(propertyId));
+    if (matchingFinding !== undefined && !anchorCovers) {
       diagnostics.push({
         code: "PROPERTY_FINDING_REFERENCE_MISMATCH",
-        message: `Campaign failure ${JSON.stringify(failure.id)} and its resulting finding must carry the same property_ids`,
+        message: `Campaign failure ${JSON.stringify(failure.id)} has a resulting finding that drops some of its property_ids`,
         severity: "error",
         source: "property-provenance",
         path: `${findingsPath}#$[${matchingFinding.index}].property_ids`

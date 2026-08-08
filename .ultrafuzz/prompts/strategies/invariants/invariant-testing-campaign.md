@@ -187,8 +187,11 @@ Use this exact top-level shape for the backend record:
 Record the exact backend in `fuzzer_backend` when it ran, using the literal
 string `recon` so the final report join matches; omit that field when the
 backend was unavailable. Every failure needs a non-empty `id` and `status`. Use an
-empty `failures` array when none were observed. A failure and its final
-deduplicated finding must share the same ID. Property IDs are optional only for
+empty `failures` array when none were observed. Each deduplicated finding must
+reuse the ID of one of the failures it covers, and must carry every property ID
+those failures reported. Do not emit one finding per counterexample: a fuzzer
+reports the same violation many times, and the backend record already preserves
+every one of them. Property IDs are optional only for
 failures not caused by an implemented catalog property. References to an
 unknown or non-implemented canonical property fail artifact validation.
 

@@ -4623,3 +4623,82 @@ test("campaign gate keeps flagging ambiguous and mismatched same-ID findings", (
   assert.equal(mismatched.ok, false);
   assert.ok(mismatched.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISMATCH"));
 });
+
+test("campaign gate rejects a failure whose property combination no single finding claims", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-combination" });
+  campaignPropertyCatalog(layout, ["property-1", "property-2"]);
+  const campaignId = "stateful-invariant-campaign";
+  // The counterexample that broke both invariants at once is the most
+  // interesting one in the file; per-property coverage alone would drop it.
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-2"] },
+        { id: "failure-3", status: "reproduced", property_ids: ["property-1", "property-2"] }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([campaignFinding("failure-1", ["property-1"]), campaignFinding("failure-2", ["property-2"])])
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  const missing = result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING");
+  assert.ok(missing);
+  assert.match(missing?.message ?? "", /failure-3/u);
+});
+
+test("campaign gate accepts a deduplicated finding that unions the properties of the failures it covers", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-union" });
+  campaignPropertyCatalog(layout, ["property-1", "property-3"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-1", "property-3"] }
+      ]
+    })
+  );
+  // The campaign prompt says to reuse a stable failure ID on the deduplicated
+  // finding, so the finding that collapses both failures carries failure-1's ID
+  // while carrying the union of their properties.
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([campaignFinding("failure-1", ["property-1", "property-3"])])
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.deepEqual(
+    result.diagnostics.filter((diagnostic) => diagnostic.source === "property-provenance"),
+    []
+  );
+  assert.equal(result.ok, true);
+});
