@@ -808,24 +808,52 @@ test("diagnoseProject reports a posture for every tracked compatibility patch", 
   const { project, env } = await launchedProject({});
   writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
   const nodeModules = path.join(project, ".smithers", "node_modules");
-  // A distinct posture per patch, so a swapped id-to-source mapping cannot pass and
-  // every branch of `patchPosture` is exercised rather than just applied/missing.
-  const postures = ["applied", "missing", "incompatible", "unknown"] as const;
+  // Group by source because many workflow-path workarounds patch the same file.
+  // Shared files can mix applied and missing anchors; incompatible and unknown
+  // remain whole-file postures and are assigned to single-workaround sources.
+  const bySource = new Map<string, typeof SMITHERS_COMPATIBILITY_PATCHES>();
+  for (const patch of SMITHERS_COMPATIBILITY_PATCHES) {
+    const source = path.join(nodeModules, ...patch.packageName.split("/"), ...patch.sourceRelativePath.split("/"));
+    bySource.set(source, [...(bySource.get(source) ?? []), patch]);
+  }
+  const wholeFilePostures = ["incompatible", "unknown", "applied"] as const;
+  const singleSources = [...bySource.entries()].filter(([, patches]) => patches.length === 1);
   assert.ok(
-    SMITHERS_COMPATIBILITY_PATCHES.length <= postures.length,
-    "extend the posture rotation to cover every described patch"
+    singleSources.length <= wholeFilePostures.length,
+    "extend the whole-file posture rotation to cover every single-workaround source"
   );
   const expected: Record<string, string> = {};
-  for (const [index, patch] of SMITHERS_COMPATIBILITY_PATCHES.entries()) {
-    const posture = postures[index]!;
-    const source = path.join(nodeModules, ...patch.packageName.split("/"), ...patch.sourceRelativePath.split("/"));
+  let singleIndex = 0;
+  for (const [source, patches] of bySource) {
     fs.mkdirSync(path.dirname(source), { recursive: true });
-    if (posture === "applied") fs.writeFileSync(source, `${patch.patched}\n`, "utf8");
-    if (posture === "missing") fs.writeFileSync(source, `${patch.patchable}\n`, "utf8");
-    // Neither the patch nor the shape Ultrafuzz patches: the next run hard-fails.
-    if (posture === "incompatible") fs.writeFileSync(source, "export const unrelated = 1;\n", "utf8");
-    // `unknown` leaves the source absent while its package directory exists.
-    expected[patch.id] = posture;
+    if (patches.length === 1) {
+      const patch = patches[0]!;
+      const posture = wholeFilePostures[singleIndex]!;
+      singleIndex += 1;
+      if (posture === "applied") fs.writeFileSync(source, `${patch.patched}\n`, "utf8");
+      if (posture === "incompatible") fs.writeFileSync(source, "export const unrelated = 1;\n", "utf8");
+      expected[patch.id] = posture;
+      continue;
+    }
+    const lines: string[] = [];
+    for (const [index, patch] of patches.entries()) {
+      const posture = index % 2 === 0 ? "applied" : "missing";
+      lines.push(posture === "applied" ? patch.patched : patch.patchable);
+      expected[patch.id] = posture;
+    }
+    fs.writeFileSync(source, `${lines.join("\n")}\n`, "utf8");
+  }
+
+  const { SMITHERS_REQUIRED_ENGINE_ANCHORS } = await import("../src/smithers.js");
+  for (const required of SMITHERS_REQUIRED_ENGINE_ANCHORS) {
+    const source = path.join(
+      nodeModules,
+      ...required.packageName.split("/"),
+      ...required.sourceRelativePath.split("/")
+    );
+    fs.mkdirSync(path.dirname(source), { recursive: true });
+    fs.appendFileSync(source, `${required.anchor}\n`, "utf8");
+    expected[required.id] = "applied";
   }
 
   const doctor = await diagnoseProject({ projectRoot: project, env, offline: true });

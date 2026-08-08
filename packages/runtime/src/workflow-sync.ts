@@ -63,7 +63,7 @@ import {
   type ModelPricing,
   type PricingCatalogMetadata
 } from "./model-pricing.js";
-import { readLinkedWorkflowEvidence } from "./start-run.js";
+import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
 import {
   type PlannedGraph,
   type PlannedGraphNode,
@@ -383,7 +383,10 @@ export async function synchronizeLinkedWorkflowRun(
   if (!evidence.ok) {
     return { ok: false, diagnostics: evidence.diagnostics };
   }
-  const loaded = loadSynchronizationInputs(layout);
+  const loaded = loadSynchronizationInputs({
+    graph: evidence.verifiedControl.contents.graph,
+    tasks: evidence.verifiedControl.contents.tasks
+  });
   if (!loaded.ok) {
     return { ok: false, diagnostics: loaded.diagnostics };
   }
@@ -392,7 +395,7 @@ export async function synchronizeLinkedWorkflowRun(
   const inspectSnapshot = await runSmithersInspectionCommand({
     args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],
     projectRoot,
-    env: input.env,
+    env: linkedWorkflowExecutionEnvironment(evidence, input.env),
     ...inspectionExecutionControl(control, synchronizationNowMs)
   });
   synchronizationNowMs = synchronizationClock(control);
@@ -409,7 +412,7 @@ export async function synchronizeLinkedWorkflowRun(
   const eventsSnapshot = await runSmithersInspectionCommand({
     args: ["events", evidence.smithersRunId, "--limit", "100000", "--json"],
     projectRoot,
-    env: input.env,
+    env: linkedWorkflowExecutionEnvironment(evidence, input.env),
     ...inspectionExecutionControl(control, synchronizationNowMs)
   });
   synchronizationNowMs = synchronizationClock(control);
@@ -420,7 +423,7 @@ export async function synchronizeLinkedWorkflowRun(
   const tokenEventsSnapshot = await runSmithersInspectionCommand({
     args: ["events", evidence.smithersRunId, "--type", "token", "--limit", "100000", "--json"],
     projectRoot,
-    env: input.env,
+    env: linkedWorkflowExecutionEnvironment(evidence, input.env),
     ...inspectionExecutionControl(control, synchronizationNowMs)
   });
   synchronizationNowMs = synchronizationClock(control);
@@ -526,7 +529,7 @@ export async function synchronizeLinkedWorkflowRun(
       await requestSmithersCancel({
         smithersRunId: evidence.smithersRunId,
         projectRoot,
-        env: input.env
+        env: linkedWorkflowExecutionEnvironment(evidence, input.env)
       });
       workflowControl.state.status = "timed-out";
       workflowControl.state.finished_at = new Date(observedAtMs).toISOString();
@@ -3375,19 +3378,18 @@ function parseWorkflowEvents(stdout: string): WorkflowEvent[] {
 }
 
 function loadSynchronizationInputs(
-  layout: RunLayout
+  contents: Readonly<{ graph: Buffer; tasks: Buffer }>
 ): { ok: true; graph: PlannedGraph; tasks: StoredWorkflowTask[] } | { ok: false; diagnostics: RuntimeDiagnostic[] } {
   const diagnostics: RuntimeDiagnostic[] = [];
   let graph: PlannedGraph | undefined;
   let tasks: StoredWorkflowTask[] | undefined;
   try {
-    graph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as PlannedGraph;
+    graph = JSON.parse(contents.graph.toString("utf8")) as PlannedGraph;
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "runtime", "RUN_GRAPH_READ_FAILED"));
   }
   try {
-    const tasksPath = path.join(layout.root, "smithers", "tasks.json");
-    const parsed = JSON.parse(fs.readFileSync(tasksPath, "utf8")) as { tasks?: unknown };
+    const parsed = JSON.parse(contents.tasks.toString("utf8")) as { tasks?: unknown };
     tasks = Array.isArray(parsed.tasks) ? parsed.tasks.flatMap(parseStoredTask) : [];
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "runtime", "WORKFLOW_TASKS_READ_FAILED"));

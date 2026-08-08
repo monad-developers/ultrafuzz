@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { CodexAgent as SmithersCodexAgent } from "smithers-orchestrator";
+import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
 import { readStringTable, stringField } from "./toml";
 
 type CodexAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
@@ -19,17 +20,18 @@ type CodexCommand = Awaited<ReturnType<SmithersCodexAgent["buildCommand"]>>;
 export class CompatibleCodexAgent extends SmithersCodexAgent {
   override async buildCommand(params: CodexCommandParams): Promise<CodexCommand> {
     const command = await super.buildCommand(params);
+    const sanitizedCommand = { ...command, env: workflowControlChildEnvironment(command.env) };
     const directories = this.opts.addDir ?? [];
     if (typeof params.options?.resumeSession === "string" || directories.length <= 1) {
-      return command;
+      return sanitizedCommand;
     }
     const addDirIndex = command.args.indexOf("--add-dir");
     if (addDirIndex < 0) {
-      return command;
+      return sanitizedCommand;
     }
     const replacement = directories.flatMap((directory) => ["--add-dir", directory]);
     return {
-      ...command,
+      ...sanitizedCommand,
       args: [
         ...command.args.slice(0, addDirIndex),
         ...replacement,
@@ -40,13 +42,15 @@ export class CompatibleCodexAgent extends SmithersCodexAgent {
 }
 
 export function createCodexAgent(options: CodexTaskOptions = {}): SmithersCodexAgent {
+  const auth = codexAuthOptions();
   return new CompatibleCodexAgent({
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.reasoningEffort === undefined ? {} : { config: { model_reasoning_effort: options.reasoningEffort } }),
     ...(options.addDir === undefined ? {} : { addDir: options.addDir }),
     sandbox: "workspace-write",
     skipGitRepoCheck: true,
-    ...codexAuthOptions()
+    ...auth,
+    env: workflowControlChildEnvironment(auth.env)
   });
 }
 
@@ -67,7 +71,7 @@ function codexAuthOptions(): CodexAuthOptions {
 }
 
 function readCodexAuthConfig(): CodexAuthConfig {
-  const configPath = path.join(process.cwd(), "ultrafuzz.toml");
+  const configPath = process.env.ULTRAFUZZ_CONFIG_PATH ?? path.join(process.cwd(), "ultrafuzz.toml");
   const codex = readStringTable(readFileSync(configPath, "utf8"), "agents.CodexAgent");
   return {
     auth: stringField(codex, "auth"),
@@ -81,7 +85,7 @@ function requiredEnv(name: string): string {
   if (value === undefined || value.trim() === "") {
     throw new Error(`agents.CodexAgent auth is api-key, but ${name} is not set`);
   }
-  return value;
+  return workflowControlCredentialValue(value, name);
 }
 
 function resolveConfigDir(value: string): string {

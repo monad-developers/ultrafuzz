@@ -87,7 +87,11 @@ ultrafuzz.toml
 ```
 
 Without `--force`, existing config, topology, prompts, and reference catalog
-files are preserved.
+files are preserved. Generated agent adapters whose bytes exactly match a stock
+version from an earlier Ultrafuzz release are upgraded to the current sealed
+configuration contract. Customized, symlinked, and hard-linked adapters are
+never replaced automatically; `init` emits an actionable diagnostic when one
+requires manual review.
 
 ## Validate
 
@@ -185,6 +189,11 @@ ultrafuzz fork <run-id> \
 `status`, `pause`, `resume`, `replay`, and `fork` operate on the workflow run
 linked from Ultrafuzz run metadata. `status` reports a concise health verdict
 and maps workflow details into the stable Ultrafuzz JSON envelope.
+
+Runs created before workflow control seals and authenticated link journals
+cannot be resumed or inspected safely in place. Their stored artifacts remain
+available, but lifecycle commands report the missing evidence and require a new
+run ID rather than constructing a seal or link from mutable historical state.
 
 `status` human output is watch-friendly:
 

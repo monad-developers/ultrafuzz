@@ -16,6 +16,7 @@ import {
   modalNodeTags,
   modalNodeVolumeName,
   parseModalNodeSandboxInput,
+  parseModalNodeWorkerInput,
   type ModalNodeSandboxInput
 } from "../src/node-provider.js";
 import {
@@ -62,6 +63,21 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
+  it("requires the canonical execution snapshot root and rejects local descriptors in worker input", () => {
+    const fixture = createProjectFixture();
+    try {
+      const { execution_snapshot_root: _canonical, ...withoutCanonical } = fixture.input;
+      expect(() => parseModalNodeSandboxInput(withoutCanonical)).toThrow(
+        /cloud node execution_snapshot_root is invalid/u
+      );
+      expect(() =>
+        parseModalNodeWorkerInput({ ...fixture.input, execution_snapshot_source_root: "/proc/1/fd/1" })
+      ).toThrow(/worker input contains a local snapshot descriptor/u);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("creates an immutable handoff from committed source plus only declared dependency evidence", async () => {
     const fixture = createProjectFixture();
     fs.writeFileSync(path.join(fixture.root, "local-only-secret"), "must stay local\n");
@@ -71,7 +87,13 @@ describe("Modal node sandbox provider", () => {
       expect(entries).toContain("./source.txt");
       expect(entries).toContain(`./${fixture.input.workflow_path}`);
       expect(entries).toContain(`./${fixture.input.prompt_path}`);
-      expect(entries).toContain("./.smithers/agents/kimi.ts");
+      for (const helper of ["index", "codex", "claude", "kimi", "deepseek", "environment", "toml"]) {
+        expect(entries).toContain(`./${fixture.input.execution_snapshot_root}/.smithers/agents/${helper}.ts`);
+      }
+      expect(entries).toContain(`./${fixture.input.execution_snapshot_root}/dependencies/packages/000001/dist/cli.js`);
+      expect(entries).toContain(`./${fixture.input.execution_snapshot_root}/dependencies/manifest.json`);
+      expect(entries).not.toContain("./.smithers/agents/kimi.ts");
+      expect(entries).not.toContain(`./${fixture.input.execution_snapshot_root}/node_modules/smithers-orchestrator`);
       for (const dependency of fixture.input.dependency_artifact_dirs) {
         expect(entries).toContain(`./${dependency}/`);
         const marker = `./${fixture.input.run_root}/.ultrafuzz-verification/${path.basename(dependency)}.json`;
@@ -88,6 +110,106 @@ describe("Modal node sandbox provider", () => {
       expect(archive.sha256).toMatch(/^[0-9a-f]{64}$/u);
     } finally {
       archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("archives sealed workflow, prompt, and agent bytes after mutable project controls are replaced", async () => {
+    const fixture = createProjectFixture();
+    fs.writeFileSync(path.join(fixture.root, fixture.mutableWorkflowPath), "hostile mutable workflow\n");
+    fs.writeFileSync(path.join(fixture.root, fixture.mutablePromptPath), "hostile mutable prompt\n");
+    for (const helper of ["kimi", "deepseek", "environment"]) {
+      fs.writeFileSync(path.join(fixture.root, ".smithers", "agents", `${helper}.ts`), `hostile ${helper}\n`);
+    }
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-sealed-handoff-"));
+    try {
+      await extractSafeTarArchive(archive.path, extracted, { gzip: true, label: "sealed handoff test" });
+      expect(fs.readFileSync(path.join(extracted, fixture.input.workflow_path), "utf8")).toBe(
+        "export default { sealed: true };\n"
+      );
+      expect(fs.readFileSync(path.join(extracted, fixture.input.prompt_path!), "utf8")).toBe(
+        "sealed rendered prompt\n"
+      );
+      expect(
+        fs.readFileSync(
+          path.join(extracted, fixture.input.execution_snapshot_root, ".smithers", "agents", "deepseek.ts"),
+          "utf8"
+        )
+      ).toBe("export const sealedDeepSeek = true;\n");
+      expect(
+        fs.readFileSync(
+          path.join(extracted, fixture.input.execution_snapshot_root, ".smithers", "agents", "environment.ts"),
+          "utf8"
+        )
+      ).toBe("export const sealedEnvironment = true;\n");
+      expect(fs.existsSync(path.join(extracted, ".smithers", "agents", "deepseek.ts"))).toBe(false);
+    } finally {
+      archive.cleanup();
+      fs.rmSync(extracted, { recursive: true, force: true });
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects snapshot file tampering against the control-seal closure", async () => {
+    const fixture = createProjectFixture();
+    const workflow = path.join(fixture.root, fixture.input.workflow_path);
+    try {
+      fs.chmodSync(workflow, 0o600);
+      fs.writeFileSync(workflow, "hostile sealed-path replacement\n");
+      fs.chmodSync(workflow, 0o400);
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /execution snapshot file is unsafe|execution snapshot file changed while copying/u
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects a retained snapshots-parent swap without archiving hostile replacement bytes", async () => {
+    const fixture = createProjectFixture();
+    const snapshotRoot = path.join(fixture.root, fixture.input.execution_snapshot_root);
+    const snapshotsParent = path.dirname(snapshotRoot);
+    const retainedParent = `${snapshotsParent}.retained`;
+    try {
+      const archivePromise = createModalNodeHandoffArchive(fixture.root, fixture.input);
+      fs.renameSync(snapshotsParent, retainedParent);
+      fs.mkdirSync(snapshotRoot, { recursive: true });
+      fs.writeFileSync(path.join(snapshotRoot, "hostile-control.ts"), "hostile replacement bytes\n");
+      await expect(archivePromise).rejects.toThrow(/execution snapshot root is unsafe|source does not match/u);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects an execution dependency directory swap between pathname check and descriptor open", async () => {
+    const fixture = createProjectFixture();
+    const snapshotRoot = path.join(fixture.root, fixture.input.execution_snapshot_root);
+    const dependencyDirectory = path.join(snapshotRoot, "dependencies");
+    const retainedDirectory = path.join(snapshotRoot, "dependencies-retained");
+    const originalOpen = fs.openSync.bind(fs);
+    let swapped = false;
+    const openSpy = vi.spyOn(fs, "openSync").mockImplementation((filePath, flags, mode) => {
+      if (!swapped && String(filePath).endsWith("/dependencies")) {
+        swapped = true;
+        fs.chmodSync(snapshotRoot, 0o700);
+        fs.renameSync(dependencyDirectory, retainedDirectory);
+        fs.mkdirSync(dependencyDirectory, { recursive: true });
+        fs.writeFileSync(
+          path.join(dependencyDirectory, "manifest.json"),
+          '{"schema_version":"ultrafuzz.workflow-execution-dependencies.v1","hostile":true}\n'
+        );
+        fs.chmodSync(snapshotRoot, 0o500);
+      }
+      return originalOpen(filePath, flags, mode);
+    });
+    try {
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /snapshot directory changed while opening|execution snapshot root changed/u
+      );
+      expect(swapped).toBe(true);
+    } finally {
+      openSpy.mockRestore();
       fixture.cleanup();
     }
   });
@@ -436,22 +558,25 @@ describe("Modal node sandbox provider", () => {
   });
 
   it("falls back to a fresh inner workflow only when no persisted run exists", async () => {
-    const fixture = createProjectFixture();
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-inner-workflow-test-"));
     const logPath = path.join(root, "commands.jsonl");
-    const fakeSmithers = path.join(root, "smithers.mjs");
-    fs.writeFileSync(
-      fakeSmithers,
-      `#!/usr/bin/env node
-import fs from "node:fs";
+    const environmentPath = path.join(root, "environment.json");
+    const fixture = createProjectFixture({
+      smithersCli: `#!/usr/bin/env node
+const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + "\\n");
+fs.writeFileSync(${JSON.stringify(environmentPath)}, JSON.stringify({
+  artifacts: process.env.ULTRAFUZZ_ARTIFACTS_MODULE,
+  runtime: process.env.ULTRAFUZZ_RUNTIME_MODULE,
+  config: process.env.ULTRAFUZZ_CONFIG_PATH,
+  workflow: process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH
+}));
 if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); process.exit(4); }
 `
-    );
-    fs.chmodSync(fakeSmithers, 0o700);
+    });
     try {
-      await runDurableWorkflow(fakeSmithers, "/volume/workflow.tsx", fixture.root, "inner-run", fixture.input);
+      await runDurableWorkflow(fixture.root, "inner-run", fixture.input);
       const commands = fs
         .readFileSync(logPath, "utf8")
         .trim()
@@ -461,6 +586,72 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
       expect(commands[0]).toEqual(expect.arrayContaining(["--resume", "--force", "--run-id", "inner-run"]));
       expect(commands[1]).toEqual(expect.arrayContaining(["--run-id", "inner-run"]));
       expect(commands[1]).not.toContain("--resume");
+      const environment = JSON.parse(fs.readFileSync(environmentPath, "utf8")) as Record<string, string>;
+      const childVisibleRoot = `/proc/${process.pid}/fd/`;
+      expect(environment.artifacts).toMatch(
+        new RegExp(`^file://${childVisibleRoot}[0-9]+/modules/@ultrafuzz/artifacts/dist/index\\.js$`, "u")
+      );
+      expect(environment.runtime).toMatch(
+        new RegExp(`^file://${childVisibleRoot}[0-9]+/modules/@ultrafuzz/runtime/dist/index\\.js$`, "u")
+      );
+      expect(environment.config).toMatch(new RegExp(`^${childVisibleRoot}[0-9]+/controls/ultrafuzz\\.toml$`, "u"));
+      expect(environment.workflow).toMatch(
+        new RegExp(`^${childVisibleRoot}[0-9]+/\\.smithers/workflows/ultrafuzz-run-one\\.tsx$`, "u")
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fixture.cleanup();
+    }
+  });
+
+  it("keeps Smithers on descriptor-anchored controls and rejects a canonical generation swap", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-inner-workflow-swap-test-"));
+    const observationPath = path.join(root, "observation.json");
+    const fixture = createProjectFixture({
+      smithersCli: `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const { fileURLToPath } = require("node:url");
+const args = process.argv.slice(2);
+const workflowPath = args[1];
+const marker = "/.smithers/workflows/";
+const markerIndex = workflowPath.indexOf(marker);
+if (markerIndex < 1) throw new Error("workflow is not descriptor-rooted");
+const snapshotAccessRoot = workflowPath.slice(0, markerIndex);
+const canonicalSnapshotRoot = fs.realpathSync(snapshotAccessRoot);
+const retainedSnapshotRoot = canonicalSnapshotRoot + ".retained";
+fs.renameSync(canonicalSnapshotRoot, retainedSnapshotRoot);
+fs.mkdirSync(canonicalSnapshotRoot, { recursive: true });
+fs.writeFileSync(path.join(canonicalSnapshotRoot, "hostile-control.ts"), "hostile replacement bytes\\n");
+fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
+  workflow: fs.readFileSync(workflowPath, "utf8"),
+  config: fs.readFileSync(process.env.ULTRAFUZZ_CONFIG_PATH, "utf8"),
+  artifacts: fs.readFileSync(fileURLToPath(process.env.ULTRAFUZZ_ARTIFACTS_MODULE), "utf8"),
+  runtime: fs.readFileSync(fileURLToPath(process.env.ULTRAFUZZ_RUNTIME_MODULE), "utf8"),
+  workflowPath,
+  canonicalSnapshotRoot
+}));
+`
+    });
+    const canonicalSnapshotRoot = path.join(fixture.root, fixture.input.execution_snapshot_root);
+    try {
+      await expect(runDurableWorkflow(fixture.root, "inner-run", fixture.input)).rejects.toThrow(
+        /execution snapshot directory changed during descriptor ownership|descriptor does not match its canonical generation/u
+      );
+      const observation = JSON.parse(fs.readFileSync(observationPath, "utf8")) as Record<string, string>;
+      expect(observation).toMatchObject({
+        workflow: "export default { sealed: true };\n",
+        config: '[models]\ndefault = "sealed"\n',
+        artifacts: "export const sealedArtifacts = true;\n",
+        runtime: "export const sealedRuntime = true;\n",
+        canonicalSnapshotRoot
+      });
+      expect(observation.workflowPath).toMatch(
+        new RegExp(`^/proc/${process.pid}/fd/[0-9]+/\\.smithers/workflows/ultrafuzz-run-one\\.tsx$`, "u")
+      );
+      expect(fs.readFileSync(path.join(canonicalSnapshotRoot, "hostile-control.ts"), "utf8")).toBe(
+        "hostile replacement bytes\n"
+      );
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
       fixture.cleanup();
@@ -479,6 +670,16 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     fixture.input.project_archive_sha256 = archive.sha256;
     try {
       const first = await initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input);
+      const smithersLink = path.join(
+        first.projectRoot,
+        fixture.input.execution_snapshot_root,
+        "node_modules",
+        "smithers-orchestrator"
+      );
+      expect(fs.lstatSync(smithersLink).isSymbolicLink()).toBe(true);
+      expect(fs.realpathSync(smithersLink)).toBe(
+        path.join(first.projectRoot, fixture.input.execution_snapshot_root, "dependencies", "packages", "000001")
+      );
       first.recordCheckpoint("prepared");
       const generatedProperty = path.join(first.projectRoot, fixture.input.workspace_dir, "test", "Property.t.sol");
       fs.mkdirSync(path.dirname(generatedProperty), { recursive: true });
@@ -505,6 +706,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
       expect(JSON.parse(fs.readFileSync(failureManifest!, "utf8"))).toMatchObject({
         stage: "failed",
         workspace_path: replacement.projectRoot,
+        execution_snapshot_root: fixture.input.execution_snapshot_root,
         error: "campaign interrupted"
       });
       expect(fs.readFileSync(path.join(volumeRoot, "input", "project.tgz"))).toHaveLength(
@@ -626,6 +828,106 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     }
   });
 
+  it("binds durable recovery to the canonical execution snapshot", async () => {
+    const fixture = createProjectFixture();
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    fixture.input.project_archive_sha256 = archive.sha256;
+    const volumeRoot = path.join(path.dirname(fixture.root), "modal-volume", "snapshot-identity");
+    try {
+      await initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input);
+      await expect(
+        initializeDurableNodeWorkspace(volumeRoot, archive.path, {
+          ...fixture.input,
+          execution_snapshot_root: `${fixture.input.run_root}/smithers/execution-snapshots/${"f".repeat(64)}`
+        })
+      ).rejects.toThrow(/durable workspace request does not match/u);
+    } finally {
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects a sealed module mutated between durable worker attempts", async () => {
+    const fixture = createProjectFixture();
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    fixture.input.project_archive_sha256 = archive.sha256;
+    const volumeRoot = path.join(path.dirname(fixture.root), "modal-volume", "snapshot-tamper");
+    try {
+      const first = await initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input);
+      const snapshotRoot = path.join(first.projectRoot, fixture.input.execution_snapshot_root);
+      const runtimeModule = path.join(snapshotRoot, "modules", "@ultrafuzz", "runtime", "dist", "index.js");
+      expect(fs.statSync(snapshotRoot).mode & 0o222).toBe(0);
+      expect(fs.statSync(runtimeModule).mode & 0o222).toBe(0);
+      fs.chmodSync(runtimeModule, 0o600);
+      fs.writeFileSync(runtimeModule, "export const hostileRuntime = true;\n");
+      await expect(initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input)).rejects.toThrow(
+        /cloud execution snapshot file is unsealed/u
+      );
+    } finally {
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("does not chmod outside the snapshot when a seal directory is swapped", async () => {
+    const fixture = createProjectFixture();
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    fixture.input.project_archive_sha256 = archive.sha256;
+    const volumeRoot = path.join(path.dirname(fixture.root), "modal-volume", "seal-swap");
+    const outside = path.join(path.dirname(fixture.root), "outside-seal-target");
+    fs.mkdirSync(outside, { mode: 0o700 });
+    const outsideFile = path.join(outside, "must-stay-writable.txt");
+    fs.writeFileSync(outsideFile, "outside\n", { mode: 0o600 });
+    const originalOpen = fs.openSync.bind(fs);
+    let swapped = false;
+    const openSpy = vi.spyOn(fs, "openSync").mockImplementation((filePath, flags, mode) => {
+      if (!swapped && String(filePath).endsWith("/modules")) {
+        swapped = true;
+        fs.renameSync(filePath, `${String(filePath)}-retained`);
+        fs.symlinkSync(outside, filePath, "dir");
+      }
+      return originalOpen(filePath, flags, mode);
+    });
+    try {
+      await expect(initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input)).rejects.toThrow();
+      expect(swapped).toBe(true);
+      expect(fs.statSync(outside).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(outsideFile).mode & 0o777).toBe(0o600);
+    } finally {
+      openSpy.mockRestore();
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("does not create dependency links outside a swapped snapshot parent", async () => {
+    const fixture = createProjectFixture();
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    fixture.input.project_archive_sha256 = archive.sha256;
+    const volumeRoot = path.join(path.dirname(fixture.root), "modal-volume", "link-swap");
+    const outside = path.join(path.dirname(fixture.root), "outside-link-target");
+    fs.mkdirSync(outside, { mode: 0o700 });
+    const originalOpen = fs.openSync.bind(fs);
+    let swapped = false;
+    const openSpy = vi.spyOn(fs, "openSync").mockImplementation((filePath, flags, mode) => {
+      if (!swapped && String(filePath).endsWith("/node_modules")) {
+        swapped = true;
+        fs.renameSync(filePath, `${String(filePath)}-retained`);
+        fs.symlinkSync(outside, filePath, "dir");
+      }
+      return originalOpen(filePath, flags, mode);
+    });
+    try {
+      await expect(initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input)).rejects.toThrow();
+      expect(swapped).toBe(true);
+      expect(fs.readdirSync(outside)).toEqual([]);
+    } finally {
+      openSpy.mockRestore();
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("publishes only old markerless completed durable handoffs with the legacy result schema", async () => {
     const fixture = createProjectFixture();
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
@@ -646,8 +948,10 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
         "legacy-markerless-v1"
       );
 
+      const retainedWorkflow = path.join(retry.projectRoot, retry.input.workflow_path);
+      fs.chmodSync(retainedWorkflow, 0o600);
       fs.writeFileSync(
-        path.join(retry.projectRoot, retry.input.workflow_path),
+        retainedWorkflow,
         'const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";\n'
       );
       expect(workerResultPublicationMode(retry.projectRoot, retry.input, retry.hasCompletedCheckpoint)).toBe(
@@ -661,7 +965,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("reattaches to one live attempt and atomically publishes its durable result", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    const result = createResultArchive(fixture.input.execution_snapshot_root);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ listed: [sandbox] });
     const provider = createModalNodeSandboxProvider(providerOptions(client));
@@ -713,7 +1017,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("recovers a published result before starting a replacement worker", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    const result = createResultArchive(fixture.input.execution_snapshot_root);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ created: sandbox });
     const provider = createModalNodeSandboxProvider(providerOptions(client));
@@ -736,9 +1040,58 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     }
   });
 
+  it("opens the canonical sealed snapshot after an admission descriptor closes and uploads no descriptor", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive(fixture.input.execution_snapshot_root);
+    const sandbox = fakeSandbox(result);
+    const snapshotDescriptor = fs.openSync(
+      path.join(fixture.root, fixture.input.execution_snapshot_root),
+      fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0)
+    );
+    fs.closeSync(snapshotDescriptor);
+    let resultVisible = false;
+    let uploadedRequest: Record<string, unknown> | undefined;
+    const readPublished = sandbox.filesystem.readText;
+    sandbox.filesystem.readText = vi.fn(async (remote: string) => {
+      if (!resultVisible) throw new SandboxFilesystemNotFoundError("not found");
+      return readPublished(remote);
+    });
+    sandbox.filesystem.copyFromLocal = vi.fn(async (local: string, remote: string) => {
+      if (remote.endsWith("request.json")) {
+        uploadedRequest = JSON.parse(fs.readFileSync(local, "utf8")) as Record<string, unknown>;
+      }
+    });
+    sandbox.exec = vi.fn(async () => {
+      resultVisible = true;
+      return {
+        stdout: { readText: vi.fn(async () => "") },
+        stderr: { readText: vi.fn(async () => "") },
+        wait: vi.fn(async () => 0)
+      };
+    }) as never;
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ created: sandbox })));
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished" });
+      expect(uploadedRequest).toMatchObject({ execution_snapshot_root: fixture.input.execution_snapshot_root });
+      expect(uploadedRequest).not.toHaveProperty("execution_snapshot_source_root");
+      expect(() => parseModalNodeWorkerInput(uploadedRequest)).not.toThrow();
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("accepts legacy v1 cloud results that predate verification marker archives", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive({
+    const result = createResultArchive(fixture.input.execution_snapshot_root, {
       schemaVersion: "ultrafuzz.modal.node-result.v1",
       includeVerificationMarker: false
     });
@@ -766,7 +1119,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("rejects v2 cloud results that omit the attempt verification marker", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive({ includeVerificationMarker: false });
+    const result = createResultArchive(fixture.input.execution_snapshot_root, { includeVerificationMarker: false });
     const sandbox = fakeSandbox(result);
     const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
     try {
@@ -801,7 +1154,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
   it("republishes over a verification marker a runtime gate refreshed to match a sanitized artifact", async () => {
     const fixture = createProjectFixture();
     const remoteMarker = verificationMarkerFixture(sha256Hex('{"ok":true}\n'));
-    const result = createResultArchive({ verificationMarker: remoteMarker });
+    const result = createResultArchive(fixture.input.execution_snapshot_root, { verificationMarker: remoteMarker });
     const sandbox = fakeSandbox(result);
     const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
     try {
@@ -838,7 +1191,9 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("rejects verification markers whose refreshed digest matches no published artifact", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive({ verificationMarker: verificationMarkerFixture(sha256Hex('{"ok":true}\n')) });
+    const result = createResultArchive(fixture.input.execution_snapshot_root, {
+      verificationMarker: verificationMarkerFixture(sha256Hex('{"ok":true}\n'))
+    });
     const sandbox = fakeSandbox(result);
     const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
     try {
@@ -870,7 +1225,9 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("rejects verification markers that differ outside the recorded artifact digests", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive({ verificationMarker: verificationMarkerFixture(sha256Hex('{"ok":true}\n')) });
+    const result = createResultArchive(fixture.input.execution_snapshot_root, {
+      verificationMarker: verificationMarkerFixture(sha256Hex('{"ok":true}\n'))
+    });
     const sandbox = fakeSandbox(result);
     const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
     try {
@@ -906,7 +1263,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("rejects v2 cloud results with conflicting existing verification markers before mutating publications", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    const result = createResultArchive(fixture.input.execution_snapshot_root);
     const sandbox = fakeSandbox(result);
     const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
     try {
@@ -946,7 +1303,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("rejects hard-linked existing verification marker destinations before mutating publications", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    const result = createResultArchive(fixture.input.execution_snapshot_root);
     const sandbox = fakeSandbox(result);
     const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
     try {
@@ -989,7 +1346,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("rejects v2 cloud results missing artifacts before mutating workspace publications", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive({ includeArtifactsDirectory: false });
+    const result = createResultArchive(fixture.input.execution_snapshot_root, { includeArtifactsDirectory: false });
     const sandbox = fakeSandbox(result);
     const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
     try {
@@ -1024,7 +1381,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("refuses a terminal result that lacks a durable checkpoint reference", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive({ includeDurableCheckpoint: false });
+    const result = createResultArchive(fixture.input.execution_snapshot_root, { includeDurableCheckpoint: false });
     const sandbox = fakeSandbox(result);
     const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
     try {
@@ -1076,7 +1433,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("binds Moonshot fallback credentials into the canonical Kimi API-key secret", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    const result = createResultArchive(fixture.input.execution_snapshot_root);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ created: sandbox });
     const provider = createModalNodeSandboxProvider({
@@ -1107,7 +1464,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("treats Moonshot as an optional Kimi fallback when compiled cloud tasks list both names", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    const result = createResultArchive(fixture.input.execution_snapshot_root);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ created: sandbox });
     const provider = createModalNodeSandboxProvider({
@@ -1138,7 +1495,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("binds a compiled Moonshot fallback list into Kimi Code's canonical API-key secret", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    const result = createResultArchive(fixture.input.execution_snapshot_root);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ created: sandbox });
     const provider = createModalNodeSandboxProvider({
@@ -1169,7 +1526,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("forwards optional Kimi API base URLs into cloud-node workers", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    const result = createResultArchive(fixture.input.execution_snapshot_root);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ created: sandbox });
     const provider = createModalNodeSandboxProvider({
@@ -1204,7 +1561,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("refuses to publish cloud results through a symlinked project destination prefix", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    const result = createResultArchive(fixture.input.execution_snapshot_root);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ listed: [sandbox] });
     const provider = createModalNodeSandboxProvider(providerOptions(client));
@@ -1333,17 +1690,20 @@ function providerOptions(client: ReturnType<typeof fakeClient>) {
   };
 }
 
-function createProjectFixture() {
+function createProjectFixture(options: { smithersCli?: string } = {}) {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-provider-test-"));
   const root = path.join(temporaryRoot, "project");
   const runRoot = ".ultrafuzz/runs/run-one";
   const artifactDir = `${runRoot}/artifacts/attempt-one`;
   const dependencyArtifactDirs = [`${runRoot}/artifacts/dependency-one`, `${runRoot}/artifacts/dependency-two`];
   const workspaceDir = `${runRoot}/workspaces/attempt-one`;
-  const workflowPath = `${runRoot}/smithers/workflow.tsx`;
-  const promptPath = `${runRoot}/prompts/attempt-one.md`;
-  fs.mkdirSync(path.join(root, path.dirname(workflowPath)), { recursive: true });
-  fs.mkdirSync(path.join(root, path.dirname(promptPath)), { recursive: true });
+  const pendingSnapshotRoot = path.join(root, runRoot, "smithers", "execution-snapshots", "pending");
+  const workflowRelativePath = ".smithers/workflows/ultrafuzz-run-one.tsx";
+  const promptRelativePath = "controls/rendered-prompts/attempt-one.md";
+  const mutableWorkflowPath = ".smithers/workflows/ultrafuzz-run-one.tsx";
+  const mutablePromptPath = `${runRoot}/prompts/attempt-one.md`;
+  fs.mkdirSync(path.join(root, path.dirname(mutableWorkflowPath)), { recursive: true });
+  fs.mkdirSync(path.join(root, path.dirname(mutablePromptPath)), { recursive: true });
   fs.mkdirSync(path.join(root, ".smithers", "agents"), { recursive: true });
   fs.mkdirSync(path.join(root, artifactDir), { recursive: true });
   for (const dependency of dependencyArtifactDirs) {
@@ -1368,9 +1728,11 @@ function createProjectFixture() {
   fs.mkdirSync(path.join(root, workspaceDir), { recursive: true });
   fs.mkdirSync(path.join(root, runRoot, "logs"), { recursive: true });
   fs.writeFileSync(path.join(root, "source.txt"), "committed source\n");
-  fs.writeFileSync(path.join(root, ".smithers", "agents", "kimi.ts"), "export const createKimiAgent = () => ({});\n");
-  fs.writeFileSync(path.join(root, workflowPath), "export default {};\n");
-  fs.writeFileSync(path.join(root, promptPath), "rendered prompt\n");
+  fs.writeFileSync(path.join(root, ".smithers", "agents", "kimi.ts"), "export const mutableKimi = true;\n");
+  fs.writeFileSync(path.join(root, ".smithers", "agents", "deepseek.ts"), "export const mutableDeepSeek = true;\n");
+  fs.writeFileSync(path.join(root, ".smithers", "agents", "environment.ts"), "export const mutableEnv = true;\n");
+  fs.writeFileSync(path.join(root, mutableWorkflowPath), "export default { mutable: true };\n");
+  fs.writeFileSync(path.join(root, mutablePromptPath), "mutable rendered prompt\n");
   fs.writeFileSync(path.join(root, artifactDir, "stale.txt"), "stale\n");
   fs.writeFileSync(path.join(root, runRoot, "artifacts", "unrelated", "unrelated.txt"), "unrelated\n");
   fs.writeFileSync(path.join(root, workspaceDir, "local.txt"), "excluded\n");
@@ -1380,12 +1742,99 @@ function createProjectFixture() {
   execFileSync("git", ["config", "user.email", "test@invalid"], { cwd: root });
   execFileSync("git", ["add", "source.txt"], { cwd: root });
   execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
+
+  const snapshotFiles = new Map<string, string>([
+    [workflowRelativePath, "export default { sealed: true };\n"],
+    [promptRelativePath, "sealed rendered prompt\n"],
+    ["controls/ultrafuzz.toml", '[models]\ndefault = "sealed"\n'],
+    [".smithers/agents/index.ts", 'export * from "./kimi.ts";\n'],
+    [".smithers/agents/codex.ts", "export const sealedCodex = true;\n"],
+    [".smithers/agents/claude.ts", "export const sealedClaude = true;\n"],
+    [".smithers/agents/kimi.ts", "export const sealedKimi = true;\n"],
+    [".smithers/agents/deepseek.ts", "export const sealedDeepSeek = true;\n"],
+    [".smithers/agents/environment.ts", "export const sealedEnvironment = true;\n"],
+    [".smithers/agents/toml.ts", "export const sealedToml = true;\n"],
+    ["modules/@ultrafuzz/artifacts/package.json", '{"name":"@ultrafuzz/artifacts"}\n'],
+    ["modules/@ultrafuzz/artifacts/dist/index.js", "export const sealedArtifacts = true;\n"],
+    ["modules/@ultrafuzz/runtime/package.json", '{"name":"@ultrafuzz/runtime"}\n'],
+    ["modules/@ultrafuzz/runtime/dist/index.js", "export const sealedRuntime = true;\n"],
+    ["dependencies/packages/000001/package.json", '{"name":"smithers-orchestrator","version":"1.0.0"}\n'],
+    ["dependencies/packages/000001/dist/cli.js", options.smithersCli ?? "#!/usr/bin/env node\n"]
+  ]);
+  const dependencyManifest = {
+    schema_version: "ultrafuzz.workflow-execution-dependencies.v1",
+    modules: [
+      {
+        id: "module:@ultrafuzz/artifacts",
+        name: "@ultrafuzz/artifacts",
+        snapshot_path: "modules/@ultrafuzz/artifacts"
+      },
+      {
+        id: "module:@ultrafuzz/runtime",
+        name: "@ultrafuzz/runtime",
+        snapshot_path: "modules/@ultrafuzz/runtime"
+      }
+    ],
+    packages: [
+      {
+        id: "package:000001",
+        name: "smithers-orchestrator",
+        version: "1.0.0",
+        snapshot_path: "dependencies/packages/000001"
+      }
+    ],
+    issuers: [
+      { id: "module:@ultrafuzz/artifacts", snapshot_path: "modules/@ultrafuzz/artifacts", dependencies: {} },
+      { id: "module:@ultrafuzz/runtime", snapshot_path: "modules/@ultrafuzz/runtime", dependencies: {} },
+      { id: "package:000001", snapshot_path: "dependencies/packages/000001", dependencies: {} },
+      { id: "root", snapshot_path: ".", dependencies: { "smithers-orchestrator": "package:000001" } }
+    ],
+    executable_paths: ["dependencies/packages/000001/dist/cli.js"],
+    smithers_bin: "dependencies/packages/000001/dist/cli.js"
+  };
+  snapshotFiles.set("dependencies/manifest.json", `${JSON.stringify(dependencyManifest)}\n`);
+  for (const [relativePath, contents] of snapshotFiles) {
+    const destination = path.join(pendingSnapshotRoot, ...relativePath.split("/"));
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, contents);
+  }
+  fs.chmodSync(path.join(pendingSnapshotRoot, "dependencies/packages/000001/dist/cli.js"), 0o500);
+  const dependencyLink = path.join(pendingSnapshotRoot, "node_modules", "smithers-orchestrator");
+  fs.mkdirSync(path.dirname(dependencyLink), { recursive: true });
+  fs.symlinkSync("../dependencies/packages/000001", dependencyLink, "dir");
+
+  const executionFiles = [...snapshotFiles]
+    .filter(([relativePath]) => relativePath !== workflowRelativePath)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([relativePath, contents]) => ({
+      source_path: path.join(root, relativePath),
+      snapshot_path: relativePath,
+      sha256: sha256Hex(contents),
+      size_bytes: Buffer.byteLength(contents)
+    }));
+  const workflowContents = snapshotFiles.get(workflowRelativePath)!;
+  const controlSeal = `${JSON.stringify({
+    schema_version: "ultrafuzz.workflow-control-integrity.v2",
+    files: {
+      workflow: { sha256: sha256Hex(workflowContents), size_bytes: Buffer.byteLength(workflowContents) }
+    },
+    execution_files: executionFiles
+  })}\n`;
+  const snapshotGeneration = sha256Hex(controlSeal);
+  const executionSnapshotRoot = `${runRoot}/smithers/execution-snapshots/${snapshotGeneration}`;
+  const executionSnapshotAbsolute = path.join(root, executionSnapshotRoot);
+  fs.renameSync(pendingSnapshotRoot, executionSnapshotAbsolute);
+  fs.writeFileSync(path.join(root, runRoot, "smithers", "control-integrity.json"), controlSeal);
+  sealFixtureSnapshot(executionSnapshotAbsolute);
+  const workflowPath = `${executionSnapshotRoot}/${workflowRelativePath}`;
+  const promptPath = `${executionSnapshotRoot}/${promptRelativePath}`;
   const input: ModalNodeSandboxInput = {
     schema_version: "ultrafuzz.modal.node.v1",
     run_id: "run-one",
     task_id: "node:attempt-one",
     attempt_id: "attempt-one",
     execution_generation: "base",
+    execution_snapshot_root: executionSnapshotRoot,
     workflow_path: workflowPath,
     prompt_path: promptPath,
     run_root: runRoot,
@@ -1402,8 +1851,42 @@ function createProjectFixture() {
   return {
     root,
     input,
-    cleanup: () => fs.rmSync(temporaryRoot, { recursive: true, force: true })
+    mutableWorkflowPath,
+    mutablePromptPath,
+    cleanup: () => {
+      makeFixtureTreeWritable(temporaryRoot);
+      fs.rmSync(temporaryRoot, { recursive: true, force: true });
+    }
   };
+}
+
+function sealFixtureSnapshot(root: string): void {
+  const directories: string[] = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    const directory = pending.pop()!;
+    directories.push(directory);
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const candidate = path.join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(candidate);
+      else if (entry.isFile()) fs.chmodSync(candidate, (fs.statSync(candidate).mode & 0o111) === 0 ? 0o400 : 0o500);
+    }
+  }
+  for (const directory of directories.reverse()) fs.chmodSync(directory, 0o500);
+}
+
+function makeFixtureTreeWritable(root: string): void {
+  if (!fs.existsSync(root)) return;
+  const pending = [root];
+  while (pending.length > 0) {
+    const directory = pending.pop()!;
+    fs.chmodSync(directory, 0o700);
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const candidate = path.join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(candidate);
+      else if (entry.isFile()) fs.chmodSync(candidate, 0o600);
+    }
+  }
 }
 
 function manifestEntry(relativePath: string, filePath: string) {
@@ -1443,6 +1926,7 @@ function verificationMarkerFixture(findingSha256: string): string {
 }
 
 function createResultArchive(
+  executionSnapshotRoot: string,
   options: {
     includeArtifactsDirectory?: boolean;
     includeDurableCheckpoint?: boolean;
@@ -1501,6 +1985,7 @@ function createResultArchive(
       storage_lineage: "run-one/attempt-one/base",
       workspace_path: `${attemptRoot}/workspace`,
       run_root: ".ultrafuzz/runs/run-one",
+      execution_snapshot_root: executionSnapshotRoot,
       handoff_archive: `${attemptRoot}/input/project.tgz`
     }),
     durableCheckpointIndex: JSON.stringify({
@@ -1508,6 +1993,7 @@ function createResultArchive(
       storage_lineage: "run-one/attempt-one/base",
       workspace_path: `${attemptRoot}/workspace`,
       run_root: ".ultrafuzz/runs/run-one",
+      execution_snapshot_root: executionSnapshotRoot,
       handoff_archive: `${attemptRoot}/input/project.tgz`,
       checkpoints: [{ manifest: durableCheckpoint, stage: "completed" }]
     }),

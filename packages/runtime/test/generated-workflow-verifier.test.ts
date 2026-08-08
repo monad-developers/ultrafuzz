@@ -6,11 +6,56 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import * as ts from "typescript";
 
 import { assertRegularFileInside, writeFileDurable } from "@ultrafuzz/artifacts";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
+
+function loadWorkflowControlPathResolvers(): {
+  admitWorkflowControls: (
+    loadedPath: string,
+    persistedPath: string | undefined
+  ) => {
+    loadedWorkflowPath: string;
+    loadedExecutionSnapshotRoot: string | undefined;
+    persistedWorkflowPath: string | undefined;
+    persistedExecutionSnapshotRoot: string | undefined;
+  };
+  taskWorkflowControlPaths: (
+    executionMode: "local" | "cloud",
+    controls: {
+      loadedWorkflowPath: string;
+      loadedExecutionSnapshotRoot: string | undefined;
+      persistedWorkflowPath: string | undefined;
+      persistedExecutionSnapshotRoot: string | undefined;
+    }
+  ) => {
+    promptExecutionSnapshotRoot: string | undefined;
+    workflowPath: string | undefined;
+    executionSnapshotRoot: string | undefined;
+  };
+  sealedTaskPromptPath: (attemptId: string, snapshotRoot: string | undefined) => string | undefined;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("type AdmittedWorkflowControls");
+  const helperEnd = source.indexOf("\n\nfunction cloudSnapshotRelativePath", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: {
+      module: ts.ModuleKind.None,
+      target: ts.ScriptTarget.ES2022
+    }
+  }).outputText;
+  return new Function(
+    "path",
+    "existsSync",
+    "realpathSync",
+    `${helper}; return { admitWorkflowControls, taskWorkflowControlPaths, sealedTaskPromptPath };`
+  )(path, fs.existsSync, fs.realpathSync) as ReturnType<typeof loadWorkflowControlPathResolvers>;
+}
 
 function loadRestoreInvariantSuiteWorkspaceSnapshot(
   snapshots: Map<string, Map<string, Buffer>>
@@ -570,6 +615,98 @@ test("generated Smithers workflow prefers its relocatable task prompt path", () 
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.match(source, /const promptPath = task\.promptPath \?\? inputTask\?\.prompt_path/u);
 });
+
+test(
+  "generated local task controls survive closure of their admission descriptor",
+  { skip: process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
+  () => {
+    const source = fs.readFileSync(workflowTemplatePath, "utf8");
+    const projectionStart = source.indexOf("const admittedWorkflowControls");
+    const projectionEnd = source.indexOf("\n\ntype AdmittedWorkflowControls", projectionStart);
+    assert.ok(projectionStart >= 0, source);
+    assert.ok(projectionEnd > projectionStart, source);
+    const projection = source.slice(projectionStart, projectionEnd);
+    assert.match(
+      projection,
+      /const controlPaths = taskWorkflowControlPaths\(task\.execution\.mode, admittedWorkflowControls\)/u
+    );
+    assert.match(projection, /sealedTaskPromptPath\(task\.attemptId, controlPaths\.promptExecutionSnapshotRoot\)/u);
+    assert.match(projection, /workflowPath: controlPaths\.workflowPath \?\?/u);
+    assert.match(projection, /executionSnapshotRoot: controlPaths\.executionSnapshotRoot/u);
+
+    const { admitWorkflowControls, taskWorkflowControlPaths, sealedTaskPromptPath } =
+      loadWorkflowControlPathResolvers();
+    const snapshotsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-detached-task-paths-"));
+    const generationRoot = path.join(snapshotsRoot, "a".repeat(64));
+    const workflowRelativePath = path.join(".smithers", "workflows", "detached-paths.tsx");
+    const persistedWorkflowPath = path.join(generationRoot, workflowRelativePath);
+    const promptRoot = path.join(generationRoot, "controls", "rendered-prompts");
+    const persistedPromptPath = path.join(promptRoot, "project-discovery.md");
+    fs.mkdirSync(path.dirname(persistedWorkflowPath), { recursive: true });
+    fs.mkdirSync(path.join(generationRoot, "dependencies"), { recursive: true });
+    fs.mkdirSync(promptRoot, { recursive: true });
+    fs.writeFileSync(persistedWorkflowPath, "export default function Workflow() {}\n", "utf8");
+    fs.writeFileSync(path.join(generationRoot, "dependencies", "manifest.json"), "{}\n", "utf8");
+    fs.writeFileSync(path.join(generationRoot, "controls", "plan.json"), "{}\n", "utf8");
+    fs.writeFileSync(persistedPromptPath, "SEALED DETACHED PROMPT\n", "utf8");
+
+    let descriptor: number | undefined;
+    try {
+      descriptor = fs.openSync(generationRoot, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+      const descriptorRoot = `/proc/self/fd/${descriptor}`;
+      const loadedWorkflowPath = path.join(descriptorRoot, workflowRelativePath);
+      const admitted = admitWorkflowControls(loadedWorkflowPath, persistedWorkflowPath);
+      const localControls = taskWorkflowControlPaths("local", admitted);
+      const localPromptPath = sealedTaskPromptPath("project-discovery", localControls.promptExecutionSnapshotRoot);
+      const directCloudControls = taskWorkflowControlPaths(
+        "cloud",
+        admitWorkflowControls(loadedWorkflowPath, undefined)
+      );
+
+      assert.equal(admitted.loadedExecutionSnapshotRoot, descriptorRoot);
+      assert.equal(localControls.promptExecutionSnapshotRoot, generationRoot);
+      assert.equal(localControls.workflowPath, persistedWorkflowPath);
+      assert.equal(localControls.executionSnapshotRoot, generationRoot);
+      assert.equal(localPromptPath, persistedPromptPath);
+      assert.doesNotMatch(JSON.stringify(localControls), /\/proc\/(?:self|[1-9][0-9]*)\/fd\//u);
+      // Keep the pre-existing cloud rule pinned: without an explicit persisted
+      // binding, direct admission may read its sealed prompt but cannot hand a
+      // generation root to the provider.
+      assert.equal(directCloudControls.promptExecutionSnapshotRoot, descriptorRoot);
+      assert.equal(directCloudControls.workflowPath, loadedWorkflowPath);
+      assert.equal(directCloudControls.executionSnapshotRoot, undefined);
+
+      fs.closeSync(descriptor);
+      descriptor = undefined;
+      assert.throws(() => fs.readFileSync(loadedWorkflowPath), /ENOENT|no such file/u);
+      assertRegularFileInside(promptRoot, localPromptPath!, "detached rendered prompt");
+      assert.equal(fs.readFileSync(localPromptPath!, "utf8"), "SEALED DETACHED PROMPT\n");
+
+      descriptor = fs.openSync(generationRoot, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+      const replacedLoadedWorkflowPath = path.join(`/proc/self/fd/${descriptor}`, workflowRelativePath);
+      const displacedGenerationRoot = `${generationRoot}.displaced`;
+      fs.renameSync(generationRoot, displacedGenerationRoot);
+      try {
+        fs.mkdirSync(path.dirname(persistedWorkflowPath), { recursive: true });
+        fs.mkdirSync(path.join(generationRoot, "dependencies"), { recursive: true });
+        fs.mkdirSync(path.join(generationRoot, "controls"), { recursive: true });
+        fs.writeFileSync(persistedWorkflowPath, "export default function Hostile() {}\n", "utf8");
+        fs.writeFileSync(path.join(generationRoot, "dependencies", "manifest.json"), "{}\n", "utf8");
+        fs.writeFileSync(path.join(generationRoot, "controls", "plan.json"), "{}\n", "utf8");
+        assert.throws(
+          () => admitWorkflowControls(replacedLoadedWorkflowPath, persistedWorkflowPath),
+          /persisted workflow path does not identify the loaded execution snapshot/u
+        );
+      } finally {
+        fs.rmSync(generationRoot, { recursive: true, force: true });
+        fs.renameSync(displacedGenerationRoot, generationRoot);
+      }
+    } finally {
+      if (descriptor !== undefined) fs.closeSync(descriptor);
+      fs.rmSync(snapshotsRoot, { recursive: true, force: true });
+    }
+  }
+);
 
 test("generated Smithers verifier explains byte-preserving invariant evidence", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");

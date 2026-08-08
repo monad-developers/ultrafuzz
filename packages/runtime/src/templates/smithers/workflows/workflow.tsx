@@ -17,6 +17,7 @@ import {
   writeFileSync
 } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Fragment } from "react";
 import { createSmithers, type AgentLike } from "smithers-orchestrator";
 import { z } from "zod/v4";
@@ -100,14 +101,128 @@ type AgentFactory = (options: { model?: string; reasoningEffort?: string; addDir
 const agentFactories =
   (projectAgents as unknown as { agentFactories?: Record<string, AgentFactory> }).agentFactories ?? {};
 const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
-const taskSpecs = serializedTaskSpecs.map((task) => ({
-  ...task,
-  promptPath: task.promptPath === undefined ? undefined : path.resolve(process.cwd(), task.promptPath),
-  workspaceRelativePath: task.workspacePath,
-  workspacePath: path.resolve(process.cwd(), task.workspacePath),
-  artifactRelativeDir: task.artifactDir,
-  artifactDir: path.resolve(process.cwd(), task.artifactDir)
-}));
+const loadedWorkflowPath = fileURLToPath(import.meta.url);
+const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
+const admittedWorkflowControls = admitWorkflowControls(loadedWorkflowPath, persistedWorkflowPath);
+const taskSpecs = serializedTaskSpecs.map((task) => {
+  const controlPaths = taskWorkflowControlPaths(task.execution.mode, admittedWorkflowControls);
+  return {
+    ...task,
+    promptPath:
+      task.promptPath === undefined
+        ? undefined
+        : (sealedTaskPromptPath(task.attemptId, controlPaths.promptExecutionSnapshotRoot) ??
+          path.resolve(process.cwd(), task.promptPath)),
+    workflowPath: controlPaths.workflowPath ?? path.resolve(process.cwd(), task.workflowPath),
+    executionSnapshotRoot: controlPaths.executionSnapshotRoot,
+    workspaceRelativePath: task.workspacePath,
+    workspacePath: path.resolve(process.cwd(), task.workspacePath),
+    artifactRelativeDir: task.artifactDir,
+    artifactDir: path.resolve(process.cwd(), task.artifactDir)
+  };
+});
+
+type AdmittedWorkflowControls = {
+  loadedWorkflowPath: string;
+  loadedExecutionSnapshotRoot: string | undefined;
+  persistedWorkflowPath: string | undefined;
+  persistedExecutionSnapshotRoot: string | undefined;
+};
+
+function admitWorkflowControls(loadedPath: string, persistedPath: string | undefined): AdmittedWorkflowControls {
+  const loadedExecutionSnapshotRoot = workflowExecutionSnapshotRoot(loadedPath);
+  const persistedExecutionSnapshotRoot =
+    persistedPath === undefined ? undefined : workflowExecutionSnapshotRoot(persistedPath);
+  if (
+    persistedPath !== undefined &&
+    (loadedExecutionSnapshotRoot === undefined ||
+      persistedExecutionSnapshotRoot === undefined ||
+      realpathSync(loadedPath) !== realpathSync(persistedPath))
+  ) {
+    throw new Error("persisted workflow path does not identify the loaded execution snapshot");
+  }
+  return {
+    loadedWorkflowPath: loadedPath,
+    loadedExecutionSnapshotRoot,
+    persistedWorkflowPath: persistedPath,
+    persistedExecutionSnapshotRoot
+  };
+}
+
+function taskWorkflowControlPaths(
+  executionMode: "local" | "cloud",
+  controls: AdmittedWorkflowControls
+): {
+  promptExecutionSnapshotRoot: string | undefined;
+  workflowPath: string | undefined;
+  executionSnapshotRoot: string | undefined;
+} {
+  const anySnapshotRoot = controls.loadedExecutionSnapshotRoot ?? controls.persistedExecutionSnapshotRoot;
+  if (anySnapshotRoot === undefined) {
+    return {
+      promptExecutionSnapshotRoot: undefined,
+      workflowPath: undefined,
+      executionSnapshotRoot: undefined
+    };
+  }
+  if (executionMode === "cloud") {
+    return controls.persistedExecutionSnapshotRoot === undefined
+      ? {
+          // Preserve direct cloud-workflow admission behavior: the loaded
+          // generation can supply sealed prompt/module bytes, but cloud handoff
+          // still requires the explicit persisted generation binding.
+          promptExecutionSnapshotRoot: controls.loadedExecutionSnapshotRoot,
+          workflowPath: controls.loadedWorkflowPath,
+          executionSnapshotRoot: undefined
+        }
+      : {
+          promptExecutionSnapshotRoot: controls.persistedExecutionSnapshotRoot,
+          workflowPath: controls.persistedWorkflowPath!,
+          executionSnapshotRoot: controls.persistedExecutionSnapshotRoot
+        };
+  }
+  const persistedSnapshotRoot = controls.persistedExecutionSnapshotRoot ?? controls.loadedExecutionSnapshotRoot;
+  return {
+    // The descriptor-rooted loaded path is an admission capability owned by
+    // the Ultrafuzz controller. Smithers may continue a detached local run
+    // after that controller closes the descriptor, so no task-spec path that
+    // survives admission may retain it when a verified persisted path exists.
+    promptExecutionSnapshotRoot: persistedSnapshotRoot,
+    workflowPath: controls.persistedWorkflowPath ?? controls.loadedWorkflowPath,
+    executionSnapshotRoot: persistedSnapshotRoot
+  };
+}
+
+function workflowExecutionSnapshotRoot(workflowPath: string): string | undefined {
+  if (!path.isAbsolute(workflowPath)) return undefined;
+  const workflows = path.dirname(workflowPath);
+  const smithers = path.dirname(workflows);
+  const candidate = path.dirname(smithers);
+  if (
+    path.basename(workflows) !== "workflows" ||
+    path.basename(smithers) !== ".smithers" ||
+    !existsSync(path.join(candidate, "dependencies", "manifest.json")) ||
+    !existsSync(path.join(candidate, "controls", "plan.json"))
+  ) {
+    return undefined;
+  }
+  return candidate;
+}
+
+function sealedTaskPromptPath(attemptId: string, snapshotRoot: string | undefined): string | undefined {
+  if (snapshotRoot === undefined) return undefined;
+  const promptPath = path.join(snapshotRoot, "controls", "rendered-prompts", `${attemptId}.md`);
+  if (!existsSync(promptPath)) throw new Error(`sealed rendered prompt is missing for ${attemptId}`);
+  return promptPath;
+}
+
+function cloudSnapshotRelativePath(value: string, label: string): string {
+  const relative = path.relative(process.cwd(), value);
+  if (relative === "" || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`${label} must stay inside the cloud handoff project`);
+  }
+  return relative.split(path.sep).join("/");
+}
 const usesCloudExecution = taskSpecs.some((task) => task.execution.mode === "cloud");
 const isCloudWorkerProcess = process.env.ULTRAFUZZ_CLOUD_WORKER === "1";
 const modalModule =
@@ -4788,6 +4903,9 @@ export default smithers((ctx) => {
             if (cloudProvider === undefined || task.execution.provider !== "modal") {
               throw new Error("cloud execution provider is unavailable");
             }
+            if (task.executionSnapshotRoot === undefined) {
+              throw new Error("cloud execution requires a sealed workflow execution snapshot");
+            }
             return (
               <Fragment key={task.id}>
                 <Sandbox
@@ -4799,8 +4917,14 @@ export default smithers((ctx) => {
                     task_id: task.id,
                     attempt_id: task.attemptId,
                     execution_generation: cloudExecutionGeneration,
-                    workflow_path: task.workflowPath,
-                    ...(task.promptPath === undefined ? {} : { prompt_path: task.promptPath }),
+                    execution_snapshot_root: cloudSnapshotRelativePath(
+                      task.executionSnapshotRoot,
+                      "workflow execution snapshot"
+                    ),
+                    workflow_path: cloudSnapshotRelativePath(task.workflowPath, "workflow path"),
+                    ...(task.promptPath === undefined
+                      ? {}
+                      : { prompt_path: cloudSnapshotRelativePath(task.promptPath, "rendered prompt path") }),
                     run_root: task.runRoot,
                     artifact_dir: task.artifactRelativeDir,
                     workspace_dir: task.workspaceRelativePath,

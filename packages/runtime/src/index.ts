@@ -16,4 +16,5 @@ export * from "./types.js";
 export * from "./validate.js";
 export * from "./workflow-sync.js";
 export * from "./workflow-control.js";
+export * from "./workflow-integrity.js";
 export * from "./workspace-handoff.js";

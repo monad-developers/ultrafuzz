@@ -24,6 +24,7 @@ import type { Dirent } from "node:fs";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { KimiAgent as SmithersKimiAgent } from "smithers-orchestrator";
+import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
 import { readStringTable, stringField } from "./toml";
 
 type KimiAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
@@ -100,6 +101,7 @@ export function createKimiAgent(options: KimiTaskOptions = {}): SmithersKimiAgen
   return new KimiCode029Agent({
     ...(options.model === undefined ? {} : { model: options.model }),
     extraArgs: kimiExtraArgs(options),
+    env: workflowControlChildEnvironment(),
     ...kimiAuthOptions(reasoningEffort)
   });
 }
@@ -228,7 +230,7 @@ export class KimiCode029Agent extends SmithersKimiAgent {
     return {
       ...command,
       args: kimiCode029Args(command.args, knownSession),
-      env: kimiCommandEnv(command.env, runtimeHome),
+      env: workflowControlChildEnvironment(kimiCommandEnv(command.env, runtimeHome)),
       cleanup,
       benignStderrPatterns: [
         ...(command.benignStderrPatterns ?? []),
@@ -291,7 +293,7 @@ function kimiAuthOptions(reasoningEffort: KimiReasoningEffort): KimiAuthOptions 
 }
 
 function readKimiAuthConfig(): KimiAuthConfig {
-  const configPath = path.join(process.cwd(), "ultrafuzz.toml");
+  const configPath = process.env.ULTRAFUZZ_CONFIG_PATH ?? path.join(process.cwd(), "ultrafuzz.toml");
   const kimi = readStringTable(readFileSync(configPath, "utf8"), "agents.KimiAgent");
   return {
     auth: stringField(kimi, "auth"),
@@ -304,7 +306,7 @@ function requiredEnv(name: string): string {
   const names = name === "KIMI_API_KEY" ? ["KIMI_API_KEY", "MOONSHOT_API_KEY"] : [name];
   for (const candidate of names) {
     const value = process.env[candidate];
-    if (value !== undefined && value.trim() !== "") return value;
+    if (value !== undefined && value.trim() !== "") return workflowControlCredentialValue(value, candidate);
   }
   throw new Error(`agents.KimiAgent auth is api-key, but none of ${names.join(", ")} are set`);
 }

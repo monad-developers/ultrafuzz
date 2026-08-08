@@ -1,14 +1,25 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smithers-orchestrator";
+import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
 import { readStringTable, stringField } from "./toml";
 
 type ClaudeAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
-type ClaudeAuthOptions = { apiKey?: string; configDir?: string };
+type ClaudeAuthOptions = { apiKey?: string; configDir?: string; env?: Record<string, string> };
 export type ClaudeTaskOptions = { model?: string; reasoningEffort?: string; addDir?: string[] };
+type ClaudeCommandParams = Parameters<SmithersClaudeCodeAgent["buildCommand"]>[0];
+type ClaudeCommand = Awaited<ReturnType<SmithersClaudeCodeAgent["buildCommand"]>>;
+
+export class CompatibleClaudeCodeAgent extends SmithersClaudeCodeAgent {
+  override async buildCommand(params: ClaudeCommandParams): Promise<ClaudeCommand> {
+    const command = await super.buildCommand(params);
+    return { ...command, env: workflowControlChildEnvironment(command.env) };
+  }
+}
 
 export function createClaudeAgent(options: ClaudeTaskOptions = {}): SmithersClaudeCodeAgent {
-  return new SmithersClaudeCodeAgent({
+  const auth = claudeAuthOptions();
+  return new CompatibleClaudeCodeAgent({
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.reasoningEffort === undefined ? {} : { extraArgs: ["--effort", options.reasoningEffort] }),
     ...(options.addDir === undefined ? {} : { addDir: options.addDir }),
@@ -19,7 +30,8 @@ export function createClaudeAgent(options: ClaudeTaskOptions = {}): SmithersClau
     // deliberately not configurable per agent -- edit this generated file if a
     // project needs otherwise.
     permissionMode: "bypassPermissions",
-    ...claudeAuthOptions()
+    ...auth,
+    env: workflowControlChildEnvironment(auth.env)
   });
 }
 
@@ -39,7 +51,7 @@ function claudeAuthOptions(): ClaudeAuthOptions {
 }
 
 function readClaudeAuthConfig(): ClaudeAuthConfig {
-  const configPath = path.join(process.cwd(), "ultrafuzz.toml");
+  const configPath = process.env.ULTRAFUZZ_CONFIG_PATH ?? path.join(process.cwd(), "ultrafuzz.toml");
   const claude = readStringTable(readFileSync(configPath, "utf8"), "agents.ClaudeAgent");
   return {
     auth: stringField(claude, "auth"),
@@ -53,7 +65,7 @@ function requiredEnv(name: string): string {
   if (value === undefined || value.trim() === "") {
     throw new Error(`agents.ClaudeAgent auth is api-key, but ${name} is not set`);
   }
-  return value;
+  return workflowControlCredentialValue(value, name);
 }
 
 function resolveConfigDir(value: string): string {
