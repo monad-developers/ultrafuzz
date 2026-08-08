@@ -21,6 +21,18 @@ const T0 = "2026-07-19T00:00:00.000Z";
 const T1 = "2026-07-19T00:01:00.000Z";
 const T2 = "2026-07-19T00:02:00.000Z";
 
+function writeRunRoot(target: string, runId: string, options: { linked: boolean }) {
+  const runRoot = path.join(target, ".ultrafuzz", "runs", runId);
+  fs.mkdirSync(runRoot, { recursive: true });
+  fs.writeFileSync(path.join(runRoot, "state.json"), JSON.stringify({ run_id: runId, nodes: {} }));
+  if (options.linked) {
+    // The workflow link `resume` requires. Written right after the workflow compiles and before it is
+    // submitted, so its presence is what separates "failed to submit" from "died while compiling".
+    fs.writeFileSync(path.join(runRoot, "run-metadata.json"), JSON.stringify({ workflow: { run_id: "wf-1" } }));
+  }
+  return runRoot;
+}
+
 function fixture() {
   const workRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-resume-"));
   const target = path.join(workRoot, "target");
@@ -169,9 +181,7 @@ describe("Modal durable evaluation resume", () => {
       path.join(value.evalDir, "runs.jsonl"),
       `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
     );
-    const runRoot = path.join(value.target, ".ultrafuzz", "runs", "durable-run-one");
-    fs.mkdirSync(runRoot, { recursive: true });
-    fs.writeFileSync(path.join(runRoot, "state.json"), JSON.stringify({ run_id: "durable-run-one" }));
+    writeRunRoot(value.target, "durable-run-one", { linked: true });
     await expect(findModalResumeWorkspace(value.workRoot)).resolves.toEqual({
       kind: "resumable",
       workspace: {
@@ -207,11 +217,7 @@ describe("Modal durable evaluation resume", () => {
   it("refuses to guess when several durable runs are on disk and none is linked", async () => {
     const value = fixture();
     fs.writeFileSync(path.join(value.evalDir, "runs.jsonl"), `${JSON.stringify({ row_id: "row-one" })}\n`);
-    for (const runId of ["durable-run-one", "durable-run-two"]) {
-      const runRoot = path.join(value.target, ".ultrafuzz", "runs", runId);
-      fs.mkdirSync(runRoot, { recursive: true });
-      fs.writeFileSync(path.join(runRoot, "state.json"), JSON.stringify({ run_id: runId }));
-    }
+    for (const runId of ["durable-run-one", "durable-run-two"]) writeRunRoot(value.target, runId, { linked: true });
     await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("exactly one durable run on disk");
   });
 
@@ -233,15 +239,32 @@ describe("Modal durable evaluation resume", () => {
     await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("persistent workspace is incomplete");
   });
 
-  it("surfaces a durable-volume read fault instead of reading it as a fresh run", async () => {
+  it("treats a non-directory eval runs path as not started, and clears nothing", async () => {
     const value = fixture();
-    // ENOTDIR: the eval runs path exists but is a file. Swallowing every readdir error would report this
-    // as "never started" and invite a restart over whatever the volume actually holds.
+    // ENOTDIR is classified like absence, deliberately: there is no evaluation to resume. What matters is
+    // that it names nothing to delete, so the not-started path cannot remove anything on this route.
     const evalRoot = path.join(value.control, ".ultrafuzz", "evals", "runs");
     fs.rmSync(evalRoot, { recursive: true });
     fs.writeFileSync(evalRoot, "not a directory\n");
     const found = await findModalResumeWorkspace(value.workRoot);
     expect(found.kind).toBe("not-started");
+    expect(found.kind === "not-started" && found.staleEvalRunId).toBeUndefined();
+    expect(found.kind === "not-started" && found.staleRunRootIds).toBeUndefined();
+  });
+
+  it("refuses to call a run root resumable when no workflow was ever linked to it (#378)", async () => {
+    const value = fixture();
+    fs.writeFileSync(
+      path.join(value.evalDir, "runs.jsonl"),
+      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
+    );
+    // A run killed while compiling has state.json but no workflow link, and `resume` refuses it forever with
+    // WORKFLOW_RUN_ID_MISSING. Calling it resumable would relocate the wedge rather than remove it; it has
+    // to be named for clearing, or the restart trips RUN_ALREADY_EXISTS on its deterministic run id.
+    writeRunRoot(value.target, "durable-run-one", { linked: false });
+    const found = await findModalResumeWorkspace(value.workRoot);
+    expect(found.kind).toBe("not-started");
+    expect(found.kind === "not-started" && found.staleRunRootIds).toEqual(["durable-run-one"]);
   });
 
   it("still resumes a linked durable run, and still rejects ambiguity, through the tolerant lookup", async () => {
@@ -280,9 +303,15 @@ describe("Modal durable evaluation resume", () => {
       .split("\n")
       .filter((line) => line.trim() !== "")
       .map((line) => JSON.parse(line) as Record<string, unknown>);
+    // The link alone is not enough. `scoreEvalRun` resolves the terminal report through
+    // `ultrafuzz_run_root`, and without it falls back to a path built from `row.run_id`, which is a
+    // different directory from the bounded run id on disk -- so the run would succeed and then fail
+    // scoring. `status` matters too: efficiency and status reporting read it, not `final_status`.
     expect(rows[rows.length - 1]).toMatchObject({
       row_id: "row-one",
       ultrafuzz_run_id: "durable-run-one",
+      ultrafuzz_run_root: path.join(value.target, ".ultrafuzz", "runs", "durable-run-one"),
+      status: "launched",
       final_status: "succeeded"
     });
     // And the repaired journal must now be resumable on its own, without consulting the disk again.

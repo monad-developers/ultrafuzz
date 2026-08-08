@@ -101,7 +101,13 @@ export function modalEvalRunCommand(input: {
  */
 export type ModalResumeLookup =
   | { readonly kind: "resumable"; readonly workspace: ModalResumeWorkspace }
-  | { readonly kind: "not-started"; readonly reason: string; readonly staleEvalRunId?: string };
+  | {
+      readonly kind: "not-started";
+      readonly reason: string;
+      readonly staleEvalRunId?: string;
+      /** Run roots that exist but can never be resumed, so a restart must clear them (`RUN_ALREADY_EXISTS`). */
+      readonly staleRunRootIds?: readonly string[];
+    };
 
 /**
  * Decide whether a volume holds a resumable run, WITHOUT treating "nothing to resume" as a failure.
@@ -172,31 +178,61 @@ export async function findModalResumeWorkspace(workRoot: string): Promise<ModalR
   if (productRunIds.size === 1) {
     return { kind: "resumable", workspace: { target, control, evalRunId, productRunId: [...productRunIds][0]! } };
   }
-  const durableRunIds = await durableRunIdsOnDisk(target);
-  if (durableRunIds.length > 1) {
-    throw new Error(`resume requires exactly one durable run on disk, found ${durableRunIds.length}`);
+  const durable = await durableRunsOnDisk(target);
+  if (durable.resumable.length > 1) {
+    throw new Error(`resume requires exactly one durable run on disk, found ${durable.resumable.length}`);
   }
-  if (durableRunIds.length === 1) {
-    return { kind: "resumable", workspace: { target, control, evalRunId, productRunId: durableRunIds[0]! } };
+  if (durable.resumable.length === 1) {
+    return { kind: "resumable", workspace: { target, control, evalRunId, productRunId: durable.resumable[0]! } };
   }
   return {
     kind: "not-started",
     reason: "resume requires exactly one linked durable run, found 0",
-    staleEvalRunId: evalRunId
+    staleEvalRunId: evalRunId,
+    ...(durable.orphaned.length === 0 ? {} : { staleRunRootIds: durable.orphaned })
   };
 }
 
-/** Durable runs present on disk, identified the same way the runtime identifies them: a run root with state. */
-async function durableRunIdsOnDisk(target: string): Promise<string[]> {
+/**
+ * Run roots on disk, split by whether `resume` could actually resume them.
+ *
+ * The line is the workflow link in `run-metadata.json`. `persistSmithersEvidence` writes it immediately
+ * after the workflow compiles and BEFORE it is submitted, and `readLinkedWorkflowEvidence` refuses any run
+ * without it (`WORKFLOW_RUN_ID_MISSING`). So the two halves of the failure window differ:
+ *
+ *   - compiled, then failed to submit -> linked, and genuinely resumable. This is the R54 case.
+ *   - died during compilation, or with only a partial run layout -> no link, and `resume` refuses it
+ *     forever. Calling that resumable only relocates the wedge; it has to be cleared instead, or a restart
+ *     trips `RUN_ALREADY_EXISTS` on its deterministic run id.
+ *
+ * `state.json` alone is not the test: `createRunLayout` writes it well before compilation, so requiring
+ * only that would classify a run nothing can resume as resumable.
+ */
+async function durableRunsOnDisk(target: string): Promise<{ resumable: string[]; orphaned: string[] }> {
   const runsRoot = path.join(target, ".ultrafuzz", "runs");
-  const found = [];
+  const resumable = [];
+  const orphaned = [];
   for (const name of await readdirIfMissing(runsRoot)) {
     const root = path.join(runsRoot, name);
-    if ((await isDirectoryNotSymlink(root)) && (await isRegularFileNotSymlink(path.join(root, "state.json")))) {
-      found.push(name);
+    if (!(await isDirectoryNotSymlink(root))) continue;
+    if ((await isRegularFileNotSymlink(path.join(root, "state.json"))) && (await hasLinkedWorkflow(root))) {
+      resumable.push(name);
+    } else {
+      orphaned.push(name);
     }
   }
-  return found.sort();
+  return { resumable: resumable.sort(), orphaned: orphaned.sort() };
+}
+
+/** Whether `run-metadata.json` carries the workflow link `resume` requires. */
+async function hasLinkedWorkflow(runRoot: string): Promise<boolean> {
+  const metadata = (await readFile(path.join(runRoot, "run-metadata.json"), "utf8").then(
+    (text) => JSON.parse(text) as unknown,
+    () => undefined
+  )) as
+    { workflow?: { run_id?: unknown; workflowRunId?: unknown }; smithers?: { workflowRunId?: unknown } } | undefined;
+  const runId = metadata?.workflow?.run_id ?? metadata?.workflow?.workflowRunId ?? metadata?.smithers?.workflowRunId;
+  return typeof runId === "string" && runId.length > 0;
 }
 
 /** Refuse a path that exists but is not a real directory. An absent path is the ordinary fresh case. */
@@ -254,7 +290,28 @@ export async function repairModalEvalRunRecord(
   if (linked.length === 0) throw new Error(`evaluation run does not reference durable run ${state.run_id}`);
   const rowIds = new Set(linked.map((record) => record.row_id));
   if (rowIds.size !== 1) throw new Error("evaluation run has ambiguous linked rows");
-  const record: Record<string, unknown> = { ...linked[linked.length - 1]!, ultrafuzz_run_id: state.run_id };
+  // A repaired row has to be the row a successful launch would have written, not the failed row with a link
+  // stamped on it. `scoreEvalRun` resolves the terminal report through `ultrafuzz_run_root`, and without it
+  // falls back to a path built from `row.run_id` — a different directory from the bounded run id actually on
+  // disk — so the run would drive to success and then fail scoring, wedging one step further downstream.
+  // `status` matters for the same reason: efficiency and status reporting read it, and would otherwise call
+  // a launch failed for a run that succeeded.
+  const record: Record<string, unknown> = {
+    ...linked[linked.length - 1]!,
+    ultrafuzz_run_id: state.run_id,
+    ...(linkageMissing
+      ? {
+          ultrafuzz_run_root: path.join(workspace.target, ".ultrafuzz", "runs", state.run_id),
+          status: "launched",
+          launcher: {
+            ...(typeof (linked[linked.length - 1] as Record<string, unknown> | undefined)?.launcher === "object"
+              ? ((linked[linked.length - 1] as Record<string, unknown>).launcher as Record<string, unknown>)
+              : {}),
+            status: "succeeded"
+          }
+        }
+      : {})
+  };
   const finalStatus = state.status;
   const currentWorkflow =
     typeof record.workflow === "object" && record.workflow !== null && !Array.isArray(record.workflow)

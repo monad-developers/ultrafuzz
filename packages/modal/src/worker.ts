@@ -152,16 +152,23 @@ async function main(): Promise<void> {
         const resumed = await resumeExistingEvaluation(workspace, writer);
         ({ control, evalRunId, terminalDisposition } = resumed);
       } else {
-        // Nothing ran, but a previous attempt may still have left the eval run directory behind. Eval run
-        // ids are deterministic, and `runEvalSuite` refuses to reuse an existing one, so leaving it here
-        // would simply trade one permanent failure for `EVAL_RUN_ALREADY_EXISTS`. Removing it is safe only
-        // because `findModalResumeWorkspace` has already established that no durable run exists on disk —
-        // this must never be reached while one does.
+        // Nothing resumable exists, but a previous attempt may have left state that a restart would trip
+        // over. Both ids involved are deterministic, so leaving either behind only moves the permanent
+        // failure: `runEvalSuite` refuses an existing eval run directory (`EVAL_RUN_ALREADY_EXISTS`), and
+        // `planRun` refuses an existing run root (`RUN_ALREADY_EXISTS`).
+        //
+        // This is the only destructive step, so it is bounded by what the lookup proved: it names a run root
+        // here only when that root carries no workflow link, which means `resume` could never have used it
+        // and no workflow was ever submitted from it. A run that compiled — the R54 case — is linked, and so
+        // is resumed above and never reaches this branch.
         if (found.staleEvalRunId !== undefined) {
           await rm(path.join(WORK_ROOT, "control", ".ultrafuzz", "evals", "runs", found.staleEvalRunId), {
             recursive: true,
             force: true
           });
+        }
+        for (const runRootId of found.staleRunRootIds ?? []) {
+          await rm(path.join(WORK_ROOT, "target", ".ultrafuzz", "runs", runRootId), { recursive: true, force: true });
         }
         const prepared = await prepareWorkspace();
         target = prepared.target;
@@ -239,10 +246,14 @@ async function resumeExistingEvaluation(
     runRoot: path.join(workspace.target, ".ultrafuzz", "runs", workspace.productRunId)
   });
   if (repairedPrompts > 0) await flushVolume();
-  modelWorkStarted = true;
   await writer.writePartial(await readWorkerCheckpoint(workspace.target));
   let state = await durableRunState(workspace.target, workspace.productRunId);
   if (state === undefined) throw new CheckpointIncompatibleError("persistent workspace is missing durable run state");
+  // Claim model work only once the durable run is known to be readable. Claiming it earlier costs the tight
+  // pre-model retry bound: an attempt reporting model work resets the streak `MODAL_PRE_MODEL_RETRY_LIMIT`
+  // counts, so a run that cannot even load its state would burn the whole no-progress budget instead of
+  // failing after three attempts with an accurate diagnosis.
+  modelWorkStarted = true;
   let disposition = await terminalDispositionForState(workspace, state);
   const checkpoint = await readWorkerCheckpoint(workspace.target);
   if (modalDurableRunNeedsResume(state, checkpoint.counts)) {
