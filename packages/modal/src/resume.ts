@@ -146,9 +146,16 @@ export async function findModalResumeWorkspace(workRoot: string): Promise<ModalR
   const names = await readdirIfMissing(evalRoot);
   const directories = [];
   const candidates = [];
+  const unclassifiableEvalEntries = [];
   for (const name of names) {
     const root = path.join(evalRoot, name);
-    if (!(await isDirectoryNotSymlink(root))) continue;
+    // Same reasoning as the run-root loop below: `runEvalSuite` refuses on `fs.existsSync`, which follows
+    // symlinks and does not care about entry type, so an entry skipped silently here would still block a
+    // restart. Report it instead of dropping it into invisibility.
+    if (!(await isDirectoryNotSymlink(root))) {
+      unclassifiableEvalEntries.push(name);
+      continue;
+    }
     // Tracked separately from `candidates`: `runEvalSuite` refuses to reuse an id whose DIRECTORY exists,
     // and it creates that directory before writing `eval.json`. A kill in between leaves a directory that
     // is not a candidate but still blocks reuse, so a restart has to be told to clear it.
@@ -168,6 +175,7 @@ export async function findModalResumeWorkspace(workRoot: string): Promise<ModalR
       throw new Error(`workspace has ${durable.resumable.length} linked durable run(s) but no evaluation run`);
     }
     assertNoDamagedRunRoots(durable.damaged);
+    assertNoUnclassifiableEvalEntries(unclassifiableEvalEntries);
     return {
       kind: "not-started",
       reason: "resume requires exactly one evaluation run, found 0",
@@ -205,8 +213,12 @@ export async function findModalResumeWorkspace(workRoot: string): Promise<ModalR
     return { kind: "resumable", workspace: { target, control, evalRunId, productRunId: durable.resumable[0]! } };
   }
   // Damage only matters on the branch that would restart: a damaged root blocks `planRun`, but it must not
-  // preempt resuming a run that is perfectly good.
+  // preempt resuming a run that is perfectly good. This applies to the `damaged` LIST only — a read fault
+  // or malformed metadata raised while classifying some other root still propagates from the loop above and
+  // will preempt a resume. That is deliberate (it fails closed and never deletes), but it is not what this
+  // deferral promises.
   assertNoDamagedRunRoots(durable.damaged);
+  assertNoUnclassifiableEvalEntries(unclassifiableEvalEntries);
   return {
     kind: "not-started",
     reason: "resume requires exactly one linked durable run, found 0",
@@ -311,6 +323,18 @@ async function hasLinkedWorkflow(runRoot: string): Promise<boolean> {
   }
   const runId = metadata.workflow?.run_id ?? metadata.workflow?.workflowRunId ?? metadata.smithers?.workflowRunId;
   return typeof runId === "string" && runId.length > 0;
+}
+
+/**
+ * Refuse to restart over an eval run entry that is not a directory. Deleting something we cannot classify
+ * would be worse, and ignoring it hands the restart an `EVAL_RUN_ALREADY_EXISTS` it cannot clear.
+ */
+function assertNoUnclassifiableEvalEntries(entries: readonly string[]): void {
+  if (entries.length === 0) return;
+  throw new Error(
+    `evaluation run entr(ies) ${[...entries].sort().join(", ")} are not directories and would block a restart; ` +
+      `resolve them on the volume`
+  );
 }
 
 /**

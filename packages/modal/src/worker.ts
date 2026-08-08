@@ -157,11 +157,11 @@ async function main(): Promise<void> {
         // failure: `runEvalSuite` refuses an existing eval run directory (`EVAL_RUN_ALREADY_EXISTS`), and
         // `planRun` refuses an existing run root (`RUN_ALREADY_EXISTS`).
         //
-        // This is the only destructive step, so it is bounded by what the lookup proved: it names a run root
-        // here only when its metadata is absent or carries no workflow link — the link is written before
-        // submission, so either way no workflow was ever submitted from it. A root that IS linked but is missing its state is reported as damage
-        // rather than named here. A run that compiled — the R54 case — is linked, so it resumes above and
-        // never reaches this branch.
+        // This is the only destructive step, and it is bounded by what the lookup proved: a run root is
+        // named here only when its metadata is absent or carries no workflow link. That link is written
+        // before submission, so either way no workflow was ever submitted from that root. A root that IS
+        // linked but is missing its state is reported as damage rather than named here. A run that
+        // compiled — the R54 case — is linked, so it resumes above and never reaches this branch.
         for (const staleEvalRunId of found.staleEvalRunIds ?? []) {
           await rm(path.join(WORK_ROOT, "control", ".ultrafuzz", "evals", "runs", staleEvalRunId), {
             recursive: true,

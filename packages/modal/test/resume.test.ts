@@ -451,6 +451,19 @@ describe("Modal durable evaluation resume", () => {
     );
   });
 
+  it("refuses an eval run entry that is not a directory, instead of silently skipping it", async () => {
+    const value = fixture();
+    fs.writeFileSync(
+      path.join(value.evalDir, "runs.jsonl"),
+      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
+    );
+    // `runEvalSuite` refuses on `existsSync`, which follows symlinks and ignores entry type, so an entry
+    // dropped here would block the restart with nothing able to clear it -- the same asymmetry that the
+    // run-root loop closes. Refusing is the conservative half: it never deletes what it cannot classify.
+    fs.writeFileSync(path.join(value.control, ".ultrafuzz", "evals", "runs", "not-a-directory"), "x\n");
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("are not directories");
+  });
+
   it("finalizes succeeded and genuine task outcomes without resetting completed nodes", async () => {
     const value = fixture();
     const workspace = await locateModalResumeWorkspace(value.workRoot);
