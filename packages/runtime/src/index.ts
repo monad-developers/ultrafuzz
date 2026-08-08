@@ -4,6 +4,7 @@ export * from "./doctor.js";
 export * from "./init.js";
 export * from "./lifecycle-inspection.js";
 export * from "./materialize.js";
+export * from "./npm-install-retry.js";
 export * from "./plan-run.js";
 export * from "./references.js";
 export * from "./run-progress.js";

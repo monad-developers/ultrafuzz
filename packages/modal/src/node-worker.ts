@@ -5,7 +5,7 @@ import path from "node:path";
 import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 
-import { smithersDependencyInstallArgs } from "@ultrafuzz/runtime";
+import { smithersDependencyInstallArgs, withTransientNpmRegistryRetry } from "@ultrafuzz/runtime";
 
 import { modalAttemptVerificationMarkerName, parseModalNodeSandboxInput } from "./node-provider.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
@@ -75,11 +75,13 @@ async function main(): Promise<void> {
     }
     syncDurableData(projectRoot);
     if (!durableWorkspace.hasCompletedCheckpoint) {
-      await runChecked(
-        "install-smithers",
-        "npm",
-        smithersDependencyInstallArgs({ prefix: path.join(projectRoot, ".smithers") }),
-        projectRoot
+      await withTransientNpmRegistryRetry(() =>
+        runChecked(
+          "install-smithers",
+          "npm",
+          smithersDependencyInstallArgs({ prefix: path.join(projectRoot, ".smithers") }),
+          projectRoot
+        )
       );
     }
     const workflowPath = anchoredProjectPath(projectRoot, input.workflow_path);

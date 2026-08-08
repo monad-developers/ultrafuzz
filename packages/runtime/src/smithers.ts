@@ -19,6 +19,7 @@ import { resolveExecutionResources, type ResolvedConfig } from "@ultrafuzz/confi
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
+import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
 import { renderRuntimeTemplate } from "./runtime-template.js";
 import {
   assertSmithersPackageManifest,
@@ -1688,16 +1689,20 @@ async function ensureSmithersDependencies(
       repairCause = error;
     }
   }
-  await execFileAsync(
-    "npm",
-    smithersDependencyInstallArgs({ prefix: packageRoot, registry: "https://registry.npmjs.org" }),
-    {
-      cwd: projectRoot,
-      env: smithersCommandEnv(projectRoot, env),
-      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
-      ...(control.signal === undefined ? {} : { signal: control.signal }),
-      ...(control.timeoutMs === undefined ? {} : { timeout: control.timeoutMs })
-    }
+  await withTransientNpmRegistryRetry(
+    () =>
+      execFileAsync(
+        "npm",
+        smithersDependencyInstallArgs({ prefix: packageRoot, registry: "https://registry.npmjs.org" }),
+        {
+          cwd: projectRoot,
+          env: smithersCommandEnv(projectRoot, env),
+          maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
+          ...(control.signal === undefined ? {} : { signal: control.signal }),
+          ...(control.timeoutMs === undefined ? {} : { timeout: control.timeoutMs })
+        }
+      ),
+    control.signal === undefined ? {} : { signal: control.signal }
   );
   const validationError = installedSmithersValidationError(projectRoot);
   if (validationError !== undefined) {
