@@ -185,9 +185,9 @@ GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, Kimi K3 `max`, and DeepSeek V4 Pro
 one strategy loop, and explicitly leaves all three disable flags off so the
 complete topology is included. Both default to one trial per variant and use
 GPT-5.6 Sol `xhigh` as an independent judge. Public Modal pairs contain one
-runner variant. Repository variables may override the smoke OpenAI model and
-reasoning level, while full workflow dispatch inputs may override any full-lane
-runner. These overrides retain the lane's fixed provider count, target
+runner variant. Repository variables may override the pushed smoke OpenAI model,
+while a manual smoke dispatch selects one provider, model, and reasoning level;
+full workflow dispatch inputs may override any full-lane runner. These overrides retain the lane's fixed provider count, target
 selection, and topology. Publication validates every pair as an exact projection
 of the candidate commit's trusted lane policy before merging its observations.
 Smoke publication additionally requires at least one normalized finding for

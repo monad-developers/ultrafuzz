@@ -4,7 +4,10 @@ import { pathToFileURL } from "node:url";
 const FULL_COMMIT = /^[0-9a-f]{40}$/u;
 const PRODUCER_WORKFLOW_PATH = ".github/workflows/eval-benchmarks.yml";
 const SUPPORTED_EVENTS = new Set(["push", "workflow_dispatch"]);
-const SUPPORTED_BENCHMARK_MODES = ["smoke", "full"];
+// Longitudinal publication is artifact-derived and deliberately allowlisted.
+// The production-topology threat-model release gate is not a comparable history row.
+const KNOWN_BENCHMARK_MODES = ["smoke", "full", "threat-model"];
+const PUBLISHABLE_BENCHMARK_MODES = new Set(["smoke", "full"]);
 const REQUIRED_ARTIFACT_PREFIXES = ["modal-benchmark-launch", "public-benchmark-results"];
 
 export function qualifyModalBenchmarkPublication(eventValue, jobsValue, artifactsValue, repository) {
@@ -55,15 +58,20 @@ function benchmarkModeFromArtifacts(value, workflowRun) {
   const runAttempt = positiveInteger(workflowRun.run_attempt);
   if (!runId || !runAttempt) return undefined;
 
+  const artifacts = artifactRecords(value);
+  const observedNames = new Set(artifacts.map((artifact) => string(artifact.name)));
   const availableNames = new Set(
-    artifactRecords(value)
-      .filter((artifact) => artifact.expired === false)
-      .map((artifact) => string(artifact.name))
+    artifacts.filter((artifact) => artifact.expired === false).map((artifact) => string(artifact.name))
   );
-  const matchingModes = SUPPORTED_BENCHMARK_MODES.filter((mode) =>
-    REQUIRED_ARTIFACT_PREFIXES.every((prefix) => availableNames.has(`${prefix}-${mode}-${runId}-${runAttempt}`))
+  const observedModes = KNOWN_BENCHMARK_MODES.filter((mode) =>
+    REQUIRED_ARTIFACT_PREFIXES.some((prefix) => observedNames.has(`${prefix}-${mode}-${runId}-${runAttempt}`))
   );
-  return matchingModes.length === 1 ? matchingModes[0] : undefined;
+  if (observedModes.length !== 1) return undefined;
+  const mode = observedModes[0];
+  if (!PUBLISHABLE_BENCHMARK_MODES.has(mode)) return undefined;
+  return REQUIRED_ARTIFACT_PREFIXES.every((prefix) => availableNames.has(`${prefix}-${mode}-${runId}-${runAttempt}`))
+    ? mode
+    : undefined;
 }
 
 function jobRecords(value) {

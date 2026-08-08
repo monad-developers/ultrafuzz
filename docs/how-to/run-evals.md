@@ -214,12 +214,13 @@ an exact failed, timed-out, or cancelled Modal generation. Different branches
 and independent full dispatches can still overlap, so enforce provider and
 Modal budgets across all concurrent runs.
 
-A manual workflow dispatch launches the full EVMBench cohort instead, with
-GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, Kimi K3 `max`, and DeepSeek V4 Pro
-`max` by default. Its
-model and reasoning inputs can override all full-lane runners. Full runs only
-through that manual dispatch; pushes always select smoke. Both modes retain
-the standard Modal CPU and memory allocation. Smoke rows receive a
+A manual workflow dispatch chooses smoke, full, or the v0.1.0 threat-model gate.
+Dispatched smoke accepts one provider/model/reasoning tuple while retaining the
+smoke targets, topology, and judge. Full uses GPT-5.6 Luna `high`, Claude Sonnet
+5 `high`, Kimi K3 `max`, and DeepSeek V4 Pro `max` by default, and its model and
+reasoning inputs can override all four runners. Threat-model ignores form model
+values and uses the checked-in OpenAI GPT-5.6 Luna `high` profile. Pushes always
+select smoke. All lanes retain the standard Modal CPU and memory allocation. Smoke rows receive a
 15,000-second watchdog, covering both allowed attempts across the smoke graph's
 four sequential agent stages plus transition slack. Full-lane rows retain the
 3,600-second watchdog, and both publish ordinary 30-day Actions artifacts. Missing

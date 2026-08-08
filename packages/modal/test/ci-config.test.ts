@@ -459,8 +459,11 @@ describe("public Modal benchmark configuration", () => {
       benchmark_lane: expect.objectContaining({
         default: "full",
         type: "choice",
-        options: ["full", "threat-model"]
+        options: ["smoke", "full", "threat-model"]
       }),
+      smoke_provider: expect.objectContaining({ default: "deepseek", type: "choice" }),
+      smoke_model: expect.objectContaining({ default: "deepseek-v4-flash", type: "string" }),
+      smoke_reasoning: expect.objectContaining({ default: "max", type: "string" }),
       openai_model: expect.objectContaining({ default: "gpt-5.6-luna", type: "string" }),
       openai_reasoning: expect.objectContaining({ default: "high", type: "string" }),
       anthropic_model: expect.objectContaining({ default: "claude-sonnet-5", type: "string" }),
@@ -504,6 +507,10 @@ describe("public Modal benchmark configuration", () => {
     expect(prepare?.env?.BENCHMARK_DEEPSEEK_MODEL).toContain("'deepseek-v4-pro'");
     expect(prepare?.env?.BENCHMARK_DEEPSEEK_REASONING).toContain("inputs.deepseek_reasoning");
     expect(prepare?.env?.BENCHMARK_DEEPSEEK_REASONING).toContain("'max'");
+    expect(prepare?.env?.BENCHMARK_SMOKE_PROVIDER).toContain("inputs.benchmark_lane == 'smoke'");
+    expect(prepare?.env?.BENCHMARK_SMOKE_PROVIDER).toContain("inputs.smoke_provider");
+    expect(prepare?.env?.BENCHMARK_SMOKE_MODEL).toContain("inputs.smoke_model");
+    expect(prepare?.env?.BENCHMARK_SMOKE_REASONING).toContain("inputs.smoke_reasoning");
     expect(prepare?.run).toContain("BENCHMARK_MODELS_JSON");
     expect(prepare?.run).toContain('--arg reasoning "high"');
     expect(prepare?.run).toContain('{provider: "kimi", model: $kimi_model, reasoning: $kimi_reasoning}');
@@ -512,12 +519,28 @@ describe("public Modal benchmark configuration", () => {
     // The release gate must not be retunable from the dispatch form: it takes the
     // checked-in lane profile from benchmarks/lanes.json instead of a models matrix.
     expect(prepare?.run).toContain('if [ "$BENCHMARK_MODE" = threat-model ]; then\n  BENCHMARK_MODELS_JSON=""');
-    // The publication qualifier reads the dispatched lane from this step name.
+    const threatModelSelection = prepare!.run!.indexOf('if [ "$BENCHMARK_MODE" = threat-model ]');
+    const dispatchedSmokeSelection = prepare!.run!.indexOf(
+      'elif [ "$BENCHMARK_MODE" = smoke ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]'
+    );
+    expect(threatModelSelection).toBeGreaterThan(-1);
+    expect(dispatchedSmokeSelection).toBeGreaterThan(threatModelSelection);
+    expect(prepare?.run).toContain('--arg provider "$BENCHMARK_SMOKE_PROVIDER"');
+    expect(prepare?.run).toContain('--arg model "$BENCHMARK_SMOKE_MODEL"');
+    expect(prepare?.run).toContain('--arg reasoning "$BENCHMARK_SMOKE_REASONING"');
+    // The operator-visible lane marker must agree with the artifact-derived mode.
     const laneMarkers = (workflow.jobs.launch?.steps ?? []).filter((step) =>
       String(step.name ?? "").startsWith("Benchmark lane ")
     );
     expect(laneMarkers).toHaveLength(1);
     expect(laneMarkers[0]?.name).toContain("inputs.benchmark_lane || 'smoke'");
+    const credentialCheck = workflow.jobs.launch?.steps.find((step) => step.name === "Validate benchmark credentials");
+    for (const providerSecret of ["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "KIMI_API_KEY"] as const) {
+      expect(credentialCheck?.env?.[providerSecret]).toContain("inputs.benchmark_lane == 'smoke'");
+      expect(credentialCheck?.env?.[providerSecret]).not.toContain("threat-model");
+    }
+    expect(credentialCheck?.env?.BENCHMARK_SMOKE_PROVIDER).toContain("inputs.smoke_provider");
+    expect(credentialCheck?.run).toContain('[ "$BENCHMARK_MODE" = smoke ]');
     for (const jobName of ["launch", "collect", "cleanup_incomplete_run"]) {
       const checkout = workflow.jobs[jobName]?.steps.find((step) =>
         String(step.with?.ref ?? "").includes("BENCHMARK_CANDIDATE")
