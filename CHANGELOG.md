@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Failed node attempts now retain a bounded, redacted error message beside their failure category in the durable attempt ledger, and the same safe diagnostic is included in public eval `failed_nodes`, so CI artifacts explain contract failures without Modal volume access (#361).
 - The non-default-branch smoke gate now forgives any operational failure category instead of only `resume-required` with collected diagnostics, so an infrastructure failure on one control pair no longer blocks unrelated pull requests. The failure is still surfaced as a warning annotation rather than silently passed (#321).
 - Every invariant-discovery git enumeration now runs under an explicit capture bound and reports an oversized listing by naming the subcommand, the bound and the largest contributing roots, instead of failing as an anonymous `ENOBUFS` system error. Five call sites were unbounded, not the three originally reported (#323).
 - A worker that ends unexpectedly now records a bounded, redacted tail of its child's stderr as the cause of its terminal error and prints a frame-only stack, so an unanticipated failure is diagnosable instead of surfacing as a bare `worker operation failed`. The public worker's previously raw stderr embedding is routed through the same redactor (#307).

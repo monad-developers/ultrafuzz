@@ -16,6 +16,7 @@ import {
   layoutForRunRoot,
   normalizeFindings,
   manifestDigest,
+  normalizeNodeAttemptFailureMessage,
   queryNodeAttempts,
   replayEvents,
   readRunState,
@@ -156,6 +157,7 @@ interface TerminalWorkflowAttempt {
   finishedAt: string;
   outcome: NodeAttemptOutcome;
   failureCategory?: NodeAttemptFailureCategory;
+  failureMessage?: string;
   executorRetryId?: string;
   checkpointGenerationId?: string;
   workflowExecutionId?: string;
@@ -2436,6 +2438,7 @@ function appendTerminalTaskAttempts(input: {
     }
     let outcome = attempt.outcome;
     let failureCategory = attempt.failureCategory;
+    let failureMessage = attempt.failureMessage;
     let outputDigest = outcome === "succeeded" ? outputManifestDigest : undefined;
     if (
       attempt === currentTerminalAttempt &&
@@ -2449,6 +2452,9 @@ function appendTerminalTaskAttempts(input: {
     } else if (outcome === "succeeded" && outputDigest === undefined) {
       outcome = "failed";
       failureCategory = "artifact-validation";
+    }
+    if (attempt === currentTerminalAttempt && ["failed", "timed-out", "canceled"].includes(outcome)) {
+      failureMessage = input.finalization.lastError ?? failureMessage;
     }
     const reuseSource =
       outcome === "reused"
@@ -2467,6 +2473,8 @@ function appendTerminalTaskAttempts(input: {
     }
     const reuse =
       reuseSource === undefined ? undefined : { status: "reused" as const, sourceAttemptId: reuseSource.attemptId };
+    const normalizedFailureMessage =
+      failureMessage === undefined ? undefined : normalizeNodeAttemptFailureMessage(failureMessage);
     const appendInput: AppendNodeAttemptInput = {
       nodeId: input.task.concreteNodeId,
       strategyAttemptId: input.task.attemptId,
@@ -2480,7 +2488,8 @@ function appendTerminalTaskAttempts(input: {
       inputManifestDigest,
       ...(outputDigest === undefined ? {} : { outputManifestDigest: outputDigest }),
       ...(reuse === undefined ? {} : { reuse }),
-      ...(failureCategory === undefined ? {} : { failureCategory })
+      ...(failureCategory === undefined ? {} : { failureCategory }),
+      ...(normalizedFailureMessage === undefined ? {} : { failureMessage: normalizedFailureMessage })
     };
     const preparedAttempt = {
       isCurrent: attempt === currentTerminalAttempt,
@@ -2565,6 +2574,7 @@ function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAtte
       current.startedSequence ??= event.sequence;
       current.outcome = terminal.outcome;
       current.failureCategory = terminal.failureCategory;
+      current.failureMessage = terminal.failureMessage;
     }
   }
   return attempts
@@ -2592,20 +2602,30 @@ function latestWorkflowAttempt(
   return undefined;
 }
 
-function terminalOutcomeForEvent(
-  event: WorkflowEvent
-): { outcome: NodeAttemptOutcome; failureCategory?: NodeAttemptFailureCategory } | undefined {
+function terminalOutcomeForEvent(event: WorkflowEvent):
+  | {
+      outcome: NodeAttemptOutcome;
+      failureCategory?: NodeAttemptFailureCategory;
+      failureMessage?: string;
+    }
+  | undefined {
   switch (event.type) {
     case "NodeFinished":
       return { outcome: "succeeded" };
     case "TaskHeartbeatTimeout":
-      return { outcome: "timed-out", failureCategory: "timeout" };
-    case "NodeFailed":
+      return {
+        outcome: "timed-out",
+        failureCategory: "timeout",
+        failureMessage: stringField(event.payload, "message") ?? "workflow task timed out"
+      };
+    case "NodeFailed": {
+      const failureMessage = errorText(event.payload?.error);
       return errorLooksLikeTimeout(event.payload?.error)
-        ? { outcome: "timed-out", failureCategory: "timeout" }
-        : { outcome: "failed", failureCategory: "executor-error" };
+        ? { outcome: "timed-out", failureCategory: "timeout", ...(failureMessage ? { failureMessage } : {}) }
+        : { outcome: "failed", failureCategory: "executor-error", ...(failureMessage ? { failureMessage } : {}) };
+    }
     case "NodeCancelled":
-      return { outcome: "canceled", failureCategory: "canceled" };
+      return { outcome: "canceled", failureCategory: "canceled", failureMessage: "workflow task was cancelled" };
     case "NodeSkipped":
       return { outcome: "skipped" };
     default:

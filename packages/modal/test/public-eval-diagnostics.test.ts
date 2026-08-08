@@ -374,20 +374,26 @@ describe("public post-eval diagnostics", () => {
         status: "failed",
         timed_out: false,
         failure_category: "artifact-contract",
-        failure_code: "task-output-validation-failure"
+        failure_code: "task-output-validation-failure",
+        failure_message: "private failure detail 0 <redacted>"
       },
       {
         node_id: "failed-node-01",
         status: "timed-out",
         timed_out: true,
-        failure_category: "provider-interruption"
+        failure_category: "provider-interruption",
+        failure_message: "private failure detail 1 <redacted>"
       },
-      { node_id: "failed-node-02", status: "failed", timed_out: false }
+      {
+        node_id: "failed-node-02",
+        status: "failed",
+        timed_out: false,
+        failure_message: "private failure detail 2 <redacted>"
+      }
     ]);
     expect(diagnostics.rows[0]?.failed_nodes.at(-1)?.node_id).toBe("failed-node-31");
     const serialized = JSON.stringify(diagnostics);
     for (const forbidden of [
-      "private failure detail",
       "sk-ant-secret-value",
       "private-category",
       "private-causal-category",
@@ -407,6 +413,10 @@ describe("public post-eval diagnostics", () => {
     const rawRows = withRawDetail.rows as Array<Record<string, unknown>>;
     const rawFailedNodes = rawRows[0]!.failed_nodes as Array<Record<string, unknown>>;
     rawFailedNodes[0]!.last_error = "private raw error";
+    expect(() => parsePublicEvalDiagnostics(withRawDetail)).toThrow();
+
+    rawFailedNodes[0]!.last_error = undefined;
+    rawFailedNodes[0]!.failure_message = "🙂".repeat(251);
     expect(() => parsePublicEvalDiagnostics(withRawDetail)).toThrow();
   });
 

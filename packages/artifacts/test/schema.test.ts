@@ -1219,7 +1219,7 @@ test("usage ledger schema requires typed incompleteness markers", () => {
   );
 });
 
-test("node attempt ledger schema keeps failure categories separate from diagnostic payloads", () => {
+test("node attempt ledger schema accepts only bounded optional failure messages", () => {
   const entry = {
     schema_version: NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
     attempt_id: "attempt-1",
@@ -1240,9 +1240,12 @@ test("node attempt ledger schema keeps failure categories separate from diagnost
       input_sha256: "a".repeat(64),
       output_sha256: null
     },
-    failure_category: "executor-error"
+    failure_category: "executor-error",
+    failure_message: "artifact contract rejected findings.json"
   };
   assert.equal(validateNodeAttemptLedgerEntry(entry).ok, true);
+  assert.equal(validateNodeAttemptLedgerEntry({ ...entry, failure_message: "" }).ok, false);
+  assert.equal(validateNodeAttemptLedgerEntry({ ...entry, failure_message: "🙂".repeat(251) }).ok, false);
   assert.equal(validateNodeAttemptLedgerEntry({ ...entry, diagnostic: { message: "raw failure" } }).ok, false);
   assert.equal(
     validateNodeAttemptLedgerEntry({

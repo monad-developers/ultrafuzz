@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { open, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 
-import { assertRegularFileInside } from "@ultrafuzz/artifacts";
+import { assertRegularFileInside, normalizeNodeAttemptFailureMessage } from "@ultrafuzz/artifacts";
 import {
   MAX_PUBLIC_EVAL_FAILED_NODES_PER_ROW,
   MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
@@ -96,6 +96,7 @@ const failedNodeInputSchema = z.looseObject({
   node_id: safeId,
   status: failedNodeStatus,
   timed_out: z.boolean(),
+  last_error: z.unknown().optional(),
   provenance: z.unknown().optional()
 });
 const runStateInputSchema = z.looseObject({ nodes: z.record(z.string(), z.unknown()) });
@@ -119,6 +120,7 @@ export function createPublicEvalDiagnosticsFromRun(input: {
     evalRunId: input.evalRunId,
     matrix,
     runSummary,
+    forbiddenSecretValues: input.forbiddenSecretValues,
     ...(input.createdAt === undefined ? {} : { createdAt: input.createdAt })
   });
   assertPublicEvalDiagnosticsContainsNoSecrets(result, input.forbiddenSecretValues ?? []);
@@ -132,6 +134,7 @@ export function createPublicEvalDiagnostics(input: {
   evalRunId: string;
   matrix: unknown;
   runSummary: unknown;
+  forbiddenSecretValues?: readonly string[];
   createdAt?: string;
 }): PublicEvalDiagnostics {
   const matrix = z.array(matrixRowInputSchema).min(1).max(MAX_ROWS).parse(input.matrix);
@@ -223,7 +226,7 @@ export function createPublicEvalDiagnostics(input: {
       terminal_report_present: terminalReportPresent,
       workflow_ids: [...new Set(record.workflow_ids)].sort(),
       diagnostic_codes: diagnosticCodes,
-      failed_nodes: publicEvalFailedNodes(record as unknown as EvalRunRecord),
+      failed_nodes: publicEvalFailedNodes(record as unknown as EvalRunRecord, input.forbiddenSecretValues ?? []),
       scoring_ready: reasons.length === 0,
       reason_codes: reasons
     };
@@ -328,7 +331,10 @@ function hasTerminalReport(record: EvalRunRecord): boolean {
   }
 }
 
-function publicEvalFailedNodes(record: Pick<EvalRunRecord, "ultrafuzz_run_root">): PublicEvalFailedNode[] {
+function publicEvalFailedNodes(
+  record: Pick<EvalRunRecord, "ultrafuzz_run_root">,
+  forbiddenSecretValues: readonly string[]
+): PublicEvalFailedNode[] {
   if (record.ultrafuzz_run_root === undefined) return [];
   try {
     const statePath = path.join(record.ultrafuzz_run_root, "state.json");
@@ -347,12 +353,17 @@ function publicEvalFailedNodes(record: Pick<EvalRunRecord, "ultrafuzz_run_root">
       const code = failureCode.safeParse(
         disposition?.schema_version === "ultrafuzz.terminal-disposition.v1" ? disposition.kind : undefined
       );
+      const message =
+        typeof parsed.data.last_error === "string"
+          ? normalizeNodeAttemptFailureMessage(parsed.data.last_error, forbiddenSecretValues)
+          : undefined;
       failedNodes.push({
         node_id: parsed.data.node_id,
         status: parsed.data.status,
         timed_out: parsed.data.timed_out,
         ...(category.success ? { failure_category: category.data } : {}),
-        ...(code.success ? { failure_code: code.data } : {})
+        ...(code.success ? { failure_code: code.data } : {}),
+        ...(message === undefined ? {} : { failure_message: message })
       });
     }
     return failedNodes

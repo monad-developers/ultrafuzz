@@ -7992,6 +7992,10 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
     failedLedger.map((entry) => entry.outcome),
     ["timed-out", "failed"]
   );
+  assert.deepEqual(
+    failedLedger.map((entry) => entry.failure_message),
+    ["workflow task timed out", "agent failed again"]
+  );
 
   const resumedEnv = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -8105,7 +8109,7 @@ test("syncRun preserves retry and checkpoint generations in the immutable attemp
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
   assert.equal(ledger.length, 3);
-  assert.doesNotMatch(ledgerText, /generated executor failure/u);
+  assert.equal(ledger[0]?.failure_message, "generated executor failure");
   assert.equal(ledger[1]?.parent_attempt_id, ledger[0]?.attempt_id);
   assert.equal(ledger[2]?.parent_attempt_id, ledger[1]?.attempt_id);
 

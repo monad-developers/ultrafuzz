@@ -15,6 +15,8 @@ import {
   normalizeFindings,
   normalizeSafeRelativePath,
   manifestDigest,
+  MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
+  normalizeNodeAttemptFailureMessage,
   publishFileDurableExclusive,
   queryNodeAttempts,
   queryEvents,
@@ -161,7 +163,8 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
     finishedAt: "2026-07-18T10:01:00.000Z",
     outcome: "failed" as const,
     inputManifestDigest: inputDigest,
-    failureCategory: "executor-error" as const
+    failureCategory: "executor-error" as const,
+    failureMessage: `executor failed with token=private-secret ${"🙂".repeat(600)}`
   };
 
   const first = appendNodeAttempt(layout, firstInput);
@@ -169,6 +172,10 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
   assert.equal(first.appended, true);
   assert.equal(replayedFirst.appended, false);
   assert.equal(replayedFirst.entry.attempt_id, first.entry.attempt_id);
+  assert.equal(first.entry.failure_message, replayedFirst.entry.failure_message);
+  assert.ok(Buffer.byteLength(first.entry.failure_message ?? "", "utf8") <= MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES);
+  assert.match(first.entry.failure_message ?? "", /<redacted>/u);
+  assert.doesNotMatch(first.entry.failure_message ?? "", /private-secret/u);
 
   const second = appendNodeAttempt(layout, {
     ...firstInput,
@@ -181,7 +188,8 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
     finishedAt: "2026-07-18T10:03:00.000Z",
     outcome: "succeeded",
     outputManifestDigest: outputDigest,
-    failureCategory: undefined
+    failureCategory: undefined,
+    failureMessage: undefined
   });
   appendNodeAttempt(layout, {
     ...firstInput,
@@ -196,7 +204,8 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
     outcome: "reused",
     reuse: { status: "reused", sourceAttemptId: second.entry.attempt_id },
     outputManifestDigest: outputDigest,
-    failureCategory: undefined
+    failureCategory: undefined,
+    failureMessage: undefined
   });
 
   assert.equal(queryNodeAttempts(layout, { checkpointGenerationId: "checkpoint-1" }).length, 1);
@@ -217,6 +226,7 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
     controller_invocations: 2
   });
   assert.equal(fs.readFileSync(layout.attemptLedgerPath, "utf8").trim().split("\n").length, 3);
+  assert.equal(normalizeNodeAttemptFailureMessage("  first\nsecond  "), "first second");
 });
 
 test("createRunLayout rejects symlinked run roots before creating outside writes", () => {

@@ -1,4 +1,5 @@
 import { z } from "zod/v4";
+import { MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "@ultrafuzz/artifacts";
 
 import { boundedEvalId } from "./utils.js";
 
@@ -61,7 +62,13 @@ const failedNodeSchema = z
     status: failedNodeStatus,
     timed_out: z.boolean(),
     failure_category: failureCategory.optional(),
-    failure_code: failureCode.optional()
+    failure_code: failureCode.optional(),
+    failure_message: z
+      .string()
+      .min(1)
+      .max(MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES)
+      .refine((value) => Buffer.byteLength(value, "utf8") <= MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES)
+      .optional()
   })
   .refine((node) => node.timed_out === (node.status === "timed-out"), {
     message: "failed node timeout flag does not match its status"
