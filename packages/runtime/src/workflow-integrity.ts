@@ -432,6 +432,49 @@ function assertSnapshotRootEntries(directory: OpenedSnapshotDirectory, expected:
   }
 }
 
+function reconcileStaleSnapshotPublications(directory: OpenedSnapshotDirectory, generation: string): void {
+  if (!SHA256_PATTERN.test(generation)) throw new Error("workflow execution snapshot generation is invalid");
+  const stalePublicationPattern = new RegExp(`^\\.${generation}\\.tmp-[1-9][0-9]*-[0-9a-f]{24}$`, "u");
+  assertOpenedSnapshotDirectoryCurrent(directory, "workflow execution snapshots");
+  const staleNames = fs
+    .readdirSync(directory.accessPath)
+    .filter((name) => stalePublicationPattern.test(name))
+    .sort(compareCanonicalStrings);
+  assertOpenedSnapshotDirectoryCurrent(directory, "workflow execution snapshots");
+
+  for (const name of staleNames) {
+    assertOpenedSnapshotDirectoryCurrent(directory, "workflow execution snapshots");
+    const accessPath = path.join(directory.accessPath, name);
+    const lexicalPath = path.join(directory.lexicalPath, name);
+    const accessed = fs.lstatSync(accessPath);
+    const lexical = fs.lstatSync(lexicalPath);
+    if (accessed.isSymbolicLink() || !accessed.isDirectory() || lexical.isSymbolicLink() || !lexical.isDirectory()) {
+      throw new Error("stale workflow execution snapshot publication is not a physical directory");
+    }
+    if (accessed.dev !== lexical.dev || accessed.ino !== lexical.ino) {
+      throw new Error("stale workflow execution snapshot publication changed during reconciliation");
+    }
+
+    const descriptor = openSnapshotDirectory(accessPath);
+    try {
+      const opened = descriptor === undefined ? accessed : fs.fstatSync(descriptor);
+      if (!opened.isDirectory() || opened.dev !== accessed.dev || opened.ino !== accessed.ino) {
+        throw new Error("stale workflow execution snapshot publication changed while it was opened");
+      }
+      assertOpenedSnapshotDirectoryCurrent(directory, "workflow execution snapshots");
+      assertExactDirectoryIdentity(
+        lexicalPath,
+        opened.dev,
+        opened.ino,
+        "stale workflow execution snapshot publication"
+      );
+      removeTemporarySnapshotThroughOwner(directory, name, descriptor, opened.dev, opened.ino);
+    } finally {
+      if (descriptor !== undefined) fs.closeSync(descriptor);
+    }
+  }
+}
+
 function assertSnapshotPublicationBoundary(boundary: SnapshotPublicationBoundary, label: string): void {
   assertOpenedSnapshotDirectoryCurrent(boundary.snapshots, "workflow execution snapshots");
   assertExactDirectoryIdentity(boundary.lexicalRoot, boundary.device, boundary.inode, label);
@@ -473,6 +516,7 @@ export function materializeWorkflowExecutionSnapshot(input: {
   let snapshotDescriptor: number | undefined;
   try {
     assertOpenedSnapshotDirectoryCurrent(snapshots, "workflow execution snapshots");
+    reconcileStaleSnapshotPublications(snapshots, input.snapshot.generation);
     const snapshotAccessPath = path.join(snapshots.accessPath, input.snapshot.generation);
     const snapshotAlreadyExists = pathEntryExists(snapshotAccessPath);
     assertSnapshotRootEntries(snapshots, snapshotAlreadyExists ? [input.snapshot.generation] : []);

@@ -4224,6 +4224,138 @@ test("startRun submits the exact sealed redacted workflow input bytes", async ()
   assert.doesNotMatch(JSON.stringify(submissionEvidence), /sk-(?:operator|nested|success)/);
 });
 
+test("snapshot recovery removes a nested read-only stale current-generation publication before retry", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "snapshot-stale-publication-retry";
+  const run = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+
+  const generation = evidence.verifiedControl.generation;
+  const snapshotsRoot = path.dirname(evidence.executionSnapshot.root);
+  const savedSnapshot = `${snapshotsRoot}.saved-${generation}`;
+  fs.chmodSync(evidence.executionSnapshot.root, 0o700);
+  fs.renameSync(evidence.executionSnapshot.root, savedSnapshot);
+  const staleRoot = path.join(snapshotsRoot, `.${generation}.tmp-${process.pid}-${"a".repeat(24)}`);
+  const readOnlyNested = path.join(staleRoot, "read-only", "nested");
+  fs.mkdirSync(readOnlyNested, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(readOnlyNested, "partial.txt"), "partial publication\n", { mode: 0o400 });
+  fs.chmodSync(readOnlyNested, 0o500);
+  fs.chmodSync(path.dirname(readOnlyNested), 0o500);
+  fs.chmodSync(staleRoot, 0o500);
+
+  const recovered = materializeWorkflowExecutionSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    snapshot: evidence.verifiedControl
+  });
+
+  assert.equal(recovered.root, evidence.executionSnapshot.root);
+  assert.equal(recovered.inputJson, evidence.executionSnapshot.inputJson);
+  assert.deepEqual(fs.readdirSync(snapshotsRoot), [generation]);
+  assert.equal(fs.existsSync(staleRoot), false);
+  assert.equal(fs.existsSync(savedSnapshot), true);
+});
+
+test("snapshot recovery rejects matching symlink and non-directory publications without escaping", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "snapshot-stale-publication-type";
+  const run = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+
+  const generation = evidence.verifiedControl.generation;
+  const snapshotsRoot = path.dirname(evidence.executionSnapshot.root);
+  const savedSnapshot = `${snapshotsRoot}.saved-${generation}`;
+  fs.chmodSync(evidence.executionSnapshot.root, 0o700);
+  fs.renameSync(evidence.executionSnapshot.root, savedSnapshot);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-stale-snapshot-outside-"));
+  const outsideMarker = path.join(outside, "outside.txt");
+  fs.writeFileSync(outsideMarker, "outside remains\n", "utf8");
+  const symlinkPublication = path.join(snapshotsRoot, `.${generation}.tmp-${process.pid}-${"b".repeat(24)}`);
+  fs.symlinkSync(outside, symlinkPublication, process.platform === "win32" ? "junction" : "dir");
+
+  assert.throws(
+    () =>
+      materializeWorkflowExecutionSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        snapshot: evidence.verifiedControl
+      }),
+    /stale workflow execution snapshot publication is not a physical directory/u
+  );
+  assert.equal(fs.lstatSync(symlinkPublication).isSymbolicLink(), true);
+  assert.equal(fs.readFileSync(outsideMarker, "utf8"), "outside remains\n");
+
+  fs.unlinkSync(symlinkPublication);
+  const filePublication = path.join(snapshotsRoot, `.${generation}.tmp-${process.pid + 1}-${"c".repeat(24)}`);
+  fs.writeFileSync(filePublication, "not a directory\n", "utf8");
+  assert.throws(
+    () =>
+      materializeWorkflowExecutionSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        snapshot: evidence.verifiedControl
+      }),
+    /stale workflow execution snapshot publication is not a physical directory/u
+  );
+  assert.equal(fs.readFileSync(filePublication, "utf8"), "not a directory\n");
+  assert.equal(fs.readFileSync(outsideMarker, "utf8"), "outside remains\n");
+  assert.equal(fs.existsSync(savedSnapshot), true);
+});
+
+test("snapshot recovery preserves and rejects unrelated and other-generation entries", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "snapshot-stale-publication-unrelated";
+  const run = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+
+  const generation = evidence.verifiedControl.generation;
+  const otherGeneration = `${generation[0] === "0" ? "1" : "0"}${generation.slice(1)}`;
+  const snapshotsRoot = path.dirname(evidence.executionSnapshot.root);
+  const savedSnapshot = `${snapshotsRoot}.saved-${generation}`;
+  fs.chmodSync(evidence.executionSnapshot.root, 0o700);
+  fs.renameSync(evidence.executionSnapshot.root, savedSnapshot);
+  const unrelated = path.join(snapshotsRoot, "operator-note");
+  fs.writeFileSync(unrelated, "retain\n", "utf8");
+  const otherGenerationPublication = path.join(
+    snapshotsRoot,
+    `.${otherGeneration}.tmp-${process.pid}-${"d".repeat(24)}`
+  );
+  fs.mkdirSync(otherGenerationPublication, { mode: 0o700 });
+  fs.writeFileSync(path.join(otherGenerationPublication, "retain.txt"), "retain other generation\n", "utf8");
+
+  assert.throws(
+    () =>
+      materializeWorkflowExecutionSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        snapshot: evidence.verifiedControl
+      }),
+    /workflow execution snapshots contain an unexpected generation/u
+  );
+  assert.equal(fs.readFileSync(unrelated, "utf8"), "retain\n");
+  assert.equal(
+    fs.readFileSync(path.join(otherGenerationPublication, "retain.txt"), "utf8"),
+    "retain other generation\n"
+  );
+  assert.equal(fs.existsSync(savedSnapshot), true);
+  assert.equal(fs.existsSync(evidence.executionSnapshot.root), false);
+});
+
 test(
   "snapshot materialization resists a swapped snapshots parent without writing outside the run",
   { concurrency: false },
