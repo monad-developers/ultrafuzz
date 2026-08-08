@@ -101,8 +101,16 @@ export interface EvalHistoryObservation {
   source_artifact: string;
 }
 
+export interface EvalHistorySupersession {
+  superseded_source_eval_run_id: string;
+  replacement_source_eval_run_id: string;
+  reason: string;
+  issue_url: string;
+}
+
 export interface EvalHistory {
   schema_version: typeof EVAL_HISTORY_SCHEMA_VERSION;
+  supersessions: EvalHistorySupersession[];
   observations: EvalHistoryObservation[];
 }
 
@@ -120,6 +128,10 @@ const sourceArtifactSchema = z
   .min(1)
   .max(500)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u);
+const issueUrlSchema = z
+  .string()
+  .max(1_000)
+  .regex(/^https:\/\/github\.com\/monad-developers\/ultrafuzz\/issues\/[1-9][0-9]*$/u);
 const publicationUrlSchema = z
   .string()
   .url()
@@ -267,8 +279,16 @@ const observationSchema = z.union([
   legacyObservationSchema
 ]);
 
+const supersessionSchema = z.strictObject({
+  superseded_source_eval_run_id: safeText,
+  replacement_source_eval_run_id: safeText,
+  reason: safeText,
+  issue_url: issueUrlSchema
+});
+
 const historySchema = z.strictObject({
   schema_version: z.literal(EVAL_HISTORY_SCHEMA_VERSION),
+  supersessions: z.array(supersessionSchema).default([]),
   observations: z.array(observationSchema)
 });
 
@@ -299,7 +319,7 @@ export const EVAL_HISTORY_PERFORMANCE_COST_MODEL_CUTOFFS: Readonly<Record<string
 type ChartMetric = (typeof EVAL_HISTORY_CHARTS)[number]["metric"];
 
 export function emptyEvalHistory(): EvalHistory {
-  return { schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations: [] };
+  return { schema_version: EVAL_HISTORY_SCHEMA_VERSION, supersessions: [], observations: [] };
 }
 
 export function parseEvalHistory(value: unknown, source = "eval history"): EvalHistory {
@@ -387,6 +407,113 @@ function assertHistoryIntegrity(history: EvalHistory): void {
       throw new EvalError("EVAL_HISTORY_DUPLICATE", `history contains duplicate observation ${observation.id}`);
     }
     byId.set(observation.id, canonical);
+  }
+  assertSupersessionIntegrity(history);
+}
+
+interface SourceRunSupersessionSignature {
+  identity: string;
+  targetObservationCounts: Array<{ target: string; count: number }>;
+}
+
+function sourceRunSupersessionSignature(observations: EvalHistoryObservation[]): SourceRunSupersessionSignature {
+  const signatures = new Set(
+    observations.map((observation) =>
+      stableStringify({
+        benchmark: observation.benchmark,
+        lane: observation.lane,
+        variant: observation.variant,
+        model_profile: observation.model_profile,
+        model: observation.model,
+        reasoning_effort: observation.reasoning_effort,
+        cohort_fingerprint: observation.cohort_fingerprint,
+        target_revisions: [...observation.target_revisions].sort((left, right) =>
+          compareText(left.target, right.target)
+        )
+      })
+    )
+  );
+  if (signatures.size !== 1) {
+    throw new EvalError("EVAL_HISTORY_INVALID", "a supersession source run has inconsistent benchmark identity");
+  }
+  const targetCounts = new Map<string, number>();
+  for (const observation of observations) {
+    targetCounts.set(observation.target, (targetCounts.get(observation.target) ?? 0) + 1);
+  }
+  return {
+    identity: [...signatures][0]!,
+    targetObservationCounts: [...targetCounts]
+      .sort(([left], [right]) => compareText(left, right))
+      .map(([target, count]) => ({ target, count }))
+  };
+}
+
+function supersessionReplacementIsCompatible(
+  superseded: SourceRunSupersessionSignature,
+  replacement: SourceRunSupersessionSignature
+): boolean {
+  if (superseded.identity !== replacement.identity) return false;
+  const supersededCounts = new Map(
+    superseded.targetObservationCounts.map(({ target, count }) => [target, count] as const)
+  );
+  return replacement.targetObservationCounts.every(({ target, count }) => count <= (supersededCounts.get(target) ?? 0));
+}
+
+function supersessionReplacementHasParity(
+  superseded: EvalHistoryObservation[],
+  replacement: EvalHistoryObservation[]
+): boolean {
+  const supersededSignature = sourceRunSupersessionSignature(superseded);
+  const replacementSignature = sourceRunSupersessionSignature(replacement);
+  return (
+    supersessionReplacementIsCompatible(supersededSignature, replacementSignature) &&
+    stableStringify(supersededSignature.targetObservationCounts) ===
+      stableStringify(replacementSignature.targetObservationCounts)
+  );
+}
+
+function assertSupersessionIntegrity(history: EvalHistory): void {
+  const observationsBySourceRun = new Map<string, EvalHistoryObservation[]>();
+  for (const observation of history.observations) {
+    observationsBySourceRun.set(observation.source_eval_run_id, [
+      ...(observationsBySourceRun.get(observation.source_eval_run_id) ?? []),
+      observation
+    ]);
+  }
+  const supersededSourceRuns = new Set<string>();
+  for (const supersession of history.supersessions) {
+    if (supersededSourceRuns.has(supersession.superseded_source_eval_run_id)) {
+      throw new EvalError(
+        "EVAL_HISTORY_INVALID",
+        `history repeats supersession for source run ${supersession.superseded_source_eval_run_id}`
+      );
+    }
+    if (supersession.superseded_source_eval_run_id === supersession.replacement_source_eval_run_id) {
+      throw new EvalError("EVAL_HISTORY_INVALID", "a history source run cannot supersede itself");
+    }
+    if (!observationsBySourceRun.has(supersession.superseded_source_eval_run_id)) {
+      throw new EvalError(
+        "EVAL_HISTORY_INVALID",
+        `superseded source run ${supersession.superseded_source_eval_run_id} is absent from history`
+      );
+    }
+    supersededSourceRuns.add(supersession.superseded_source_eval_run_id);
+  }
+  for (const supersession of history.supersessions) {
+    if (supersededSourceRuns.has(supersession.replacement_source_eval_run_id)) {
+      throw new EvalError("EVAL_HISTORY_INVALID", "history supersession chains are not supported");
+    }
+    const superseded = observationsBySourceRun.get(supersession.superseded_source_eval_run_id)!;
+    const replacement = observationsBySourceRun.get(supersession.replacement_source_eval_run_id);
+    if (replacement === undefined) continue;
+    const supersededSignature = sourceRunSupersessionSignature(superseded);
+    const replacementSignature = sourceRunSupersessionSignature(replacement);
+    if (!supersessionReplacementIsCompatible(supersededSignature, replacementSignature)) {
+      throw new EvalError(
+        "EVAL_HISTORY_INVALID",
+        `replacement source run ${supersession.replacement_source_eval_run_id} does not match superseded source run ${supersession.superseded_source_eval_run_id}`
+      );
+    }
   }
 }
 
@@ -933,6 +1060,7 @@ function aggregateCompletenessValues(
 export function mergeEvalHistory(history: EvalHistory, incoming: EvalHistoryObservation[]): EvalHistory {
   const validated = parseEvalHistory({
     schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+    supersessions: [],
     observations: incoming
   }).observations;
   const existing = new Map(history.observations.map((observation) => [observation.id, stableStringify(observation)]));
@@ -953,6 +1081,7 @@ export function mergeEvalHistory(history: EvalHistory, incoming: EvalHistoryObse
   }
   return parseEvalHistory({
     schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+    supersessions: history.supersessions,
     observations: [...history.observations, ...appended]
   });
 }
@@ -1495,6 +1624,42 @@ function aggregateRunKey(aggregate: EvalHistoryBenchmarkAggregate): string {
   ].join("\u0000");
 }
 
+function latestEfficiencyLabel(
+  value: number | null,
+  completeness: EvalHistoryCompleteness,
+  availableTargetCount: number,
+  expectedTargetCount: number,
+  formatValue: (value: number) => string
+): string {
+  const formatted = value === null ? "n/a" : formatValue(value);
+  return completeness.status === "complete"
+    ? formatted
+    : `${formatted} · ${completeness.status} ${availableTargetCount}/${expectedTargetCount}`;
+}
+
+function renderLatestEfficiencyCell(input: {
+  metric: "cost_usd" | "wall_clock_seconds";
+  label: string;
+  x: number;
+  y: number;
+  value: number | null;
+  completeness: EvalHistoryCompleteness;
+  availableTargetCount: number;
+  expectedTargetCount: number;
+  formatValue: (value: number) => string;
+}): string {
+  const rendered = latestEfficiencyLabel(
+    input.value,
+    input.completeness,
+    input.availableTargetCount,
+    input.expectedTargetCount,
+    input.formatValue
+  );
+  const reasons = input.completeness.reasons.length === 0 ? "" : ` (${input.completeness.reasons.join(", ")})`;
+  const fontSize = input.completeness.status === "complete" ? 14 : 12;
+  return `<text data-metric="${input.metric}" data-status="${input.completeness.status}" data-available-target-count="${input.availableTargetCount}" data-expected-target-count="${input.expectedTargetCount}" x="${input.x}" y="${input.y}" text-anchor="end" font-family="system-ui, sans-serif" font-size="${fontSize}" fill="#374151"><title>${xml(`${input.label}: ${rendered}${reasons}`)}</title>${xml(rendered)}</text>`;
+}
+
 function renderLatestEvalSummary(aggregates: EvalHistoryBenchmarkAggregate[]): string {
   const width = 960;
   const left = 40;
@@ -1530,7 +1695,21 @@ function renderLatestEvalSummary(aggregates: EvalHistoryBenchmarkAggregate[]): s
       aggregate.ground_truth_bug_count === null
         ? `${aggregate.cumulative_unique_true_positives} bugs found`
         : `${aggregate.cumulative_unique_true_positives} of ${aggregate.ground_truth_bug_count} bugs found`;
-    return `${aggregate.model} ${aggregate.reasoning_effort}: UltrafuzzBench Score ${formatOverviewPercent(aggregate.f1)}, ${bugs}`;
+    const cost = latestEfficiencyLabel(
+      aggregate.cost_usd,
+      aggregate.cost_completeness,
+      aggregate.cost_available_target_count,
+      aggregate.target_count,
+      (value) => `$${value.toFixed(2)}`
+    );
+    const wallClock = latestEfficiencyLabel(
+      aggregate.wall_clock_seconds,
+      aggregate.wall_clock_completeness,
+      aggregate.wall_clock_available_target_count,
+      aggregate.target_count,
+      formatElapsed
+    );
+    return `${aggregate.model} ${aggregate.reasoning_effort}: UltrafuzzBench Score ${formatOverviewPercent(aggregate.f1)}, ${bugs}, cost ${cost}, wall clock ${wallClock}`;
   });
   lines.push(
     `<desc id="desc">Latest complete ${xml(latestAnchor.benchmark)} ${xml(latestAnchor.lane)} run with ${latestRun.length} model ${latestRun.length === 1 ? "profile" : "profiles"}. ${xml(profileDescriptions.join("; "))}.</desc>`,
@@ -1557,8 +1736,28 @@ function renderLatestEvalSummary(aggregates: EvalHistoryBenchmarkAggregate[]): s
       `<text x="${left + 12}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#111827"><title>${xml(`${aggregate.lane} · ${aggregate.model_profile}`)}</title>${xml(`${aggregate.model} · ${aggregate.reasoning_effort}`)}</text>`,
       `<text x="400" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#0f766e">${xml(formatOverviewPercent(aggregate.f1))}</text>`,
       `<text x="600" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${xml(bugs)}</text>`,
-      `<text x="760" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${aggregate.cost_usd === null ? "n/a" : xml(`$${aggregate.cost_usd.toFixed(2)}`)}</text>`,
-      `<text x="920" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${aggregate.wall_clock_seconds === null ? "n/a" : xml(formatElapsed(aggregate.wall_clock_seconds))}</text>`
+      renderLatestEfficiencyCell({
+        metric: "cost_usd",
+        label: "Cost",
+        x: 760,
+        y: rowY,
+        value: aggregate.cost_usd,
+        completeness: aggregate.cost_completeness,
+        availableTargetCount: aggregate.cost_available_target_count,
+        expectedTargetCount: aggregate.target_count,
+        formatValue: (value) => `$${value.toFixed(2)}`
+      }),
+      renderLatestEfficiencyCell({
+        metric: "wall_clock_seconds",
+        label: "Wall clock",
+        x: 920,
+        y: rowY,
+        value: aggregate.wall_clock_seconds,
+        completeness: aggregate.wall_clock_completeness,
+        availableTargetCount: aggregate.wall_clock_available_target_count,
+        expectedTargetCount: aggregate.target_count,
+        formatValue: formatElapsed
+      })
     );
   });
   lines.push("</svg>");
@@ -1913,9 +2112,29 @@ function formatElapsed(value: number): string {
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
+function effectiveEvalHistoryObservations(history: EvalHistory): EvalHistoryObservation[] {
+  const observationsBySourceRun = new Map<string, EvalHistoryObservation[]>();
+  for (const observation of history.observations) {
+    observationsBySourceRun.set(observation.source_eval_run_id, [
+      ...(observationsBySourceRun.get(observation.source_eval_run_id) ?? []),
+      observation
+    ]);
+  }
+  const supersededSourceRuns = new Set<string>();
+  for (const supersession of history.supersessions) {
+    const superseded = observationsBySourceRun.get(supersession.superseded_source_eval_run_id)!;
+    const replacement = observationsBySourceRun.get(supersession.replacement_source_eval_run_id);
+    if (replacement !== undefined && supersessionReplacementHasParity(superseded, replacement)) {
+      supersededSourceRuns.add(supersession.superseded_source_eval_run_id);
+    }
+  }
+  return history.observations.filter((observation) => !supersededSourceRuns.has(observation.source_eval_run_id));
+}
+
 export function renderEvalHistoryCharts(history: EvalHistory): Map<string, string> {
   const validated = parseEvalHistory(history);
-  const aggregates = aggregateEvalHistoryBenchmarkRuns(validated.observations).filter(
+  const observations = effectiveEvalHistoryObservations(validated);
+  const aggregates = aggregateEvalHistoryBenchmarkRuns(observations).filter(
     (aggregate) => aggregate.benchmark === "ultrafuzz-bench"
   );
   return new Map([
@@ -1923,7 +2142,7 @@ export function renderEvalHistoryCharts(history: EvalHistory): Map<string, strin
     [EVAL_HISTORY_OVERVIEW_FILES[1], renderEvalQualityChart(aggregates)],
     [EVAL_HISTORY_OVERVIEW_FILES[2], renderEvalPerformanceCostChart(aggregates)],
     ...EVAL_HISTORY_CHARTS.map(
-      (chart) => [chart.file, renderChart(validated.observations, chart.metric, chart.title, chart.ratio)] as const
+      (chart) => [chart.file, renderChart(observations, chart.metric, chart.title, chart.ratio)] as const
     )
   ]);
 }
@@ -2195,7 +2414,7 @@ function renderChart(
     '<?xml version="1.0" encoding="UTF-8"?>',
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
     `<title id="title">${xml(title)}</title>`,
-    `<desc id="desc">${xml(`${title} by candidate commit and benchmark target${metric === "wall_clock_seconds" || metric === "cost_usd" ? "; partial values use hollow dashed markers and unavailable values retain their recorded status" : ""}`)}</desc>`,
+    `<desc id="desc">${xml(`${title} by candidate commit and benchmark target${metric === "wall_clock_seconds" || metric === "cost_usd" ? "; partial values use hollow dashed markers, legacy partial values without a number use a dashed ring and partial n/a label, and unavailable values use an n/a cross" : ""}`)}</desc>`,
     `<rect width="${width}" height="${height}" fill="#ffffff"/>`,
     `<text x="${left}" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">${xml(title)}</text>`
   ];
@@ -2251,12 +2470,20 @@ function renderChart(
         const label = seriesLabel(point.fields);
         if (point.value === null) {
           const pointY = plotBottom - 8;
-          const status = point.completeness.status === "partial" ? "partial (value unavailable)" : "unavailable";
+          const partialWithoutValue = point.completeness.status === "partial";
+          const status = partialWithoutValue ? "partial (value unavailable)" : "unavailable";
           lines.push(
-            `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}" data-status="${point.completeness.status}" data-available-count="${point.availableCount}" data-expected-count="${point.expectedCount}"><title>${xml(`${label} ${shortCommit}: ${status}${point.completeness.reasons.length === 0 ? "" : ` (${point.completeness.reasons.join(", ")})`}`)}</title>`,
+            `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}" data-status="${point.completeness.status}" data-available-count="${point.availableCount}" data-expected-count="${point.expectedCount}"><title>${xml(`${label} ${shortCommit}: ${status}${point.completeness.reasons.length === 0 ? "" : ` (${point.completeness.reasons.join(", ")})`}`)}</title>`
+          );
+          if (partialWithoutValue) {
+            lines.push(
+              `<circle data-completeness-marker="partial-null" cx="${format(pointX)}" cy="${format(pointY)}" r="8" fill="none" stroke="${stroke}" stroke-width="2" stroke-dasharray="2 2"/>`
+            );
+          }
+          lines.push(
             `<line x1="${format(pointX - 5)}" y1="${format(pointY - 5)}" x2="${format(pointX + 5)}" y2="${format(pointY + 5)}" stroke="${stroke}"/>`,
             `<line x1="${format(pointX + 5)}" y1="${format(pointY - 5)}" x2="${format(pointX - 5)}" y2="${format(pointY + 5)}" stroke="${stroke}"/>`,
-            `<text x="${format(pointX)}" y="${format(pointY - 10)}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#6b7280">n/a ${shortCommit}</text></a>`
+            `<text x="${format(pointX)}" y="${format(pointY - 10)}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#6b7280">${partialWithoutValue ? "partial n/a" : "n/a"} ${shortCommit}</text></a>`
           );
           continue;
         }

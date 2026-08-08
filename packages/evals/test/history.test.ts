@@ -35,6 +35,7 @@ const FINGERPRINT = `sha256:${"a".repeat(64)}`;
 const EXECUTION_POLICY_FINGERPRINT = `sha256:${"d".repeat(64)}`;
 const SCORING_FINGERPRINT = `sha256:${"b".repeat(64)}`;
 const PUBLICATION_URL = "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts";
+const SUPERSESSION_ISSUE_URL = "https://github.com/monad-developers/ultrafuzz/issues/427";
 
 function observation(overrides: Partial<EvalHistoryObservation> = {}): EvalHistoryObservation {
   return {
@@ -116,6 +117,49 @@ function cohortObservation(
       repository: `https://example.com/${target}`
     },
     ...overrides
+  });
+}
+
+const SUPERSESSION_TARGETS = ["target-a", "target-b", "target-c"] as const;
+const SUPERSESSION_TARGET_REVISIONS = [
+  { target: "target-a", revision: TARGET_REVISION },
+  { target: "target-b", revision: TARGET_B_REVISION },
+  { target: "target-c", revision: "6666666666666666666666666666666666666666" }
+];
+
+function supersessionRun(input: {
+  sourceRunId: string;
+  timestamp: string;
+  commitCharacter: string;
+  legacyPartialLastTarget?: boolean;
+  model?: string;
+}): EvalHistoryObservation[] {
+  return SUPERSESSION_TARGETS.map((target, index) => {
+    const base = observation();
+    const revision = SUPERSESSION_TARGET_REVISIONS.find((candidate) => candidate.target === target)!.revision;
+    const partial = input.legacyPartialLastTarget === true && index === SUPERSESSION_TARGETS.length - 1;
+    return observation({
+      schema_version: partial ? "ultrafuzz.eval.history.observation.v4" : EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION,
+      id: `${input.sourceRunId}:${target}:baseline:benchmark-smoke`,
+      benchmark: "ultrafuzz-bench",
+      target,
+      target_revisions: SUPERSESSION_TARGET_REVISIONS,
+      model: input.model ?? "deepseek-v4-flash",
+      run_timestamp: input.timestamp,
+      candidate_commit: input.commitCharacter.repeat(40),
+      source_eval_run_id: input.sourceRunId,
+      source_artifact: `artifact-${input.sourceRunId}`,
+      cost_usd: partial ? null : 0.2,
+      cost_completeness: partial
+        ? { status: "partial", reasons: ["pricing-incomplete"] }
+        : { status: "complete", reasons: [] },
+      target_publication: {
+        ...base.target_publication!,
+        target,
+        revision,
+        repository: `https://example.com/${target}`
+      }
+    });
   });
 }
 
@@ -320,6 +364,144 @@ describe("longitudinal eval history", () => {
     expect(mergeEvalHistory(publishedHistory, [publishedV2])).toEqual(publishedHistory);
   });
 
+  it("activates a source-run supersession only after its matching replacement is merged", () => {
+    const supersededSourceRun = "superseded-run";
+    const replacementSourceRun = "replacement-run";
+    const supersession = {
+      superseded_source_eval_run_id: supersededSourceRun,
+      replacement_source_eval_run_id: replacementSourceRun,
+      reason: "Replace the legacy partial accounting row with a complete rerun.",
+      issue_url: SUPERSESSION_ISSUE_URL
+    };
+    const superseded = supersessionRun({
+      sourceRunId: supersededSourceRun,
+      timestamp: "2026-08-04T00:00:00.000Z",
+      commitCharacter: "7",
+      legacyPartialLastTarget: true
+    });
+    const pending = parseEvalHistory({
+      schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+      supersessions: [supersession],
+      observations: superseded
+    });
+
+    const pendingCharts = renderEvalHistoryCharts(pending);
+    expect(pendingCharts.get("performance-cost.svg")).toContain(
+      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="2" data-expected-target-count="3"'
+    );
+    expect(pendingCharts.get("cost.svg")).toContain("partial n/a 7777777");
+
+    const replacement = supersessionRun({
+      sourceRunId: replacementSourceRun,
+      timestamp: "2026-08-05T00:00:00.000Z",
+      commitCharacter: "8"
+    });
+    const partiallyMerged = mergeEvalHistory(pending, replacement.slice(0, 2));
+    expect(partiallyMerged.supersessions).toEqual([supersession]);
+    expect(partiallyMerged.observations).toHaveLength(5);
+    expect(renderEvalHistoryCharts(partiallyMerged).get("performance-cost.svg")).toContain(
+      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="2" data-expected-target-count="3"'
+    );
+    expect(renderEvalHistoryCharts(partiallyMerged).get("cost.svg")).toContain("partial n/a 7777777");
+
+    const merged = mergeEvalHistory(partiallyMerged, replacement);
+    expect(merged.supersessions).toEqual([supersession]);
+
+    const replacedCharts = renderEvalHistoryCharts(merged);
+    const performance = replacedCharts.get("performance-cost.svg")!;
+    expect(performance).toContain(
+      'data-model="deepseek-v4-flash" data-status="complete" data-run-count="1" data-expected-run-count="1" data-available-target-count="3" data-expected-target-count="3"'
+    );
+    expect(performance).not.toContain('data-available-target-count="5" data-expected-target-count="6"');
+    expect(performance).not.toContain("targets 5/6");
+    expect(replacedCharts.get("cost.svg")).not.toContain("7777777");
+    expect(replacedCharts.get("cost.svg")).toContain("8888888");
+    expect(replacedCharts.get("precision.svg")).not.toContain(`/commit/${"7".repeat(40)}`);
+    expect(replacedCharts.get("precision.svg")).toContain(`/commit/${"8".repeat(40)}`);
+  });
+
+  it("rejects invalid source-run supersession ledgers", () => {
+    const supersededSourceRun = "superseded-run";
+    const replacementSourceRun = "replacement-run";
+    const superseded = supersessionRun({
+      sourceRunId: supersededSourceRun,
+      timestamp: "2026-08-04T00:00:00.000Z",
+      commitCharacter: "7",
+      legacyPartialLastTarget: true
+    });
+    const replacement = supersessionRun({
+      sourceRunId: replacementSourceRun,
+      timestamp: "2026-08-05T00:00:00.000Z",
+      commitCharacter: "8"
+    });
+    const entry = {
+      superseded_source_eval_run_id: supersededSourceRun,
+      replacement_source_eval_run_id: replacementSourceRun,
+      reason: "Replace the legacy partial accounting row with a complete rerun.",
+      issue_url: SUPERSESSION_ISSUE_URL
+    };
+    const parse = (
+      supersessions: unknown[],
+      observations: EvalHistoryObservation[] = [...superseded, ...replacement]
+    ) =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions,
+        observations
+      });
+
+    expect(() => parse([entry], replacement)).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    expect(() => parse([entry, entry])).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    expect(() =>
+      parse([
+        {
+          ...entry,
+          replacement_source_eval_run_id: supersededSourceRun
+        }
+      ])
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    expect(() =>
+      parse([
+        entry,
+        {
+          ...entry,
+          superseded_source_eval_run_id: replacementSourceRun,
+          replacement_source_eval_run_id: "future-run"
+        }
+      ])
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    expect(() => parse([{ ...entry, issue_url: "https://github.com/example/project/issues/427" }])).toThrowError(
+      expect.objectContaining({ code: "EVAL_HISTORY_INVALID" })
+    );
+    expect(() =>
+      parse(
+        [entry],
+        [
+          ...superseded,
+          ...supersessionRun({
+            sourceRunId: replacementSourceRun,
+            timestamp: "2026-08-05T00:00:00.000Z",
+            commitCharacter: "8",
+            model: "gpt-5.6-luna"
+          })
+        ]
+      )
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    const duplicateTargetReplacement = [
+      replacement[0]!,
+      replacement[1]!,
+      {
+        ...replacement[2]!,
+        id: `${replacementSourceRun}:target-a:duplicate:benchmark-smoke`,
+        target: "target-a",
+        target_publication: replacement[0]!.target_publication
+      }
+    ];
+    expect(() => parse([entry], [...superseded, ...duplicateTargetReplacement])).toThrowError(
+      expect.objectContaining({ code: "EVAL_HISTORY_INVALID" })
+    );
+  });
+
   it("preserves historical multi-trial observations without applying current lane defaults", () => {
     const historical = observation({
       trial_count: 10,
@@ -486,7 +668,18 @@ describe("longitudinal eval history", () => {
   it("continues to parse the checked-in history containing the legacy Flash partial-null row", () => {
     const checkedIn = JSON.parse(fs.readFileSync(path.join(REPOSITORY_ROOT, "benchmarks", "history.json"), "utf8"));
     const parsed = parseEvalHistory(checkedIn, "benchmarks/history.json");
-    const charts = renderEvalHistoryCharts(parsed);
+    const legacySourceRun = "ci-31264673583-1-smoke-ultrafuzz-bench-deepseek-benchmark-smoke-deepseek-v4-flash-max";
+    const legacyObservations = parsed.observations.filter(
+      (candidate) => candidate.source_eval_run_id === legacySourceRun
+    );
+    expect(legacyObservations).toHaveLength(3);
+    const charts = renderEvalHistoryCharts(
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
+        observations: legacyObservations
+      })
+    );
     expect(charts.get("performance-cost.svg")).toContain(
       'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="2" data-expected-target-count="3"'
     );
@@ -494,6 +687,16 @@ describe("longitudinal eval history", () => {
       'deepseek-v4-flash</tspan><tspan fill="#6b7280"> · median 23.7% · $0.41 · n=1 · targets 2/3 · partial'
     );
     expect(charts.get("cost.svg")).toContain('data-status="partial" data-available-count="0" data-expected-count="1"');
+    expect(charts.get("cost.svg")).toContain('data-completeness-marker="partial-null"');
+    expect(charts.get("cost.svg")).toContain("partial n/a 70646d2");
+    expect(charts.get("latest-summary.svg")).toContain(
+      'data-metric="cost_usd" data-status="partial" data-available-target-count="2" data-expected-target-count="3"'
+    );
+    expect(charts.get("latest-summary.svg")).toContain("$0.41 · partial 2/3");
+    expect(charts.get("latest-summary.svg")).toContain(
+      'data-metric="wall_clock_seconds" data-status="partial" data-available-target-count="2" data-expected-target-count="3"'
+    );
+    expect(charts.get("latest-summary.svg")).toContain("26m 40s · partial 2/3");
   });
 
   it("rejects malformed history", () => {
@@ -984,7 +1187,7 @@ describe("longitudinal eval history", () => {
     expect(first.get("wall-clock-time.svg")).toContain('data-status="unavailable"');
     expect(first.get("wall-clock-time.svg")).toContain(`>n/a ${CANDIDATE.slice(0, 7)}<`);
     expect(first.get("latest-summary.svg")).toContain("Score (macro-F1)");
-    expect(first.get("latest-summary.svg")).toContain(">n/a</text>");
+    expect(first.get("latest-summary.svg")).toContain("n/a · unavailable 0/1");
     expect(first.get("quality.svg")).toContain('data-metric="f1"');
   });
 
