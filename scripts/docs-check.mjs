@@ -28,6 +28,7 @@ const requiredDocs = [
   "docs/reference/references.md",
   "docs/reference/topology-yaml.md",
   "docs/explanation/index.md",
+  "docs/explanation/aave-v4-invariant-case-study.md",
   "docs/explanation/backends-safety.md",
   "docs/explanation/bugfinder.md",
   "docs/explanation/campaigns.md",

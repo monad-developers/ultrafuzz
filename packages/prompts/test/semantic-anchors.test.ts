@@ -81,6 +81,21 @@ describe("prompt semantic anchors", () => {
     // empty rendered field is tolerated, but a placeholder such as `ledger_ids: none` is rejected as
     // `INVARIANT_LEDGER_MARKDOWN_MAPPING_EXTRA`.
     expect(fanin).toContain("and, when present, render the exact ledger IDs under a `ledger_ids` field");
+
+    // `reference_expectations` is also optional. The contract accepts empty legacy arrays, but its
+    // canonical output form omits the field when there are no IDs. Only the two required path arrays
+    // use `[]` to say that a selected property produced no corresponding path (#328).
+    const implementation = flat("strategies/invariants/implement-properties.md");
+    expect(implementation).toContain(
+      "Omit `reference_expectations` from its structured record when the property has none"
+    );
+    expect(implementation).toContain(
+      "Include `implementation_paths` and `test_paths` on every record, using an empty array for either path field when no corresponding path exists"
+    );
+    expect(implementation).toContain(
+      "Omit `reference_expectations` entirely when the property has none; do not emit an empty array"
+    );
+    expect(implementation).not.toContain("both path arrays on every record");
   });
 
   it("preserves source-guided denial-of-service and liveness requirements", () => {
