@@ -2,7 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { GOAL_PLAN_POLICY, GOAL_PLAN_SCHEMA_VERSION, validateGoalPlan } from "@ultrafuzz/artifacts";
+import {
+  GOAL_PLAN_POLICY,
+  GOAL_PLAN_SCHEMA_VERSION,
+  goalPlanExpansionFacts,
+  validateGoalPlan
+} from "@ultrafuzz/artifacts";
 import { planDynamicExpansion } from "@ultrafuzz/runtime";
 import { parse as parseYaml } from "yaml";
 import { describe, expect, it } from "vitest";
@@ -16,7 +21,6 @@ import {
   BENCHMARK_SMOKE_WORKFLOW_PATH,
   BENCHMARK_THREAT_MODEL_MAX_PARALLEL_RUNS,
   BENCHMARK_THREAT_MODEL_MAX_PARALLEL_TARGETS,
-  BENCHMARK_THREAT_MODEL_RETAINED_ARTIFACTS,
   benchmarkLaneConcurrency,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
@@ -30,6 +34,7 @@ const LANES_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "lanes.json");
 const COHORT_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json");
 const TOPOLOGY_PATH = path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml");
 const DIGEST = "a".repeat(64);
+const MAX_DYNAMIC_NODES = 512;
 
 interface TopologyNode {
   id: string;
@@ -111,17 +116,13 @@ describe("v0.1.0 threat-model release-gate benchmark lane", () => {
     });
   });
 
-  it("retains the real threat-model, plan, and database provenance artifacts", () => {
+  it("keeps reporter-only artifact uploads lane-agnostic", () => {
     const suite = gateSuite();
     expect(suite.reporting.artifacts).toMatchObject({ mode: "upload", mode_explicit: true });
-    expect(suite.reporting.artifacts?.include).toEqual([
-      "report.md",
-      "report.json",
-      "findings.normalized.json",
-      ...BENCHMARK_THREAT_MODEL_RETAINED_ARTIFACTS
-    ]);
-    // The smoke lane keeps only the report bundle; the gate's assertions are
-    // deliberately structural, so the prose has to survive for human review.
+    // `eval run --provider none` constructs no reporters, so this list cannot
+    // retain the threat-model artifacts. The public worker collects those
+    // independently through optionalRowArtifactSources.
+    expect(suite.reporting.artifacts?.include).toEqual(["report.md", "report.json", "findings.normalized.json"]);
     expect(
       adaptBenchmarkManifestToEvalSuite({
         benchmark: "ultrafuzz-bench",
@@ -227,7 +228,7 @@ describe("v0.1.0 threat-model release-gate benchmark lane", () => {
         nodeIdTemplate: dynamic!.node_id,
         templateDigest: DIGEST,
         templateFingerprint: DIGEST,
-        maxDynamicNodes: 512
+        maxDynamicNodes: MAX_DYNAMIC_NODES
       });
 
       // The real expansion of the real template reproduces the plan's own node IDs.
@@ -326,6 +327,11 @@ function goalPlanFixture() {
       selection_rationale: "The class is applicable under evidence-backed capabilities."
     };
   });
+  const roamingGoal = {
+    node_id: "goal-roaming" as const,
+    prompt_path: "strategies/roaming-goal.md" as const,
+    purpose: "Search outside the database and challenge the threat model itself."
+  };
   return {
     schema_version: GOAL_PLAN_SCHEMA_VERSION,
     policy: GOAL_PLAN_POLICY,
@@ -377,11 +383,13 @@ function goalPlanFixture() {
       sha256: DIGEST,
       size_bytes: 1024
     })),
-    roaming_goal: {
-      node_id: "goal-roaming" as const,
-      prompt_path: "strategies/roaming-goal.md" as const,
-      purpose: "Search outside the database and challenge the threat model itself."
-    },
+    roaming_goal: roamingGoal,
+    ...goalPlanExpansionFacts({
+      threat_goals: threatGoals,
+      class_goals: classGoals,
+      roaming_goal: roamingGoal,
+      max_dynamic_nodes: MAX_DYNAMIC_NODES
+    }),
     counts: {
       threats: threatGoals.length,
       applicable_classes: classGoals.length,

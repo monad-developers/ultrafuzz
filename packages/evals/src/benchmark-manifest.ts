@@ -600,12 +600,7 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
       experiment_prefix: `${input.benchmark}-${input.lane}`,
       artifacts: {
         mode: "upload",
-        include: [
-          "report.md",
-          "report.json",
-          "findings.normalized.json",
-          ...(input.lane === "threat-model" ? BENCHMARK_THREAT_MODEL_RETAINED_ARTIFACTS : [])
-        ],
+        include: ["report.md", "report.json", "findings.normalized.json"],
         max_file_bytes: 5_000_000,
         mode_explicit: true
       }
