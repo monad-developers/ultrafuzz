@@ -654,6 +654,13 @@ jobs:
           overwrite: true
           retention-days: 30
 
+      - name: Validate threat-model structural gate
+        if: always() && env.BENCHMARK_MODE == 'threat-model'
+        run: |
+          node scripts/ci/validate-threat-model-benchmark-gate.mjs \
+            "$BENCHMARK_CONTROL/manifest.json" \
+            "$BENCHMARK_RESULTS"
+
       - name: Fail an incomplete matrix after preserving artifacts
         if: always()
         env:

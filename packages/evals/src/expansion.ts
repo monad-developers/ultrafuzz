@@ -368,8 +368,11 @@ function observeGoalLanes(
   }
   return lanes.map((lane) => {
     const matched: NodeState[] = [];
+    const observedPlannedNodeIds: string[] = [];
     for (const plannedId of lane.node_ids) {
-      for (const node of byIdentity.get(plannedId) ?? []) {
+      const plannedMatches = byIdentity.get(plannedId) ?? [];
+      if (plannedMatches.length > 0) observedPlannedNodeIds.push(plannedId);
+      for (const node of plannedMatches) {
         if (!matched.includes(node)) matched.push(node);
       }
     }
@@ -378,6 +381,7 @@ function observeGoalLanes(
       lane_id: lane.lane_id,
       kind: lane.kind,
       planned_node_ids: [...lane.node_ids],
+      observed_planned_node_ids: observedPlannedNodeIds.sort(compareIds),
       observed_node_ids: matched.map((node) => node.node_id).sort(compareIds),
       observed_node_count: matched.length,
       status_counts: statusCounts(matched),

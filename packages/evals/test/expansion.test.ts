@@ -308,6 +308,10 @@ describe("eval run expansion", () => {
       ["accounting:share-inflation", 1, true],
       ["goal-roaming", 1, false]
     ]);
+    expect(lanes[0]?.observed_planned_node_ids).toEqual(["dynamic:threat:liquidation:overdue"]);
+    expect(lanes[0]?.observed_node_ids).toEqual(["dynamic-threat-goals-aaaa"]);
+    expect(lanes[1]?.observed_planned_node_ids).toEqual(["dynamic:class:accounting:share-inflation"]);
+    expect(lanes[1]?.observed_node_ids).toEqual(["dynamic-class-goals-bbbb"]);
     // Failed goal lanes are distinct from failed nodes, and per-lane cost is a grouping of the
     // usage ledger the run already writes -- joined on the ledger's own `node_id`.
     expect(lanes[1]?.failed_node_ids).toEqual(["dynamic-class-goals-bbbb"]);
@@ -421,6 +425,7 @@ describe("eval run expansion", () => {
     // The lane the planner named that the run never ran is still reported, with nothing observed.
     const roaming = (observed.goal_lanes ?? []).find((lane) => lane.kind === "roaming");
     expect(roaming?.observed_node_count).toBe(0);
+    expect(roaming?.observed_planned_node_ids).toEqual([]);
     expect(roaming?.observed_node_ids).toEqual([]);
     expect(roaming?.total_tokens).toBeNull();
     expect(roaming?.wall_time_seconds).toBeNull();
