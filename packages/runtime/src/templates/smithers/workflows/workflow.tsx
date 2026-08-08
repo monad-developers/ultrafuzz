@@ -102,41 +102,96 @@ const agentFactories =
   (projectAgents as unknown as { agentFactories?: Record<string, AgentFactory> }).agentFactories ?? {};
 const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
 const loadedWorkflowPath = fileURLToPath(import.meta.url);
-const loadedExecutionSnapshotRoot = workflowExecutionSnapshotRoot(loadedWorkflowPath);
 const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
-const persistedExecutionSnapshotRoot =
-  persistedWorkflowPath === undefined ? undefined : workflowExecutionSnapshotRoot(persistedWorkflowPath);
-if (
-  persistedWorkflowPath !== undefined &&
-  (loadedExecutionSnapshotRoot === undefined ||
-    persistedExecutionSnapshotRoot === undefined ||
-    realpathSync(loadedWorkflowPath) !== realpathSync(persistedWorkflowPath))
-) {
-  throw new Error("persisted workflow path does not identify the loaded execution snapshot");
+const admittedWorkflowControls = admitWorkflowControls(loadedWorkflowPath, persistedWorkflowPath);
+const taskSpecs = serializedTaskSpecs.map((task) => {
+  const controlPaths = taskWorkflowControlPaths(task.execution.mode, admittedWorkflowControls);
+  return {
+    ...task,
+    promptPath:
+      task.promptPath === undefined
+        ? undefined
+        : (sealedTaskPromptPath(task.attemptId, controlPaths.promptExecutionSnapshotRoot) ??
+          path.resolve(process.cwd(), task.promptPath)),
+    workflowPath: controlPaths.workflowPath ?? path.resolve(process.cwd(), task.workflowPath),
+    executionSnapshotRoot: controlPaths.executionSnapshotRoot,
+    workspaceRelativePath: task.workspacePath,
+    workspacePath: path.resolve(process.cwd(), task.workspacePath),
+    artifactRelativeDir: task.artifactDir,
+    artifactDir: path.resolve(process.cwd(), task.artifactDir)
+  };
+});
+
+type AdmittedWorkflowControls = {
+  loadedWorkflowPath: string;
+  loadedExecutionSnapshotRoot: string | undefined;
+  persistedWorkflowPath: string | undefined;
+  persistedExecutionSnapshotRoot: string | undefined;
+};
+
+function admitWorkflowControls(loadedPath: string, persistedPath: string | undefined): AdmittedWorkflowControls {
+  const loadedExecutionSnapshotRoot = workflowExecutionSnapshotRoot(loadedPath);
+  const persistedExecutionSnapshotRoot =
+    persistedPath === undefined ? undefined : workflowExecutionSnapshotRoot(persistedPath);
+  if (
+    persistedPath !== undefined &&
+    (loadedExecutionSnapshotRoot === undefined ||
+      persistedExecutionSnapshotRoot === undefined ||
+      realpathSync(loadedPath) !== realpathSync(persistedPath))
+  ) {
+    throw new Error("persisted workflow path does not identify the loaded execution snapshot");
+  }
+  return {
+    loadedWorkflowPath: loadedPath,
+    loadedExecutionSnapshotRoot,
+    persistedWorkflowPath: persistedPath,
+    persistedExecutionSnapshotRoot
+  };
 }
-const taskSpecs = serializedTaskSpecs.map((task) => ({
-  ...task,
-  promptPath:
-    task.promptPath === undefined
-      ? undefined
-      : (sealedTaskPromptPath(
-          task.attemptId,
-          task.execution.mode === "cloud" && persistedExecutionSnapshotRoot !== undefined
-            ? persistedExecutionSnapshotRoot
-            : (loadedExecutionSnapshotRoot ?? persistedExecutionSnapshotRoot)
-        ) ?? path.resolve(process.cwd(), task.promptPath)),
-  workflowPath:
-    loadedExecutionSnapshotRoot === undefined && persistedExecutionSnapshotRoot === undefined
-      ? path.resolve(process.cwd(), task.workflowPath)
-      : task.execution.mode === "cloud" && persistedExecutionSnapshotRoot !== undefined
-        ? persistedWorkflowPath!
-        : loadedWorkflowPath,
-  executionSnapshotRoot: task.execution.mode === "cloud" ? persistedExecutionSnapshotRoot : loadedExecutionSnapshotRoot,
-  workspaceRelativePath: task.workspacePath,
-  workspacePath: path.resolve(process.cwd(), task.workspacePath),
-  artifactRelativeDir: task.artifactDir,
-  artifactDir: path.resolve(process.cwd(), task.artifactDir)
-}));
+
+function taskWorkflowControlPaths(
+  executionMode: "local" | "cloud",
+  controls: AdmittedWorkflowControls
+): {
+  promptExecutionSnapshotRoot: string | undefined;
+  workflowPath: string | undefined;
+  executionSnapshotRoot: string | undefined;
+} {
+  const anySnapshotRoot = controls.loadedExecutionSnapshotRoot ?? controls.persistedExecutionSnapshotRoot;
+  if (anySnapshotRoot === undefined) {
+    return {
+      promptExecutionSnapshotRoot: undefined,
+      workflowPath: undefined,
+      executionSnapshotRoot: undefined
+    };
+  }
+  if (executionMode === "cloud") {
+    return controls.persistedExecutionSnapshotRoot === undefined
+      ? {
+          // Preserve direct cloud-workflow admission behavior: the loaded
+          // generation can supply sealed prompt/module bytes, but cloud handoff
+          // still requires the explicit persisted generation binding.
+          promptExecutionSnapshotRoot: controls.loadedExecutionSnapshotRoot,
+          workflowPath: controls.loadedWorkflowPath,
+          executionSnapshotRoot: undefined
+        }
+      : {
+          promptExecutionSnapshotRoot: controls.persistedExecutionSnapshotRoot,
+          workflowPath: controls.persistedWorkflowPath!,
+          executionSnapshotRoot: controls.persistedExecutionSnapshotRoot
+        };
+  }
+  const persistedSnapshotRoot = controls.persistedExecutionSnapshotRoot ?? controls.loadedExecutionSnapshotRoot;
+  return {
+    // The descriptor-rooted loaded path is an admission capability owned by
+    // the Ultrafuzz controller. Smithers may continue a detached local run
+    // after that controller closes the descriptor, so no task-spec path that
+    // survives admission may retain it when a verified persisted path exists.
+    promptExecutionSnapshotRoot: persistedSnapshotRoot,
+    workflowPath: controls.persistedWorkflowPath ?? controls.loadedWorkflowPath,
+    executionSnapshotRoot: persistedSnapshotRoot
+  };
+}
 
 function workflowExecutionSnapshotRoot(workflowPath: string): string | undefined {
   if (!path.isAbsolute(workflowPath)) return undefined;
