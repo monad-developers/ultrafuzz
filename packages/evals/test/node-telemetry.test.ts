@@ -234,7 +234,8 @@ describe("NodeTelemetryPump", () => {
     const policy = testReportingPolicy({
       artifacts: { mode: "upload", include: ["report.md"], max_file_bytes: 5_000_000, mode_explicit: false }
     });
-    const { runRoot, reporter, pump } = setup({ policy });
+    const { runRoot, reporter, pump, row } = setup({ policy });
+    row.target.sensitivity = "private";
     writeRunFixture({
       runRoot,
       events: [

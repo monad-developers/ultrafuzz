@@ -215,6 +215,56 @@ describe("deterministic scorer math", () => {
     expect(fs.existsSync(path.join(fixture.evalRunRoot, "summary.json"))).toBe(true);
   });
 
+  it("requires a validated subject for private in-memory scoring", async () => {
+    const suite = testSuite("/tmp/gt", {
+      targets: [
+        {
+          id: "target-a",
+          repo: "https://example.com/target-a",
+          ref: "0123456789abcdef0123456789abcdef01234567",
+          sensitivity: "private",
+          ground_truth: "target-a.yml"
+        }
+      ]
+    });
+
+    await expect(
+      scoreFindingsAgainstGroundTruth({
+        suite,
+        row: testRow(suite),
+        findings: [],
+        bugs: BUGS
+      })
+    ).rejects.toMatchObject({ code: "EVAL_GROUND_TRUTH_SUBJECT_MISSING" });
+  });
+
+  it("revalidates the subject on private in-memory scoring", async () => {
+    const suite = testSuite("/tmp/gt", {
+      targets: [
+        {
+          id: "target-a",
+          repo: "https://example.com/target-a",
+          ref: "0123456789abcdef0123456789abcdef01234567",
+          sensitivity: "private",
+          ground_truth: "target-a.yml"
+        }
+      ]
+    });
+
+    await expect(
+      scoreFindingsAgainstGroundTruth({
+        suite,
+        row: testRow(suite),
+        findings: [],
+        bugs: BUGS,
+        groundTruthSubject: {
+          repository: "https://github.com/example/fork",
+          revision: "0123456789abcdef0123456789abcdef01234567"
+        }
+      })
+    ).rejects.toMatchObject({ code: "EVAL_GROUND_TRUTH_SUBJECT_REPOSITORY_MISMATCH" });
+  });
+
   it("fails closed when the private subject names another immutable revision", async () => {
     const fixture = scoreRunFixture();
     const document = JSON.parse(fs.readFileSync(fixture.groundTruthPath, "utf8")) as {
@@ -990,7 +1040,17 @@ describe("deterministic scorer math", () => {
       throw new Error("unexpected request");
     }) as unknown as typeof fetch;
     const judge = gatewayLlmJudge({ ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key" }, fetchImpl);
-    const suite = testSuite("/tmp/gt");
+    const suite = testSuite("/tmp/gt", {
+      targets: [
+        {
+          id: "target-a",
+          repo: "https://example.com/target-a",
+          ref: "0123456789abcdef0123456789abcdef01234567",
+          sensitivity: "private",
+          ground_truth: "target-a.yml"
+        }
+      ]
+    });
 
     await expect(
       scoreFindingsAgainstGroundTruth({
@@ -998,6 +1058,10 @@ describe("deterministic scorer math", () => {
         row: testRow(suite),
         findings: [matchedFinding()],
         bugs: BUGS,
+        groundTruthSubject: {
+          repository: "https://example.com/target-a",
+          revision: "0123456789abcdef0123456789abcdef01234567"
+        },
         llmJudge: judge
       })
     ).rejects.toMatchObject({ code: "EVAL_LLM_JUDGE_PRIVATE_DATA_ACK_REQUIRED" });

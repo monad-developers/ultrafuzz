@@ -38,7 +38,7 @@ export function buildEvalRunProvenance(plan: EvalPlanValue, controller: EvalCont
     .map(([id, target]) => ({ id, repo: target.repo, ...resolveTargetProvenance(target.path, target.ref) }))
     .sort((left, right) => left.id.localeCompare(right.id));
   const groundTruthSha256 = groundTruthDigests(plan.matrix);
-  const groundTruthSubjects = collectGroundTruthSubjects(plan.matrix, false);
+  const groundTruthSubjects = collectGroundTruthSubjects(plan.matrix, true);
   const benchmarkControls = benchmarkExecutionControls(plan.matrix);
   const executionPolicyValue = {
     revision: EVAL_EXECUTION_POLICY_REVISION,

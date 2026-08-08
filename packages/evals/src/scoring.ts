@@ -683,6 +683,13 @@ async function scoreFindings(input: {
   findingScores: EvalFindingScore[];
   reviewQueue: HumanReviewQueueItem[];
 }> {
+  if (input.row.target.sensitivity === "private" && input.groundTruthSubject === undefined) {
+    throw new EvalError(
+      "EVAL_GROUND_TRUTH_SUBJECT_MISSING",
+      "private in-memory scoring requires a validated ground-truth subject binding",
+      { target: input.row.target_id }
+    );
+  }
   if (input.row.target.sensitivity === "private" && input.groundTruthSubject !== undefined) {
     assertGroundTruthSubject(input.groundTruthSubject, {
       repository: input.row.target.repo,
