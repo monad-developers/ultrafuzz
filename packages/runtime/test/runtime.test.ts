@@ -1663,6 +1663,236 @@ test("startRun gives manual upgrade guidance for a customized stale adapter", as
   assert.match(run.diagnostics[0]?.message ?? "", /update this customized adapter manually/u);
 });
 
+test("init preserves a dangling adapter symlink without writing through it", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+  const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-init-dangling-"));
+  const outsidePath = path.join(outsideRoot, "codex.ts");
+  fs.unlinkSync(codexPath);
+  fs.symlinkSync(outsidePath, codexPath);
+
+  const result = initProject({ projectRoot: project });
+
+  assert.equal(result.ok, true);
+  assert.equal(fs.existsSync(outsidePath), false);
+  assert.equal(fs.readlinkSync(codexPath), outsidePath);
+});
+
+test("init does not modify a regular file swapped after the anchored open", { concurrency: false }, () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const environmentPath = path.join(project, ".smithers", "agents", "environment.ts");
+  const originalContents = fs.readFileSync(environmentPath, "utf8");
+  const concurrentContents = "export const concurrentEnvironmentCustomization = true;\n";
+  const originalOpenSync = fs.openSync;
+  const descriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
+  let swapped = false;
+  Object.defineProperty(fs, "openSync", {
+    ...descriptor,
+    value: (...args: unknown[]) => {
+      const opened = Reflect.apply(originalOpenSync, fs, args) as number;
+      if (!swapped && path.basename(String(args[0])) === "environment.ts") {
+        swapped = true;
+        fs.renameSync(environmentPath, `${environmentPath}.old`);
+        fs.writeFileSync(environmentPath, concurrentContents, "utf8");
+      }
+      return opened;
+    }
+  });
+  try {
+    const result = initProject({ projectRoot: project, force: true });
+    assert.equal(result.ok, false);
+  } finally {
+    Object.defineProperty(fs, "openSync", descriptor);
+  }
+  assert.equal(swapped, true);
+  assert.equal(fs.readFileSync(environmentPath, "utf8"), concurrentContents);
+  assert.equal(fs.readFileSync(`${environmentPath}.old`, "utf8"), originalContents);
+});
+
+test(
+  "stock adapter publication retains the replacement when final directory fsync fails",
+  { concurrency: false },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    const expectedReplacement = fs.readFileSync(codexPath, "utf8");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const originalFsyncSync = fs.fsyncSync;
+    const descriptor = Object.getOwnPropertyDescriptor(fs, "fsyncSync")!;
+    let directoryFsyncs = 0;
+    Object.defineProperty(fs, "fsyncSync", {
+      ...descriptor,
+      value: (fileDescriptor: number) => {
+        let target = "";
+        try {
+          target = fs.readlinkSync(`/proc/self/fd/${fileDescriptor}`);
+        } catch {
+          // Let the real fsync report invalid descriptors.
+        }
+        if (target === agentsDirectory) {
+          directoryFsyncs += 1;
+          if (directoryFsyncs === 4)
+            throw Object.assign(new Error("induced final directory fsync failure"), { code: "EIO" });
+        }
+        return originalFsyncSync(fileDescriptor);
+      }
+    });
+    try {
+      const result = initProject({ projectRoot: project });
+      assert.equal(result.ok, false);
+    } finally {
+      Object.defineProperty(fs, "fsyncSync", descriptor);
+    }
+    assert.equal(directoryFsyncs, 4);
+    assert.equal(fs.readFileSync(codexPath, "utf8"), expectedReplacement);
+    assert.deepEqual(
+      fs.readdirSync(agentsDirectory).filter((entry) => entry.includes(".ultrafuzz-init-")),
+      []
+    );
+  }
+);
+
+test(
+  "stock adapter publication retains its recovery marker when post-displacement fsync fails",
+  { concurrency: false },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    const expectedReplacement = fs.readFileSync(codexPath, "utf8");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const originalFsyncSync = fs.fsyncSync;
+    const descriptor = Object.getOwnPropertyDescriptor(fs, "fsyncSync")!;
+    let directoryFsyncs = 0;
+    Object.defineProperty(fs, "fsyncSync", {
+      ...descriptor,
+      value: (fileDescriptor: number) => {
+        let target = "";
+        try {
+          target = fs.readlinkSync(`/proc/self/fd/${fileDescriptor}`);
+        } catch {
+          // Let the real fsync report invalid descriptors.
+        }
+        if (target === agentsDirectory) {
+          directoryFsyncs += 1;
+          if (directoryFsyncs === 3)
+            throw Object.assign(new Error("induced post-displacement directory fsync failure"), { code: "EIO" });
+        }
+        return originalFsyncSync(fileDescriptor);
+      }
+    });
+    try {
+      const result = initProject({ projectRoot: project });
+      assert.equal(result.ok, false);
+    } finally {
+      Object.defineProperty(fs, "fsyncSync", descriptor);
+    }
+    assert.equal(directoryFsyncs, 3);
+    assert.equal(fs.readFileSync(codexPath, "utf8"), expectedReplacement);
+    assert.deepEqual(
+      fs.readdirSync(agentsDirectory).filter((entry) => entry.includes(".ultrafuzz-init-")),
+      [".codex.ts.ultrafuzz-init-recovery"]
+    );
+    assert.equal(initProject({ projectRoot: project }).ok, true);
+    assert.equal(fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-recovery")), false);
+  }
+);
+
+test(
+  "stock adapter publication restores the original when intermediate commit fsync fails",
+  { concurrency: false },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const originalFsyncSync = fs.fsyncSync;
+    const descriptor = Object.getOwnPropertyDescriptor(fs, "fsyncSync")!;
+    let directoryFsyncs = 0;
+    Object.defineProperty(fs, "fsyncSync", {
+      ...descriptor,
+      value: (fileDescriptor: number) => {
+        let target = "";
+        try {
+          target = fs.readlinkSync(`/proc/self/fd/${fileDescriptor}`);
+        } catch {
+          // Let the real fsync report invalid descriptors.
+        }
+        if (target === agentsDirectory) {
+          directoryFsyncs += 1;
+          if (directoryFsyncs === 2)
+            throw Object.assign(new Error("induced intermediate directory fsync failure"), { code: "EIO" });
+        }
+        return originalFsyncSync(fileDescriptor);
+      }
+    });
+    try {
+      const result = initProject({ projectRoot: project });
+      assert.equal(result.ok, false);
+    } finally {
+      Object.defineProperty(fs, "fsyncSync", descriptor);
+    }
+    assert.equal(directoryFsyncs, 2);
+    assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
+    assert.deepEqual(
+      fs.readdirSync(agentsDirectory).filter((entry) => entry.includes(".ultrafuzz-init-")),
+      []
+    );
+  }
+);
+
+test(
+  "stock adapter publication retains the replacement when final directory stability fails",
+  { concurrency: false },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    const expectedReplacement = fs.readFileSync(codexPath, "utf8");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const originalLstatSync = fs.lstatSync;
+    const descriptor = Object.getOwnPropertyDescriptor(fs, "lstatSync")!;
+    let injected = false;
+    Object.defineProperty(fs, "lstatSync", {
+      ...descriptor,
+      value: (...args: unknown[]) => {
+        const result = Reflect.apply(originalLstatSync, fs, args) as fs.BigIntStats;
+        if (
+          !injected &&
+          String(args[0]) === agentsDirectory &&
+          !fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-recovery"))
+        ) {
+          const target = fs.lstatSync(codexPath, { bigint: true });
+          if (target.size === BigInt(Buffer.byteLength(expectedReplacement))) {
+            injected = true;
+            return { ...result, ino: result.ino + 1n } as fs.BigIntStats;
+          }
+        }
+        return result;
+      }
+    });
+    try {
+      const result = initProject({ projectRoot: project });
+      assert.equal(result.ok, false);
+    } finally {
+      Object.defineProperty(fs, "lstatSync", descriptor);
+    }
+    assert.equal(injected, true);
+    assert.equal(fs.readFileSync(codexPath, "utf8"), expectedReplacement);
+    assert.deepEqual(
+      fs.readdirSync(agentsDirectory).filter((entry) => entry.includes(".ultrafuzz-init-")),
+      []
+    );
+  }
+);
+
 test(
   "generated Codex adapter repeats artifact directory flags and preserves resume argv",
   { skip: !runningUnderBun },

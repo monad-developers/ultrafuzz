@@ -410,8 +410,8 @@ function writeProjectFile(
       Buffer.from(contents, "utf8")
     );
   }
-  const existed = fs.existsSync(filePath);
-  if (existed && !force) {
+  const existing = lstatIfPresent(filePath);
+  if (existing !== undefined && !force) {
     if (
       knownStockSha256 !== undefined &&
       replaceKnownStockAgentAdapter(projectRoot, filePath, contents, knownStockSha256)
@@ -425,13 +425,105 @@ function writeProjectFile(
   assertNoSymlinkComponents(projectRoot, filePath, `init file ${relativePath}`);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   assertNoSymlinkComponents(projectRoot, filePath, `init file ${relativePath}`);
-  fs.writeFileSync(filePath, contents, "utf8");
-  if (existed) {
-    overwritten.push(relativePath);
-  } else {
-    created.push(relativePath);
-  }
+  writeProjectFileNoFollow(projectRoot, filePath, contents, force, existing);
+  if (existing !== undefined) overwritten.push(relativePath);
+  else created.push(relativePath);
   return false;
+}
+
+function writeProjectFileNoFollow(
+  projectRoot: string,
+  filePath: string,
+  contents: string,
+  replaceExisting: boolean,
+  expected: fs.BigIntStats | undefined
+): void {
+  const directoryPath = path.dirname(filePath);
+  assertNoSymlinkComponents(projectRoot, directoryPath, "generated project file directory");
+  const directoryDescriptor = fs.openSync(
+    directoryPath,
+    fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | (fs.constants.O_NOFOLLOW ?? 0)
+  );
+  let fileDescriptor: number | undefined;
+  let failure: unknown;
+  try {
+    const directory = fs.fstatSync(directoryDescriptor, { bigint: true });
+    const lexicalDirectory = fs.lstatSync(directoryPath, { bigint: true });
+    if (
+      !directory.isDirectory() ||
+      !lexicalDirectory.isDirectory() ||
+      directory.dev !== lexicalDirectory.dev ||
+      directory.ino !== lexicalDirectory.ino
+    ) {
+      throw new Error("generated project file directory changed while it was opened");
+    }
+    let directoryAccessPath = directoryPath;
+    try {
+      // Anchor both creation and replacement to the opened directory whenever
+      // a verifiable descriptor pseudo-path is available. This closes the
+      // parent-directory swap window before an O_EXCL creation as well as the
+      // corresponding replacement window.
+      directoryAccessPath = agentAdapterDirectoryDescriptorPath(directoryDescriptor, directory);
+    } catch (error) {
+      // Descriptor pseudo-files are unavailable on Windows and on some
+      // restricted Unix environments. The lexical fallback still opens
+      // with O_NOFOLLOW where supported, validates the inode before
+      // truncating, and rechecks both path and directory identity after the
+      // write.
+      if (!(error instanceof Error) || !/no verifiable descriptor path/u.test(error.message)) throw error;
+      assertStableInitDirectory(directoryPath, directory, "generated project file directory changed");
+    }
+    const accessPath = path.join(directoryAccessPath, path.basename(filePath));
+    const flags =
+      expected === undefined
+        ? fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0)
+        : fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW ?? 0);
+    fileDescriptor = fs.openSync(accessPath, flags, 0o666);
+    const opened = fs.fstatSync(fileDescriptor, { bigint: true });
+    if (
+      !opened.isFile() ||
+      opened.nlink !== 1n ||
+      opened.dev !== directory.dev ||
+      (expected !== undefined && !sameStableInitFile(opened, expected))
+    ) {
+      throw new Error("generated project file changed while it was opened");
+    }
+    const lexicalBeforeWrite = fs.lstatSync(filePath, { bigint: true });
+    if (!sameStableInitFile(opened, lexicalBeforeWrite)) {
+      throw new Error("generated project file changed before its contents could be replaced");
+    }
+    if (replaceExisting) fs.ftruncateSync(fileDescriptor, 0);
+    // Ordinary scaffold files retain writeFileSync's prior durability
+    // semantics; only the adapter publication sidecars use descriptor fsync.
+    writeDescriptorContents(fileDescriptor, Buffer.from(contents, "utf8"));
+    const completed = fs.fstatSync(fileDescriptor, { bigint: true });
+    const lexicalCompleted = fs.lstatSync(filePath, { bigint: true });
+    const currentDirectory = fs.lstatSync(directoryPath, { bigint: true });
+    if (
+      !sameInitFileContentIdentity(opened, completed) ||
+      completed.size !== BigInt(Buffer.byteLength(contents, "utf8")) ||
+      !sameInitFileContentIdentity(opened, lexicalCompleted) ||
+      lexicalCompleted.size !== BigInt(Buffer.byteLength(contents, "utf8")) ||
+      !currentDirectory.isDirectory() ||
+      currentDirectory.dev !== directory.dev ||
+      currentDirectory.ino !== directory.ino
+    ) {
+      throw new Error("generated project file or its directory changed while it was written");
+    }
+  } catch (error) {
+    failure = error;
+  }
+  try {
+    if (fileDescriptor !== undefined) closeDescriptorReliably(fileDescriptor, "generated project file");
+  } catch (error) {
+    failure ??= error;
+  }
+  try {
+    closeDescriptorReliably(directoryDescriptor, "generated project file directory");
+  } catch (error) {
+    failure ??= error;
+  }
+  if (failure !== undefined) throw failure;
 }
 
 function recoverInterruptedStockAgentAdapterPublication(
@@ -862,6 +954,12 @@ function publishAgentAdapterAtomically(
   let displacedWasOriginal = false;
   let targetMoved = false;
   let targetLinked = false;
+  // Once the displaced original is gone, the replacement is the only copy.
+  // Later cleanup must never remove it: a failed final fsync or stability
+  // check is recoverable on the next init, but an unmarked missing target is
+  // not.
+  let commitRetained = false;
+  let commitDurable = false;
   let targetAccessPath: string | undefined;
   let published = false;
   let failure: unknown;
@@ -1023,6 +1121,10 @@ function publishAgentAdapterAtomically(
     }
 
     verifyPublishedAgentAdapter(targetAccessPath, filePath, temporaryIdentity, original, replacement, 2n);
+    // Make the complete target/prepared/displacement/marker projection
+    // durable before any recovery sidecar is removed. A restart can then
+    // deterministically finish from the marker at every later boundary.
+    fs.fsyncSync(directoryDescriptor);
     if (!removeOwnedAgentAdapterTemporaryFile(temporaryPath, temporaryIdentity)) {
       throw new Error("generated agent adapter temporary publication file could not be removed");
     }
@@ -1032,6 +1134,13 @@ function publishAgentAdapterAtomically(
       throw new Error("generated agent adapter displaced stock file could not be removed");
     }
     displacementPath = undefined;
+    commitRetained = true;
+    // The target is now the only published copy. Persist that fact before
+    // removing the marker; otherwise a crash could leave a durable marker
+    // projection with an absent displacement, or (worse) an absent marker
+    // with a nondurable displacement removal that recovery cannot classify.
+    fs.fsyncSync(directoryDescriptor);
+    commitDurable = true;
     if (!removeOwnedAgentAdapterTemporaryFile(recoveryMarkerPath, recoveryMarkerIdentity)) {
       throw new Error("generated agent adapter recovery marker could not be removed");
     }
@@ -1057,20 +1166,31 @@ function publishAgentAdapterAtomically(
     }
   };
 
-  if (!published && targetLinked && temporaryIdentity !== undefined && targetAccessPath !== undefined) {
+  if (
+    !published &&
+    !commitRetained &&
+    targetLinked &&
+    temporaryIdentity !== undefined &&
+    targetAccessPath !== undefined
+  ) {
     const targetIdentity = temporaryIdentity;
     const anchoredTargetPath = targetAccessPath;
     cleanup(() => {
-      if (!removeOwnedAgentAdapterTemporaryFile(anchoredTargetPath, targetIdentity)) {
-        const current = lstatIfPresent(anchoredTargetPath);
-        if (current !== undefined && sameInitFileIdentity(current, targetIdentity)) {
-          throw new Error("generated agent adapter incomplete destination could not be removed");
-        }
+      if (displacementPath === undefined || displacedIdentity === undefined || !displacedWasOriginal) return;
+      const displaced = lstatIfPresent(displacementPath);
+      if (displaced === undefined || !sameInitFileIdentity(displaced, displacedIdentity)) return;
+      const current = lstatIfPresent(anchoredTargetPath);
+      if (current !== undefined && !sameInitFileIdentity(current, targetIdentity)) return;
+      if (current !== undefined && !removeOwnedAgentAdapterTemporaryFile(anchoredTargetPath, targetIdentity)) return;
+      if (!restoreDisplacedAgentAdapterNoReplace(displacementPath, anchoredTargetPath, displacedIdentity)) {
+        throw new Error("generated agent adapter stock source could not be restored without replacement");
       }
+      displacementPath = undefined;
     });
   }
   if (
     targetMoved &&
+    !targetLinked &&
     displacementPath !== undefined &&
     displacedIdentity !== undefined &&
     targetAccessPath !== undefined
@@ -1105,7 +1225,12 @@ function publishAgentAdapterAtomically(
       temporaryPath = undefined;
     });
   }
-  if (recoveryMarkerPath !== undefined && displacementPath === undefined && temporaryPath === undefined) {
+  if (
+    recoveryMarkerPath !== undefined &&
+    displacementPath === undefined &&
+    temporaryPath === undefined &&
+    (!commitRetained || commitDurable || published)
+  ) {
     cleanup(() => {
       recoveryMarkerIdentity ??= fs.fstatSync(recoveryMarkerDescriptor!, { bigint: true });
       if (!removeOwnedAgentAdapterTemporaryFile(recoveryMarkerPath!, recoveryMarkerIdentity)) {
@@ -1303,6 +1428,18 @@ function sameInitFileIdentity(left: fs.BigIntStats, right: fs.BigIntStats): bool
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+function sameInitFileContentIdentity(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
+  return (
+    left.isFile() === right.isFile() &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.nlink === right.nlink &&
+    left.uid === right.uid &&
+    left.gid === right.gid
+  );
+}
+
 function sameInitFileAcrossRename(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
   return (
     sameInitFileIdentity(left, right) &&
@@ -1336,13 +1473,17 @@ function sameStableInitFile(left: fs.BigIntStats, right: fs.BigIntStats): boolea
 }
 
 function writeNewDescriptorContents(descriptor: number, contents: Buffer): void {
+  writeDescriptorContents(descriptor, contents);
+  fs.fsyncSync(descriptor);
+}
+
+function writeDescriptorContents(descriptor: number, contents: Buffer): void {
   let offset = 0;
   while (offset < contents.byteLength) {
     const written = fs.writeSync(descriptor, contents, offset, contents.byteLength - offset, offset);
     if (written === 0) throw new Error("generated agent adapter stopped accepting replacement bytes");
     offset += written;
   }
-  fs.fsyncSync(descriptor);
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
