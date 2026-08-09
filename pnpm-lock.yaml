@@ -84,6 +84,9 @@ importers:
       '@ultrafuzz/evals':
         specifier: workspace:*
         version: link:../evals
+      '@ultrafuzz/evmbench':
+        specifier: workspace:*
+        version: link:../evmbench
       '@ultrafuzz/modal':
         specifier: workspace:*
         version: link:../modal

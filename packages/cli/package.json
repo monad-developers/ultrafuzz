@@ -33,6 +33,7 @@
     "@ultrafuzz/artifacts": "workspace:*",
     "@ultrafuzz/config": "workspace:*",
     "@ultrafuzz/dashboard": "workspace:*",
+    "@ultrafuzz/evmbench": "workspace:*",
     "@ultrafuzz/evals": "workspace:*",
     "@ultrafuzz/modal": "workspace:*",
     "@ultrafuzz/references": "workspace:*",

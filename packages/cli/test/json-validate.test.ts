@@ -5,6 +5,11 @@ import path from "node:path";
 import test from "node:test";
 
 import { artifactSchemaDirectory } from "@ultrafuzz/artifacts";
+import {
+  EVMBENCH_PROFILE_JSON_SCHEMA_ID,
+  evmbenchSchemaBundleDigest,
+  evmbenchSchemaDirectory
+} from "@ultrafuzz/evmbench";
 import { EVAL_PUBLICATION_STATE_SCHEMA_ID, evalSchemaBundleDigest, evalSchemaDirectory } from "@ultrafuzz/evals";
 import { MODAL_NODE_INPUT_SCHEMA_ID, modalSchemaBundleDigest, modalSchemaDirectory } from "@ultrafuzz/modal";
 import {
@@ -179,6 +184,51 @@ test("json validate recognizes the pinned eval schema and reports the owning eva
     const tamperedSchema = path.join(temporary, "eval-publication-state.schema.json");
     fs.writeFileSync(tamperedSchema, `${fs.readFileSync(schema, "utf8")} `, "utf8");
     const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", publicationState]);
+    assert.equal(tamperedCapture.code, 2);
+    assert.match(tamperedCapture.stderr, /JSON_SCHEMA_DIGEST_MISMATCH/u);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("json validate recognizes the pinned EVMBench schema and reports the owning bundle", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-evmbench-"));
+  try {
+    const schema = path.join(evmbenchSchemaDirectory(), "evmbench-profile.schema.json");
+    const profile = path.join(temporary, "profile.json");
+    fs.writeFileSync(
+      profile,
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.evmbench.profile.v2",
+        id: "smoke",
+        max_concurrency: 2,
+        poll_interval_seconds: 15,
+        workflow_timeout_seconds: 7_200,
+        node_timeout_seconds: 900,
+        model: "gpt-5.5",
+        reasoning: "high"
+      })}\n`,
+      "utf8"
+    );
+
+    const validCapture = await capture(["json", "validate", "--schema", schema, "--file", profile, "--json"]);
+    assert.equal(validCapture.code, 0);
+    const envelope = JSON.parse(validCapture.stdout) as {
+      ok: boolean;
+      data: {
+        status: string;
+        schema: { id: string; bundle_sha256: string; registered: boolean };
+      };
+    };
+    assert.equal(envelope.ok, true);
+    assert.equal(envelope.data.status, "valid");
+    assert.equal(envelope.data.schema.registered, true);
+    assert.equal(envelope.data.schema.id, EVMBENCH_PROFILE_JSON_SCHEMA_ID);
+    assert.equal(envelope.data.schema.bundle_sha256, evmbenchSchemaBundleDigest());
+
+    const tamperedSchema = path.join(temporary, "evmbench-profile.schema.json");
+    fs.writeFileSync(tamperedSchema, `${fs.readFileSync(schema, "utf8")} `, "utf8");
+    const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", profile]);
     assert.equal(tamperedCapture.code, 2);
     assert.match(tamperedCapture.stderr, /JSON_SCHEMA_DIGEST_MISMATCH/u);
   } finally {
