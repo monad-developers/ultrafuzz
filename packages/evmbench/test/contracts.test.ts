@@ -29,6 +29,11 @@ import {
 import { EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID, IMPLEMENTED_EVMBENCH_SEMANTIC_GATES } from "../src/semantic-gates.js";
 import { findUltrafuzzRepoRoot } from "../src/definition.js";
 import {
+  EVMBENCH_CLI_EXPECTED_COMMAND_CONTEXT_GATE,
+  EVMBENCH_CLI_RESULT_JSON_SCHEMA_ID,
+  parseEvmbenchCliResult
+} from "../src/cli-contracts.js";
+import {
   NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID,
   NANOEVAL_RECORD_JSON_SCHEMA_ID,
   nanoevalFinalReportSchema,
@@ -45,6 +50,7 @@ describe("EVMBench JSON Schema and Zod parity", () => {
       EVMBENCH_LOCK_JSON_SCHEMA_ID,
       EVMBENCH_PROFILE_JSON_SCHEMA_ID,
       EVMBENCH_RESULT_JSON_SCHEMA_ID,
+      EVMBENCH_CLI_RESULT_JSON_SCHEMA_ID,
       NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID,
       NANOEVAL_RECORD_JSON_SCHEMA_ID
     ]);
@@ -330,6 +336,27 @@ describe("EVMBench JSON Schema and Zod parity", () => {
     const bytes = serializeNormalizedEvmbenchResult(value);
     expect(parseNormalizedEvmbenchResultBytes(bytes)).toEqual(value);
     expect(bytes.at(-1)).toBe(0x0a);
+  });
+
+  it("validates the exact registered CLI consumer contract without a parallel Zod authority", () => {
+    const data = { project_root: "/tmp/project", created: [], preserved: [], overwritten: [] };
+    const envelope = {
+      schema_version: "ultrafuzz.cli.result.v2",
+      command: "init",
+      ok: true,
+      diagnostics: [],
+      data
+    };
+
+    expect(validateEvmbenchJsonSchema(EVMBENCH_CLI_RESULT_JSON_SCHEMA_ID, envelope)).toMatchObject({ ok: true });
+    expect(parseEvmbenchCliResult("init", envelope)).toBe(data);
+    expect(() => parseEvmbenchCliResult("run", envelope)).toThrow(EVMBENCH_CLI_EXPECTED_COMMAND_CONTEXT_GATE);
+    expect(
+      validateEvmbenchJsonSchema(EVMBENCH_CLI_RESULT_JSON_SCHEMA_ID, {
+        ...envelope,
+        data: { ...data, compatibility_payload: {} }
+      })
+    ).toMatchObject({ ok: false });
   });
 
   it("validates pinned NanoEval documents Ajv-first while preserving the retained Zod value", () => {

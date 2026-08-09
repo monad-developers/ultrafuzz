@@ -54,13 +54,19 @@ const SCHEMA_METADATA = {
     typescriptExport: "NormalizedEvmbenchResult",
     zodParser: "normalizedEvmbenchResultSchema",
     semanticGates: EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID["urn:ultrafuzz:schema:evmbench:result:2"]
+  },
+  "evmbench-ultrafuzz-cli-result.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "EvmbenchCliResult",
+    zodParser: undefined,
+    semanticGates: EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID["urn:ultrafuzz:schema:evmbench:ultrafuzz-cli-result:1"]
   }
 } as const satisfies Record<
   string,
   {
     role: SchemaRegistryEntry["role"];
     typescriptExport: string;
-    zodParser: string;
+    zodParser?: string;
     semanticGates: readonly string[];
   }
 >;
@@ -121,7 +127,7 @@ export function evmbenchSchemaRegistry(): readonly SchemaRegistryEntry[] {
         localReferences: Object.freeze(collectLocalReferences(schema)),
         semanticGates: Object.freeze([...metadata.semanticGates]),
         typescriptExport: metadata.typescriptExport,
-        zodParser: metadata.zodParser
+        ...(metadata.zodParser === undefined ? {} : { zodParser: metadata.zodParser })
       });
     })
   );

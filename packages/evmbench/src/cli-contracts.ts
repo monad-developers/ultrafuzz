@@ -1,205 +1,130 @@
-import { z } from "zod/v4";
+import { assertEvmbenchJsonSchema } from "./schema-registry.js";
+import { assertEvmbenchDocumentSemantics } from "./semantic-gates.js";
 
 export const ULTRAFUZZ_CLI_RESULT_VERSION = "ultrafuzz.cli.result.v2" as const;
+export const EVMBENCH_CLI_RESULT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:evmbench:ultrafuzz-cli-result:1" as const;
+export const EVMBENCH_CLI_EXPECTED_COMMAND_CONTEXT_GATE = "evmbench-cli-result-expected-command" as const;
 
-const stringSchema = z.string();
-const fingerprintSchema = z.string().regex(/^[0-9a-f]{64}$/u);
-const nonnegativeIntegerSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+export interface EvmbenchCliDiagnostic {
+  code: string;
+  message: string;
+  severity: "error" | "warning" | "info";
+  source: string;
+  path?: string;
+}
 
-export const evmbenchCliDiagnosticSchema = z
-  .object({
-    code: stringSchema,
-    message: stringSchema,
-    severity: z.enum(["error", "warning", "info"]),
-    source: stringSchema,
-    path: stringSchema.optional()
-  })
-  .strict();
+export interface EvmbenchInitData {
+  project_root: string;
+  created: string[];
+  preserved: string[];
+  overwritten: string[];
+}
 
-const initDataSchema = z
-  .object({
-    project_root: stringSchema,
-    created: z.array(stringSchema),
-    preserved: z.array(stringSchema),
-    overwritten: z.array(stringSchema)
-  })
-  .strict();
+export interface EvmbenchRunData {
+  run_id: string;
+  run_root: string;
+  status: string;
+  source_run_id?: string;
+  graph_fingerprint: string;
+  config_fingerprint: string;
+  workflow_ids: string[];
+}
 
-const runDataSchema = z
-  .object({
-    run_id: stringSchema,
-    run_root: stringSchema,
-    status: stringSchema,
-    source_run_id: stringSchema.optional(),
-    graph_fingerprint: fingerprintSchema,
-    config_fingerprint: fingerprintSchema,
-    workflow_ids: z.array(stringSchema)
-  })
-  .strict();
+export interface EvmbenchResumeData {
+  run_id: string;
+  workflow_run_id?: string;
+  workflow_path?: string;
+  action: "resume";
+  submitted: boolean;
+}
 
-const resumeDataSchema = z
-  .object({
-    run_id: stringSchema,
-    workflow_run_id: stringSchema.optional(),
-    workflow_path: stringSchema.optional(),
-    action: z.literal("resume"),
-    submitted: z.boolean()
-  })
-  .strict();
+export type EvmbenchStatusVerdict =
+  | "done"
+  | "running-healthy"
+  | "progressing"
+  | "stalled"
+  | "blocked"
+  | "waiting-quota"
+  | "paused"
+  | "cancelled"
+  | "failed";
 
-const runListFields = {
-  run_id: stringSchema,
-  run_root: stringSchema,
-  status: stringSchema,
-  created_at: stringSchema.optional(),
-  started_at: stringSchema.optional(),
-  finished_at: stringSchema.optional(),
-  source_run_id: stringSchema.optional(),
-  workflow_ids: z.array(stringSchema)
-} as const;
+export interface EvmbenchStatusData {
+  run_id: string;
+  run_root: string;
+  status: string;
+  created_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  source_run_id?: string;
+  workflow_ids: string[];
+  workflow_run_id: string;
+  workflow_status: string;
+  verdict: EvmbenchStatusVerdict;
+  reason: string;
+  counts: {
+    finished: number;
+    in_progress: number;
+    pending: number;
+    failed: number;
+    waiting_approval: number;
+    waiting_event: number;
+    waiting_timer: number;
+    skipped: number;
+    other: number;
+    total: number;
+  };
+  model_mix: Array<{ engine: string; model: string; attempts: number; quota_parked: boolean }>;
+  throughput: {
+    recent_finished: number;
+    window_ms: number;
+    total_finished: number;
+    last_finished_at_ms: number | null;
+  };
+  progress: {
+    percent: number;
+    finished: number;
+    in_progress: number;
+    pending: number;
+    failed: number;
+    skipped: number;
+    remaining: number;
+    total: number;
+  };
+  eta:
+    | {
+        available: true;
+        seconds: number;
+        basis: "recent-throughput" | "run-throughput" | "no-remaining-nodes";
+        unavailable_reason: null;
+      }
+    | {
+        available: false;
+        seconds: null;
+        basis: null;
+        unavailable_reason:
+          "run-terminal" | "run-paused" | "no-node-counts" | "no-finished-nodes" | "no-observed-elapsed-time";
+      };
+  current_step: {
+    node_id: string | null;
+    iteration: number | null;
+    started_at: string | null;
+    elapsed_seconds: number | null;
+    running_count: number;
+  };
+  gating: Array<{ node_id: string; iteration: number; state: string; detail: string | null }>;
+  gating_omitted: number;
+  quota: { parked_count: number; parked_node_ids: string[]; reset_at_ms: number | null } | null;
+  generated_at_ms: number;
+}
 
-const statusDataSchema = z
-  .object({
-    ...runListFields,
-    workflow_run_id: stringSchema,
-    workflow_status: stringSchema,
-    verdict: z.enum([
-      "done",
-      "running-healthy",
-      "progressing",
-      "stalled",
-      "blocked",
-      "waiting-quota",
-      "paused",
-      "cancelled",
-      "failed"
-    ]),
-    reason: stringSchema,
-    counts: z
-      .object({
-        finished: nonnegativeIntegerSchema,
-        in_progress: nonnegativeIntegerSchema,
-        pending: nonnegativeIntegerSchema,
-        failed: nonnegativeIntegerSchema,
-        waiting_approval: nonnegativeIntegerSchema,
-        waiting_event: nonnegativeIntegerSchema,
-        waiting_timer: nonnegativeIntegerSchema,
-        skipped: nonnegativeIntegerSchema,
-        other: nonnegativeIntegerSchema,
-        total: nonnegativeIntegerSchema
-      })
-      .strict(),
-    model_mix: z.array(
-      z
-        .object({
-          engine: stringSchema,
-          model: stringSchema,
-          attempts: nonnegativeIntegerSchema,
-          quota_parked: z.boolean()
-        })
-        .strict()
-    ),
-    throughput: z
-      .object({
-        recent_finished: nonnegativeIntegerSchema,
-        window_ms: nonnegativeIntegerSchema,
-        total_finished: nonnegativeIntegerSchema,
-        last_finished_at_ms: nonnegativeIntegerSchema.nullable()
-      })
-      .strict(),
-    progress: z
-      .object({
-        percent: z.number().min(0).max(100),
-        finished: nonnegativeIntegerSchema,
-        in_progress: nonnegativeIntegerSchema,
-        pending: nonnegativeIntegerSchema,
-        failed: nonnegativeIntegerSchema,
-        skipped: nonnegativeIntegerSchema,
-        remaining: nonnegativeIntegerSchema,
-        total: nonnegativeIntegerSchema
-      })
-      .strict(),
-    eta: z
-      .object({
-        available: z.boolean(),
-        seconds: z.number().nonnegative().nullable(),
-        basis: z.enum(["recent-throughput", "run-throughput", "no-remaining-nodes"]).nullable(),
-        unavailable_reason: z
-          .enum(["run-terminal", "run-paused", "no-node-counts", "no-finished-nodes", "no-observed-elapsed-time"])
-          .nullable()
-      })
-      .strict()
-      .superRefine((eta, context) => {
-        if (eta.available !== (eta.seconds !== null)) {
-          context.addIssue({ code: "custom", path: ["seconds"], message: "ETA availability does not match seconds" });
-        }
-        if (eta.available && (eta.basis === null || eta.unavailable_reason !== null)) {
-          context.addIssue({ code: "custom", path: ["basis"], message: "available ETA metadata is inconsistent" });
-        }
-        if (!eta.available && (eta.basis !== null || eta.unavailable_reason === null)) {
-          context.addIssue({
-            code: "custom",
-            path: ["unavailable_reason"],
-            message: "unavailable ETA metadata is inconsistent"
-          });
-        }
-      }),
-    current_step: z
-      .object({
-        node_id: stringSchema.nullable(),
-        iteration: nonnegativeIntegerSchema.nullable(),
-        started_at: stringSchema.nullable(),
-        elapsed_seconds: z.number().nonnegative().nullable(),
-        running_count: nonnegativeIntegerSchema
-      })
-      .strict(),
-    gating: z.array(
-      z
-        .object({
-          node_id: stringSchema,
-          iteration: nonnegativeIntegerSchema,
-          state: stringSchema,
-          detail: stringSchema.nullable()
-        })
-        .strict()
-    ),
-    gating_omitted: nonnegativeIntegerSchema,
-    quota: z
-      .object({
-        parked_count: nonnegativeIntegerSchema,
-        parked_node_ids: z.array(stringSchema),
-        reset_at_ms: nonnegativeIntegerSchema.nullable()
-      })
-      .strict()
-      .nullable(),
-    generated_at_ms: nonnegativeIntegerSchema
-  })
-  .strict();
+export interface EvmbenchReportData {
+  markdown_path: string;
+  json_path: string;
+  source: "verified-agent-report";
+}
 
-const reportDataSchema = z
-  .object({
-    markdown_path: stringSchema,
-    json_path: stringSchema,
-    source: z.literal("validated-agent-report")
-  })
-  .strict();
-
-export const evmbenchCliCommandDataSchemas = {
-  init: initDataSchema,
-  run: runDataSchema,
-  resume: resumeDataSchema,
-  status: statusDataSchema,
-  report: reportDataSchema
-} as const;
-
-export type EvmbenchCliCommand = keyof typeof evmbenchCliCommandDataSchemas;
-export type EvmbenchInitData = z.infer<typeof initDataSchema>;
-export type EvmbenchRunData = z.infer<typeof runDataSchema>;
-export type EvmbenchResumeData = z.infer<typeof resumeDataSchema>;
-export type EvmbenchStatusData = z.infer<typeof statusDataSchema>;
-export type EvmbenchReportData = z.infer<typeof reportDataSchema>;
-
-interface EvmbenchCliDataMap {
+export interface EvmbenchCliDataMap {
   init: EvmbenchInitData;
   run: EvmbenchRunData;
   resume: EvmbenchResumeData;
@@ -207,28 +132,28 @@ interface EvmbenchCliDataMap {
   report: EvmbenchReportData;
 }
 
+export type EvmbenchCliCommand = keyof EvmbenchCliDataMap;
+
+export type EvmbenchCliResult = {
+  [Command in EvmbenchCliCommand]: {
+    schema_version: typeof ULTRAFUZZ_CLI_RESULT_VERSION;
+    command: Command;
+    ok: true;
+    diagnostics: EvmbenchCliDiagnostic[];
+    data: EvmbenchCliDataMap[Command];
+  };
+}[EvmbenchCliCommand];
+
+/** Validate the CLI-owned shared contract, then apply the caller's expected-command context gate. */
 export function parseEvmbenchCliResult<Command extends EvmbenchCliCommand>(
   command: Command,
   value: unknown
 ): EvmbenchCliDataMap[Command] {
-  const envelopeSchema = z
-    .object({
-      schema_version: z.literal(ULTRAFUZZ_CLI_RESULT_VERSION),
-      command: z.literal(command),
-      ok: z.literal(true),
-      diagnostics: z.array(evmbenchCliDiagnosticSchema),
-      data: evmbenchCliCommandDataSchemas[command]
-    })
-    .strict()
-    .superRefine((envelope, context) => {
-      if (envelope.diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
-        context.addIssue({
-          code: "custom",
-          path: ["diagnostics"],
-          message: "successful CLI response contains an error diagnostic"
-        });
-      }
-    });
-  const parsed = envelopeSchema.parse(value) as unknown as { data: EvmbenchCliDataMap[Command] };
-  return parsed.data;
+  assertEvmbenchJsonSchema(EVMBENCH_CLI_RESULT_JSON_SCHEMA_ID, value, "Ultrafuzz CLI result for EVMBench");
+  assertEvmbenchDocumentSemantics(EVMBENCH_CLI_RESULT_JSON_SCHEMA_ID, value);
+  const envelope = value as EvmbenchCliResult;
+  if (envelope.command !== command) {
+    throw new Error(`${EVMBENCH_CLI_EXPECTED_COMMAND_CONTEXT_GATE}: expected ${command}; received ${envelope.command}`);
+  }
+  return envelope.data as EvmbenchCliDataMap[Command];
 }

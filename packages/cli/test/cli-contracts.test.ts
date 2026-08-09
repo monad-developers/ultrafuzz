@@ -4,7 +4,11 @@ import test from "node:test";
 
 import { parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
 import { dashboardSchemaBundleDigest, dashboardSchemaRegistry } from "@ultrafuzz/dashboard";
-import { parseEvmbenchCliResult, type EvmbenchCliCommand } from "@ultrafuzz/evmbench";
+import {
+  EVMBENCH_CLI_RESULT_JSON_SCHEMA_ID,
+  parseEvmbenchCliResult,
+  type EvmbenchCliCommand
+} from "@ultrafuzz/evmbench";
 import { runtimeSchemaBundleDigest, runtimeSchemaRegistry } from "@ultrafuzz/runtime";
 
 import { CLI_KNOWN_COMMANDS, CLI_SCHEMA_VERSION, type CliResultEnvelope } from "../src/cli-contracts.js";
@@ -174,7 +178,13 @@ test("unknown Oclif invocation failures remain closed and value-free", () => {
   );
 });
 
-test("EVMBench's retained Zod consumer has exact v2 shape acceptance", () => {
+test("EVMBench consumes the same registered CLI v2 definitions without a parallel shape authority", () => {
+  const definitions = cliResultJsonSchema.$defs as Record<string, unknown>;
+  for (const name of ["initData", "runData", "statusData", "reportData"] as const) {
+    assert.deepEqual(definitions[name], { $ref: `${EVMBENCH_CLI_RESULT_JSON_SCHEMA_ID}#/$defs/${name}` });
+  }
+  assert.match(JSON.stringify(definitions["commandTemplate-resume"]), new RegExp(EVMBENCH_CLI_RESULT_JSON_SCHEMA_ID));
+
   const samples: Record<EvmbenchCliCommand, Record<string, unknown>> = {
     init: {
       project_root: "",
@@ -246,14 +256,14 @@ function successEnvelope(command: EvmbenchCliCommand, data: Record<string, unkno
 
 function assertParity(command: EvmbenchCliCommand, value: unknown, expected: boolean): void {
   const ajvAccepted = validateCliResultEnvelope(value).ok;
-  let zodAccepted = true;
+  let consumerAccepted = true;
   try {
     parseEvmbenchCliResult(command, value);
   } catch {
-    zodAccepted = false;
+    consumerAccepted = false;
   }
   assert.equal(ajvAccepted, expected, `unexpected JSON Schema result for ${command}`);
-  assert.equal(zodAccepted, expected, `unexpected Zod result for ${command}`);
+  assert.equal(consumerAccepted, expected, `unexpected EVMBench consumer result for ${command}`);
 }
 
 function statusData(): Record<string, unknown> {

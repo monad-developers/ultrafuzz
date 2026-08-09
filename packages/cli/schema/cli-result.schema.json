@@ -187,17 +187,7 @@
         "workflow_ids": { "$ref": "#/$defs/stringArray" }
       }
     },
-    "initData": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["project_root", "created", "preserved", "overwritten"],
-      "properties": {
-        "project_root": { "type": "string" },
-        "created": { "$ref": "#/$defs/stringArray" },
-        "preserved": { "$ref": "#/$defs/stringArray" },
-        "overwritten": { "$ref": "#/$defs/stringArray" }
-      }
-    },
+    "initData": { "$ref": "urn:ultrafuzz:schema:evmbench:ultrafuzz-cli-result:1#/$defs/initData" },
     "posture": {
       "type": "object",
       "additionalProperties": false,
@@ -272,20 +262,7 @@
         }
       }
     },
-    "runData": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["run_id", "run_root", "status", "graph_fingerprint", "config_fingerprint", "workflow_ids"],
-      "properties": {
-        "run_id": { "type": "string" },
-        "run_root": { "type": "string" },
-        "status": { "type": "string" },
-        "source_run_id": { "type": "string" },
-        "graph_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "config_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "workflow_ids": { "$ref": "#/$defs/stringArray" }
-      }
-    },
+    "runData": { "$ref": "urn:ultrafuzz:schema:evmbench:ultrafuzz-cli-result:1#/$defs/runData" },
     "psData": {
       "type": "object",
       "additionalProperties": false,
@@ -314,229 +291,7 @@
         }
       }
     },
-    "statusData": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "run_id",
-        "run_root",
-        "status",
-        "workflow_ids",
-        "workflow_run_id",
-        "workflow_status",
-        "verdict",
-        "reason",
-        "counts",
-        "model_mix",
-        "throughput",
-        "progress",
-        "eta",
-        "current_step",
-        "gating",
-        "gating_omitted",
-        "quota",
-        "generated_at_ms"
-      ],
-      "properties": {
-        "run_id": { "type": "string" },
-        "run_root": { "type": "string" },
-        "status": { "type": "string" },
-        "created_at": { "type": "string" },
-        "started_at": { "type": "string" },
-        "finished_at": { "type": "string" },
-        "source_run_id": { "type": "string" },
-        "workflow_ids": { "$ref": "#/$defs/stringArray" },
-        "workflow_run_id": { "type": "string" },
-        "workflow_status": { "type": "string" },
-        "verdict": {
-          "enum": [
-            "done",
-            "running-healthy",
-            "progressing",
-            "stalled",
-            "blocked",
-            "waiting-quota",
-            "paused",
-            "cancelled",
-            "failed"
-          ]
-        },
-        "reason": { "type": "string" },
-        "counts": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "finished",
-            "in_progress",
-            "pending",
-            "failed",
-            "waiting_approval",
-            "waiting_event",
-            "waiting_timer",
-            "skipped",
-            "other",
-            "total"
-          ],
-          "properties": {
-            "finished": { "$ref": "#/$defs/nonNegativeInteger" },
-            "in_progress": { "$ref": "#/$defs/nonNegativeInteger" },
-            "pending": { "$ref": "#/$defs/nonNegativeInteger" },
-            "failed": { "$ref": "#/$defs/nonNegativeInteger" },
-            "waiting_approval": { "$ref": "#/$defs/nonNegativeInteger" },
-            "waiting_event": { "$ref": "#/$defs/nonNegativeInteger" },
-            "waiting_timer": { "$ref": "#/$defs/nonNegativeInteger" },
-            "skipped": { "$ref": "#/$defs/nonNegativeInteger" },
-            "other": { "$ref": "#/$defs/nonNegativeInteger" },
-            "total": { "$ref": "#/$defs/nonNegativeInteger" }
-          }
-        },
-        "model_mix": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["engine", "model", "attempts", "quota_parked"],
-            "properties": {
-              "engine": { "type": "string" },
-              "model": { "type": "string" },
-              "attempts": { "$ref": "#/$defs/nonNegativeInteger" },
-              "quota_parked": { "type": "boolean" }
-            }
-          }
-        },
-        "throughput": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["recent_finished", "window_ms", "total_finished", "last_finished_at_ms"],
-          "properties": {
-            "recent_finished": { "$ref": "#/$defs/nonNegativeInteger" },
-            "window_ms": { "$ref": "#/$defs/nonNegativeInteger" },
-            "total_finished": { "$ref": "#/$defs/nonNegativeInteger" },
-            "last_finished_at_ms": {
-              "type": ["integer", "null"],
-              "minimum": 0,
-              "maximum": 9007199254740991
-            }
-          }
-        },
-        "progress": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["percent", "finished", "in_progress", "pending", "failed", "skipped", "remaining", "total"],
-          "properties": {
-            "percent": { "type": "number", "minimum": 0, "maximum": 100 },
-            "finished": { "$ref": "#/$defs/nonNegativeInteger" },
-            "in_progress": { "$ref": "#/$defs/nonNegativeInteger" },
-            "pending": { "$ref": "#/$defs/nonNegativeInteger" },
-            "failed": { "$ref": "#/$defs/nonNegativeInteger" },
-            "skipped": { "$ref": "#/$defs/nonNegativeInteger" },
-            "remaining": { "$ref": "#/$defs/nonNegativeInteger" },
-            "total": { "$ref": "#/$defs/nonNegativeInteger" }
-          }
-        },
-        "eta": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["available", "seconds", "basis", "unavailable_reason"],
-          "properties": {
-            "available": { "type": "boolean" },
-            "seconds": { "type": ["number", "null"], "minimum": 0 },
-            "basis": { "enum": ["recent-throughput", "run-throughput", "no-remaining-nodes", null] },
-            "unavailable_reason": {
-              "enum": [
-                "run-terminal",
-                "run-paused",
-                "no-node-counts",
-                "no-finished-nodes",
-                "no-observed-elapsed-time",
-                null
-              ]
-            }
-          },
-          "oneOf": [
-            {
-              "type": "object",
-              "properties": {
-                "available": { "const": true },
-                "seconds": { "type": "number", "minimum": 0 },
-                "basis": { "enum": ["recent-throughput", "run-throughput", "no-remaining-nodes"] },
-                "unavailable_reason": { "type": "null" }
-              },
-              "required": ["available", "seconds", "basis", "unavailable_reason"]
-            },
-            {
-              "type": "object",
-              "properties": {
-                "available": { "const": false },
-                "seconds": { "type": "null" },
-                "basis": { "type": "null" },
-                "unavailable_reason": {
-                  "enum": [
-                    "run-terminal",
-                    "run-paused",
-                    "no-node-counts",
-                    "no-finished-nodes",
-                    "no-observed-elapsed-time"
-                  ]
-                }
-              },
-              "required": ["available", "seconds", "basis", "unavailable_reason"]
-            }
-          ]
-        },
-        "current_step": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["node_id", "iteration", "started_at", "elapsed_seconds", "running_count"],
-          "properties": {
-            "node_id": { "type": ["string", "null"] },
-            "iteration": {
-              "type": ["integer", "null"],
-              "minimum": 0,
-              "maximum": 9007199254740991
-            },
-            "started_at": { "type": ["string", "null"] },
-            "elapsed_seconds": { "type": ["number", "null"], "minimum": 0 },
-            "running_count": { "$ref": "#/$defs/nonNegativeInteger" }
-          }
-        },
-        "gating": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["node_id", "iteration", "state", "detail"],
-            "properties": {
-              "node_id": { "type": "string" },
-              "iteration": { "$ref": "#/$defs/nonNegativeInteger" },
-              "state": { "type": "string" },
-              "detail": { "type": ["string", "null"] }
-            }
-          }
-        },
-        "gating_omitted": { "$ref": "#/$defs/nonNegativeInteger" },
-        "quota": {
-          "oneOf": [
-            { "type": "null" },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["parked_count", "parked_node_ids", "reset_at_ms"],
-              "properties": {
-                "parked_count": { "$ref": "#/$defs/nonNegativeInteger" },
-                "parked_node_ids": { "$ref": "#/$defs/stringArray" },
-                "reset_at_ms": {
-                  "type": ["integer", "null"],
-                  "minimum": 0,
-                  "maximum": 9007199254740991
-                }
-              }
-            }
-          ]
-        },
-        "generated_at_ms": { "$ref": "#/$defs/nonNegativeInteger" }
-      }
-    },
+    "statusData": { "$ref": "urn:ultrafuzz:schema:evmbench:ultrafuzz-cli-result:1#/$defs/statusData" },
     "inspectData": {
       "type": "object",
       "additionalProperties": false,
@@ -796,16 +551,7 @@
         "accounting": { "$ref": "urn:ultrafuzz:schema:artifacts:run-metadata:2#/$defs/accounting" }
       }
     },
-    "reportData": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["markdown_path", "json_path", "source"],
-      "properties": {
-        "markdown_path": { "type": "string" },
-        "json_path": { "type": "string" },
-        "source": { "const": "verified-agent-report" }
-      }
-    },
+    "reportData": { "$ref": "urn:ultrafuzz:schema:evmbench:ultrafuzz-cli-result:1#/$defs/reportData" },
     "reportBundleData": {
       "type": "object",
       "additionalProperties": false,
@@ -1926,12 +1672,7 @@
           "data": {
             "oneOf": [
               { "type": "null" },
-              {
-                "allOf": [
-                  { "$ref": "#/$defs/lifecycleData" },
-                  { "type": "object", "properties": { "action": { "const": "resume" } } }
-                ]
-              }
+              { "$ref": "urn:ultrafuzz:schema:evmbench:ultrafuzz-cli-result:1#/$defs/resumeData" }
             ]
           }
         }

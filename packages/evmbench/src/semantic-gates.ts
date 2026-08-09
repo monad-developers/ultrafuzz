@@ -37,7 +37,8 @@ export const EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID = Object.freeze({
     "NanoEval scores do not exceed their maxima",
     "NanoEval totals and percentages equal per-audit aggregates",
     "NanoEval failed rollout count does not exceed sample count"
-  ]
+  ],
+  "urn:ultrafuzz:schema:evmbench:ultrafuzz-cli-result:1": []
 } as const satisfies Readonly<Record<string, readonly EvmbenchSemanticGateName[]>>);
 
 export class EvmbenchSemanticValidationError extends Error {

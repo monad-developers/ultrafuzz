@@ -220,7 +220,7 @@ describe("EVMBench adapter", () => {
         ...mislabeled,
         execute: (args) =>
           args[0] === "init"
-            ? success("run", initData(mislabeled.auditRoot))
+            ? defaultSuccess("run", mislabeled.auditRoot)
             : defaultSuccess(args[0], mislabeled.auditRoot)
       })
     ).rejects.toThrow("command");
@@ -234,7 +234,7 @@ describe("EVMBench adapter", () => {
             ? success("init", { ...initData(openEnded.auditRoot), legacy_fallback: true })
             : defaultSuccess(args[0], openEnded.auditRoot)
       })
-    ).rejects.toThrow("Unrecognized key");
+    ).rejects.toThrow("must NOT have additional properties");
   });
 });
 
@@ -303,7 +303,7 @@ function reportData(markdownPath: string): Record<string, unknown> {
   return {
     markdown_path: markdownPath,
     json_path: path.join(path.dirname(markdownPath), "report.json"),
-    source: "validated-agent-report"
+    source: "verified-agent-report"
   };
 }
 
