@@ -250,17 +250,34 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
   const finishedAt = new Date().toISOString();
   // Everything from here to the `runs.jsonl` append is enrichment read off the
   // run root, and a launch that succeeded has already spent its budget. None of
-  // these reads may be able to keep the row out of the journal: a launched row
-  // missing from `runs.jsonl` reads downstream as a run that never reached a
-  // model -- `publicEvalModelWorkEvidence` would answer `none` for it -- and
-  // buys a relaunch of work that already ran. `readRunFingerprints` swallows its
-  // own faults; `resolveTerminalReportPath` is guarded here instead of there
-  // because its callers elsewhere do want to hear about an unresolvable path.
-  const runFingerprints = launch.ok && launch.runRoot !== undefined ? readRunFingerprints(launch.runRoot) : {};
+  // these reads may keep the row out of the journal: a launched row missing
+  // from `runs.jsonl` reads downstream as a run that never reached a model and
+  // can buy a relaunch of work that already ran. Invalid-present enrichment is
+  // recorded explicitly; it is neither repaired nor treated as missing.
+  const enrichmentDiagnostics: RuntimeDiagnostic[] = [];
+  let runFingerprints: ReturnType<typeof readRunFingerprints> = {};
+  if (
+    launch.ok &&
+    launch.runRoot !== undefined &&
+    (launch.graphFingerprint === undefined || launch.configFingerprint === undefined)
+  ) {
+    try {
+      runFingerprints = readRunFingerprints(launch.runRoot);
+    } catch (error) {
+      enrichmentDiagnostics.push(rowEnrichmentDiagnostic("state.json", error));
+    }
+  }
   const graphFingerprint = launch.graphFingerprint ?? runFingerprints.graph_fingerprint;
   const configFingerprint = launch.configFingerprint ?? runFingerprints.config_fingerprint;
   const executionArtifactId = launch.executionArtifactId ?? input.candidateProvenance?.execution_artifact_id;
-  const reportJsonPath = launch.ok && launch.runRoot !== undefined ? readTerminalReportPath(launch.runRoot) : undefined;
+  let reportJsonPath: string | undefined;
+  if (launch.ok && launch.runRoot !== undefined) {
+    try {
+      reportJsonPath = readTerminalReportPath(launch.runRoot);
+    } catch (error) {
+      enrichmentDiagnostics.push(rowEnrichmentDiagnostic("graph.json", error));
+    }
+  }
   const record: EvalRunRecord =
     launch.ok && launch.runId !== undefined && launch.runRoot !== undefined
       ? {
@@ -274,7 +291,7 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
           ...(executionArtifactId !== undefined ? { execution_artifact_id: executionArtifactId } : {}),
           workflow_ids: launch.workflowIds,
           launcher: { status: "succeeded", started_at: startedAt, finished_at: finishedAt },
-          diagnostics: launch.diagnostics
+          diagnostics: [...launch.diagnostics, ...enrichmentDiagnostics]
         }
       : {
           ...recordBase,
@@ -599,6 +616,18 @@ function readRunFingerprints(runRoot: string): {
   return {
     ...(value.graph_fingerprint === undefined ? {} : { graph_fingerprint: value.graph_fingerprint }),
     ...(value.config_fingerprint === undefined ? {} : { config_fingerprint: value.config_fingerprint })
+  };
+}
+
+function rowEnrichmentDiagnostic(sourceDocument: "state.json" | "graph.json", error: unknown): RuntimeDiagnostic {
+  const reason = error instanceof Error ? error.message : String(error);
+  const boundedReason = (reason.trim() === "" ? "invalid durable metadata" : reason).slice(0, 1_024);
+  return {
+    code: "EVAL_ROW_ENRICHMENT_INVALID",
+    message: `successful launch has invalid ${sourceDocument} enrichment: ${boundedReason}`,
+    severity: "error",
+    source: "evals",
+    details: { source_document: sourceDocument }
   };
 }
 

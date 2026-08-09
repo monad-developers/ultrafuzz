@@ -342,6 +342,53 @@ describe("runner", () => {
     expect(lines).toEqual([expect.objectContaining({ row_id: row.id, status: "failed" })]);
   });
 
+  it.each(["state.json", "graph.json"] as const)(
+    "preserves one successful launch record when %s enrichment is invalid",
+    async (invalidDocument) => {
+      const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-launch-enrichment-"));
+      const suite = testSuite(path.join(base, "gt"));
+      const row = testRow(suite);
+      const evalRunRoot = path.join(base, "eval-run");
+      const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-enrichment");
+      fs.mkdirSync(evalRunRoot, { recursive: true });
+      fs.mkdirSync(runRoot, { recursive: true });
+      fs.writeFileSync(path.join(evalRunRoot, "runs.jsonl"), "");
+      fs.writeFileSync(path.join(runRoot, invalidDocument), "{malformed\n", "utf8");
+
+      const record = await launchEvalRow({
+        projectRoot: base,
+        suitePath: "suite.yml",
+        evalRunId: "eval-enrichment",
+        evalRunRoot,
+        row,
+        suite,
+        appendRecord: true,
+        launcher: async () => ({
+          ok: true,
+          runId: "run-enrichment",
+          runRoot,
+          workflowIds: ["workflow-enrichment"],
+          diagnostics: []
+        })
+      });
+
+      expect(record).toMatchObject({
+        status: "launched",
+        ultrafuzz_run_id: "run-enrichment",
+        ultrafuzz_run_root: runRoot,
+        diagnostics: [
+          {
+            code: "EVAL_ROW_ENRICHMENT_INVALID",
+            severity: "error",
+            details: { source_document: invalidDocument }
+          }
+        ]
+      });
+      expect(record.diagnostics[0]?.message).toContain(invalidDocument);
+      expect(readEvalRunRecords(path.join(evalRunRoot, "runs.jsonl"))).toEqual([record]);
+    }
+  );
+
   it("keeps a detached workflow nonterminal after its launcher exits", async () => {
     const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-detached-"));
     const suite = testSuite(path.join(base, "gt"));
