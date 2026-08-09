@@ -1115,6 +1115,95 @@ test("report validates current artifacts without rewriting agent-owned bytes", a
   assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
 });
 
+test("eval report validates the registered summary and never synthesizes missing Markdown", async () => {
+  const project = tempProject();
+  const evalRunId = "eval-report-strict";
+  const runRoot = path.join(project, ".ultrafuzz", "evals", "runs", evalRunId);
+  const summaryPath = path.join(runRoot, "summary.json");
+  const markdownPath = path.join(runRoot, "summary.md");
+  fs.mkdirSync(runRoot, { recursive: true });
+  const sha256 = "a".repeat(64);
+  const summary = {
+    schema_version: "ultrafuzz.eval.score-summary.v1",
+    eval_run_id: evalRunId,
+    eval_run_root: runRoot,
+    recall_threshold: 0.7,
+    rows: [],
+    variants: [],
+    scores_path: path.join(runRoot, "scores.jsonl"),
+    summary_path: summaryPath,
+    review_queue_path: path.join(runRoot, "review", "new-findings.jsonl"),
+    recovery_equivalence: {
+      aggregate_non_comparable: "include",
+      included_row_count: 0,
+      excluded_row_count: 0,
+      classification_counts: {
+        clean: 0,
+        "infrastructure-recovered": 0,
+        "model-reexecuted-within-policy": 0,
+        "non-comparable": 0
+      },
+      non_comparable_variants: []
+    },
+    provenance: {
+      availability: "available",
+      candidate: { label: "candidate", commit: "a".repeat(40), dirty: false },
+      benchmark: {
+        availability: "available",
+        series: "series",
+        protocol_revision: "protocol-v1",
+        cohort_fingerprint: sha256,
+        targets: [],
+        ground_truth_sha256: {},
+        ground_truth_subjects: {},
+        execution_policy: {
+          revision: "policy-v1",
+          fingerprint: sha256,
+          max_parallel_targets: null,
+          max_parallel_runs: 1,
+          node_telemetry: true,
+          heartbeat_interval_seconds: 60,
+          controller_mode: "watch",
+          watch_timeout_seconds: 60,
+          poll_interval_ms: 100,
+          recovery_equivalence_fingerprint: sha256
+        }
+      },
+      scoring: {
+        implementation_revision: "a".repeat(40),
+        implementation_dirty: false,
+        judge_mode: "deterministic",
+        judge_prompt_version: "judge-v1",
+        judge_models: ["judge-model"],
+        judge_panel: { total: 1, quorum: 1 },
+        ground_truth_sha256: {},
+        ground_truth_subjects: {},
+        fingerprint: sha256
+      }
+    }
+  };
+  writeJsonRecord(summaryPath, summary);
+  const summaryBytes = fs.readFileSync(summaryPath);
+
+  const missingMarkdown = await cli(project, ["eval", "report", evalRunId, "--json"]);
+  assert.equal(missingMarkdown.code, 1);
+  assert.match(JSON.stringify(parseJson(missingMarkdown).diagnostics), /summary\.md|ENOENT/iu);
+  assert.deepEqual(fs.readFileSync(summaryPath), summaryBytes);
+
+  fs.writeFileSync(markdownPath, "# Canonical eval summary\n", "utf8");
+  writeJsonRecord(summaryPath, { ...summary, unexpected: true });
+  const invalidBytes = fs.readFileSync(summaryPath);
+  const invalidSummary = await cli(project, ["eval", "report", evalRunId, "--json"]);
+  assert.equal(invalidSummary.code, 1);
+  assert.match(JSON.stringify(parseJson(invalidSummary).diagnostics), /additional propert/iu);
+  assert.deepEqual(fs.readFileSync(summaryPath), invalidBytes);
+
+  writeJsonRecord(summaryPath, summary);
+  const valid = await cli(project, ["eval", "report", evalRunId, "--json"]);
+  assert.equal(valid.code, 0, valid.stderr);
+  assert.equal((parseJson(valid).data as { eval_run_id: string }).eval_run_id, evalRunId);
+});
+
 test("report rejects final_severity compatibility aliases without rewriting artifacts", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-rejects-severity-alias");

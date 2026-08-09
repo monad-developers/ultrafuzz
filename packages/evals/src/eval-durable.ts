@@ -482,7 +482,11 @@ function serializeStrictJsonLines<T>(values: readonly T[], parser: (value: unkno
 function validate<T>(schemaId: string, value: unknown, source: string): T {
   const result = validateEvalJsonSchema(schemaId, value);
   if (!result.ok) {
-    throw new EvalError("EVAL_DURABLE_SCHEMA_INVALID", `${source} failed canonical schema ${schemaId}`, {
+    const summary = result.issues
+      .slice(0, 8)
+      .map((issue) => `${issue.instancePath || "/"} ${issue.keyword}: ${issue.message}`)
+      .join("; ");
+    throw new EvalError("EVAL_DURABLE_SCHEMA_INVALID", `${source} failed canonical schema ${schemaId}: ${summary}`, {
       source,
       schema_id: schemaId,
       issues: result.issues,
@@ -492,7 +496,11 @@ function validate<T>(schemaId: string, value: unknown, source: string): T {
   assertEvalSemanticGateRegistry();
   const semanticIssues = executeEvalSchemaSemanticGates(schemaId, value);
   if (semanticIssues.length > 0) {
-    throw new EvalError("EVAL_DURABLE_SEMANTIC_INVALID", `${source} failed canonical semantic gates`, {
+    const summary = semanticIssues
+      .slice(0, 8)
+      .map((issue) => `${issue.gate} ${issue.path}: ${issue.message}`)
+      .join("; ");
+    throw new EvalError("EVAL_DURABLE_SEMANTIC_INVALID", `${source} failed canonical semantic gates: ${summary}`, {
       source,
       schema_id: schemaId,
       issues: semanticIssues
