@@ -131,15 +131,14 @@ function supersessionRun(input: {
   sourceRunId: string;
   timestamp: string;
   commitCharacter: string;
-  legacyPartialLastTarget?: boolean;
+  partialLastTarget?: boolean;
   model?: string;
 }): EvalHistoryObservation[] {
   return SUPERSESSION_TARGETS.map((target, index) => {
     const base = observation();
     const revision = SUPERSESSION_TARGET_REVISIONS.find((candidate) => candidate.target === target)!.revision;
-    const partial = input.legacyPartialLastTarget === true && index === SUPERSESSION_TARGETS.length - 1;
+    const partial = input.partialLastTarget === true && index === SUPERSESSION_TARGETS.length - 1;
     return observation({
-      schema_version: partial ? "ultrafuzz.eval.history.observation.v4" : EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION,
       id: `${input.sourceRunId}:${target}:baseline:benchmark-smoke`,
       benchmark: "ultrafuzz-bench",
       target,
@@ -149,7 +148,7 @@ function supersessionRun(input: {
       candidate_commit: input.commitCharacter.repeat(40),
       source_eval_run_id: input.sourceRunId,
       source_artifact: `artifact-${input.sourceRunId}`,
-      cost_usd: partial ? null : 0.2,
+      cost_usd: 0.2,
       cost_completeness: partial
         ? { status: "partial", reasons: ["pricing-incomplete"] }
         : { status: "complete", reasons: [] },
@@ -354,14 +353,10 @@ describe("longitudinal eval history", () => {
       expect.objectContaining({ code: "EVAL_HISTORY_CONFLICT" })
     );
 
-    const { ground_truth_bug_count: _groundTruthBugCount, ...publishedV2 } = observation({
-      schema_version: "ultrafuzz.eval.history.observation.v2"
-    });
-    const publishedHistory = parseEvalHistory({
-      schema_version: EVAL_HISTORY_SCHEMA_VERSION,
-      observations: [publishedV2]
-    });
-    expect(mergeEvalHistory(publishedHistory, [publishedV2])).toEqual(publishedHistory);
+    const oldVersion = { ...observation(), schema_version: "ultrafuzz.eval.history.observation.v2" };
+    expect(() =>
+      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, supersessions: [], observations: [oldVersion] })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
   });
 
   it("activates a source-run supersession only after its matching replacement is merged", () => {
@@ -377,7 +372,7 @@ describe("longitudinal eval history", () => {
       sourceRunId: supersededSourceRun,
       timestamp: "2026-08-04T00:00:00.000Z",
       commitCharacter: "7",
-      legacyPartialLastTarget: true
+      partialLastTarget: true
     });
     const pending = parseEvalHistory({
       schema_version: EVAL_HISTORY_SCHEMA_VERSION,
@@ -387,9 +382,11 @@ describe("longitudinal eval history", () => {
 
     const pendingCharts = renderEvalHistoryCharts(pending);
     expect(pendingCharts.get("performance-cost.svg")).toContain(
-      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="2" data-expected-target-count="3"'
+      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="3" data-expected-target-count="3"'
     );
-    expect(pendingCharts.get("cost.svg")).toContain("partial n/a 7777777");
+    expect(pendingCharts.get("cost.svg")).toContain(
+      'data-status="partial" data-available-count="1" data-expected-count="1"'
+    );
 
     const replacement = supersessionRun({
       sourceRunId: replacementSourceRun,
@@ -400,9 +397,11 @@ describe("longitudinal eval history", () => {
     expect(partiallyMerged.supersessions).toEqual([supersession]);
     expect(partiallyMerged.observations).toHaveLength(5);
     expect(renderEvalHistoryCharts(partiallyMerged).get("performance-cost.svg")).toContain(
-      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="2" data-expected-target-count="3"'
+      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="3" data-expected-target-count="3"'
     );
-    expect(renderEvalHistoryCharts(partiallyMerged).get("cost.svg")).toContain("partial n/a 7777777");
+    expect(renderEvalHistoryCharts(partiallyMerged).get("cost.svg")).toContain(
+      'data-status="partial" data-available-count="1" data-expected-count="1"'
+    );
 
     const merged = mergeEvalHistory(partiallyMerged, replacement);
     expect(merged.supersessions).toEqual([supersession]);
@@ -427,7 +426,7 @@ describe("longitudinal eval history", () => {
       sourceRunId: supersededSourceRun,
       timestamp: "2026-08-04T00:00:00.000Z",
       commitCharacter: "7",
-      legacyPartialLastTarget: true
+      partialLastTarget: true
     });
     const replacement = supersessionRun({
       sourceRunId: replacementSourceRun,
@@ -515,13 +514,14 @@ describe("longitudinal eval history", () => {
     });
     const parsed = parseEvalHistory({
       schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+      supersessions: [],
       observations: [historical]
     });
     expect(parsed.observations).toEqual([historical]);
     expect(parsed.observations[0]?.trial_count).toBe(10);
   });
 
-  it("preserves legacy v1 observations without publication metadata", () => {
+  it("rejects historical observation versions instead of converting them", () => {
     const {
       status: _status,
       executed_case_count: _executedCaseCount,
@@ -530,23 +530,21 @@ describe("longitudinal eval history", () => {
       target_publication: _targetPublication,
       ground_truth_bug_count: _groundTruthBugCount,
       ...legacy
-    } = observation({ schema_version: "ultrafuzz.eval.history.observation.v1" });
-    const parsed = parseEvalHistory({
-      schema_version: EVAL_HISTORY_SCHEMA_VERSION,
-      observations: [legacy]
-    });
-    expect(parsed.observations).toEqual([legacy]);
-  });
-
-  it("preserves published v2 observations without ground-truth counts", () => {
-    const { ground_truth_bug_count: _groundTruthBugCount, ...publishedV2 } = observation({
-      schema_version: "ultrafuzz.eval.history.observation.v2"
-    });
-    const parsed = parseEvalHistory({
-      schema_version: EVAL_HISTORY_SCHEMA_VERSION,
-      observations: [publishedV2]
-    });
-    expect(parsed.observations).toEqual([publishedV2]);
+    } = observation();
+    for (const schemaVersion of [
+      "ultrafuzz.eval.history.observation.v1",
+      "ultrafuzz.eval.history.observation.v2",
+      "ultrafuzz.eval.history.observation.v3",
+      "ultrafuzz.eval.history.observation.v4"
+    ]) {
+      expect(() =>
+        parseEvalHistory({
+          schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+          supersessions: [],
+          observations: [{ ...legacy, schema_version: schemaVersion }]
+        })
+      ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    }
   });
 
   it("requires ground-truth counts for current observations and bounds unique matches", () => {
@@ -554,27 +552,31 @@ describe("longitudinal eval history", () => {
     expect(() =>
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [missingGroundTruth]
       })
     ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
     expect(() =>
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [observation({ cumulative_unique_true_positives: 3, ground_truth_bug_count: 2 })]
       })
     ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
     expect(() =>
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [observation({ cumulative_unique_true_positives: 0, ground_truth_bug_count: 0 })]
       })
     ).not.toThrow();
   });
 
-  it("versions failed publication statuses without widening older observations", () => {
+  it("accepts failed publication status only in the current exact version", () => {
     expect(() =>
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [
           observation({
             status: "failed",
@@ -583,30 +585,23 @@ describe("longitudinal eval history", () => {
         ]
       })
     ).not.toThrow();
-    expect(() =>
-      parseEvalHistory({
-        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
-        observations: [
-          observation({
-            schema_version: "ultrafuzz.eval.history.observation.v4",
-            status: "failed",
-            target_publication: { ...observation().target_publication!, status: "failed" }
-          })
-        ]
-      })
-    ).not.toThrow();
-    expect(() =>
-      parseEvalHistory({
-        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
-        observations: [
-          observation({
-            schema_version: "ultrafuzz.eval.history.observation.v3",
-            status: "failed",
-            target_publication: { ...observation().target_publication!, status: "failed" }
-          })
-        ]
-      })
-    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    for (const schemaVersion of ["ultrafuzz.eval.history.observation.v3", "ultrafuzz.eval.history.observation.v4"]) {
+      expect(() =>
+        parseEvalHistory({
+          schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+          supersessions: [],
+          observations: [
+            {
+              ...observation({
+                status: "failed",
+                target_publication: { ...observation().target_publication!, status: "failed" }
+              }),
+              schema_version: schemaVersion
+            }
+          ]
+        })
+      ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    }
   });
 
   it("enforces the complete, partial, and unavailable value/reason matrix for current observations", () => {
@@ -623,6 +618,7 @@ describe("longitudinal eval history", () => {
           const parse = () =>
             parseEvalHistory({
               schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+              supersessions: [],
               observations: [
                 observation({
                   cost_usd,
@@ -637,24 +633,30 @@ describe("longitudinal eval history", () => {
     }
   });
 
-  it("preserves the v4 partial-null contract while requiring v5 for partial values", () => {
-    const partialNullV4 = observation({
-      schema_version: "ultrafuzz.eval.history.observation.v4",
+  it("rejects partial-null and historical-version observations", () => {
+    const partialNull = {
+      ...observation(),
       cost_usd: null,
       cost_completeness: { status: "partial", reasons: ["pricing-incomplete"] }
-    });
-    expect(() =>
-      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations: [partialNullV4] })
-    ).not.toThrow();
+    };
     expect(() =>
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
-        observations: [{ ...partialNullV4, cost_usd: 1.25 }]
+        supersessions: [],
+        observations: [partialNull]
       })
     ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
     expect(() =>
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
+        observations: [{ ...partialNull, schema_version: "ultrafuzz.eval.history.observation.v4", cost_usd: 1.25 }]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    expect(() =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [
           observation({
             cost_usd: 1.25,
@@ -665,7 +667,7 @@ describe("longitudinal eval history", () => {
     ).not.toThrow();
   });
 
-  it("continues to parse the checked-in history containing the legacy Flash partial-null row", () => {
+  it("parses the fully migrated checked-in history", () => {
     const checkedIn = JSON.parse(fs.readFileSync(path.join(REPOSITORY_ROOT, "benchmarks", "history.json"), "utf8"));
     const parsed = parseEvalHistory(checkedIn, "benchmarks/history.json");
     const legacySourceRun = "ci-31264673583-1-smoke-ultrafuzz-bench-deepseek-benchmark-smoke-deepseek-v4-flash-max";
@@ -686,9 +688,11 @@ describe("longitudinal eval history", () => {
     expect(charts.get("performance-cost.svg")).toContain(
       'deepseek-v4-flash</tspan><tspan fill="#6b7280"> · median 23.7% · $0.41 · n=1 · targets 2/3 · partial'
     );
-    expect(charts.get("cost.svg")).toContain('data-status="partial" data-available-count="0" data-expected-count="1"');
-    expect(charts.get("cost.svg")).toContain('data-completeness-marker="partial-null"');
-    expect(charts.get("cost.svg")).toContain("partial n/a 70646d2");
+    expect(charts.get("cost.svg")).toContain(
+      'data-status="unavailable" data-available-count="0" data-expected-count="1"'
+    );
+    expect(charts.get("cost.svg")).not.toContain('data-completeness-marker="partial-null"');
+    expect(charts.get("cost.svg")).toContain("n/a 70646d2");
     expect(charts.get("latest-summary.svg")).toContain(
       'data-metric="cost_usd" data-status="partial" data-available-target-count="2" data-expected-target-count="3"'
     );
@@ -1165,6 +1169,7 @@ describe("longitudinal eval history", () => {
   it("renders deterministic linked SVGs and marks missing efficiency unavailable", () => {
     const history = parseEvalHistory({
       schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+      supersessions: [],
       observations: [
         observation({
           benchmark: "ultrafuzz-bench",
@@ -1314,8 +1319,8 @@ describe("longitudinal eval history", () => {
       ["luna-5", "2026-07-31T18:52:13.635Z", "6", 0.5, 18],
       ["luna-6", "2026-07-31T19:52:13.635Z", "7", 0.6, 20]
     ] as const;
-    const legacyFlash = completeRun({
-      id: "legacy-flash",
+    const partialFlash = completeRun({
+      id: "partial-flash",
       timestamp: "2026-08-01T12:00:00.000Z",
       commitCharacter: "c",
       model: "deepseek-v4-flash",
@@ -1326,8 +1331,7 @@ describe("longitudinal eval history", () => {
         ? entry
         : {
             ...entry,
-            schema_version: "ultrafuzz.eval.history.observation.v4" as const,
-            cost_usd: null,
+            cost_usd: 0.2,
             cost_completeness: { status: "partial" as const, reasons: ["pricing-incomplete"] }
           }
     );
@@ -1351,7 +1355,7 @@ describe("longitudinal eval history", () => {
         completeRun({ id, timestamp, commitCharacter, model: "gpt-5.6-luna", f1, costUsd })
       ),
       ...partialDeepseek,
-      ...legacyFlash,
+      ...partialFlash,
       ...completeRun({
         id: "kimi",
         timestamp: "2026-08-02T00:00:00.000Z",
@@ -1368,10 +1372,10 @@ describe("longitudinal eval history", () => {
         model: "deepseek-v4-flash",
         runCount: 1,
         expectedRunCount: 1,
-        availableTargetCount: 1,
+        availableTargetCount: 2,
         expectedTargetCount: 2,
         costCompleteness: { status: "partial", reasons: ["pricing-incomplete"] },
-        costUsd: { q1: 0.2, median: 0.2, q3: 0.2 },
+        costUsd: { q1: 0.4, median: 0.4, q3: 0.4 },
         f1: { q1: 0.25, median: 0.25, q3: 0.25 }
       },
       {
@@ -1398,24 +1402,24 @@ describe("longitudinal eval history", () => {
     ]);
 
     const svg = renderEvalHistoryCharts(
-      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations })
+      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, supersessions: [], observations })
     ).get("performance-cost.svg")!;
     expect(svg).toContain('data-model="gpt-5.6-luna" data-status="complete" data-run-count="6"');
     expect(svg).toContain('data-cost-q1="12.5" data-cost-median="15" data-cost-q3="17.5"');
     expect(svg).toContain('data-f1-q1="0.225" data-f1-median="0.35" data-f1-q3="0.475"');
     expect(svg).toContain("Not plotted · kimi-k3 · median 40.0% · n=1 · cost unavailable · targets 0/2");
     expect(svg).toContain(
-      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="1" data-expected-target-count="2"'
+      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="2" data-expected-target-count="2"'
     );
     expect(svg).toContain('data-completeness-marker="partial"');
     expect(svg).toContain(
-      'deepseek-v4-flash</tspan><tspan fill="#6b7280"> · median 25.0% · $0.20 · n=1 · targets 1/2 · partial'
+      'deepseek-v4-flash</tspan><tspan fill="#6b7280"> · median 25.0% · $0.40 · n=1 · targets 2/2 · partial'
     );
     const costSvg = renderEvalHistoryCharts(
-      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations: legacyFlash })
+      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, supersessions: [], observations: partialFlash })
     ).get("cost.svg")!;
-    expect(costSvg).toContain('data-status="partial" data-available-count="0" data-expected-count="1"');
-    expect(costSvg).toContain("partial (value unavailable) (pricing-incomplete)");
+    expect(costSvg).toContain('data-status="partial" data-available-count="1" data-expected-count="1"');
+    expect(costSvg).toContain("partial (pricing-incomplete)");
     const deepseek = /<g data-model="deepseek-v4-pro"[\s\S]+?<\/g>/u.exec(svg)?.[0];
     expect(deepseek).toBeDefined();
     expect(deepseek).not.toContain('data-iqr="');
@@ -1423,6 +1427,7 @@ describe("longitudinal eval history", () => {
     const currentUnpricedLuna = renderEvalHistoryCharts(
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [
           ...completeRun({
             id: "old-priced-luna",
@@ -1487,6 +1492,7 @@ describe("longitudinal eval history", () => {
     const charts = renderEvalHistoryCharts(
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [...firstRun, ...secondRun, ...thirdRun, ...thirdRunAlternateProfile]
       })
     );
@@ -1526,7 +1532,7 @@ describe("longitudinal eval history", () => {
       )
     );
     const quality = renderEvalHistoryCharts(
-      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations })
+      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, supersessions: [], observations })
     ).get("quality.svg")!;
 
     expect(quality).toContain("latest 12 of 13 complete runs");
@@ -1539,6 +1545,7 @@ describe("longitudinal eval history", () => {
   it("formats published history JSON compatibly with repository Prettier checks", () => {
     const history = parseEvalHistory({
       schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+      supersessions: [],
       observations: [
         observation({
           cost_usd: null,
@@ -1556,6 +1563,7 @@ describe("longitudinal eval history", () => {
     const svg = renderEvalHistoryCharts(
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [
           observation({ id: "first-series" }),
           observation({
@@ -1579,6 +1587,7 @@ describe("longitudinal eval history", () => {
     const charts = renderEvalHistoryCharts(
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [
           observation({ id: "later", benchmark: "evmbench", run_timestamp: "2026-07-19T12:00:00.000Z" }),
           observation({
@@ -1606,6 +1615,7 @@ describe("longitudinal eval history", () => {
     const svg = renderEvalHistoryCharts(
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations
       })
     ).get("precision.svg")!;
