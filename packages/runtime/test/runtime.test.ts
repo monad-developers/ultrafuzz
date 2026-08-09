@@ -57,7 +57,7 @@ import {
   syncRun,
   validateProject
 } from "../src/index.js";
-import { runSmithersInspectionCommand } from "../src/smithers.js";
+import { inspectSmithersInstallation, runSmithersInspectionCommand } from "../src/smithers.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
 import { materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.js";
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
@@ -7032,6 +7032,49 @@ test("startRun accepts the published Smithers bin target with its leading dot se
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-published-smithers-bin-run\.tsx/);
+});
+
+test("package-manager-owned Smithers manifests use bounded strict parsing and narrow projections", () => {
+  const project = tempProject();
+  const paths = writeFakeInstalledSmithers(project);
+  const valid = {
+    name: "smithers-orchestrator",
+    version: SMITHERS_ORCHESTRATOR_VERSION,
+    bin: { smithers: SMITHERS_ORCHESTRATOR_BIN_PATH },
+    future_package_manager_field: { retained_by_owner: true }
+  };
+  fs.writeFileSync(paths.packageJson, `${JSON.stringify(valid)}\n`, "utf8");
+  const validPosture = inspectSmithersInstallation(project);
+  assert.equal(validPosture.bundled_version, SMITHERS_ORCHESTRATOR_VERSION);
+  assert.equal(validPosture.required_version, SMITHERS_ORCHESTRATOR_VERSION);
+  assert.equal(validPosture.installed_version, SMITHERS_ORCHESTRATOR_VERSION);
+  assert.equal(validPosture.installed_bin_target, SMITHERS_ORCHESTRATOR_BIN_PATH);
+  assert.equal(validPosture.bin_path, paths.shim);
+  assert.equal(validPosture.layout_error, null);
+
+  const tooDeep = `${"[".repeat(34)}null${"]".repeat(34)}`;
+  const malformed: Array<{ label: string; bytes: Buffer; expected: RegExp }> = [
+    {
+      label: "duplicate key",
+      bytes: Buffer.from(
+        `{"version":"${SMITHERS_ORCHESTRATOR_VERSION}","version":"${SMITHERS_ORCHESTRATOR_VERSION}","bin":{"smithers":"${SMITHERS_ORCHESTRATOR_BIN_PATH}"}}`
+      ),
+      expected: /duplicate/iu
+    },
+    { label: "invalid UTF-8", bytes: Buffer.from([0x7b, 0xff, 0x7d]), expected: /UTF-8/iu },
+    { label: "oversize", bytes: Buffer.alloc(1024 * 1024 + 1, 0x20), expected: /1048576-byte limit/iu },
+    {
+      label: "excessive depth",
+      bytes: Buffer.from(`{"version":"${SMITHERS_ORCHESTRATOR_VERSION}","future":${tooDeep}}`),
+      expected: /nesting-depth limit of 32/iu
+    }
+  ];
+  for (const fixture of malformed) {
+    fs.writeFileSync(paths.packageJson, fixture.bytes);
+    const posture = inspectSmithersInstallation(project);
+    assert.equal(posture.installed_version, null, fixture.label);
+    assert.match(posture.layout_error ?? "", fixture.expected, fixture.label);
+  }
 });
 
 test("startRun accepts a package-manager package link and regular command shim inside node_modules", async () => {

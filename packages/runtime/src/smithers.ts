@@ -14,7 +14,6 @@ import {
   getNodeArtifactDir,
   getNodeWorkspaceDir,
   parseStrictJsonBytes,
-  readJsonFile,
   readRegularFileSnapshot,
   readRunPlanDocument,
   SMITHERS_NODE_STATES,
@@ -73,6 +72,10 @@ import { stableJson } from "./utils.js";
 
 const execFileAsync = promisify(execFile);
 const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
+const MAX_PACKAGE_MANAGER_MANIFEST_BYTES = 1024 * 1024;
+const MAX_PACKAGE_MANAGER_MANIFEST_DEPTH = 32;
+const MAX_PACKAGE_MANAGER_MANIFEST_ITEMS = 10_000;
+const MAX_PACKAGE_MANAGER_MANIFEST_PROPERTIES = 10_000;
 const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
 const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
@@ -1422,13 +1425,13 @@ export async function smithersExecutionControlFiles(
 }
 
 interface WorkflowPackageManifest {
-  name?: unknown;
-  version?: unknown;
-  bin?: unknown;
-  dependencies?: unknown;
-  optionalDependencies?: unknown;
-  peerDependencies?: unknown;
-  peerDependenciesMeta?: unknown;
+  name?: string;
+  version?: string;
+  bin?: string | Readonly<Record<string, string>>;
+  dependencies?: Readonly<Record<string, string>>;
+  optionalDependencies?: Readonly<Record<string, string>>;
+  peerDependencies?: Readonly<Record<string, string>>;
+  peerDependenciesMeta?: Readonly<Record<string, Readonly<{ optional?: boolean }>>>;
 }
 
 interface WorkflowExecutionModule {
@@ -1562,9 +1565,16 @@ function collectWorkflowExecutionDependencies(input: {
 }
 
 function readWorkflowPackageManifest(packageJsonPath: string): WorkflowPackageManifest {
-  const value = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as unknown;
-  if (!isObjectRecord(value)) throw new Error(`workflow package manifest is invalid: ${packageJsonPath}`);
-  return value;
+  const envelope = readPackageManagerOwnedManifestEnvelope(packageJsonPath, "workflow package manifest");
+  return {
+    ...projectOptionalPackageManifestString(envelope, "name", packageJsonPath),
+    ...projectOptionalPackageManifestString(envelope, "version", packageJsonPath),
+    ...projectOptionalPackageManifestBin(envelope, packageJsonPath),
+    ...projectOptionalPackageManifestStringMap(envelope, "dependencies", packageJsonPath),
+    ...projectOptionalPackageManifestStringMap(envelope, "optionalDependencies", packageJsonPath),
+    ...projectOptionalPackageManifestStringMap(envelope, "peerDependencies", packageJsonPath),
+    ...projectOptionalPackageManifestPeerMetadata(envelope, packageJsonPath)
+  };
 }
 
 function requiredWorkflowDependencies(manifest: WorkflowPackageManifest): string[] {
@@ -1998,14 +2008,14 @@ export function inspectSmithersInstallation(projectRoot: string): SmithersInstal
   let installedBinTarget: string | null = null;
   try {
     const packageJson = path.join(resolveInstalledSmithersPackageRoot(resolvedRoot), "package.json");
-    const metadata = JSON.parse(fs.readFileSync(packageJson, "utf8")) as unknown;
-    if (isObjectRecord(metadata)) {
-      installedVersion = typeof metadata.version === "string" ? metadata.version : null;
-      const bin = metadata.bin;
-      installedBinTarget = isObjectRecord(bin) && typeof bin.smithers === "string" ? bin.smithers : null;
-    }
+    const metadata = readPackageManagerOwnedManifestEnvelope(packageJson, "installed Smithers package manifest");
+    const candidateVersion = optionalPackageManifestString(metadata, "version", packageJson) ?? null;
+    const bin = optionalPackageManifestBin(metadata, packageJson);
+    const candidateBinTarget = typeof bin === "object" && bin !== null ? (bin.smithers ?? null) : null;
+    installedVersion = candidateVersion;
+    installedBinTarget = candidateBinTarget;
   } catch {
-    installedVersion = null;
+    // The detailed layout error below reports malformed or missing manifests.
   }
   return {
     bundled_version: SMITHERS_ORCHESTRATOR_VERSION,
@@ -3086,7 +3096,7 @@ async function ensureSmithersDependencies(
   }
   assertNoSymlinkComponents(projectRoot, packageRoot, "Smithers package");
   assertNoSymlinkComponents(projectRoot, packageJson, "Smithers package manifest");
-  const parsedManifest = readJsonFile(packageJson);
+  const parsedManifest = readPackageManagerOwnedManifestEnvelope(packageJson, "generated Smithers package manifest");
   assertSmithersPackageManifest(parsedManifest);
   const nodeModules = path.join(packageRoot, "node_modules");
   if (fs.existsSync(nodeModules)) {
@@ -3186,8 +3196,8 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
   assertRegularFileInside(nodeModules, admissionSource, "installed Smithers detached admission implementation");
   assertRegularFileInside(nodeModules, cliSource, "installed Smithers CLI implementation");
   assertRegularFileInside(nodeModules, resumeDetachedSource, "installed Smithers detached resume implementation");
-  const metadata = JSON.parse(fs.readFileSync(packageJson, "utf8")) as unknown;
-  if (!isObjectRecord(metadata) || metadata.version !== SMITHERS_ORCHESTRATOR_VERSION) {
+  const metadata = readPackageManagerOwnedManifestEnvelope(packageJson, "installed Smithers CLI package manifest");
+  if (optionalPackageManifestString(metadata, "version", packageJson) !== SMITHERS_ORCHESTRATOR_VERSION) {
     throw new Error(`installed Smithers CLI package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`);
   }
   const admissionContents = fs.readFileSync(admissionSource, "utf8");
@@ -3261,8 +3271,14 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
   ] as const) {
     assertRegularFileInside(nodeModules, dependencyPackageJson, `installed Smithers ${label} package metadata`);
     assertRegularFileInside(nodeModules, dependencySource, `installed Smithers ${label} implementation`);
-    const dependencyMetadata = JSON.parse(fs.readFileSync(dependencyPackageJson, "utf8")) as unknown;
-    if (!isObjectRecord(dependencyMetadata) || dependencyMetadata.version !== SMITHERS_ORCHESTRATOR_VERSION) {
+    const dependencyMetadata = readPackageManagerOwnedManifestEnvelope(
+      dependencyPackageJson,
+      `installed Smithers ${label} package manifest`
+    );
+    if (
+      optionalPackageManifestString(dependencyMetadata, "version", dependencyPackageJson) !==
+      SMITHERS_ORCHESTRATOR_VERSION
+    ) {
       throw new Error(`installed Smithers ${label} package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`);
     }
   }
@@ -3352,11 +3368,12 @@ function installedSmithersValidationError(projectRoot: string): string | undefin
       return "installed package metadata is missing";
     }
     assertRegularFileInside(packageRoot, packageJson, "installed Smithers package metadata");
-    const metadata = JSON.parse(fs.readFileSync(packageJson, "utf8")) as unknown;
-    if (!isObjectRecord(metadata) || metadata.version !== SMITHERS_ORCHESTRATOR_VERSION) {
+    const metadata = readPackageManagerOwnedManifestEnvelope(packageJson, "installed Smithers package manifest");
+    if (optionalPackageManifestString(metadata, "version", packageJson) !== SMITHERS_ORCHESTRATOR_VERSION) {
       return `installed package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`;
     }
-    if (!isObjectRecord(metadata.bin) || !isExpectedSmithersBinTarget(metadata.bin.smithers)) {
+    const bin = optionalPackageManifestBin(metadata, packageJson);
+    if (typeof bin !== "object" || bin === null || !isExpectedSmithersBinTarget(bin.smithers)) {
       return "installed package metadata has an unexpected workflow runner target";
     }
     assertRegularFileInside(packageRoot, expectedBin, "installed Smithers workflow runner");
@@ -3396,6 +3413,118 @@ function installedSmithersValidationError(projectRoot: string): string | undefin
 
 function isExpectedSmithersBinTarget(value: unknown): boolean {
   return value === SMITHERS_ORCHESTRATOR_BIN_PATH || value === `./${SMITHERS_ORCHESTRATOR_BIN_PATH}`;
+}
+
+/**
+ * `package.json` is an open package-manager-owned envelope, not an Ultrafuzz
+ * durable document. Capture and strictly parse one bounded immutable snapshot,
+ * then let each caller project only the package-manager fields it consumes.
+ */
+function readPackageManagerOwnedManifestEnvelope(
+  packageJsonPath: string,
+  label: string
+): Readonly<Record<string, unknown>> {
+  const value = parseStrictJsonBytes(readRegularFileSnapshot(packageJsonPath, MAX_PACKAGE_MANAGER_MANIFEST_BYTES), {
+    maxBytes: MAX_PACKAGE_MANAGER_MANIFEST_BYTES,
+    maxDepth: MAX_PACKAGE_MANAGER_MANIFEST_DEPTH,
+    maxItems: MAX_PACKAGE_MANAGER_MANIFEST_ITEMS,
+    maxProperties: MAX_PACKAGE_MANAGER_MANIFEST_PROPERTIES
+  });
+  if (!isObjectRecord(value)) throw new Error(`${label} must be a JSON object: ${packageJsonPath}`);
+  return value;
+}
+
+function optionalPackageManifestString(
+  manifest: Readonly<Record<string, unknown>>,
+  key: string,
+  packageJsonPath: string
+): string | undefined {
+  const value = manifest[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`package-manager manifest ${key} must be a non-empty string: ${packageJsonPath}`);
+  }
+  return value;
+}
+
+function optionalPackageManifestBin(
+  manifest: Readonly<Record<string, unknown>>,
+  packageJsonPath: string
+): string | Readonly<Record<string, string>> | undefined {
+  const value = manifest.bin;
+  if (value === undefined || typeof value === "string") return value;
+  return packageManifestStringMap(value, "bin", packageJsonPath);
+}
+
+function projectOptionalPackageManifestString<Key extends "name" | "version">(
+  manifest: Readonly<Record<string, unknown>>,
+  key: Key,
+  packageJsonPath: string
+): Partial<Pick<WorkflowPackageManifest, Key>> {
+  const value = optionalPackageManifestString(manifest, key, packageJsonPath);
+  return value === undefined ? {} : ({ [key]: value } as Pick<WorkflowPackageManifest, Key>);
+}
+
+function projectOptionalPackageManifestBin(
+  manifest: Readonly<Record<string, unknown>>,
+  packageJsonPath: string
+): Pick<WorkflowPackageManifest, "bin"> | Record<never, never> {
+  const value = optionalPackageManifestBin(manifest, packageJsonPath);
+  return value === undefined ? {} : { bin: value };
+}
+
+function projectOptionalPackageManifestStringMap<
+  Key extends "dependencies" | "optionalDependencies" | "peerDependencies"
+>(
+  manifest: Readonly<Record<string, unknown>>,
+  key: Key,
+  packageJsonPath: string
+): Partial<Pick<WorkflowPackageManifest, Key>> {
+  const value = manifest[key];
+  if (value === undefined) return {};
+  return { [key]: packageManifestStringMap(value, key, packageJsonPath) } as Pick<WorkflowPackageManifest, Key>;
+}
+
+function packageManifestStringMap(
+  value: unknown,
+  field: string,
+  packageJsonPath: string
+): Readonly<Record<string, string>> {
+  if (!isObjectRecord(value)) {
+    throw new Error(`package-manager manifest ${field} must be an object: ${packageJsonPath}`);
+  }
+  const projected: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry !== "string" || entry.length === 0) {
+      throw new Error(`package-manager manifest ${field}.${key} must be a non-empty string: ${packageJsonPath}`);
+    }
+    projected[key] = entry;
+  }
+  return projected;
+}
+
+function projectOptionalPackageManifestPeerMetadata(
+  manifest: Readonly<Record<string, unknown>>,
+  packageJsonPath: string
+): Pick<WorkflowPackageManifest, "peerDependenciesMeta"> | Record<never, never> {
+  const value = manifest.peerDependenciesMeta;
+  if (value === undefined) return {};
+  if (!isObjectRecord(value)) {
+    throw new Error(`package-manager manifest peerDependenciesMeta must be an object: ${packageJsonPath}`);
+  }
+  const projected: Record<string, Readonly<{ optional?: boolean }>> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (!isObjectRecord(entry)) {
+      throw new Error(`package-manager manifest peerDependenciesMeta.${key} must be an object: ${packageJsonPath}`);
+    }
+    if (entry.optional !== undefined && typeof entry.optional !== "boolean") {
+      throw new Error(
+        `package-manager manifest peerDependenciesMeta.${key}.optional must be a boolean: ${packageJsonPath}`
+      );
+    }
+    projected[key] = entry.optional === undefined ? {} : { optional: entry.optional };
+  }
+  return { peerDependenciesMeta: projected };
 }
 
 function installedSmithersPackageRoot(projectRoot: string): string {
