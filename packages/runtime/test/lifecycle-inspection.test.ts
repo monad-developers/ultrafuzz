@@ -5,6 +5,12 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  artifactSchemaBundleDigest,
+  artifactSchemaRegistry,
+  VALIDATOR_BUILD_IDENTITY
+} from "@ultrafuzz/artifacts";
+
+import {
   cancelRun,
   diagnoseProject,
   diagnoseRun,
@@ -31,6 +37,32 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+function fakeUltrafuzzCliEntrypoint(project: string): string {
+  const entrypoint = path.join(project, "validator-cli.mjs");
+  const findings = artifactSchemaRegistry().find((entry) => entry.filename === "findings.schema.json");
+  assert.ok(findings);
+  const preflightResponse = {
+    ok: true,
+    data: {
+      status: "valid",
+      schema: {
+        id: findings.id,
+        sha256: findings.sha256,
+        bundle_sha256: artifactSchemaBundleDigest(),
+        validator_build: VALIDATOR_BUILD_IDENTITY,
+        registered: true
+      }
+    }
+  };
+  fs.writeFileSync(
+    entrypoint,
+    `process.stdout.write(${JSON.stringify(JSON.stringify(preflightResponse))});\n`,
+    "utf8"
+  );
+  fs.chmodSync(entrypoint, 0o500);
+  return entrypoint;
+}
+
 function writeSmallTopology(project: string): void {
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
@@ -52,7 +84,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
   - id: __finish__
     kind: meta
     role: finish
@@ -152,7 +184,12 @@ async function launchedProject(
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const env = fakeInspectionEnv(project, fixtures);
-  const run = await startRun({ projectRoot: project, runId: "inspect-run", env });
+  const run = await startRun({
+    projectRoot: project,
+    runId: "inspect-run",
+    env,
+    ultrafuzzCliEntrypoint: fakeUltrafuzzCliEntrypoint(project)
+  });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   return { project, env, runRoot: run.value!.run_root };
 }

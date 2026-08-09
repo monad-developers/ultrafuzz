@@ -1374,7 +1374,10 @@ test("generated Smithers workflow preserves the complete invariant suite across 
   assert.match(source, /captureInvariantSuiteWorkspaceSnapshot/u);
   assert.match(source, /restoreInvariantSuiteWorkspaceSnapshot/u);
   assert.match(source, /INVARIANT_SUITE_MANIFEST_FILE/u);
-  assert.match(source, /invariant-suite-manifest\.v1/u);
+  assert.match(source, /INVARIANT_SUITE_MANIFEST_SCHEMA_VERSION/u);
+  assert.match(source, /assertValidInvariantSuiteManifest\(manifest\)/u);
+  assert.match(source, /parseInvariantSuiteManifestBytes\(manifestBytes\)/u);
+  assert.doesNotMatch(source, /invariant-suite-manifest\.v1/u);
   assert.match(source, /INVARIANT_SUITE_ALLOWED_ROOTS/u);
   assert.match(source, /ancestor invariant suite sources conflict/u);
 
@@ -1610,7 +1613,7 @@ test("generated Smithers dependency verification fails closed before descendant 
     .replace("dependency: string", "dependency")
     .replace("): void {", ") {")
     .replace(
-      /\s+as \{\s*schema_version\?: unknown;\s*attempt_id\?: unknown;\s*artifacts\?: unknown;\s*publications\?: unknown;\s*\};/u,
+      /\s+as \{\s*schema_version\?: unknown;\s*attempt_id\?: unknown;\s*node_id\?: unknown;\s*artifacts\?: unknown;\s*publications\?: unknown;\s*\};/u,
       ";"
     )
     .replace(
@@ -1637,6 +1640,7 @@ test("generated Smithers dependency verification fails closed before descendant 
       "function assertSafeVerifiedPublicationPath(relativePath) {"
     )
     .replaceAll(" as Parameters<typeof artifactContractDefinition>[0]", "")
+    .replaceAll(" as Parameters<typeof artifactContractSchemaBinding>[0]", "")
     .replaceAll(" as Parameters<typeof validateArtifactContract>[0]", "");
   const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verification-gate-"));
   const dependency = path.join(runRoot, "property-specification-fanin");
@@ -1645,6 +1649,20 @@ test("generated Smithers dependency verification fails closed before descendant 
   fs.mkdirSync(dependency);
   fs.mkdirSync(generatedDependency);
   fs.mkdirSync(invariantDependency);
+  const schemaBinding = {
+    schemaFile: "generated-tests.schema.json",
+    schemaId: "urn:ultrafuzz:schema:artifacts:generated-tests:2",
+    schemaSha256: "b".repeat(64),
+    schemaBundleSha256: "c".repeat(64),
+    validatorBuild: `ultrafuzz-json-validator.v1:${"d".repeat(64)}`
+  };
+  const markerSchemaBinding = {
+    schema_file: schemaBinding.schemaFile,
+    schema_id: schemaBinding.schemaId,
+    schema_sha256: schemaBinding.schemaSha256,
+    schema_bundle_sha256: schemaBinding.schemaBundleSha256,
+    validator_build: schemaBinding.validatorBuild
+  };
   const taskSpecs = [
     {
       attemptId: "property-specification-fanin",
@@ -1668,6 +1686,7 @@ test("generated Smithers dependency verification fails closed before descendant 
           path: "generated-tests.json",
           contract: "ultrafuzz/generated-tests@2",
           contractDigest: "a".repeat(64),
+          ...schemaBinding,
           primary: true
         }
       ]
@@ -1692,7 +1711,11 @@ test("generated Smithers dependency verification fails closed before descendant 
     "resolveRegularArtifactFile",
     "readFileSync",
     "taskSpecs",
+    "parseStrictJsonBytes",
+    "validateArtifactVerificationMarker",
+    "assertArtifactVerificationMarkerSemantics",
     "artifactContractDefinition",
+    "artifactContractSchemaBinding",
     "validateArtifactContract",
     "createHash",
     "invariantSuiteNodeIds",
@@ -1715,7 +1738,11 @@ test("generated Smithers dependency verification fails closed before descendant 
     },
     fs.readFileSync,
     taskSpecs,
+    (bytes: Uint8Array) => JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown,
+    () => ({ ok: true, issues: [] }),
+    () => undefined,
     () => ({ digest: "a".repeat(64) }),
+    (contract: string) => (contract === "ultrafuzz/text@1" ? undefined : markerSchemaBinding),
     (contract: string) => ({
       ok: true,
       issues: [],
@@ -1766,6 +1793,7 @@ test("generated Smithers dependency verification fails closed before descendant 
       `${JSON.stringify({
         schema_version: "ultrafuzz.artifact-verification.v2",
         attempt_id: attemptId,
+        node_id: attemptId,
         artifacts,
         publications
       })}\n`,
@@ -1807,7 +1835,7 @@ test("generated Smithers dependency verification fails closed before descendant 
     [
       {
         ...validArtifact,
-        contract: "ultrafuzz/json-object@1"
+        contract: "ultrafuzz/findings@2"
       }
     ],
     [
@@ -1839,6 +1867,7 @@ test("generated Smithers dependency verification fails closed before descendant 
     path: "generated-tests.json",
     contract: "ultrafuzz/generated-tests@2",
     contract_digest: "a".repeat(64),
+    ...markerSchemaBinding,
     sha256: createHash("sha256").update(generatedBytes).digest("hex"),
     primary: true
   };
@@ -1895,7 +1924,8 @@ test("generated Smithers dependency verification fails closed before descendant 
     markerPath,
     `${JSON.stringify({
       schema_version: "ultrafuzz.artifact-verification.v2",
-      attempt_id: "property-specification-fanin"
+      attempt_id: "property-specification-fanin",
+      node_id: "property-specification-fanin"
     })}\n`,
     "utf8"
   );

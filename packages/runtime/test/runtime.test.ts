@@ -9,7 +9,12 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import * as ts from "typescript";
 
-import type { RunState } from "@ultrafuzz/artifacts";
+import {
+  artifactSchemaBundleDigest,
+  artifactSchemaRegistry,
+  VALIDATOR_BUILD_IDENTITY,
+  type RunState
+} from "@ultrafuzz/artifacts";
 import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
 
 import {
@@ -31,7 +36,7 @@ import {
   ARTIFACT_RECONCILIATION_GRACE_MS,
   ARTIFACT_RECONCILIATION_MAX_ATTEMPTS,
   ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS,
-  forkRun,
+  forkRun as runtimeForkRun,
   getRunHealth,
   getRunStatus,
   initProject,
@@ -39,10 +44,9 @@ import {
   planRun,
   pauseRun,
   readLinkedWorkflowEvidence,
-  replayRun,
-  repairMissingRenderedPromptsForRun,
-  resumeRun,
-  startRun,
+  replayRun as runtimeReplayRun,
+  resumeRun as runtimeResumeRun,
+  startRun as runtimeStartRun,
   syncRun,
   validateProject
 } from "../src/index.js";
@@ -55,6 +59,56 @@ const runningUnderBun = typeof process.versions.bun === "string";
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
+}
+
+function fakeUltrafuzzCliEntrypoint(project: string): string {
+  const entrypoint = path.join(project, "fake-ultrafuzz-cli.mjs");
+  if (fs.existsSync(entrypoint)) return entrypoint;
+  const findings = artifactSchemaRegistry().find((entry) => entry.filename === "findings.schema.json");
+  assert.ok(findings);
+  const preflightResponse = {
+    ok: true,
+    data: {
+      status: "valid",
+      schema: {
+        id: findings.id,
+        sha256: findings.sha256,
+        bundle_sha256: artifactSchemaBundleDigest(),
+        validator_build: VALIDATOR_BUILD_IDENTITY,
+        registered: true
+      }
+    }
+  };
+  fs.writeFileSync(
+    entrypoint,
+    `process.stdout.write(${JSON.stringify(JSON.stringify(preflightResponse))});\n`,
+    "utf8"
+  );
+  fs.chmodSync(entrypoint, 0o500);
+  return entrypoint;
+}
+
+function withFakeCliEntrypoint<T extends { projectRoot: string; ultrafuzzCliEntrypoint?: string }>(input: T): T {
+  return {
+    ...input,
+    ultrafuzzCliEntrypoint: input.ultrafuzzCliEntrypoint ?? fakeUltrafuzzCliEntrypoint(input.projectRoot)
+  };
+}
+
+function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnType<typeof runtimeStartRun> {
+  return runtimeStartRun(withFakeCliEntrypoint(input));
+}
+
+function resumeRun(input: Parameters<typeof runtimeResumeRun>[0]): ReturnType<typeof runtimeResumeRun> {
+  return runtimeResumeRun(withFakeCliEntrypoint(input));
+}
+
+function replayRun(input: Parameters<typeof runtimeReplayRun>[0]): ReturnType<typeof runtimeReplayRun> {
+  return runtimeReplayRun(withFakeCliEntrypoint(input));
+}
+
+function forkRun(input: Parameters<typeof runtimeForkRun>[0]): ReturnType<typeof runtimeForkRun> {
+  return runtimeForkRun(withFakeCliEntrypoint(input));
 }
 
 function firstSymlinkUnder(root: string): string | undefined {
@@ -739,13 +793,14 @@ function writeRequiredArtifactSet(runRoot: string, nodeId: string, required: str
     const contents = relative.endsWith(".json")
       ? JSON.stringify([
           {
-            schema_version: "1.0",
+            schema_version: "ultrafuzz.finding.v2",
             id: `finding-${nodeId}`,
             title: "Candidate issue",
             status: "candidate",
-            severity_guess: "medium",
+            severity_guess: "Medium",
             confidence: "medium",
-            summary: "The generated evidence needs review."
+            summary: "The generated evidence needs review.",
+            source_node_id: nodeId
           }
         ])
       : `artifact for ${nodeId}\n`;
@@ -774,7 +829,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
   - id: __finish__
     kind: meta
     role: finish
@@ -851,7 +906,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: ${RUN_REFERENCE_MANIFEST_FILE}
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/reference-manifest@1
   - id: project-discovery
     kind: agentic
     prompt: setup/project-discovery.md
@@ -863,7 +918,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
   - id: __finish__
     kind: meta
     role: finish
@@ -1000,7 +1055,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
   - id: signal-analysis
     prompt: strategies/target-signal.md
     model_profiles:
@@ -1013,7 +1068,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
   - id: __finish__
     kind: meta
     role: finish
@@ -3593,10 +3648,10 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   const renderedPromptPath = path.join(plan.value!.run_root, "artifacts/project-discovery/prompt.rendered.md");
   assert.equal(fs.existsSync(renderedPromptPath), true);
   const renderedPrompt = fs.readFileSync(renderedPromptPath, "utf8");
-  assert.match(renderedPrompt, /severity_guess to exactly "High", "Medium", or "Low"/u);
-  assert.match(renderedPrompt, /including one that is or may become a non-production record/u);
-  assert.match(renderedPrompt, /"severity_guess":"Medium"/u);
-  assert.doesNotMatch(renderedPrompt, /"severity_guess":"medium"/u);
+  assert.match(renderedPrompt, /Contract: `ultrafuzz\/findings@2`/u);
+  assert.match(renderedPrompt, /Schema: The canonical strict Ultrafuzz finding v2 array\./u);
+  assert.match(renderedPrompt, /Validation command: `ultrafuzz json validate --schema/u);
+  assert.match(renderedPrompt, /After your final write and before returning the node's final response/u);
   const persistedPlan = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "plan.json"), "utf8")) as {
     execution?: { mode?: string; retentionDays?: number };
     rendered_prompts: Array<{ rendered_prompt_snapshot_path?: string }>;
@@ -3645,7 +3700,7 @@ nodes:
       - __start__
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
   - id: __finish__
     kind: meta
@@ -3663,159 +3718,6 @@ nodes:
   assert.match(rendered, /Threshold=high/u);
   assert.match(rendered, /Filter=properties with priority at or above `high`/u);
   assert.match(rendered, /Priorities=high/u);
-});
-
-test("repairs only missing rendered prompts from compatible persisted run metadata", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const plan = await planRun({ projectRoot: project, runId: "prompt-repair", env: {} });
-  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  const promptPath = path.join(plan.value!.run_root, "artifacts", "project-discovery", "prompt.rendered.md");
-  const expected = fs.readFileSync(promptPath, "utf8");
-  fs.rmSync(promptPath);
-
-  assert.equal(
-    await repairMissingRenderedPromptsForRun({
-      projectRoot: project,
-      runId: "prompt-repair",
-      runRoot: plan.value!.run_root
-    }),
-    1
-  );
-  assert.equal(fs.readFileSync(promptPath, "utf8"), expected);
-  assert.equal(
-    await repairMissingRenderedPromptsForRun({
-      projectRoot: project,
-      runId: "prompt-repair",
-      runRoot: plan.value!.run_root
-    }),
-    0
-  );
-});
-
-test("serializes concurrent prompt repairs without deleting another invocation's output", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const plan = await planRun({ projectRoot: project, runId: "concurrent-prompt-repair", env: {} });
-  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  const promptPath = plan.value!.rendered_prompts[0]!.rendered_prompt_path;
-  const expected = fs.readFileSync(promptPath, "utf8");
-  fs.rmSync(promptPath);
-
-  const repair = () =>
-    repairMissingRenderedPromptsForRun({
-      projectRoot: project,
-      runId: "concurrent-prompt-repair",
-      runRoot: plan.value!.run_root
-    });
-  assert.deepEqual((await Promise.all([repair(), repair()])).sort(), [0, 1]);
-  assert.equal(fs.readFileSync(promptPath, "utf8"), expected);
-  assert.equal(fs.existsSync(path.join(plan.value!.run_root, ".prompt-repair")), false);
-});
-
-test("repairs from immutable bytes after prompt-affecting runtime overrides and source changes", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const sourcePrompt = path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md");
-  fs.appendFileSync(sourcePrompt, "\nOriginal quorum: {{triage_quorum}} of {{triage_panel_size}}.\n", "utf8");
-  const plan = await planRun({
-    projectRoot: project,
-    runId: "prompt-repair-runtime-override",
-    runtimeOverrides: { triageQuorum: 6, triagePanelSize: 7 },
-    env: {}
-  });
-  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  const promptPath = plan.value!.rendered_prompts[0]!.rendered_prompt_path;
-  const expected = fs.readFileSync(promptPath, "utf8");
-  assert.match(expected, /Original quorum: 6 of 7\./u);
-  fs.rmSync(promptPath);
-  fs.appendFileSync(sourcePrompt, "\nChanged after planning.\n", "utf8");
-  fs.writeFileSync(path.join(project, "ultrafuzz.toml"), "not valid toml = [\n", "utf8");
-
-  assert.equal(
-    await repairMissingRenderedPromptsForRun({
-      projectRoot: project,
-      runId: "prompt-repair-runtime-override",
-      runRoot: plan.value!.run_root
-    }),
-    1
-  );
-  assert.equal(fs.readFileSync(promptPath, "utf8"), expected);
-});
-
-test("refuses all digest-less legacy prompt reuse because original lineage is unprovable", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const plan = await planRun({ projectRoot: project, runId: "legacy-prompt-repair", env: {} });
-  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  const planPath = path.join(plan.value!.run_root, "plan.json");
-  const persisted = JSON.parse(fs.readFileSync(planPath, "utf8")) as {
-    rendered_prompts: Array<Record<string, unknown>>;
-  };
-  persisted.rendered_prompts = persisted.rendered_prompts.map(
-    ({ rendered_prompt_digest: _digest, rendered_prompt_snapshot_path: _snapshot, ...entry }) => ({
-      ...entry,
-      rendered_prompt_path: path.join("/__legacy_volume_mount", String(entry.rendered_prompt_path).replace(/^\/+/u, ""))
-    })
-  );
-  fs.writeFileSync(planPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
-
-  await assert.rejects(
-    repairMissingRenderedPromptsForRun({
-      projectRoot: project,
-      runId: "legacy-prompt-repair",
-      runRoot: plan.value!.run_root
-    }),
-    /cannot validate legacy rendered prompt/u
-  );
-});
-
-test("refuses rendered prompt repair when its immutable snapshot does not match the persisted digest", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const plan = await planRun({ projectRoot: project, runId: "prompt-lineage", env: {} });
-  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  const prompt = plan.value!.rendered_prompts[0]!;
-  const persisted = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "plan.json"), "utf8")) as {
-    rendered_prompts: Array<{ rendered_prompt_snapshot_path: string }>;
-  };
-  const snapshotPath = path.join(plan.value!.run_root, persisted.rendered_prompts[0]!.rendered_prompt_snapshot_path);
-  fs.rmSync(prompt.rendered_prompt_path);
-  fs.appendFileSync(snapshotPath, "\n.\n", "utf8");
-
-  await assert.rejects(
-    repairMissingRenderedPromptsForRun({
-      projectRoot: project,
-      runId: "prompt-lineage",
-      runRoot: plan.value!.run_root
-    }),
-    /immutable rendered prompt snapshot does not match persisted task metadata/u
-  );
-  assert.equal(fs.existsSync(prompt.rendered_prompt_path), false);
-});
-
-test("refuses to reuse an existing rendered prompt that does not match its persisted digest", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const plan = await planRun({ projectRoot: project, runId: "prompt-validation", env: {} });
-  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  const prompt = plan.value!.rendered_prompts[0]!;
-  fs.appendFileSync(prompt.rendered_prompt_path, "\n.\n", "utf8");
-
-  await assert.rejects(
-    repairMissingRenderedPromptsForRun({
-      projectRoot: project,
-      runId: "prompt-validation",
-      runRoot: plan.value!.run_root
-    }),
-    /existing rendered prompt does not match persisted task metadata/u
-  );
 });
 
 test("plan uses an eval topology override without replacing the project topology", async () => {
@@ -3928,7 +3830,7 @@ test("plan provisions a validated trusted expectation catalog through pinned ref
   fs.writeFileSync(
     path.join(project, "reference-expectations.json"),
     JSON.stringify({
-      schema_version: "ultrafuzz.reference-expectations.v1",
+      schema_version: "ultrafuzz.reference-expectations.v2",
       expectations: [{ id: "benchmark:example:supply", description: "Supply remains live." }]
     }),
     "utf8"
@@ -3951,7 +3853,7 @@ test("plan provisions a validated trusted expectation catalog through pinned ref
     assert.ok(
       referenceNode.outputs.some(
         (output) =>
-          output.path === "references/expectations.json" && output.contract === "ultrafuzz/reference-expectations@1"
+          output.path === "references/expectations.json" && output.contract === "ultrafuzz/reference-expectations@2"
       )
     );
     const catalogPath = path.join(
@@ -3962,7 +3864,7 @@ test("plan provisions a validated trusted expectation catalog through pinned ref
       "expectations.json"
     );
     assert.deepEqual(JSON.parse(fs.readFileSync(catalogPath, "utf8")), {
-      schema_version: "ultrafuzz.reference-expectations.v1",
+      schema_version: "ultrafuzz.reference-expectations.v2",
       expectations: [{ id: "benchmark:example:supply", description: "Supply remains live." }]
     });
     const rendered = fs.readFileSync(
@@ -4599,7 +4501,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.doesNotMatch(workflowSource, /import \* as projectAgents from "\.\.\/agents";/);
   assert.match(workflowSource, /agent=\{agentForTask\(task\)\}/);
   assert.match(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/);
-  assert.match(workflowSource, /materializePromptSchemas\(path\.join\(workspaceRoot, "\.ultrafuzz", "schemas"\)\)/);
+  assert.match(workflowSource, /const schemaDirectory = path\.join\(workspaceRoot, "\.ultrafuzz", "schemas"\)/u);
+  assert.match(workflowSource, /materializePromptSchemas\(schemaDirectory\)/u);
   assert.match(workflowSource, /prompt\.replaceAll\(task\.artifactDir, mirroredArtifactDir\(task\)\)/);
   assert.match(workflowSource, /path\.join\(task\.workspacePath, "artifacts", task\.attemptId\)/);
   assert.match(workflowSource, /taskArtifactRoots\(task, artifactDir\)/);
@@ -4608,18 +4511,14 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /function prepareArtifactMirror/);
   assert.match(workflowSource, /function assertTaskInputs/);
   assert.match(workflowSource, /artifact handoff directory is unavailable/);
-  assert.match(workflowSource, /function canonicalEmptyArtifact/);
-  assert.match(workflowSource, /output\.primary && output\.contract !== "ultrafuzz\/findings@1"/);
-  assert.match(workflowSource, /artifactContractDefinition\(output\.contract\)\.validEmptyExample/);
+  assert.doesNotMatch(workflowSource, /canonicalEmptyArtifact|ultrafuzz\/findings@1/u);
   assert.match(workflowSource, /function artifactAwareAgent/);
-  assert.match(
+  assert.match(workflowSource, /return await agent\.generate\(attemptArgs\)/u);
+  assert.doesNotMatch(
     workflowSource,
-    /const result = await agent\.generate\(attemptArgs\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\);/
+    /materializeMissingMarkdownArtifacts|normalizeLegacyFinding|normalizeLegacyReportProvenance|normalizeLegacyGeneratedTest/u
   );
-  assert.match(workflowSource, /materializeMissingMarkdownArtifacts\(task, result\)/);
-  assert.match(workflowSource, /normalizeLegacyFindingFields\(task\)/);
-  assert.match(workflowSource, /normalizeLegacyReportProvenance\(task\)/);
-  assert.match(workflowSource, /normalizeLegacyGeneratedTestManifests\(task\)/);
+  assert.match(workflowSource, /function finalizeAndVerifyArtifacts/);
   assert.match(workflowSource, /materializeGeneratedTestCompanions\(task\)/);
   assert.match(workflowSource, /INVARIANT_TEST_ROOT_NAMES\.flatMap\(\(testRoot\) => \[/);
   assert.match(workflowSource, /path\.resolve\(workspaceRoot, testRoot, "foundry", workspaceRelativePath\)/);
@@ -4628,15 +4527,11 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
     /nodeIds\.map\(\(nodeId\) => path\.resolve\(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath\)\)/
   );
   assert.match(workflowSource, /generatedTestNodeIds\(task\)/);
-  assert.match(workflowSource, /typeof entry === "string" \? \{ path: entry \} : entry/);
-  assert.match(workflowSource, /typeof finding\.confidence === "number"/);
-  assert.match(workflowSource, /finding\.confidence = String\(finding\.confidence\)/);
-  assert.match(workflowSource, /\(strategy as Record<string, unknown>\)\.origin/);
-  assert.match(workflowSource, /finding\.strategy = legacyStrategy\.trim\(\)/);
-  assert.match(workflowSource, /finding\.evidence = \[evidence\]/);
-  assert.match(workflowSource, /report\.issues\.map/);
-  assert.match(workflowSource, /\["implementation_paths", "test_paths"\]/);
-  assert.match(workflowSource, /\["fuzzer_backend", "fuzzer_backends"\]/);
+  assert.doesNotMatch(workflowSource, /typeof entry === "string" \? \{ path: entry \}/u);
+  assert.doesNotMatch(
+    workflowSource,
+    /typeof finding\.confidence === "number"|finding\.confidence = String|finding\.strategy = legacyStrategy|finding\.evidence = \[evidence\]/u
+  );
   assert.match(workflowSource, /verifyArtifacts\(task\);/);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[(?:task\.)?(?:workspacePath|repoPath|runRoot)\]/);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(expectedArtifactDir)}`), true);
@@ -7266,7 +7161,7 @@ test("startRun includes bounded workflow runner stdio when submission fails", as
   assert.equal(diagnostic.details?.stderr, "submission stderr detail token=<redacted>\n");
 });
 
-test("syncRun marks successful workflow completion, normalizes findings, and writes manifests", async () => {
+test("syncRun accepts canonical findings without rewriting them and writes manifests", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -7286,6 +7181,8 @@ test("syncRun marks successful workflow completion, normalizes findings, and wri
   const run = await startRun({ projectRoot: project, runId: "sync-success", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const findingsPath = path.join(run.value!.run_root, "artifacts", "project-discovery", "findings.json");
+  const findingsBefore = fs.readFileSync(findingsPath);
 
   const sync = await syncRun({ projectRoot: project, runId: "sync-success", env });
 
@@ -7297,9 +7194,8 @@ test("syncRun marks successful workflow completion, normalizes findings, and wri
   };
   assert.equal(state.status, "succeeded");
   assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
-  const findings = JSON.parse(
-    fs.readFileSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "findings.json"), "utf8")
-  ) as Array<{ source_node_id?: string }>;
+  assert.deepEqual(fs.readFileSync(findingsPath), findingsBefore);
+  const findings = JSON.parse(fs.readFileSync(findingsPath, "utf8")) as Array<{ source_node_id?: string }>;
   assert.equal(findings[0]?.source_node_id, "project-discovery");
   const manifest = JSON.parse(
     fs.readFileSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json"), "utf8")
@@ -7312,106 +7208,8 @@ test("syncRun marks successful workflow completion, normalizes findings, and wri
     "setup/project-discovery.md"
   ]);
   const events = fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8");
-  assert.match(events, /findings-normalized/);
+  assert.doesNotMatch(events, /findings-normalized/u);
   assert.match(events, /artifact-manifest-written/);
-});
-
-// Findings normalization rewrites findings.json in place, stamping the provenance the producer
-// omitted. The workflow verifier has already sealed the pre-normalization bytes into this attempt's
-// verification marker, and every dependent re-hashes the published file against that marker in
-// `assertVerifiedDependency`. A marker left describing bytes that no longer exist fails each
-// dependent's `prepare:` wrapper as `artifact-contract` before its agent runs -- which is exactly
-// what kept `dedupe-findings`, the only smoke-lane node whose dependencies publish findings.json,
-// red on all three targets in every toolchain (issue #348). The drift is not confined to producers
-// that reported findings: `writeJsonDurable` re-serializes with two-space indent and a trailing
-// newline, so even `[]` moves unless the producer already wrote exactly `[]\n`. What kept this
-// hidden is that no fixture drove normalization and a sealed marker together.
-test("syncRun re-seals the verification marker after it normalizes a producer's findings", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const workflowRunId = "ultrafuzz-sync-findings-marker";
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-    }),
-    events: workflowEvents(workflowRunId, [
-      { type: "RunStarted" },
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "RunFinished" }
-    ])
-  });
-  const run = await startRun({ projectRoot: project, runId: "sync-findings-marker", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const runRoot = run.value!.run_root;
-  writeRequiredArtifactSet(runRoot, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-
-  const findingsPath = path.join(runRoot, "artifacts", "project-discovery", "findings.json");
-  const markdownPath = path.join(runRoot, "artifacts", "project-discovery", "setup", "project-discovery.md");
-  const sha = (filePath: string): string => crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
-  // Exactly what the generated workflow's verifier publishes once the agent task succeeds.
-  const sealedFindings = sha(findingsPath);
-  const sealedMarkdown = sha(markdownPath);
-  const markerDir = path.join(runRoot, ".ultrafuzz-verification");
-  fs.mkdirSync(markerDir, { recursive: true });
-  const markerPath = path.join(markerDir, "project-discovery.json");
-  fs.writeFileSync(
-    markerPath,
-    `${JSON.stringify({
-      schema_version: "ultrafuzz.artifact-verification.v2",
-      attempt_id: "project-discovery",
-      node_id: "project-discovery",
-      artifacts: [
-        {
-          path: "setup/project-discovery.md",
-          contract: "ultrafuzz/nonempty-markdown@1",
-          contract_digest: "a".repeat(64),
-          sha256: sealedMarkdown,
-          primary: true
-        },
-        {
-          path: "findings.json",
-          contract: "ultrafuzz/findings@1",
-          contract_digest: "b".repeat(64),
-          sha256: sealedFindings,
-          primary: false
-        }
-      ],
-      publications: [
-        { path: "setup/project-discovery.md", sha256: sealedMarkdown },
-        { path: "findings.json", sha256: sealedFindings }
-      ]
-    })}\n`,
-    "utf8"
-  );
-
-  const sync = await syncRun({ projectRoot: project, runId: "sync-findings-marker", env });
-  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-
-  const normalizedFindings = sha(findingsPath);
-  assert.notEqual(normalizedFindings, sealedFindings, "normalization did not actually rewrite findings.json");
-  const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as {
-    artifacts: Array<{ path: string; sha256: string; contract?: string; contract_digest?: string; primary?: boolean }>;
-    publications: Array<{ path: string; sha256: string }>;
-  };
-  // Both sets a dependent re-checks now attest the bytes on disk.
-  for (const entries of [marker.artifacts, marker.publications]) {
-    assert.equal(entries.find((entry) => entry.path === "findings.json")?.sha256, normalizedFindings);
-    // Nothing the runtime did not rewrite may move.
-    assert.equal(entries.find((entry) => entry.path === "setup/project-discovery.md")?.sha256, sealedMarkdown);
-  }
-  const findingsArtifact = marker.artifacts.find((entry) => entry.path === "findings.json");
-  assert.equal(findingsArtifact?.contract, "ultrafuzz/findings@1");
-  assert.equal(findingsArtifact?.contract_digest, "b".repeat(64));
-  assert.equal(findingsArtifact?.primary, false);
-  // Re-sealing an attestation is a security-relevant edit, so it is recorded rather than silent.
-  const refreshed = sync.diagnostics.find((diagnostic) => diagnostic.code === "ARTIFACT_VERIFICATION_DIGEST_REFRESHED");
-  assert.ok(refreshed, JSON.stringify(sync.diagnostics));
-  assert.equal(refreshed.severity, "warning");
-  assert.equal(refreshed.source, "findings");
-  assert.deepEqual((refreshed.details as { previous_sha256?: string[] }).previous_sha256, [sealedFindings]);
 });
 
 test("syncRun marks task-output validation failures for terminal disposition", async () => {
@@ -7433,16 +7231,20 @@ test("syncRun marks task-output validation failures for terminal disposition", a
   const run = await startRun({ projectRoot: project, runId: "sync-invalid-output", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-  fs.writeFileSync(
-    path.join(run.value!.run_root, "artifacts", "project-discovery", "findings.json"),
-    `${JSON.stringify([{ title: "incomplete output" }])}\n`,
-    "utf8"
+  const invalidFindingsPath = path.join(
+    run.value!.run_root,
+    "artifacts",
+    "project-discovery",
+    "findings.json"
   );
+  fs.writeFileSync(invalidFindingsPath, `${JSON.stringify([{ title: "incomplete output" }])}\n`, "utf8");
+  const invalidFindingsBefore = fs.readFileSync(invalidFindingsPath);
 
   const sync = await syncRun({ projectRoot: project, runId: "sync-invalid-output", env });
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   assert.equal(sync.value?.status, "failed");
+  assert.deepEqual(fs.readFileSync(invalidFindingsPath), invalidFindingsBefore);
   const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
     nodes?: Record<string, { status?: string; provenance?: Record<string, unknown> }>;
   };
@@ -7453,12 +7255,11 @@ test("syncRun marks task-output validation failures for terminal disposition", a
   });
   assert.equal(
     fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json")),
-    true
+    false
   );
 
   writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
   const manifestPath = path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json");
-  fs.rmSync(manifestPath);
   fs.mkdirSync(manifestPath);
 
   const operational = await syncRun({ projectRoot: project, runId: "sync-invalid-output", env });

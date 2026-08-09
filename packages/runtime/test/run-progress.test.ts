@@ -36,7 +36,7 @@ function throughput(overrides: Partial<RunHealthThroughput> = {}): RunHealthThro
 
 function runState(nodes: RunState["nodes"]): RunState {
   return {
-    schema_version: "ultrafuzz.state.v1",
+    schema_version: "ultrafuzz.run-state.v3",
     run_id: "progress-run",
     status: "running",
     graph_fingerprint: "graph",

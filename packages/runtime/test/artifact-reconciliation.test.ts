@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { createRunLayout, getNodeArtifactDir, getNodeWorkspaceDir } from "@ultrafuzz/artifacts";
+import {
+  artifactContractDefinition,
+  artifactContractSchemaBinding,
+  createRunLayout,
+  getNodeArtifactDir,
+  getNodeWorkspaceDir
+} from "@ultrafuzz/artifacts";
 
 import {
   onlyTransientArtifactDiagnostics,
@@ -25,13 +31,19 @@ function plannedNode(requiredArtifacts: string[]): PlannedGraphNode {
     kind: "agentic",
     depends_on: [],
     artifact_dir: "artifacts/strategy-a",
-    outputs: requiredArtifacts.map((artifactPath, index) => ({
-      path: artifactPath,
-      contract:
-        artifactPath === "generated-tests.json" ? "ultrafuzz/generated-tests@1" : "ultrafuzz/nonempty-markdown@1",
-      contract_digest: "a".repeat(64),
-      primary: index === 0
-    })),
+    outputs: requiredArtifacts.map((artifactPath, index) => {
+      const contract =
+        artifactPath === "generated-tests.json"
+          ? ("ultrafuzz/generated-tests@2" as const)
+          : ("ultrafuzz/nonempty-markdown@1" as const);
+      return {
+        path: artifactPath,
+        contract,
+        contract_digest: artifactContractDefinition(contract).digest,
+        ...(artifactContractSchemaBinding(contract) ?? {}),
+        primary: index === 0
+      };
+    }),
     prompt_id: "strategy-a",
     prompt_path: "strategies/strategy-a.md",
     loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
@@ -249,13 +261,13 @@ test("rejects a destination-directory move during publication", async () => {
   assert.deepEqual(fs.readdirSync(outsideDirectory), []);
 });
 
-test("reconciles manifest-enumerated generated companions before the strict gate", async () => {
+test("reconciles manifest-enumerated generated companions by exact bytes before the strict gate", async () => {
   const fixture = setup(["generated-tests.json"]);
   writeFile(
     fixture.mirrorDir,
     "generated-tests.json",
     JSON.stringify({
-      schema_version: "1.0",
+      schema_version: "ultrafuzz.generated-tests.v2",
       run_id: "run-1",
       node_id: "strategy-a",
       generated_tests: [{ path: "generated-tests/Example.t.sol" }]
@@ -273,10 +285,10 @@ test("reconciles manifest-enumerated generated companions before the strict gate
   assert.equal(verifyRequiredArtifactsForAttempt(fixture.layout, fixture.node, "strategy-a").ok, true);
 });
 
-test("reconciles a missing generated companion when the canonical manifest already exists", async () => {
+test("reconciles an exact-byte generated companion when the canonical manifest already exists", async () => {
   const fixture = setup(["generated-tests.json"]);
   const manifest = JSON.stringify({
-    schema_version: "1.0",
+    schema_version: "ultrafuzz.generated-tests.v2",
     run_id: "run-1",
     node_id: "strategy-a",
     generated_tests: [{ path: "generated-tests/Example.t.sol" }]
@@ -309,8 +321,8 @@ test("a warning does not collapse the artifact reconciliation grace", () => {
     source: "artifact-gate"
   };
   const warning = {
-    code: "PROPERTY_REFERENCE_EXPECTATION_SANITIZED",
-    message: "the lens output was sanitized",
+    code: "PROPERTY_REFERENCE_EXPECTATION_CATALOG_ABSENT",
+    message: "the lens has no supplied expectation catalog",
     severity: "warning" as const,
     source: "property-provenance"
   };

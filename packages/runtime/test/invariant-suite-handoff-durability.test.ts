@@ -6,7 +6,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { writeFileDurable } from "@ultrafuzz/artifacts";
+import {
+  INVARIANT_SUITE_MANIFEST_SCHEMA_VERSION,
+  assertValidInvariantSuiteManifest,
+  parseInvariantSuiteManifestBytes,
+  writeFileDurable
+} from "@ultrafuzz/artifacts";
 import ts from "typescript";
 
 /**
@@ -55,6 +60,15 @@ type TaskSpecLike = {
 };
 
 type WorkflowHelpers = {
+  parseInvariantSuiteManifestRecord?: (
+    manifestBytes: Buffer,
+    manifestPath: string
+  ) => {
+    producerNodeId: string;
+    producerAttemptId: string;
+    files: Map<string, { sha256: string; sizeBytes: number }>;
+    tombstones: Set<string>;
+  };
   materializeInvariantSuiteFromDependencies?: (task: TaskSpecLike, workspaceRoot: string) => void;
   materializeInvariantSuiteCompanions?: (task: TaskSpecLike) => void;
   rememberInvariantSuitePublications?: (
@@ -228,6 +242,7 @@ function loadWorkflowHelpers(
     taskSpecs: state.taskSpecs,
     pinnedSourceRef: "refs/heads/ultrafuzz/pinned-source",
     INVARIANT_SUITE_MANIFEST_FILE: "invariant-suite-manifest.json",
+    INVARIANT_SUITE_MANIFEST_SCHEMA_VERSION,
     INVARIANT_SUITE_BASELINE_FILE: "invariant-suite-baseline.json",
     INVARIANT_SUITE_HANDOFF_DIR: "invariant-suite-handoffs",
     INVARIANT_SUITE_HANDOFF_FILE: "handoff.json",
@@ -249,6 +264,8 @@ function loadWorkflowHelpers(
     safeInvariantSuiteDirectory,
     assertSafeInvariantSuitePath,
     assertSafeInvariantSuiteTestPath: assertSafeInvariantSuitePath,
+    assertValidInvariantSuiteManifest,
+    parseInvariantSuiteManifestBytes,
     assertInvariantSuiteSourceBudget: () => undefined,
     assertInvariantSuiteSourceSize: (relativePath: string, size: number) => {
       if (!Number.isSafeInteger(size) || size < 1) {
@@ -402,12 +419,12 @@ function writeSuiteManifest(
   producerNodeId: string,
   producerAttemptId: string,
   files: readonly string[],
-  tombstones?: readonly string[]
+  tombstones: readonly string[] = []
 ): void {
   fs.writeFileSync(
     path.join(artifactDir, "invariant-suite-manifest.json"),
     `${JSON.stringify({
-      schema_version: "ultrafuzz.invariant-suite-manifest.v1",
+      schema_version: INVARIANT_SUITE_MANIFEST_SCHEMA_VERSION,
       producer_node_id: producerNodeId,
       producer_attempt_id: producerAttemptId,
       files: [...files].sort().map((relativePath) => {
@@ -418,7 +435,7 @@ function writeSuiteManifest(
           sha256: createHash("sha256").update(contents).digest("hex")
         };
       }),
-      ...(tombstones === undefined ? {} : { tombstones: [...tombstones].sort() })
+      tombstones: [...tombstones].sort()
     })}\n`,
     "utf8"
   );
@@ -475,6 +492,58 @@ function createInvariantChain(): {
   return { runRoot, setup, handlers, coverage, state: createHarnessState([setup, handlers, coverage]) };
 }
 
+test("invariant-suite runtime readers accept only strict current-version manifests", () => {
+  const helpers = loadWorkflowHelpers(
+    ["assertInvariantSuiteTombstoneBudget", "parseInvariantSuiteManifestRecord"],
+    createHarnessState([])
+  );
+  const parseManifest = helpers.parseInvariantSuiteManifestRecord;
+  assert.ok(parseManifest);
+  const manifest = {
+    schema_version: INVARIANT_SUITE_MANIFEST_SCHEMA_VERSION,
+    producer_node_id: "stateful-invariant-setup",
+    producer_attempt_id: "setup",
+    files: [
+      {
+        path: "test/recon/Properties.sol",
+        size_bytes: 10,
+        sha256: "a".repeat(64)
+      }
+    ],
+    tombstones: ["src/Legacy.sol"]
+  };
+
+  const parsed = parseManifest(Buffer.from(JSON.stringify(manifest), "utf8"), "manifest.json");
+  assert.equal(parsed.producerAttemptId, "setup");
+  assert.deepEqual([...parsed.files.keys()], ["test/recon/Properties.sol"]);
+  assert.deepEqual([...parsed.tombstones], ["src/Legacy.sol"]);
+
+  const missingTombstones = { ...manifest } as Record<string, unknown>;
+  delete missingTombstones.tombstones;
+  const duplicatePath = {
+    ...manifest,
+    files: [...manifest.files, { ...manifest.files[0], sha256: "b".repeat(64) }]
+  };
+  const overlap = { ...manifest, tombstones: [manifest.files[0]!.path] };
+  const duplicateKey = JSON.stringify(manifest).replace(
+    `"producer_attempt_id":"${manifest.producer_attempt_id}"`,
+    `"producer_attempt_id":"shadowed","producer_attempt_id":"${manifest.producer_attempt_id}"`
+  );
+
+  for (const invalid of [
+    JSON.stringify({ ...manifest, schema_version: "ultrafuzz.invariant-suite-manifest.v1" }),
+    JSON.stringify(missingTombstones),
+    JSON.stringify(duplicatePath),
+    JSON.stringify(overlap),
+    duplicateKey
+  ]) {
+    assert.throws(
+      () => parseManifest(Buffer.from(invalid, "utf8"), "manifest.json"),
+      /artifact-contract failure: invariant suite manifest is invalid manifest\.json/u
+    );
+  }
+});
+
 test("#217 a source deleted at an invariant stage is not resurrected from an indirect ancestor", () => {
   const { runRoot, setup, handlers, coverage, state } = createInvariantChain();
   try {
@@ -530,18 +599,17 @@ test("#217 a declared predecessor that still carries a tombstoned path outranks 
       ["test/recon/Properties.sol"]
     );
 
-    // handlers is coverage's DIRECT dependency and it both re-added
-    // Properties.sol and still carries the inherited tombstone for it. Only a
-    // direct predecessor reaches the "still present" subtraction, so this is
-    // the shape that pins the rule.
+    // handlers is coverage's DIRECT dependency and re-added Properties.sol
+    // after setup tombstoned it. Only a direct predecessor reaches the "still
+    // present" subtraction, so its current manifest republishes the source and
+    // no longer carries the ancestor tombstone.
     writeSuiteSource(handlers.artifactDir, "test/recon/TargetFunctions.sol", "contract TargetFunctions { /* v2 */ }\n");
     writeSuiteSource(handlers.artifactDir, "test/recon/Properties.sol", "contract Properties { /* re-added */ }\n");
     writeSuiteManifest(
       handlers.artifactDir,
       "stateful-invariant-handlers",
       "handlers",
-      ["test/recon/Properties.sol", "test/recon/TargetFunctions.sol"],
-      ["test/recon/Properties.sol"]
+      ["test/recon/Properties.sol", "test/recon/TargetFunctions.sol"]
     );
 
     const helpers = loadWorkflowHelpers([...MATERIALIZATION_HELPERS], state);
@@ -580,7 +648,7 @@ test("#217 a path this stage deletes and re-creates in the same attempt is not p
 
     const manifest = JSON.parse(
       fs.readFileSync(path.join(handlers.artifactDir, "invariant-suite-manifest.json"), "utf8")
-    ) as { files: Array<{ path: string }>; tombstones?: string[] };
+    ) as { files: Array<{ path: string }>; tombstones: string[] };
     assert.deepEqual(
       manifest.files.map((file) => file.path),
       ["test/recon/Properties.sol"]
@@ -642,7 +710,7 @@ test("#217 the published invariant-suite manifest carries deletion tombstones", 
 
     const manifest = JSON.parse(
       fs.readFileSync(path.join(handlers.artifactDir, "invariant-suite-manifest.json"), "utf8")
-    ) as { files: Array<{ path: string }>; tombstones?: string[] };
+    ) as { files: Array<{ path: string }>; tombstones: string[] };
     assert.deepEqual(
       manifest.files.map((file) => file.path),
       ["test/recon/TargetFunctions.sol"]
@@ -979,7 +1047,7 @@ test("#219 the durable record's tombstones drive the deletion channel this stage
 
     const manifest = JSON.parse(
       fs.readFileSync(path.join(handlers.artifactDir, "invariant-suite-manifest.json"), "utf8")
-    ) as { tombstones?: string[] };
+    ) as { tombstones: string[] };
     assert.deepEqual(
       manifest.tombstones,
       ["src/Legacy.sol"],
@@ -1620,7 +1688,7 @@ test("#212 retry cleanup resets generated tests under the repository's plural te
       "contract CryticTester { /* recon */ }\n",
       "utf8"
     );
-    handlers.outputs = [{ path: "generated-tests/CryticTester.sol", contract: "ultrafuzz/generated-tests@1" }];
+    handlers.outputs = [{ path: "generated-tests/CryticTester.sol", contract: "ultrafuzz/generated-tests@2" }];
 
     const resetGeneratedTestRoots: string[] = [];
     const helpers = loadWorkflowHelpers([...RETRY_HELPERS], state, {

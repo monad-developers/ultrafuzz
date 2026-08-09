@@ -7,13 +7,16 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  artifactContractDefinition,
   artifactContractSchemaBinding,
   artifactSchemaDirectory,
   createInitialRunState,
   createRunLayout,
   getNodeArtifactDir,
-  writeArtifact,
+  readRunState,
   validateRegisteredJsonFileSync,
+  writeArtifact as writeArtifactFile,
+  writeRunState,
   writeArtifactManifest
 } from "@ultrafuzz/artifacts";
 import { loadBuiltInPromptAssets } from "@ultrafuzz/prompts";
@@ -27,6 +30,119 @@ import {
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-gates-"));
+}
+
+/**
+ * Real planned runs record every logical producer in state before any artifact
+ * gate executes. These focused fixtures write producer artifacts directly, so
+ * keep the state index in sync instead of relying on the removed historical
+ * artifact-directory fallback.
+ */
+function registerArtifactNode(layout: ReturnType<typeof createRunLayout>, nodeId: string): void {
+  const state = readRunState(layout);
+  if (state.nodes[nodeId] !== undefined) return;
+  state.nodes[nodeId] = {
+    node_id: nodeId,
+    logical_node_id: nodeId,
+    status: "succeeded",
+    retry_count: 0,
+    timed_out: false
+  };
+  writeRunState(layout, state);
+}
+
+function writeArtifact(
+  layout: ReturnType<typeof createRunLayout>,
+  nodeId: string,
+  artifactPath: string,
+  contents: string
+): string {
+  registerArtifactNode(layout, nodeId);
+  return writeArtifactFile(layout, nodeId, artifactPath, contents);
+}
+
+function boundOutput(
+  artifactPath: string,
+  contract: PlannedGraphNode["outputs"][number]["contract"],
+  primary = false
+): PlannedGraphNode["outputs"][number] {
+  return {
+    path: artifactPath,
+    contract,
+    contract_digest: artifactContractDefinition(contract).digest,
+    ...(artifactContractSchemaBinding(contract) ?? {}),
+    primary
+  };
+}
+
+function currentFinding(id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.finding.v2",
+    id,
+    title: "Property failure",
+    status: "confirmed",
+    severity_guess: "Medium",
+    confidence: "high",
+    summary: "The property failed.",
+    ...overrides
+  };
+}
+
+function currentReport(runId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.report.v2",
+    run_metadata: {
+      run_id: runId,
+      source_run_id: runId,
+      repository: ".",
+      elapsed_time: "0s",
+      models_used: [],
+      tokens_used: "0",
+      estimated_spend: "$0",
+      partial_pricing: false,
+      strategy_loops: 1
+    },
+    issues: [],
+    non_production_outcomes: [],
+    property_provenance: [],
+    ...overrides
+  };
+}
+
+function currentNonProductionOutcome(id: string, sourceFindingId: string): Record<string, unknown> {
+  return currentFinding(id, {
+    title: "Non-production outcome",
+    triage_classification: "undetermined",
+    recommended_next_action: "Review the campaign evidence.",
+    lifecycle: {
+      dedupe_key: `dedupe-${id}`,
+      source_artifacts: [
+        {
+          path: "findings.json",
+          node_id: "stateful-invariant-campaign",
+          finding_id: sourceFindingId,
+          title: "Property failure",
+          relationship: "primary"
+        }
+      ],
+      strategy_hits: []
+    }
+  });
+}
+
+function currentImplementedCoverage(propertyIds: string[]): Record<string, unknown> {
+  return {
+    priority_threshold: "high",
+    priorities: ["high"],
+    selected_property_ids: propertyIds,
+    implemented_property_ids: propertyIds,
+    blocked_property_ids: [],
+    pending_property_ids: [],
+    deferred_property_ids: [],
+    reference_expected_property_ids: [],
+    reference_expectation_ids: [],
+    blocker_summaries: []
+  };
 }
 
 // A discovery workspace as a benchmark run sees it: a Git worktree whose pinned branch exists and
@@ -72,31 +188,27 @@ function plannedNode(paths: string[]): PlannedGraphNode {
         outputPath === "workspace-patch.json"
           ? "ultrafuzz/workspace-patch@1"
           : outputPath === "generated-tests.json"
-            ? "ultrafuzz/generated-tests@1"
+            ? "ultrafuzz/generated-tests@2"
             : outputPath === "findings.json"
-              ? "ultrafuzz/findings@1"
+              ? "ultrafuzz/findings@2"
               : outputPath === "properties.json"
-                ? "ultrafuzz/properties@1"
+                ? "ultrafuzz/properties@2"
                 : outputPath === "implemented-properties.json"
-                  ? "ultrafuzz/implemented-properties@1"
+                  ? "ultrafuzz/implemented-properties@3"
                   : outputPath === "setup/invariant-evidence-ledger.json"
-                  ? "ultrafuzz/invariant-ledger@1"
-                  : outputPath.startsWith("properties/") && outputPath.endsWith(".json")
-                    ? "ultrafuzz/property-lens@1"
-                    : ["echidna-results.json", "medusa-results.json", "recon-fuzzer-results.json"].includes(outputPath)
-                      ? "ultrafuzz/property-campaign@1"
-                      : outputPath === "campaign-summary.json"
-                        ? "ultrafuzz/json-object@1"
-                        : outputPath === "report.json"
-                          ? "ultrafuzz/report@1"
-                          : "ultrafuzz/nonempty-markdown@1";
-      return {
-        path: outputPath,
-        contract,
-        contract_digest: "a".repeat(64),
-        ...(artifactContractSchemaBinding(contract) ?? {}),
-        primary: index === 0
-      };
+                    ? "ultrafuzz/invariant-ledger@1"
+                    : outputPath.startsWith("properties/") && outputPath.endsWith(".json")
+                      ? "ultrafuzz/property-lens@2"
+                      : ["echidna-results.json", "medusa-results.json", "recon-fuzzer-results.json"].includes(
+                            outputPath
+                          )
+                        ? "ultrafuzz/property-campaign@2"
+                        : outputPath === "campaign-summary.json"
+                          ? "ultrafuzz/campaign-summary@2"
+                          : outputPath === "report.json"
+                            ? "ultrafuzz/report@2"
+                            : "ultrafuzz/nonempty-markdown@1";
+      return boundOutput(outputPath, contract, index === 0);
     }),
     prompt_id: "strategy-a",
     prompt_path: "strategies/strategy-a.md",
@@ -140,7 +252,7 @@ test("required artifact gate validates generated-test manifest shape and listed 
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({
-      schema_version: "1.0",
+      schema_version: "ultrafuzz.generated-tests.v2",
       run_id: "run-1",
       node_id: "strategy-a",
       test_files: [{ path: "generated-tests/Invariant.t.sol" }]
@@ -155,7 +267,7 @@ test("required artifact gate validates generated-test manifest shape and listed 
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({
-      schema_version: "1.0",
+      schema_version: "ultrafuzz.generated-tests.v2",
       run_id: "run-1",
       node_id: "strategy-a",
       generated_tests: [{ path: "generated-tests/Invariant.t.sol" }]
@@ -1186,7 +1298,7 @@ test("fanin gate checks scan probe containment against the discovery workspace",
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-1",
@@ -1286,7 +1398,7 @@ test("fanin gate requires every invariant ledger entry to map to a canonical pro
   writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", JSON.stringify(ledger));
   const catalog = (ledgerIds: string[]) =>
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-1",
@@ -1382,7 +1494,7 @@ test("property fan-in gate rejects Markdown that omits source-only canonical row
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-1",
@@ -1423,7 +1535,7 @@ test("property fan-in gate rejects Markdown that omits source-only canonical row
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-1",
@@ -1550,7 +1662,7 @@ test("property fan-in gate does not demand a ledger_ids field from a property th
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-from-lens-only",
@@ -1642,7 +1754,7 @@ test("property fan-in gate still requires the ledger_ids field when the property
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-from-ledger",
@@ -1685,7 +1797,7 @@ test("property fan-in gate still requires the ledger_ids field when the property
   );
 });
 
-test("property fan-in gate ignores optional ledger evidence when checking ledger ID parity", () => {
+test("property fan-in gate ignores optional Markdown ledger evidence when checking ledger ID parity", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-ledger-evidence" });
   writeArtifact(
     layout,
@@ -1718,7 +1830,7 @@ test("property fan-in gate ignores optional ledger evidence when checking ledger
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-supply",
@@ -1726,8 +1838,7 @@ test("property fan-in gate ignores optional ledger evidence when checking ledger
           category: "accounting",
           priority: "high",
           sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-supply" }],
-          ledger_ids: ["evidence-supply"],
-          ledger_evidence: [{ id: "evidence-supply", source_path: "docs/overview.md", source_location: "line 1" }]
+          ledger_ids: ["evidence-supply"]
         }
       ]
     })
@@ -1833,7 +1944,7 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-supply",
@@ -1852,7 +1963,7 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
     "property-specification-recon",
     "properties/recon.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
+      schema_version: "ultrafuzz.property-lens.v2",
       properties: [
         {
           id: "iSpoke_supply",
@@ -1875,7 +1986,7 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
     "reference-properties-recon",
     "references/expectations.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.reference-expectations.v1",
+      schema_version: "ultrafuzz.reference-expectations.v2",
       expectations: [{ id: "scfuzzbench:aave-v4:iSpoke_supply" }]
     })
   );
@@ -1915,7 +2026,7 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
     "property-specification-recon",
     "properties/recon.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
+      schema_version: "ultrafuzz.property-lens.v2",
       properties: [
         {
           id: "iSpoke_supply",
@@ -1934,14 +2045,14 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
   );
 });
 
-test("property lens gate strips unsupported external labels without weakening benchmark authority", () => {
+test("property lens gate accepts a bound pinned expectation catalog without rewriting the lens", () => {
   const expectationId = "scfuzzbench:aave-v4:iSpoke_supply";
-  const externalLabelId = "ERC4626-013";
-  const expectationCatalog = JSON.stringify({
-    schema_version: "ultrafuzz.reference-expectations.v1",
+  const catalog = JSON.stringify({
+    schema_version: "ultrafuzz.reference-expectations.v2",
     expectations: [{ id: expectationId }]
   });
-  const expectationDigest = createHash("sha256").update(expectationCatalog).digest("hex");
+  const catalogDigest = createHash("sha256").update(catalog).digest("hex");
+  const catalogOutput = boundOutput("references/expectations.json", "ultrafuzz/reference-expectations@2");
   const layout = createRunLayout({
     projectRoot: tempProject(),
     runId: "run-properties-reference-authority",
@@ -1949,166 +2060,73 @@ test("property lens gate strips unsupported external labels without weakening be
       {
         id: "reference-properties-recon",
         status: "succeeded",
-        outputs: [
-          {
-            path: "references/expectations.json",
-            contract: "ultrafuzz/reference-expectations@1",
-            contract_digest: "a".repeat(64),
-            primary: false
-          }
-        ],
+        outputs: [catalogOutput],
         provenance: {
           origin: "pinned-reference",
           reference_expectations: {
             source: "operator-supplied",
             path: "reference-expectations.json",
-            sha256: expectationDigest
+            sha256: catalogDigest
           }
         }
       }
     ]
   });
-  const base = plannedNode(["properties/recon.json"]);
   const node = {
-    ...base,
+    ...plannedNode(["properties/recon.json"]),
     id: "property-specification-recon",
     logical_id: "property-specification-recon",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+    depends_on: ["reference-properties-recon"]
   };
-  const nodeWithReferenceCatalog = {
-    ...node,
-    depends_on: ["base-test-setup", "reference-properties-recon"]
-  };
-  const writeLens = (referenceExpectations: string[]) => {
-    writeArtifact(
-      layout,
-      "property-specification-recon",
-      "properties/recon.json",
-      JSON.stringify({
-        schema_version: "ultrafuzz.property-lens.v1",
-        properties: [
-          {
-            id: "iSpoke_supply",
-            description: "Supply completes for valid state.",
-            category: "dos-liveness",
-            priority: "high",
-            reference_expectations: referenceExpectations
-          }
-        ]
-      })
-    );
-  };
-  const readLensReferenceExpectations = () =>
-    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
-      .properties[0].reference_expectations;
-
-  writeLens([externalLabelId]);
-  const externalOnly = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(externalOnly.ok, true, JSON.stringify(externalOnly.diagnostics));
-  assert.ok(
-    externalOnly.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
-    JSON.stringify(externalOnly.diagnostics)
-  );
-  assert.deepEqual(readLensReferenceExpectations(), undefined);
-
-  writeLens([expectationId, externalLabelId]);
-  const forgedBenchmarkMapping = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(forgedBenchmarkMapping.ok, false);
-  assert.ok(
-    forgedBenchmarkMapping.diagnostics.some(
-      (diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"
-    ),
-    JSON.stringify(forgedBenchmarkMapping.diagnostics)
-  );
-  assert.equal(
-    forgedBenchmarkMapping.diagnostics.some(
-      (diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"
-    ),
-    false,
-    JSON.stringify(forgedBenchmarkMapping.diagnostics)
-  );
-  assert.deepEqual(readLensReferenceExpectations(), [expectationId, externalLabelId]);
-
-  writeLens([expectationId, externalLabelId]);
-  writeArtifact(layout, "reference-properties-recon", "references/expectations.json", expectationCatalog);
-  const unmanifestedCatalog = verifyRequiredArtifactsForAttempt(
-    layout,
-    nodeWithReferenceCatalog,
-    nodeWithReferenceCatalog.id
-  );
-  assert.equal(unmanifestedCatalog.ok, false);
-  assert.ok(
-    unmanifestedCatalog.diagnostics.some(
-      (diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_MANIFEST_MISMATCH"
-    ),
-    JSON.stringify(unmanifestedCatalog.diagnostics)
-  );
-
-  writeLens([expectationId, externalLabelId]);
-  writeArtifact(layout, "reference-properties-recon", "references/expectations.json", expectationCatalog);
+  const lens = JSON.stringify({
+    schema_version: "ultrafuzz.property-lens.v2",
+    properties: [
+      {
+        id: "iSpoke_supply",
+        description: "Supply completes for valid state.",
+        category: "dos-liveness",
+        priority: "high",
+        reference_expectations: [expectationId]
+      }
+    ]
+  });
+  const lensPath = writeArtifact(layout, node.id, "properties/recon.json", lens);
+  writeArtifact(layout, "reference-properties-recon", "references/expectations.json", catalog);
   writeArtifactManifest({
     layout,
     nodeId: "reference-properties-recon",
-    outputs: [
-      {
-        path: "references/expectations.json",
-        contract: "ultrafuzz/reference-expectations@1",
-        contract_digest: "a".repeat(64),
-        primary: false
-      }
-    ],
+    outputs: [catalogOutput],
     provenance: { origin: "pinned-reference" }
   });
-  const authorized = verifyRequiredArtifactsForAttempt(layout, nodeWithReferenceCatalog, nodeWithReferenceCatalog.id);
-  assert.equal(authorized.ok, true, JSON.stringify(authorized.diagnostics));
-  assert.ok(
-    authorized.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
-    JSON.stringify(authorized.diagnostics)
-  );
-  assert.deepEqual(readLensReferenceExpectations(), [expectationId]);
+  const before = fs.readFileSync(lensPath);
 
-  writeLens([expectationId, externalLabelId]);
-  writeArtifact(
-    layout,
-    "reference-properties-recon",
-    "references/expectations.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.reference-expectations.v1",
-      expectations: [{ id: "benchmark:tampered" }]
-    })
-  );
-  const tampered = verifyRequiredArtifactsForAttempt(layout, nodeWithReferenceCatalog, nodeWithReferenceCatalog.id);
-  assert.equal(tampered.ok, false);
-  assert.ok(
-    tampered.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_TAMPERED"),
-    JSON.stringify(tampered.diagnostics)
-  );
-  assert.ok(
-    tampered.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
-    JSON.stringify(tampered.diagnostics)
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.deepEqual(fs.readFileSync(lensPath), before);
+  assert.equal(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED" ||
+        diagnostic.code === "ARTIFACT_VERIFICATION_DIGEST_REFRESHED"
+    ),
+    false
   );
 });
 
-// Issue #285(a). Aave run R44 supplied no catalogue — its config keys were `app_name,
-// benchmark_execution, braintrust, eval_reporting, ground_truth, image_name, models,
-// node_timeout_seconds, run_id, schema_version, target` — so `readLensSuppliedExpectationIds`
-// returned an empty id set with no diagnostic and the provenance gate authorized nothing while
-// looking active. That is every benchmark run, not an edge case, so it has to be said out loud.
-test("property lens gate reports that no reference expectation catalog was supplied", () => {
+test("property lens gate rejects expectations when no pinned catalog was supplied without rewriting bytes", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-no-catalog" });
-  const base = plannedNode(["properties/recon.json"]);
   const node = {
-    ...base,
+    ...plannedNode(["properties/recon.json"]),
     id: "property-specification-recon",
-    logical_id: "property-specification-recon",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+    logical_id: "property-specification-recon"
   };
-  writeArtifact(
+  const lensPath = writeArtifact(
     layout,
     node.id,
     "properties/recon.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
+      schema_version: "ultrafuzz.property-lens.v2",
       properties: [
         {
           id: "iSpoke_supply",
@@ -2120,153 +2138,139 @@ test("property lens gate reports that no reference expectation catalog was suppl
       ]
     })
   );
+  const before = fs.readFileSync(lensPath);
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  const absent = result.diagnostics.find(
-    (diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_CATALOG_ABSENT"
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_CATALOG_ABSENT")
   );
-  assert.ok(absent !== undefined, JSON.stringify(result.diagnostics));
-  // Reporting the inert gate must not by itself fail a node: the diagnostic describes the run's
-  // configuration, which no agent can fix from inside the lens.
-  assert.equal(absent.severity, "warning");
-  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"));
+  assert.deepEqual(fs.readFileSync(lensPath), before);
 });
 
-// Issue #285(b) staging. Once a catalogue IS supplied, escalating "cited but absent from it" to a
-// node failure is a behaviour change nobody has watched land, and getting it wrong costs an entire
-// reference lens (issues #283, #293). So it is opt-in, and the default stays the strip-and-warn
-// behaviour six existing tests already pin.
-test("supplied reference expectation catalog fails the lens only when enforcement is switched to fail", () => {
-  const expectationId = "supplied-expectation-01";
-  const citedElsewhereId = "LEND_ACC_01";
-  const expectationCatalog = JSON.stringify({
-    schema_version: "ultrafuzz.reference-expectations.v1",
-    expectations: [{ id: expectationId }]
+test("property lens gate rejects every unauthorized catalog spelling without conversion", () => {
+  const suppliedId = "supplied-expectation-01";
+  const unauthorizedIds = [
+    "testConvertToAssetsSharesDesirable",
+    "erc4626.maxDeposit",
+    "LEND_ACC_01",
+    "LEND-ACC-01",
+    "CRYTIC-ERC4626-05",
+    "benchmark:unexpected"
+  ];
+  const catalog = JSON.stringify({
+    schema_version: "ultrafuzz.reference-expectations.v2",
+    expectations: [{ id: suppliedId }]
   });
-  const expectationDigest = createHash("sha256").update(expectationCatalog).digest("hex");
-  const referenceStateNode = {
-    id: "reference-properties-recon",
-    status: "succeeded" as const,
-    outputs: [
-      {
-        path: "references/expectations.json",
-        contract: "ultrafuzz/reference-expectations@1" as const,
-        contract_digest: "a".repeat(64),
-        primary: false
-      }
-    ],
-    provenance: {
-      origin: "pinned-reference",
-      reference_expectations: {
-        source: "operator-supplied",
-        path: "reference-expectations.json",
-        sha256: expectationDigest
-      }
-    }
-  };
-  const lensJson = JSON.stringify({
-    schema_version: "ultrafuzz.property-lens.v1",
-    properties: [
-      {
-        id: "iSpoke_supply",
-        description: "Supply completes for valid state.",
-        category: "dos-liveness",
-        priority: "high",
-        reference_expectations: [expectationId, citedElsewhereId]
-      }
-    ]
-  });
-
-  const runGate = (resolvedConfigToml?: string) => {
-    const layout = createRunLayout({
-      projectRoot: tempProject(),
-      runId: "run-properties-enforcement",
-      stateNodes: [referenceStateNode],
-      ...(resolvedConfigToml === undefined ? {} : { resolvedConfigToml })
-    });
-    const base = plannedNode(["properties/recon.json"]);
-    const node = {
-      ...base,
-      id: "property-specification-recon",
-      logical_id: "property-specification-recon",
-      depends_on: ["reference-properties-recon"],
-      outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
-    };
-    writeArtifact(layout, node.id, "properties/recon.json", lensJson);
-    writeArtifact(layout, "reference-properties-recon", "references/expectations.json", expectationCatalog);
-    writeArtifactManifest({
-      layout,
-      nodeId: "reference-properties-recon",
-      outputs: referenceStateNode.outputs,
-      provenance: { origin: "pinned-reference" }
-    });
-    const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-    const lens = JSON.parse(
-      fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8")
-    );
-    return { result, referenceExpectations: lens.properties[0].reference_expectations };
-  };
-
-  const defaulted = runGate();
-  assert.equal(defaulted.result.ok, true, JSON.stringify(defaulted.result.diagnostics));
-  assert.ok(
-    defaulted.result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
-    JSON.stringify(defaulted.result.diagnostics)
-  );
-  assert.deepEqual(defaulted.referenceExpectations, [expectationId]);
-
-  const warned = runGate('[invariants]\nreference_expectation_enforcement = "warn"\n');
-  assert.equal(warned.result.ok, true, JSON.stringify(warned.result.diagnostics));
-  assert.deepEqual(warned.referenceExpectations, [expectationId]);
-
-  const failed = runGate('[invariants]\nreference_expectation_enforcement = "fail"\n');
-  assert.equal(failed.result.ok, false, JSON.stringify(failed.result.diagnostics));
-  assert.ok(
-    failed.result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
-    JSON.stringify(failed.result.diagnostics)
-  );
-  // The lens keeps the bytes the model wrote: that artifact is the evidence of what was cited.
-  assert.deepEqual(failed.referenceExpectations, [expectationId, citedElsewhereId]);
-});
-
-test("property lens gate rejects schema-invalid expectation catalogs even when digest-bound", () => {
-  const expectationId = "scfuzzbench:aave-v4:iSpoke_supply";
-  const malformedCatalog = JSON.stringify({
-    expectations: [{ id: expectationId }]
-  });
-  const malformedDigest = createHash("sha256").update(malformedCatalog).digest("hex");
+  const catalogDigest = createHash("sha256").update(catalog).digest("hex");
+  const catalogOutput = boundOutput("references/expectations.json", "ultrafuzz/reference-expectations@2");
   const layout = createRunLayout({
     projectRoot: tempProject(),
-    runId: "run-properties-reference-malformed-catalog",
+    runId: "run-properties-unauthorized",
     stateNodes: [
       {
         id: "reference-properties-recon",
         status: "succeeded",
-        outputs: [
-          {
-            path: "references/expectations.json",
-            contract: "ultrafuzz/reference-expectations@1",
-            contract_digest: "a".repeat(64),
-            primary: false
-          }
-        ],
+        outputs: [catalogOutput],
         provenance: {
           origin: "pinned-reference",
           reference_expectations: {
             source: "operator-supplied",
             path: "reference-expectations.json",
-            sha256: malformedDigest
+            sha256: catalogDigest
           }
         }
       }
     ]
   });
-  writeArtifact(
+  const node = {
+    ...plannedNode(["properties/recon.json"]),
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon",
+    depends_on: ["reference-properties-recon"]
+  };
+  const lensPath = writeArtifact(
     layout,
-    "property-specification-recon",
+    node.id,
     "properties/recon.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: [suppliedId, ...unauthorizedIds]
+        }
+      ]
+    })
+  );
+  writeArtifact(layout, "reference-properties-recon", "references/expectations.json", catalog);
+  writeArtifactManifest({
+    layout,
+    nodeId: "reference-properties-recon",
+    outputs: [catalogOutput],
+    provenance: { origin: "pinned-reference" }
+  });
+  const before = fs.readFileSync(lensPath);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.equal(
+    result.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED").length,
+    unauthorizedIds.length
+  );
+  assert.deepEqual(fs.readFileSync(lensPath), before);
+  assert.equal(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED" ||
+        diagnostic.code === "ARTIFACT_VERIFICATION_DIGEST_REFRESHED"
+    ),
+    false
+  );
+});
+
+test("property lens gate rejects a digest-bound schema-invalid expectation catalog", () => {
+  const expectationId = "scfuzzbench:aave-v4:iSpoke_supply";
+  const malformedCatalog = JSON.stringify({ expectations: [{ id: expectationId }] });
+  const catalogDigest = createHash("sha256").update(malformedCatalog).digest("hex");
+  const catalogOutput = boundOutput("references/expectations.json", "ultrafuzz/reference-expectations@2");
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-properties-malformed-catalog",
+    stateNodes: [
+      {
+        id: "reference-properties-recon",
+        status: "succeeded",
+        outputs: [catalogOutput],
+        provenance: {
+          origin: "pinned-reference",
+          reference_expectations: {
+            source: "operator-supplied",
+            path: "reference-expectations.json",
+            sha256: catalogDigest
+          }
+        }
+      }
+    ]
+  });
+  const node = {
+    ...plannedNode(["properties/recon.json"]),
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon",
+    depends_on: ["reference-properties-recon"]
+  };
+  const lensPath = writeArtifact(
+    layout,
+    node.id,
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
       properties: [
         {
           id: "iSpoke_supply",
@@ -2282,744 +2286,17 @@ test("property lens gate rejects schema-invalid expectation catalogs even when d
   writeArtifactManifest({
     layout,
     nodeId: "reference-properties-recon",
-    outputs: [
-      {
-        path: "references/expectations.json",
-        contract: "ultrafuzz/reference-expectations@1",
-        contract_digest: "a".repeat(64),
-        primary: false
-      }
-    ],
+    outputs: [catalogOutput],
     provenance: { origin: "pinned-reference" }
   });
-  const base = plannedNode(["properties/recon.json"]);
-  const node = {
-    ...base,
-    id: "property-specification-recon",
-    logical_id: "property-specification-recon",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const })),
-    depends_on: ["reference-properties-recon"]
-  };
-  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(result.ok, false);
-  assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_TAMPERED"),
-    JSON.stringify(result.diagnostics)
-  );
-});
-
-// R45's `property-specification-runtime-verification` died at 2026-08-06T18:28:20Z on five camelCase
-// test-function names copied from its own pinned reference (issue #293):
-//
-//   Property lens expectation "testConvertToAssetsSharesDesirable" is not present in a supplied
-//   pinned-reference catalog
-//
-// This is the THIRD identifier shape to hit the gate: `LEND-01` was stripped, `LEND_ACC_01` killed R44
-// (#283) until the shape test was widened, and a camelCase name is not a shape any widening should
-// chase. The distinction the gate actually cares about is already stated in its own comment: a
-// NAMESPACED identifier asserts external authority and must fail closed, an unnamespaced one is a
-// citation the model copied from a document and can be stripped.
-test("property lens authority sanitizer strips an unnamespaced camelCase expectation", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-camel" });
-  writeArtifact(
-    layout,
-    "recon-properties",
-    "properties/recon.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
-      properties: [
-        {
-          id: "iSpoke_supply",
-          description: "Supply completes for valid state.",
-          category: "dos-liveness",
-          priority: "high",
-          reference_expectations: ["testConvertToAssetsSharesDesirable", "testPreviewDepositZeroAmountReturnsZero"]
-        }
-      ]
-    })
-  );
-  const base = plannedNode(["properties/recon.json"]);
-  const node = {
-    ...base,
-    id: "recon-properties",
-    logical_id: "recon-properties",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
-  };
+  const before = fs.readFileSync(lensPath);
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
-  assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
-    JSON.stringify(result.diagnostics)
-  );
-  assert.equal(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
-    false,
-    JSON.stringify(result.diagnostics)
-  );
-  assert.equal(
-    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
-      .properties[0].reference_expectations,
-    undefined
-  );
-});
 
-// A colon is NOT the discriminator. Real catalogue identifiers are bare labels (`total-borrowed-v0`)
-// and `.ultrafuzz/references.yml` namespaces with dots, so keying on a colon would have made the
-// fail-closed half dead code. A dotted identifier is an ordinary citation and must strip.
-test("property lens authority sanitizer strips dotted and mixed-separator citations", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-dotted" });
-  writeArtifact(
-    layout,
-    "recon-properties",
-    "properties/recon.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
-      properties: [
-        {
-          id: "iSpoke_supply",
-          description: "Supply completes for valid state.",
-          category: "dos-liveness",
-          priority: "high",
-          reference_expectations: [
-            "properties.a16z-erc4626",
-            "RoundingProps.sol:88",
-            "total-borrowed-v0",
-            "4626-01",
-            "_internal"
-          ]
-        }
-      ]
-    })
-  );
-  const base = plannedNode(["properties/recon.json"]);
-  const node = {
-    ...base,
-    id: "recon-properties",
-    logical_id: "recon-properties",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
-  };
-
-  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
-  assert.equal(
-    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
-      .properties[0].reference_expectations,
-    undefined
-  );
-});
-
-// The strippable set is bounded positively, so an entry that no prompt would ever produce still fails
-// the node instead of vanishing. Without this bound, "anything without an authority prefix" would have
-// swallowed all four of these.
-test("property lens authority sanitizer fails closed on entries that are not plausible citations", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-implausible" });
-  const base = plannedNode(["properties/recon.json"]);
-  const node = {
-    ...base,
-    id: "recon-properties",
-    logical_id: "recon-properties",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
-  };
-
-  for (const implausible of [
-    "the vault must not lose funds, per the ERC4626 README",
-    "https://evil.example/expectations#1",
-    " ",
-    '{"id"="scfuzzbench=aave-v4=iSpoke_supply"}'
-  ]) {
-    writeArtifact(
-      layout,
-      "recon-properties",
-      "properties/recon.json",
-      JSON.stringify({
-        schema_version: "ultrafuzz.property-lens.v1",
-        properties: [
-          {
-            id: "iSpoke_supply",
-            description: "Supply completes for valid state.",
-            category: "dos-liveness",
-            priority: "high",
-            reference_expectations: [implausible]
-          }
-        ]
-      })
-    );
-    const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-    assert.equal(result.ok, false, `${implausible}: ${JSON.stringify(result.diagnostics)}`);
-    assert.ok(
-      result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
-      `${implausible}: ${JSON.stringify(result.diagnostics)}`
-    );
-  }
-});
-
-// The other half of the rule, kept explicit so a future widening cannot quietly relax it: an
-// identifier claiming a reserved authority namespace is a benchmark-mapping claim and must still fail
-// the node, mixed in with strippable citations so the all-or-nothing guard is exercised too. Case and
-// separator variants are included because a prefix allowlist is only as good as its normalisation.
-test("property lens authority sanitizer still fails closed on a reserved authority namespace", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-namespaced" });
-  writeArtifact(
-    layout,
-    "recon-properties",
-    "properties/recon.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
-      properties: [
-        {
-          id: "iSpoke_supply",
-          description: "Supply completes for valid state.",
-          category: "dos-liveness",
-          priority: "high",
-          reference_expectations: ["testConvertToAssetsSharesDesirable", "ScFuzzBench:aave-v4:iSpoke_supply"]
-        }
-      ]
-    })
-  );
-  const base = plannedNode(["properties/recon.json"]);
-  const node = {
-    ...base,
-    id: "recon-properties",
-    logical_id: "recon-properties",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
-  };
-
-  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
-  assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
-    JSON.stringify(result.diagnostics)
-  );
-  // The forged claim must survive byte-for-byte so the failure is diagnosable.
-  assert.deepEqual(
-    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
-      .properties[0].reference_expectations,
-    ["testConvertToAssetsSharesDesirable", "ScFuzzBench:aave-v4:iSpoke_supply"]
-  );
-
-  // Every entry here matches COPIED_REFERENCE_CITATION, so each one is pinning the authority check
-  // itself rather than the implausibility bound. `Benchmark_unexpected` is the normalisation canary:
-  // drop `.toLowerCase()` and only this case fails.
-  for (const forged of [
-    "benchmark.unexpected",
-    "benchmark_unexpected",
-    "benchmark-unexpected",
-    "Benchmark_unexpected",
-    "scfuzzbench_aave_v4_iSpoke_supply",
-    "scfuzz-bench.total-borrowed-v0",
-    "ground_truth.total-borrowed-v0",
-    "ground.truth.total-borrowed-v0",
-    "groundtruth.total-borrowed-v0"
-  ]) {
-    writeArtifact(
-      layout,
-      "recon-properties",
-      "properties/recon.json",
-      JSON.stringify({
-        schema_version: "ultrafuzz.property-lens.v1",
-        properties: [
-          {
-            id: "iSpoke_supply",
-            description: "Supply completes for valid state.",
-            category: "dos-liveness",
-            priority: "high",
-            reference_expectations: [forged]
-          }
-        ]
-      })
-    );
-    const variant = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-    assert.equal(variant.ok, false, `${forged}: ${JSON.stringify(variant.diagnostics)}`);
-    assert.ok(
-      variant.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
-      `${forged}: ${JSON.stringify(variant.diagnostics)}`
-    );
-  }
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_TAMPERED"));
+  assert.deepEqual(fs.readFileSync(lensPath), before);
 });
-
-test("property lens authority sanitizer applies to custom logical lens IDs", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-custom-lens" });
-  writeArtifact(
-    layout,
-    "recon-properties",
-    "properties/recon.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
-      properties: [
-        {
-          id: "iSpoke_supply",
-          description: "Supply completes for valid state.",
-          category: "dos-liveness",
-          priority: "high",
-          reference_expectations: ["ERC4626-999"]
-        }
-      ]
-    })
-  );
-  const base = plannedNode(["properties/recon.json"]);
-  const node = {
-    ...base,
-    id: "recon-properties",
-    logical_id: "recon-properties",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
-  };
-  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
-  assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
-    JSON.stringify(result.diagnostics)
-  );
-  assert.deepEqual(
-    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
-      .properties[0].reference_expectations,
-    undefined
-  );
-
-  writeArtifact(
-    layout,
-    "recon-properties",
-    "properties/recon.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
-      properties: [
-        {
-          id: "iSpoke_supply",
-          description: "Supply completes for valid state.",
-          category: "dos-liveness",
-          priority: "high",
-          reference_expectations: ["benchmark:unexpected"]
-        }
-      ]
-    })
-  );
-  const benchmarkShaped = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(benchmarkShaped.ok, false);
-  assert.ok(
-    benchmarkShaped.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
-    JSON.stringify(benchmarkShaped.diagnostics)
-  );
-});
-
-// R43 (issue #275) was stranded permanently by this exact sequence: the workflow verifier
-// published `properties/<lens>.json` and sealed its digest in a verification marker, then this
-// runtime gate rewrote the artifact to strip unauthorized reference expectations and left the
-// marker describing the old bytes. Every dependent's `assertVerifiedDependency` then failed
-// forever, and because the failure lands on a `prepare:` wrapper rather than a node there was no
-// failed node for --retry-failed to reset.
-test("property lens authority sanitizer keeps the verification marker digest consistent", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-marker" });
-  const lens = JSON.stringify({
-    schema_version: "ultrafuzz.property-lens.v1",
-    properties: [
-      {
-        id: "iSpoke_supply",
-        description: "Supply completes for valid state.",
-        category: "dos-liveness",
-        priority: "high",
-        reference_expectations: ["ERC4626-999"]
-      }
-    ]
-  });
-  writeArtifact(layout, "recon-properties", "properties/recon.json", lens);
-  const base = plannedNode(["properties/recon.json"]);
-  const node = {
-    ...base,
-    id: "recon-properties",
-    logical_id: "recon-properties",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
-  };
-  const artifactPath = path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json");
-
-  // The verifier has already sealed the pre-sanitization bytes.
-  const sealed = createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex");
-  const markerDir = path.join(layout.root, ".ultrafuzz-verification");
-  fs.mkdirSync(markerDir, { recursive: true });
-  const markerPath = path.join(markerDir, `${node.id}.json`);
-  fs.writeFileSync(
-    markerPath,
-    `${JSON.stringify({
-      schema_version: "ultrafuzz.artifact-verification.v2",
-      attempt_id: node.id,
-      node_id: node.id,
-      artifacts: [
-        {
-          path: "properties/recon.json",
-          contract: "ultrafuzz/property-lens@1",
-          contract_digest: "a".repeat(64),
-          sha256: sealed,
-          primary: true
-        },
-        {
-          path: "findings.json",
-          contract: "ultrafuzz/findings@1",
-          contract_digest: "b".repeat(64),
-          sha256: "0".repeat(64),
-          primary: false
-        }
-      ],
-      publications: [
-        { path: "properties/recon.json", sha256: sealed },
-        { path: "findings.json", sha256: "0".repeat(64) }
-      ]
-    })}\n`,
-    "utf8"
-  );
-
-  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
-  assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
-    JSON.stringify(result.diagnostics)
-  );
-  assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_VERIFICATION_DIGEST_REFRESHED"),
-    JSON.stringify(result.diagnostics)
-  );
-
-  const sanitizedSha = createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex");
-  assert.notEqual(sanitizedSha, sealed, "sanitizer did not actually rewrite the artifact");
-  const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as {
-    artifacts: Array<{
-      path: string;
-      sha256: string;
-      primary?: boolean;
-      contract?: string;
-      contract_digest?: string;
-    }>;
-    publications: Array<{ path: string; sha256: string }>;
-  };
-  // The rewritten path now matches disk in both sets, and nothing else was touched.
-  for (const entries of [marker.artifacts, marker.publications]) {
-    const lensEntry = entries.find((entry) => entry.path === "properties/recon.json");
-    assert.equal(lensEntry?.sha256, sanitizedSha);
-    const untouched = entries.find((entry) => entry.path === "findings.json");
-    assert.equal(untouched?.sha256, "0".repeat(64));
-  }
-  const lensArtifact = marker.artifacts.find((entry) => entry.path === "properties/recon.json");
-  assert.equal(lensArtifact?.primary, true);
-  // Only the digest changes: the contract identity a dependent re-checks must survive untouched.
-  assert.equal(lensArtifact?.contract, "ultrafuzz/property-lens@1");
-  assert.equal(lensArtifact?.contract_digest, "a".repeat(64));
-  const refreshed = result.diagnostics.find(
-    (diagnostic) => diagnostic.code === "ARTIFACT_VERIFICATION_DIGEST_REFRESHED"
-  );
-  assert.deepEqual((refreshed?.details as { previous_sha256?: string[] } | undefined)?.previous_sha256, [sealed]);
-
-  // Idempotent: a second pass removes nothing, so it must not rewrite or re-report anything.
-  const second = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
-  assert.equal(
-    second.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_VERIFICATION_DIGEST_REFRESHED"),
-    false,
-    JSON.stringify(second.diagnostics)
-  );
-  assert.equal(createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex"), sanitizedSha);
-});
-
-// A marker can end up describing stale bytes without this gate having rewritten anything - the
-// verifier may have sealed the lens while an earlier pass was mid-rewrite. Re-sealing an
-// unexplained change would be indistinguishable from laundering it past verification, so the gate
-// reports an error instead. That turns an invisible `prepare:` strand into a retryable failed node.
-test("property lens authority gate reports a marker digest that drifted from disk", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-drift" });
-  writeArtifact(
-    layout,
-    "recon-properties",
-    "properties/recon.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
-      properties: [
-        {
-          id: "iSpoke_supply",
-          description: "Supply completes for valid state.",
-          category: "dos-liveness",
-          priority: "high"
-        }
-      ]
-    })
-  );
-  const base = plannedNode(["properties/recon.json"]);
-  const node = {
-    ...base,
-    id: "recon-properties",
-    logical_id: "recon-properties",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
-  };
-  const markerDir = path.join(layout.root, ".ultrafuzz-verification");
-  fs.mkdirSync(markerDir, { recursive: true });
-  const markerPath = path.join(markerDir, `${node.id}.json`);
-  const stale = `${JSON.stringify({
-    schema_version: "ultrafuzz.artifact-verification.v2",
-    attempt_id: node.id,
-    node_id: node.id,
-    artifacts: [{ path: "properties/recon.json", sha256: "0".repeat(64), primary: true }],
-    publications: [{ path: "properties/recon.json", sha256: "0".repeat(64) }]
-  })}\n`;
-  fs.writeFileSync(markerPath, stale, "utf8");
-
-  // There is nothing to sanitize, so the gate takes the no-write path.
-  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
-    false
-  );
-  const drifted = result.diagnostics.find((diagnostic) => diagnostic.code === "ARTIFACT_VERIFICATION_DIGEST_DRIFTED");
-  assert.ok(drifted, JSON.stringify(result.diagnostics));
-  assert.equal(drifted?.severity, "error");
-  assert.equal(result.ok, false);
-  // Neither side is touched: the drift is reported, not papered over.
-  assert.equal(fs.readFileSync(markerPath, "utf8"), stale);
-});
-
-test("property lens authority gate accepts a marker digest that matches disk", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-match" });
-  const lens = JSON.stringify({
-    schema_version: "ultrafuzz.property-lens.v1",
-    properties: [
-      {
-        id: "iSpoke_supply",
-        description: "Supply completes for valid state.",
-        category: "dos-liveness",
-        priority: "high"
-      }
-    ]
-  });
-  writeArtifact(layout, "recon-properties", "properties/recon.json", lens);
-  const base = plannedNode(["properties/recon.json"]);
-  const node = {
-    ...base,
-    id: "recon-properties",
-    logical_id: "recon-properties",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
-  };
-  const artifactPath = path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json");
-  const sha = createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex");
-  const markerDir = path.join(layout.root, ".ultrafuzz-verification");
-  fs.mkdirSync(markerDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(markerDir, `${node.id}.json`),
-    `${JSON.stringify({
-      schema_version: "ultrafuzz.artifact-verification.v2",
-      attempt_id: node.id,
-      node_id: node.id,
-      artifacts: [{ path: "properties/recon.json", sha256: sha, primary: true }],
-      publications: [{ path: "properties/recon.json", sha256: sha }]
-    })}\n`,
-    "utf8"
-  );
-
-  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
-  assert.equal(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_VERIFICATION_DIGEST_DRIFTED"),
-    false,
-    JSON.stringify(result.diagnostics)
-  );
-});
-
-// R44's `property-specification-0kn0t` node was killed by `LEND_ACC_01` (issue #283). The matcher
-// only allowed a hyphen before the digits, so an underscore-separated catalog ID was not recognized as
-// an unsupported external label, survived sanitization, and was then reported as an unauthorized
-// expectation — failing the node. `LEND-01` was stripped in the same position, so the outcome turned
-// on punctuation rather than on anything meaningful.
-// Review pointed out the first version of this fix was a point fix for a class bug: only `_` was
-// widened, so hyphen-segmented labels like `CRYTIC-ERC4626-05` still killed the node, and the
-// per-property all-or-nothing check meant one unrecognised sibling poisoned every ID beside it.
-test("property lens authority sanitizer strips multi-segment catalog labels per identifier", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-multisegment" });
-  writeArtifact(
-    layout,
-    "recon-properties",
-    "properties/recon.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
-      properties: [
-        {
-          id: "iSpoke_supply",
-          description: "Supply completes for valid state.",
-          category: "dos-liveness",
-          priority: "high",
-          reference_expectations: ["LEND_ACC_01", "LEND-ACC-01", "CRYTIC-ERC4626-05", "ERC4626-999"]
-        }
-      ]
-    })
-  );
-  const base = plannedNode(["properties/recon.json"]);
-  const node = {
-    ...base,
-    id: "recon-properties",
-    logical_id: "recon-properties",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
-  };
-
-  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
-  const sanitized = result.diagnostics.find(
-    (diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"
-  );
-  assert.ok(sanitized, JSON.stringify(result.diagnostics));
-  // The audit trail is the only record an operator gets of what was dropped.
-  assert.deepEqual(
-    (
-      (sanitized?.details as { removed_reference_expectations?: string[] } | undefined)
-        ?.removed_reference_expectations ?? []
-    )
-      .slice()
-      .sort(),
-    ["CRYTIC-ERC4626-05", "ERC4626-999", "LEND-ACC-01", "LEND_ACC_01"]
-  );
-  assert.equal(
-    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
-      .properties[0].reference_expectations,
-    undefined
-  );
-});
-
-// A lens that mixes a recognisable catalogue label with a forged namespaced citation is left
-// byte-unchanged on purpose: the artifact as the model wrote it is the evidence the authority check
-// exists to surface, so sanitizing around the forgery would destroy it. This pins that the widened
-// label matcher did NOT weaken that rule — reviewing suggested stripping per identifier, which would
-// have silently rewritten a forged mapping.
-test("property lens authority sanitizer leaves a forged namespaced citation untouched", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-mixed" });
-  const written = ["LEND_ACC_01", "benchmark:unexpected"];
-  writeArtifact(
-    layout,
-    "recon-properties",
-    "properties/recon.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
-      properties: [
-        {
-          id: "iSpoke_supply",
-          description: "Supply completes for valid state.",
-          category: "dos-liveness",
-          priority: "high",
-          reference_expectations: written
-        }
-      ]
-    })
-  );
-  const base = plannedNode(["properties/recon.json"]);
-  const node = {
-    ...base,
-    id: "recon-properties",
-    logical_id: "recon-properties",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
-  };
-
-  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(result.ok, false);
-  assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
-    JSON.stringify(result.diagnostics)
-  );
-  assert.equal(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
-    false,
-    JSON.stringify(result.diagnostics)
-  );
-  assert.deepEqual(
-    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
-      .properties[0].reference_expectations,
-    written
-  );
-});
-
-test("property lens authority sanitizer strips underscore-separated catalog labels", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-underscore" });
-  writeArtifact(
-    layout,
-    "recon-properties",
-    "properties/recon.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
-      properties: [
-        {
-          id: "iSpoke_supply",
-          description: "Supply completes for valid state.",
-          category: "dos-liveness",
-          priority: "high",
-          reference_expectations: ["LEND_ACC_01", "LEND_ACC_02", "ERC4626-999"]
-        }
-      ]
-    })
-  );
-  const base = plannedNode(["properties/recon.json"]);
-  const node = {
-    ...base,
-    id: "recon-properties",
-    logical_id: "recon-properties",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
-  };
-
-  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
-  assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
-    JSON.stringify(result.diagnostics)
-  );
-  // The node must not fail: an unauthorized citation is stripped, not treated as a fatal artifact.
-  assert.equal(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
-    false,
-    JSON.stringify(result.diagnostics)
-  );
-  assert.equal(
-    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
-      .properties[0].reference_expectations,
-    undefined
-  );
-});
-
-test("property lens authority sanitizer does not mutate non-lens JSON outputs", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-non-lens-json" });
-  writeArtifact(
-    layout,
-    "recon-properties",
-    "properties/recon.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
-      properties: [
-        {
-          id: "iSpoke_supply",
-          description: "Supply completes for valid state.",
-          category: "dos-liveness",
-          priority: "high",
-          reference_expectations: ["ERC4626-013"]
-        }
-      ]
-    })
-  );
-  const base = plannedNode(["properties/recon.json"]);
-  const node = {
-    ...base,
-    id: "recon-properties",
-    logical_id: "recon-properties",
-    outputs: [
-      {
-        path: "properties/recon.json",
-        contract: "ultrafuzz/nonempty-markdown@1" as const,
-        contract_digest: "a".repeat(64),
-        primary: true
-      }
-    ]
-  };
-  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
-  assert.equal(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_SANITIZED"),
-    false,
-    JSON.stringify(result.diagnostics)
-  );
-  assert.deepEqual(
-    JSON.parse(fs.readFileSync(path.join(getNodeArtifactDir(layout, node.id), "properties", "recon.json"), "utf8"))
-      .properties[0].reference_expectations,
-    ["ERC4626-013"]
-  );
-});
-
 test("ordinary pinned references without expectation catalogs do not require catalog provenance", () => {
   const layout = createRunLayout({
     projectRoot: tempProject(),
@@ -3045,7 +2322,7 @@ test("ordinary pinned references without expectation catalogs do not require cat
     "property-specification-recon",
     "properties/recon.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
+      schema_version: "ultrafuzz.property-lens.v2",
       properties: [
         {
           id: "supply",
@@ -3061,7 +2338,7 @@ test("ordinary pinned references without expectation catalogs do not require cat
     ...base,
     id: "property-specification-recon",
     logical_id: "property-specification-recon",
-    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const })),
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@2" as const })),
     depends_on: ["reference-properties-example"]
   };
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
@@ -3108,7 +2385,7 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
     "property-specification-recon-0",
     "properties/recon.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
+      schema_version: "ultrafuzz.property-lens.v2",
       properties: [
         {
           id: "iSpoke_supply",
@@ -3125,7 +2402,7 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
     "property-specification-recon-1",
     "properties/recon.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v1",
+      schema_version: "ultrafuzz.property-lens.v2",
       properties: [
         {
           id: "iSpoke_supply",
@@ -3142,7 +2419,7 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-supply",
@@ -3184,7 +2461,7 @@ test("property implementation gate rejects an unknown canonical property referen
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-1",
@@ -3201,7 +2478,8 @@ test("property implementation gate rejects an unknown canonical property referen
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-unknown"] },
       properties: [
         {
           property_id: "property-unknown",
@@ -3238,7 +2516,7 @@ test("property implementation gate enforces declared selection coverage and acti
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-high",
@@ -3263,7 +2541,7 @@ test("property implementation gate enforces declared selection coverage and acti
     nodeId,
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
       selection: {
         priority_threshold: "high",
         priorities: ["high"],
@@ -3285,7 +2563,7 @@ test("property implementation gate enforces declared selection coverage and acti
     logical_id: nodeId,
     outputs: plannedNode(["implemented-properties.json"]).outputs.map((output) => ({
       ...output,
-      contract: "ultrafuzz/implemented-properties@2" as const
+      contract: "ultrafuzz/implemented-properties@3" as const
     }))
   };
 
@@ -3294,7 +2572,7 @@ test("property implementation gate enforces declared selection coverage and acti
     nodeId,
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
       properties: [
         {
           property_id: "property-high",
@@ -3307,16 +2585,14 @@ test("property implementation gate enforces declared selection coverage and acti
   );
   const missingSelection = verifyRequiredArtifactsForAttempt(layout, node, nodeId);
   assert.equal(missingSelection.ok, false);
-  assert.ok(
-    missingSelection.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_IMPLEMENTATION_SELECTION_MISSING")
-  );
+  assert.ok(missingSelection.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"));
 
   writeArtifact(
     layout,
     nodeId,
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
       selection: {
         priority_threshold: "high",
         priorities: ["high"],
@@ -3335,16 +2611,14 @@ test("property implementation gate enforces declared selection coverage and acti
 
   const missingBlocker = verifyRequiredArtifactsForAttempt(layout, node, nodeId);
   assert.equal(missingBlocker.ok, false);
-  assert.ok(
-    missingBlocker.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_IMPLEMENTATION_BLOCKER_MISSING")
-  );
+  assert.ok(missingBlocker.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"));
 
   writeArtifact(
     layout,
     nodeId,
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
       selection: {
         priority_threshold: "high",
         priorities: ["high"],
@@ -3373,7 +2647,7 @@ test("property implementation gate enforces declared selection coverage and acti
     nodeId,
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
       selection: {
         priority_threshold: "medium",
         priorities: ["high", "medium"],
@@ -3418,7 +2692,7 @@ test("property implementation gate enforces declared selection coverage and acti
     nodeId,
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
       selection: {
         priority_threshold: "high",
         priorities: ["high"],
@@ -3452,7 +2726,7 @@ test("property implementation gate includes lower-priority benchmark expectation
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-high",
@@ -3483,7 +2757,7 @@ test("property implementation gate includes lower-priority benchmark expectation
     nodeId,
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
       selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-high"] },
       properties: [
         {
@@ -3500,7 +2774,7 @@ test("property implementation gate includes lower-priority benchmark expectation
     ...baseNode,
     id: nodeId,
     logical_id: nodeId,
-    outputs: baseNode.outputs.map((output) => ({ ...output, contract: "ultrafuzz/implemented-properties@2" as const }))
+    outputs: baseNode.outputs.map((output) => ({ ...output, contract: "ultrafuzz/implemented-properties@3" as const }))
   };
   const result = verifyRequiredArtifactsForAttempt(layout, node, nodeId);
   assert.equal(result.ok, false);
@@ -3519,7 +2793,7 @@ test("property implementation gate includes lower-priority benchmark expectation
     nodeId,
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
       selection: {
         priority_threshold: "high",
         priorities: ["high"],
@@ -3553,7 +2827,7 @@ test("property implementation gate includes lower-priority benchmark expectation
     nodeId,
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
       selection: {
         priority_threshold: "high",
         priorities: ["high"],
@@ -3586,7 +2860,7 @@ test("property implementation gate rejects an unknown finding property reference
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-1",
@@ -3604,7 +2878,8 @@ test("property implementation gate rejects an unknown finding property reference
     nodeId,
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
       properties: [
         {
           property_id: "property-1",
@@ -3619,18 +2894,7 @@ test("property implementation gate rejects an unknown finding property reference
     layout,
     nodeId,
     "findings.json",
-    JSON.stringify([
-      {
-        schema_version: "1.0",
-        id: "finding-property",
-        title: "Property failure",
-        status: "reproduced",
-        severity_guess: "medium",
-        confidence: "high",
-        summary: "The property failed.",
-        property_ids: ["property-unknown"]
-      }
-    ])
+    JSON.stringify([currentFinding("finding-property", { property_ids: ["property-unknown"] })])
   );
   const node = {
     ...plannedNode(["implemented-properties.json", "findings.json"]),
@@ -3654,7 +2918,7 @@ test("campaign gate accepts non-property findings and validates property-derived
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-1",
@@ -3671,7 +2935,8 @@ test("campaign gate accepts non-property findings and validates property-derived
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
       properties: [
         {
           property_id: "property-1",
@@ -3688,7 +2953,7 @@ test("campaign gate accepts non-property findings and validates property-derived
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
     })
@@ -3698,25 +2963,13 @@ test("campaign gate accepts non-property findings and validates property-derived
     campaignId,
     "findings.json",
     JSON.stringify([
-      {
-        schema_version: "1.0",
-        id: "failure-1",
-        title: "Property failure",
-        status: "reproduced",
-        severity_guess: "medium",
-        confidence: "high",
-        summary: "The property failed.",
-        property_ids: ["property-1"]
-      },
-      {
-        schema_version: "1.0",
-        id: "finding-setup",
+      accountedCampaignFinding("failure-1", ["property-1"], ["failure-1"]),
+      currentFinding("finding-setup", {
         title: "Harness setup issue",
         status: "needs-review",
-        severity_guess: "low",
-        confidence: "high",
+        severity_guess: "Low",
         summary: "The harness setup is incomplete."
-      }
+      })
     ])
   );
   const node = {
@@ -3731,17 +2984,7 @@ test("campaign gate accepts non-property findings and validates property-derived
     layout,
     campaignId,
     "findings.json",
-    JSON.stringify([
-      {
-        schema_version: "1.0",
-        id: "failure-1",
-        title: "Property failure",
-        status: "reproduced",
-        severity_guess: "medium",
-        confidence: "high",
-        summary: "The property failed."
-      }
-    ])
+    JSON.stringify([accountedCampaignFinding("failure-1", [], ["failure-1"])])
   );
   const dropped = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(dropped.ok, false);
@@ -3752,7 +2995,8 @@ test("campaign gate accepts non-property findings and validates property-derived
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
+      fuzzer_backend: "recon",
       failures: [{ id: "failure-2", status: "reproduced", property_ids: ["property-unknown"] }]
     })
   );
@@ -3761,16 +3005,11 @@ test("campaign gate accepts non-property findings and validates property-derived
     campaignId,
     "findings.json",
     JSON.stringify([
-      {
-        schema_version: "1.0",
-        id: "failure-2",
+      accountedCampaignFinding("failure-2", ["property-unknown"], ["failure-2"]),
+      currentFinding("unknown-property-context", {
         title: "Unknown property failure",
-        status: "reproduced",
-        severity_guess: "medium",
-        confidence: "high",
-        summary: "The unknown property failed.",
-        property_ids: ["property-unknown"]
-      }
+        summary: "The unknown property failed."
+      })
     ])
   );
   const unknown = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
@@ -3785,7 +3024,7 @@ test("campaign gate accepts a partial dual-backend campaign where one backend sa
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-1",
@@ -3802,7 +3041,8 @@ test("campaign gate accepts a partial dual-backend campaign where one backend sa
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
       properties: [
         {
           property_id: "property-1",
@@ -3822,7 +3062,7 @@ test("campaign gate accepts a partial dual-backend campaign where one backend sa
     campaignId,
     "echidna-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "echidna",
       failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
     })
@@ -3832,7 +3072,7 @@ test("campaign gate accepts a partial dual-backend campaign where one backend sa
     campaignId,
     "medusa-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "medusa",
       failures: []
     })
@@ -3841,18 +3081,7 @@ test("campaign gate accepts a partial dual-backend campaign where one backend sa
     layout,
     campaignId,
     "findings.json",
-    JSON.stringify([
-      {
-        schema_version: "1.0",
-        id: "failure-1",
-        title: "Property failure",
-        status: "reproduced",
-        severity_guess: "medium",
-        confidence: "high",
-        summary: "The property failed.",
-        property_ids: ["property-1"]
-      }
-    ])
+    JSON.stringify([accountedCampaignFinding("failure-1", ["property-1"], ["failure-1"], 1, ["echidna"])])
   );
   const node = {
     ...plannedNode(["echidna-results.json", "medusa-results.json", "findings.json"]),
@@ -3870,20 +3099,23 @@ test("campaign gate accepts a partial dual-backend campaign where one backend sa
     "findings.json",
     JSON.stringify([
       {
-        schema_version: "1.0",
-        id: "failure-unknown",
+        ...accountedCampaignFinding(
+          "failure-unknown",
+          ["property-1"],
+          [{ fuzzer_backend: "echidna", failure_id: "failure-unknown" }],
+          1,
+          ["echidna"]
+        ),
         title: "Unexplained failure",
-        status: "reproduced",
-        severity_guess: "medium",
-        confidence: "high",
-        summary: "No campaign record explains this.",
-        property_ids: ["property-1"]
+        summary: "No campaign record explains this."
       }
     ])
   );
   const dangling = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(dangling.ok, false);
-  assert.ok(dangling.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_REFERENCE_MISSING"));
+  assert.ok(
+    dangling.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_REFERENCE_UNKNOWN")
+  );
 });
 
 test("campaign gate still applies to project-owned split recon campaign nodes", () => {
@@ -3893,7 +3125,7 @@ test("campaign gate still applies to project-owned split recon campaign nodes", 
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-1",
@@ -3910,7 +3142,8 @@ test("campaign gate still applies to project-owned split recon campaign nodes", 
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
       properties: [
         {
           property_id: "property-1",
@@ -3927,7 +3160,7 @@ test("campaign gate still applies to project-owned split recon campaign nodes", 
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-unknown"] }]
     })
@@ -3936,18 +3169,7 @@ test("campaign gate still applies to project-owned split recon campaign nodes", 
     layout,
     campaignId,
     "findings.json",
-    JSON.stringify([
-      {
-        schema_version: "1.0",
-        id: "failure-1",
-        title: "Property failure",
-        status: "reproduced",
-        severity_guess: "medium",
-        confidence: "high",
-        summary: "The property failed.",
-        property_ids: ["property-unknown"]
-      }
-    ])
+    JSON.stringify([currentFinding("failure-1", { property_ids: ["property-unknown"] })])
   );
   const node = {
     ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
@@ -3961,14 +3183,18 @@ test("campaign gate still applies to project-owned split recon campaign nodes", 
 });
 
 test("final report gate joins the default recon-only campaign backend", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-recon-report" });
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-recon-report",
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
+  });
   const node = { ...plannedNode(["report.json"]), id: "final-report", logical_id: "final-report" };
   writeArtifact(
     layout,
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-1",
@@ -3985,7 +3211,8 @@ test("final report gate joins the default recon-only campaign backend", () => {
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
       properties: [
         {
           property_id: "property-1",
@@ -4003,32 +3230,38 @@ test("final report gate joins the default recon-only campaign backend", () => {
     "stateful-invariant-campaign",
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [{ id: "finding-property", status: "reproduced", property_ids: ["property-1"] }]
     })
   );
   writeArtifact(
     layout,
+    "stateful-invariant-campaign",
+    "findings.json",
+    JSON.stringify([accountedCampaignFinding("finding-property", ["property-1"], ["finding-property"])])
+  );
+  writeArtifact(
+    layout,
     node.id,
     "report.json",
-    JSON.stringify({
-      schema_version: "1.0",
-      run_metadata: {},
-      issues: [],
-      non_production_outcomes: [],
-      property_provenance: [
-        {
-          finding_id: "finding-property",
-          title: "Property failure",
-          property_ids: ["property-1"],
-          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
-          implementation_paths: ["test/recon/Properties.sol"],
-          test_paths: ["test/foundry/Property1.t.sol"],
-          fuzzer_backend: "recon"
-        }
-      ]
-    })
+    JSON.stringify(
+      currentReport(layout.runId, {
+        non_production_outcomes: [currentNonProductionOutcome("finding-property", "finding-property")],
+        property_provenance: [
+          {
+            finding_id: "finding-property",
+            title: "Property failure",
+            property_ids: ["property-1"],
+            sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
+            implementation_paths: ["test/recon/Properties.sol"],
+            test_paths: ["test/foundry/Property1.t.sol"],
+            fuzzer_backend: "recon"
+          }
+        ],
+        property_implementation_coverage: currentImplementedCoverage(["property-1"])
+      })
+    )
   );
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
@@ -4039,38 +3272,42 @@ test("final report gate joins the default recon-only campaign backend", () => {
     layout,
     node.id,
     "report.json",
-    JSON.stringify({
-      schema_version: "1.0",
-      run_metadata: {},
-      issues: [],
-      non_production_outcomes: [],
-      property_provenance: [
-        {
-          finding_id: "finding-property",
-          title: "Property failure",
-          property_ids: ["property-1"],
-          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
-          implementation_paths: ["test/recon/Properties.sol"],
-          test_paths: ["test/foundry/Property1.t.sol"],
-          fuzzer_backends: ["recon", "medusa"]
-        }
-      ]
-    })
+    JSON.stringify(
+      currentReport(layout.runId, {
+        non_production_outcomes: [currentNonProductionOutcome("finding-property", "finding-property")],
+        property_provenance: [
+          {
+            finding_id: "finding-property",
+            title: "Property failure",
+            property_ids: ["property-1"],
+            sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
+            implementation_paths: ["test/recon/Properties.sol"],
+            test_paths: ["test/foundry/Property1.t.sol"],
+            fuzzer_backends: ["recon", "medusa"]
+          }
+        ],
+        property_implementation_coverage: currentImplementedCoverage(["property-1"])
+      })
+    )
   );
   const mismatch = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(mismatch.ok, false);
   assert.ok(mismatch.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_FUZZER_BACKEND_MISMATCH"));
 });
 
-test("final report gate joins renumbered findings through their source finding id", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-renumbered-report" });
+test("final report gate rejects backend provenance borrowed from an unrelated canonical finding", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-renumbered-report",
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
+  });
   const node = { ...plannedNode(["report.json"]), id: "final-report", logical_id: "final-report" };
   writeArtifact(
     layout,
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-1",
@@ -4087,7 +3324,8 @@ test("final report gate joins renumbered findings through their source finding i
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
       properties: [
         {
           property_id: "property-1",
@@ -4107,80 +3345,61 @@ test("final report gate joins renumbered findings through their source finding i
       "stateful-invariant-campaign",
       artifactName,
       JSON.stringify({
-        schema_version: "ultrafuzz.property-campaign.v1",
+        schema_version: "ultrafuzz.property-campaign.v2",
         fuzzer_backend: backend,
         failures: [{ id: failureId, status: "reproduced", property_ids: ["property-1"] }]
       })
     );
   }
+  writeArtifact(
+    layout,
+    "stateful-invariant-campaign",
+    "findings.json",
+    JSON.stringify([
+      accountedCampaignFinding("failure-1", ["property-1"], ["failure-1"], 1, ["recon"]),
+      accountedCampaignFinding("failure-2", ["property-1"], ["failure-2"], 1, ["medusa"])
+    ])
+  );
 
-  const report = (sourceFindingId: string, fuzzerBackends: string[]) =>
-    JSON.stringify({
-      schema_version: "1.0",
-      run_metadata: {},
-      issues: [],
-      non_production_outcomes: [
-        {
-          id: "NP-01",
-          finding_id: "failure-1",
-          lifecycle: {
-            source_artifacts: [
-              {
-                node_id: "stateful-invariant-campaign",
-                finding_id: "failure-1",
-                relationship: "primary"
-              }
-            ]
+  const report = (fuzzerBackends: string[]) =>
+    JSON.stringify(
+      currentReport(layout.runId, {
+        non_production_outcomes: [currentNonProductionOutcome("failure-1", "failure-1")],
+        property_provenance: [
+          {
+            finding_id: "failure-1",
+            title: "Canonical non-production outcome",
+            property_ids: ["property-1"],
+            sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-1" }],
+            implementation_paths: ["tests/recon/Properties.sol"],
+            test_paths: ["tests/recon/CryticToFoundry.sol"],
+            fuzzer_backends: fuzzerBackends
           }
-        },
-        {
-          id: "NP-02",
-          finding_id: "failure-2",
-          lifecycle: {
-            source_artifacts: [
-              {
-                node_id: "stateful-invariant-campaign",
-                finding_id: "failure-2",
-                relationship: "primary"
-              }
-            ]
-          }
-        }
-      ],
-      property_provenance: [
-        {
-          finding_id: "NP-01",
-          source_finding_id: sourceFindingId,
-          title: "Renumbered non-production outcome",
-          property_ids: ["property-1"],
-          sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-1" }],
-          implementation_paths: ["tests/recon/Properties.sol"],
-          test_paths: ["tests/recon/CryticToFoundry.sol"],
-          fuzzer_backends: fuzzerBackends
-        }
-      ]
-    });
+        ],
+        property_implementation_coverage: currentImplementedCoverage(["property-1"])
+      })
+    );
 
-  writeArtifact(layout, node.id, "report.json", report("failure-1", ["recon"]));
+  writeArtifact(layout, node.id, "report.json", report(["recon"]));
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
 
-  // NP-02 owns failure-2. NP-01 cannot borrow that unrelated finding's Medusa
-  // provenance merely by placing its ID in source_finding_id.
-  writeArtifact(layout, node.id, "report.json", report("failure-2", ["medusa"]));
+  // A backend recorded for another canonical finding cannot be borrowed merely
+  // because it appears elsewhere in the same campaign.
+  writeArtifact(layout, node.id, "report.json", report(["medusa"]));
   const mismatch = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(mismatch.ok, false);
   assert.ok(mismatch.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_FUZZER_BACKEND_MISMATCH"));
 });
 
-test("final report gate rejects dangling property references while allowing historical provenance", () => {
-  const historicalLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-historical-report" });
+test("final report gate rejects legacy report shapes without rewriting them and validates current provenance", () => {
+  const legacyLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-legacy-report" });
   const node = {
     ...plannedNode(["report.json"]),
     id: "final-report",
     logical_id: "final-report"
   };
-  writeArtifact(
-    historicalLayout,
+  const legacyPath = writeArtifact(
+    legacyLayout,
     node.id,
     "report.json",
     JSON.stringify({
@@ -4191,30 +3410,27 @@ test("final report gate rejects dangling property references while allowing hist
       property_provenance: "unavailable"
     })
   );
-  assert.equal(verifyRequiredArtifactsForAttempt(historicalLayout, node, node.id).ok, true);
+  const legacyBytes = fs.readFileSync(legacyPath);
+  const legacy = verifyRequiredArtifactsForAttempt(legacyLayout, node, node.id);
+  assert.equal(legacy.ok, false);
+  assert.ok(legacy.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"));
+  assert.deepEqual(fs.readFileSync(legacyPath), legacyBytes);
 
   const smokeLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-smoke-report" });
-  writeArtifact(
-    smokeLayout,
-    node.id,
-    "report.json",
-    JSON.stringify({
-      schema_version: "1.0",
-      run_metadata: {},
-      issues: [],
-      non_production_outcomes: [],
-      property_provenance: []
-    })
-  );
+  writeArtifact(smokeLayout, node.id, "report.json", JSON.stringify(currentReport(smokeLayout.runId)));
   assert.equal(verifyRequiredArtifactsForAttempt(smokeLayout, node, node.id).ok, true);
 
-  const currentLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-current-report" });
+  const currentLayout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-current-report",
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
+  });
   writeArtifact(
     currentLayout,
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-1",
@@ -4234,7 +3450,8 @@ test("final report gate rejects dangling property references while allowing hist
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
       properties: [
         {
           property_id: "property-1",
@@ -4250,7 +3467,7 @@ test("final report gate rejects dangling property references while allowing hist
     "stateful-invariant-campaign",
     "echidna-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "echidna",
       failures: [{ id: "finding-property", status: "reproduced", property_ids: ["property-1"] }]
     })
@@ -4260,7 +3477,7 @@ test("final report gate rejects dangling property references while allowing hist
     "stateful-invariant-campaign",
     "medusa-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "medusa",
       failures: [{ id: "medusa-property", status: "reproduced", property_ids: ["property-1"] }]
     })
@@ -4269,7 +3486,18 @@ test("final report gate rejects dangling property references while allowing hist
     currentLayout,
     "stateful-invariant-campaign",
     "findings.json",
-    JSON.stringify([{ ...campaignFinding("finding-property", ["property-1"]), fuzzer_backends: ["echidna", "medusa"] }])
+    JSON.stringify([
+      accountedCampaignFinding(
+        "finding-property",
+        ["property-1"],
+        [
+          { fuzzer_backend: "echidna", failure_id: "finding-property" },
+          { fuzzer_backend: "medusa", failure_id: "medusa-property" }
+        ],
+        2,
+        ["echidna", "medusa"]
+      )
+    ])
   );
   const campaignNode = {
     ...plannedNode(["echidna-results.json", "medusa-results.json", "findings.json"]),
@@ -4285,22 +3513,21 @@ test("final report gate rejects dangling property references while allowing hist
     currentLayout,
     node.id,
     "report.json",
-    JSON.stringify({
-      schema_version: "1.0",
-      run_metadata: {},
-      issues: [],
-      non_production_outcomes: [],
-      property_provenance: [
-        {
-          finding_id: "finding-property",
-          title: "Property failure",
-          property_ids: ["property-unknown"],
-          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
-          implementation_paths: [],
-          test_paths: []
-        }
-      ]
-    })
+    JSON.stringify(
+      currentReport(currentLayout.runId, {
+        property_provenance: [
+          {
+            finding_id: "finding-property",
+            title: "Property failure",
+            property_ids: ["property-unknown"],
+            sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
+            implementation_paths: [],
+            test_paths: []
+          }
+        ],
+        property_implementation_coverage: currentImplementedCoverage(["property-1"])
+      })
+    )
   );
   const dangling = verifyRequiredArtifactsForAttempt(currentLayout, node, node.id);
   assert.equal(dangling.ok, false);
@@ -4314,23 +3541,22 @@ test("final report gate rejects dangling property references while allowing hist
     currentLayout,
     node.id,
     "report.json",
-    JSON.stringify({
-      schema_version: "1.0",
-      run_metadata: {},
-      issues: [],
-      non_production_outcomes: [],
-      property_provenance: [
-        {
-          finding_id: "finding-property",
-          title: "Property failure",
-          property_ids: ["property-1"],
-          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
-          implementation_paths: ["test/recon/Properties.sol"],
-          test_paths: ["test/foundry/Property1.t.sol"],
-          fuzzer_backends: ["echidna", "medusa"]
-        }
-      ]
-    })
+    JSON.stringify(
+      currentReport(currentLayout.runId, {
+        property_provenance: [
+          {
+            finding_id: "finding-property",
+            title: "Property failure",
+            property_ids: ["property-1"],
+            sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
+            implementation_paths: ["test/recon/Properties.sol"],
+            test_paths: ["test/foundry/Property1.t.sol"],
+            fuzzer_backends: ["echidna", "medusa"]
+          }
+        ],
+        property_implementation_coverage: currentImplementedCoverage(["property-1"])
+      })
+    )
   );
   const incompleteJoin = verifyRequiredArtifactsForAttempt(currentLayout, node, node.id);
   assert.equal(incompleteJoin.ok, false);
@@ -4340,26 +3566,25 @@ test("final report gate rejects dangling property references while allowing hist
     currentLayout,
     node.id,
     "report.json",
-    JSON.stringify({
-      schema_version: "1.0",
-      run_metadata: {},
-      issues: [],
-      non_production_outcomes: [],
-      property_provenance: [
-        {
-          finding_id: "finding-property",
-          title: "Property failure",
-          property_ids: ["property-1"],
-          sources: [
-            { source_node_id: "property-specification-certora", source_property_id: "certora-1" },
-            { source_node_id: "property-specification-crytic", source_property_id: "crytic-2" }
-          ],
-          implementation_paths: ["test/recon/Properties.sol"],
-          test_paths: ["test/foundry/Property1.t.sol"],
-          fuzzer_backends: ["echidna", "medusa"]
-        }
-      ]
-    })
+    JSON.stringify(
+      currentReport(currentLayout.runId, {
+        property_provenance: [
+          {
+            finding_id: "finding-property",
+            title: "Property failure",
+            property_ids: ["property-1"],
+            sources: [
+              { source_node_id: "property-specification-certora", source_property_id: "certora-1" },
+              { source_node_id: "property-specification-crytic", source_property_id: "crytic-2" }
+            ],
+            implementation_paths: ["test/recon/Properties.sol"],
+            test_paths: ["test/foundry/Property1.t.sol"],
+            fuzzer_backends: ["echidna", "medusa"]
+          }
+        ],
+        property_implementation_coverage: currentImplementedCoverage(["property-1"])
+      })
+    )
   );
   assert.equal(verifyRequiredArtifactsForAttempt(currentLayout, node, node.id).ok, true);
 });
@@ -4380,7 +3605,7 @@ test("current final reports preserve implementation coverage in JSON and Markdow
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-high",
@@ -4397,7 +3622,7 @@ test("current final reports preserve implementation coverage in JSON and Markdow
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
       selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-high"] },
       properties: [
         {
@@ -4410,12 +3635,7 @@ test("current final reports preserve implementation coverage in JSON and Markdow
     })
   );
   const reportPath = "report.json";
-  const baseReport = {
-    schema_version: "1.0",
-    run_metadata: {},
-    issues: [],
-    non_production_outcomes: []
-  };
+  const baseReport = currentReport(layout.runId);
   writeArtifact(layout, node.id, reportPath, JSON.stringify(baseReport));
   writeArtifact(layout, node.id, "report.md", "# Ultrafuzz report\n\nNo coverage section yet.\n");
 
@@ -4464,7 +3684,7 @@ test("current final reports preserve implementation coverage in JSON and Markdow
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
       selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-high"] },
       properties: [
         {
@@ -4575,7 +3795,7 @@ test("dependency gates reject reused descendants after an ancestor manifest chan
   const state = createInitialRunState({
     runId: "run-reuse",
     graphFingerprint: "graph",
-    configFingerprint: "config",
+    configFingerprint: "c".repeat(64),
     nodes: [
       { id: "ancestor", status: "succeeded" },
       { id: "reused", status: "reused-from-prior-run" },
@@ -4604,7 +3824,7 @@ function campaignPropertyCatalog(layout: ReturnType<typeof createRunLayout>, pro
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: propertyIds.map((propertyId) => ({
         id: propertyId,
         description: `Invariant ${propertyId}`,
@@ -4619,7 +3839,8 @@ function campaignPropertyCatalog(layout: ReturnType<typeof createRunLayout>, pro
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: propertyIds },
       properties: propertyIds.map((propertyId) => ({
         property_id: propertyId,
         status: "implemented",
@@ -4631,15 +3852,9 @@ function campaignPropertyCatalog(layout: ReturnType<typeof createRunLayout>, pro
 }
 
 function campaignFinding(id: string, propertyIds: string[]): Record<string, unknown> {
-  const finding: Record<string, unknown> = {
-    schema_version: "1.0",
-    id,
-    title: propertyIds.length > 0 ? `Violation of ${propertyIds.join(", ")}` : "Harness observation",
-    status: "reproduced",
-    severity_guess: "medium",
-    confidence: "high",
-    summary: "The property failed."
-  };
+  const finding = currentFinding(id, {
+    title: propertyIds.length > 0 ? `Violation of ${propertyIds.join(", ")}` : "Harness observation"
+  });
   // A finding with no property provenance omits the key entirely; an empty
   // array is not how the campaign nodes express "no properties".
   if (propertyIds.length > 0) {
@@ -4671,7 +3886,7 @@ function currentCampaignNode(paths: string[]): PlannedGraphNode {
     ...node,
     outputs: node.outputs.map((output) =>
       output.path === "campaign-summary.json"
-        ? { ...output, contract: "ultrafuzz/campaign-summary@1" as const }
+        ? { ...output, contract: "ultrafuzz/campaign-summary@2" as const }
         : output
     )
   };
@@ -4688,7 +3903,13 @@ function writeCampaignSummary(
     campaignId,
     "campaign-summary.json",
     JSON.stringify({
+      schema_version: "ultrafuzz.campaign-summary.v2",
       outcome: "partial",
+      implemented_property_suite_refs: ["implemented-properties.json"],
+      campaign_plan_ref: "campaign-plan.json",
+      backend_results: [{ fuzzer_backend: "recon", status: "partial", result_ref: "recon-fuzzer-results.json" }],
+      finding_refs: [],
+      reproducer_refs: [],
       failure_counts: {
         pre_deduplication: preDeduplication,
         post_deduplication: postDeduplication
@@ -4706,7 +3927,7 @@ test("campaign gate accepts many counterexamples of one property deduplicated in
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [1, 2, 3].map((index) => ({
         id: `failure-${index}`,
@@ -4715,7 +3936,12 @@ test("campaign gate accepts many counterexamples of one property deduplicated in
       }))
     })
   );
-  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-1", ["property-1"])]));
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([accountedCampaignFinding("failure-1", ["property-1"], ["failure-1", "failure-2", "failure-3"])])
+  );
   const node = {
     ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
     id: campaignId,
@@ -4745,7 +3971,7 @@ test("current campaign gate accepts the exact R55 partition: 29 counterexamples,
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures
     })
@@ -4782,7 +4008,7 @@ test("current campaign gate accepts the exact R55 partition: 29 counterexamples,
   assert.equal(result.ok, true);
 });
 
-test("current campaign gate requires partition metadata while historical plans retain the coverage fallback", () => {
+test("current campaign gate requires partition metadata and accepts an explicit complete partition", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partition-required" });
   campaignPropertyCatalog(layout, ["property-1"]);
   const campaignId = "stateful-invariant-campaign";
@@ -4791,7 +4017,7 @@ test("current campaign gate requires partition metadata while historical plans r
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [
         { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
@@ -4802,19 +4028,12 @@ test("current campaign gate requires partition metadata while historical plans r
   writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-1", ["property-1"])]));
   writeCampaignSummary(layout, campaignId, 2, 1);
 
-  const historicalNode = {
-    ...plannedNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
-    id: campaignId,
-    logical_id: campaignId
-  };
-  assert.equal(verifyRequiredArtifactsForAttempt(layout, historicalNode, campaignId).ok, true);
-
-  const currentNode = {
+  const node = {
     ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
     id: campaignId,
     logical_id: campaignId
   };
-  const current = verifyRequiredArtifactsForAttempt(layout, currentNode, campaignId);
+  const current = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(current.ok, false);
   assert.ok(current.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_REQUIRED"));
   assert.equal(
@@ -4827,14 +4046,10 @@ test("current campaign gate requires partition metadata while historical plans r
       .every((diagnostic) => diagnostic.severity === "error")
   );
 
-  const volunteeredHistoricalPartition = accountedCampaignFinding(
-    "failure-1",
-    ["property-1"],
-    ["failure-1", "failure-2"]
-  );
-  delete volunteeredHistoricalPartition.fuzzer_backend;
-  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([volunteeredHistoricalPartition]));
-  assert.equal(verifyRequiredArtifactsForAttempt(layout, historicalNode, campaignId).ok, true);
+  const completePartition = accountedCampaignFinding("failure-1", ["property-1"], ["failure-1", "failure-2"]);
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([completePartition]));
+  const complete = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(complete.ok, true, JSON.stringify(complete.diagnostics));
 });
 
 test("campaign partition rejects unknown contributions and per-finding count mismatches", () => {
@@ -4846,7 +4061,7 @@ test("campaign partition rejects unknown contributions and per-finding count mis
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
     })
@@ -4887,7 +4102,7 @@ test("campaign partition rejects duplicate claims and property subset mismatches
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [
         { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
@@ -4928,7 +4143,7 @@ test("campaign partition requires each finding ID to represent one of its contri
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [
         { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
@@ -4970,7 +4185,7 @@ test("campaign partition requires a finding's properties to equal its contributi
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [
         { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
@@ -5013,7 +4228,7 @@ test("campaign partition binds finding backend provenance to its exact contribut
       campaignId,
       `${backend}-results.json`,
       JSON.stringify({
-        schema_version: "ultrafuzz.property-campaign.v1",
+        schema_version: "ultrafuzz.property-campaign.v2",
         fuzzer_backend: backend,
         failures: [{ id: `failure-${backend}`, status: "reproduced", property_ids: ["property-1"] }]
       })
@@ -5053,7 +4268,7 @@ test("campaign partition requires qualified references for colliding cross-backe
       campaignId,
       `${backend}-results.json`,
       JSON.stringify({
-        schema_version: "ultrafuzz.property-campaign.v1",
+        schema_version: "ultrafuzz.property-campaign.v2",
         fuzzer_backend: backend,
         failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
       })
@@ -5109,7 +4324,7 @@ test("campaign gate conditionally reconciles the R55 summary failure counts with
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures
     })
@@ -5118,31 +4333,29 @@ test("campaign gate conditionally reconciles the R55 summary failure counts with
     layout,
     campaignId,
     "findings.json",
-    JSON.stringify([campaignFinding("failure-1", ["property-1"]), campaignFinding("failure-25", ["property-3"])])
+    JSON.stringify([
+      accountedCampaignFinding(
+        "failure-1",
+        ["property-1"],
+        failures.filter((failure) => failure.property_ids[0] === "property-1").map((failure) => failure.id)
+      ),
+      accountedCampaignFinding(
+        "failure-25",
+        ["property-3"],
+        failures.filter((failure) => failure.property_ids[0] === "property-3").map((failure) => failure.id)
+      )
+    ])
   );
-  writeArtifact(
-    layout,
-    campaignId,
-    "campaign-summary.json",
-    JSON.stringify({
-      outcome: "partial",
-      failure_counts: { pre_deduplication: 29, post_deduplication: 2, blocked_unreproduced: 0 }
-    })
-  );
+  writeCampaignSummary(layout, campaignId, 29, 2);
   const node = {
-    ...plannedNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
+    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
     id: campaignId,
     logical_id: campaignId
   };
 
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, campaignId).ok, true);
 
-  writeArtifact(
-    layout,
-    campaignId,
-    "campaign-summary.json",
-    JSON.stringify({ failure_counts: { pre_deduplication: 0, post_deduplication: 0 } })
-  );
+  writeCampaignSummary(layout, campaignId, 0, 0);
   const mismatched = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(mismatched.ok, false);
   assert.deepEqual(
@@ -5152,20 +4365,33 @@ test("campaign gate conditionally reconciles the R55 summary failure counts with
     ["pre_deduplication", "post_deduplication"]
   );
 
-  // The node still declares json-object@1, so old summaries that predate the
-  // named block remain readable. Once failure_counts is present, both named
-  // integer fields are gated.
-  writeArtifact(layout, campaignId, "campaign-summary.json", JSON.stringify({ outcome: "partial" }));
-  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, campaignId).ok, true);
-  writeArtifact(
+  const legacyPath = writeArtifact(layout, campaignId, "campaign-summary.json", JSON.stringify({ outcome: "partial" }));
+  const legacyBytes = fs.readFileSync(legacyPath);
+  const legacy = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(legacy.ok, false);
+  assert.ok(legacy.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"));
+  assert.deepEqual(fs.readFileSync(legacyPath), legacyBytes);
+
+  const incompletePath = writeArtifact(
     layout,
     campaignId,
     "campaign-summary.json",
-    JSON.stringify({ failure_counts: { pre_deduplication: 29 } })
+    JSON.stringify({
+      schema_version: "ultrafuzz.campaign-summary.v2",
+      outcome: "partial",
+      implemented_property_suite_refs: ["implemented-properties.json"],
+      campaign_plan_ref: "campaign-plan.json",
+      backend_results: [{ fuzzer_backend: "recon", status: "partial", result_ref: "recon-fuzzer-results.json" }],
+      finding_refs: [],
+      reproducer_refs: [],
+      failure_counts: { pre_deduplication: 29 }
+    })
   );
+  const incompleteBytes = fs.readFileSync(incompletePath);
   const incomplete = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(incomplete.ok, false);
-  assert.ok(incomplete.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_SUMMARY_FAILURE_COUNT_INVALID"));
+  assert.ok(incomplete.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"));
+  assert.deepEqual(fs.readFileSync(incompletePath), incompleteBytes);
 });
 
 test("campaign gate still rejects a property-derived failure no finding covers", () => {
@@ -5177,7 +4403,7 @@ test("campaign gate still rejects a property-derived failure no finding covers",
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [
         { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
@@ -5208,7 +4434,7 @@ test("campaign gate does not let an unrelated finding cover a campaign failure",
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
     })
@@ -5239,7 +4465,7 @@ test("campaign gate names only the genuinely uncovered property of a partially c
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [
         { id: "failure-1", status: "reproduced", property_ids: ["property-1", "property-2"] },
@@ -5273,7 +4499,7 @@ test("campaign gate keeps flagging ambiguous and mismatched same-ID findings", (
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [
         { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
@@ -5321,7 +4547,7 @@ test("campaign gate rejects a failure whose property combination no single findi
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [
         { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
@@ -5358,7 +4584,7 @@ test("campaign gate accepts a deduplicated finding that unions the properties of
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [
         { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
@@ -5373,7 +4599,7 @@ test("campaign gate accepts a deduplicated finding that unions the properties of
     layout,
     campaignId,
     "findings.json",
-    JSON.stringify([campaignFinding("failure-1", ["property-1", "property-3"])])
+    JSON.stringify([accountedCampaignFinding("failure-1", ["property-1", "property-3"], ["failure-1", "failure-2"])])
   );
   const node = {
     ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
@@ -5398,7 +4624,7 @@ test("campaign gate rejects a finding that claims a property no failure ever rep
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
     })
@@ -5438,7 +4664,7 @@ test("campaign gate rejects a property claim anchored to a failure that reported
     campaignId,
     "recon-fuzzer-results.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
+      schema_version: "ultrafuzz.property-campaign.v2",
       fuzzer_backend: "recon",
       failures: [{ id: "failure-1", status: "reproduced" }]
     })
@@ -5505,7 +4731,7 @@ test("the coverage examples in final-report.md satisfy the coverage gate", () =>
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-1",
@@ -5530,7 +4756,7 @@ test("the coverage examples in final-report.md satisfy the coverage gate", () =>
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
       selection: {
         priority_threshold: "medium",
         priorities: ["high", "medium"],
@@ -5562,13 +4788,11 @@ test("the coverage examples in final-report.md satisfy the coverage gate", () =>
     layout,
     node.id,
     "report.json",
-    JSON.stringify({
-      schema_version: "1.0",
-      run_metadata: {},
-      issues: [],
-      non_production_outcomes: [],
-      property_implementation_coverage: coverageJson
-    })
+    JSON.stringify(
+      currentReport(layout.runId, {
+        property_implementation_coverage: coverageJson
+      })
+    )
   );
   writeArtifact(
     layout,
@@ -5598,7 +4822,7 @@ test("coverage Markdown accepts a blocker summary escaped or as written, but not
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-1",
@@ -5615,7 +4839,7 @@ test("coverage Markdown accepts a blocker summary escaped or as written, but not
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: "ultrafuzz.implemented-properties.v3",
       selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
       properties: [
         {
@@ -5636,24 +4860,22 @@ test("coverage Markdown accepts a blocker summary escaped or as written, but not
     layout,
     node.id,
     "report.json",
-    JSON.stringify({
-      schema_version: "1.0",
-      run_metadata: {},
-      issues: [],
-      non_production_outcomes: [],
-      property_implementation_coverage: {
-        priority_threshold: "high",
-        priorities: ["high"],
-        selected_property_ids: ["property-1"],
-        implemented_property_ids: [],
-        blocked_property_ids: [],
-        pending_property_ids: [],
-        deferred_property_ids: ["property-1"],
-        reference_expected_property_ids: [],
-        reference_expectation_ids: [],
-        blocker_summaries: [`property-1: ${summary}`]
-      }
-    })
+    JSON.stringify(
+      currentReport(layout.runId, {
+        property_implementation_coverage: {
+          priority_threshold: "high",
+          priorities: ["high"],
+          selected_property_ids: ["property-1"],
+          implemented_property_ids: [],
+          blocked_property_ids: [],
+          pending_property_ids: [],
+          deferred_property_ids: ["property-1"],
+          reference_expected_property_ids: [],
+          reference_expectation_ids: [],
+          blocker_summaries: [`property-1: ${summary}`]
+        }
+      })
+    )
   );
   const counts =
     "- Priority threshold: `high`\n- Included priorities: `high`\n- Selected properties: `1`\n" +
@@ -5729,7 +4951,7 @@ test("properties Markdown parity accepts a description that ends with a pipe", (
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
+      schema_version: "ultrafuzz.properties.v2",
       properties: [
         {
           id: "property-277",

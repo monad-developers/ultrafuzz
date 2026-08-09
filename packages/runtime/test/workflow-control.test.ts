@@ -269,7 +269,7 @@ function initialState(
   return createInitialRunState({
     runId: "synthetic-run",
     graphFingerprint: "synthetic-graph",
-    configFingerprint: "synthetic-config",
+    configFingerprint: "c".repeat(64),
     createdAt: new Date(BASE_MS).toISOString(),
     controllerLeaseSeconds,
     workflowDeadlineSeconds,
@@ -284,9 +284,9 @@ function tasksFor(graph: PlannedGraph): WorkflowControlTask[] {
 
 function syntheticGraph(nodes: PlannedGraphNode[]): PlannedGraph {
   return {
-    schema_version: "2.0",
-    graph_version: "synthetic",
-    topology_version: 1,
+    schema_version: "ultrafuzz.planned-graph.v3",
+    graph_version: "3",
+    topology_version: 2,
     groups: {},
     nodes
   };
@@ -303,7 +303,7 @@ function node(id: string, dependsOn: string[] = []): PlannedGraphNode {
     outputs: [],
     prompt_id: id,
     prompt_path: `${id}.md`,
-    loop: { index: 0, count: 1, mode: "single", attempt_index: 0 },
+    loop: { index: 0, count: 1, mode: "series", attempt_index: 0 },
     model_fanout: []
   };
 }
