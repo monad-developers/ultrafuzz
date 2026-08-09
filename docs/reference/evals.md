@@ -64,6 +64,77 @@ names/hashes, while payloads stay on disk unless the suite explicitly opts
 into `mode: upload`. Before an allowlisted payload is sent, its manifest and
 path containment, regular-file status, size, and SHA-256 digest are checked.
 
+### Suite contract and workflow input
+
+The current suite version is exactly `ultrafuzz.eval.v2`, validated against
+`urn:ultrafuzz:schema:evals:suite:2`. JSON Schema is canonical. The retained
+Zod parser is strict and non-transforming, and a shared acceptance corpus keeps
+it aligned with the JSON Schema. Defaults are applied only after both shape
+validators accept the operator-authored document.
+
+All eval-owned objects are closed. In particular, model profiles contain only
+`agent`, optional `model`, optional `reasoning`, and optional
+`timeout_seconds`; variants contain only `id`, optional `topology`, optional
+`workflow_input`, and optional runner/judge profile overrides; `metrics`
+contains only `recall_threshold`. Historical no-op fields such as model
+`config`, variant `prompts` or `model_profiles`, root `prompt_overlays`, and
+`metrics.primary`/`metrics.secondary` are rejected. `ground_truth_root` is
+machine-specific TOML/CLI configuration and is not a suite-YAML field.
+
+Ordinary operator-defined `workflow_input` remains an intentional extension
+seam. It must be a JSON object with nonempty, non-whitespace keys; its values
+may be nested JSON objects, arrays, strings, numbers, booleans, or null. It may
+not use the eval-owned reserved keys `benchmark_execution`, `benchmark_lane`,
+`excluded_strategy_families`, `target_frameworks`, or `ultrafuzz_eval`.
+Scalars and arrays at the `workflow_input` root are rejected instead of being
+silently discarded.
+
+Benchmark variants use one of three exact shapes. Private benchmark controls
+contain only the execution budget:
+
+```yaml
+workflow_input:
+  benchmark_execution:
+    strategy_loops: 2
+    excluded_node_ids: [optional-analysis]
+```
+
+The public full lane contains all fields below and permits neither excluded
+families nor excluded nodes:
+
+```yaml
+workflow_input:
+  benchmark_lane: full
+  target_frameworks: { target-a: foundry }
+  excluded_strategy_families: []
+  benchmark_execution:
+    strategy_loops: 1
+    excluded_node_ids: []
+```
+
+The public smoke lane fixes the workflow profile, all three excluded strategy
+families, and all four selected strategies:
+
+```yaml
+workflow_input:
+  benchmark_lane: smoke
+  target_frameworks: { target-a: foundry }
+  excluded_strategy_families: [stateful-invariant, differential, dynamic-strategy]
+  benchmark_execution:
+    workflow_profile: smoke-benchmark-v1
+    selected_strategy_ids:
+      - time-warp-sequences
+      - external-dependency-boundaries
+      - externalized-state-accounting
+      - lifecycle-view-boundaries
+    strategy_loops: 1
+    excluded_node_ids: []
+```
+
+Missing fields, extra fields, duplicate array entries, wrong lane constants,
+reserved operator keys, and historical version literals fail validation. There
+is no alias conversion, compatibility fallback, or repair pass.
+
 ### Recovery equivalence
 
 Each suite may declare how much model work a recovered row may repeat:

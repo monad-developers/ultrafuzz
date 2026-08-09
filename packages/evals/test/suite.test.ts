@@ -3,9 +3,17 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_EVAL_JUDGE_PANEL, loadEvalSuite, planEvalSuite, resolveJudgePanelConfig } from "../src/suite.js";
+import { EVAL_SUITE_SCHEMA_ID, validateEvalJsonSchema } from "../src/eval-schema-registry.js";
+import {
+  DEFAULT_EVAL_JUDGE_PANEL,
+  evalSuiteInputSchema,
+  loadEvalSuite,
+  planEvalSuite,
+  resolveJudgePanelConfig
+} from "../src/suite.js";
 import { EvalError } from "../src/utils.js";
 
 const SUITE_YAML = `
@@ -65,6 +73,41 @@ function setup(): { projectRoot: string; groundTruthRoot: string; suitePath: str
   const suitePath = path.join(projectRoot, ".ultrafuzz", "evals", "bug-finding.yml");
   fs.writeFileSync(suitePath, SUITE_YAML, "utf8");
   return { projectRoot, groundTruthRoot, suitePath };
+}
+
+type SuiteDocument = Record<string, unknown>;
+
+function suiteDocument(): SuiteDocument {
+  return objectValue(parse(SUITE_YAML));
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("expected object fixture");
+  }
+  return value as Record<string, unknown>;
+}
+
+function objectField(value: Record<string, unknown>, key: string): Record<string, unknown> {
+  return objectValue(value[key]);
+}
+
+function firstObjectField(value: Record<string, unknown>, key: string): Record<string, unknown> {
+  const items = value[key];
+  if (!Array.isArray(items) || items.length === 0) throw new Error(`expected nonempty ${key} fixture array`);
+  return objectValue(items[0]);
+}
+
+function withWorkflowInput(workflowInput: unknown): SuiteDocument {
+  const document = suiteDocument();
+  document.variants = [{ id: "baseline", workflow_input: workflowInput }];
+  return document;
+}
+
+function expectSchemaParity(document: unknown, expected: boolean): void {
+  const jsonSchemaValid = validateEvalJsonSchema(EVAL_SUITE_SCHEMA_ID, document).ok;
+  const zodValid = evalSuiteInputSchema.safeParse(document).success;
+  expect({ jsonSchemaValid, zodValid }).toEqual({ jsonSchemaValid: expected, zodValid: expected });
 }
 
 describe("eval suite loading and planning", () => {
@@ -235,5 +278,149 @@ describe("eval suite loading and planning", () => {
       expect(error).toBeInstanceOf(EvalError);
       expect((error as EvalError).code).toBe("EVAL_MODEL_PROFILE_UNKNOWN");
     }
+  });
+});
+
+describe("eval suite JSON Schema and Zod parity", () => {
+  it.each([
+    ["ordinary operator JSON", { campaign: { enabled: true, weights: [1, 2, null], label: "nightly" } }],
+    ["empty operator JSON", {}],
+    [
+      "private benchmark controls",
+      { benchmark_execution: { strategy_loops: 2, excluded_node_ids: ["optional-analysis"] } }
+    ],
+    [
+      "public full benchmark controls",
+      {
+        benchmark_lane: "full",
+        target_frameworks: { "aave-v4": "foundry" },
+        excluded_strategy_families: [],
+        benchmark_execution: { strategy_loops: 1, excluded_node_ids: [] }
+      }
+    ],
+    [
+      "public smoke benchmark controls",
+      {
+        benchmark_lane: "smoke",
+        target_frameworks: { "aave-v4": "foundry" },
+        excluded_strategy_families: ["stateful-invariant", "differential", "dynamic-strategy"],
+        benchmark_execution: {
+          workflow_profile: "smoke-benchmark-v1",
+          selected_strategy_ids: [
+            "time-warp-sequences",
+            "external-dependency-boundaries",
+            "externalized-state-accounting",
+            "lifecycle-view-boundaries"
+          ],
+          strategy_loops: 1,
+          excluded_node_ids: []
+        }
+      }
+    ]
+  ])("accepts %s in both validators", (_description, workflowInput) => {
+    expectSchemaParity(withWorkflowInput(workflowInput), true);
+  });
+
+  it.each([null, true, 1, "raw input", [], ["array input"]])(
+    "rejects non-object workflow input %j in both validators",
+    (workflowInput) => {
+      expectSchemaParity(withWorkflowInput(workflowInput), false);
+    }
+  );
+
+  it.each([
+    "benchmark_execution",
+    "benchmark_lane",
+    "excluded_strategy_families",
+    "target_frameworks",
+    "ultrafuzz_eval"
+  ])("rejects operator input that shadows reserved key %s", (reservedKey) => {
+    expectSchemaParity(withWorkflowInput({ campaign: "nightly", [reservedKey]: {} }), false);
+  });
+
+  it.each([
+    [
+      "private controls with an extra field",
+      { benchmark_execution: { strategy_loops: 1, excluded_node_ids: [], extra: true } }
+    ],
+    ["private controls missing excluded node IDs", { benchmark_execution: { strategy_loops: 1 } }],
+    [
+      "full controls with a nonempty excluded family list",
+      {
+        benchmark_lane: "full",
+        target_frameworks: { "aave-v4": "foundry" },
+        excluded_strategy_families: ["differential"],
+        benchmark_execution: { strategy_loops: 1, excluded_node_ids: [] }
+      }
+    ],
+    [
+      "full controls with an extra execution field",
+      {
+        benchmark_lane: "full",
+        target_frameworks: { "aave-v4": "foundry" },
+        excluded_strategy_families: [],
+        benchmark_execution: { strategy_loops: 1, excluded_node_ids: [], workflow_profile: "smoke-benchmark-v1" }
+      }
+    ],
+    [
+      "full controls without target frameworks",
+      {
+        benchmark_lane: "full",
+        excluded_strategy_families: [],
+        benchmark_execution: { strategy_loops: 1, excluded_node_ids: [] }
+      }
+    ],
+    [
+      "smoke controls missing one selected strategy",
+      {
+        benchmark_lane: "smoke",
+        target_frameworks: { "aave-v4": "foundry" },
+        excluded_strategy_families: ["stateful-invariant", "differential", "dynamic-strategy"],
+        benchmark_execution: {
+          workflow_profile: "smoke-benchmark-v1",
+          selected_strategy_ids: [
+            "time-warp-sequences",
+            "external-dependency-boundaries",
+            "externalized-state-accounting"
+          ],
+          strategy_loops: 1,
+          excluded_node_ids: []
+        }
+      }
+    ]
+  ])("rejects malformed benchmark arm: %s", (_description, workflowInput) => {
+    expectSchemaParity(withWorkflowInput(workflowInput), false);
+  });
+
+  const rejectedMutations: Array<[string, (document: SuiteDocument) => void]> = [
+    [
+      "model profile config",
+      (document) => (objectField(objectField(document, "model_profiles"), "eval-runner").config = {})
+    ],
+    ["variant prompts", (document) => (firstObjectField(document, "variants").prompts = ["prompt.md"])],
+    ["root prompt overlays", (document) => (document.prompt_overlays = ["prompt.md"])],
+    ["variant model profiles", (document) => (firstObjectField(document, "variants").model_profiles = ["eval-runner"])],
+    ["primary metric alias", (document) => (objectField(document, "metrics").primary = "recall")],
+    ["secondary metric alias", (document) => (objectField(document, "metrics").secondary = ["precision"])],
+    ["unknown root key", (document) => (document.unknown = true)],
+    ["unknown target key", (document) => (firstObjectField(document, "targets").unknown = true)],
+    ["unknown run key", (document) => (objectField(document, "run").unknown = true)],
+    ["normalized ground-truth root", (document) => (document.ground_truth_root = "/tmp/ground-truth")],
+    [
+      "normalized reporting mode marker",
+      (document) => (objectField(objectField(document, "reporting"), "artifacts").mode_explicit = true)
+    ],
+    ["historical v1 version", (document) => (document.schema_version = "ultrafuzz.eval.v1")],
+    ["numeric-looking historical version", (document) => (document.schema_version = "1.0")]
+  ];
+
+  it.each(rejectedMutations)("rejects removed, internal, or unknown field: %s", (_description, mutate) => {
+    const document = suiteDocument();
+    mutate(document);
+    expectSchemaParity(document, false);
+  });
+
+  it("keeps nested operator keys bounded by the same nonempty-string rule", () => {
+    expectSchemaParity(withWorkflowInput({ campaign: { " ": true } }), false);
   });
 });

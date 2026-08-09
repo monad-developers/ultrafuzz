@@ -47,7 +47,7 @@
         },
         {
           "type": "object",
-          "propertyNames": { "minLength": 1 },
+          "propertyNames": { "$ref": "#/$defs/nonEmptyString" },
           "additionalProperties": { "$ref": "#/$defs/operatorJsonValue" }
         }
       ]
@@ -159,12 +159,7 @@
     "publicFullBenchmarkWorkflowInput": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "benchmark_lane",
-        "target_frameworks",
-        "excluded_strategy_families",
-        "benchmark_execution"
-      ],
+      "required": ["benchmark_lane", "target_frameworks", "excluded_strategy_families", "benchmark_execution"],
       "properties": {
         "benchmark_lane": { "const": "full" },
         "target_frameworks": {
@@ -198,12 +193,7 @@
     "publicSmokeBenchmarkWorkflowInput": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "benchmark_lane",
-        "target_frameworks",
-        "excluded_strategy_families",
-        "benchmark_execution"
-      ],
+      "required": ["benchmark_lane", "target_frameworks", "excluded_strategy_families", "benchmark_execution"],
       "properties": {
         "benchmark_lane": { "const": "smoke" },
         "target_frameworks": {
