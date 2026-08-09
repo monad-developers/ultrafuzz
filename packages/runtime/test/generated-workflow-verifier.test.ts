@@ -63,6 +63,68 @@ function loadReportImplementationCoverageReplacer(): (contents: string, coverage
   ) as ReturnType<typeof loadReportImplementationCoverageReplacer>;
 }
 
+function loadReportImplementationCoverageReconstructor(
+  taskSpecs: Array<{
+    attemptId: string;
+    metadata: { node: { logicalNodeId: string } };
+    outputs: Array<{ path: string; contract: string }>;
+  }>,
+  verifiedAncestorJsonArtifact: (
+    task: unknown,
+    logicalNodeId: string,
+    relativePath: string,
+    contract: string,
+    historicalContract?: string
+  ) => { path: string; value: unknown } | undefined
+): (task: {
+  metadata: { node: { logicalNodeId: string }; artifacts: { dir: string } };
+  outputs: Array<{ path: string; contract: string }>;
+}) => void {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function reconstructAuthoritativeReportImplementationCoverage");
+  const helperEnd = source.indexOf("\n\nfunction verifiedAncestorJsonArtifact", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const unexpectedAuthorityRead = (): never => {
+    throw new Error("producer-free reconstruction must not read current implementation authority");
+  };
+  return new Function(
+    "path",
+    "taskSpecs",
+    "realpathSync",
+    "taskArtifactRoots",
+    "resolveRegularArtifactFile",
+    "verifiedAncestorJsonArtifact",
+    "validatePropertiesSchema",
+    "validateImplementedPropertiesSchema",
+    "configuredInvariantPrioritySelection",
+    "derivePropertyImplementationCoverage",
+    "formatSchemaValidationIssues",
+    "readBoundedFinalReportJson",
+    "replaceReportImplementationCoverage",
+    "writeFileDurable",
+    `${helper}; return reconstructAuthoritativeReportImplementationCoverage;`
+  )(
+    path,
+    taskSpecs,
+    fs.realpathSync,
+    (_task: unknown, artifactDir: string) => [artifactDir],
+    (_artifactRoot: string, candidate: string) => candidate,
+    verifiedAncestorJsonArtifact,
+    unexpectedAuthorityRead,
+    unexpectedAuthorityRead,
+    unexpectedAuthorityRead,
+    unexpectedAuthorityRead,
+    unexpectedAuthorityRead,
+    (reportPath: string) => fs.readFileSync(reportPath, "utf8"),
+    loadReportImplementationCoverageReplacer(),
+    writeFileDurable
+  ) as ReturnType<typeof loadReportImplementationCoverageReconstructor>;
+}
+
 function loadVerifiedAncestorJsonArtifact(
   taskSpecs: Array<{
     attemptId: string;
@@ -1702,6 +1764,19 @@ test("generated Smithers final-report producer replaces model coverage with cano
     reference_expectation_ids: ["benchmark:low-reference"],
     blocker_summaries: []
   });
+  assert.ok(derived.value.priorities.length > 0, "authoritative priorities must never collapse to an empty set");
+  for (const field of [
+    "selected_property_ids",
+    "implemented_property_ids",
+    "blocked_property_ids",
+    "pending_property_ids",
+    "deferred_property_ids",
+    "reference_expected_property_ids",
+    "reference_expectation_ids",
+    "blocker_summaries"
+  ] as const) {
+    assert.ok(Array.isArray(derived.value[field]), `authoritative coverage must always emit ${field}`);
+  }
 
   // Exact recurrence of run 31315460119: the model supplied an invalid
   // threshold, no priorities, and omitted deferred_property_ids entirely.
@@ -1790,6 +1865,91 @@ test("generated Smithers coverage authority preserves the shipped smoke topology
     undefined
   );
   assert.equal(verificationCount, 0, "absent authority must not reinterpret another smoke artifact as coverage");
+
+  const replaceCoverage = loadReportImplementationCoverageReplacer();
+  let reconstructionAuthorityReads = 0;
+  const reconstructCoverage = loadReportImplementationCoverageReconstructor(
+    taskSpecs,
+    (_task, logicalNodeId, relativePath, contract, historicalContract) => {
+      reconstructionAuthorityReads += 1;
+      assert.equal(logicalNodeId, "stateful-invariant-implement-properties");
+      assert.equal(relativePath, "implemented-properties.json");
+      assert.equal(contract, "ultrafuzz/implemented-properties@2");
+      assert.equal(historicalContract, "ultrafuzz/implemented-properties@1");
+      return undefined;
+    }
+  );
+  const invalidCoverageCases = [
+    {
+      runId: "31338426579",
+      coverage: {
+        priority_threshold: "high",
+        priorities: [],
+        selected_property_ids: [],
+        implemented_property_ids: [],
+        blocked_property_ids: [],
+        pending_property_ids: [],
+        deferred_property_ids: [],
+        reference_expected_property_ids: [],
+        reference_expectation_ids: [],
+        blocker_summaries: []
+      },
+      failure: /Too small: expected array to have >=1 items/u
+    },
+    {
+      runId: "31339777943",
+      coverage: {
+        priority_threshold: "high",
+        priorities: ["high"],
+        selected_property_ids: [],
+        implemented_property_ids: [],
+        blocked_property_ids: [],
+        pending_property_ids: [],
+        reference_expected_property_ids: [],
+        reference_expectation_ids: [],
+        blocker_summaries: []
+      },
+      failure: /expected array, received undefined/u
+    }
+  ];
+  for (const fixture of invalidCoverageCases) {
+    const modelReport = {
+      schema_version: "1.0",
+      run_metadata: { run_id: fixture.runId },
+      issues: [],
+      non_production_outcomes: [],
+      property_implementation_coverage: fixture.coverage
+    };
+    const modelBytes = `${JSON.stringify(modelReport, null, 2)}\n`;
+    const modelValidation = validateArtifactContract("ultrafuzz/report@1", modelBytes, "report.json");
+    assert.equal(modelValidation.ok, false, fixture.runId);
+    assert.match(modelValidation.issues.map((issue) => issue.message).join("; "), fixture.failure, fixture.runId);
+
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-producer-free-coverage-${fixture.runId}-`));
+    const reportPath = path.join(root, "report.json");
+    try {
+      fs.writeFileSync(reportPath, modelBytes);
+      reconstructCoverage({
+        metadata: { node: { logicalNodeId: "final-report" }, artifacts: { dir: root } },
+        outputs: [{ path: "report.json", contract: "ultrafuzz/report@1" }]
+      });
+      const canonical = fs.readFileSync(reportPath, "utf8");
+      assert.equal(validateArtifactContract("ultrafuzz/report@1", canonical, "report.json").ok, true, fixture.runId);
+      assert.equal(
+        JSON.parse(canonical).property_implementation_coverage,
+        "unavailable",
+        `${fixture.runId} must use the canonical no-coverage sentinel`
+      );
+      assert.equal(
+        replaceCoverage(canonical, "unavailable"),
+        canonical,
+        "canonical no-coverage replacement must be byte-idempotent"
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+  assert.equal(reconstructionAuthorityReads, invalidCoverageCases.length);
 });
 
 test("generated Smithers coverage authority fails closed except for an explicit historical handoff", () => {
@@ -1832,6 +1992,26 @@ test("generated Smithers coverage authority fails closed except for an explicit 
     producer.outputs[0]!.contract = "ultrafuzz/implemented-properties@1";
     assert.equal(readCurrent(), undefined, "a declared historical @1 handoff keeps legacy behavior");
     assert.equal(verificationCount, 1, "historical bytes are not reinterpreted as current coverage authority");
+
+    const historicalReportRoot = path.join(root, "historical-report");
+    fs.mkdirSync(historicalReportRoot);
+    const historicalReportPath = path.join(historicalReportRoot, "report.json");
+    const historicalReport = `${JSON.stringify(
+      { schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] },
+      null,
+      2
+    )}\n`;
+    fs.writeFileSync(historicalReportPath, historicalReport);
+    const reconstructHistorical = loadReportImplementationCoverageReconstructor([producer], () => undefined);
+    reconstructHistorical({
+      metadata: { node: { logicalNodeId: "final-report" }, artifacts: { dir: historicalReportRoot } },
+      outputs: [{ path: "report.json", contract: "ultrafuzz/report@1" }]
+    });
+    assert.equal(
+      fs.readFileSync(historicalReportPath, "utf8"),
+      historicalReport,
+      "a declared historical producer must not be rewritten as a producer-free topology"
+    );
 
     producer.outputs = [];
     assert.throws(readCurrent, /authoritative implemented-properties\.json handoff is unavailable/u);
