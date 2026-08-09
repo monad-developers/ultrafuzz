@@ -63,6 +63,8 @@ test("file validation uses the registered schema and distinguishes instance from
     const invalidPath = path.join(temporary, "invalid.json");
     const duplicatePath = path.join(temporary, "duplicate.json");
     const badSchemaPath = path.join(temporary, "bad-schema.json");
+    const boundedSchemaPath = path.join(temporary, "bounded-schema.json");
+    const emptyObjectPath = path.join(temporary, "empty-object.json");
     fs.writeFileSync(validPath, '{"schema_version":"ultrafuzz.properties.v1","properties":[]}\n');
     fs.writeFileSync(invalidPath, '{"schema_version":"ultrafuzz.properties.v1","properties":[],"extra":true}\n');
     fs.writeFileSync(duplicatePath, '{"schema_version":"ultrafuzz.properties.v1","properties":[],"properties":[]}\n');
@@ -70,6 +72,22 @@ test("file validation uses the registered schema and distinguishes instance from
       badSchemaPath,
       '{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"urn:test#bad","type":"object"}\n'
     );
+    fs.writeFileSync(
+      boundedSchemaPath,
+      JSON.stringify({
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        $id: "urn:test:bounded:1",
+        type: "object",
+        additionalProperties: false,
+        required: ["alpha", "beta", "gamma"],
+        properties: {
+          alpha: { type: "string" },
+          beta: { type: "string" },
+          gamma: { type: "string" }
+        }
+      })
+    );
+    fs.writeFileSync(emptyObjectPath, "{}");
 
     const valid = await validateJsonFile({ schemaPath, filePath: validPath });
     assert.equal(valid.status, "valid");
@@ -92,6 +110,19 @@ test("file validation uses the registered schema and distinguishes instance from
 
     const badSchema = await validateJsonFile({ schemaPath: badSchemaPath, filePath: validPath });
     assert.equal(badSchema.status, "setup-error");
+
+    const bounded = await validateJsonFile({
+      schemaPath: boundedSchemaPath,
+      filePath: emptyObjectPath,
+      maxErrors: 2
+    });
+    assert.equal(bounded.status, "instance-error");
+    assert.equal(bounded.diagnostics.length, 2);
+    assert.equal(bounded.truncated, true);
+    assert.deepEqual(
+      bounded.diagnostics.map((diagnostic) => diagnostic.schemaPath),
+      ["#/required", "#/required"]
+    );
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }

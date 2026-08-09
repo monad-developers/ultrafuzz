@@ -8,6 +8,11 @@ import { parseStrictJsonBytes } from "./strict-json.js";
 
 export type SchemaRole = "artifact-contract" | "runtime-state" | "subschema";
 
+const MAX_REGISTERED_SCHEMA_BYTES = 4 * 1024 * 1024;
+const MAX_REGISTERED_BUNDLE_BYTES = 16 * 1024 * 1024;
+const MAX_REGISTERED_PATTERNS = 256;
+const MAX_REGISTERED_PATTERN_LENGTH = 1_024;
+
 export interface ArtifactSchemaRegistryEntry {
   filename: string;
   id: string;
@@ -152,12 +157,23 @@ export function artifactSchemaRegistry(): readonly ArtifactSchemaRegistryEntry[]
   }
 
   const ids = new Set<string>();
+  let bundleBytes = 0;
   cachedRegistry = Object.freeze(
     filenames.map((filename): ArtifactSchemaRegistryEntry => {
       const metadata = metadataByFilename[filename]!;
-      const snapshot = readRegularFileSnapshot(path.join(directory, filename), 16 * 1024 * 1024);
-      const parsed = parseStrictJsonBytes(snapshot, { maxBytes: 16 * 1024 * 1024 });
+      const snapshot = readRegularFileSnapshot(path.join(directory, filename), MAX_REGISTERED_SCHEMA_BYTES);
+      bundleBytes += snapshot.byteLength;
+      if (bundleBytes > MAX_REGISTERED_BUNDLE_BYTES) {
+        throw new Error(`registered schema bundle exceeds the ${MAX_REGISTERED_BUNDLE_BYTES}-byte limit`);
+      }
+      const parsed = parseStrictJsonBytes(snapshot, {
+        maxBytes: MAX_REGISTERED_SCHEMA_BYTES,
+        maxDepth: 128,
+        maxItems: 100_000,
+        maxProperties: 100_000
+      });
       if (!isRecord(parsed)) throw new Error(`schema must be a JSON object: ${filename}`);
+      assertRegisteredPatternLimits(parsed, filename);
       const id = parsed.$id;
       if (typeof id !== "string" || id.length === 0 || id.includes("#")) {
         throw new Error(`schema must have a fragment-free non-empty $id: ${filename}`);
@@ -196,7 +212,7 @@ export function registeredSchemaForPath(filePath: string): ArtifactSchemaRegistr
   const filename = path.basename(filePath);
   const expected = artifactSchemaRegistry().find((entry) => entry.filename === filename);
   if (expected === undefined) return undefined;
-  const snapshot = readRegularFileSnapshot(filePath, 16 * 1024 * 1024);
+  const snapshot = readRegularFileSnapshot(filePath, MAX_REGISTERED_SCHEMA_BYTES);
   return sha256(snapshot) === expected.sha256 ? expected : undefined;
 }
 
@@ -209,17 +225,31 @@ export function readRegularFileSnapshot(filePath: string, maxBytes: number): Buf
     throw new Error(`cannot open regular file ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
   }
   try {
-    const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile()) throw new Error(`path is not a regular file: ${filePath}`);
-    if (stat.size > maxBytes) throw new Error(`file exceeds the ${maxBytes}-byte limit: ${filePath}`);
-    const bytes = Buffer.alloc(stat.size);
+    const before = fs.fstatSync(descriptor, { bigint: true });
+    if (!before.isFile()) throw new Error(`path is not a regular file: ${filePath}`);
+    if (before.size > BigInt(maxBytes)) throw new Error(`file exceeds the ${maxBytes}-byte limit: ${filePath}`);
+    const chunks: Buffer[] = [];
     let offset = 0;
-    while (offset < bytes.length) {
-      const read = fs.readSync(descriptor, bytes, offset, bytes.length - offset, offset);
-      if (read === 0) throw new Error(`file changed while it was read: ${filePath}`);
+    for (;;) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1 - offset));
+      const read = fs.readSync(descriptor, chunk, 0, chunk.length, offset);
+      if (read === 0) break;
       offset += read;
+      if (offset > maxBytes) throw new Error(`file exceeds the ${maxBytes}-byte limit: ${filePath}`);
+      chunks.push(chunk.subarray(0, read));
     }
-    return bytes;
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeNs !== after.mtimeNs ||
+      before.ctimeNs !== after.ctimeNs ||
+      after.size !== BigInt(offset)
+    ) {
+      throw new Error(`file changed while it was read: ${filePath}`);
+    }
+    return Buffer.concat(chunks, offset);
   } finally {
     fs.closeSync(descriptor);
   }
@@ -236,6 +266,30 @@ function collectReferences(value: unknown, output = new Set<string>()): Set<stri
     }
   }
   return output;
+}
+
+function assertRegisteredPatternLimits(value: unknown, filename: string): void {
+  let count = 0;
+  const visit = (entry: unknown): void => {
+    if (Array.isArray(entry)) {
+      for (const item of entry) visit(item);
+      return;
+    }
+    if (!isRecord(entry)) return;
+    for (const [key, item] of Object.entries(entry)) {
+      if (key === "pattern" && typeof item === "string") {
+        count += 1;
+        if (count > MAX_REGISTERED_PATTERNS) {
+          throw new Error(`schema exceeds the ${MAX_REGISTERED_PATTERNS}-pattern limit: ${filename}`);
+        }
+        if (item.length > MAX_REGISTERED_PATTERN_LENGTH) {
+          throw new Error(`schema pattern exceeds the ${MAX_REGISTERED_PATTERN_LENGTH}-character limit: ${filename}`);
+        }
+      }
+      visit(item);
+    }
+  };
+  visit(value);
 }
 
 function sha256(bytes: Uint8Array): string {
