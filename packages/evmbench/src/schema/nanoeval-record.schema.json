@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evmbench:nanoeval-record:1",
+  "title": "Pinned NanoEval JSONL record",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/runStartedRecord" },
+    { "$ref": "#/$defs/samplingRecord" },
+    { "$ref": "#/$defs/matchRecord" },
+    { "$ref": "#/$defs/extraRecord" },
+    { "$ref": "#/$defs/sampleCompletedRecord" },
+    { "$ref": "#/$defs/errorRecord" },
+    { "$ref": "#/$defs/finalReportRecord" }
+  ],
+  "$defs": {
+    "timestamp": { "type": "string", "format": "date-time" },
+    "recorderId": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "nullableRecorderId": {
+      "oneOf": [{ "$ref": "#/$defs/recorderId" }, { "type": "null" }]
+    },
+    "runStartedRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "record_type", "sample_id", "group_id", "run_spec"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "record_type": { "const": "run_started" },
+        "sample_id": { "type": "null" },
+        "group_id": { "type": "null" },
+        "run_spec": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["run_id", "run_set_id"],
+          "properties": {
+            "run_id": { "$ref": "#/$defs/recorderId" },
+            "run_set_id": { "$ref": "#/$defs/recorderId" }
+          }
+        }
+      }
+    },
+    "samplingRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "record_type", "sample_id", "group_id", "prompt", "sampled"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "record_type": { "const": "sampling" },
+        "sample_id": { "$ref": "#/$defs/nullableRecorderId" },
+        "group_id": { "$ref": "#/$defs/nullableRecorderId" },
+        "prompt": { "type": "string" },
+        "sampled": { "type": "string" }
+      }
+    },
+    "matchRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timestamp",
+        "record_type",
+        "sample_id",
+        "group_id",
+        "correct",
+        "expected",
+        "picked",
+        "prob_correct"
+      ],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "record_type": { "const": "match" },
+        "sample_id": { "$ref": "#/$defs/nullableRecorderId" },
+        "group_id": { "$ref": "#/$defs/nullableRecorderId" },
+        "correct": { "type": "boolean" },
+        "expected": { "type": "null" },
+        "picked": { "type": "null" },
+        "prob_correct": { "type": "null" }
+      }
+    },
+    "extraRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "record_type", "sample_id", "group_id", "data"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "record_type": { "const": "extra" },
+        "sample_id": { "$ref": "#/$defs/nullableRecorderId" },
+        "group_id": { "$ref": "#/$defs/nullableRecorderId" },
+        "data": {
+          "description": "Intentionally opaque third-party NanoEval payload, constrained to RFC 8259 JSON.",
+          "$ref": "#/$defs/jsonValue"
+        }
+      }
+    },
+    "sampleCompletedRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "record_type", "sample_id", "group_id", "status"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "record_type": { "const": "sample_completed" },
+        "sample_id": { "$ref": "#/$defs/nullableRecorderId" },
+        "group_id": { "$ref": "#/$defs/nullableRecorderId" },
+        "status": { "const": "completed" }
+      }
+    },
+    "errorRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "record_type", "sample_id", "group_id", "message", "error"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "record_type": { "const": "error" },
+        "sample_id": { "$ref": "#/$defs/nullableRecorderId" },
+        "group_id": { "$ref": "#/$defs/nullableRecorderId" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "error": {
+          "oneOf": [{ "type": "string", "maxLength": 1048576 }, { "type": "null" }]
+        }
+      }
+    },
+    "finalReportRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "record_type", "sample_id", "group_id", "final_report"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "record_type": { "const": "final_report" },
+        "sample_id": { "type": "null" },
+        "group_id": { "type": "null" },
+        "final_report": { "$ref": "urn:ultrafuzz:schema:evmbench:nanoeval-final-report:1" }
+      }
+    },
+    "jsonValue": {
+      "description": "An intentionally opaque RFC 8259 JSON value.",
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        }
+      ]
+    }
+  }
+}

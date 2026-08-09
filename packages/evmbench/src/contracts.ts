@@ -102,7 +102,7 @@ export const evmbenchPerAuditMetricsSchema = z
   .object({
     score: z.number().nonnegative(),
     max_score: z.number().positive(),
-    n_runs: z.number().int().positive(),
+    n_runs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     detect_award: z.number().nonnegative(),
     detect_max_award: z.number().nonnegative()
   })
@@ -187,7 +187,7 @@ const completenessSchema = z
 export const evmbenchOperationalMetricsSchema = z
   .object({
     runtime_seconds: z.number().nonnegative().nullable(),
-    token_usage: z.number().int().nonnegative().nullable(),
+    token_usage: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(),
     cost_usd: z.number().nonnegative().nullable(),
     completeness: completenessSchema
   })

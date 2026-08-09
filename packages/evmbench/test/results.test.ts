@@ -114,7 +114,7 @@ describe("EVMBench result normalization", () => {
       runStarted(0),
       recorderRow(1, "sampling", { prompt: "", sampled: "sample", compatibility_payload: {} })
     ]);
-    expect(() => readNanoevalFinalReport([openEnded])).toThrow("Unrecognized key");
+    expect(() => readNanoevalFinalReport([openEnded])).toThrow("must NOT have additional properties");
 
     const duplicate = temporaryFile("duplicate.jsonl");
     const sample = recorderRow(1, "sampling", { prompt: "", sampled: "sample" });

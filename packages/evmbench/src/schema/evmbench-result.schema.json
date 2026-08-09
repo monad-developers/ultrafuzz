@@ -51,7 +51,8 @@
         },
         "n_runs": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 9007199254740991
         },
         "detect_award": {
           "type": "number",
@@ -284,7 +285,8 @@
         },
         "token_usage": {
           "type": ["integer", "null"],
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "cost_usd": {
           "type": ["number", "null"],

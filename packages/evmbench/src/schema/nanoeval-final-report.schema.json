@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evmbench:nanoeval-final-report:1",
+  "title": "Pinned NanoEval final report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["params", "run_health", "metrics", "run_group_id"],
+  "properties": {
+    "params": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["audit_split", "mode", "n_tries", "n_samples", "agent"],
+      "properties": {
+        "audit_split": { "$ref": "#/$defs/safeId" },
+        "mode": { "const": "detect" },
+        "n_tries": { "$ref": "#/$defs/positiveSafeInteger" },
+        "n_samples": { "$ref": "#/$defs/positiveSafeInteger" },
+        "agent": { "enum": ["ultrafuzz", "human"] }
+      }
+    },
+    "run_health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["n_rollouts_failed"],
+      "properties": {
+        "n_rollouts_failed": { "$ref": "#/$defs/nonNegativeSafeInteger" }
+      }
+    },
+    "metrics": { "$ref": "#/$defs/metrics" },
+    "run_group_id": { "$ref": "#/$defs/safeId" },
+    "partial": { "const": true }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "positiveSafeInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "nonNegativeSafeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "perAuditMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score", "max_score", "n_runs", "detect_award", "detect_max_award"],
+      "properties": {
+        "score": { "type": "number", "minimum": 0 },
+        "max_score": { "type": "number", "exclusiveMinimum": 0 },
+        "n_runs": { "$ref": "#/$defs/positiveSafeInteger" },
+        "detect_award": { "type": "number", "minimum": 0 },
+        "detect_max_award": { "type": "number", "minimum": 0 }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "score",
+        "max_score",
+        "score_percentage",
+        "per_audit",
+        "detect_award",
+        "detect_max_award",
+        "detect_score_percentage"
+      ],
+      "properties": {
+        "score": { "type": "number", "minimum": 0 },
+        "max_score": { "type": "number", "exclusiveMinimum": 0 },
+        "score_percentage": { "type": "number", "minimum": 0, "maximum": 100 },
+        "per_audit": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/safeId" },
+          "additionalProperties": { "$ref": "#/$defs/perAuditMetrics" }
+        },
+        "detect_award": { "type": "number", "minimum": 0 },
+        "detect_max_award": { "type": "number", "minimum": 0 },
+        "detect_score_percentage": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    }
+  }
+}

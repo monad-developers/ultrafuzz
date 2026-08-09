@@ -30,6 +30,18 @@ const SCHEMA_METADATA = {
     zodParser: "evmbenchLockSchema",
     semanticGates: EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID["urn:ultrafuzz:schema:evmbench:lock:2"]
   },
+  "nanoeval-final-report.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "NanoevalFinalReport",
+    zodParser: "nanoevalFinalReportSchema",
+    semanticGates: EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID["urn:ultrafuzz:schema:evmbench:nanoeval-final-report:1"]
+  },
+  "nanoeval-record.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "NanoevalRecord",
+    zodParser: "nanoevalRecordSchema",
+    semanticGates: EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID["urn:ultrafuzz:schema:evmbench:nanoeval-record:1"]
+  },
   "evmbench-profile.schema.json": {
     role: "runtime-state",
     typescriptExport: "EvmbenchProfile",
@@ -164,7 +176,9 @@ function collectLocalReferences(value: unknown, output = new Set<string>()): str
   } else if (isRecord(value)) {
     for (const [key, entry] of Object.entries(value)) {
       if (key === "$ref" && typeof entry === "string") {
-        if (!entry.startsWith("#")) throw new Error(`remote EVMBench schema reference is forbidden: ${entry}`);
+        if (!entry.startsWith("#") && !entry.startsWith("urn:ultrafuzz:schema:evmbench:")) {
+          throw new Error(`external EVMBench schema reference is forbidden: ${entry}`);
+        }
         output.add(entry);
       } else {
         collectLocalReferences(entry, output);

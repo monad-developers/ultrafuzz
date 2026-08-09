@@ -4,7 +4,7 @@ import {
   type DurablePublicationResult,
   type StrictJsonlCodec
 } from "@ultrafuzz/artifacts";
-import { z, type ZodType } from "zod/v4";
+import { z } from "zod/v4";
 
 import {
   EVMBENCH_RESULT_VERSION,
@@ -17,20 +17,16 @@ import {
   type EvmbenchRunProvenance,
   type NormalizedEvmbenchResult
 } from "./contracts.js";
+import { assertEvmbenchJsonSchema } from "./schema-registry.js";
+import { assertEvmbenchDocumentSemantics } from "./semantic-gates.js";
 
-type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+export const NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:evmbench:nanoeval-final-report:1" as const;
+export const NANOEVAL_RECORD_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:evmbench:nanoeval-record:1" as const;
 
-const jsonValueSchema: ZodType<JsonValue> = z.lazy(() =>
-  z.union([
-    z.null(),
-    z.boolean(),
-    z.number(),
-    z.string(),
-    z.array(jsonValueSchema),
-    z.record(z.string(), jsonValueSchema)
-  ])
-);
+const jsonValueSchema = z.json();
 const recorderIdSchema = z.string().min(1).max(1024);
+const positiveSafeIntegerSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const nonNegativeSafeIntegerSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const commonRecorderFields = {
   timestamp: z.string().datetime({ offset: true }),
   sample_id: recorderIdSchema.nullable(),
@@ -41,54 +37,25 @@ export const nanoevalPerAuditMetricsSchema = z
   .object({
     score: z.number().nonnegative(),
     max_score: z.number().positive(),
-    n_runs: z.number().int().positive(),
+    n_runs: positiveSafeIntegerSchema,
     detect_award: z.number().nonnegative(),
     detect_max_award: z.number().nonnegative()
   })
-  .strict()
-  .superRefine((metrics, context) => {
-    if (metrics.score > metrics.max_score) {
-      context.addIssue({ code: "custom", path: ["score"], message: "score exceeds max_score" });
-    }
-    if (metrics.detect_award > metrics.detect_max_award) {
-      context.addIssue({
-        code: "custom",
-        path: ["detect_award"],
-        message: "detect_award exceeds detect_max_award"
-      });
-    }
-  });
+  .strict();
 
 export const nanoevalMetricsSchema = z
   .object({
     score: z.number().nonnegative(),
     max_score: z.number().positive(),
     score_percentage: z.number().min(0).max(100),
-    per_audit: z.record(evmbenchSafeIdSchema, nanoevalPerAuditMetricsSchema),
+    per_audit: z
+      .record(evmbenchSafeIdSchema, nanoevalPerAuditMetricsSchema)
+      .refine((perAudit) => Object.keys(perAudit).length > 0, "per_audit must not be empty"),
     detect_award: z.number().nonnegative(),
     detect_max_award: z.number().nonnegative(),
     detect_score_percentage: z.number().min(0).max(100)
   })
-  .strict()
-  .superRefine((metrics, context) => {
-    const perAudit = Object.values(metrics.per_audit);
-    if (perAudit.length === 0) {
-      context.addIssue({ code: "custom", path: ["per_audit"], message: "per_audit must not be empty" });
-    }
-    addBoundedMetricIssues(metrics.score, metrics.max_score, "score", "max_score", context);
-    addBoundedMetricIssues(metrics.detect_award, metrics.detect_max_award, "detect_award", "detect_max_award", context);
-    addAggregateIssue(metrics.score, sum(perAudit, "score"), "score", context);
-    addAggregateIssue(metrics.max_score, sum(perAudit, "max_score"), "max_score", context);
-    addAggregateIssue(metrics.detect_award, sum(perAudit, "detect_award"), "detect_award", context);
-    addAggregateIssue(metrics.detect_max_award, sum(perAudit, "detect_max_award"), "detect_max_award", context);
-    addAggregateIssue(metrics.score_percentage, (metrics.score / metrics.max_score) * 100, "score_percentage", context);
-    addAggregateIssue(
-      metrics.detect_score_percentage,
-      metrics.detect_max_award === 0 ? 0 : (metrics.detect_award / metrics.detect_max_award) * 100,
-      "detect_score_percentage",
-      context
-    );
-  });
+  .strict();
 
 export const nanoevalFinalReportSchema = z
   .object({
@@ -96,26 +63,17 @@ export const nanoevalFinalReportSchema = z
       .object({
         audit_split: evmbenchSafeIdSchema,
         mode: z.literal("detect"),
-        n_tries: z.number().int().positive(),
-        n_samples: z.number().int().positive(),
+        n_tries: positiveSafeIntegerSchema,
+        n_samples: positiveSafeIntegerSchema,
         agent: z.enum(["ultrafuzz", "human"])
       })
       .strict(),
-    run_health: z.object({ n_rollouts_failed: z.number().int().nonnegative() }).strict(),
+    run_health: z.object({ n_rollouts_failed: nonNegativeSafeIntegerSchema }).strict(),
     metrics: nanoevalMetricsSchema,
     run_group_id: evmbenchSafeIdSchema,
     partial: z.literal(true).optional()
   })
-  .strict()
-  .superRefine((report, context) => {
-    if (report.run_health.n_rollouts_failed > report.params.n_samples) {
-      context.addIssue({
-        code: "custom",
-        path: ["run_health", "n_rollouts_failed"],
-        message: "failed rollout count exceeds sample count"
-      });
-    }
-  });
+  .strict();
 
 const nanoevalRunStartedRecordSchema = z
   .object({
@@ -195,12 +153,26 @@ export const nanoevalRecordSchema = z.discriminatedUnion("record_type", [
 export type NanoevalFinalReport = z.infer<typeof nanoevalFinalReportSchema>;
 export type NanoevalRecord = z.infer<typeof nanoevalRecordSchema>;
 
+export function parseNanoevalFinalReport(value: unknown, label = "NanoEval final report"): NanoevalFinalReport {
+  assertEvmbenchJsonSchema(NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID, value, label);
+  const parsed = nanoevalFinalReportSchema.parse(value);
+  assertEvmbenchDocumentSemantics(NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID, parsed);
+  return parsed;
+}
+
+export function parseNanoevalRecord(value: unknown, label = "NanoEval record"): NanoevalRecord {
+  assertEvmbenchJsonSchema(NANOEVAL_RECORD_JSON_SCHEMA_ID, value, label);
+  const parsed = nanoevalRecordSchema.parse(value);
+  assertEvmbenchDocumentSemantics(NANOEVAL_RECORD_JSON_SCHEMA_ID, parsed);
+  return parsed;
+}
+
 export function normalizeEvmbenchResult(input: {
   finalReport: unknown;
   provenance: EvmbenchRunProvenance;
   operational: EvmbenchOperationalMetrics;
 }): NormalizedEvmbenchResult {
-  const finalReport = nanoevalFinalReportSchema.parse(input.finalReport);
+  const finalReport = parseNanoevalFinalReport(input.finalReport);
   if (finalReport.partial === true) throw new Error("cannot normalize a partial NanoEval final report");
   const provenance = evmbenchRunProvenanceSchema.parse(input.provenance);
   const operational = evmbenchOperationalMetricsSchema.parse(input.operational);
@@ -252,13 +224,14 @@ function nanoevalCodec(filePath: string): StrictJsonlCodec<NanoevalRecord> {
   return {
     label: `NanoEval record journal ${filePath}`,
     parseRecord(value, recordPath) {
-      const parsed = nanoevalRecordSchema.safeParse(value);
-      if (parsed.success) return parsed.data;
-      throw new Error(
-        `NanoEval record ${recordPath} violates the pinned recorder contract: ${parsed.error.issues
-          .map((issue) => `${formatPath(issue.path)} ${issue.message}`)
-          .join("; ")}`
-      );
+      try {
+        return parseNanoevalRecord(value, `NanoEval record ${recordPath}`);
+      } catch (error) {
+        throw new Error(
+          `NanoEval record ${recordPath} violates the pinned recorder contract: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error }
+        );
+      }
     },
     identity(record) {
       return `${record.timestamp}\u0000${record.record_type}\u0000${record.sample_id ?? ""}\u0000${record.group_id ?? ""}\u0000${JSON.stringify(record)}`;
@@ -284,37 +257,4 @@ function nanoevalCodec(filePath: string): StrictJsonlCodec<NanoevalRecord> {
     maxRecordBytes: 16 * 1024 * 1024,
     maxRecords: 1_000_000
   };
-}
-
-function addBoundedMetricIssues(
-  value: number,
-  maximum: number,
-  valueField: string,
-  maximumField: string,
-  context: z.core.$RefinementCtx
-): void {
-  if (value > maximum) {
-    context.addIssue({ code: "custom", path: [valueField], message: `${valueField} exceeds ${maximumField}` });
-  }
-}
-
-function addAggregateIssue(value: number, aggregate: number, field: string, context: z.core.$RefinementCtx): void {
-  if (!approximatelyEqual(value, aggregate)) {
-    context.addIssue({ code: "custom", path: [field], message: `${field} does not match its aggregate` });
-  }
-}
-
-function sum(
-  values: Array<z.infer<typeof nanoevalPerAuditMetricsSchema>>,
-  field: "score" | "max_score" | "detect_award" | "detect_max_award"
-): number {
-  return values.reduce((total, value) => total + value[field], 0);
-}
-
-function approximatelyEqual(left: number, right: number): boolean {
-  return Math.abs(left - right) <= Number.EPSILON * Math.max(1, Math.abs(left), Math.abs(right)) * 16;
-}
-
-function formatPath(path: PropertyKey[]): string {
-  return path.length === 0 ? "/" : `/${path.map(String).join("/")}`;
 }

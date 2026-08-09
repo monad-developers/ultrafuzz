@@ -28,6 +28,14 @@ import {
 } from "../src/schema-registry.js";
 import { EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID, IMPLEMENTED_EVMBENCH_SEMANTIC_GATES } from "../src/semantic-gates.js";
 import { findUltrafuzzRepoRoot } from "../src/definition.js";
+import {
+  NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID,
+  NANOEVAL_RECORD_JSON_SCHEMA_ID,
+  nanoevalFinalReportSchema,
+  nanoevalRecordSchema,
+  parseNanoevalFinalReport,
+  parseNanoevalRecord
+} from "../src/results.js";
 
 describe("EVMBench JSON Schema and Zod parity", () => {
   it("compiles a closed, immutable Draft 2020-12 registry", () => {
@@ -36,12 +44,29 @@ describe("EVMBench JSON Schema and Zod parity", () => {
       EVMBENCH_CATALOG_JSON_SCHEMA_ID,
       EVMBENCH_LOCK_JSON_SCHEMA_ID,
       EVMBENCH_PROFILE_JSON_SCHEMA_ID,
-      EVMBENCH_RESULT_JSON_SCHEMA_ID
+      EVMBENCH_RESULT_JSON_SCHEMA_ID,
+      NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID,
+      NANOEVAL_RECORD_JSON_SCHEMA_ID
     ]);
     expect(evmbenchSchemaBundleDigest()).toMatch(/^[0-9a-f]{64}$/u);
     for (const entry of registry) {
       expect(entry.schema.$schema).toBe("https://json-schema.org/draft/2020-12/schema");
-      expect(entry.schema.additionalProperties).toBe(false);
+      if (entry.id === NANOEVAL_RECORD_JSON_SCHEMA_ID) {
+        const definitions = entry.schema.$defs as Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+        for (const name of [
+          "runStartedRecord",
+          "samplingRecord",
+          "matchRecord",
+          "extraRecord",
+          "sampleCompletedRecord",
+          "errorRecord",
+          "finalReportRecord"
+        ]) {
+          expect(definitions[name]?.additionalProperties).toBe(false);
+        }
+      } else {
+        expect(entry.schema.additionalProperties).toBe(false);
+      }
       expect(Object.isFrozen(entry.schema)).toBe(true);
       expect(Object.isFrozen(entry.schema.properties)).toBe(true);
       expect(entry.sha256).toMatch(/^[0-9a-f]{64}$/u);
@@ -167,6 +192,60 @@ describe("EVMBench JSON Schema and Zod parity", () => {
           completeness: { ...validResult().operational.completeness, runtime: "complete" }
         }
       }
+    },
+    {
+      label: "unsafe normalized result run count",
+      schemaId: EVMBENCH_RESULT_JSON_SCHEMA_ID,
+      parser: normalizedEvmbenchResultSchema,
+      value: {
+        ...validResult(),
+        official_evmbench: {
+          ...validResult().official_evmbench,
+          per_audit: {
+            "synthetic-audit": {
+              ...validResult().official_evmbench.per_audit["synthetic-audit"],
+              n_runs: Number.MAX_SAFE_INTEGER + 1
+            }
+          }
+        }
+      }
+    },
+    {
+      label: "unsafe normalized result token count",
+      schemaId: EVMBENCH_RESULT_JSON_SCHEMA_ID,
+      parser: normalizedEvmbenchResultSchema,
+      value: {
+        ...validResult(),
+        operational: {
+          ...validResult().operational,
+          token_usage: Number.MAX_SAFE_INTEGER + 1,
+          completeness: { ...validResult().operational.completeness, token_usage: "complete" as const }
+        }
+      }
+    },
+    {
+      label: "NanoEval final report with an empty per-audit map",
+      schemaId: NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID,
+      parser: nanoevalFinalReportSchema,
+      value: {
+        ...validNanoevalFinalReport(),
+        metrics: { ...validNanoevalFinalReport().metrics, per_audit: {} }
+      }
+    },
+    {
+      label: "NanoEval final report with an unsafe integer",
+      schemaId: NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID,
+      parser: nanoevalFinalReportSchema,
+      value: {
+        ...validNanoevalFinalReport(),
+        params: { ...validNanoevalFinalReport().params, n_samples: Number.MAX_SAFE_INTEGER + 1 }
+      }
+    },
+    {
+      label: "open NanoEval recorder envelope",
+      schemaId: NANOEVAL_RECORD_JSON_SCHEMA_ID,
+      parser: nanoevalRecordSchema,
+      value: { ...validNanoevalRecord(), compatibility_payload: {} }
     }
   ])("rejects $label structurally in JSON Schema and Zod", ({ schemaId, parser, value }) => {
     expect(validateEvmbenchJsonSchema(schemaId, value).ok).toBe(false);
@@ -251,6 +330,101 @@ describe("EVMBench JSON Schema and Zod parity", () => {
     const bytes = serializeNormalizedEvmbenchResult(value);
     expect(parseNormalizedEvmbenchResultBytes(bytes)).toEqual(value);
     expect(bytes.at(-1)).toBe(0x0a);
+  });
+
+  it("validates pinned NanoEval documents Ajv-first while preserving the retained Zod value", () => {
+    const report = validNanoevalFinalReport();
+    const record = validNanoevalRecord({
+      record_type: "extra",
+      data: { opaque: [null, true, 1, "third-party", { nested: false }] }
+    });
+
+    expect(parseNanoevalFinalReport(report)).toEqual(report);
+    expect(parseNanoevalRecord(record)).toEqual(record);
+    expect(validateEvmbenchJsonSchema(NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID, report)).toMatchObject({ ok: true });
+    expect(validateEvmbenchJsonSchema(NANOEVAL_RECORD_JSON_SCHEMA_ID, record)).toMatchObject({ ok: true });
+  });
+
+  it("keeps every pinned NanoEval recorder variant closed and aligned in Ajv and Zod", () => {
+    const rows = [
+      validNanoevalRecord({
+        record_type: "run_started",
+        sample_id: null,
+        group_id: null,
+        run_spec: { run_id: "260809000000AAAA", run_set_id: "synthetic-run-set" }
+      }),
+      validNanoevalRecord(),
+      validNanoevalRecord({
+        record_type: "match",
+        correct: true,
+        expected: null,
+        picked: null,
+        prob_correct: null
+      }),
+      validNanoevalRecord({ record_type: "extra", data: { opaque: [null, true, 1, "text"] } }),
+      validNanoevalRecord({ record_type: "sample_completed", status: "completed" }),
+      validNanoevalRecord({ record_type: "error", message: "rollout failed", error: null }),
+      validNanoevalRecord({
+        record_type: "final_report",
+        sample_id: null,
+        group_id: null,
+        final_report: validNanoevalFinalReport()
+      })
+    ];
+
+    for (const row of rows) {
+      expect(validateEvmbenchJsonSchema(NANOEVAL_RECORD_JSON_SCHEMA_ID, row)).toMatchObject({ ok: true });
+      const retained = nanoevalRecordSchema.safeParse(row);
+      expect(retained.success).toBe(true);
+      if (retained.success) expect(retained.data).toEqual(row);
+
+      const open = { ...row, compatibility_payload: {} };
+      expect(validateEvmbenchJsonSchema(NANOEVAL_RECORD_JSON_SCHEMA_ID, open)).toMatchObject({ ok: false });
+      expect(nanoevalRecordSchema.safeParse(open).success).toBe(false);
+    }
+  });
+
+  it("runs registered NanoEval final-report gates for nested JSONL records", () => {
+    const record = validNanoevalRecord({
+      record_type: "final_report",
+      sample_id: null,
+      group_id: null,
+      final_report: {
+        ...validNanoevalFinalReport(),
+        run_health: { n_rollouts_failed: 2 }
+      }
+    });
+
+    expect(validateEvmbenchJsonSchema(NANOEVAL_RECORD_JSON_SCHEMA_ID, record)).toMatchObject({ ok: true });
+    expect(nanoevalRecordSchema.safeParse(record).success).toBe(true);
+    expect(() => parseNanoevalRecord(record)).toThrow("NanoEval failed rollout count does not exceed sample count");
+  });
+
+  it.each([
+    {
+      gate: "NanoEval scores do not exceed their maxima",
+      value: {
+        ...validNanoevalFinalReport(),
+        metrics: { ...validNanoevalFinalReport().metrics, score: 5, score_percentage: 100 }
+      }
+    },
+    {
+      gate: "NanoEval totals and percentages equal per-audit aggregates",
+      value: {
+        ...validNanoevalFinalReport(),
+        metrics: { ...validNanoevalFinalReport().metrics, score: 2, score_percentage: 50 }
+      }
+    },
+    {
+      gate: "NanoEval failed rollout count does not exceed sample count",
+      value: { ...validNanoevalFinalReport(), run_health: { n_rollouts_failed: 2 } }
+    }
+  ])("keeps $gate out of both NanoEval shape authorities and rejects it in its named gate", ({ gate, value }) => {
+    expect(validateEvmbenchJsonSchema(NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID, value)).toMatchObject({ ok: true });
+    const retained = nanoevalFinalReportSchema.safeParse(value);
+    expect(retained.success).toBe(true);
+    if (retained.success) expect(retained.data).toEqual(value);
+    expect(() => parseNanoevalFinalReport(value)).toThrow(gate);
   });
 });
 
@@ -347,5 +521,51 @@ function validResult() {
       cost_usd: null,
       completeness: { runtime: "complete" as const, token_usage: "unavailable" as const, cost: "unavailable" as const }
     }
+  };
+}
+
+function validNanoevalFinalReport() {
+  return {
+    params: {
+      audit_split: "synthetic-audit",
+      mode: "detect" as const,
+      n_tries: 1,
+      n_samples: 1,
+      agent: "ultrafuzz" as const
+    },
+    run_health: { n_rollouts_failed: 0 },
+    metrics: {
+      score: 3,
+      max_score: 4,
+      score_percentage: 75,
+      per_audit: {
+        "synthetic-audit": {
+          score: 3,
+          max_score: 4,
+          n_runs: 1,
+          detect_award: 7.5,
+          detect_max_award: 10
+        }
+      },
+      detect_award: 7.5,
+      detect_max_award: 10,
+      detect_score_percentage: 75
+    },
+    run_group_id: "synthetic-run-group"
+  };
+}
+
+function validNanoevalRecord(
+  fields: Record<string, unknown> = {
+    record_type: "sampling",
+    prompt: "audit this target",
+    sampled: "sample"
+  }
+): Record<string, unknown> {
+  return {
+    timestamp: "2026-08-09T00:00:00.000+00:00",
+    sample_id: "synthetic-audit",
+    group_id: "0.0",
+    ...fields
   };
 }

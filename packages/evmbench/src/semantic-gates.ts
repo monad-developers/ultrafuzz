@@ -1,4 +1,5 @@
 import type { EvmbenchCatalog, EvmbenchLock, EvmbenchProfile, NormalizedEvmbenchResult } from "./contracts.js";
+import type { NanoevalFinalReport, NanoevalRecord } from "./results.js";
 
 export const IMPLEMENTED_EVMBENCH_SEMANTIC_GATES = Object.freeze([
   "audit IDs are unique",
@@ -8,7 +9,10 @@ export const IMPLEMENTED_EVMBENCH_SEMANTIC_GATES = Object.freeze([
   "recall equals score divided by max_score",
   "official totals equal the per-audit aggregates",
   "target, image, and per-audit identities agree",
-  "operational values agree with completeness labels"
+  "operational values agree with completeness labels",
+  "NanoEval scores do not exceed their maxima",
+  "NanoEval totals and percentages equal per-audit aggregates",
+  "NanoEval failed rollout count does not exceed sample count"
 ] as const);
 
 export type EvmbenchSemanticGateName = (typeof IMPLEMENTED_EVMBENCH_SEMANTIC_GATES)[number];
@@ -23,6 +27,16 @@ export const EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID = Object.freeze({
     "official totals equal the per-audit aggregates",
     "target, image, and per-audit identities agree",
     "operational values agree with completeness labels"
+  ],
+  "urn:ultrafuzz:schema:evmbench:nanoeval-final-report:1": [
+    "NanoEval scores do not exceed their maxima",
+    "NanoEval totals and percentages equal per-audit aggregates",
+    "NanoEval failed rollout count does not exceed sample count"
+  ],
+  "urn:ultrafuzz:schema:evmbench:nanoeval-record:1": [
+    "NanoEval scores do not exceed their maxima",
+    "NanoEval totals and percentages equal per-audit aggregates",
+    "NanoEval failed rollout count does not exceed sample count"
   ]
 } as const satisfies Readonly<Record<string, readonly EvmbenchSemanticGateName[]>>);
 
@@ -117,7 +131,63 @@ function assertEvmbenchSemanticGate(gate: EvmbenchSemanticGateName, value: unkno
       assertCompleteness(operational.cost_usd, operational.completeness.cost, gate, "cost_usd");
       return;
     }
+    case "NanoEval scores do not exceed their maxima": {
+      const report = nanoevalFinalReport(value);
+      if (report === undefined) return;
+      assertBoundedMetric(report.metrics.score, report.metrics.max_score, gate, "score", "max_score");
+      assertBoundedMetric(
+        report.metrics.detect_award,
+        report.metrics.detect_max_award,
+        gate,
+        "detect_award",
+        "detect_max_award"
+      );
+      for (const [auditId, row] of Object.entries(report.metrics.per_audit)) {
+        assertBoundedMetric(row.score, row.max_score, gate, `${auditId} score`, "max_score");
+        assertBoundedMetric(
+          row.detect_award,
+          row.detect_max_award,
+          gate,
+          `${auditId} detect_award`,
+          "detect_max_award"
+        );
+      }
+      return;
+    }
+    case "NanoEval totals and percentages equal per-audit aggregates": {
+      const report = nanoevalFinalReport(value);
+      if (report === undefined) return;
+      const metrics = report.metrics;
+      const perAudit = Object.values(metrics.per_audit);
+      assertAggregate(metrics.score, sum(perAudit, "score"), gate, "score");
+      assertAggregate(metrics.max_score, sum(perAudit, "max_score"), gate, "max_score");
+      assertAggregate(metrics.detect_award, sum(perAudit, "detect_award"), gate, "detect_award");
+      assertAggregate(metrics.detect_max_award, sum(perAudit, "detect_max_award"), gate, "detect_max_award");
+      assertAggregate(metrics.score_percentage, (metrics.score / metrics.max_score) * 100, gate, "score_percentage");
+      assertAggregate(
+        metrics.detect_score_percentage,
+        metrics.detect_max_award === 0 ? 0 : (metrics.detect_award / metrics.detect_max_award) * 100,
+        gate,
+        "detect_score_percentage"
+      );
+      return;
+    }
+    case "NanoEval failed rollout count does not exceed sample count": {
+      const report = nanoevalFinalReport(value);
+      if (report !== undefined && report.run_health.n_rollouts_failed > report.params.n_samples) {
+        fail(gate, "failed rollout count exceeds sample count");
+      }
+      return;
+    }
   }
+}
+
+function nanoevalFinalReport(value: unknown): NanoevalFinalReport | undefined {
+  const candidate = value as NanoevalFinalReport | NanoevalRecord;
+  if ("record_type" in candidate) {
+    return candidate.record_type === "final_report" ? candidate.final_report : undefined;
+  }
+  return candidate;
 }
 
 function assertUnique(values: readonly string[], gate: EvmbenchSemanticGateName, label: string): void {
