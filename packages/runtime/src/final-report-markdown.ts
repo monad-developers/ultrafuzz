@@ -368,19 +368,27 @@ function proofOfConcept(issue: JsonRecord): RenderableProof | undefined {
 
 function markdownOutsideFencedCode(markdown: string): string {
   const prose: string[] = [];
-  let fenceLength: number | undefined;
+  let openFence: { marker: "`" | "~"; length: number } | undefined;
   for (const line of markdown.split("\n")) {
-    const fence = /^(`{3,})/u.exec(line)?.[1];
-    if (fenceLength === undefined && fence !== undefined) {
-      fenceLength = fence.length;
+    if (openFence === undefined) {
+      const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
+      if (opening === null) {
+        prose.push(line);
+        continue;
+      }
+      const delimiter = opening[1]!;
+      const marker = delimiter[0] as "`" | "~";
+      if (marker === "`" && opening[2]!.includes("`")) {
+        prose.push(line);
+        continue;
+      }
+      openFence = { marker, length: delimiter.length };
       continue;
     }
-    if (fenceLength !== undefined && fence !== undefined && fence.length >= fenceLength) {
-      fenceLength = undefined;
+    const closing = /^ {0,3}(`+|~+)[ \t]*$/u.exec(line)?.[1];
+    if (closing?.[0] === openFence.marker && closing.length >= openFence.length) {
+      openFence = undefined;
       continue;
-    }
-    if (fenceLength === undefined) {
-      prose.push(line);
     }
   }
   return prose.join("\n");

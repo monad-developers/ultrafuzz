@@ -155,3 +155,57 @@ test("directive validation treats fenced proof code as code while retaining pros
     false
   );
 });
+
+test("directive validation recognizes CommonMark tilde fences and matching closers", () => {
+  const projection = projectCanonicalFinalReport(renderableReport());
+  const insertProofBlock = (block: string): string =>
+    projection.markdown.replace("\n### Strategy\n", `\n${block}\n\n### Strategy\n`);
+  const tildeProof = insertProofBlock(
+    [
+      "   ~~~~solidity",
+      "contract CriticalStateProbe {",
+      '    string internal constant label = "#### Sources";',
+      "    // **Source Node Id**, ## Executive summary, and ### Strategy provenance are code.",
+      "```",
+      "Critical",
+      "~~~",
+      "<script>proofOnly()</script>",
+      "~~~~   "
+    ].join("\n")
+  );
+
+  assert.equal(isDirectiveConformingFinalReportMarkdown(tildeProof, projection.report), true);
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      tildeProof.replace("~~~~   \n\n### Strategy", "~~~~   \n\nCritical\n\n### Strategy"),
+      projection.report
+    ),
+    false
+  );
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      insertProofBlock(["    ~~~solidity", "Critical", "    ~~~"].join("\n")),
+      projection.report
+    ),
+    false,
+    "four-space indentation must not hide prose as a CommonMark fence"
+  );
+});
+
+test("directive validation scans tilde-fenced code for secrets and private paths", () => {
+  const projection = projectCanonicalFinalReport(renderableReport());
+  const insertProofBlock = (code: string): string =>
+    projection.markdown.replace("\n### Strategy\n", `\n~~~text\n${code}\n~~~\n\n### Strategy\n`);
+
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(insertProofBlock("token=synthetic-tilde-fence-secret"), projection.report),
+    false
+  );
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      insertProofBlock("/home/runner/private/reproducer.sol"),
+      projection.report
+    ),
+    false
+  );
+});
