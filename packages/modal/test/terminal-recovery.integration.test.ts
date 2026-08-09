@@ -26,33 +26,30 @@ import {
 import { NonResumableTerminalRunError, repairModalEvalRunRecord, type ModalResumeWorkspace } from "../src/resume.js";
 import { classifyTerminalDisposition } from "../src/terminal-disposition.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "../src/worker-result.js";
+import { currentArtifactBinding, currentRunState } from "./current-artifact-fixtures.js";
 
 describe("terminal artifact-gate recovery", () => {
   it("ends an unchanged failed checkpoint without another Modal generation", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "ultrafuzz-terminal-recovery-"));
     const workspace = recoveryWorkspace(root);
-    const durableState = {
-      nodes: {
-        setup: { node_id: "setup", status: "succeeded", timed_out: false },
-        "task-one": {
-          node_id: "task-one",
-          status: "failed",
-          timed_out: false,
-          finished_at: "2026-01-01T00:01:00.000Z",
-          last_error: "required artifact missing",
-          provenance: {
-            workflow: { run_id: "workflow-one", task_id: "node:task-one", state: "finished" },
-            required_artifacts: { ok: false, missing: ["required"] },
-            failure: {
-              category: "artifact-contract",
-              causal_task_id: "verify:task-one",
-              causal_failure_category: "artifact-contract",
-              dependent_task_ids: []
-            }
+    const durableState = currentRunState({
+      setup: { status: "succeeded" },
+      "task-one": {
+        status: "failed",
+        finished_at: "2026-01-01T00:01:00.000Z",
+        last_error: "required artifact missing",
+        provenance: {
+          workflow: { run_id: "workflow-one", task_id: "node:task-one", state: "finished" },
+          required_artifacts: { ok: false, missing: ["required"] },
+          failure: {
+            category: "artifact-contract",
+            causal_task_id: "verify:task-one",
+            causal_failure_category: "artifact-contract",
+            dependent_task_ids: []
           }
         }
       }
-    };
+    });
     const manifest = {
       tasks: [{ attemptId: "task-one", concreteNodeId: "task-one", smithersNodeId: "node:task-one" }]
     };
@@ -122,7 +119,7 @@ describe("terminal artifact-gate recovery", () => {
     const gate = verifyRequiredArtifactsForAttempt(layout, findingsNode(), "task-one");
     expect(gate.ok).toBe(false);
     expect(gate.missing).toEqual([]);
-    expect(gate.diagnostics.map((diagnostic) => diagnostic.code)).toContain("ARTIFACT_SCHEMA_INVALID");
+    expect(gate.diagnostics.map((diagnostic) => diagnostic.code)).toContain("JSON_SCHEMA_VIOLATION");
 
     const gated = durableStateForGate(gate);
     expect(classifyTerminalDisposition(gated, TASK_MANIFEST)).toEqual({
@@ -243,8 +240,7 @@ function findingsNode(): PlannedGraphNode {
     outputs: [
       {
         path: "findings.json",
-        contract: "ultrafuzz/findings@2",
-        contract_digest: "a".repeat(64),
+        ...currentArtifactBinding("ultrafuzz/findings@2"),
         primary: true
       }
     ],
@@ -258,38 +254,32 @@ function findingsNode(): PlannedGraphNode {
 /** Durable state whose failing node carries the gate verdict it actually got. */
 function durableStateForGate(gate: { ok: boolean; missing: string[] }): unknown {
   const workflow = (taskId: string) => ({ run_id: WORKFLOW_RUN_ID, task_id: taskId, state: "finished" });
-  return {
-    nodes: {
-      setup: {
-        node_id: "setup",
-        status: "succeeded",
-        timed_out: false,
-        finished_at: "2026-01-01T00:00:30.000Z",
-        provenance: { workflow: workflow("node:setup"), required_artifacts: { ok: true, missing: [] } }
-      },
-      "task-one": {
-        node_id: "task-one",
-        status: gate.ok ? "succeeded" : "failed",
-        timed_out: false,
-        finished_at: "2026-01-01T00:01:00.000Z",
-        ...(gate.ok ? {} : { last_error: "required artifact contract violated" }),
-        provenance: {
-          workflow: workflow("node:task-one"),
-          required_artifacts: { ok: gate.ok, missing: gate.missing },
-          ...(gate.ok
-            ? {}
-            : {
-                failure: {
-                  category: "artifact-contract",
-                  causal_task_id: "verify:task-one",
-                  causal_failure_category: "artifact-contract",
-                  dependent_task_ids: []
-                }
-              })
-        }
+  return currentRunState({
+    setup: {
+      status: "succeeded",
+      finished_at: "2026-01-01T00:00:30.000Z",
+      provenance: { workflow: workflow("node:setup"), required_artifacts: { ok: true, missing: [] } }
+    },
+    "task-one": {
+      status: gate.ok ? "succeeded" : "failed",
+      finished_at: "2026-01-01T00:01:00.000Z",
+      ...(gate.ok ? {} : { last_error: "required artifact contract violated" }),
+      provenance: {
+        workflow: workflow("node:task-one"),
+        required_artifacts: { ok: gate.ok, missing: gate.missing },
+        ...(gate.ok
+          ? {}
+          : {
+              failure: {
+                category: "artifact-contract",
+                causal_task_id: "verify:task-one",
+                causal_failure_category: "artifact-contract",
+                dependent_task_ids: []
+              }
+            })
       }
     }
-  };
+  });
 }
 
 /** Mirrored canonical progress derived from the gated durable state itself. */

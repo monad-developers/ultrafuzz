@@ -21,6 +21,7 @@ import {
   type ModalCollectedLineage
 } from "../src/runner.js";
 import { publicEvalRunId } from "../src/public-worker.js";
+import { currentRunState, writeCurrentTerminalReport } from "./current-artifact-fixtures.js";
 
 const MODEL: ModalModelSpec = {
   slug: "benchmark-smoke-claude-sonnet-5-low",
@@ -255,6 +256,7 @@ describe("public post-eval diagnostics", () => {
     const record = fixture.runSummary.records[0] as unknown as Record<string, unknown>;
     record.final_status = "launched";
     record.workflow = { status: "running", terminal: false };
+    fs.rmSync(String(record.report_json_path));
     delete record.report_json_path;
     record.diagnostics = [
       { code: "unsafe code with spaces", message: "do not persist me", details: { token: "secret" } }
@@ -354,7 +356,7 @@ describe("public post-eval diagnostics", () => {
         ];
       })
     );
-    fs.writeFileSync(path.join(fixture.runRoot, "state.json"), `${JSON.stringify({ nodes })}\n`);
+    fs.writeFileSync(path.join(fixture.runRoot, "state.json"), `${JSON.stringify(currentRunState(nodes))}\n`);
     fixture.runSummary.records[0]!.final_status = "failed";
     fixture.runSummary.records[0]!.workflow = { status: "failed", terminal: true };
 
@@ -433,7 +435,7 @@ describe("public post-eval diagnostics", () => {
         }
       ])
     );
-    fs.writeFileSync(path.join(fixture.runRoot, "state.json"), `${JSON.stringify({ nodes })}\n`);
+    fs.writeFileSync(path.join(fixture.runRoot, "state.json"), `${JSON.stringify(currentRunState(nodes))}\n`);
 
     const diagnostics = createPublicEvalDiagnostics({
       config: CONFIG,
@@ -475,10 +477,6 @@ describe("public post-eval diagnostics", () => {
     // "still rejects a record the matrix never planned".
 
     const diagnostics = createPublicEvalDiagnostics(input);
-    const legacyV1 = structuredClone(diagnostics) as unknown as Record<string, unknown>;
-    const legacyRows = legacyV1.rows as Array<Record<string, unknown>>;
-    delete legacyRows[0]!.failed_nodes;
-    expect(parsePublicEvalDiagnostics(legacyV1).rows[0]?.failed_nodes).toEqual([]);
     expect(() => parsePublicEvalDiagnostics({ ...diagnostics, extra: true })).toThrow();
     expect(() =>
       parsePublicEvalDiagnostics({ ...diagnostics, summary: { ...diagnostics.summary, planned: 2 } })
@@ -543,28 +541,6 @@ describe("public post-eval diagnostics", () => {
       reason_codes: []
     });
     expect(diagnostics.summary.genuine_task_failure_rows).toBe(1);
-
-    const legacySecondRow = {
-      ...diagnostics.rows[0]!,
-      row_id: "target-a-runner-trial-2",
-      trial_id: "trial-2"
-    };
-    expect(() =>
-      parsePublicEvalDiagnostics({
-        ...diagnostics,
-        schema_version: "ultrafuzz.modal.public-eval-diagnostics.v1",
-        summary: {
-          ...diagnostics.summary,
-          planned: 2,
-          launched: 2,
-          workflow_failed: 2,
-          genuine_task_failure_rows: 2,
-          terminal_reports_present: 2,
-          scoring_ready: true
-        },
-        rows: [diagnostics.rows[0], legacySecondRow]
-      })
-    ).not.toThrow();
   });
 
   it("publishes one report-backed failed target across rows but rejects two targets", () => {
@@ -662,9 +638,7 @@ describe("public post-eval diagnostics", () => {
 function evalFixture() {
   const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-public-diagnostics-"));
   const runRoot = path.join(root, "run");
-  const reportPath = path.join(runRoot, "artifacts", "final-report", "report.json");
-  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-  fs.writeFileSync(reportPath, '{"schema_version":"1.0","issues":[]}\n');
+  const reportPath = writeCurrentTerminalReport(runRoot);
   const evalRunId = "public-diagnostics-benchmark-smoke-claude-sonnet-5-low";
   const matrix = [
     {
@@ -715,12 +689,10 @@ function writeGenuineTaskFailureFixture(runRoot: string): void {
   const attemptId = "task-one";
   fs.writeFileSync(
     path.join(runRoot, "state.json"),
-    `${JSON.stringify({
-      nodes: {
+    `${JSON.stringify(
+      currentRunState({
         [attemptId]: {
-          node_id: attemptId,
           status: "failed",
-          timed_out: false,
           finished_at: "2026-07-20T00:00:00.000Z",
           last_error: "task output did not pass final validation",
           provenance: {
@@ -732,8 +704,8 @@ function writeGenuineTaskFailureFixture(runRoot: string): void {
             }
           }
         }
-      }
-    })}\n`
+      })
+    )}\n`
   );
   fs.mkdirSync(path.join(runRoot, "smithers"), { recursive: true });
   fs.writeFileSync(

@@ -57,6 +57,7 @@ import type { PublicBenchmarkBundle } from "../src/public-bundle.js";
 import { createExactCandidateSourceArchive } from "../src/runner.js";
 import { OperationalDispositionError } from "../src/terminal-disposition.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "../src/worker-result.js";
+import { currentRunState, writeCurrentTerminalReport } from "./current-artifact-fixtures.js";
 
 it("keeps high-fanout public benchmark work off the persistent Modal volume", () => {
   const dataRoot = "/data/public-run/model";
@@ -1239,10 +1240,8 @@ it("publishes only the final journal record for each benchmark row", () => {
   const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
   const runRoot = path.join(root, "target-run");
   const reportRoot = path.join(runRoot, "artifacts/final-report");
-  const reportPath = path.join(reportRoot, "report.json");
   fs.mkdirSync(evalRoot, { recursive: true });
-  fs.mkdirSync(reportRoot, { recursive: true });
-  fs.writeFileSync(reportPath, '{"schema_version":"1.0","issues":[]}\n');
+  const reportPath = writeCurrentTerminalReport(runRoot);
   fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
   fs.writeFileSync(path.join(reportRoot, "findings.normalized.json"), "[]\n");
   const record = {
@@ -1313,9 +1312,8 @@ it("publishes smoke dedupe evidence through the trusted normalized-findings bund
   const reportRoot = path.join(runRoot, "artifacts/final-report");
   const dedupeRoot = path.join(runRoot, "artifacts/dedupe-findings");
   fs.mkdirSync(evalRoot, { recursive: true });
-  fs.mkdirSync(reportRoot, { recursive: true });
+  writeCurrentTerminalReport(runRoot);
   fs.mkdirSync(dedupeRoot, { recursive: true });
-  fs.writeFileSync(path.join(reportRoot, "report.json"), '{"schema_version":"1.0","issues":[]}\n');
   fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
   fs.writeFileSync(path.join(reportRoot, "findings.normalized.json"), "[]\n");
   fs.writeFileSync(path.join(dedupeRoot, "deduped-findings.json"), "[]\n");
@@ -1549,12 +1547,10 @@ function writeGenuineTaskFailureFixture(runRoot: string): void {
   const attemptId = "task-one";
   fs.writeFileSync(
     path.join(runRoot, "state.json"),
-    `${JSON.stringify({
-      nodes: {
+    `${JSON.stringify(
+      currentRunState({
         [attemptId]: {
-          node_id: attemptId,
           status: "failed",
-          timed_out: false,
           finished_at: "2026-07-20T00:00:00.000Z",
           last_error: "task output did not pass final validation",
           provenance: {
@@ -1566,8 +1562,8 @@ function writeGenuineTaskFailureFixture(runRoot: string): void {
             }
           }
         }
-      }
-    })}\n`
+      })
+    )}\n`
   );
   fs.mkdirSync(path.join(runRoot, "smithers"), { recursive: true });
   fs.writeFileSync(
@@ -1590,10 +1586,8 @@ it("retains threat-model, goal-plan and vulnerability-database artifacts per row
   const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
   const runRoot = path.join(root, "target-run");
   const reportRoot = path.join(runRoot, "artifacts/final-report");
-  const reportPath = path.join(reportRoot, "report.json");
   fs.mkdirSync(evalRoot, { recursive: true });
-  fs.mkdirSync(reportRoot, { recursive: true });
-  fs.writeFileSync(reportPath, '{"schema_version":"1.0","issues":[]}\n');
+  const reportPath = writeCurrentTerminalReport(runRoot);
   fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
   fs.writeFileSync(path.join(reportRoot, "findings.normalized.json"), "[]\n");
 

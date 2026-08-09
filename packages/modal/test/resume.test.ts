@@ -17,6 +17,7 @@ import {
   NonResumableTerminalRunError,
   repairModalEvalRunRecord
 } from "../src/resume.js";
+import { currentRunState } from "./current-artifact-fixtures.js";
 
 const T0 = "2026-07-19T00:00:00.000Z";
 const T1 = "2026-07-19T00:01:00.000Z";
@@ -25,7 +26,10 @@ const T2 = "2026-07-19T00:02:00.000Z";
 function writeRunRoot(target: string, runId: string, options: { linked: boolean }) {
   const runRoot = path.join(target, ".ultrafuzz", "runs", runId);
   fs.mkdirSync(runRoot, { recursive: true });
-  fs.writeFileSync(path.join(runRoot, "state.json"), JSON.stringify({ run_id: runId, nodes: {} }));
+  fs.writeFileSync(
+    path.join(runRoot, "state.json"),
+    JSON.stringify(currentRunState({}, { run_id: runId, status: "pending" }))
+  );
   if (options.linked) {
     // The workflow link `resume` requires, at the path the RUNTIME writes it to. Derived from
     // `layoutForRunRoot`, never spelled out: an earlier revision invented the filename here and in the

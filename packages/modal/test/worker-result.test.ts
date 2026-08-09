@@ -16,6 +16,7 @@ import {
   WorkerResultWriter,
   type WorkerResultContract
 } from "../src/worker-result.js";
+import { currentRunState } from "./current-artifact-fixtures.js";
 
 const TERMINAL_CATEGORIES = [
   "finished",
@@ -199,15 +200,15 @@ describe("sanitized worker result contracts", () => {
     const root = await temporaryRoot();
     const runRoot = path.join(root, ".ultrafuzz", "runs", "run-one");
     fs.mkdirSync(runRoot, { recursive: true });
-    const state = {
-      nodes: {
+    const state = currentRunState(
+      {
         first: taskNode("succeeded"),
         second: taskNode("failed"),
         third: taskNode("running"),
-        setup: { status: "succeeded", private_detail: "placeholder" }
+        setup: { status: "succeeded", provenance: { private_detail: "placeholder" } }
       },
-      private_detail: "placeholder"
-    };
+      { status: "running", provenance: { private_detail: "placeholder" } }
+    );
     const stateContents = `${JSON.stringify(state)}\n`;
     const statePath = path.join(runRoot, "state.json");
     fs.writeFileSync(statePath, stateContents, { mode: 0o600 });
@@ -277,41 +278,24 @@ describe("sanitized worker result contracts", () => {
     expect(JSON.stringify(snapshot)).not.toContain("placeholder-one");
   });
 
-  it("counts loop-expanded concrete attempts as one logical checkpoint row", async () => {
-    const root = await temporaryRoot();
-    const runRoot = path.join(root, ".ultrafuzz", "runs", "run-one");
-    fs.mkdirSync(runRoot, { recursive: true });
-    fs.writeFileSync(
-      path.join(runRoot, "state.json"),
-      `${JSON.stringify({
-        nodes: {
-          "strategy-0": { ...taskNode("succeeded"), logical_id: "strategy" },
-          "strategy-1": { ...taskNode("succeeded"), logical_id: "strategy" },
-          "strategy-2": { ...taskNode("running"), logical_id: "strategy" },
-          setup: taskNode("succeeded"),
-          review: taskNode("failed")
-        }
-      })}\n`
-    );
-
-    expect((await readWorkerCheckpoint(root)).counts).toEqual({ succeeded: 1, failed: 1, remaining: 1 });
-  });
-
   it("counts durable state logical_node_id rows once across loop attempts", async () => {
     const root = await temporaryRoot();
     const runRoot = path.join(root, ".ultrafuzz", "runs", "run-one");
     fs.mkdirSync(runRoot, { recursive: true });
     fs.writeFileSync(
       path.join(runRoot, "state.json"),
-      `${JSON.stringify({
-        nodes: {
-          "strategy-0": { ...taskNode("succeeded"), logical_node_id: "strategy", node_id: "strategy-0" },
-          "strategy-1": { ...taskNode("succeeded"), logical_node_id: "strategy", node_id: "strategy-1" },
-          "strategy-2": { ...taskNode("running"), logical_node_id: "strategy", node_id: "strategy-2" },
-          setup: { ...taskNode("succeeded"), logical_node_id: "setup", node_id: "setup" },
-          review: { ...taskNode("failed"), logical_node_id: "review", node_id: "review" }
-        }
-      })}\n`
+      `${JSON.stringify(
+        currentRunState(
+          {
+            "strategy-0": { ...taskNode("succeeded"), logical_node_id: "strategy", node_id: "strategy-0" },
+            "strategy-1": { ...taskNode("succeeded"), logical_node_id: "strategy", node_id: "strategy-1" },
+            "strategy-2": { ...taskNode("running"), logical_node_id: "strategy", node_id: "strategy-2" },
+            setup: { ...taskNode("succeeded"), logical_node_id: "setup", node_id: "setup" },
+            review: { ...taskNode("failed"), logical_node_id: "review", node_id: "review" }
+          },
+          { status: "running" }
+        )
+      )}\n`
     );
 
     expect((await readWorkerCheckpoint(root)).counts).toEqual({ succeeded: 1, failed: 1, remaining: 1 });

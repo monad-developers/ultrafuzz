@@ -76,6 +76,7 @@ import {
   terminateModalBenchmarkSandboxes,
   terminateModalBenchmarkTagScopes
 } from "../src/runner.js";
+import { currentRunState } from "./current-artifact-fixtures.js";
 
 const MODEL: ModalModelSpec = {
   slug: "model-one",
@@ -1161,32 +1162,34 @@ describe("Modal canonical recovery probe", () => {
     );
     fs.writeFileSync(
       path.join(runRoot, "state.json"),
-      JSON.stringify({
-        status: "running",
-        created_at: "2026-01-01T00:00:00.000Z",
-        last_transition_at: "2026-01-01T00:09:50.000Z",
-        nodes: {
-          "complete-0": {
-            node_id: "complete-0",
-            logical_node_id: "complete",
-            status: "succeeded",
-            finished_at: "2026-01-01T00:09:40.000Z"
+      JSON.stringify(
+        currentRunState(
+          {
+            "complete-0": {
+              logical_node_id: "complete",
+              status: "succeeded",
+              finished_at: "2026-01-01T00:09:40.000Z"
+            },
+            "complete-1": {
+              logical_node_id: "complete",
+              status: "succeeded",
+              finished_at: "2026-01-01T00:09:45.000Z"
+            },
+            "pending-0": {
+              logical_node_id: "pending",
+              status: "succeeded",
+              finished_at: "2026-01-01T00:09:30.000Z"
+            },
+            "pending-1": { logical_node_id: "pending", status: "pending" }
           },
-          "complete-1": {
-            node_id: "complete-1",
-            logical_node_id: "complete",
-            status: "succeeded",
-            finished_at: "2026-01-01T00:09:45.000Z"
-          },
-          "pending-0": {
-            node_id: "pending-0",
-            logical_node_id: "pending",
-            status: "succeeded",
-            finished_at: "2026-01-01T00:09:30.000Z"
-          },
-          "pending-1": { node_id: "pending-1", logical_node_id: "pending", status: "pending" }
-        }
-      })
+          {
+            run_id: "durable-run",
+            status: "running",
+            created_at: "2026-01-01T00:00:00.000Z",
+            last_transition_at: "2026-01-01T00:09:50.000Z"
+          }
+        )
+      )
     );
     fs.writeFileSync(path.join(runRoot, "plan.json"), JSON.stringify({ topology: { logical_nodes: 3 } }));
     const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount);

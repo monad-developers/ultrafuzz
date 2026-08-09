@@ -14,6 +14,7 @@ import {
   readPublicBenchmarkBundle
 } from "../src/public-bundle.js";
 import { PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION } from "../src/public-eval-diagnostics.js";
+import { currentFinding, currentTerminalReport } from "./current-artifact-fixtures.js";
 
 const TEST_LINEAGE = {
   logical_run_id: "fixture-run",
@@ -54,19 +55,6 @@ describe("public Modal benchmark bundles", () => {
     const output = path.join(root, "output");
     expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v4");
     expect(bundle.schema_version).toBe(PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION);
-    expect(
-      parsePublicBenchmarkBundle({
-        ...bundle,
-        schema_version: "ultrafuzz.modal.public-benchmark-bundle.v3"
-      })
-    ).toMatchObject({ schema_version: "ultrafuzz.modal.public-benchmark-bundle.v3", status: "succeeded" });
-    expect(() =>
-      parsePublicBenchmarkBundle({
-        ...bundle,
-        schema_version: "ultrafuzz.modal.public-benchmark-bundle.v3",
-        status: "failed"
-      })
-    ).toThrow();
     expect(bundle).toMatchObject({
       status: "succeeded",
       executed_case_count: 2,
@@ -665,25 +653,13 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
     return { path: `eval/${name}`, root, source };
   });
   for (const rowId of rowIds) {
-    const finding = {
-      schema_version: "1.0",
+    const finding = currentFinding({
       id: `${rowId}-finding-1`,
-      title: "Fixture finding",
-      status: "confirmed",
-      severity_guess: "Low",
-      confidence: "high",
       summary: "A fixture finding used to exercise public bundle validation."
-    };
+    });
     for (const [name, contents] of [
       ["report.md", `# Report for ${rowId}\n`],
-      [
-        "report.json",
-        `${JSON.stringify(
-          { schema_version: "1.0", run_metadata: {}, issues: [finding], non_production_outcomes: [] },
-          null,
-          2
-        )}\n`
-      ],
+      ["report.json", `${JSON.stringify(currentTerminalReport(), null, 2)}\n`],
       ["findings.normalized.json", `${JSON.stringify([finding], null, 2)}\n`]
     ] as const) {
       const source = path.join(root, "report-source", rowId, name);
