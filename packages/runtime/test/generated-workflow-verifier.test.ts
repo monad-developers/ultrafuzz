@@ -8,10 +8,32 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import * as ts from "typescript";
 
-import { assertRegularFileInside, writeFileDurable } from "@ultrafuzz/artifacts";
+import {
+  assertRegularFileInside,
+  MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
+  normalizeNodeAttemptFailureMessage,
+  writeFileDurable
+} from "@ultrafuzz/artifacts";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
+
+function loadRetryFailureAwareArgs(): (
+  args: { prompt?: unknown } | undefined,
+  previousFailure: string | undefined
+) => { prompt?: unknown } | undefined {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function retryFailureAwareArgs");
+  const helperEnd = source.indexOf("\n\nfunction isStrictlyInsideDirectory", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function("untrustedContentBoundary", `${helper}; return retryFailureAwareArgs;`)(
+    "UNTRUSTED CONTENT BOUNDARY"
+  ) as ReturnType<typeof loadRetryFailureAwareArgs>;
+}
 
 function loadWorkflowControlPathResolvers(): {
   admitWorkflowControls: (
@@ -973,6 +995,48 @@ test("generated Smithers pinned source proof ignores unrelated same-commit Ultra
   }
 });
 
+test("retry feedback changes only the execution-time prompt section inside the untrusted boundary", () => {
+  const retryFailureAwareArgs = loadRetryFailureAwareArgs();
+  const renderedPrompt = "trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\ntrusted runtime\n\nrendered task";
+  const firstAttempt = retryFailureAwareArgs({ prompt: renderedPrompt }, undefined);
+  const secondAttempt = retryFailureAwareArgs({ prompt: renderedPrompt }, "Error: deterministic verifier failure");
+
+  assert.deepEqual(firstAttempt, { prompt: renderedPrompt });
+  assert.equal(typeof secondAttempt?.prompt, "string");
+  const injected = String(secondAttempt?.prompt);
+  assert.ok(injected.startsWith("trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\n"), injected);
+  assert.match(injected, /## Untrusted prior-attempt failure[\s\S]*deterministic verifier failure/u);
+  assert.ok(injected.indexOf("deterministic verifier failure") < injected.indexOf("trusted runtime"), injected);
+  assert.equal(
+    injected.replace(/## Untrusted prior-attempt failure[\s\S]*?## Current task instructions\n\n/u, ""),
+    renderedPrompt
+  );
+  assert.throws(
+    () => retryFailureAwareArgs({ prompt: "prompt without boundary" }, "failure"),
+    /cannot locate the untrusted-content boundary/u
+  );
+});
+
+test("retry feedback diagnostics are secret-redacted and UTF-8 byte bounded before prompt injection", () => {
+  const diagnostic = normalizeNodeAttemptFailureMessage(
+    `verifier rejected token=sk-${"x".repeat(48)} ${"界".repeat(MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES)}`
+  );
+  assert.ok(diagnostic);
+  assert.match(diagnostic, /<redacted>/u);
+  assert.doesNotMatch(diagnostic, /sk-x/u);
+  assert.ok(Buffer.byteLength(diagnostic, "utf8") <= MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES);
+
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const agent = source.slice(
+    source.indexOf("function artifactAwareAgent"),
+    source.indexOf("function retryFailureText")
+  );
+  assert.match(agent, /catch \(error\)[\s\S]*normalizeNodeAttemptFailureMessage\(retryFailureText\(error\)\)/u);
+  assert.ok(
+    agent.indexOf("retryFailureAwareArgs(args, previousFailure)") < agent.indexOf("agent.generate(attemptArgs)")
+  );
+});
+
 test("generated Smithers retries reset exact task-owned artifact contents after the first attempt", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const agentStart = source.indexOf("function artifactAwareAgent");
@@ -985,7 +1049,10 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
 
   const agent = source.slice(agentStart, rootsStart);
   assert.match(agent, /if \(\(args\?\.taskContext\?\.attempt \?\? 1\) > 1\)/u);
-  assert.ok(agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("await agent.generate(args)"), agent);
+  assert.ok(
+    agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("await agent.generate(attemptArgs)"),
+    agent
+  );
 
   const reset = source.slice(rootsStart, preparationStart);
   assert.match(
@@ -1081,7 +1148,7 @@ test("generated Smithers agent preserves its final response as missing non-repor
   assert.ok(preparationStart > agentStart, source);
 
   const agent = source.slice(agentStart, preparationStart);
-  assert.match(agent, /const result = await agent\.generate\(args\)/u);
+  assert.match(agent, /const result = await agent\.generate\(attemptArgs\)/u);
   assert.match(agent, /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\)/u);
   assert.match(agent, /materializeMissingMarkdownArtifacts\(task, result\)/u);
   assert.match(agent, /materializeMissingFinalReportArtifacts\(task\)/u);
@@ -2045,7 +2112,7 @@ test("generated Smithers preserves setup-patch baselines across post-agent prepa
   assert.match(helper, /captures\.slice\(replayFrom\)/u);
   assert.match(
     source,
-    /const result = await agent\.generate\(args\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\);/u
+    /const result = await agent\.generate\(attemptArgs\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\);/u
   );
 });
 
