@@ -4,12 +4,20 @@ import path from "node:path";
 
 import { Args, Command, Flags } from "@oclif/core";
 import {
+  DEFAULT_STRICT_JSONL_MAX_BYTES,
+  DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES,
+  DEFAULT_STRICT_JSONL_MAX_RECORDS,
+  assertEventRecord,
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
   layoutForRunRoot,
+  parseStrictJsonBytes,
   readRegularFileSnapshot,
   readRunState,
+  validateStrictJsonlHistory,
+  type EventRecord,
+  type StrictJsonlCodec,
   validateSafeId
 } from "@ultrafuzz/artifacts";
 import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
@@ -102,7 +110,8 @@ export default class ReportBundle extends Command {
       const validatedReport = hasFinalReportJson(layout.root, layout.artifactsDir)
         ? loadValidatedReportSnapshot(layout.root)
         : undefined;
-      const files = collectBundleFiles(layout.root, diagnostics);
+      const eventJournal = loadValidatedEventJournalSnapshot(layout.root, layout.eventsPath, runId);
+      const files = collectBundleFiles(layout.root, diagnostics, eventJournal);
       if (validatedReport !== undefined) assertValidatedReportBundleSnapshot(files, validatedReport);
       if (files.length === 0) {
         throw new Error("run has no report bundle artifacts to package");
@@ -220,10 +229,112 @@ function hasFinalReportJson(runRoot: string, artifactsDirectory: string): boolea
   return false;
 }
 
-function collectBundleFiles(runRoot: string, diagnostics: RuntimeDiagnostic[]): BundleFile[] {
-  const files: BundleFile[] = [];
+function loadValidatedEventJournalSnapshot(
+  runRoot: string,
+  eventsPath: string,
+  expectedRunId: string
+): BundleFile | undefined {
+  const stat = lstatIfPresent(eventsPath);
+  if (stat === undefined) return undefined;
+  if (stat.isSymbolicLink()) throw new Error(`event journal cannot be a symlink: ${eventsPath}`);
+  if (!stat.isFile()) throw new Error(`event journal is not a regular file: ${eventsPath}`);
+
+  assertRegularFileInside(runRoot, eventsPath, "event journal");
+  const contents = readRegularFileSnapshot(eventsPath, DEFAULT_STRICT_JSONL_MAX_BYTES);
+  validateEventJournalSnapshot(contents, expectedRunId);
+  return {
+    absolutePath: eventsPath,
+    archivePath: "events.jsonl",
+    contents
+  };
+}
+
+function validateEventJournalSnapshot(contents: Buffer, expectedRunId: string): void {
+  if (contents.byteLength === 0) return;
+  if (contents[contents.byteLength - 1] !== 0x0a) {
+    throw new Error("event journal has a torn or unterminated final record");
+  }
+
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(contents);
+  } catch (error) {
+    throw new Error("event journal is not valid UTF-8", { cause: error });
+  }
+  const lines = text.split("\n");
+  lines.pop();
+  if (lines.length > DEFAULT_STRICT_JSONL_MAX_RECORDS) {
+    throw new Error(`event journal exceeds the ${DEFAULT_STRICT_JSONL_MAX_RECORDS}-record limit`);
+  }
+
+  const codec = eventJournalCodec(expectedRunId);
+  const records: EventRecord[] = [];
+  for (const [index, line] of lines.entries()) {
+    const lineNumber = index + 1;
+    if (line.trim().length === 0) throw new Error(`event journal contains a blank record at line ${lineNumber}`);
+    const lineBytes = Buffer.from(line, "utf8");
+    if (lineBytes.byteLength > DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES) {
+      throw new Error(
+        `event journal record ${lineNumber} exceeds the ${DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES}-byte limit`
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = parseStrictJsonBytes(lineBytes, {
+        maxBytes: DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES,
+        maxDepth: 128,
+        maxItems: 100_000,
+        maxProperties: 100_000
+      });
+    } catch (error) {
+      throw new Error(
+        `event journal record ${lineNumber} is invalid strict JSON: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
+      );
+    }
+    records.push(codec.parseRecord(parsed, `$[${index}]`));
+  }
+  validateStrictJsonlHistory(records, codec);
+}
+
+function eventJournalCodec(expectedRunId: string): StrictJsonlCodec<EventRecord> {
+  return {
+    label: "event journal",
+    parseRecord: (value, recordPath) => {
+      const record = assertEventRecord(value, recordPath);
+      if (record.run_id !== expectedRunId) {
+        throw new Error(
+          `${recordPath}.run_id belongs to ${JSON.stringify(record.run_id)}, expected ${JSON.stringify(expectedRunId)}`
+        );
+      }
+      return record;
+    },
+    identity: (record) => record.event_id,
+    validateHistory: (records) => {
+      const firstRunId = records[0]?.run_id;
+      let priorTimestamp = records[0]?.timestamp;
+      for (const [index, record] of records.entries()) {
+        if (firstRunId !== undefined && record.run_id !== firstRunId) {
+          throw new Error(`event journal changes run_id at record ${index + 1}`);
+        }
+        if (priorTimestamp !== undefined && record.timestamp < priorTimestamp) {
+          throw new Error(`event journal timestamps are not ordered at record ${index + 1}`);
+        }
+        priorTimestamp = record.timestamp;
+      }
+    }
+  };
+}
+
+function collectBundleFiles(
+  runRoot: string,
+  diagnostics: RuntimeDiagnostic[],
+  eventJournal: BundleFile | undefined
+): BundleFile[] {
+  const files: BundleFile[] = eventJournal === undefined ? [] : [eventJournal];
 
   for (const relativePath of TOP_LEVEL_RUN_FILES) {
+    if (relativePath === "events.jsonl") continue;
     const absolutePath = path.join(runRoot, relativePath);
     if (fs.existsSync(absolutePath)) {
       addBundleFile(runRoot, absolutePath, relativePath, files, diagnostics);

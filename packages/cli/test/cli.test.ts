@@ -10,6 +10,7 @@ import {
   REPORT_SCHEMA_VERSION,
   artifactContractDefinition,
   artifactContractSchemaBinding,
+  createEventRecord,
   layoutForRunRoot,
   readRunMetadataDocument,
   writeRunMetadataDocument,
@@ -346,6 +347,19 @@ async function createReportRun(project: string, runId: string): Promise<{ run_id
   const run = await cli(project, ["run", "--run-id", runId, "--json"], fakeSmithersEnv(project));
   assert.equal(run.code, 0, run.stderr);
   return parseJson(run).data as { run_id: string; run_root: string };
+}
+
+function bundleFixtureEvent(runId: string) {
+  return createEventRecord(
+    { runId },
+    {
+      eventType: "findings-validated",
+      nodeId: "final-report",
+      status: "succeeded",
+      timestamp: "2026-08-09T00:00:00.000Z",
+      payload: { count: 1, path: "artifacts/final-report/report.json" }
+    }
+  );
 }
 
 function writeJsonRecord(filePath: string, value: Record<string, unknown>): void {
@@ -1169,6 +1183,123 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   ]);
   assert.equal(linkedParentAttempt.code, 1);
   assert.match(JSON.stringify(parseJson(linkedParentAttempt).diagnostics), /symlink/u);
+});
+
+test("report bundle preserves the exact validated event-record-v2 journal snapshot", async () => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  const runId = "report-bundle-event-snapshot";
+  const runRoot = path.join(project, ".ultrafuzz", "runs", runId);
+  fs.mkdirSync(runRoot, { recursive: true });
+  const record = bundleFixtureEvent(runId);
+  const journalBytes = Buffer.from(`  ${JSON.stringify(record)}  \n`, "utf8");
+  fs.writeFileSync(path.join(runRoot, "events.jsonl"), journalBytes);
+
+  const bundled = await cli(project, ["report", "bundle", runId, "--json"]);
+
+  assert.equal(bundled.code, 0, bundled.stderr);
+  const data = parseJson(bundled).data as { zip_path: string };
+  const captured = new AdmZip(data.zip_path).readFile("events.jsonl");
+  assert.ok(captured);
+  assert.deepEqual(captured, journalBytes);
+});
+
+test("report bundle treats only an absent event journal as optional", async () => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  const runId = "report-bundle-no-event-journal";
+  const runRoot = path.join(project, ".ultrafuzz", "runs", runId);
+  fs.mkdirSync(runRoot, { recursive: true });
+  fs.writeFileSync(path.join(runRoot, "graph.fingerprint"), "sha256:fixture\n", "utf8");
+
+  const bundled = await cli(project, ["report", "bundle", runId, "--json"]);
+
+  assert.equal(bundled.code, 0, bundled.stderr);
+  const data = parseJson(bundled).data as { zip_path: string };
+  const zip = new AdmZip(data.zip_path);
+  assert.equal(zip.getEntry("events.jsonl"), null);
+  assert.equal(zip.readAsText("graph.fingerprint"), "sha256:fixture\n");
+});
+
+test("report bundle fails closed on every present invalid event journal", async (context) => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  const cases: Array<{
+    name: string;
+    prepare(eventsPath: string, runId: string): void;
+    diagnostic: RegExp;
+  }> = [
+    {
+      name: "malformed JSON",
+      prepare: (eventsPath) => fs.writeFileSync(eventsPath, '{"schema_version":\n', "utf8"),
+      diagnostic: /invalid strict JSON/iu
+    },
+    {
+      name: "duplicate JSON property",
+      prepare: (eventsPath, runId) => {
+        const line = JSON.stringify(bundleFixtureEvent(runId)).replace(
+          `"run_id":"${runId}"`,
+          `"run_id":"${runId}","run_id":"${runId}"`
+        );
+        fs.writeFileSync(eventsPath, `${line}\n`, "utf8");
+      },
+      diagnostic: /duplicate property name/iu
+    },
+    {
+      name: "foreign run record",
+      prepare: (eventsPath) => fs.writeFileSync(eventsPath, `${JSON.stringify(bundleFixtureEvent("foreign-run"))}\n`),
+      diagnostic: /belongs to.*expected/iu
+    },
+    {
+      name: "torn final record",
+      prepare: (eventsPath, runId) => fs.writeFileSync(eventsPath, JSON.stringify(bundleFixtureEvent(runId))),
+      diagnostic: /torn or unterminated/iu
+    },
+    {
+      name: "legacy event schema",
+      prepare: (eventsPath, runId) => {
+        fs.writeFileSync(
+          eventsPath,
+          `${JSON.stringify({ ...bundleFixtureEvent(runId), schema_version: "ultrafuzz.event-record.v1" })}\n`
+        );
+      },
+      diagnostic: /event record schema validation failed/iu
+    },
+    {
+      name: "duplicate event identity",
+      prepare: (eventsPath, runId) => {
+        const line = JSON.stringify(bundleFixtureEvent(runId));
+        fs.writeFileSync(eventsPath, `${line}\n${line}\n`, "utf8");
+      },
+      diagnostic: /duplicate identity/iu
+    },
+    {
+      name: "dangling symlink",
+      prepare: (eventsPath) => fs.symlinkSync(`${eventsPath}.missing`, eventsPath),
+      diagnostic: /cannot be a symlink/iu
+    },
+    {
+      name: "nonregular file",
+      prepare: (eventsPath) => fs.mkdirSync(eventsPath),
+      diagnostic: /not a regular file/iu
+    }
+  ];
+
+  for (const [index, invalidCase] of cases.entries()) {
+    await context.test(invalidCase.name, async () => {
+      const runId = `report-bundle-invalid-events-${index}`;
+      const runRoot = path.join(project, ".ultrafuzz", "runs", runId);
+      fs.mkdirSync(runRoot, { recursive: true });
+      fs.writeFileSync(path.join(runRoot, "graph.fingerprint"), "sha256:fixture\n", "utf8");
+      invalidCase.prepare(path.join(runRoot, "events.jsonl"), runId);
+
+      const bundled = await cli(project, ["report", "bundle", runId, "--json"]);
+
+      assert.equal(bundled.code, 1, bundled.stderr);
+      assert.match(JSON.stringify(parseJson(bundled).diagnostics), invalidCase.diagnostic);
+      assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "bundles", `${runId}-report-bundle.zip`)), false);
+    });
+  }
 });
 
 test("report bundle packages incomplete runs without a final-report JSON", async () => {
