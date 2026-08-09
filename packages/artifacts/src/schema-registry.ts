@@ -229,8 +229,9 @@ function collectReferences(value: unknown, output = new Set<string>()): Set<stri
     for (const entry of value) collectReferences(entry, output);
   } else if (isRecord(value)) {
     for (const [key, entry] of Object.entries(value)) {
-      if (key === "$ref" && typeof entry === "string") output.add(entry);
-      else collectReferences(entry, output);
+      if ((key === "$ref" || key === "$dynamicRef" || key === "$recursiveRef") && typeof entry === "string") {
+        output.add(entry);
+      } else collectReferences(entry, output);
     }
   }
   return output;

@@ -94,11 +94,11 @@ function boundedIssues(
       keyword: error.keyword,
       message: error.message ?? "schema constraint failed"
     }))
-    .sort((left, right) =>
-      [left.instancePath, left.schemaPath, left.keyword, left.message]
-        .join("\u0000")
-        .localeCompare([right.instancePath, right.schemaPath, right.keyword, right.message].join("\u0000"), "en")
-    );
+    .sort((left, right) => {
+      const leftKey = [left.instancePath, left.schemaPath, left.keyword, left.message].join("\u0000");
+      const rightKey = [right.instancePath, right.schemaPath, right.keyword, right.message].join("\u0000");
+      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+    });
   const issues: JsonSchemaValidationIssue[] = [];
   let bytes = 2;
   for (const issue of sorted.slice(0, maxErrors)) {

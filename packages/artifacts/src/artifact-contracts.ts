@@ -7,7 +7,7 @@ import { validateGeneratedTestManifestSchema } from "./generated-tests.js";
 import { validateInvariantLedgerSchema } from "./invariant-ledger.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { validateWorkspacePatchSchema } from "./workspace-patch.js";
-import { artifactSchemaRegistry } from "./schema-registry.js";
+import { artifactSchemaBundleDigest, artifactSchemaRegistry, VALIDATOR_BUILD_IDENTITY } from "./schema-registry.js";
 import { parseStrictJson, StrictJsonError } from "./strict-json.js";
 import {
   validateLensPropertiesSchema,
@@ -56,6 +56,14 @@ export interface ArtifactContractValidationResult {
   ok: boolean;
   issues: ArtifactContractIssue[];
   value?: unknown;
+}
+
+export interface ArtifactContractSchemaBinding {
+  schema_file: string;
+  schema_id: string;
+  schema_sha256: string;
+  schema_bundle_sha256: string;
+  validator_build: string;
 }
 
 const uniqueReportPathArraySchema = z
@@ -282,6 +290,20 @@ export function isArtifactContractId(value: unknown): value is ArtifactContractI
 
 export function artifactContractSchemaFile(id: ArtifactContractId): string | undefined {
   return contractSchemaFiles[id];
+}
+
+export function artifactContractSchemaBinding(id: ArtifactContractId): ArtifactContractSchemaBinding | undefined {
+  const schemaFile = contractSchemaFiles[id];
+  if (schemaFile === undefined) return undefined;
+  const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === schemaFile);
+  if (entry === undefined) throw new Error(`Artifact contract ${id} names an unregistered schema ${schemaFile}`);
+  return Object.freeze({
+    schema_file: entry.filename,
+    schema_id: entry.id,
+    schema_sha256: entry.sha256,
+    schema_bundle_sha256: artifactSchemaBundleDigest(),
+    validator_build: VALIDATOR_BUILD_IDENTITY
+  });
 }
 
 export function artifactContractDefinition(id: ArtifactContractId): ArtifactContractDefinition {

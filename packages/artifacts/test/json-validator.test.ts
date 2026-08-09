@@ -8,6 +8,7 @@ import {
   artifactSchemaBundleDigest,
   artifactSchemaDirectory,
   artifactSchemaRegistry,
+  artifactContractSchemaBinding,
   compileBundledSchemas,
   parseStrictJson,
   StrictJsonError,
@@ -41,6 +42,13 @@ test("the artifact schema registry is exhaustive, fragment-free, and strictly co
   );
   assert.equal(/^[0-9a-f]{64}$/u.test(artifactSchemaBundleDigest()), true);
   assert.match(VALIDATOR_BUILD_IDENTITY, /ajv8-draft2020-strict/u);
+  assert.deepEqual(artifactContractSchemaBinding("ultrafuzz/properties@1"), {
+    schema_file: "properties.schema.json",
+    schema_id: "urn:ultrafuzz:schema:artifacts:properties:1",
+    schema_sha256: registry.find((entry) => entry.filename === "properties.schema.json")?.sha256,
+    schema_bundle_sha256: artifactSchemaBundleDigest(),
+    validator_build: VALIDATOR_BUILD_IDENTITY
+  });
   assert.doesNotThrow(() => compileBundledSchemas());
 });
 

@@ -270,12 +270,12 @@ function rewriteAndLoadReferences(value: unknown, referringPath: string, load: (
   }
   if (!isRecord(value)) return;
   for (const [key, entry] of Object.entries(value)) {
-    if (key !== "$ref" || typeof entry !== "string") {
+    if ((key !== "$ref" && key !== "$dynamicRef" && key !== "$recursiveRef") || typeof entry !== "string") {
       rewriteAndLoadReferences(entry, referringPath, load);
       continue;
     }
     if (/^https?:/iu.test(entry)) throw new Error(`HTTP(S) schema references are forbidden: ${entry}`);
-    if (/^file:/iu.test(entry) || path.isAbsolute(entry)) {
+    if (/^file:/iu.test(entry) || path.isAbsolute(entry) || /^[A-Za-z]:/u.test(entry) || entry.includes("\\")) {
       throw new Error(`absolute file schema references are forbidden: ${entry}`);
     }
     if (entry.startsWith("#") || /^urn:/iu.test(entry)) continue;
@@ -283,7 +283,14 @@ function rewriteAndLoadReferences(value: unknown, referringPath: string, load: (
     const relative = hashIndex === -1 ? entry : entry.slice(0, hashIndex);
     const fragment = hashIndex === -1 ? "" : entry.slice(hashIndex);
     if (relative.length === 0) continue;
-    const loadedPath = load(path.resolve(path.dirname(referringPath), relative));
+    if (relative.includes("?")) throw new Error(`schema reference queries are forbidden: ${entry}`);
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(relative);
+    } catch {
+      throw new Error(`schema reference contains invalid percent-encoding: ${entry}`);
+    }
+    const loadedPath = load(path.resolve(path.dirname(referringPath), decoded));
     value[key] = `${pathToFileURL(loadedPath).href}${fragment}`;
   }
 }
