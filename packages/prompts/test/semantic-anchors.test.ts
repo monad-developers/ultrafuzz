@@ -592,6 +592,8 @@ describe("prompt semantic anchors", () => {
     const template = readFileSync(templatePath, "utf8");
     expect(template).toContain("Use `[]` when there are no findings");
     expect(template).toContain("without anchors or line selectors");
+    expect(template).toContain("disjoint spans in `line_ranges`");
+    expect(template).toContain("Keep independent explanatory prose in `detail`");
     // The contract accepts findings without a schema_version, so the template must not demand one.
     expect(template).not.toContain('Use `schema_version: "1.0"`');
     expect(template).toContain("`schema_version` is optional");

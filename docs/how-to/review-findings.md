@@ -31,7 +31,22 @@ when present it must be `"1.0"` or the alias `"ultrafuzz.finding.v1"`. Status va
 `candidate`, `needs-review`, `duplicate`, `false-positive`, `confirmed`,
 `fixed`, and `wont-fix`; agent-produced lifecycle statuses may also appear.
 Evidence may be recorded as non-empty string references or as metadata objects
-with optional `kind` and `path` fields.
+with optional `kind` and safe relative `path` fields. Keep selectors out of
+`path`: use `line` and optional `end_line` for one span, or a typed
+`line_ranges` array for disjoint spans. `detail` remains available for
+independent explanatory prose:
+
+```json
+{
+  "kind": "source",
+  "path": "src/Vault.sol",
+  "line_ranges": [
+    { "line": 105, "end_line": 107 },
+    { "line": 154, "end_line": 185 }
+  ],
+  "detail": "The two ranges jointly establish the accounting boundary."
+}
+```
 
 Review-stage artifacts may include:
 

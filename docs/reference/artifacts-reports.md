@@ -208,7 +208,12 @@ evidence, patch references, notes, dedupe metadata, and family metadata.
 `evidence` entries may be non-empty string references or objects. Object
 entries may include `kind`, `path`, and additional metadata; `kind` and `path`
 must be non-empty strings when present. Relative `path` values must stay inside
-safe artifact-relative paths.
+safe artifact-relative paths and must not embed anchors or line selectors. Use
+positive integer `line` and optional `end_line` for one source span. Use
+`line_ranges` for disjoint spans; it contains at least two objects with a
+required positive integer `line` and an optional non-descending `end_line`.
+Explanatory `detail` remains independent and is not replaced by structural
+selectors.
 
 ## Property Provenance
 

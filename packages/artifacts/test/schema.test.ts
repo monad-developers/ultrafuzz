@@ -911,6 +911,8 @@ test("the findings contract accepts the house-style schema_version and states th
   assert.match(description, /severity_guess to exactly "High", "Medium", or "Low"/u);
   assert.match(description, /including one that is or may become a non-production record/u);
   assert.match(description, /"severity_guess":"Medium"/u);
+  assert.match(description, /disjoint spans with at least two typed line_ranges entries/u);
+  assert.match(description, /Keep independent prose in detail/u);
   assert.doesNotMatch(description, /"severity_guess":"medium"/u);
   assert.equal(
     validateArtifactContract(
@@ -959,6 +961,62 @@ test("the findings contract does not require schema_version, and still rejects m
     "an otherwise malformed finding still fails the contract"
   );
   assert.equal(validateFindingSchema({ ...withoutVersion[0], property_ids: ["property-99", "property-99"] }).ok, false);
+});
+
+test("the findings schema validates typed disjoint evidence line ranges", () => {
+  const finding = {
+    id: "failure-1",
+    title: "Disjoint source evidence",
+    status: "candidate",
+    severity_guess: "medium",
+    confidence: "high",
+    summary: "Two disjoint source ranges support the finding.",
+    evidence: [
+      {
+        kind: "source",
+        path: "VeryLiquidVault.sol",
+        detail: "The ranges jointly establish the boundary.",
+        line_ranges: [
+          { line: 105, end_line: 107 },
+          { line: 154, end_line: 185 }
+        ]
+      }
+    ]
+  };
+
+  assert.equal(validateFindingSchema(finding).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([finding])).ok, true);
+  assert.match(JSON.stringify(findingJsonSchema.properties.evidence), /line_ranges/u);
+
+  for (const lineRanges of [
+    null,
+    [{ line: 105, end_line: 107 }],
+    [
+      { line: 105, end_line: 104 },
+      { line: 154, end_line: 185 }
+    ],
+    [{ line: 0 }, { line: 154, end_line: 185 }],
+    [
+      { line: "105", end_line: 107 },
+      { line: 154, end_line: 185 }
+    ],
+    [
+      { line: 105, end_line: 107, note: "not canonical" },
+      { line: 154, end_line: 185 }
+    ],
+    [{ line: Number.MAX_SAFE_INTEGER + 1 }, { line: 154, end_line: 185 }]
+  ]) {
+    const malformed = structuredClone(finding) as Record<string, unknown>;
+    malformed.evidence = [
+      {
+        kind: "source",
+        path: "VeryLiquidVault.sol",
+        line_ranges: lineRanges
+      }
+    ];
+    assert.equal(validateFindingSchema(malformed).ok, false);
+    assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([malformed])).ok, false);
+  }
 });
 
 test("the findings schema recognizes typed campaign deduplication accounting without imposing it globally", () => {

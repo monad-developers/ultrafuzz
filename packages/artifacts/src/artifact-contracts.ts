@@ -156,7 +156,7 @@ const definitions = defineContracts([
     id: "ultrafuzz/findings@1",
     format: "json",
     description:
-      'A JSON array of findings. Every entry must satisfy the Ultrafuzz finding schema, including id, title, status, severity_guess, confidence, and summary. Every finding, including one that is or may become a non-production record, must set severity_guess to exactly "High", "Medium", or "Low"; do not emit lowercase or any other severity vocabulary. schema_version is optional; when present it must be the literal "1.0" or the alias "ultrafuzz.finding.v1". A populated entry looks like {"id":"finding-0","title":"...","status":"candidate","severity_guess":"Medium","confidence":"low","summary":"..."}.',
+      'A JSON array of findings. Every entry must satisfy the Ultrafuzz finding schema, including id, title, status, severity_guess, confidence, and summary. Every finding, including one that is or may become a non-production record, must set severity_guess to exactly "High", "Medium", or "Low"; do not emit lowercase or any other severity vocabulary. schema_version is optional; when present it must be the literal "1.0" or the alias "ultrafuzz.finding.v1". Evidence object paths must be safe relative paths without line selectors. Represent one source span with positive integer line and optional end_line; represent disjoint spans with at least two typed line_ranges entries such as [{"line":105,"end_line":107},{"line":154,"end_line":185}]. Every end_line must be no smaller than its line. Keep independent prose in detail. A populated entry looks like {"id":"finding-0","title":"...","status":"candidate","severity_guess":"Medium","confidence":"low","summary":"..."}.',
     validEmptyExample: "[]"
   },
   {

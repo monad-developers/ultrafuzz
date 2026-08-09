@@ -1106,7 +1106,15 @@ test("findings normalize source evidence line suffixes", () => {
   const lineListReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
 
   assert.deepEqual(lineListReport.findings[0]!.evidence, [
-    { kind: "source", path: "VeryLiquidVault.sol", detail: "lines 105-107,154-185" }
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      line_ranges: [
+        { line: 105, end_line: 107 },
+        { line: 154, end_line: 185 }
+      ],
+      detail: "lines 105-107,154-185"
+    }
   ]);
 
   fs.writeFileSync(
@@ -1126,7 +1134,15 @@ test("findings normalize source evidence line suffixes", () => {
   const semicolonListReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
 
   assert.deepEqual(semicolonListReport.findings[0]!.evidence, [
-    { kind: "source", path: "CurveStableSwapNG.vy", detail: "lines 17-19;33-35" }
+    {
+      kind: "source",
+      path: "CurveStableSwapNG.vy",
+      line_ranges: [
+        { line: 17, end_line: 19 },
+        { line: 33, end_line: 35 }
+      ],
+      detail: "lines 17-19;33-35"
+    }
   ]);
 
   fs.writeFileSync(
@@ -1149,8 +1165,24 @@ test("findings normalize source evidence line suffixes", () => {
   const naturalLanguageListReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
 
   assert.deepEqual(naturalLanguageListReport.findings[0]!.evidence, [
-    { kind: "source", path: "VeryLiquidVault.sol", detail: "lines 253-258 and 346-364" },
-    { kind: "source", path: "VToken.sol", detail: "lines 698-728 and 1463-1478" }
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      line_ranges: [
+        { line: 253, end_line: 258 },
+        { line: 346, end_line: 364 }
+      ],
+      detail: "lines 253-258 and 346-364"
+    },
+    {
+      kind: "source",
+      path: "VToken.sol",
+      line_ranges: [
+        { line: 698, end_line: 728 },
+        { line: 1463, end_line: 1478 }
+      ],
+      detail: "lines 698-728 and 1463-1478"
+    }
   ]);
 
   const inlineDetail =
@@ -1220,13 +1252,20 @@ test("findings normalize source evidence line suffixes", () => {
   const matchingDetailReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
 
   assert.deepEqual(matchingDetailReport.findings[0]!.evidence, [
-    { kind: "source", path: "VeryLiquidVault.sol", detail: "lines 105-107,154-185" }
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      line_ranges: [
+        { line: 105, end_line: 107 },
+        { line: 154, end_line: 185 }
+      ],
+      detail: "lines 105-107,154-185"
+    }
   ]);
 
   for (const evidence of [
     { kind: "source", path: "VeryLiquidVault.sol:105-107,154-185", line: 105 },
-    { kind: "source", path: "VeryLiquidVault.sol:105-107,154-185", end_line: 185 },
-    { kind: "source", path: "VeryLiquidVault.sol:105-107,154-185", detail: "different ranges" }
+    { kind: "source", path: "VeryLiquidVault.sol:105-107,154-185", end_line: 185 }
   ]) {
     fs.writeFileSync(
       path.join(nodeDir, "findings.json"),
@@ -1242,6 +1281,116 @@ test("findings normalize source evidence line suffixes", () => {
       ])
     );
     assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /line list conflicts/u);
+  }
+
+  const independentDetail = "  The ranges jointly show the external-dependency boundary.  ";
+  const canonicalLineRanges = [
+    { line: 105, end_line: 107 },
+    { line: 154, end_line: 185 }
+  ];
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Disjoint source ranges with independent detail",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "Structural ranges and producer prose occupy separate metadata fields.",
+        evidence: [
+          {
+            kind: "source",
+            path: "VeryLiquidVault.sol:105-107,154-185",
+            detail: independentDetail
+          },
+          {
+            kind: "source",
+            path: "VeryLiquidVault.sol:105-107,154-185",
+            detail: independentDetail,
+            line_ranges: canonicalLineRanges
+          },
+          {
+            kind: "source",
+            path: "VeryLiquidVault.sol",
+            detail: independentDetail,
+            line_ranges: canonicalLineRanges
+          }
+        ]
+      }
+    ])
+  );
+
+  const independentDetailReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(independentDetailReport.findings[0]!.evidence, [
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      detail: independentDetail,
+      line_ranges: canonicalLineRanges
+    },
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      detail: independentDetail,
+      line_ranges: canonicalLineRanges
+    },
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      detail: independentDetail,
+      line_ranges: canonicalLineRanges
+    }
+  ]);
+
+  for (const lineRanges of [
+    [
+      { line: 105, end_line: 107 },
+      { line: 155, end_line: 185 }
+    ],
+    [
+      { line: 154, end_line: 185 },
+      { line: 105, end_line: 107 }
+    ],
+    [{ line: 105, end_line: 107 }],
+    [
+      { line: 105, end_line: 104 },
+      { line: 154, end_line: 185 }
+    ],
+    [
+      { line: 105, end_line: 107, note: "not canonical" },
+      { line: 154, end_line: 185 }
+    ],
+    [{ line: 0 }, { line: 154, end_line: 185 }],
+    [
+      { line: "105", end_line: 107 },
+      { line: 154, end_line: 185 }
+    ],
+    [
+      { line: Number.MAX_SAFE_INTEGER + 1 },
+      { line: 154, end_line: 185 }
+    ]
+  ]) {
+    fs.writeFileSync(
+      path.join(nodeDir, "findings.json"),
+      JSON.stringify([
+        {
+          title: "Conflicting disjoint line ranges",
+          status: "candidate",
+          severity_guess: "medium",
+          confidence: "medium",
+          summary: "Differing or malformed typed range metadata must fail closed.",
+          evidence: [
+            {
+              kind: "source",
+              path: "VeryLiquidVault.sol:105-107,154-185",
+              line_ranges: lineRanges
+            }
+          ]
+        }
+      ])
+    );
+    assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /line_ranges/u);
   }
 
   for (const evidence of [
@@ -1344,6 +1493,30 @@ test("findings normalize source evidence line suffixes", () => {
       command: "forge test --match-path VeryLiquidVault.sol:104-105: inline prose"
     }
   ]);
+
+  for (const evidence of [
+    {
+      kind: "validation",
+      path: "forge test --match-path VeryLiquidVault.sol",
+      line_ranges: canonicalLineRanges
+    },
+    { kind: "source", path: "VeryLiquidVault.sol", line_ranges: null }
+  ]) {
+    fs.writeFileSync(
+      path.join(nodeDir, "findings.json"),
+      JSON.stringify([
+        {
+          title: "Invalid typed source ranges",
+          status: "candidate",
+          severity_guess: "medium",
+          confidence: "medium",
+          summary: "Typed source ranges cannot annotate commands or contain null.",
+          evidence: [evidence]
+        }
+      ])
+    );
+    assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /line_ranges/u);
+  }
 
   fs.writeFileSync(
     path.join(nodeDir, "findings.json"),
