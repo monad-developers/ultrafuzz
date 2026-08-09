@@ -1093,6 +1093,112 @@ test("findings normalize source evidence line suffixes", () => {
     path.join(nodeDir, "findings.json"),
     JSON.stringify([
       {
+        title: "Disjoint source ranges",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "Two disjoint source ranges anchor the issue.",
+        evidence: [{ kind: "source", path: "VeryLiquidVault.sol:105-107,154-185" }]
+      }
+    ])
+  );
+
+  const lineListReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(lineListReport.findings[0]!.evidence, [
+    { kind: "source", path: "VeryLiquidVault.sol", detail: "lines 105-107,154-185" }
+  ]);
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Disjoint source ranges with matching detail",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "Equivalent explicit detail is unambiguous.",
+        evidence: [
+          {
+            kind: "source",
+            path: "VeryLiquidVault.sol:105-107,154-185",
+            detail: "lines 105-107,154-185"
+          }
+        ]
+      }
+    ])
+  );
+
+  const matchingDetailReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(matchingDetailReport.findings[0]!.evidence, [
+    { kind: "source", path: "VeryLiquidVault.sol", detail: "lines 105-107,154-185" }
+  ]);
+
+  for (const evidence of [
+    { kind: "source", path: "VeryLiquidVault.sol:105-107,154-185", line: 105 },
+    { kind: "source", path: "VeryLiquidVault.sol:105-107,154-185", end_line: 185 },
+    { kind: "source", path: "VeryLiquidVault.sol:105-107,154-185", detail: "different ranges" }
+  ]) {
+    fs.writeFileSync(
+      path.join(nodeDir, "findings.json"),
+      JSON.stringify([
+        {
+          title: "Ambiguous disjoint source ranges",
+          status: "candidate",
+          severity_guess: "medium",
+          confidence: "medium",
+          summary: "Conflicting structured metadata must fail closed.",
+          evidence: [evidence]
+        }
+      ])
+    );
+    assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /line list conflicts/u);
+  }
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Descending disjoint source range",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "A descending member of the list must fail closed.",
+        evidence: [{ kind: "source", path: "VeryLiquidVault.sol:105-107,185-154" }]
+      }
+    ])
+  );
+  assert.throws(
+    () => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }),
+    /line range must not descend/u
+  );
+
+  for (const [unsafePath, expectedError] of [
+    ["../VeryLiquidVault.sol:105-107,154-185", /traverse/u],
+    ["VeryLiquidVault.sol:105-107,latest", /unsafe segment/u],
+    ["VeryLiquidVault.sol:9007199254740992,154-185", /positive safe integer/u]
+  ] as const) {
+    fs.writeFileSync(
+      path.join(nodeDir, "findings.json"),
+      JSON.stringify([
+        {
+          title: "Invalid disjoint source ranges",
+          status: "candidate",
+          severity_guess: "medium",
+          confidence: "medium",
+          summary: "Unsafe or malformed paths must retain fail-closed behavior.",
+          evidence: [{ kind: "source", path: unsafePath }]
+        }
+      ])
+    );
+    assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), expectedError);
+  }
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
         title: "Source-backed issue",
         status: "candidate",
         severity_guess: "medium",

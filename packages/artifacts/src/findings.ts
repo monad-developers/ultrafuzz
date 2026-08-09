@@ -366,6 +366,16 @@ function validateEvidence(value: unknown, index: number): void {
       } else if (existingFragment !== undefined) {
         validateFindingMetadataFragment(existingFragment, "evidence fragment");
       }
+      if (reference.detail !== undefined) {
+        const existingDetail = optionalString(entry, "detail");
+        if (existingLine !== undefined || existingEndLine !== undefined) {
+          throw new FindingsValidationError(`evidence path line list conflicts with existing line fields`);
+        }
+        if (existingDetail !== undefined && existingDetail !== reference.detail) {
+          throw new FindingsValidationError(`evidence path line list conflicts with existing detail field`);
+        }
+        entry.detail = reference.detail;
+      }
     }
   }
 }
@@ -385,20 +395,20 @@ function looksLikeEvidenceCommand(value: string): boolean {
 function normalizeFindingMetadataPathReference(
   value: string,
   key: string
-): { path: string; fragment?: string; line?: number; endLine?: number } {
+): { path: string; fragment?: string; line?: number; endLine?: number; detail?: string } {
   const hashIndex = value.indexOf("#");
   if (hashIndex === -1) {
     const lineReference = splitLineReference(value);
     const relativePath = lineReference?.path ?? value;
     validateFindingMetadataRelativePath(relativePath, key);
+    if (lineReference === undefined) {
+      return { path: relativePath };
+    }
     return {
       path: relativePath,
-      ...(lineReference === undefined
-        ? {}
-        : {
-            line: lineReference.line,
-            ...(lineReference.endLine === undefined ? {} : { endLine: lineReference.endLine })
-          })
+      ...(lineReference.line === undefined ? {} : { line: lineReference.line }),
+      ...(lineReference.endLine === undefined ? {} : { endLine: lineReference.endLine }),
+      ...(lineReference.detail === undefined ? {} : { detail: lineReference.detail })
     };
   }
 
@@ -409,7 +419,25 @@ function normalizeFindingMetadataPathReference(
   return { path: relativePath, fragment };
 }
 
-function splitLineReference(value: string): { path: string; line: number; endLine?: number } | undefined {
+function splitLineReference(
+  value: string
+): { path: string; line?: number; endLine?: number; detail?: string } | undefined {
+  const lineListMatch = /^(?<path>.+):(?<ranges>[1-9][0-9]*(?:-[1-9][0-9]*)?(?:,[1-9][0-9]*(?:-[1-9][0-9]*)?)+)$/u.exec(
+    value
+  );
+  const lineListPath = lineListMatch?.groups?.path;
+  const lineListRanges = lineListMatch?.groups?.ranges;
+  if (lineListPath !== undefined && lineListRanges !== undefined) {
+    for (const range of lineListRanges.split(",")) {
+      const dashIndex = range.indexOf("-");
+      const start = parseLineReferenceNumber(dashIndex === -1 ? range : range.slice(0, dashIndex));
+      const end = dashIndex === -1 ? undefined : parseLineReferenceNumber(range.slice(dashIndex + 1));
+      if (end !== undefined && end < start) {
+        throw new FindingsValidationError(`evidence line range must not descend`);
+      }
+    }
+    return { path: lineListPath, detail: `lines ${lineListRanges}` };
+  }
   const match = /^(?<path>.+):(?<line>[1-9][0-9]*)(?:-(?<endLine>[1-9][0-9]*))?$/u.exec(value);
   const linePath = match?.groups?.path;
   const line = match?.groups?.line;
@@ -417,12 +445,20 @@ function splitLineReference(value: string): { path: string; line: number; endLin
   if (linePath === undefined || line === undefined) {
     return undefined;
   }
-  const parsedLine = Number(line);
-  const parsedEndLine = endLine === undefined ? undefined : Number(endLine);
+  const parsedLine = parseLineReferenceNumber(line);
+  const parsedEndLine = endLine === undefined ? undefined : parseLineReferenceNumber(endLine);
   if (parsedEndLine !== undefined && parsedEndLine < parsedLine) {
     throw new FindingsValidationError(`evidence line range must not descend`);
   }
   return { path: linePath, line: parsedLine, ...(parsedEndLine === undefined ? {} : { endLine: parsedEndLine }) };
+}
+
+function parseLineReferenceNumber(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new FindingsValidationError(`evidence line number must be a positive safe integer`);
+  }
+  return parsed;
 }
 
 function validateFindingMetadataFragment(value: string, key: string): void {
