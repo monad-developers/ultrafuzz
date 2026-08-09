@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   createInitialRunState,
   createRunLayout,
+  derivePropertyImplementationCoverage,
   getNodeArtifactDir,
   writeArtifact,
   writeArtifactManifest
@@ -4339,39 +4340,46 @@ test("current final reports preserve implementation coverage in JSON and Markdow
     id: "final-report",
     logical_id: "final-report"
   };
-  writeArtifact(
-    layout,
-    "property-specification-fanin",
-    "properties.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
-      properties: [
-        {
-          id: "property-high",
-          description: "The accounting relation holds.",
-          category: "accounting",
-          priority: "high",
-          sources: [{ source_node_id: "property-specification-recon", source_property_id: "hub-total" }]
-        }
-      ]
-    })
-  );
+  const catalog = {
+    schema_version: "ultrafuzz.properties.v1" as const,
+    properties: [
+      {
+        id: "property-high",
+        description: "The accounting relation holds.",
+        category: "accounting",
+        priority: "high" as const,
+        sources: [{ source_node_id: "property-specification-recon", source_property_id: "hub-total" }]
+      }
+    ]
+  };
+  const implementation = {
+    schema_version: "ultrafuzz.implemented-properties.v1" as const,
+    selection: {
+      priority_threshold: "high" as const,
+      priorities: ["high" as const],
+      property_ids: ["property-high"]
+    },
+    properties: [
+      {
+        property_id: "property-high",
+        status: "implemented" as const,
+        implementation_paths: ["test/recon/Properties.sol"],
+        test_paths: ["test/foundry/PropertyHigh.t.sol"]
+      }
+    ]
+  };
+  const expectedCoverage = derivePropertyImplementationCoverage(catalog, implementation, {
+    configuredSelection: { priority_threshold: "high", priorities: ["high"] },
+    requireConfiguredSelection: true
+  });
+  assert.equal(expectedCoverage.ok, true, JSON.stringify(expectedCoverage.issues));
+  assert.ok(expectedCoverage.value);
+  writeArtifact(layout, "property-specification-fanin", "properties.json", JSON.stringify(catalog));
   writeArtifact(
     layout,
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
-      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-high"] },
-      properties: [
-        {
-          property_id: "property-high",
-          status: "implemented",
-          implementation_paths: ["test/recon/Properties.sol"],
-          test_paths: ["test/foundry/PropertyHigh.t.sol"]
-        }
-      ]
-    })
+    JSON.stringify(implementation)
   );
   const reportPath = "report.json";
   const baseReport = {
@@ -4400,18 +4408,7 @@ test("current final reports preserve implementation coverage in JSON and Markdow
     reportPath,
     JSON.stringify({
       ...baseReport,
-      property_implementation_coverage: {
-        priority_threshold: "high",
-        priorities: ["high"],
-        selected_property_ids: ["property-high"],
-        implemented_property_ids: ["property-high"],
-        blocked_property_ids: [],
-        pending_property_ids: [],
-        deferred_property_ids: [],
-        reference_expected_property_ids: [],
-        reference_expectation_ids: [],
-        blocker_summaries: []
-      }
+      property_implementation_coverage: expectedCoverage.value
     })
   );
   writeArtifact(
@@ -4523,6 +4520,56 @@ test("current final reports preserve implementation coverage in JSON and Markdow
   assert.ok(
     mismatch.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MISMATCH")
   );
+});
+
+test("final-report coverage gate distinguishes missing current handoffs from explicit historical plans", () => {
+  const graphFor = (contract: string): Record<string, unknown> => ({
+    schema_version: "1.0",
+    nodes: [
+      {
+        id: "stateful-invariant-implement-properties",
+        logical_id: "stateful-invariant-implement-properties",
+        outputs: [{ path: "implemented-properties.json", contract }]
+      }
+    ]
+  });
+  const finalNode = {
+    ...plannedNode(["report.md", "report.json"]),
+    id: "final-report",
+    logical_id: "final-report"
+  };
+  const writeReport = (layout: ReturnType<typeof createRunLayout>): void => {
+    writeArtifact(layout, finalNode.id, "report.md", "# Historical report\n");
+    writeArtifact(
+      layout,
+      finalNode.id,
+      "report.json",
+      JSON.stringify({ schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] })
+    );
+  };
+
+  const current = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-current-coverage-handoff-missing",
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n',
+    graph: graphFor("ultrafuzz/implemented-properties@2")
+  });
+  writeReport(current);
+  const missingCurrent = verifyRequiredArtifactsForAttempt(current, finalNode, finalNode.id);
+  assert.equal(missingCurrent.ok, false);
+  assert.ok(
+    missingCurrent.diagnostics.some((diagnostic) => diagnostic.code === "IMPLEMENTED_PROPERTIES_MISSING"),
+    JSON.stringify(missingCurrent.diagnostics)
+  );
+
+  const historical = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-historical-coverage-handoff",
+    graph: graphFor("ultrafuzz/implemented-properties@1")
+  });
+  writeReport(historical);
+  const preservedHistorical = verifyRequiredArtifactsForAttempt(historical, finalNode, finalNode.id);
+  assert.equal(preservedHistorical.ok, true, JSON.stringify(preservedHistorical.diagnostics));
 });
 
 test("dependency gates reject reused descendants after an ancestor manifest changes", () => {

@@ -10,15 +10,95 @@ import * as ts from "typescript";
 
 import {
   assertRegularFileInside,
+  derivePropertyImplementationCoverage,
+  IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
   MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
   normalizeEvidenceLineRangeCardinality,
   normalizeNodeAttemptFailureMessage,
+  PROPERTIES_SCHEMA_VERSION,
   validateArtifactContract,
   writeFileDurable
 } from "@ultrafuzz/artifacts";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
+
+function loadBoundedFinalReportReader(): (reportPath: string) => string {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function readBoundedFinalReportJson");
+  const helperEnd = source.indexOf("\n\nfunction reconstructAuthoritativeReportImplementationCoverage", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "openSync",
+    "fsConstants",
+    "fstatSync",
+    "readFileSync",
+    "closeSync",
+    "MAX_FINAL_REPORT_JSON_BYTES",
+    `${helper}; return readBoundedFinalReportJson;`
+  )(fs.openSync, fs.constants, fs.fstatSync, fs.readFileSync, fs.closeSync, 64 * 1024 * 1024) as ReturnType<
+    typeof loadBoundedFinalReportReader
+  >;
+}
+
+function loadReportImplementationCoverageReplacer(): (contents: string, coverage: unknown) => string | undefined {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function replaceReportImplementationCoverage");
+  const helperEnd = source.indexOf("\n\nfunction normalizeLegacyReportProvenance", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function("isPlainRecord", `${helper}; return replaceReportImplementationCoverage;`)(
+    (value: unknown): value is Record<string, unknown> =>
+      typeof value === "object" && value !== null && !Array.isArray(value)
+  ) as ReturnType<typeof loadReportImplementationCoverageReplacer>;
+}
+
+function loadVerifiedAncestorJsonArtifact(
+  taskSpecs: Array<{
+    attemptId: string;
+    metadata: { node: { logicalNodeId: string } };
+    outputs: Array<{ path: string; contract: string }>;
+  }>,
+  assertVerifiedDependency: (task: unknown, dependency: string) => void
+): (
+  task: { dependencyArtifactDirs: string[] },
+  logicalNodeId: string,
+  relativePath: string,
+  contract: string,
+  historicalContract?: string
+) => { path: string; value: unknown } | undefined {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function verifiedAncestorJsonArtifact");
+  const helperEnd = source.indexOf("\n\nfunction configuredInvariantPrioritySelection", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "path",
+    "taskSpecs",
+    "assertVerifiedDependency",
+    "realpathSync",
+    "resolveRegularArtifactFile",
+    "readFileSync",
+    `${helper}; return verifiedAncestorJsonArtifact;`
+  )(
+    path,
+    taskSpecs,
+    assertVerifiedDependency,
+    fs.realpathSync,
+    (_root: string, candidate: string) => candidate,
+    fs.readFileSync
+  ) as ReturnType<typeof loadVerifiedAncestorJsonArtifact>;
+}
 
 function loadFinalReportProducerNormalizers(): {
   normalizeReport: (contents: string) => string | undefined;
@@ -1311,13 +1391,19 @@ test("generated Smithers agent preserves its final response as missing non-repor
   assert.match(agent, /const result = await agent\.generate\(attemptArgs\)/u);
   assert.match(agent, /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\)/u);
   assert.match(agent, /materializeMissingMarkdownArtifacts\(task, result\)/u);
+  assert.match(agent, /reconstructAuthoritativeReportImplementationCoverage\(task\)/u);
   assert.match(agent, /materializeMissingFinalReportArtifacts\(task\)/u);
   assert.match(agent, /normalizeLegacyReportProvenance\(task\)/u);
   assert.match(agent, /normalizeLegacyGeneratedTestManifests\(task\)/u);
   assert.match(agent, /materializeGeneratedTestCompanions\(task\)/u);
   assert.match(agent, /verifyArtifacts\(task\)/u);
   assert.ok(
-    agent.indexOf("normalizeLegacyFindingFields(task)") < agent.indexOf("normalizeLegacyReportProvenance(task)")
+    agent.indexOf("normalizeLegacyFindingFields(task)") <
+      agent.indexOf("reconstructAuthoritativeReportImplementationCoverage(task)")
+  );
+  assert.ok(
+    agent.indexOf("reconstructAuthoritativeReportImplementationCoverage(task)") <
+      agent.indexOf("normalizeLegacyReportProvenance(task)")
   );
   assert.ok(
     agent.indexOf("normalizeLegacyReportProvenance(task)") <
@@ -1326,6 +1412,189 @@ test("generated Smithers agent preserves its final response as missing non-repor
   assert.ok(agent.indexOf("materializeMissingFinalReportArtifacts(task)") < agent.indexOf("verifyArtifacts(task)"));
   assert.match(source, /output\.contract !== "ultrafuzz\/nonempty-markdown@1"/u);
   assert.match(source, /const fallback = `# \$\{title\}\\n\\n\$\{summary\}\\n`/u);
+});
+
+test("generated Smithers coverage reconstruction bounds report JSON before parsing", () => {
+  const readReport = loadBoundedFinalReportReader();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-bounded-report-json-"));
+  const small = path.join(root, "small.json");
+  const oversized = path.join(root, "oversized.json");
+  const symlink = path.join(root, "symlink.json");
+  try {
+    fs.writeFileSync(small, '{"schema_version":"1.0"}\n');
+    fs.writeFileSync(oversized, "{}");
+    fs.truncateSync(oversized, 64 * 1024 * 1024 + 1);
+    fs.symlinkSync(small, symlink);
+
+    assert.equal(readReport(small), '{"schema_version":"1.0"}\n');
+    assert.throws(readReport.bind(undefined, oversized), /exceeds the 67108864-byte read limit/u);
+    assert.throws(readReport.bind(undefined, symlink));
+
+    const source = fs.readFileSync(workflowTemplatePath, "utf8");
+    assert.match(source, /openSync\(reportPath, fsConstants\.O_RDONLY \| fsConstants\.O_NOFOLLOW\)/u);
+    assert.match(source, /contents\.byteLength > MAX_FINAL_REPORT_JSON_BYTES/u);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers final-report producer replaces model coverage with canonical handoff coverage", () => {
+  const replaceCoverage = loadReportImplementationCoverageReplacer();
+  const catalog = {
+    schema_version: PROPERTIES_SCHEMA_VERSION,
+    properties: [
+      {
+        id: "property-high",
+        description: "The high-priority accounting relation holds.",
+        category: "accounting",
+        priority: "high" as const,
+        sources: [{ source_node_id: "lens-high", source_property_id: "accounting-relation" }]
+      },
+      {
+        id: "property-low-reference",
+        description: "The below-threshold reference behavior remains reachable.",
+        category: "liveness",
+        priority: "low" as const,
+        reference_expectations: ["benchmark:low-reference"],
+        sources: [{ source_node_id: "lens-low", source_property_id: "reference-behavior" }]
+      }
+    ]
+  };
+  const implementation = {
+    schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+    selection: {
+      priority_threshold: "high" as const,
+      priorities: ["high" as const],
+      property_ids: ["property-high", "property-low-reference"]
+    },
+    properties: [
+      {
+        property_id: "property-high",
+        status: "implemented" as const,
+        implementation_paths: ["src/Properties.sol"],
+        test_paths: []
+      },
+      {
+        property_id: "property-low-reference",
+        status: "implemented" as const,
+        implementation_paths: [],
+        test_paths: ["test/ReferenceProperty.t.sol"],
+        reference_expectations: ["benchmark:low-reference"]
+      }
+    ]
+  };
+  const derived = derivePropertyImplementationCoverage(catalog, implementation, {
+    configuredSelection: { priority_threshold: "high", priorities: ["high"] },
+    requireConfiguredSelection: true
+  });
+  assert.equal(derived.ok, true, JSON.stringify(derived.issues));
+  assert.ok(derived.value);
+  assert.deepEqual(derived.value, {
+    priority_threshold: "high",
+    priorities: ["high"],
+    selected_property_ids: ["property-high", "property-low-reference"],
+    implemented_property_ids: ["property-high", "property-low-reference"],
+    blocked_property_ids: [],
+    pending_property_ids: [],
+    deferred_property_ids: [],
+    reference_expected_property_ids: ["property-low-reference"],
+    reference_expectation_ids: ["benchmark:low-reference"],
+    blocker_summaries: []
+  });
+
+  // Exact recurrence of run 31315460119: the model supplied an invalid
+  // threshold, no priorities, and omitted deferred_property_ids entirely.
+  const modelReport = {
+    schema_version: "1.0",
+    run_metadata: { run_id: "31315460119" },
+    issues: [],
+    non_production_outcomes: [],
+    property_implementation_coverage: {
+      priority_threshold: "critical",
+      priorities: [],
+      selected_property_ids: ["model-owned-value"],
+      implemented_property_ids: [],
+      blocked_property_ids: [],
+      pending_property_ids: []
+    }
+  };
+  const modelBytes = `${JSON.stringify(modelReport, null, 2)}\n`;
+  assert.equal(validateArtifactContract("ultrafuzz/report@1", modelBytes, "report.json").ok, false);
+
+  const replaced = replaceCoverage(modelBytes, derived.value);
+  assert.ok(replaced);
+  assert.equal(validateArtifactContract("ultrafuzz/report@1", replaced, "report.json").ok, true);
+  assert.equal(
+    replaced,
+    `${JSON.stringify({ ...modelReport, property_implementation_coverage: derived.value }, null, 2)}\n`
+  );
+  assert.deepEqual(JSON.parse(replaced).property_implementation_coverage, derived.value);
+  assert.equal(replaceCoverage(replaced, derived.value), replaced, "canonical replacement must be byte-idempotent");
+  assert.equal(replaceCoverage("{malformed", derived.value), undefined);
+
+  const unrelatedInvalid = replaceCoverage(JSON.stringify({ ...modelReport, run_metadata: [] }), derived.value);
+  assert.ok(unrelatedInvalid);
+  assert.equal(
+    validateArtifactContract("ultrafuzz/report@1", unrelatedInvalid, "report.json").ok,
+    false,
+    "coverage reconstruction must not forgive unrelated report violations"
+  );
+});
+
+test("generated Smithers coverage authority fails closed except for an explicit historical handoff", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-report-coverage-authority-"));
+  const dependency = path.join(root, "implementation-attempt");
+  fs.mkdirSync(dependency);
+  fs.writeFileSync(path.join(dependency, "implemented-properties.json"), JSON.stringify({ authoritative: true }));
+  const producer = {
+    attemptId: "implementation-attempt",
+    metadata: { node: { logicalNodeId: "stateful-invariant-implement-properties" } },
+    outputs: [
+      {
+        path: "implemented-properties.json",
+        contract: "ultrafuzz/implemented-properties@2"
+      }
+    ]
+  };
+  let verificationFailure = false;
+  let verificationCount = 0;
+  const readAncestor = loadVerifiedAncestorJsonArtifact([producer], (_task, verifiedDependency) => {
+    verificationCount += 1;
+    assert.equal(verifiedDependency, dependency);
+    if (verificationFailure) throw new Error("unverified dependency");
+  });
+  const finalReportTask = { dependencyArtifactDirs: [dependency] };
+  const readCurrent = (): { path: string; value: unknown } | undefined =>
+    readAncestor(
+      finalReportTask,
+      "stateful-invariant-implement-properties",
+      "implemented-properties.json",
+      "ultrafuzz/implemented-properties@2",
+      "ultrafuzz/implemented-properties@1"
+    );
+
+  try {
+    assert.deepEqual(readCurrent()?.value, { authoritative: true });
+    assert.equal(verificationCount, 1);
+
+    producer.outputs[0]!.contract = "ultrafuzz/implemented-properties@1";
+    assert.equal(readCurrent(), undefined, "a declared historical @1 handoff keeps legacy behavior");
+    assert.equal(verificationCount, 1, "historical bytes are not reinterpreted as current coverage authority");
+
+    producer.outputs = [];
+    assert.throws(readCurrent, /authoritative implemented-properties\.json handoff is unavailable/u);
+
+    producer.outputs = [
+      { path: "implemented-properties.json", contract: "ultrafuzz/implemented-properties@unexpected" }
+    ];
+    assert.throws(readCurrent, /declares unexpected contract/u);
+
+    producer.outputs[0]!.contract = "ultrafuzz/implemented-properties@2";
+    verificationFailure = true;
+    assert.throws(readCurrent, /unverified dependency/u);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("generated Smithers final-report normalization emits canonical report and sidecar bytes", () => {
