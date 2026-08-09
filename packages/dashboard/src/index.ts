@@ -17,7 +17,6 @@ import {
   replayEvents,
   safeResolveInside,
   sha256Bytes,
-  validateArtifactContractBytes,
   validateSafeId,
   writeFileDurable,
   type ArtifactContractId,
@@ -51,6 +50,9 @@ import {
   validateProject,
   loadResolvedProject,
   modelProfilesForTopology,
+  isVerifiedOutputAuthorityUnavailable,
+  loadVerifiedFinalReportSnapshot,
+  loadVerifiedNodeOutputSnapshot,
   type RuntimeResult
 } from "@ultrafuzz/runtime";
 import {
@@ -128,10 +130,8 @@ const SESSION_HEADER = "x-ultrafuzz-session";
 const MAX_COMMAND_JOBS = 20;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024;
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
-const MAX_DASHBOARD_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const FINDINGS_CONTRACT = "ultrafuzz/findings@2" as ArtifactContractId;
 const REPORT_CONTRACT = "ultrafuzz/report@2" as ArtifactContractId;
-const REPORT_MARKDOWN_CONTRACT = "ultrafuzz/nonempty-markdown@1" as ArtifactContractId;
 const SECURITY_HEADERS = {
   "content-security-policy": [
     "default-src 'none'",
@@ -788,15 +788,26 @@ class DashboardApp {
       "artifacts/dedupe-findings/deduped-findings.json",
       "artifacts/final-report/report.json"
     ];
+    const state = readRunState(layoutForRunRoot(context.runRoot, context.runId));
     for (const candidate of candidates) {
       const file = safeResolveInside(context.runRoot, candidate, "findings path");
       if (lstatIfPresent(file) === undefined) {
         continue;
       }
       assertRegularFileInside(context.runRoot, file, "findings path");
+      const [artifactsSegment, attemptId, ...artifactSegments] = candidate.split("/");
+      if (artifactsSegment !== "artifacts" || attemptId === undefined || artifactSegments.length === 0) {
+        throw new Error(`dashboard findings candidate is not a run artifact path: ${candidate}`);
+      }
       return dashboardHttpDocument("findings", {
         source: candidate,
-        findings: readValidatedFindingsArtifact(context.runRoot, file)
+        findings: readVerifiedFindingsArtifact({
+          runRoot: context.runRoot,
+          filePath: file,
+          attemptId,
+          logicalNodeId: state.nodes[attemptId]?.logical_node_id ?? attemptId,
+          artifactPath: artifactSegments.join("/")
+        })
       });
     }
     return dashboardHttpDocument("findings", {
@@ -815,34 +826,36 @@ class DashboardApp {
         json: undefined
       });
     }
-    const candidateDirs = this.finalReportDirs(context.runRoot, context.runId);
-    for (const candidateDir of uniqueStrings(candidateDirs)) {
+    const candidateDirs = uniqueStrings(this.finalReportDirs(context.runRoot, context.runId));
+    const physicalReportPresent = candidateDirs.some((candidateDir) => {
       const markdownPath = safeResolveInside(context.runRoot, `${candidateDir}/report.md`, "report markdown");
       const jsonPath = safeResolveInside(context.runRoot, `${candidateDir}/report.json`, "report JSON");
-      if (lstatIfPresent(markdownPath) !== undefined || lstatIfPresent(jsonPath) !== undefined) {
-        assertRegularFileInside(context.runRoot, markdownPath, "report markdown");
-        assertRegularFileInside(context.runRoot, jsonPath, "report JSON");
-        const markdown = readValidatedArtifact(
-          context.runRoot,
-          markdownPath,
-          REPORT_MARKDOWN_CONTRACT,
-          "report Markdown"
-        );
-        const report = readValidatedArtifact(context.runRoot, jsonPath, REPORT_CONTRACT, "report JSON");
+      return lstatIfPresent(markdownPath) !== undefined || lstatIfPresent(jsonPath) !== undefined;
+    });
+    const state = readRunState(layoutForRunRoot(context.runRoot, context.runId));
+    try {
+      const loaded = loadVerifiedFinalReportSnapshot(context.runRoot);
+      return dashboardHttpDocument("report", {
+        markdown_path: posixRelativePath(context.runRoot, loaded.artifacts.markdown_path),
+        markdown: loaded.markdown,
+        json_path: posixRelativePath(context.runRoot, loaded.artifacts.json_path),
+        json: loaded.json
+      });
+    } catch (error) {
+      if (
+        !physicalReportPresent &&
+        !hasSuccessfulDashboardFinalization(state, "final-report") &&
+        isVerifiedOutputAuthorityUnavailable(error)
+      ) {
         return dashboardHttpDocument("report", {
-          markdown_path: `${candidateDir}/report.md`,
-          markdown,
-          json_path: `${candidateDir}/report.json`,
-          json: report
+          markdown_path: undefined,
+          markdown: undefined,
+          json_path: undefined,
+          json: undefined
         });
       }
+      throw error;
     }
-    return dashboardHttpDocument("report", {
-      markdown_path: undefined,
-      markdown: undefined,
-      json_path: undefined,
-      json: undefined
-    });
   }
 
   finalReportDirs(runRoot: string, runId: string): string[] {
@@ -1557,11 +1570,14 @@ class DashboardApp {
     if (!runRoot || this.currentRunId === PREVIEW_RUN_ID) {
       return [];
     }
+    const state = readRunState(layoutForRunRoot(runRoot));
     return attempts.flatMap((attempt) => {
       const dir = path.join(runRoot, attempt.artifactDir);
       if (!fs.existsSync(dir)) {
         return [];
       }
+      const attemptId = path.basename(dir);
+      if (!hasSuccessfulDashboardFinalization(state, attemptId)) return [];
       return [
         "findings.json",
         "deduped-findings.json",
@@ -1574,7 +1590,13 @@ class DashboardApp {
           return [];
         }
         assertRegularFileInside(runRoot, candidate, "findings path");
-        return readValidatedFindingsArtifact(runRoot, candidate);
+        return readVerifiedFindingsArtifact({
+          runRoot,
+          filePath: candidate,
+          attemptId,
+          logicalNodeId: attempt.logicalId,
+          artifactPath: file
+        });
       });
     });
   }
@@ -1584,9 +1606,21 @@ class DashboardApp {
     if (!fs.existsSync(artifacts)) {
       return [];
     }
+    const state = readRunState(layoutForRunRoot(runRoot));
     return listSafeFiles(artifacts)
       .filter((entry) => findingsContractForFile(entry.relativePath) !== undefined)
-      .flatMap((entry) => readValidatedFindingsArtifact(runRoot, entry.absolutePath));
+      .flatMap((entry) => {
+        const [attemptId, ...artifactSegments] = entry.relativePath.split("/");
+        if (attemptId === undefined || artifactSegments.length === 0) return [];
+        if (!hasSuccessfulDashboardFinalization(state, attemptId)) return [];
+        return readVerifiedFindingsArtifact({
+          runRoot,
+          filePath: entry.absolutePath,
+          attemptId,
+          logicalNodeId: state.nodes[attemptId]?.logical_node_id ?? attemptId,
+          artifactPath: artifactSegments.join("/")
+        });
+      });
   }
 }
 
@@ -1987,20 +2021,49 @@ function edgeColorForStatus(status: string): string {
   return "var(--mds-border-strong)";
 }
 
-function readValidatedFindingsArtifact(runRoot: string, filePath: string): unknown[] {
-  const contract = findingsContractForFile(filePath);
+function readVerifiedFindingsArtifact(input: {
+  runRoot: string;
+  filePath: string;
+  attemptId: string;
+  logicalNodeId: string;
+  artifactPath: string;
+}): unknown[] {
+  const contract = findingsContractForFile(input.filePath);
   if (contract === undefined) {
-    throw new Error(`dashboard has no findings contract for ${filePath}`);
+    throw new Error(`dashboard has no findings contract for ${input.filePath}`);
   }
-  const value = readValidatedArtifact(runRoot, filePath, contract, "findings artifact");
-  if (path.basename(filePath) === "report.json") {
+  let value: unknown;
+  if (path.basename(input.filePath) === "report.json") {
+    const report = loadVerifiedFinalReportSnapshot(input.runRoot);
+    if (
+      report.authority.attempt_id !== input.attemptId ||
+      path.resolve(report.artifacts.json_path) !== path.resolve(input.filePath)
+    ) {
+      throw new Error("dashboard report findings path does not match the authoritative final report");
+    }
+    value = report.json;
+  } else {
+    const authority = loadVerifiedNodeOutputSnapshot({
+      runRoot: input.runRoot,
+      logicalNodeId: input.logicalNodeId,
+      attemptId: input.attemptId
+    });
+    const matches = authority.outputs.filter(
+      (output) => output.path === input.artifactPath && output.contract === contract
+    );
+    if (matches.length !== 1 || path.resolve(matches[0]!.absolute_path) !== path.resolve(input.filePath)) {
+      throw new Error(`dashboard findings path is not one exact verified output: ${input.filePath}`);
+    }
+    value = matches[0]!.value;
+  }
+  if (path.basename(input.filePath) === "report.json") {
     if (!isRecord(value) || !Array.isArray(value.issues)) {
-      throw new Error(`validated report does not contain an issues array: ${filePath}`);
+      throw new Error(`verified report does not contain an issues array: ${input.filePath}`);
     }
     return value.issues;
   }
   if (!Array.isArray(value)) {
-    throw new Error(`validated findings-stage artifact is not an array: ${filePath}`);
+    throw new Error(`verified findings-stage artifact is not an array: ${input.filePath}`);
   }
   return value;
 }
@@ -2021,26 +2084,18 @@ function findingsContractForFile(filePath: string): ArtifactContractId | undefin
   }
 }
 
-function readValidatedArtifact(
-  runRoot: string,
-  filePath: string,
-  contract: ArtifactContractId,
-  label: string
-): unknown {
-  assertRegularFileInside(runRoot, filePath, `${label} path`);
-  const stat = fs.statSync(filePath);
-  if (stat.size > MAX_DASHBOARD_ARTIFACT_BYTES) {
-    throw new Error(`${label} exceeds the ${MAX_DASHBOARD_ARTIFACT_BYTES}-byte limit: ${filePath}`);
-  }
-  const validation = validateArtifactContractBytes(contract, fs.readFileSync(filePath), filePath);
-  if (!validation.ok) {
-    throw new Error(
-      `${label} failed ${contract} validation: ${validation.issues
-        .map((issue) => `${issue.code} ${issue.path}: ${issue.message}`)
-        .join("; ")}`
-    );
-  }
-  return validation.value;
+function hasSuccessfulDashboardFinalization(state: RunState, attemptOrLogicalId: string): boolean {
+  return Object.entries(state.nodes).some(([attemptId, node]) => {
+    if (attemptId !== attemptOrLogicalId && node.logical_node_id !== attemptOrLogicalId) return false;
+    if (node.status !== "succeeded" || !isRecord(node.provenance)) return false;
+    const outputContracts = node.provenance.output_contracts;
+    return isRecord(outputContracts) && outputContracts.ok === true && Array.isArray(outputContracts.missing);
+  });
+}
+
+function posixRelativePath(root: string, filePath: string): string {
+  assertPathInside(root, filePath, "dashboard artifact response path");
+  return path.relative(path.resolve(root), path.resolve(filePath)).split(path.sep).join("/");
 }
 
 function copySelections(body: JsonObject): Array<{ source: string; destination: string }> {

@@ -22,6 +22,7 @@ export * from "./trusted-cli.js";
 export * from "./state-export.js";
 export * from "./types.js";
 export * from "./validate.js";
+export * from "./verified-output.js";
 export * from "./workflow-sync.js";
 export * from "./workflow-control.js";
 export * from "./workflow-integrity.js";

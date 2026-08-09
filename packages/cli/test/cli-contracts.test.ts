@@ -199,7 +199,7 @@ test("EVMBench's retained Zod consumer has exact v2 shape acceptance", () => {
     report: {
       markdown_path: "",
       json_path: "",
-      source: "validated-agent-report"
+      source: "verified-agent-report"
     }
   };
 

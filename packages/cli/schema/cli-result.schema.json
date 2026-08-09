@@ -803,7 +803,7 @@
       "properties": {
         "markdown_path": { "type": "string" },
         "json_path": { "type": "string" },
-        "source": { "const": "validated-agent-report" }
+        "source": { "const": "verified-agent-report" }
       }
     },
     "reportBundleData": {
