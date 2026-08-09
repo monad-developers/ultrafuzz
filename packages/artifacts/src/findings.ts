@@ -34,6 +34,11 @@ export const TRIAGE_CLASSIFICATIONS = [
 export type FindingStatus = string;
 export type TriageClassification = (typeof TRIAGE_CLASSIFICATIONS)[number];
 
+interface EvidenceLineRange {
+  line: number;
+  end_line?: number;
+}
+
 export interface FindingProvenance {
   nodeId?: string;
   strategy?: string;
@@ -174,6 +179,10 @@ function normalizeFinding(value: unknown, index: number, input: NormalizeFinding
   validateOptionalStringArray(normalized, "affected_files", true);
   validateOptionalStringArray(normalized, "affected_functions", false);
   validateOptionalStringArray(normalized, "patch_refs", true);
+  const normalizedEvidence = normalizeEvidenceLineRangeCardinality(normalized.evidence);
+  if (normalizedEvidence.changed) {
+    normalized.evidence = normalizedEvidence.value;
+  }
   validateEvidence(normalized.evidence, index);
 
   return normalized as NormalizedFinding;
@@ -302,6 +311,84 @@ function validateFindingMetadataRelativePath(relativePath: string, key: string):
   }
 }
 
+export function normalizeEvidenceLineRangeCardinality(value: unknown): { value: unknown; changed: boolean } {
+  if (!Array.isArray(value)) {
+    return { value, changed: false };
+  }
+  let changed = false;
+  const normalized = value.map((entry) => {
+    if (!isPlainRecord(entry) || entry.line_ranges === undefined) {
+      return entry;
+    }
+    const hasLine = Object.hasOwn(entry, "line");
+    const hasEndLine = Object.hasOwn(entry, "end_line");
+    if (hasLine || hasEndLine) {
+      throw new FindingsValidationError(`evidence line_ranges conflicts with existing line fields`);
+    }
+    if (!Array.isArray(entry.line_ranges) || entry.line_ranges.length !== 1) {
+      return entry;
+    }
+    if (!isSafeSelectorFreeEvidencePath(entry)) {
+      throw new FindingsValidationError(`single-entry evidence line_ranges requires a safe selector-free path`);
+    }
+    const range = canonicalSingleEvidenceLineRange(entry.line_ranges[0]);
+    const canonical: Record<string, unknown> = {
+      ...entry,
+      line: range.line,
+      ...(range.end_line === undefined ? {} : { end_line: range.end_line })
+    };
+    delete canonical.line_ranges;
+    changed = true;
+    return canonical;
+  });
+  return changed ? { value: normalized, changed: true } : { value, changed: false };
+}
+
+function canonicalSingleEvidenceLineRange(value: unknown): EvidenceLineRange {
+  if (!isPlainRecord(value) || Object.keys(value).some((key) => key !== "line" && key !== "end_line")) {
+    throw new FindingsValidationError(`single-entry evidence line_ranges must contain only line and end_line`);
+  }
+  const line = requiredEvidenceLineNumber(value.line, "line_ranges[0].line");
+  const endLine =
+    value.end_line === undefined ? undefined : requiredEvidenceLineNumber(value.end_line, "line_ranges[0].end_line");
+  if (endLine !== undefined && endLine < line) {
+    throw new FindingsValidationError(`field line_ranges[0].end_line must not precede line`);
+  }
+  return { line, ...(endLine === undefined ? {} : { end_line: endLine }) };
+}
+
+function isSafeSelectorFreeEvidencePath(entry: Record<string, unknown>): boolean {
+  if (Object.hasOwn(entry, "command")) {
+    return false;
+  }
+  const rawEvidencePath = entry.path;
+  if (typeof rawEvidencePath !== "string") {
+    return false;
+  }
+  const evidencePath = optionalString(entry, "path");
+  if (
+    evidencePath === undefined ||
+    rawEvidencePath !== evidencePath ||
+    path.isAbsolute(evidencePath) ||
+    looksLikeEvidenceCommand(evidencePath)
+  ) {
+    return false;
+  }
+  try {
+    const reference = normalizeFindingMetadataPathReference(evidencePath, "evidence path");
+    return (
+      reference.path === evidencePath &&
+      reference.fragment === undefined &&
+      reference.line === undefined &&
+      reference.endLine === undefined &&
+      reference.lineRanges === undefined &&
+      reference.detail === undefined
+    );
+  } catch {
+    return false;
+  }
+}
+
 function validateEvidence(value: unknown, index: number): void {
   if (value === undefined || value === null) {
     return;
@@ -323,9 +410,19 @@ function validateEvidence(value: unknown, index: number): void {
     optionalString(entry, "command");
     const existingLine = optionalLineNumber(entry, "line");
     const existingEndLine = optionalLineNumber(entry, "end_line");
+    const existingLineRanges = optionalLineRanges(entry);
+    if (existingLineRanges !== undefined) {
+      if (existingLine !== undefined || existingEndLine !== undefined) {
+        throw new FindingsValidationError(`evidence line_ranges conflicts with existing line fields`);
+      }
+      entry.line_ranges = existingLineRanges;
+    }
     const evidencePath = optionalString(entry, "path");
     if (evidencePath !== undefined && !path.isAbsolute(evidencePath)) {
       if (looksLikeEvidenceCommand(evidencePath)) {
+        if (existingLineRanges !== undefined) {
+          throw new FindingsValidationError(`evidence command conflicts with existing line_ranges field`);
+        }
         const existingCommand = optionalString(entry, "command");
         if (existingCommand !== undefined && existingCommand !== evidencePath) {
           throw new FindingsValidationError(`evidence command conflicts with existing command field`);
@@ -337,6 +434,18 @@ function validateEvidence(value: unknown, index: number): void {
       const reference = normalizeFindingMetadataPathReference(evidencePath, "evidence path");
       entry.path = reference.path;
       const existingFragment = optionalString(entry, "fragment");
+      if (existingLineRanges !== undefined && (reference.line !== undefined || reference.endLine !== undefined)) {
+        throw new FindingsValidationError(`evidence path line conflicts with existing line_ranges field`);
+      }
+      if (reference.lineRanges !== undefined) {
+        if (existingLine !== undefined || existingEndLine !== undefined) {
+          throw new FindingsValidationError(`evidence path line list conflicts with existing line fields`);
+        }
+        if (existingLineRanges !== undefined && !evidenceLineRangesEqual(existingLineRanges, reference.lineRanges)) {
+          throw new FindingsValidationError(`evidence path line list conflicts with existing line_ranges field`);
+        }
+        entry.line_ranges = reference.lineRanges;
+      }
       if (reference.line !== undefined) {
         if (existingLine !== undefined && existingLine !== reference.line) {
           throw new FindingsValidationError(`evidence path line conflicts with existing line field`);
@@ -366,6 +475,19 @@ function validateEvidence(value: unknown, index: number): void {
       } else if (existingFragment !== undefined) {
         validateFindingMetadataFragment(existingFragment, "evidence fragment");
       }
+      if (reference.detail !== undefined) {
+        const existingDetail = optionalString(entry, "detail");
+        if (reference.lineRanges !== undefined) {
+          if (existingDetail === undefined) {
+            entry.detail = reference.detail;
+          }
+        } else {
+          if (existingDetail !== undefined && existingDetail !== reference.detail) {
+            throw new FindingsValidationError(`evidence path detail conflicts with existing detail field`);
+          }
+          entry.detail = reference.detail;
+        }
+      }
     }
   }
 }
@@ -385,20 +507,28 @@ function looksLikeEvidenceCommand(value: string): boolean {
 function normalizeFindingMetadataPathReference(
   value: string,
   key: string
-): { path: string; fragment?: string; line?: number; endLine?: number } {
+): {
+  path: string;
+  fragment?: string;
+  line?: number;
+  endLine?: number;
+  lineRanges?: EvidenceLineRange[];
+  detail?: string;
+} {
   const hashIndex = value.indexOf("#");
   if (hashIndex === -1) {
     const lineReference = splitLineReference(value);
     const relativePath = lineReference?.path ?? value;
     validateFindingMetadataRelativePath(relativePath, key);
+    if (lineReference === undefined) {
+      return { path: relativePath };
+    }
     return {
       path: relativePath,
-      ...(lineReference === undefined
-        ? {}
-        : {
-            line: lineReference.line,
-            ...(lineReference.endLine === undefined ? {} : { endLine: lineReference.endLine })
-          })
+      ...(lineReference.line === undefined ? {} : { line: lineReference.line }),
+      ...(lineReference.endLine === undefined ? {} : { endLine: lineReference.endLine }),
+      ...(lineReference.lineRanges === undefined ? {} : { lineRanges: lineReference.lineRanges }),
+      ...(lineReference.detail === undefined ? {} : { detail: lineReference.detail })
     };
   }
 
@@ -409,7 +539,69 @@ function normalizeFindingMetadataPathReference(
   return { path: relativePath, fragment };
 }
 
-function splitLineReference(value: string): { path: string; line: number; endLine?: number } | undefined {
+function splitLineReference(value: string):
+  | {
+      path: string;
+      line?: number;
+      endLine?: number;
+      lineRanges?: EvidenceLineRange[];
+      detail?: string;
+    }
+  | undefined {
+  const describedLineMatch =
+    /^(?<path>.+):(?<line>[1-9][0-9]*)(?:-(?<endLine>[1-9][0-9]*))?(?<detailSeparator>: |; )(?<detail>\S(?:[^\r\n]*\S)?)$/u.exec(
+      value
+    );
+  const describedLinePath = describedLineMatch?.groups?.path;
+  const describedLine = describedLineMatch?.groups?.line;
+  const describedEndLine = describedLineMatch?.groups?.endLine;
+  const describedDetailSeparator = describedLineMatch?.groups?.detailSeparator;
+  const describedDetail = describedLineMatch?.groups?.detail;
+  if (
+    describedLinePath !== undefined &&
+    describedLine !== undefined &&
+    describedDetailSeparator !== undefined &&
+    describedDetail !== undefined
+  ) {
+    if (describedDetailSeparator === "; " && /^[0-9]/u.test(describedDetail)) {
+      return undefined;
+    }
+    const parsedLine = parseLineReferenceNumber(describedLine);
+    const parsedEndLine = describedEndLine === undefined ? undefined : parseLineReferenceNumber(describedEndLine);
+    if (parsedEndLine !== undefined && parsedEndLine < parsedLine) {
+      throw new FindingsValidationError(`evidence line range must not descend`);
+    }
+    return {
+      path: describedLinePath,
+      line: parsedLine,
+      ...(parsedEndLine === undefined ? {} : { endLine: parsedEndLine }),
+      detail: describedDetail
+    };
+  }
+  const lineListMatch =
+    /^(?<path>.+):(?<ranges>[1-9][0-9]*(?:-[1-9][0-9]*)?(?:(?: and |[;,])[1-9][0-9]*(?:-[1-9][0-9]*)?)+)$/u.exec(value);
+  const lineListPath = lineListMatch?.groups?.path;
+  const lineListRanges = lineListMatch?.groups?.ranges;
+  if (lineListPath !== undefined && lineListRanges !== undefined) {
+    const separators = lineListRanges.match(/ and |[;,]/gu);
+    if (separators === null) {
+      return undefined;
+    }
+    const separator = separators[0];
+    if (separator === undefined || separators.some((candidate) => candidate !== separator)) {
+      return undefined;
+    }
+    const lineRanges = lineListRanges.split(separator).map((range): EvidenceLineRange => {
+      const dashIndex = range.indexOf("-");
+      const start = parseLineReferenceNumber(dashIndex === -1 ? range : range.slice(0, dashIndex));
+      const end = dashIndex === -1 ? undefined : parseLineReferenceNumber(range.slice(dashIndex + 1));
+      if (end !== undefined && end < start) {
+        throw new FindingsValidationError(`evidence line range must not descend`);
+      }
+      return { line: start, ...(end === undefined ? {} : { end_line: end }) };
+    });
+    return { path: lineListPath, lineRanges, detail: `lines ${lineListRanges}` };
+  }
   const match = /^(?<path>.+):(?<line>[1-9][0-9]*)(?:-(?<endLine>[1-9][0-9]*))?$/u.exec(value);
   const linePath = match?.groups?.path;
   const line = match?.groups?.line;
@@ -417,12 +609,20 @@ function splitLineReference(value: string): { path: string; line: number; endLin
   if (linePath === undefined || line === undefined) {
     return undefined;
   }
-  const parsedLine = Number(line);
-  const parsedEndLine = endLine === undefined ? undefined : Number(endLine);
+  const parsedLine = parseLineReferenceNumber(line);
+  const parsedEndLine = endLine === undefined ? undefined : parseLineReferenceNumber(endLine);
   if (parsedEndLine !== undefined && parsedEndLine < parsedLine) {
     throw new FindingsValidationError(`evidence line range must not descend`);
   }
   return { path: linePath, line: parsedLine, ...(parsedEndLine === undefined ? {} : { endLine: parsedEndLine }) };
+}
+
+function parseLineReferenceNumber(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new FindingsValidationError(`evidence line number must be a positive safe integer`);
+  }
+  return parsed;
 }
 
 function validateFindingMetadataFragment(value: string, key: string): void {
@@ -452,6 +652,46 @@ function optionalLineNumber(record: Record<string, unknown>, key: string): numbe
     throw new FindingsValidationError(`field ${key} must be a positive integer`);
   }
   return parsed;
+}
+
+function optionalLineRanges(record: Record<string, unknown>): EvidenceLineRange[] | undefined {
+  const value = record.line_ranges;
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.length < 2) {
+    throw new FindingsValidationError(`field line_ranges must be an array with at least two entries`);
+  }
+  return value.map((candidate, index): EvidenceLineRange => {
+    if (!isPlainRecord(candidate) || Object.keys(candidate).some((key) => key !== "line" && key !== "end_line")) {
+      throw new FindingsValidationError(`field line_ranges[${index}] must contain only line and end_line`);
+    }
+    const line = requiredEvidenceLineNumber(candidate.line, `line_ranges[${index}].line`);
+    const endLine =
+      candidate.end_line === undefined
+        ? undefined
+        : requiredEvidenceLineNumber(candidate.end_line, `line_ranges[${index}].end_line`);
+    if (endLine !== undefined && endLine < line) {
+      throw new FindingsValidationError(`field line_ranges[${index}].end_line must not precede line`);
+    }
+    return { line, ...(endLine === undefined ? {} : { end_line: endLine }) };
+  });
+}
+
+function requiredEvidenceLineNumber(value: unknown, key: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw new FindingsValidationError(`field ${key} must be a positive safe integer`);
+  }
+  return value;
+}
+
+function evidenceLineRangesEqual(left: EvidenceLineRange[], right: EvidenceLineRange[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (candidate, index) => candidate.line === right[index]?.line && candidate.end_line === right[index]?.end_line
+    )
+  );
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

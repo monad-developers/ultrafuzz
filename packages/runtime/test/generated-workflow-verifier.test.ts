@@ -11,12 +11,49 @@ import * as ts from "typescript";
 import {
   assertRegularFileInside,
   MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
+  normalizeEvidenceLineRangeCardinality,
   normalizeNodeAttemptFailureMessage,
+  validateArtifactContract,
   writeFileDurable
 } from "@ultrafuzz/artifacts";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
+
+function loadFinalReportProducerNormalizers(): {
+  normalizeReport: (contents: string) => string | undefined;
+  normalizeFindings: (value: unknown) => unknown[] | undefined;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const findingArrayStart = source.indexOf("function normalizedFindingArray");
+  const findingArrayEnd = source.indexOf("\n\nfunction writeNormalizedFindings", findingArrayStart);
+  const findingStart = source.indexOf("function normalizeLegacyFindingRecord");
+  const findingEnd = source.indexOf("\n\nfunction normalizeLegacyReportProvenance", findingStart);
+  const reportStart = source.indexOf("function normalizeLegacyReportProvenanceFields");
+  const reportEnd = source.indexOf("\n\nfunction normalizeLegacyGeneratedTestManifests", reportStart);
+  assert.ok(findingArrayStart >= 0 && findingArrayEnd > findingArrayStart, source);
+  assert.ok(findingStart >= 0 && findingEnd > findingStart, source);
+  assert.ok(reportStart >= 0 && reportEnd > reportStart, source);
+
+  const helper = ts.transpileModule(
+    [
+      source.slice(findingArrayStart, findingArrayEnd),
+      source.slice(findingStart, findingEnd),
+      source.slice(reportStart, reportEnd)
+    ].join("\n\n"),
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  return new Function(
+    "normalizeEvidenceLineRangeCardinality",
+    "normalizeFinalReportSeverityRecord",
+    "validateArtifactContract",
+    `${helper}; return { normalizeReport: normalizeLegacyReportProvenanceFields, normalizeFindings: normalizedFindingArray };`
+  )(
+    normalizeEvidenceLineRangeCardinality,
+    (value: unknown) => ({ value, changed: false }),
+    validateArtifactContract
+  ) as ReturnType<typeof loadFinalReportProducerNormalizers>;
+}
 
 function loadRetryFailureAwareArgs(): (
   args: { prompt?: unknown } | undefined,
@@ -1279,8 +1316,90 @@ test("generated Smithers agent preserves its final response as missing non-repor
   assert.match(agent, /normalizeLegacyGeneratedTestManifests\(task\)/u);
   assert.match(agent, /materializeGeneratedTestCompanions\(task\)/u);
   assert.match(agent, /verifyArtifacts\(task\)/u);
+  assert.ok(
+    agent.indexOf("normalizeLegacyFindingFields(task)") < agent.indexOf("normalizeLegacyReportProvenance(task)")
+  );
+  assert.ok(
+    agent.indexOf("normalizeLegacyReportProvenance(task)") <
+      agent.indexOf("materializeMissingFinalReportArtifacts(task)")
+  );
+  assert.ok(agent.indexOf("materializeMissingFinalReportArtifacts(task)") < agent.indexOf("verifyArtifacts(task)"));
   assert.match(source, /output\.contract !== "ultrafuzz\/nonempty-markdown@1"/u);
   assert.match(source, /const fallback = `# \$\{title\}\\n\\n\$\{summary\}\\n`/u);
+});
+
+test("generated Smithers final-report normalization emits canonical report and sidecar bytes", () => {
+  const { normalizeReport, normalizeFindings } = loadFinalReportProducerNormalizers();
+  const independentDetail = "  The source span establishes the bounded StableSwap loop.  ";
+  const report = {
+    schema_version: "1.0",
+    run_metadata: { run_id: "stableswap-singleton-range" },
+    issues: [
+      {
+        schema_version: "1.0",
+        id: "M-01",
+        title: "[M-01] - StableSwap loop boundary",
+        status: "confirmed",
+        severity_guess: "Medium",
+        confidence: "medium",
+        summary: "A bounded loop is anchored to one source span.",
+        evidence: [
+          "scope",
+          {
+            kind: "source",
+            path: "contracts/main/CurveStableSwapNG.vy",
+            detail: independentDetail,
+            line_ranges: [{ line: 318, end_line: 337 }]
+          }
+        ]
+      }
+    ],
+    non_production_outcomes: []
+  };
+  const rawReportBytes = `${JSON.stringify(report, null, 2)}\n`;
+  assert.equal(validateArtifactContract("ultrafuzz/report@1", rawReportBytes, "report.json").ok, false);
+
+  const canonicalReport = {
+    ...report,
+    issues: [
+      {
+        ...report.issues[0]!,
+        evidence: [
+          "scope",
+          {
+            kind: "source",
+            path: "contracts/main/CurveStableSwapNG.vy",
+            detail: independentDetail,
+            line: 318,
+            end_line: 337
+          }
+        ]
+      }
+    ]
+  };
+  const expectedReportBytes = `${JSON.stringify(canonicalReport, null, 2)}\n`;
+
+  const normalizedReportBytes = normalizeReport(rawReportBytes);
+  assert.equal(normalizedReportBytes, expectedReportBytes);
+  assert.equal(
+    createHash("sha256").update(normalizedReportBytes!).digest("hex"),
+    "4c6b608ee8e06f5b96afc145ef64030d1e3a1fc81602308a8a3474c93146b21b"
+  );
+  const normalizedFindings = normalizeFindings(JSON.parse(normalizedReportBytes!).issues);
+  assert.deepEqual(normalizedFindings, canonicalReport.issues);
+  const normalizedSidecarBytes = `${JSON.stringify(normalizedFindings, null, 2)}\n`;
+  assert.equal(
+    createHash("sha256").update(normalizedSidecarBytes).digest("hex"),
+    "e71234ffb758f6ff82ed0fa92b3232b5bfca6260754bf90b0175806525eadb6d"
+  );
+  assert.equal(validateArtifactContract("ultrafuzz/report@1", normalizedReportBytes!, "report.json").ok, true);
+  assert.equal(
+    validateArtifactContract("ultrafuzz/findings@1", normalizedSidecarBytes, "findings.normalized.json").ok,
+    true
+  );
+  assert.deepEqual(JSON.parse(normalizedReportBytes!).issues[0].evidence[1], canonicalReport.issues[0]!.evidence[1]);
+  assert.equal(JSON.parse(normalizedReportBytes!).issues[0].evidence[1].detail, independentDetail);
+  assert.equal(normalizeReport(normalizedReportBytes!), undefined, "canonical bytes are idempotent");
 });
 
 test("generated Smithers agent retains validated strategy findings when dedupe output is missing", () => {

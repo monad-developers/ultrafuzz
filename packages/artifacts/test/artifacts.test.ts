@@ -17,6 +17,7 @@ import {
   normalizeSafeRelativePath,
   manifestDigest,
   MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
+  normalizeEvidenceLineRangeCardinality,
   normalizeNodeAttemptFailureMessage,
   publishFileDurableExclusive,
   queryNodeAttempts,
@@ -1048,6 +1049,164 @@ test("findings normalize markdown evidence path fragments", () => {
   assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /fragment conflicts/);
 });
 
+test("findings canonicalize a singleton typed evidence range without mutating producer metadata", () => {
+  const independentDetail = "  The source span establishes the bounded StableSwap loop.  ";
+  const evidence = [
+    "scope",
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      detail: independentDetail,
+      line_ranges: [{ line: 318, end_line: 337 }]
+    }
+  ];
+  const original = structuredClone(evidence);
+
+  const canonical = normalizeEvidenceLineRangeCardinality(evidence);
+
+  assert.equal(canonical.changed, true);
+  assert.deepEqual(evidence, original, "the shared producer normalizer must be pure");
+  assert.deepEqual(canonical.value, [
+    "scope",
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      detail: independentDetail,
+      line: 318,
+      end_line: 337
+    }
+  ]);
+
+  assert.deepEqual(
+    normalizeEvidenceLineRangeCardinality([
+      {
+        kind: "source",
+        path: "contracts/main/CurveStableSwapNG.vy",
+        detail: independentDetail,
+        line_ranges: [{ line: 318 }]
+      }
+    ]),
+    {
+      changed: true,
+      value: [
+        {
+          kind: "source",
+          path: "contracts/main/CurveStableSwapNG.vy",
+          detail: independentDetail,
+          line: 318
+        }
+      ]
+    }
+  );
+
+  const disjoint = [
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      detail: independentDetail,
+      line_ranges: [
+        { line: 318, end_line: 337 },
+        { line: 411, end_line: 419 }
+      ]
+    }
+  ];
+  const unchanged = normalizeEvidenceLineRangeCardinality(disjoint);
+  assert.deepEqual(unchanged, { value: disjoint, changed: false });
+  assert.equal(unchanged.value, disjoint);
+
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const finding = {
+    title: "StableSwap source span",
+    status: "candidate",
+    severity_guess: "Medium",
+    confidence: "medium",
+    summary: "A bounded loop is anchored to one source span.",
+    evidence
+  };
+  fs.writeFileSync(path.join(nodeDir, "findings.json"), JSON.stringify([finding]));
+  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+  assert.deepEqual(report.findings[0]!.evidence, canonical.value);
+
+  for (const invalidEvidence of [
+    { kind: "source", path: "contracts/main/CurveStableSwapNG.vy", line_ranges: [] },
+    { kind: "source", path: "contracts/main/CurveStableSwapNG.vy", line_ranges: null },
+    { kind: "source", path: "contracts/main/CurveStableSwapNG.vy", line_ranges: [{ line: 0 }] },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      line_ranges: [{ line: 337, end_line: 318 }]
+    },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      line_ranges: [{ line: Number.MAX_SAFE_INTEGER + 1 }]
+    },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      line_ranges: [{ line: 318, note: "not canonical" }]
+    },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      line: 318,
+      line_ranges: [{ line: 318, end_line: 337 }]
+    },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      end_line: 337,
+      line_ranges: [{ line: 318, end_line: 337 }]
+    },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      line: 318,
+      line_ranges: [
+        { line: 318, end_line: 337 },
+        { line: 411, end_line: 419 }
+      ]
+    },
+    {
+      kind: "source",
+      path: "../CurveStableSwapNG.vy",
+      line_ranges: [{ line: 318, end_line: 337 }]
+    },
+    {
+      kind: "source",
+      path: " contracts/main/CurveStableSwapNG.vy ",
+      line_ranges: [{ line: 318, end_line: 337 }]
+    },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy:318-337",
+      line_ranges: [{ line: 318, end_line: 337 }]
+    },
+    {
+      kind: "validation",
+      path: "forge test --match-path CurveStableSwapNG.vy",
+      line_ranges: [{ line: 318, end_line: 337 }]
+    },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      command: "forge test",
+      line_ranges: [{ line: 318, end_line: 337 }]
+    }
+  ]) {
+    fs.writeFileSync(
+      path.join(nodeDir, "findings.json"),
+      JSON.stringify([{ ...finding, evidence: ["scope", invalidEvidence] }])
+    );
+    assert.throws(
+      () => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }),
+      /./u,
+      JSON.stringify(invalidEvidence)
+    );
+  }
+});
+
 test("findings normalize source evidence line suffixes", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
   const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
@@ -1088,6 +1247,479 @@ test("findings normalize source evidence line suffixes", () => {
   assert.deepEqual(rangeReport.findings[0]!.evidence, [
     { kind: "source", path: "PoolLens.sol", line: 248, end_line: 274 }
   ]);
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Disjoint source ranges",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "Two disjoint source ranges anchor the issue.",
+        evidence: [{ kind: "source", path: "VeryLiquidVault.sol:105-107,154-185" }]
+      }
+    ])
+  );
+
+  const lineListReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(lineListReport.findings[0]!.evidence, [
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      line_ranges: [
+        { line: 105, end_line: 107 },
+        { line: 154, end_line: 185 }
+      ],
+      detail: "lines 105-107,154-185"
+    }
+  ]);
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Semicolon-separated source ranges",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "Two semicolon-separated source ranges anchor the issue.",
+        evidence: [{ kind: "source", path: "CurveStableSwapNG.vy:17-19;33-35" }]
+      }
+    ])
+  );
+
+  const semicolonListReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(semicolonListReport.findings[0]!.evidence, [
+    {
+      kind: "source",
+      path: "CurveStableSwapNG.vy",
+      line_ranges: [
+        { line: 17, end_line: 19 },
+        { line: 33, end_line: 35 }
+      ],
+      detail: "lines 17-19;33-35"
+    }
+  ]);
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Natural-language separated source ranges",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "Two natural-language separated source ranges anchor the issue.",
+        evidence: [
+          { kind: "source", path: "VeryLiquidVault.sol:253-258 and 346-364" },
+          { kind: "source", path: "VToken.sol:698-728 and 1463-1478" }
+        ]
+      }
+    ])
+  );
+
+  const naturalLanguageListReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(naturalLanguageListReport.findings[0]!.evidence, [
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      line_ranges: [
+        { line: 253, end_line: 258 },
+        { line: 346, end_line: 364 }
+      ],
+      detail: "lines 253-258 and 346-364"
+    },
+    {
+      kind: "source",
+      path: "VToken.sol",
+      line_ranges: [
+        { line: 698, end_line: 728 },
+        { line: 1463, end_line: 1478 }
+      ],
+      detail: "lines 698-728 and 1463-1478"
+    }
+  ]);
+
+  const inlineDetail =
+    "maxDeposit only takes the minimum of the summed strategy maxDeposit values and the meta-vault limit";
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Source range with inline detail",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "A source range and inline description anchor the issue.",
+        evidence: [
+          { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}` },
+          {
+            kind: "source",
+            path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`,
+            line: 104,
+            end_line: 105,
+            detail: inlineDetail
+          }
+        ]
+      }
+    ])
+  );
+
+  const inlineDetailReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(inlineDetailReport.findings[0]!.evidence, [
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      line: 104,
+      end_line: 105,
+      detail: inlineDetail
+    },
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      line: 104,
+      end_line: 105,
+      detail: inlineDetail
+    }
+  ]);
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Source range with semicolon-delimited detail",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "A source range and short description anchor the issue.",
+        evidence: [
+          { kind: "source", path: "PoolRegistry.sol:305-327; tests" },
+          {
+            kind: "source",
+            path: "PoolRegistry.sol:305-327; tests",
+            line: 305,
+            end_line: 327,
+            detail: "tests"
+          }
+        ]
+      }
+    ])
+  );
+
+  const semicolonDetailReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(semicolonDetailReport.findings[0]!.evidence, [
+    { kind: "source", path: "PoolRegistry.sol", line: 305, end_line: 327, detail: "tests" },
+    { kind: "source", path: "PoolRegistry.sol", line: 305, end_line: 327, detail: "tests" }
+  ]);
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Disjoint source ranges with matching detail",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "Equivalent explicit detail is unambiguous.",
+        evidence: [
+          {
+            kind: "source",
+            path: "VeryLiquidVault.sol:105-107,154-185",
+            detail: "lines 105-107,154-185"
+          }
+        ]
+      }
+    ])
+  );
+
+  const matchingDetailReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(matchingDetailReport.findings[0]!.evidence, [
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      line_ranges: [
+        { line: 105, end_line: 107 },
+        { line: 154, end_line: 185 }
+      ],
+      detail: "lines 105-107,154-185"
+    }
+  ]);
+
+  for (const evidence of [
+    { kind: "source", path: "VeryLiquidVault.sol:105-107,154-185", line: 105 },
+    { kind: "source", path: "VeryLiquidVault.sol:105-107,154-185", end_line: 185 }
+  ]) {
+    fs.writeFileSync(
+      path.join(nodeDir, "findings.json"),
+      JSON.stringify([
+        {
+          title: "Ambiguous disjoint source ranges",
+          status: "candidate",
+          severity_guess: "medium",
+          confidence: "medium",
+          summary: "Conflicting structured metadata must fail closed.",
+          evidence: [evidence]
+        }
+      ])
+    );
+    assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /line list conflicts/u);
+  }
+
+  const independentDetail = "  The ranges jointly show the external-dependency boundary.  ";
+  const canonicalLineRanges = [
+    { line: 105, end_line: 107 },
+    { line: 154, end_line: 185 }
+  ];
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Disjoint source ranges with independent detail",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "Structural ranges and producer prose occupy separate metadata fields.",
+        evidence: [
+          {
+            kind: "source",
+            path: "VeryLiquidVault.sol:105-107,154-185",
+            detail: independentDetail
+          },
+          {
+            kind: "source",
+            path: "VeryLiquidVault.sol:105-107,154-185",
+            detail: independentDetail,
+            line_ranges: canonicalLineRanges
+          },
+          {
+            kind: "source",
+            path: "VeryLiquidVault.sol",
+            detail: independentDetail,
+            line_ranges: canonicalLineRanges
+          }
+        ]
+      }
+    ])
+  );
+
+  const independentDetailReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(independentDetailReport.findings[0]!.evidence, [
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      detail: independentDetail,
+      line_ranges: canonicalLineRanges
+    },
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      detail: independentDetail,
+      line_ranges: canonicalLineRanges
+    },
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      detail: independentDetail,
+      line_ranges: canonicalLineRanges
+    }
+  ]);
+
+  for (const lineRanges of [
+    [
+      { line: 105, end_line: 107 },
+      { line: 155, end_line: 185 }
+    ],
+    [
+      { line: 154, end_line: 185 },
+      { line: 105, end_line: 107 }
+    ],
+    [{ line: 105, end_line: 107 }],
+    [
+      { line: 105, end_line: 104 },
+      { line: 154, end_line: 185 }
+    ],
+    [
+      { line: 105, end_line: 107, note: "not canonical" },
+      { line: 154, end_line: 185 }
+    ],
+    [{ line: 0 }, { line: 154, end_line: 185 }],
+    [
+      { line: "105", end_line: 107 },
+      { line: 154, end_line: 185 }
+    ],
+    [{ line: Number.MAX_SAFE_INTEGER + 1 }, { line: 154, end_line: 185 }]
+  ]) {
+    fs.writeFileSync(
+      path.join(nodeDir, "findings.json"),
+      JSON.stringify([
+        {
+          title: "Conflicting disjoint line ranges",
+          status: "candidate",
+          severity_guess: "medium",
+          confidence: "medium",
+          summary: "Differing or malformed typed range metadata must fail closed.",
+          evidence: [
+            {
+              kind: "source",
+              path: "VeryLiquidVault.sol:105-107,154-185",
+              line_ranges: lineRanges
+            }
+          ]
+        }
+      ])
+    );
+    assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /line_ranges/u);
+  }
+
+  for (const evidence of [
+    { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`, line: 103 },
+    { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`, end_line: 106 },
+    { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`, detail: "different detail" },
+    { kind: "source", path: "PoolRegistry.sol:305-327; tests", line: 304 },
+    { kind: "source", path: "PoolRegistry.sol:305-327; tests", end_line: 328 },
+    { kind: "source", path: "PoolRegistry.sol:305-327; tests", detail: "different detail" }
+  ]) {
+    fs.writeFileSync(
+      path.join(nodeDir, "findings.json"),
+      JSON.stringify([
+        {
+          title: "Conflicting inline source detail",
+          status: "candidate",
+          severity_guess: "medium",
+          confidence: "medium",
+          summary: "Conflicting structured metadata must fail closed.",
+          evidence: [evidence]
+        }
+      ])
+    );
+    assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /conflicts/u);
+  }
+
+  for (const descendingPath of [
+    "VeryLiquidVault.sol:105-107,185-154",
+    "CurveStableSwapNG.vy:17-19;35-33",
+    "VToken.sol:698-728 and 1478-1463",
+    "VeryLiquidVault.sol:105-104: descending inline range",
+    "PoolRegistry.sol:327-305; tests"
+  ]) {
+    fs.writeFileSync(
+      path.join(nodeDir, "findings.json"),
+      JSON.stringify([
+        {
+          title: "Descending disjoint source range",
+          status: "candidate",
+          severity_guess: "medium",
+          confidence: "medium",
+          summary: "A descending member of the list must fail closed.",
+          evidence: [{ kind: "source", path: descendingPath }]
+        }
+      ])
+    );
+    assert.throws(
+      () => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }),
+      /line range must not descend/u
+    );
+  }
+
+  for (const [unsafePath, expectedError] of [
+    ["../VeryLiquidVault.sol:105-107,154-185", /traverse/u],
+    ["VeryLiquidVault.sol:105-107,latest", /unsafe segment/u],
+    ["CurveStableSwapNG.vy:17-19;33-35,40", /unsafe segment/u],
+    ["VToken.sol:698-728 and 1463-1478,1500-1501", /unsafe segment/u],
+    ["VeryLiquidVault.sol:104-105: ", /unsafe segment/u],
+    ["PoolRegistry.sol:305-327; ", /unsafe segment/u],
+    ["PoolRegistry.sol:305-327; 411-419", /unsafe segment/u],
+    ["VeryLiquidVault.sol:latest: prose", /unsafe segment/u],
+    ["PoolRegistry.sol:latest; tests", /unsafe segment/u],
+    ["../VeryLiquidVault.sol:104-105: prose", /traverse/u],
+    ["../PoolRegistry.sol:305-327; tests", /traverse/u],
+    ["VeryLiquidVault.sol:9007199254740992,154-185", /positive safe integer/u],
+    ["VeryLiquidVault.sol:9007199254740992: prose", /positive safe integer/u],
+    ["PoolRegistry.sol:9007199254740992; tests", /positive safe integer/u]
+  ] as const) {
+    fs.writeFileSync(
+      path.join(nodeDir, "findings.json"),
+      JSON.stringify([
+        {
+          title: "Invalid disjoint source ranges",
+          status: "candidate",
+          severity_guess: "medium",
+          confidence: "medium",
+          summary: "Unsafe or malformed paths must retain fail-closed behavior.",
+          evidence: [{ kind: "source", path: unsafePath }]
+        }
+      ])
+    );
+    assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), expectedError);
+  }
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Command-like evidence remains a command",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "Command normalization takes precedence over path-reference parsing.",
+        evidence: [
+          {
+            kind: "validation",
+            path: "forge test --match-path VeryLiquidVault.sol:104-105: inline prose"
+          },
+          {
+            kind: "validation",
+            path: "forge test --match-path PoolRegistry.sol:305-327; tests"
+          }
+        ]
+      }
+    ])
+  );
+
+  const commandReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(commandReport.findings[0]!.evidence, [
+    {
+      kind: "validation",
+      command: "forge test --match-path VeryLiquidVault.sol:104-105: inline prose"
+    },
+    {
+      kind: "validation",
+      command: "forge test --match-path PoolRegistry.sol:305-327; tests"
+    }
+  ]);
+
+  for (const evidence of [
+    {
+      kind: "validation",
+      path: "forge test --match-path VeryLiquidVault.sol",
+      line_ranges: canonicalLineRanges
+    },
+    { kind: "source", path: "VeryLiquidVault.sol", line_ranges: null }
+  ]) {
+    fs.writeFileSync(
+      path.join(nodeDir, "findings.json"),
+      JSON.stringify([
+        {
+          title: "Invalid typed source ranges",
+          status: "candidate",
+          severity_guess: "medium",
+          confidence: "medium",
+          summary: "Typed source ranges cannot annotate commands or contain null.",
+          evidence: [evidence]
+        }
+      ])
+    );
+    assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /line_ranges/u);
+  }
 
   fs.writeFileSync(
     path.join(nodeDir, "findings.json"),

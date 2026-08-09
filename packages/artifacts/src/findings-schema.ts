@@ -8,6 +8,7 @@ export const FINDINGS_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#sc
 
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
+const positiveSafeInteger = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const stringArray = z.array(nonEmptyString);
 const propertyIdsSchema = stringArray.min(1).superRefine((propertyIds, context) => {
   const seen = new Set<string>();
@@ -52,13 +53,45 @@ const contributingBackendFailuresSchema = z
 const findingDeduplicationSchema = z.looseObject({
   pre_dedup_count: z.number().int().positive()
 });
-const evidenceEntrySchema = z.union([
-  nonEmptyString,
-  z.looseObject({
-    kind: nonEmptyString.optional(),
-    path: nonEmptyString.optional()
+const evidenceLineRangeSchema = z
+  .strictObject({
+    line: positiveSafeInteger,
+    end_line: positiveSafeInteger.optional()
   })
-]);
+  .superRefine((range, context) => {
+    if (range.end_line !== undefined && range.end_line < range.line) {
+      context.addIssue({
+        code: "custom",
+        message: "end_line must not precede line",
+        path: ["end_line"]
+      });
+    }
+  });
+const evidenceObjectSchema = z
+  .looseObject({
+    kind: nonEmptyString.optional(),
+    path: nonEmptyString.optional(),
+    line: positiveSafeInteger.optional(),
+    end_line: positiveSafeInteger.optional(),
+    line_ranges: z.array(evidenceLineRangeSchema).min(2).optional()
+  })
+  .superRefine((evidence, context) => {
+    if (evidence.line !== undefined && evidence.end_line !== undefined && evidence.end_line < evidence.line) {
+      context.addIssue({
+        code: "custom",
+        message: "end_line must not precede line",
+        path: ["end_line"]
+      });
+    }
+    if (evidence.line_ranges !== undefined && (evidence.line !== undefined || evidence.end_line !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        message: "line_ranges cannot coexist with line or end_line",
+        path: ["line_ranges"]
+      });
+    }
+  });
+const evidenceEntrySchema = z.union([nonEmptyString, evidenceObjectSchema]);
 
 export const findingSchema = z.looseObject({
   // Optional: nothing reads a finding's schema_version, there is only one findings schema, and
@@ -156,7 +189,25 @@ export const findingJsonSchema = {
             additionalProperties: true,
             properties: {
               kind: { type: "string", minLength: 1 },
-              path: { type: "string", minLength: 1 }
+              path: { type: "string", minLength: 1 },
+              line: { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+              end_line: { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+              line_ranges: {
+                type: "array",
+                minItems: 2,
+                items: {
+                  type: "object",
+                  required: ["line"],
+                  additionalProperties: false,
+                  properties: {
+                    line: { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+                    end_line: { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER }
+                  }
+                }
+              }
+            },
+            not: {
+              anyOf: [{ required: ["line_ranges", "line"] }, { required: ["line_ranges", "end_line"] }]
             }
           }
         ]

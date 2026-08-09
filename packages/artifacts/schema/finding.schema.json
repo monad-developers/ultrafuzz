@@ -168,7 +168,48 @@
               "path": {
                 "type": "string",
                 "minLength": 1
+              },
+              "line": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "end_line": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "line_ranges": {
+                "type": "array",
+                "minItems": 2,
+                "items": {
+                  "type": "object",
+                  "required": ["line"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "line": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "end_line": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  }
+                }
               }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["line_ranges", "line"]
+                },
+                {
+                  "required": ["line_ranges", "end_line"]
+                }
+              ]
             }
           }
         ]

@@ -583,6 +583,8 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("non-empty `detection_rates` or `strategies` array");
     expect(markdown).toContain("Use exactly one of\nthese array keys; never emit both");
     expect(markdown).toContain("omit both `fuzzer_backend` and `fuzzer_backends`");
+    expect(markdown).toContain("never emit a one-entry\n`line_ranges`");
+    expect(markdown).toContain("never combine `line_ranges` with `line` or `end_line`");
   });
 
   it("keeps the empty findings array contract in prompt-owned templates", () => {
@@ -592,6 +594,10 @@ describe("prompt semantic anchors", () => {
     const template = readFileSync(templatePath, "utf8");
     expect(template).toContain("Use `[]` when there are no findings");
     expect(template).toContain("without anchors or line selectors");
+    expect(template).toContain("disjoint spans in `line_ranges`");
+    expect(template).toContain("Never emit a one-entry `line_ranges`");
+    expect(template).toContain("never combine `line_ranges` with `line` or `end_line`");
+    expect(template).toContain("Keep independent explanatory prose in `detail`");
     // The contract accepts findings without a schema_version, so the template must not demand one.
     expect(template).not.toContain('Use `schema_version: "1.0"`');
     expect(template).toContain("`schema_version` is optional");

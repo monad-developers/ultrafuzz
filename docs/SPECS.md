@@ -382,7 +382,11 @@ patch references, notes, and dedupe or family metadata when available.
 `evidence` entries MAY be non-empty string references or objects with optional
 `kind`, `path`, and additional metadata. When present, object `kind` and `path`
 values MUST be non-empty strings, and relative evidence paths MUST remain safe
-artifact-relative paths.
+artifact-relative paths without embedded selectors. A single source span MAY use
+positive integer `line` and `end_line` metadata. Disjoint spans MUST use at least
+two ordered `line_ranges` objects with a required positive integer `line` and an
+optional `end_line` that does not precede it. Independent explanatory `detail`
+MUST remain separate from structural range metadata.
 
 Default review flows SHOULD deduplicate findings, classify severity, aggregate
 generated tests, and write final report artifacts. `ultrafuzz report` MUST read

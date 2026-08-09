@@ -375,6 +375,83 @@ test("artifact contract registry validates structured, empty, and malformed outp
   }
 });
 
+test("the final report contract rejects raw singleton ranges and accepts the canonical scalar span", () => {
+  const independentDetail = "  The source span establishes the bounded StableSwap loop.  ";
+  const issue = {
+    schema_version: FINDINGS_SCHEMA_VERSION,
+    id: "finding-1",
+    title: "StableSwap loop boundary",
+    status: "needs-review",
+    severity_guess: "Medium",
+    confidence: "medium",
+    summary: "A bounded loop is anchored to one source span.",
+    evidence: [
+      "scope",
+      {
+        kind: "source",
+        path: "contracts/main/CurveStableSwapNG.vy",
+        detail: independentDetail,
+        line_ranges: [{ line: 318, end_line: 337 }]
+      }
+    ]
+  };
+  const report = {
+    schema_version: "1.0",
+    run_metadata: {},
+    issues: [issue],
+    non_production_outcomes: []
+  };
+
+  assert.equal(
+    validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([issue]), "findings.json").ok,
+    false,
+    "standalone findings keep the canonical line_ranges minItems=2 contract"
+  );
+  assert.equal(
+    validateArtifactContract("ultrafuzz/report@1", JSON.stringify(report), "report.json").ok,
+    false,
+    "report bytes stay strict until the producer boundary canonicalizes them"
+  );
+
+  const canonical = structuredClone(report);
+  (canonical.issues[0]!.evidence as unknown[])[1] = {
+    kind: "source",
+    path: "contracts/main/CurveStableSwapNG.vy",
+    detail: independentDetail,
+    line: 318,
+    end_line: 337
+  };
+  const validation = validateArtifactContract("ultrafuzz/report@1", JSON.stringify(canonical), "report.json");
+  assert.equal(validation.ok, true, JSON.stringify(validation.issues));
+  assert.deepEqual((validation.value as typeof canonical).issues[0]!.evidence[1], canonical.issues[0]!.evidence[1]);
+
+  const multiRange = structuredClone(report);
+  multiRange.issues[0]!.evidence[1] = {
+    kind: "source",
+    path: "contracts/main/CurveStableSwapNG.vy",
+    detail: independentDetail,
+    line_ranges: [
+      { line: 318, end_line: 337 },
+      { line: 411, end_line: 419 }
+    ]
+  };
+  const multiRangeValidation = validateArtifactContract(
+    "ultrafuzz/report@1",
+    JSON.stringify(multiRange),
+    "report.json"
+  );
+  assert.equal(multiRangeValidation.ok, true, JSON.stringify(multiRangeValidation.issues));
+  assert.deepEqual((multiRangeValidation.value as typeof report).issues[0]!.evidence[1], {
+    kind: "source",
+    path: "contracts/main/CurveStableSwapNG.vy",
+    detail: independentDetail,
+    line_ranges: [
+      { line: 318, end_line: 337 },
+      { line: 411, end_line: 419 }
+    ]
+  });
+});
+
 test("invariant evidence ledger preserves verbatim source entries and inventory joins", () => {
   const ledger = {
     schema_version: INVARIANT_LEDGER_SCHEMA_VERSION,
@@ -911,6 +988,8 @@ test("the findings contract accepts the house-style schema_version and states th
   assert.match(description, /severity_guess to exactly "High", "Medium", or "Low"/u);
   assert.match(description, /including one that is or may become a non-production record/u);
   assert.match(description, /"severity_guess":"Medium"/u);
+  assert.match(description, /disjoint spans with at least two typed line_ranges entries/u);
+  assert.match(description, /Keep independent prose in detail/u);
   assert.doesNotMatch(description, /"severity_guess":"medium"/u);
   assert.equal(
     validateArtifactContract(
@@ -959,6 +1038,108 @@ test("the findings contract does not require schema_version, and still rejects m
     "an otherwise malformed finding still fails the contract"
   );
   assert.equal(validateFindingSchema({ ...withoutVersion[0], property_ids: ["property-99", "property-99"] }).ok, false);
+});
+
+test("the findings schema validates typed disjoint evidence line ranges", () => {
+  const finding = {
+    id: "failure-1",
+    title: "Disjoint source evidence",
+    status: "candidate",
+    severity_guess: "medium",
+    confidence: "high",
+    summary: "Two disjoint source ranges support the finding.",
+    evidence: [
+      {
+        kind: "source",
+        path: "VeryLiquidVault.sol",
+        detail: "The ranges jointly establish the boundary.",
+        line_ranges: [
+          { line: 105, end_line: 107 },
+          { line: 154, end_line: 185 }
+        ]
+      }
+    ]
+  };
+
+  assert.equal(validateFindingSchema(finding).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([finding])).ok, true);
+  const evidenceSchema = JSON.stringify(findingJsonSchema.properties.evidence);
+  assert.match(evidenceSchema, /line_ranges/u);
+  assert.match(evidenceSchema, /end_line/u);
+
+  const scalar = structuredClone(finding);
+  (scalar.evidence as unknown[])[0] = {
+    kind: "source",
+    path: "VeryLiquidVault.sol",
+    detail: "One source span establishes the boundary.",
+    line: 105,
+    end_line: 107
+  };
+  assert.equal(validateFindingSchema(scalar).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([scalar])).ok, true);
+
+  for (const lineRanges of [
+    null,
+    [{ line: 105, end_line: 107 }],
+    [
+      { line: 105, end_line: 104 },
+      { line: 154, end_line: 185 }
+    ],
+    [{ line: 0 }, { line: 154, end_line: 185 }],
+    [
+      { line: "105", end_line: 107 },
+      { line: 154, end_line: 185 }
+    ],
+    [
+      { line: 105, end_line: 107, note: "not canonical" },
+      { line: 154, end_line: 185 }
+    ],
+    [{ line: Number.MAX_SAFE_INTEGER + 1 }, { line: 154, end_line: 185 }]
+  ]) {
+    const malformed = structuredClone(finding) as Record<string, unknown>;
+    malformed.evidence = [
+      {
+        kind: "source",
+        path: "VeryLiquidVault.sol",
+        line_ranges: lineRanges
+      }
+    ];
+    assert.equal(validateFindingSchema(malformed).ok, false);
+    assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([malformed])).ok, false);
+  }
+
+  for (const evidence of [
+    { kind: "source", path: "VeryLiquidVault.sol", line: 0 },
+    { kind: "source", path: "VeryLiquidVault.sol", line: Number.MAX_SAFE_INTEGER + 1 },
+    { kind: "source", path: "VeryLiquidVault.sol", line: 107, end_line: 105 },
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      line: 105,
+      line_ranges: [
+        { line: 105, end_line: 107 },
+        { line: 154, end_line: 185 }
+      ]
+    },
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      end_line: 107,
+      line_ranges: [
+        { line: 105, end_line: 107 },
+        { line: 154, end_line: 185 }
+      ]
+    }
+  ]) {
+    const malformed = structuredClone(finding) as Record<string, unknown>;
+    malformed.evidence = [evidence];
+    assert.equal(validateFindingSchema(malformed).ok, false, JSON.stringify(evidence));
+    assert.equal(
+      validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([malformed])).ok,
+      false,
+      JSON.stringify(evidence)
+    );
+  }
 });
 
 test("the findings schema recognizes typed campaign deduplication accounting without imposing it globally", () => {
