@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Final-review tasks now derive canonical Markdown and normalized findings from one validated, renderable report object through the same deterministic projector used by the CLI, so a missing `report.md` can be recovered without trusting an agent summary while malformed, empty, or unrenderable reports still fail closed (#460).
 - Pinned source materialization now rewrites GitHub SCP-style and `ssh://` submodule URLs to public HTTPS through invocation-scoped Git configuration inherited by recursive updates, so public targets hydrate without SSH credentials while retaining exact gitlink pins, checkout isolation, and unchanged behavior for other hosts (#458).
 - The Aave v4 private benchmark ground truth now binds its 12 scored labels to the exact ScFuzzBench fork and immutable revision that contains the injected harness, with regression coverage against the checked-in document (#453; related to #404).
 - Retry artifact cleanup now preserves only legacy prompts directly owned by the task artifact root, so sealed snapshot prompts remain outside cleanup; evidence paths with homogeneous comma-, semicolon-, or `and`-separated line/range lists, singleton `line_ranges`, and numeric ranges followed by colon or semicolon prose normalize into safe scalar or typed disjoint metadata while preserving independent detail; and Modal launch-state inspection resolves states that carry image IDs through the persisted immutable ID rather than a mutable published name (#416, #443, #444, #449, #450, #451, #452, #455).
