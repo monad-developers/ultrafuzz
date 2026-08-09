@@ -160,8 +160,18 @@ function loadMaterializer(
   const emitted = ts.transpileModule(declaration, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
   }).outputText;
-  const names = Object.keys(collaborators);
-  return new Function(...names, emitted)(...names.map((name) => collaborators[name])) as (
+  const readFile = collaborators.readFileSync;
+  assert.equal(typeof readFile, "function", "the materializer harness requires readFileSync");
+  const injected = {
+    readBoundedRegularArtifactSnapshot: (_root: string, target: string) =>
+      (readFile as (target: string) => string)(target),
+    parseStrictJsonSnapshot: (snapshot: string) => JSON.parse(snapshot) as unknown,
+    decodeStrictUtf8Snapshot: (snapshot: string) => snapshot,
+    MAX_VERIFIED_ARTIFACT_BYTES: 64 * 1024 * 1024,
+    ...collaborators
+  };
+  const names = Object.keys(injected);
+  return new Function(...names, emitted)(...Object.values(injected)) as (
     task: unknown,
     workspaceRoot: string,
     replay: boolean
@@ -192,7 +202,7 @@ function replayScenario(worktreeTree: string, replay = true): string[] {
   const materialize = loadMaterializer({
     path,
     taskSpecs: chain.map((entry) => ({ attemptId: entry.dir.split("/").pop() })),
-    existsSync: () => true,
+    pathEntryExists: () => true,
     readFileSync: (target: string) => {
       const entry = byPath.get(path.dirname(target));
       assert.ok(entry !== undefined, target);
@@ -297,7 +307,7 @@ test("#312 every dependency capture is validated even when replay skips it", () 
   const materialize = loadMaterializer({
     path,
     taskSpecs: chain.map((entry) => ({ attemptId: entry.dir.split("/").pop() })),
-    existsSync: () => true,
+    pathEntryExists: () => true,
     readFileSync: (target: string) => {
       const entry = byPath.get(path.dirname(target));
       assert.ok(entry !== undefined, target);
@@ -370,7 +380,7 @@ test("#312 dependencies are replayed in task order regardless of the order they 
   const materialize = loadMaterializer({
     path,
     taskSpecs: chain.map((entry) => ({ attemptId: entry.dir.split("/").pop() })),
-    existsSync: () => true,
+    pathEntryExists: () => true,
     readFileSync: (target: string) => {
       const entry = byPath.get(path.dirname(target));
       assert.ok(entry !== undefined, target);

@@ -6237,7 +6237,7 @@ test("snapshot materialization closes ownership descriptors on pre-publication v
         layout: evidence.layout,
         snapshot: malformedDependencyMap
       }),
-    /dependency map is invalid/u
+    /workflow execution dependency map does not match urn:ultrafuzz:schema:runtime:workflow-execution-dependencies:1/u
   );
   assert.deepEqual(openDescriptorTargetsInside(snapshotsRoot), []);
 });
@@ -6521,7 +6521,10 @@ test("linked evidence rejects extra snapshot generations and malformed control s
   assert.equal(malformedEvidence.ok, false);
   if (!malformedEvidence.ok) {
     assert.equal(malformedEvidence.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
-    assert.match(malformedEvidence.diagnostics[0]?.message ?? "", /seal is invalid/u);
+    assert.match(
+      malformedEvidence.diagnostics[0]?.message ?? "",
+      /workflow control seal does not match urn:ultrafuzz:schema:runtime:workflow-control-integrity:2/u
+    );
   }
 });
 
@@ -10653,7 +10656,7 @@ test("a pristine initial-link projection is reconstructed only from sealed contr
   const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
     provenance?: Record<string, unknown>;
   };
-  if (state.provenance !== undefined) delete state.provenance.workflow;
+  delete state.provenance;
   fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
 
   const evidence = await readLinkedWorkflowEvidence(project, run.value!.run_id);

@@ -966,6 +966,7 @@ test("project discovery gate rejects a symlinked-directory scan probe", () => {
       schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
       entries: [],
       inventory_rows: [],
+      no_invariants_justification: "The symlinked-directory fixture declares no invariant to record.",
       scan_probes: [
         {
           id: "probe-tests-alias",
@@ -1139,6 +1140,7 @@ test("project discovery gate rejects root-normalizing traversal and a symlinked 
       schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
       entries: [],
       inventory_rows: [],
+      no_invariants_justification: "The traversal fixture declares no invariant to record.",
       scan_probes: [
         { id: "probe-traversal", source_path: "foo/..", query: "inventory", result: "done" },
         { id: "probe-drive", source_path: "C:/outside", query: "inventory", result: "done" },
@@ -1162,6 +1164,7 @@ test("project discovery gate rejects root-normalizing traversal and a symlinked 
       schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
       entries: [],
       inventory_rows: [],
+      no_invariants_justification: "The broken-parent fixture declares no invariant to record.",
       scan_probes: [
         { id: "probe-broken-parent", source_path: "broken/optional.txt", query: "inventory", result: "absent" }
       ]
@@ -1187,6 +1190,7 @@ test("project discovery gate rejects root-normalizing traversal and a symlinked 
       schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
       entries: [],
       inventory_rows: [],
+      no_invariants_justification: "The symlinked-workspace fixture declares no invariant to record.",
       scan_probes: [{ id: "probe-root", source_path: ".", query: "inventory", result: "done" }]
     })
   );
@@ -1640,8 +1644,8 @@ test("fanin gate checks scan probe containment against the discovery workspace",
   );
 
   // Fan-in is the second gate that reads this artifact, and issue #292's whole point is that the
-  // ledger must have ONE reading at both of them. Discovery's copy of this rule was covered; this
-  // one was not, so deleting the fan-in call broke nothing.
+  // ledger must have ONE reading at both of them. The canonical JSON Schema now requires the
+  // justification before semantic checks run, so fan-in must reject the invalid registered document.
   writeArtifact(
     layout,
     "project-discovery",
@@ -1656,7 +1660,7 @@ test("fanin gate checks scan probe containment against the discovery workspace",
   const unjustified = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(unjustified.ok, false, JSON.stringify(unjustified.diagnostics));
   assert.ok(
-    unjustified.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_NO_INVARIANTS_UNJUSTIFIED"),
+    unjustified.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_INVALID"),
     JSON.stringify(unjustified.diagnostics)
   );
 });
