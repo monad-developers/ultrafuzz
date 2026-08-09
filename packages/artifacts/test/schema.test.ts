@@ -1290,6 +1290,13 @@ test("analysis bundle manifest schema rejects unversioned and non-allowlisted en
     ]
   };
   assert.equal(validateAnalysisBundleManifestSchema(manifest).ok, true);
+  const registeredSchemaFailure = validateAnalysisBundleManifestSchema({ ...manifest, legacy: true });
+  assert.equal(registeredSchemaFailure.ok, false);
+  assert.ok(registeredSchemaFailure.issues.every((issue) => issue.code === "ANALYSIS_BUNDLE_MANIFEST_SCHEMA_INVALID"));
+  assert.ok(
+    registeredSchemaFailure.issues.some((issue) => issue.message === "must NOT have additional properties"),
+    "the registered Ajv schema must remain the manifest shape authority"
+  );
   assert.equal(
     validateAnalysisBundleManifestSchema({
       ...manifest,

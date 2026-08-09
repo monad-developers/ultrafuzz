@@ -6,12 +6,7 @@ import { z } from "zod/v4";
 
 import { validateRegisteredJsonSchema, type JsonSchemaValidationIssue } from "./json-schema-validator.js";
 import { canonicalTimestampSchema } from "./portable-json-primitives.js";
-import {
-  schemaErrorMessage,
-  validateWithZod,
-  type SchemaValidationIssue,
-  type SchemaValidationResult
-} from "./schema-validation.js";
+import { schemaErrorMessage, type SchemaValidationIssue, type SchemaValidationResult } from "./schema-validation.js";
 import { artifactSchemaDirectory, readRegularFileSnapshot } from "./schema-registry.js";
 import { assertRegularFileInside, listSafeFiles, safeResolveInside, sha256Bytes, sha256File } from "./safe-paths.js";
 import { executeSemanticGate, type SemanticGateName } from "./semantic-gates.js";
@@ -502,35 +497,58 @@ function assertRegisteredAnalysisBundleDocument<T>(
   semanticGates: readonly SemanticGateName[],
   value: unknown
 ): T {
+  const result = validateRegisteredAnalysisBundleDocument(schemaId, schema, semanticGates, value);
+  if (!result.ok || result.value === undefined) {
+    throw new Error(schemaErrorMessage(label, result.issues));
+  }
+  return result.value;
+}
+
+function validateRegisteredAnalysisBundleDocument<T>(
+  schemaId: string,
+  schema: z.ZodType<T>,
+  semanticGates: readonly SemanticGateName[],
+  value: unknown,
+  issueCode?: string
+): SchemaValidationResult<T> {
   const structural = validateRegisteredJsonSchema(schemaId, value);
   if (!structural.ok) {
-    throw new Error(schemaErrorMessage(label, structural.issues.map(jsonSchemaValidationIssue)));
+    return {
+      ok: false,
+      issues: structural.issues.map((issue) => withIssueCode(jsonSchemaValidationIssue(issue), issueCode))
+    };
   }
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
-    throw new Error(
-      schemaErrorMessage(`${label} registered schema and retained Zod parser disagree`, validationIssues(parsed.error))
-    );
+    return {
+      ok: false,
+      issues: validationIssues(parsed.error).map((issue) => ({
+        ...withIssueCode(issue, issueCode),
+        message: `registered schema and retained Zod parser disagree: ${issue.message}`
+      }))
+    };
   }
   for (const gate of semanticGates) {
     const result = executeSemanticGate(gate, { document: parsed.data });
     if (result.status === "failed") {
-      throw new Error(
-        schemaErrorMessage(
-          label,
-          result.issues.map((semanticIssue) => ({
-            path: semanticIssue.path,
-            code: gate,
-            message: semanticIssue.message
-          }))
-        )
-      );
+      return {
+        ok: false,
+        issues: result.issues.map((semanticIssue) => ({
+          path: semanticIssue.path,
+          code: issueCode ?? gate,
+          message: semanticIssue.message
+        }))
+      };
     }
     if (result.status === "requires-context") {
-      throw new Error(`${label} semantic gate unexpectedly requires context: ${gate}`);
+      throw new Error(`analysis bundle semantic gate unexpectedly requires context: ${gate}`);
     }
   }
-  return parsed.data;
+  return { ok: true, issues: [], value: parsed.data };
+}
+
+function withIssueCode(issue: SchemaValidationIssue, issueCode: string | undefined): SchemaValidationIssue {
+  return issueCode === undefined ? issue : { ...issue, code: issueCode };
 }
 
 function jsonSchemaValidationIssue(issue: JsonSchemaValidationIssue): SchemaValidationIssue {
@@ -739,20 +757,13 @@ function assertAnalysisBundleCoverage(manifest: AnalysisBundleManifest, omission
 }
 
 export function validateAnalysisBundleManifestSchema(value: unknown): SchemaValidationResult<AnalysisBundleManifest> {
-  const shape = validateWithZod(analysisBundleManifestSchema, value, {
-    code: "ANALYSIS_BUNDLE_MANIFEST_SCHEMA_INVALID"
-  });
-  if (!shape.ok || shape.value === undefined) return shape;
-  const semantics = executeSemanticGate("analysis-bundle-path-order", { document: shape.value });
-  if (semantics.status !== "failed") return shape;
-  return {
-    ok: false,
-    issues: semantics.issues.map((semanticIssue) => ({
-      code: "ANALYSIS_BUNDLE_MANIFEST_SCHEMA_INVALID",
-      path: semanticIssue.path,
-      message: semanticIssue.message
-    }))
-  };
+  return validateRegisteredAnalysisBundleDocument(
+    ANALYSIS_BUNDLE_MANIFEST_JSON_SCHEMA_ID,
+    analysisBundleManifestSchema,
+    ["analysis-bundle-path-order"],
+    value,
+    "ANALYSIS_BUNDLE_MANIFEST_SCHEMA_INVALID"
+  );
 }
 
 export function assertAnalysisBundleManifest(value: unknown): AnalysisBundleManifest {
