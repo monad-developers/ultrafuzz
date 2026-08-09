@@ -12,11 +12,13 @@ import {
   RUN_STATE_JSON_SCHEMA_ID,
   SMITHERS_NODE_STATES,
   STATE_SCHEMA_VERSION,
+  TERMINAL_DISPOSITION_JSON_SCHEMA_ID,
   TERMINAL_DISPOSITION_SCHEMA_VERSION,
   TERMINAL_NODE_STATE_STATUSES,
   isTerminalNodeStatus,
   type NodeState,
-  type RunState
+  type RunState,
+  type TerminalDispositionDocument
 } from "./state.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
@@ -60,10 +62,26 @@ const failureProvenanceSchema = z.strictObject({
   causal_failure_category: z.enum(NODE_PROVENANCE_FAILURE_CATEGORIES),
   dependent_task_ids: uniqueNonEmptyStrings
 });
-const terminalDispositionSchema = z.strictObject({
+export const terminalDispositionSchema = z.strictObject({
   schema_version: z.literal(TERMINAL_DISPOSITION_SCHEMA_VERSION),
   kind: z.literal("task-output-validation-failure")
 });
+const terminalDispositionShape = {
+  type: "object",
+  required: ["schema_version", "kind"],
+  additionalProperties: false,
+  properties: {
+    schema_version: { const: TERMINAL_DISPOSITION_SCHEMA_VERSION },
+    kind: { const: "task-output-validation-failure" }
+  }
+} as const;
+
+export const terminalDispositionJsonSchema = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: TERMINAL_DISPOSITION_JSON_SCHEMA_ID,
+  title: "Ultrafuzz terminal disposition",
+  ...terminalDispositionShape
+} as const;
 const executionNodeProvenanceSchema = z
   .strictObject({
     source_node_id: nonEmptyString.optional(),
@@ -474,15 +492,7 @@ export const runStateJsonSchema = {
         dependent_task_ids: { type: "array", uniqueItems: true, items: { type: "string", minLength: 1 } }
       }
     },
-    terminalDisposition: {
-      type: "object",
-      required: ["schema_version", "kind"],
-      additionalProperties: false,
-      properties: {
-        schema_version: { const: TERMINAL_DISPOSITION_SCHEMA_VERSION },
-        kind: { const: "task-output-validation-failure" }
-      }
-    },
+    terminalDisposition: terminalDispositionShape,
     referenceNodeProvenance: {
       type: "object",
       required: ["origin", "reference"],
@@ -522,6 +532,16 @@ export function validateRunStateSchema(value: unknown, path = "$"): SchemaValida
   return validateWithZod(runStateSchema as z.ZodType<RunState>, value, {
     path,
     code: "RUN_STATE_SCHEMA_INVALID"
+  });
+}
+
+export function validateTerminalDispositionSchema(
+  value: unknown,
+  path = "$"
+): SchemaValidationResult<TerminalDispositionDocument> {
+  return validateWithZod(terminalDispositionSchema as z.ZodType<TerminalDispositionDocument>, value, {
+    path,
+    code: "TERMINAL_DISPOSITION_SCHEMA_INVALID"
   });
 }
 

@@ -544,6 +544,11 @@ function zodPositiveFixture(filename: string, contractIds: readonly string[]): u
         configFingerprint: "config-fingerprint",
         nodes: []
       });
+    case "terminal-disposition.schema.json":
+      return {
+        schema_version: "ultrafuzz.terminal-disposition.v1",
+        kind: "task-output-validation-failure"
+      };
     case "usage-ledger.schema.json":
       return {
         schema_version: "ultrafuzz.usage-ledger.v1",

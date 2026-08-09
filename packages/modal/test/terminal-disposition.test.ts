@@ -114,6 +114,33 @@ describe("terminal benchmark disposition", () => {
     expect(disposition).toEqual({ kind: "operational-failure", failedTasks: 0, operationalFailures: 1 });
   });
 
+  it("validates the complete terminal-disposition root contract", () => {
+    for (const terminal_disposition of [
+      {
+        schema_version: "ultrafuzz.terminal-disposition.v0",
+        kind: "task-output-validation-failure"
+      },
+      {
+        schema_version: "ultrafuzz.terminal-disposition.v1",
+        kind: "task-output-validation-failure",
+        compatibility_alias: true
+      }
+    ]) {
+      const disposition = classifyTerminalDisposition(
+        {
+          nodes: {
+            "task-one": {
+              ...verifiedFailure,
+              provenance: { ...verifiedFailure.provenance, terminal_disposition }
+            }
+          }
+        },
+        { tasks: [task] }
+      );
+      expect(disposition).toEqual({ kind: "operational-failure", failedTasks: 0, operationalFailures: 1 });
+    }
+  });
+
   it("requires a positive completed-workflow state", () => {
     for (const state of ["failed", "canceled", "running", undefined]) {
       const disposition = classifyTerminalDisposition(

@@ -14,6 +14,8 @@ import {
   getNodeArtifactDir,
   findingFuzzerBackendProvenance,
   invariantPinnedSourceRefExists,
+  IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+  PROPERTIES_SCHEMA_VERSION,
   readArtifactManifest,
   readJsonFile,
   readRegularFileSnapshot,
@@ -64,6 +66,19 @@ import { validateSeverityMatrixArtifact, type SeverityArtifactKind } from "./sev
 import { deriveWorkspacePatchGitFacts } from "./workspace-handoff.js";
 
 const MAX_ARTIFACT_SNAPSHOT_BYTES = 64 * 1024 * 1024;
+
+// These are semantic projections for topologies that deliberately omit the
+// corresponding producer. They are never written or published as artifacts;
+// a planned producer that is missing or malformed must not reach either value.
+const UNPLANNED_PROPERTY_CATALOG_CONTEXT = {
+  schema_version: PROPERTIES_SCHEMA_VERSION,
+  properties: []
+} satisfies PropertiesArtifact;
+const UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT = {
+  schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+  selection: { priority_threshold: "high", priorities: ["high"], property_ids: [] },
+  properties: []
+} satisfies ImplementedPropertiesArtifact;
 
 export type DependencyGateDecision =
   | { ok: true }
@@ -1682,43 +1697,34 @@ function semanticCampaignArtifacts(artifactDir: string, node: PlannedGraphNode):
   const findingOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/findings@2");
   const campaigns: PropertyCampaignArtifact[] = [];
   const findings: Array<Readonly<Record<string, unknown>>> = [];
-  let campaignsAvailable = true;
-  let findingsAvailable = true;
   for (const output of campaignOutputs) {
-    try {
-      const artifactPath = safeResolveInside(artifactDir, output.path, "campaign semantic context");
-      assertRegularFileInside(artifactDir, artifactPath, "campaign semantic context");
-      const parsed = validatePropertyCampaignSchema(
-        readStrictContractDocument(artifactPath, "ultrafuzz/property-campaign@2"),
-        artifactPath
-      );
-      if (!parsed.ok || parsed.value === undefined) campaignsAvailable = false;
-      else campaigns.push(parsed.value);
-    } catch {
-      campaignsAvailable = false;
+    const artifactPath = safeResolveInside(artifactDir, output.path, "campaign semantic context");
+    assertRegularFileInside(artifactDir, artifactPath, "campaign semantic context");
+    const parsed = validatePropertyCampaignSchema(
+      readStrictContractDocument(artifactPath, "ultrafuzz/property-campaign@2"),
+      artifactPath
+    );
+    if (!parsed.ok || parsed.value === undefined) {
+      throw new Error(`campaign semantic context is schema-invalid: ${artifactPath}`);
     }
+    campaigns.push(parsed.value);
   }
   for (const output of findingOutputs) {
-    try {
-      const artifactPath = safeResolveInside(artifactDir, output.path, "finding semantic context");
-      assertRegularFileInside(artifactDir, artifactPath, "finding semantic context");
-      const parsed = validateFindingsSchema(
-        readStrictContractDocument(artifactPath, "ultrafuzz/findings@2"),
-        artifactPath
-      );
-      if (!parsed.ok || parsed.value === undefined) findingsAvailable = false;
-      else findings.push(...parsed.value);
-    } catch {
-      findingsAvailable = false;
+    const artifactPath = safeResolveInside(artifactDir, output.path, "finding semantic context");
+    assertRegularFileInside(artifactDir, artifactPath, "finding semantic context");
+    const parsed = validateFindingsSchema(
+      readStrictContractDocument(artifactPath, "ultrafuzz/findings@2"),
+      artifactPath
+    );
+    if (!parsed.ok || parsed.value === undefined) {
+      throw new Error(`finding semantic context is schema-invalid: ${artifactPath}`);
     }
+    findings.push(...parsed.value);
   }
-  return {
-    ...(campaignsAvailable ? { campaigns } : {}),
-    ...(findingsAvailable ? { findings } : {})
-  };
+  return { campaigns, findings };
 }
 
-function semanticCanonicalPropertyCatalog(layout: RunLayout): unknown | undefined {
+function semanticCanonicalPropertyCatalog(layout: RunLayout): PropertiesArtifact | undefined {
   const artifactPath = findLogicalNodeArtifact(layout, "property-specification-fanin", "properties.json");
   if (artifactPath !== undefined) {
     assertRegularFileInside(layout.root, artifactPath, "canonical property semantic context");
@@ -1726,14 +1732,17 @@ function semanticCanonicalPropertyCatalog(layout: RunLayout): unknown | undefine
       readStrictContractDocument(artifactPath, "ultrafuzz/properties@2"),
       artifactPath
     );
-    return parsed.ok ? parsed.value : undefined;
+    if (!parsed.ok || parsed.value === undefined) {
+      throw new Error(`canonical property semantic context is schema-invalid: ${artifactPath}`);
+    }
+    return parsed.value;
   }
   return plannedProducerStatus(layout, "property-specification-fanin", "ultrafuzz/properties@2") === "absent"
-    ? { schema_version: "ultrafuzz.properties.v2", properties: [] }
+    ? UNPLANNED_PROPERTY_CATALOG_CONTEXT
     : undefined;
 }
 
-function semanticImplementedProperties(layout: RunLayout): unknown | undefined {
+function semanticImplementedProperties(layout: RunLayout): ImplementedPropertiesArtifact | undefined {
   const artifactPath = findLogicalNodeArtifact(
     layout,
     "stateful-invariant-implement-properties",
@@ -1745,18 +1754,17 @@ function semanticImplementedProperties(layout: RunLayout): unknown | undefined {
       readStrictContractDocument(artifactPath, "ultrafuzz/implemented-properties@3"),
       artifactPath
     );
-    return parsed.ok ? parsed.value : undefined;
+    if (!parsed.ok || parsed.value === undefined) {
+      throw new Error(`implemented property semantic context is schema-invalid: ${artifactPath}`);
+    }
+    return parsed.value;
   }
   return plannedProducerStatus(
     layout,
     "stateful-invariant-implement-properties",
     "ultrafuzz/implemented-properties@3"
   ) === "absent"
-    ? {
-        schema_version: "ultrafuzz.implemented-properties.v3",
-        selection: { priority_threshold: "high", priorities: ["high"], property_ids: [] },
-        properties: []
-      }
+    ? UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT
     : undefined;
 }
 
@@ -1866,21 +1874,24 @@ function workspacePatchGitContext(
 function readStrictContractDocument(
   artifactPath: string,
   contract: Parameters<typeof artifactContractSchemaBinding>[0]
-): unknown | undefined {
+): unknown {
   const binding = artifactContractSchemaBinding(contract);
-  if (binding === undefined) return undefined;
+  if (binding === undefined) throw new Error(`registered schema binding is unavailable for ${contract}`);
   const document = parseStrictJsonBytes(readRegularFileSnapshot(artifactPath, MAX_ARTIFACT_SNAPSHOT_BYTES));
-  return validateRegisteredJsonSchema(binding.schema_id, document).ok ? document : undefined;
+  if (!validateRegisteredJsonSchema(binding.schema_id, document).ok) {
+    throw new Error(`registered ${contract} document is schema-invalid: ${artifactPath}`);
+  }
+  return document;
 }
 
-function readStrictRegisteredDocument(
-  artifactPath: string,
-  schemaFilename: ArtifactSchemaFilename
-): unknown | undefined {
+function readStrictRegisteredDocument(artifactPath: string, schemaFilename: ArtifactSchemaFilename): unknown {
   const registration = artifactSchemaRegistry().find((entry) => entry.filename === schemaFilename);
   if (registration === undefined) throw new Error(`registered schema is unavailable: ${schemaFilename}`);
   const document = parseStrictJsonBytes(readRegularFileSnapshot(artifactPath, MAX_ARTIFACT_SNAPSHOT_BYTES));
-  return validateRegisteredJsonSchema(registration.id, document).ok ? document : undefined;
+  if (!validateRegisteredJsonSchema(registration.id, document).ok) {
+    throw new Error(`registered ${schemaFilename} document is schema-invalid: ${artifactPath}`);
+  }
+  return document;
 }
 
 function verifyRequiredArtifactSchemaBinding(

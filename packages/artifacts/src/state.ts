@@ -10,6 +10,7 @@ import { parseStrictJsonBytes } from "./strict-json.js";
 
 export const STATE_SCHEMA_VERSION = "ultrafuzz.run-state.v4" as const;
 export const RUN_STATE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-state:4" as const;
+export const TERMINAL_DISPOSITION_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:terminal-disposition:1" as const;
 
 export const RUN_STATE_STATUSES = [
   "pending",
@@ -143,6 +144,11 @@ export type NodeProvenanceReasonCode = (typeof NODE_PROVENANCE_REASON_CODES)[num
 
 export const TERMINAL_DISPOSITION_SCHEMA_VERSION = "ultrafuzz.terminal-disposition.v1" as const;
 
+export interface TerminalDispositionDocument {
+  schema_version: typeof TERMINAL_DISPOSITION_SCHEMA_VERSION;
+  kind: "task-output-validation-failure";
+}
+
 export interface RunWorkflowProvenance {
   inspection: { runId: string };
   runId: string;
@@ -197,10 +203,7 @@ export interface ExecutionNodeProvenance {
   output_contracts?: NodeOutputContractProvenance;
   findings_count?: number;
   failure?: NodeFailureProvenance;
-  terminal_disposition?: {
-    schema_version: typeof TERMINAL_DISPOSITION_SCHEMA_VERSION;
-    kind: "task-output-validation-failure";
-  };
+  terminal_disposition?: TerminalDispositionDocument;
 }
 
 export interface ReferenceNodeProvenance {
@@ -439,6 +442,15 @@ export function readRunState(target: RunLayoutStateLike | string): RunState {
   const value = parseStrictJsonBytes(readRegularFileSnapshot(statePath, 64 * 1024 * 1024));
   assertCurrentRunState(value);
   return value;
+}
+
+export function assertTerminalDispositionDocument(value: unknown): TerminalDispositionDocument {
+  const validation = validateRegisteredJsonSchema(TERMINAL_DISPOSITION_JSON_SCHEMA_ID, value, { maxErrors: 20 });
+  if (!validation.ok) {
+    const details = validation.issues.map((issue) => `${issue.instancePath || "/"} ${issue.message}`).join("; ");
+    throw new Error(`terminal disposition is schema-invalid${details.length === 0 ? "" : `: ${details}`}`);
+  }
+  return value as TerminalDispositionDocument;
 }
 
 function assertCurrentRunState(value: unknown): asserts value is RunState {

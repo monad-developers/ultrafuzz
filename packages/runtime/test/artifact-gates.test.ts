@@ -485,6 +485,48 @@ test("sealed planned graph distinguishes an absent property track from a missing
     missing.diagnostics.filter((diagnostic) => diagnostic.code === "ARTIFACT_SEMANTIC_GATE_CONTEXT_UNAVAILABLE").length,
     1
   );
+
+  const malformedCatalogPath = writeArtifact(
+    missingLayout,
+    catalogNode.id,
+    "properties.json",
+    JSON.stringify({ schema_version: "ultrafuzz.properties.v1", properties: [] })
+  );
+  const malformedCatalogBytes = fs.readFileSync(malformedCatalogPath);
+  const malformedCatalog = verifyRequiredArtifactsForAttempt(missingLayout, plannedReportNode, plannedReportNode.id);
+  assert.equal(malformedCatalog.ok, false);
+  assert.ok(
+    malformedCatalog.diagnostics.some(
+      (diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_INVALID" && /schema-invalid/u.test(diagnostic.message)
+    )
+  );
+  assert.deepEqual(fs.readFileSync(malformedCatalogPath), malformedCatalogBytes);
+
+  writeArtifact(
+    missingLayout,
+    catalogNode.id,
+    "properties.json",
+    JSON.stringify({ schema_version: "ultrafuzz.properties.v2", properties: [] })
+  );
+  const malformedImplementationPath = writeArtifact(
+    missingLayout,
+    implementationNode.id,
+    "implemented-properties.json",
+    JSON.stringify({ schema_version: "ultrafuzz.implemented-properties.v2", properties: [] })
+  );
+  const malformedImplementationBytes = fs.readFileSync(malformedImplementationPath);
+  const malformedImplementation = verifyRequiredArtifactsForAttempt(
+    missingLayout,
+    plannedReportNode,
+    plannedReportNode.id
+  );
+  assert.equal(malformedImplementation.ok, false);
+  assert.ok(
+    malformedImplementation.diagnostics.some(
+      (diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_INVALID" && /schema-invalid/u.test(diagnostic.message)
+    )
+  );
+  assert.deepEqual(fs.readFileSync(malformedImplementationPath), malformedImplementationBytes);
 });
 
 test("required artifact gate rejects contract-invalid empty files and final-component symlinks", () => {

@@ -3,6 +3,7 @@ import { readdir } from "node:fs/promises";
 import path from "node:path";
 
 import {
+  assertTerminalDispositionDocument,
   assertPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
   parseSmithersTaskManifestBytes,
@@ -55,8 +56,6 @@ interface TaskBinding {
   smithersNodeId: string;
   verifierSmithersNodeId: string;
 }
-
-const TERMINAL_DISPOSITION_SCHEMA_VERSION = "ultrafuzz.terminal-disposition.v1";
 
 export function classifyTerminalDisposition(stateValue: unknown, manifestValue: unknown): TerminalDisposition {
   const state = record(stateValue);
@@ -337,10 +336,13 @@ function isGenuineTaskFailure(node: Record<string, unknown>, binding: TaskBindin
     return false;
   }
   const provenance = record(node.provenance);
-  const marker = record(provenance?.terminal_disposition);
-  return (
-    marker?.schema_version === TERMINAL_DISPOSITION_SCHEMA_VERSION && marker.kind === "task-output-validation-failure"
-  );
+  try {
+    return (
+      assertTerminalDispositionDocument(provenance?.terminal_disposition).kind === "task-output-validation-failure"
+    );
+  } catch {
+    return false;
+  }
 }
 
 function isVerifiedSucceededTask(node: Record<string, unknown>, binding: TaskBinding, workflowRunId: string): boolean {

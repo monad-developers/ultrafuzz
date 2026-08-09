@@ -293,6 +293,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "run-state-node-key-equality"
   ]),
   "source-run.schema.json": runtime("sourceRunJsonSchema", undefined, ["source-run-not-self"]),
+  "terminal-disposition.schema.json": runtime("terminalDispositionJsonSchema", "terminalDispositionSchema"),
   "selected-strategies.schema.json": artifact(
     "ultrafuzz/selected-strategies@1",
     "selectedStrategiesJsonSchema",

@@ -6,6 +6,7 @@ import {
   appendUsageEvents,
   appendNodeAttempts,
   appendEvent,
+  assertTerminalDispositionDocument,
   assertRunMetadataDocument,
   assertPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
@@ -55,6 +56,7 @@ import {
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestTask,
   PLANNED_GRAPH_SCHEMA_VERSION,
+  TERMINAL_DISPOSITION_SCHEMA_VERSION,
   type UsageLedgerEntry,
   type UsageLedgerReplay
 } from "@ultrafuzz/artifacts";
@@ -2446,10 +2448,10 @@ async function finalizeTerminalTask(input: {
         ...(findingsCount !== undefined ? { findings_count: findingsCount } : {}),
         ...(taskOutputValidationFailure
           ? {
-              terminal_disposition: {
-                schema_version: "ultrafuzz.terminal-disposition.v1",
+              terminal_disposition: assertTerminalDispositionDocument({
+                schema_version: TERMINAL_DISPOSITION_SCHEMA_VERSION,
                 kind: "task-output-validation-failure"
-              }
+              })
             }
           : {})
       },
@@ -3164,10 +3166,12 @@ function immutableTerminalFinalization(previous: NodeState | undefined): boolean
   if (previous === undefined || !terminalStatus(previous.status)) return false;
   if (NODE_RECOVERED_STATUSES.has(previous.status)) return true;
   const disposition = recordField(previous.provenance, "terminal_disposition");
-  return (
-    disposition?.schema_version === "ultrafuzz.terminal-disposition.v1" &&
-    disposition.kind === "task-output-validation-failure"
-  );
+  if (disposition === undefined) return false;
+  try {
+    return assertTerminalDispositionDocument(disposition).kind === "task-output-validation-failure";
+  } catch {
+    return false;
+  }
 }
 
 function workflowEvidenceSupersedesPrevious(
