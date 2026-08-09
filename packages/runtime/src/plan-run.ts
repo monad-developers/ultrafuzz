@@ -848,17 +848,13 @@ function promptEntryForNode(catalog: PromptCatalog | undefined, node: ExpandedNo
   return promptEntryForPath(catalog, node.promptPath, node.logicalId);
 }
 
-function promptEntryForPath(catalog: PromptCatalog, promptPath: string, fallbackId: string): PromptCatalogEntry {
+function promptEntryForPath(catalog: PromptCatalog, promptPath: string, nodeId: string): PromptCatalogEntry {
   for (const entry of catalog.entries.values()) {
     if (entry.relativePath === promptPath) {
       return entry;
     }
   }
-  const fallback = catalog.entries.get(fallbackId);
-  if (fallback) {
-    return fallback;
-  }
-  throw new Error(`prompt ${promptPath} for ${fallbackId} was not found`);
+  throw new Error(`prompt ${promptPath} for ${nodeId} was not found`);
 }
 
 function projectPromptCatalogPath(promptPath: string): string {
