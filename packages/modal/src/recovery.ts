@@ -1,5 +1,4 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 
 import { z } from "zod/v4";
@@ -12,6 +11,8 @@ import {
   MODAL_RECOVERY_STALE_AFTER_MS,
   MODAL_RECOVERY_STATE_SCHEMA_VERSION
 } from "./defaults.js";
+import { MODAL_RECOVERY_STATE_SCHEMA_ID } from "./modal-contracts.js";
+import { readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
 
 const timestampSchema = z.iso.datetime({ offset: true });
 const workerPhaseSchema = z.enum(["reserved", "launched", "stopped"]);
@@ -238,7 +239,7 @@ export function modalRecoveryRowsComplete(rows: readonly Pick<ModalRecoveryRowSt
 
 export async function readModalRecoveryState(statePath: string): Promise<ModalRecoveryState | undefined> {
   try {
-    return parseModalRecoveryState(JSON.parse(await readFile(path.resolve(statePath), "utf8")) as unknown);
+    return parseModalRecoveryState(readModalDocument(path.resolve(statePath), MODAL_RECOVERY_STATE_SCHEMA_ID).value);
   } catch (error) {
     if (isNodeError(error, "ENOENT")) return undefined;
     throw error;
@@ -248,26 +249,11 @@ export async function readModalRecoveryState(statePath: string): Promise<ModalRe
 export async function writeModalRecoveryState(statePath: string, state: ModalRecoveryState): Promise<void> {
   const target = path.resolve(statePath);
   const checked = parseModalRecoveryState(state);
-  await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
-  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-  let handle;
-  try {
-    handle = await open(temporary, "wx", 0o600);
-    await handle.writeFile(`${JSON.stringify(checked, null, 2)}\n`, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await rename(temporary, target);
-    const directory = await open(path.dirname(target), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
-  } finally {
-    await handle?.close().catch(() => undefined);
-    await unlink(temporary).catch(() => undefined);
-  }
+  const trustedRoot = path.dirname(target);
+  await mkdir(trustedRoot, { recursive: true, mode: 0o700 });
+  await writeModalDocumentAtomic(target, MODAL_RECOVERY_STATE_SCHEMA_ID, checked, {
+    trustedRoot
+  });
 }
 
 export function reconcileModalRecoveryRow(input: {
@@ -573,5 +559,7 @@ function optionalTimestamp(value: string | undefined): number | undefined {
 }
 
 function isNodeError(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
+  if (!(error instanceof Error)) return false;
+  if ("code" in error && error.code === code) return true;
+  return "cause" in error && isNodeError(error.cause, code);
 }

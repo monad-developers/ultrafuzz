@@ -1,3 +1,7 @@
+import fs, { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -8,8 +12,10 @@ import {
   modalRecoveryPolicyForNodeTimeout,
   modalRecoveryRowsComplete,
   parseModalRecoveryState,
+  readModalRecoveryState,
   reconcileModalRecoveryRow,
   reserveModalRecoveryWorker,
+  writeModalRecoveryState,
   type ModalRecoveryCanonicalProgress,
   type ModalRecoveryOwner,
   type ModalRecoveryPolicy,
@@ -27,6 +33,37 @@ const IMAGE_ONE = "recovery-image-one";
 const IMAGE_TWO = "recovery-image-two";
 
 describe("Modal durable recovery policy", () => {
+  it("round-trips current recovery state through the canonical registered contract", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-state-"));
+    const statePath = path.join(root, "nested", "recovery-state.json");
+    const current = state();
+
+    await writeModalRecoveryState(statePath, current);
+
+    await expect(readModalRecoveryState(statePath)).resolves.toEqual(current);
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8"))).toEqual(current);
+    expect(fs.readdirSync(path.dirname(statePath)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("returns absence only when the recovery state file is missing", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-missing-recovery-state-"));
+
+    await expect(readModalRecoveryState(path.join(root, "missing.json"))).resolves.toBeUndefined();
+  });
+
+  it("rejects duplicate recovery-state keys through the canonical strict JSON reader", async () => {
+    const current = state();
+    const serialized = JSON.stringify(current);
+    const field = `"logical_run_id":"${current.logical_run_id}"`;
+    const duplicate = serialized.replace(field, `${field},"logical_run_id":"shadow-run"`);
+    expect(duplicate).not.toBe(serialized);
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-duplicate-recovery-state-"));
+    const statePath = path.join(root, "recovery-state.json");
+    fs.writeFileSync(statePath, duplicate, { mode: 0o600 });
+
+    await expect(readModalRecoveryState(statePath)).rejects.toThrow(/duplicate|strict JSON/u);
+  });
+
   it("does not accept an incomplete terminal row as settled", () => {
     expect(modalRecoveryRowsComplete([{ status: "terminal" }])).toBe(false);
     expect(modalRecoveryRowsComplete([{ status: "completed" }])).toBe(true);

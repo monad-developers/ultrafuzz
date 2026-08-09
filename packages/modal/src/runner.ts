@@ -2015,7 +2015,15 @@ async function launchModalRecoveryWorker(input: {
       if (sandbox !== undefined) await terminateRecoveryOwner(sandbox).catch(() => undefined);
       row = markModalRecoveryWorkerStopped(row, worker.generation, "exited", new Date(input.now()).toISOString());
       setModalRecoveryRow(input.recoveryState, row);
-      await writeModalRecoveryState(input.recoveryStatePath, input.recoveryState).catch(() => undefined);
+      try {
+        await writeModalRecoveryState(input.recoveryStatePath, input.recoveryState);
+      } catch (persistenceError) {
+        throw new AggregateError(
+          [error, persistenceError],
+          "Modal recovery launch and failure-state persistence both failed",
+          { cause: persistenceError }
+        );
+      }
       throw error;
     }
   } finally {
