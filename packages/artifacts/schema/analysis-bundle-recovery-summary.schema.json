@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:artifacts:analysis-bundle-recovery-summary:1",
+  "title": "Ultrafuzz analysis bundle recovery summary",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "total_generations",
+    "terminal_generations",
+    "active_generations",
+    "progress_generations",
+    "no_progress_generations",
+    "unknown_progress_generations",
+    "model_work_generations",
+    "no_model_work_generations",
+    "unknown_model_work_generations",
+    "genuine_failures",
+    "rotations",
+    "resumptions",
+    "start_reasons",
+    "terminal_reasons",
+    "terminal_classes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.analysis-bundle.v1" },
+    "total_generations": { "$ref": "#/$defs/count" },
+    "terminal_generations": { "$ref": "#/$defs/count" },
+    "active_generations": { "$ref": "#/$defs/count" },
+    "progress_generations": { "$ref": "#/$defs/count" },
+    "no_progress_generations": { "$ref": "#/$defs/count" },
+    "unknown_progress_generations": { "$ref": "#/$defs/count" },
+    "model_work_generations": { "$ref": "#/$defs/count" },
+    "no_model_work_generations": { "$ref": "#/$defs/count" },
+    "unknown_model_work_generations": { "$ref": "#/$defs/count" },
+    "genuine_failures": { "$ref": "#/$defs/count" },
+    "rotations": { "$ref": "#/$defs/count" },
+    "resumptions": { "$ref": "#/$defs/count" },
+    "start_reasons": {
+      "type": "object",
+      "required": [
+        "initial",
+        "pre-model-retry",
+        "post-model-resume",
+        "image-rollout",
+        "stale-probe-rotation",
+        "operator-restart",
+        "unknown"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "initial": { "$ref": "#/$defs/count" },
+        "pre-model-retry": { "$ref": "#/$defs/count" },
+        "post-model-resume": { "$ref": "#/$defs/count" },
+        "image-rollout": { "$ref": "#/$defs/count" },
+        "stale-probe-rotation": { "$ref": "#/$defs/count" },
+        "operator-restart": { "$ref": "#/$defs/count" },
+        "unknown": { "$ref": "#/$defs/count" }
+      }
+    },
+    "terminal_reasons": {
+      "type": "object",
+      "required": [
+        "active",
+        "succeeded",
+        "genuine-worker-failure",
+        "operational-failure",
+        "image-rollout",
+        "stale-probe-rotation",
+        "operator-request",
+        "timeout",
+        "resource-termination",
+        "recovery-budget-exhausted",
+        "unknown"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "active": { "$ref": "#/$defs/count" },
+        "succeeded": { "$ref": "#/$defs/count" },
+        "genuine-worker-failure": { "$ref": "#/$defs/count" },
+        "operational-failure": { "$ref": "#/$defs/count" },
+        "image-rollout": { "$ref": "#/$defs/count" },
+        "stale-probe-rotation": { "$ref": "#/$defs/count" },
+        "operator-request": { "$ref": "#/$defs/count" },
+        "timeout": { "$ref": "#/$defs/count" },
+        "resource-termination": { "$ref": "#/$defs/count" },
+        "recovery-budget-exhausted": { "$ref": "#/$defs/count" },
+        "unknown": { "$ref": "#/$defs/count" }
+      }
+    },
+    "terminal_classes": {
+      "type": "object",
+      "required": [
+        "active",
+        "succeeded",
+        "genuine-worker-failure",
+        "operational-failure",
+        "controller-rotation",
+        "timeout",
+        "resource-termination",
+        "recovery-budget-exhausted",
+        "unknown"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "active": { "$ref": "#/$defs/count" },
+        "succeeded": { "$ref": "#/$defs/count" },
+        "genuine-worker-failure": { "$ref": "#/$defs/count" },
+        "operational-failure": { "$ref": "#/$defs/count" },
+        "controller-rotation": { "$ref": "#/$defs/count" },
+        "timeout": { "$ref": "#/$defs/count" },
+        "resource-termination": { "$ref": "#/$defs/count" },
+        "recovery-budget-exhausted": { "$ref": "#/$defs/count" },
+        "unknown": { "$ref": "#/$defs/count" }
+      }
+    }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+  }
+}
