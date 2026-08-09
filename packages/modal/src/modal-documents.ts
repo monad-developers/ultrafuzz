@@ -102,21 +102,7 @@ export function parseModalDocumentBytes<SchemaId extends ModalContractSchemaId>(
       cause: error
     });
   }
-  const value = parsed as ModalContractForSchemaId<SchemaId>;
-  try {
-    assertModalRetainedZodShape(schemaId, value);
-  } catch (error) {
-    throw new ModalDocumentValidationError(schemaId, `Modal JSON document failed retained Zod shape validation`, [], {
-      cause: error
-    });
-  }
-  try {
-    assertModalDocumentSemantics(schemaId, value);
-  } catch (error) {
-    throw new ModalDocumentValidationError(schemaId, `Modal JSON document failed trusted semantic gates`, [], {
-      cause: error
-    });
-  }
+  const value = parseModalDocumentValue(schemaId, parsed);
   deepFreeze(value);
   return Object.freeze({
     schema_id: schemaId,
@@ -141,6 +127,18 @@ export function assertModalDocumentValue<SchemaId extends ModalContractSchemaId>
   schemaId: SchemaId,
   value: ModalContractForSchemaId<SchemaId>
 ): void {
+  parseModalDocumentValue(schemaId, value);
+}
+
+/**
+ * Validate an unknown in-memory value through the canonical JSON Schema and
+ * the same named host gates used for byte snapshots. The original value is
+ * returned without cloning, stripping, defaulting, or otherwise converting it.
+ */
+export function parseModalDocumentValue<SchemaId extends ModalContractSchemaId>(
+  schemaId: SchemaId,
+  value: unknown
+): ModalContractForSchemaId<SchemaId> {
   const result = validateModalJsonSchema(schemaId, value);
   if (!result.ok) {
     const detail = result.issues.map((issue) => `${issue.instancePath || "/"} ${issue.message}`).join("; ");
@@ -149,20 +147,22 @@ export function assertModalDocumentValue<SchemaId extends ModalContractSchemaId>
       `Modal JSON value failed ${schemaId}${detail === "" ? "" : `: ${detail}`}`
     );
   }
+  const contract = value as ModalContractForSchemaId<SchemaId>;
   try {
-    assertModalRetainedZodShape(schemaId, value);
+    assertModalRetainedZodShape(schemaId, contract);
   } catch (error) {
     throw new ModalDocumentValidationError(schemaId, `Modal JSON value failed retained Zod shape validation`, [], {
       cause: error
     });
   }
   try {
-    assertModalDocumentSemantics(schemaId, value);
+    assertModalDocumentSemantics(schemaId, contract);
   } catch (error) {
     throw new ModalDocumentValidationError(schemaId, `Modal JSON value failed trusted semantic gates`, [], {
       cause: error
     });
   }
+  return contract;
 }
 
 /**

@@ -1,8 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 
-import { z } from "zod/v4";
-
 import {
   MODAL_RECOVERY_BACKOFF_BASE_MS,
   MODAL_RECOVERY_BACKOFF_MAX_MS,
@@ -11,17 +9,15 @@ import {
   MODAL_RECOVERY_STALE_AFTER_MS,
   MODAL_RECOVERY_STATE_SCHEMA_VERSION
 } from "./defaults.js";
-import { MODAL_RECOVERY_STATE_SCHEMA_ID } from "./modal-contracts.js";
-import { readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
+import { MODAL_COMMON_SCHEMA_ID, MODAL_RECOVERY_STATE_SCHEMA_ID } from "./modal-contracts.js";
+import { parseModalDocumentValue, readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
+import { validateModalJsonSchema } from "./modal-schema-registry.js";
+import { assertModalRecoveryRowSemantics } from "./modal-semantic-gates.js";
 
-const timestampSchema = z.iso.datetime({ offset: true });
-const workerPhaseSchema = z.enum(["reserved", "launched", "stopped"]);
-const workerStopReasonSchema = z.enum(["exited", "stalled", "rollout", "completed"]);
-const rowStatusSchema = z.enum(["idle", "healthy", "grace", "backoff", "rollout-deferred", "terminal", "completed"]);
-
-export type ModalRecoveryRowStatus = z.infer<typeof rowStatusSchema>;
-export type ModalRecoveryWorkerPhase = z.infer<typeof workerPhaseSchema>;
-export type ModalRecoveryWorkerStopReason = z.infer<typeof workerStopReasonSchema>;
+export type ModalRecoveryRowStatus =
+  "idle" | "healthy" | "grace" | "backoff" | "rollout-deferred" | "terminal" | "completed";
+export type ModalRecoveryWorkerPhase = "reserved" | "launched" | "stopped";
+export type ModalRecoveryWorkerStopReason = "exited" | "stalled" | "rollout" | "completed";
 
 export interface ModalRecoveryWorker {
   generation: number;
@@ -132,84 +128,8 @@ export interface ModalRecoveryDecision {
   retry_after_ms: number;
 }
 
-const recoveryWorkerSchema = z
-  .object({
-    generation: z.number().int().positive(),
-    attempt: z.number().int().positive(),
-    attempt_id: z.string().min(1),
-    name: z.string().min(1),
-    image: z.string().min(1),
-    phase: workerPhaseSchema,
-    reserved_at: timestampSchema,
-    sandbox_id: z.string().min(1).optional(),
-    launched_at: timestampSchema.optional(),
-    stopped_at: timestampSchema.optional(),
-    stop_reason: workerStopReasonSchema.optional(),
-    baseline_successful_nodes: z.number().int().nonnegative(),
-    made_progress: z.boolean(),
-    no_progress_accounted: z.boolean()
-  })
-  .strict()
-  .superRefine((worker, context) => {
-    if (worker.phase === "launched" && (worker.sandbox_id === undefined || worker.launched_at === undefined)) {
-      context.addIssue({ code: "custom", message: "launched recovery worker is missing ownership metadata" });
-    }
-    if (worker.phase === "stopped" && (worker.stopped_at === undefined || worker.stop_reason === undefined)) {
-      context.addIssue({ code: "custom", message: "stopped recovery worker is missing terminal metadata" });
-    }
-  });
-
-const recoveryRowSchema = z
-  .object({
-    slug: z.string().min(1),
-    status: rowStatusSchema,
-    no_progress_generations: z.number().int().nonnegative(),
-    successful_nodes: z.number().int().nonnegative(),
-    last_progress_at: timestampSchema.optional(),
-    next_eligible_at: timestampSchema.optional(),
-    pending_image: z.string().min(1).optional(),
-    terminal: z
-      .object({
-        category: z.literal("no-progress-budget-exhausted"),
-        entered_at: timestampSchema
-      })
-      .strict()
-      .optional(),
-    workers: z.array(recoveryWorkerSchema)
-  })
-  .strict()
-  .superRefine((row, context) => {
-    const generations = new Set<number>();
-    for (const worker of row.workers) {
-      if (generations.has(worker.generation)) {
-        context.addIssue({ code: "custom", message: `duplicate recovery generation ${worker.generation}` });
-      }
-      generations.add(worker.generation);
-    }
-    if ((row.status === "terminal") !== (row.terminal !== undefined)) {
-      context.addIssue({ code: "custom", message: "terminal recovery row must have exactly one terminal state" });
-    }
-  });
-
-const recoveryStateSchema = z
-  .object({
-    schema_version: z.literal(MODAL_RECOVERY_STATE_SCHEMA_VERSION),
-    logical_run_id: z.string().min(1),
-    launch_generation: z.number().int().positive(),
-    app: z.string().min(1),
-    rows: z.array(recoveryRowSchema)
-  })
-  .strict()
-  .superRefine((state, context) => {
-    const slugs = new Set<string>();
-    for (const row of state.rows) {
-      if (slugs.has(row.slug)) context.addIssue({ code: "custom", message: `duplicate recovery row ${row.slug}` });
-      slugs.add(row.slug);
-    }
-  });
-
 export function parseModalRecoveryState(value: unknown): ModalRecoveryState {
-  return recoveryStateSchema.parse(value) as ModalRecoveryState;
+  return parseModalDocumentValue(MODAL_RECOVERY_STATE_SCHEMA_ID, value) as ModalRecoveryState;
 }
 
 export function createModalRecoveryState(input: {
@@ -239,7 +159,8 @@ export function modalRecoveryRowsComplete(rows: readonly Pick<ModalRecoveryRowSt
 
 export async function readModalRecoveryState(statePath: string): Promise<ModalRecoveryState | undefined> {
   try {
-    return parseModalRecoveryState(readModalDocument(path.resolve(statePath), MODAL_RECOVERY_STATE_SCHEMA_ID).value);
+    const snapshot = readModalDocument(path.resolve(statePath), MODAL_RECOVERY_STATE_SCHEMA_ID);
+    return structuredClone(snapshot.value) as ModalRecoveryState;
   } catch (error) {
     if (isNodeError(error, "ENOENT")) return undefined;
     throw error;
@@ -508,7 +429,17 @@ function requiredWorker(row: ModalRecoveryRowState, generation: number): ModalRe
 }
 
 function parseRecoveryRow(value: ModalRecoveryRowState): ModalRecoveryRowState {
-  return recoveryRowSchema.parse(value) as ModalRecoveryRowState;
+  const schemaId = `${MODAL_COMMON_SCHEMA_ID}#/$defs/recoveryRow`;
+  const validation = validateModalJsonSchema(schemaId, value);
+  if (!validation.ok) {
+    throw new Error(
+      `Modal recovery row failed ${schemaId}: ${validation.issues
+        .map((issue) => `${issue.instancePath || "/"} ${issue.message}`)
+        .join("; ")}`
+    );
+  }
+  assertModalRecoveryRowSemantics(value);
+  return value;
 }
 
 function cloneRow(row: ModalRecoveryRowState): ModalRecoveryRowState {

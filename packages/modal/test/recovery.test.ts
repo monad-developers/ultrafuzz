@@ -40,7 +40,11 @@ describe("Modal durable recovery policy", () => {
 
     await writeModalRecoveryState(statePath, current);
 
-    await expect(readModalRecoveryState(statePath)).resolves.toEqual(current);
+    const persisted = await readModalRecoveryState(statePath);
+    expect(persisted).toEqual(current);
+    expect(Object.isFrozen(persisted)).toBe(false);
+    persisted!.rows[0]!.status = "healthy";
+    expect(persisted!.rows[0]!.status).toBe("healthy");
     expect(JSON.parse(fs.readFileSync(statePath, "utf8"))).toEqual(current);
     expect(fs.readdirSync(path.dirname(statePath)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
   });

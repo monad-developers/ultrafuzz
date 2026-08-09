@@ -1,7 +1,20 @@
 import { isDeepStrictEqual } from "node:util";
 
 import { redactSecretsInText } from "@ultrafuzz/security";
-import { z } from "zod/v4";
+
+import {
+  MODAL_COMMON_SCHEMA_ID,
+  MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID,
+  type StrictModalRecoveryLifecycleDocument,
+  type StrictModalRecoveryLifecycleRecord,
+  type StrictModalRecoveryLifecycleSummary
+} from "./modal-contracts.js";
+import { parseModalDocumentValue } from "./modal-documents.js";
+import { validateModalJsonSchema } from "./modal-schema-registry.js";
+import {
+  assertModalRecoveryLifecycleRecordSemantics,
+  assertModalRecoveryLifecycleRecordsSemantics
+} from "./modal-semantic-gates.js";
 
 export const MODAL_RECOVERY_LIFECYCLE_SCHEMA_VERSION = "ultrafuzz.modal.recovery-lifecycle.v1" as const;
 export const MODAL_RECOVERY_LIFECYCLE_FILE = "recovery-lifecycle.json" as const;
@@ -58,19 +71,6 @@ export type ModalRecoveryTerminalReason = (typeof MODAL_RECOVERY_TERMINAL_REASON
 export type ModalRecoveryTerminalClass = (typeof MODAL_RECOVERY_TERMINAL_CLASSES)[number];
 export type ModalRecoveryObservation<T> = T | "unknown";
 
-const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
-const fingerprint = z.string().regex(/^[a-f0-9]{64}$/u);
-const timestamp = z.string().datetime({ offset: true });
-const observationBoolean = z.union([z.boolean(), z.literal("unknown")]);
-const observationTimestamp = z.union([timestamp, z.literal("unknown")]);
-const observationExitCode = z.union([z.number().int(), z.null(), z.literal("unknown")]);
-const observationDigest = z.union([fingerprint, z.literal("unknown")]);
-const nonNegativeInteger = z.number().int().nonnegative();
-const nodeCounts = z
-  .record(safeId, nonNegativeInteger)
-  .refine((value) => Object.keys(value).length <= 64, { message: "node counts must contain at most 64 statuses" });
-const observationNodeCounts = z.union([nodeCounts, z.literal("unknown")]);
-
 const START_REASON_ACTIONS = {
   initial: "initial-launch",
   "pre-model-retry": "retry",
@@ -95,100 +95,9 @@ const TERMINAL_REASON_CLASSES = {
   unknown: "unknown"
 } as const satisfies Record<ModalRecoveryTerminalReason, ModalRecoveryTerminalClass>;
 
-export const modalRecoveryLifecycleRecordSchema = z
-  .strictObject({
-    schema_version: z.literal(MODAL_RECOVERY_LIFECYCLE_SCHEMA_VERSION),
-    logical_run_id: safeId,
-    model_slug: safeId,
-    generation: z.number().int().positive(),
-    attempt: z.number().int().positive(),
-    attempt_id: safeId,
-    parent_generation: z.number().int().positive().optional(),
-    parent_attempt_id: safeId.optional(),
-    trigger_action: z.enum(MODAL_RECOVERY_TRIGGER_ACTIONS),
-    start_reason: z.enum(MODAL_RECOVERY_START_REASONS),
-    terminal_reason: z.enum(MODAL_RECOVERY_TERMINAL_REASONS),
-    terminal_class: z.enum(MODAL_RECOVERY_TERMINAL_CLASSES),
-    launched_at: timestamp,
-    finished_at: timestamp.optional(),
-    worker_exit_code: observationExitCode,
-    fingerprints: z.strictObject({
-      config: fingerprint,
-      source: fingerprint,
-      image: fingerprint,
-      model: fingerprint
-    }),
-    model_work_started: observationBoolean,
-    last_durable_transition_at: observationTimestamp,
-    node_counts_before: observationNodeCounts,
-    node_counts_after: observationNodeCounts,
-    progress_made: observationBoolean,
-    controller_requested: observationBoolean,
-    node_attempt_ledger_digest: observationDigest,
-    evaluation_lineage_digest: observationDigest
-  })
-  .superRefine((record, context) => {
-    if (record.trigger_action !== START_REASON_ACTIONS[record.start_reason]) {
-      context.addIssue({
-        code: "custom",
-        path: ["trigger_action"],
-        message: "must match start_reason"
-      });
-    }
-    if (record.terminal_class !== TERMINAL_REASON_CLASSES[record.terminal_reason]) {
-      context.addIssue({
-        code: "custom",
-        path: ["terminal_class"],
-        message: "must match terminal_reason"
-      });
-    }
-    if (record.terminal_reason === "active" && record.finished_at !== undefined) {
-      context.addIssue({ code: "custom", path: ["finished_at"], message: "active generations cannot be finished" });
-    }
-    if (!["active", "unknown"].includes(record.terminal_reason) && record.finished_at === undefined) {
-      context.addIssue({ code: "custom", path: ["finished_at"], message: "terminal generations require finished_at" });
-    }
-    if (record.finished_at !== undefined && Date.parse(record.finished_at) < Date.parse(record.launched_at)) {
-      context.addIssue({ code: "custom", path: ["finished_at"], message: "cannot precede launched_at" });
-    }
-    if (record.parent_attempt_id === record.attempt_id) {
-      context.addIssue({
-        code: "custom",
-        path: ["parent_attempt_id"],
-        message: "a worker generation cannot parent itself"
-      });
-    }
-    if ((record.parent_generation === undefined) !== (record.parent_attempt_id === undefined)) {
-      context.addIssue({
-        code: "custom",
-        path: ["parent_attempt_id"],
-        message: "parent generation and attempt ID must be recorded together"
-      });
-    }
-    if (record.parent_generation !== undefined && record.parent_generation > record.generation) {
-      context.addIssue({
-        code: "custom",
-        path: ["parent_generation"],
-        message: "cannot exceed generation"
-      });
-    }
-    if (record.controller_requested === true && record.terminal_class === "genuine-worker-failure") {
-      context.addIssue({
-        code: "custom",
-        path: ["terminal_class"],
-        message: "a controller-requested termination cannot be a genuine worker failure"
-      });
-    }
-    if (record.terminal_class === "controller-rotation" && record.controller_requested !== true) {
-      context.addIssue({
-        code: "custom",
-        path: ["controller_requested"],
-        message: "controller rotations must be explicitly controller-requested"
-      });
-    }
-  });
+const MODAL_RECOVERY_LIFECYCLE_RECORD_SCHEMA_ID = `${MODAL_COMMON_SCHEMA_ID}#/$defs/recoveryLifecycleRecord` as const;
 
-export type ModalRecoveryLifecycleRecord = z.infer<typeof modalRecoveryLifecycleRecordSchema>;
+export type ModalRecoveryLifecycleRecord = StrictModalRecoveryLifecycleRecord;
 
 export interface StartModalRecoveryLifecycleInput {
   logicalRunId: string;
@@ -335,86 +244,38 @@ export function finishModalRecoveryLifecycle(
 }
 
 export function parseModalRecoveryLifecycleRecord(value: unknown): ModalRecoveryLifecycleRecord {
-  return modalRecoveryLifecycleRecordSchema.parse(value);
+  const validation = validateModalJsonSchema(MODAL_RECOVERY_LIFECYCLE_RECORD_SCHEMA_ID, value);
+  if (!validation.ok) {
+    throw new Error(
+      `Modal recovery lifecycle record failed ${MODAL_RECOVERY_LIFECYCLE_RECORD_SCHEMA_ID}: ${validation.issues
+        .map((issue) => `${issue.instancePath || "/"} ${issue.message}`)
+        .join("; ")}`
+    );
+  }
+  const record = value as ModalRecoveryLifecycleRecord;
+  assertModalRecoveryLifecycleRecordSemantics(record);
+  return record;
 }
 
 export function parseModalRecoveryLifecycleRecords(value: unknown): ModalRecoveryLifecycleRecord[] {
-  const records = z.array(modalRecoveryLifecycleRecordSchema).max(100_000).parse(value);
-  const attemptsById = new Map<string, ModalRecoveryLifecycleRecord>();
-  const generationAttempts = new Set<string>();
-  for (const record of records) {
-    if (attemptsById.has(record.attempt_id)) {
-      throw new Error(`duplicate Modal recovery attempt ID: ${record.attempt_id}`);
-    }
-    const key = `${record.logical_run_id}\0${record.model_slug}\0${record.generation}\0${record.attempt}`;
-    if (generationAttempts.has(key)) throw new Error("duplicate Modal recovery generation attempt");
-    generationAttempts.add(key);
-    if (record.parent_attempt_id !== undefined) {
-      const parent = attemptsById.get(record.parent_attempt_id);
-      if (parent === undefined) {
-        throw new Error(`Modal recovery parent must precede child: ${record.parent_attempt_id}`);
-      }
-      if (
-        parent.logical_run_id !== record.logical_run_id ||
-        parent.model_slug !== record.model_slug ||
-        parent.generation !== record.parent_generation ||
-        (parent.generation === record.generation && parent.attempt >= record.attempt)
-      ) {
-        throw new Error(`Modal recovery generation ${record.attempt_id} has incompatible parent linkage`);
-      }
-    }
-    attemptsById.set(record.attempt_id, record);
+  if (!Array.isArray(value) || value.length > 100_000) {
+    throw new Error("Modal recovery lifecycle records must be an array of at most 100000 records");
   }
+  const records = value as ModalRecoveryLifecycleRecord[];
+  for (const record of records) parseModalRecoveryLifecycleRecord(record);
+  assertModalRecoveryLifecycleRecordsSemantics(records);
   return records;
 }
 
-type CountByStartReason = Record<ModalRecoveryStartReason, number>;
-type CountByTerminalReason = Record<ModalRecoveryTerminalReason, number>;
-type CountByTerminalClass = Record<ModalRecoveryTerminalClass, number>;
-
-export interface ModalRecoveryLifecycleSummary {
-  /**
-   * Recorded Modal launch generation-attempts, not evolutionary generations.
-   *
-   * A worker result reports both counters and they are unrelated: `launch_generation` is the Modal
-   * generation this summary counts, while `generation` is how far the evaluation's own loop got. A
-   * run showing `generation: 3`, `launch_generation: 1` and `total_generations: 1` is consistent —
-   * one Modal launch that reached the third evolutionary generation (#322).
-   */
-  total_generations: number;
-  terminal_generations: number;
-  active_generations: number;
-  progress_generations: number;
-  no_progress_generations: number;
-  unknown_progress_generations: number;
-  model_work_generations: number;
-  no_model_work_generations: number;
-  unknown_model_work_generations: number;
-  genuine_failures: number;
-  rotations: number;
-  resumptions: number;
-  start_reasons: CountByStartReason;
-  terminal_reasons: CountByTerminalReason;
-  terminal_classes: CountByTerminalClass;
-}
-
-const modalRecoveryLifecycleSummarySchema = z.strictObject({
-  total_generations: nonNegativeInteger,
-  terminal_generations: nonNegativeInteger,
-  active_generations: nonNegativeInteger,
-  progress_generations: nonNegativeInteger,
-  no_progress_generations: nonNegativeInteger,
-  unknown_progress_generations: nonNegativeInteger,
-  model_work_generations: nonNegativeInteger,
-  no_model_work_generations: nonNegativeInteger,
-  unknown_model_work_generations: nonNegativeInteger,
-  genuine_failures: nonNegativeInteger,
-  rotations: nonNegativeInteger,
-  resumptions: nonNegativeInteger,
-  start_reasons: exactCountRecord(MODAL_RECOVERY_START_REASONS),
-  terminal_reasons: exactCountRecord(MODAL_RECOVERY_TERMINAL_REASONS),
-  terminal_classes: exactCountRecord(MODAL_RECOVERY_TERMINAL_CLASSES)
-});
+/**
+ * Recorded Modal launch generation-attempts, not evolutionary generations.
+ *
+ * A worker result reports both counters and they are unrelated: `launch_generation` is the Modal
+ * generation this summary counts, while `generation` is how far the evaluation's own loop got. A
+ * run showing `generation: 3`, `launch_generation: 1` and `total_generations: 1` is consistent —
+ * one Modal launch that reached the third evolutionary generation (#322).
+ */
+export type ModalRecoveryLifecycleSummary = StrictModalRecoveryLifecycleSummary;
 
 export function summarizeModalRecoveryLifecycle(
   records: readonly ModalRecoveryLifecycleRecord[]
@@ -459,36 +320,21 @@ export function summarizeModalRecoveryLifecycle(
   };
 }
 
-export interface ModalRecoveryLifecycleDocument {
-  schema_version: typeof MODAL_RECOVERY_LIFECYCLE_SCHEMA_VERSION;
-  summary: ModalRecoveryLifecycleSummary;
-  records: ModalRecoveryLifecycleRecord[];
-}
+export type ModalRecoveryLifecycleDocument = StrictModalRecoveryLifecycleDocument;
 
 export function createModalRecoveryLifecycleDocument(
   records: readonly ModalRecoveryLifecycleRecord[]
 ): ModalRecoveryLifecycleDocument {
   const checked = parseModalRecoveryLifecycleRecords(records);
-  return {
+  return parseModalRecoveryLifecycleDocument({
     schema_version: MODAL_RECOVERY_LIFECYCLE_SCHEMA_VERSION,
     summary: summarizeModalRecoveryLifecycle(checked),
     records: checked
-  };
+  });
 }
 
 export function parseModalRecoveryLifecycleDocument(value: unknown): ModalRecoveryLifecycleDocument {
-  const parsed = z
-    .strictObject({
-      schema_version: z.literal(MODAL_RECOVERY_LIFECYCLE_SCHEMA_VERSION),
-      summary: modalRecoveryLifecycleSummarySchema,
-      records: z.array(modalRecoveryLifecycleRecordSchema).max(100_000)
-    })
-    .parse(value);
-  const document = createModalRecoveryLifecycleDocument(parsed.records);
-  if (!isDeepStrictEqual(parsed.summary, document.summary)) {
-    throw new Error("Modal recovery lifecycle summary does not reconcile with its records");
-  }
-  return document;
+  return parseModalDocumentValue(MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID, value) as ModalRecoveryLifecycleDocument;
 }
 
 export function assertModalRecoveryLifecycleContainsNoSecrets(
@@ -506,15 +352,6 @@ export function assertModalRecoveryLifecycleContainsNoSecrets(
 
 function counts<const T extends readonly string[]>(values: T): Record<T[number], number> {
   return Object.fromEntries(values.map((value) => [value, 0])) as Record<T[number], number>;
-}
-
-function exactCountRecord<const T extends readonly [string, ...string[]]>(values: T) {
-  return z.strictObject(
-    Object.fromEntries(values.map((value) => [value, nonNegativeInteger])) as Record<
-      T[number],
-      typeof nonNegativeInteger
-    >
-  );
 }
 
 function sameModalRecoveryStart(

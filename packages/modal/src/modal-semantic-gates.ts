@@ -35,6 +35,7 @@ import {
   type StrictModalRecoveryLifecycleDocument,
   type StrictModalRecoveryLifecycleRecord,
   type StrictModalRecoveryLifecycleSummary,
+  type StrictModalRecoveryRow,
   type StrictModalRecoveryStartReason,
   type StrictModalRecoveryStateDocument,
   type StrictModalRecoveryTerminalClass,
@@ -371,7 +372,7 @@ function assertLaunchStateSemantics(state: StrictModalLaunchStateDocument): void
     });
   }
 
-  assertRecoveryRecords(state.recovery_lifecycle);
+  assertModalRecoveryLifecycleRecordsSemantics(state.recovery_lifecycle);
   const lifecycleIds = new Set<string>();
   const activeModels = new Set<string>();
   for (const record of state.recovery_lifecycle) {
@@ -404,23 +405,23 @@ function assertLaunchStateSemantics(state: StrictModalLaunchStateDocument): void
 }
 
 function assertRecoveryLifecycleDocumentSemantics(document: StrictModalRecoveryLifecycleDocument): void {
-  assertRecoveryRecords(document.records);
+  assertModalRecoveryLifecycleRecordsSemantics(document.records);
   const expected = summarizeRecoveryLifecycle(document.records);
   if (!isDeepStrictEqual(document.summary, expected)) {
     fail("modal-recovery-lifecycle-summary-reconciliation", "summary does not reconcile with records");
   }
 }
 
-function assertRecoveryRecords(records: readonly StrictModalRecoveryLifecycleRecord[]): void {
+export function assertModalRecoveryLifecycleRecordsSemantics(
+  records: readonly StrictModalRecoveryLifecycleRecord[]
+): void {
   const byAttemptId = new Map<string, StrictModalRecoveryLifecycleRecord>();
   const coordinates = new Set<string>();
   for (const record of records) {
+    assertModalRecoveryLifecycleRecordSemantics(record);
     const coordinate = `${record.logical_run_id}\0${record.model_slug}\0${record.generation}\0${record.attempt}`;
     if (byAttemptId.has(record.attempt_id) || coordinates.has(coordinate)) {
       fail("modal-recovery-lifecycle-parent-order", `duplicate recovery attempt ${record.attempt_id}`);
-    }
-    if (record.parent_attempt_id === record.attempt_id) {
-      fail("modal-recovery-lifecycle-parent-order", `recovery attempt ${record.attempt_id} parents itself`);
     }
     if (record.parent_attempt_id !== undefined) {
       const parent = byAttemptId.get(record.parent_attempt_id);
@@ -435,14 +436,24 @@ function assertRecoveryRecords(records: readonly StrictModalRecoveryLifecycleRec
         fail("modal-recovery-lifecycle-parent-order", `invalid parent for recovery attempt ${record.attempt_id}`);
       }
     }
-    assertOrderedTimestamps(
-      "modal-recovery-lifecycle-timestamp-order",
-      [record.launched_at, record.finished_at],
-      `recovery attempt ${record.attempt_id}`
-    );
     byAttemptId.set(record.attempt_id, record);
     coordinates.add(coordinate);
   }
+}
+
+/** Validate nonportable relationships that are local to one lifecycle record. */
+export function assertModalRecoveryLifecycleRecordSemantics(record: StrictModalRecoveryLifecycleRecord): void {
+  if (record.parent_attempt_id === record.attempt_id) {
+    fail("modal-recovery-lifecycle-parent-order", `recovery attempt ${record.attempt_id} parents itself`);
+  }
+  if (record.parent_generation !== undefined && record.parent_generation > record.generation) {
+    fail("modal-recovery-lifecycle-parent-order", `recovery attempt ${record.attempt_id} has a future parent`);
+  }
+  assertOrderedTimestamps(
+    "modal-recovery-lifecycle-timestamp-order",
+    [record.launched_at, record.finished_at],
+    `recovery attempt ${record.attempt_id}`
+  );
 }
 
 function summarizeRecoveryLifecycle(
@@ -525,19 +536,31 @@ function assertRecoveryStateSemantics(state: StrictModalRecoveryStateDocument): 
       fail("modal-recovery-state-row-worker-identity", `duplicate recovery row ${row.slug}`);
     }
     rowSlugs.add(row.slug);
-    const generations = new Set<number>();
+    assertModalRecoveryRowSemantics(row);
     for (const worker of row.workers) {
-      if (generations.has(worker.generation) || attemptIds.has(worker.attempt_id)) {
+      if (attemptIds.has(worker.attempt_id)) {
         fail("modal-recovery-state-row-worker-identity", `duplicate recovery worker ${worker.attempt_id}`);
       }
-      generations.add(worker.generation);
       attemptIds.add(worker.attempt_id);
-      assertOrderedTimestamps(
-        "modal-recovery-state-row-worker-identity",
-        [worker.reserved_at, worker.launched_at, worker.stopped_at],
-        `recovery worker ${worker.attempt_id}`
-      );
     }
+  }
+}
+
+/** Validate the nonportable projected identities and timestamp order of one recovery row. */
+export function assertModalRecoveryRowSemantics(row: StrictModalRecoveryRow): void {
+  const generations = new Set<number>();
+  const attemptIds = new Set<string>();
+  for (const worker of row.workers) {
+    if (generations.has(worker.generation) || attemptIds.has(worker.attempt_id)) {
+      fail("modal-recovery-state-row-worker-identity", `duplicate recovery worker ${worker.attempt_id}`);
+    }
+    generations.add(worker.generation);
+    attemptIds.add(worker.attempt_id);
+    assertOrderedTimestamps(
+      "modal-recovery-state-row-worker-identity",
+      [worker.reserved_at, worker.launched_at, worker.stopped_at],
+      `recovery worker ${worker.attempt_id}`
+    );
   }
 }
 

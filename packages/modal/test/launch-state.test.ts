@@ -84,7 +84,7 @@ function streak(attempt: number): ModalPreModelAttempt {
 
 function workerStatus(category: ModalWorkerStatus["category"], modelWorkStarted: boolean): ModalWorkerStatus {
   return {
-    schema_version: "ultrafuzz.modal.worker-status.v2",
+    schema_version: WORKER_RESULT_SCHEMA_VERSION,
     updated_at: "2026-01-01T00:00:00.000Z",
     stage: "fixture",
     terminal: false,
@@ -413,7 +413,7 @@ describe("Modal lineage", () => {
     });
     state.recovery_lifecycle[0]!.fingerprints.source = "f".repeat(64);
 
-    expect(() => parseModalLaunchState(state)).toThrow(/mismatched lifecycle/u);
+    expect(() => parseModalLaunchState(state)).toThrow(/trusted semantic gates/u);
   });
 
   it("rejects legacy launch state files without conversion", async () => {
@@ -531,20 +531,12 @@ describe("Modal runner status", () => {
       result_generation: 2
     });
     expect(parseModalWorkerStatus(workerResult(), { generation: 1, attempt: 2 })).toBeUndefined();
-    // The `sandbox-exited` pairings below are legacy contracts, not contracts a
-    // worker can still write: `namedFaultDisposition` now records `unreachable`
-    // for any fault the worker named, so a contract written today pairs each of
-    // these codes with `unreachable` (see "classifies a sandbox exit by the exit
-    // and a named fault by its name" below). They stay asserted because Modal
-    // volumes outlive a deploy: a contract persisted by a pre-#320 worker is
-    // still read by this parser, and it must keep classifying by the code it
-    // names rather than by the exit category that was never a determination.
-    expect(
+    expect(() =>
       parseModalWorkerStatus(
         workerResult({ exit_category: "sandbox-exited", diagnostic_code: "checkpoint-incompatible" })
       )
-    ).toMatchObject({ category: "incompatible-checkpoint", retryable: false });
-    expect(
+    ).toThrow(/diagnostic_code/u);
+    expect(() =>
       parseModalWorkerStatus(
         workerResult({
           model_work_started: true,
@@ -552,16 +544,11 @@ describe("Modal runner status", () => {
           diagnostic_code: "public-eval-diagnostics-invalid"
         })
       )
-    ).toMatchObject({
-      category: "permanent-operational-failure",
-      model_work_started: true,
-      retryable: false,
-      error_code: "public-eval-diagnostics-invalid"
-    });
+    ).toThrow(/diagnostic_code/u);
     const nonResumable = parseModalWorkerStatus(
       workerResult({
         model_work_started: true,
-        exit_category: "sandbox-exited",
+        exit_category: "unreachable",
         diagnostic_code: "terminal-run-non-resumable"
       })
     );
@@ -595,7 +582,7 @@ describe("Modal runner status", () => {
         })
       )
     ).toMatchObject({ category: "permanent-operational-failure", retryable: false });
-    expect(
+    expect(() =>
       parseModalWorkerStatus({
         schema_version: "ultrafuzz.modal.worker-status.v2",
         updated_at: "2026-01-01T00:00:00.000Z",
@@ -604,28 +591,10 @@ describe("Modal runner status", () => {
         model_work_started: false,
         retryable: true,
         generation: 1,
-        attempt: 1,
-        eval_run_id: "generic-evaluation",
-        run_status: "running",
-        node_counts: { running: 1 },
-        error_code: "worker-live"
+        attempt: 1
       })
-    ).toEqual({
-      schema_version: "ultrafuzz.modal.worker-status.v2",
-      updated_at: "2026-01-01T00:00:00.000Z",
-      stage: "preparing",
-      terminal: false,
-      category: "preparing",
-      model_work_started: false,
-      retryable: true,
-      generation: 1,
-      attempt: 1,
-      eval_run_id: "generic-evaluation",
-      run_status: "running",
-      node_counts: { running: 1 },
-      error_code: "worker-live"
-    });
-    expect(
+    ).toThrow(/worker-result/u);
+    expect(() =>
       parseModalWorkerStatus({
         schema_version: "ultrafuzz.modal.worker-status.v2",
         updated_at: "2026-01-01T00:00:00.000Z",
@@ -636,7 +605,7 @@ describe("Modal runner status", () => {
         generation: 1,
         attempt: 1
       })
-    ).toMatchObject({ stage: "succeeded", terminal: true, category: "succeeded" });
+    ).toThrow(/worker-result/u);
   });
 
   it("classifies a sandbox exit by the exit and a named fault by its name", () => {

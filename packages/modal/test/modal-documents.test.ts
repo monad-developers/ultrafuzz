@@ -34,6 +34,7 @@ import {
 import {
   ModalDocumentValidationError,
   parseModalDocumentBytes,
+  parseModalDocumentValue,
   readModalDocument,
   writeModalDocumentAtomic
 } from "../src/modal-documents.js";
@@ -429,6 +430,7 @@ describe("Modal strict JSON contract foundation", () => {
       [ModalContractSchemaId, ModalContractBySchemaId[ModalContractSchemaId]]
     >) {
       expect(validateModalJsonSchema(schemaId, value)).toMatchObject({ ok: true });
+      expect(parseModalDocumentValue(schemaId, value)).toBe(value);
       expect(parseModalDocumentBytes(schemaId, bytes(value)).value).toEqual(value);
     }
   });

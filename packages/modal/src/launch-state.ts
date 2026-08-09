@@ -5,7 +5,6 @@ import { mkdir, open, readFile, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import { parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
-import { z } from "zod/v4";
 
 import {
   MODAL_LAUNCH_STATE_SCHEMA_VERSION,
@@ -13,37 +12,24 @@ import {
   MODAL_PRE_MODEL_RETRY_LIMIT,
   MODAL_PRE_MODEL_RETRY_MAX_DELAY_MS,
   MODAL_WORKER_LINEAGE_SCHEMA_VERSION,
-  MODAL_WORKER_STATUS_SCHEMA_VERSION,
   type ModalLaunchMode,
   type ModalModelSpec
 } from "./defaults.js";
 import {
   finishModalRecoveryLifecycle,
-  modalRecoveryLifecycleRecordSchema,
-  parseModalRecoveryLifecycleRecords,
   startModalRecoveryLifecycle,
   type FinishModalRecoveryLifecycleInput,
   type ModalRecoveryLifecycleRecord,
   type ModalRecoveryStartReason,
   type ModalRecoveryTerminalReason
 } from "./recovery-lifecycle.js";
-import { MODAL_LAUNCH_STATE_SCHEMA_ID } from "./modal-contracts.js";
-import { readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
-import { OPERATIONAL_DISPOSITION_CATEGORIES } from "./terminal-disposition.js";
-import { WORKER_DIAGNOSTIC_CODES, WORKER_RESULT_SCHEMA_VERSION, type WorkerResultContract } from "./worker-result.js";
-
-const fingerprintSchema = z.string().regex(/^[a-f0-9]{64}$/u);
-const timestampSchema = z.string().min(1);
-const modelSchema = z
-  .object({
-    slug: z.string().min(1),
-    model: z.string().min(1),
-    provider: z.enum(["openai", "anthropic", "deepseek", "kimi"]),
-    agent: z.enum(["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent"]),
-    reasoning: z.string().min(1),
-    auth_mode: z.enum(["api-key", "subscription"])
-  })
-  .strict();
+import {
+  MODAL_LAUNCH_STATE_SCHEMA_ID,
+  MODAL_WORKER_LINEAGE_SCHEMA_ID,
+  MODAL_WORKER_RESULT_SCHEMA_ID
+} from "./modal-contracts.js";
+import { parseModalDocumentValue, readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
+import { WORKER_RESULT_SCHEMA_VERSION, type WorkerResultContract } from "./worker-result.js";
 
 export interface ModalLineageFingerprints {
   config: string;
@@ -128,7 +114,7 @@ export type ModalWorkerStatusCategory =
   | "incompatible-checkpoint";
 
 export interface ModalWorkerStatus {
-  schema_version: typeof MODAL_WORKER_STATUS_SCHEMA_VERSION | typeof WORKER_RESULT_SCHEMA_VERSION;
+  schema_version: typeof WORKER_RESULT_SCHEMA_VERSION;
   updated_at?: string;
   stage: string;
   terminal: boolean;
@@ -144,285 +130,18 @@ export interface ModalWorkerStatus {
   result_generation?: number;
 }
 
-const lineageFingerprintsSchema = z
-  .object({ config: fingerprintSchema, source: fingerprintSchema, image: fingerprintSchema })
-  .strict();
-
-const attemptProvenanceSchema = z
-  .object({
-    slug: z.string().min(1),
-    generation: z.number().int().positive(),
-    attempt: z.number().int().positive(),
-    attempt_id: z.string().min(1),
-    model_fingerprint: fingerprintSchema,
-    fingerprints: lineageFingerprintsSchema,
-    workspace_mode: z.enum(["resume", "fresh"]),
-    post_model_recovery: z.enum(["relaunch", "stop"]).optional(),
-    reserved_at: timestampSchema,
-    sandbox_id: z.string().min(1).optional(),
-    launched_at: timestampSchema.optional(),
-    finished_at: timestampSchema.optional(),
-    phase: z.enum(["reserved", "sandbox-created", "launched", "failed"])
-  })
-  .strict();
-
-const launchRecordSchema = modelSchema
-  .extend({
-    generation: z.number().int().positive(),
-    attempt: z.number().int().positive(),
-    attempt_id: z.string().min(1),
-    model_fingerprint: fingerprintSchema,
-    volume_name: z.string().min(1),
-    remote_root: z.string().min(1),
-    workspace_mode: z.enum(["resume", "fresh"]),
-    post_model_recovery: z.enum(["relaunch", "stop"]).optional(),
-    phase: z.enum(["reserved", "sandbox-created", "launched", "failed"]),
-    reserved_at: timestampSchema,
-    sandbox_id: z.string().min(1).optional(),
-    launched_at: timestampSchema.optional(),
-    finished_at: timestampSchema.optional(),
-    failure_category: z.enum(["transient-operational-failure", "permanent-operational-failure"]).optional()
-  })
-  .strict()
-  .superRefine((record, context) => {
-    if ((record.phase === "sandbox-created" || record.phase === "launched") && record.sandbox_id === undefined) {
-      context.addIssue({ code: "custom", message: `${record.phase} launch is missing sandbox_id` });
-    }
-    if (record.phase === "launched" && record.launched_at === undefined) {
-      context.addIssue({ code: "custom", message: "launched record is missing launched_at" });
-    }
-    if (record.phase === "failed" && record.failure_category === undefined) {
-      context.addIssue({ code: "custom", message: "failed record is missing failure_category" });
-    }
-  });
-
-const launchStateSchema = z
-  .object({
-    schema_version: z.literal(MODAL_LAUNCH_STATE_SCHEMA_VERSION),
-    logical_run_id: z.string().min(1),
-    generation: z.number().int().positive(),
-    generation_mode: z.enum(["resume", "fresh"]),
-    generation_start_reason: z.enum([
-      "initial",
-      "pre-model-retry",
-      "post-model-resume",
-      "image-rollout",
-      "stale-probe-rotation",
-      "operator-restart",
-      "unknown"
-    ]),
-    app: z.string().min(1),
-    image: z.string().min(1),
-    image_id: z.string().min(1),
-    timeout_ms: z.number().int().positive(),
-    source_revision: z.string().min(1),
-    fingerprints: lineageFingerprintsSchema,
-    launches: z.array(launchRecordSchema),
-    attempt_history: z.array(attemptProvenanceSchema),
-    recovery_lifecycle: z.array(modalRecoveryLifecycleRecordSchema)
-  })
-  .strict()
-  .superRefine((state, context) => {
-    const slugs = new Set<string>();
-    for (const launch of state.launches) {
-      if (launch.generation !== state.generation) {
-        context.addIssue({ code: "custom", message: `launch ${launch.slug} has the wrong generation` });
-      }
-      if (slugs.has(launch.slug)) {
-        context.addIssue({ code: "custom", message: `duplicate launch slug: ${launch.slug}` });
-      }
-      slugs.add(launch.slug);
-    }
-    const attempts = new Set<string>();
-    const attemptIds = new Set<string>();
-    for (const attempt of [...state.attempt_history, ...state.launches]) {
-      const key = `${attempt.generation}:${attempt.slug}:${attempt.attempt}`;
-      if (attempts.has(key)) context.addIssue({ code: "custom", message: `duplicate launch attempt: ${key}` });
-      attempts.add(key);
-      attemptIds.add(attempt.attempt_id);
-      const lifecycle = state.recovery_lifecycle.find((record) => record.attempt_id === attempt.attempt_id);
-      const expectedFingerprints = "fingerprints" in attempt ? attempt.fingerprints : state.fingerprints;
-      if (lifecycle === undefined) {
-        context.addIssue({ code: "custom", message: `launch attempt ${attempt.attempt_id} is missing lifecycle` });
-      } else if (
-        lifecycle.logical_run_id !== state.logical_run_id ||
-        lifecycle.model_slug !== attempt.slug ||
-        lifecycle.generation !== attempt.generation ||
-        lifecycle.attempt !== attempt.attempt ||
-        lifecycle.fingerprints.config !== expectedFingerprints.config ||
-        lifecycle.fingerprints.source !== expectedFingerprints.source ||
-        lifecycle.fingerprints.image !== expectedFingerprints.image ||
-        lifecycle.fingerprints.model !== attempt.model_fingerprint
-      ) {
-        context.addIssue({ code: "custom", message: `launch attempt ${attempt.attempt_id} has mismatched lifecycle` });
-      }
-    }
-    try {
-      const recoveryRecords = parseModalRecoveryLifecycleRecords(state.recovery_lifecycle);
-      const activeModels = new Set<string>();
-      for (const record of recoveryRecords) {
-        if (record.logical_run_id !== state.logical_run_id || !attemptIds.has(record.attempt_id)) {
-          context.addIssue({
-            code: "custom",
-            path: ["recovery_lifecycle"],
-            message: `orphaned recovery lifecycle ${record.attempt_id}`
-          });
-        }
-        if (record.terminal_reason !== "active") continue;
-        if (activeModels.has(record.model_slug)) {
-          context.addIssue({
-            code: "custom",
-            path: ["recovery_lifecycle"],
-            message: `multiple active recovery generations for ${record.model_slug}`
-          });
-        }
-        activeModels.add(record.model_slug);
-      }
-    } catch (error) {
-      context.addIssue({
-        code: "custom",
-        path: ["recovery_lifecycle"],
-        message: error instanceof Error ? error.message : "invalid recovery lifecycle"
-      });
-    }
-  });
-
-const workerLineageSchema = z
-  .object({
-    schema_version: z.literal(MODAL_WORKER_LINEAGE_SCHEMA_VERSION),
-    logical_run_id: z.string().min(1),
-    generation: z.number().int().positive(),
-    attempt: z.number().int().positive(),
-    attempt_id: z.string().min(1),
-    workspace_mode: z.enum(["resume", "fresh"]),
-    fingerprints: lineageFingerprintsSchema,
-    model_fingerprint: fingerprintSchema
-  })
-  .strict();
-
-const workerStatusSchema = z
-  .object({
-    schema_version: z.literal(MODAL_WORKER_STATUS_SCHEMA_VERSION),
-    updated_at: timestampSchema,
-    stage: z.string().min(1),
-    category: z.enum([
-      "preparing",
-      "model-work",
-      "post-processing",
-      "succeeded",
-      "genuine-task-outcome",
-      "resume-required",
-      "transient-operational-failure",
-      "permanent-operational-failure",
-      "incompatible-checkpoint"
-    ]),
-    model_work_started: z.boolean(),
-    retryable: z.boolean(),
-    generation: z.number().int().positive(),
-    attempt: z.number().int().positive(),
-    eval_run_id: z.string().min(1).optional(),
-    run_status: z.string().min(1).optional(),
-    node_counts: z.record(z.string(), z.number().int().nonnegative()).optional(),
-    error_code: z.enum(WORKER_DIAGNOSTIC_CODES).optional()
-  })
-  .strict();
-
-const workerResultStatusSchema = z
-  .object({
-    schema_version: z.literal(WORKER_RESULT_SCHEMA_VERSION),
-    result_type: z.enum(["partial", "terminal"]),
-    generation: z.number().int().positive(),
-    launch_generation: z.number().int().positive(),
-    attempt: z.number().int().positive(),
-    model_work_started: z.boolean(),
-    counts: z
-      .object({
-        succeeded: z.number().int().nonnegative(),
-        failed: z.number().int().nonnegative(),
-        remaining: z.number().int().nonnegative()
-      })
-      .strict(),
-    checkpoint: z
-      .object({
-        age_ms: z.number().int().nonnegative().nullable(),
-        digest: z
-          .string()
-          .regex(/^sha256:[a-f0-9]{64}$/u)
-          .nullable()
-      })
-      .strict(),
-    exit_category: z.enum(OPERATIONAL_DISPOSITION_CATEGORIES),
-    runtime_ms: z.number().int().nonnegative(),
-    usage: z
-      .object({
-        input_tokens: z.number().int().nonnegative(),
-        output_tokens: z.number().int().nonnegative(),
-        cache_read_tokens: z.number().int().nonnegative(),
-        cache_write_tokens: z.number().int().nonnegative(),
-        reasoning_tokens: z.number().int().nonnegative(),
-        total_tokens: z.number().int().nonnegative(),
-        estimated_cost_usd: z.number().nonnegative().nullable(),
-        partial_pricing: z.boolean(),
-        event_count: z.number().int().nonnegative(),
-        priced_event_count: z.number().int().nonnegative(),
-        unpriced_event_count: z.number().int().nonnegative()
-      })
-      .strict()
-      .nullable(),
-    pricing: z
-      .object({
-        source: z.enum(["models.dev", "configured-catalog", "disabled"]),
-        status: z.enum(["available", "disabled", "unavailable"]),
-        fetched_at: timestampSchema.optional(),
-        resolved_model_count: z.number().int().nonnegative(),
-        unresolved_model_count: z.number().int().nonnegative()
-      })
-      .strict()
-      .optional(),
-    diagnostic_code: z.enum(WORKER_DIAGNOSTIC_CODES)
-  })
-  .strict()
-  .superRefine((status, context) => {
-    if (status.result_type === "partial" && status.exit_category !== "live") {
-      context.addIssue({ code: "custom", message: "partial worker result must be live" });
-    }
-    if (status.result_type === "terminal" && status.exit_category === "live") {
-      context.addIssue({ code: "custom", message: "terminal worker result cannot be live" });
-    }
-  });
-
 export function parseModalLaunchState(value: unknown): ModalLaunchState {
-  return launchStateSchema.parse(value) as ModalLaunchState;
+  return parseModalDocumentValue(MODAL_LAUNCH_STATE_SCHEMA_ID, value) as ModalLaunchState;
 }
 
 export function parseModalWorkerLineage(value: unknown): ModalWorkerLineage {
-  return workerLineageSchema.parse(value) as ModalWorkerLineage;
+  return parseModalDocumentValue(MODAL_WORKER_LINEAGE_SCHEMA_ID, value) as ModalWorkerLineage;
 }
 
 export function parseModalWorkerStatus(
   value: unknown,
   expected?: { generation: number; attempt: number }
 ): ModalWorkerStatus | undefined {
-  const parsed = workerStatusSchema.safeParse(value);
-  if (parsed.success) {
-    const candidate = parsed.data;
-    const status: ModalWorkerStatus = {
-      schema_version: MODAL_WORKER_STATUS_SCHEMA_VERSION,
-      updated_at: candidate.updated_at,
-      stage: candidate.category,
-      terminal: candidate.stage === "terminal",
-      category: candidate.category,
-      model_work_started: candidate.model_work_started,
-      retryable: candidate.retryable,
-      generation: candidate.generation,
-      attempt: candidate.attempt,
-      ...(candidate.eval_run_id === undefined ? {} : { eval_run_id: candidate.eval_run_id }),
-      ...(candidate.run_status === undefined ? {} : { run_status: candidate.run_status }),
-      ...(candidate.node_counts === undefined ? {} : { node_counts: candidate.node_counts }),
-      ...(candidate.error_code === undefined ? {} : { error_code: candidate.error_code })
-    };
-    return matchesWorkerAttempt(status, expected) ? status : undefined;
-  }
   const contract = parseModalWorkerResult(value, expected);
   if (contract === undefined) return undefined;
   const status: ModalWorkerStatus = {
@@ -445,9 +164,7 @@ export function parseModalWorkerResult(
   value: unknown,
   expected?: { generation: number; attempt: number }
 ): WorkerResultContract | undefined {
-  const parsed = workerResultStatusSchema.safeParse(value);
-  if (!parsed.success) return undefined;
-  const contract = parsed.data as WorkerResultContract;
+  const contract = parseModalDocumentValue(MODAL_WORKER_RESULT_SCHEMA_ID, value) as WorkerResultContract;
   return matchesWorkerAttempt({ generation: contract.launch_generation, attempt: contract.attempt }, expected)
     ? contract
     : undefined;
@@ -968,7 +685,8 @@ export function isTransientModalError(error: unknown): boolean {
 
 export async function readModalLaunchState(statePath: string): Promise<ModalLaunchState | undefined> {
   try {
-    return parseModalLaunchState(readModalDocument(path.resolve(statePath), MODAL_LAUNCH_STATE_SCHEMA_ID).value);
+    const snapshot = readModalDocument(path.resolve(statePath), MODAL_LAUNCH_STATE_SCHEMA_ID);
+    return structuredClone(snapshot.value) as ModalLaunchState;
   } catch (error) {
     if (isNodeError(error, "ENOENT")) return undefined;
     throw error;
