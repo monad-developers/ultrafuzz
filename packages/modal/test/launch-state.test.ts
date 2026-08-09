@@ -29,7 +29,7 @@ import {
   modalRecoveryFinishedAtForWorkerStatus,
   modalRecoveryTerminalReasonForWorkerStatus,
   modalRunnerAbandonmentMessage,
-  parseCompatibleModalLaunchState,
+  parseModalLaunchState,
   parseModalWorkerStatus,
   readModalLaunchState,
   reserveModalLaunchAttempt,
@@ -322,7 +322,7 @@ describe("Modal launch ownership", () => {
 });
 
 describe("Modal lineage", () => {
-  it("surfaces missing v2 recovery fields as unknown during migration", () => {
+  it("rejects v2 launch state instead of migrating missing recovery fields", () => {
     const state = launchState();
     reserveModalLaunchAttempt({
       state,
@@ -339,24 +339,12 @@ describe("Modal lineage", () => {
       recovery_lifecycle: _recoveryLifecycle,
       ...previous
     } = state;
-    const migrated = parseCompatibleModalLaunchState({
-      ...previous,
-      schema_version: "ultrafuzz.modal.launch-state.v2"
-    });
-
-    expect(migrated).toMatchObject({
-      schema_version: "ultrafuzz.modal.launch-state.v3",
-      generation_start_reason: "unknown",
-      recovery_lifecycle: [
-        {
-          start_reason: "unknown",
-          terminal_reason: "unknown",
-          model_work_started: "unknown",
-          progress_made: "unknown",
-          controller_requested: "unknown"
-        }
-      ]
-    });
+    expect(() =>
+      parseModalLaunchState({
+        ...previous,
+        schema_version: "ultrafuzz.modal.launch-state.v2"
+      })
+    ).toThrow();
   });
 
   it("rejects lifecycle fingerprints that diverge from launch provenance", () => {
@@ -371,10 +359,10 @@ describe("Modal lineage", () => {
     });
     state.recovery_lifecycle[0]!.fingerprints.source = "f".repeat(64);
 
-    expect(() => parseCompatibleModalLaunchState(state)).toThrow(/mismatched lifecycle/u);
+    expect(() => parseModalLaunchState(state)).toThrow(/mismatched lifecycle/u);
   });
 
-  it("adapts legacy launch state files for inspection and guarded resume", async () => {
+  it("rejects legacy launch state files without conversion", async () => {
     const legacy = {
       schema_version: "ultrafuzz.modal.launch-state.v1",
       run_id: "logical-run",
@@ -396,58 +384,8 @@ describe("Modal lineage", () => {
     const statePath = path.join(root, "launch-state.json");
     fs.writeFileSync(statePath, `${JSON.stringify(legacy, null, 2)}\n`, { mode: 0o600 });
 
-    const migrated = await readModalLaunchState(statePath, {
-      imageId: "image-id-placeholder",
-      fingerprints: {
-        config: CONFIG_FINGERPRINT,
-        source: SOURCE_FINGERPRINT,
-        image: IMAGE_FINGERPRINT
-      }
-    });
-
-    expect(migrated).toMatchObject({
-      schema_version: "ultrafuzz.modal.launch-state.v3",
-      logical_run_id: "logical-run",
-      generation: 1,
-      generation_mode: "resume",
-      image_id: "image-id-placeholder",
-      timeout_ms: 60_000,
-      fingerprints: {
-        config: CONFIG_FINGERPRINT,
-        source: SOURCE_FINGERPRINT,
-        image: IMAGE_FINGERPRINT
-      },
-      launches: [
-        expect.objectContaining({
-          slug: MODEL.slug,
-          generation: 1,
-          attempt: 1,
-          phase: "launched",
-          sandbox_id: "sandbox-one",
-          launched_at: "2026-01-01T00:00:00.000Z"
-        })
-      ],
-      attempt_history: [],
-      generation_start_reason: "unknown",
-      recovery_lifecycle: [
-        expect.objectContaining({
-          start_reason: "unknown",
-          terminal_reason: "unknown",
-          progress_made: "unknown"
-        })
-      ]
-    });
-    expect(migrated!.launches[0]!.attempt_id).toBe(
-      parseCompatibleModalLaunchState(legacy, {
-        imageId: "image-id-placeholder",
-        fingerprints: {
-          config: CONFIG_FINGERPRINT,
-          source: SOURCE_FINGERPRINT,
-          image: IMAGE_FINGERPRINT
-        }
-      }).launches[0]!.attempt_id
-    );
-    expect(() => parseCompatibleModalLaunchState(legacy)).toThrow(/legacy Modal launch state/u);
+    await expect(readModalLaunchState(statePath)).rejects.toThrow();
+    expect(() => parseModalLaunchState(legacy)).toThrow();
   });
 
   it("fails closed on every incompatible checkpoint fingerprint", () => {

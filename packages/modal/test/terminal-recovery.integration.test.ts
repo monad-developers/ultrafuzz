@@ -122,7 +122,7 @@ describe("terminal artifact-gate recovery", () => {
     const gate = verifyRequiredArtifactsForAttempt(layout, findingsNode(), "task-one");
     expect(gate.ok).toBe(false);
     expect(gate.missing).toEqual([]);
-    expect(gate.diagnostics.map((diagnostic) => diagnostic.code)).toContain("FINDINGS_SCHEMA_INVALID");
+    expect(gate.diagnostics.map((diagnostic) => diagnostic.code)).toContain("ARTIFACT_SCHEMA_INVALID");
 
     const gated = durableStateForGate(gate);
     expect(classifyTerminalDisposition(gated, TASK_MANIFEST)).toEqual({
@@ -243,7 +243,7 @@ function findingsNode(): PlannedGraphNode {
     outputs: [
       {
         path: "findings.json",
-        contract: "ultrafuzz/findings@1",
+        contract: "ultrafuzz/findings@2",
         contract_digest: "a".repeat(64),
         primary: true
       }
