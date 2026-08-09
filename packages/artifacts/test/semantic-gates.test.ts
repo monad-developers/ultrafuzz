@@ -515,6 +515,10 @@ const fixtures = {
     positive: [{ family_variants: [{ evidence: [{ line_ranges: [{ line: 3 }, { line: 5 }] }] }] }],
     negative: [{ family_variants: [{ evidence: [{ line_ranges: [{ line: 3, end_line: 2 }, { line: 5 }] }] }] }]
   },
+  "severity-classification-matrix": {
+    positive: [{ severity: "Medium", impact: "High", likelihood: "Low" }],
+    negative: [{ severity: "High", impact: "High", likelihood: "Low" }]
+  },
   "smithers-task-attempt-id-uniqueness": {
     positive: { tasks: [{ attemptId: "a" }] },
     negative: { tasks: [{ attemptId: "a" }, { attemptId: "a" }] }
@@ -580,6 +584,24 @@ const fixtures = {
   "strategy-detection-dedupe-key-uniqueness": {
     positive: [{ dedupe_key: "a" }],
     negative: [{ dedupe_key: "a" }, { dedupe_key: "a" }]
+  },
+  "strategy-detection-hit-identity-uniqueness": {
+    positive: [
+      {
+        hits: [
+          { strategy: "stateful", attempt_index: 0, model_id: "m", model_index: 0, loop_index: 0 },
+          { strategy: "stateful", attempt_index: 1, model_id: "m", model_index: 0, loop_index: 1 }
+        ]
+      }
+    ],
+    negative: [
+      {
+        hits: [
+          { strategy: "stateful", attempt_index: 0, model_id: "m", model_index: 0, loop_index: 0 },
+          { strategy: "stateful", attempt_index: 0, model_id: "m", model_index: 0, loop_index: 0 }
+        ]
+      }
+    ]
   },
   "triaged-finding-id-uniqueness": {
     positive: [{ id: "a" }],
@@ -891,6 +913,39 @@ test("every contextual registration executes real positive and negative checks",
             implementedProperties: {
               properties: [{ property_id: "a", implementation_paths: ["impl"], test_paths: ["test"] }]
             }
+          }
+        }
+      },
+      "severity-classification-upstream-preservation": {
+        positive: [
+          {
+            id: "finding-a",
+            summary: "Preserved summary",
+            severity_guess: "Medium",
+            severity: "Low",
+            impact: "Medium",
+            likelihood: "Low",
+            impact_rationale: "Bounded impact.",
+            likelihood_rationale: "Narrow state.",
+            severity_rationale: "Medium x Low is Low."
+          }
+        ],
+        negative: [
+          {
+            id: "finding-a",
+            summary: "Rewritten summary",
+            severity_guess: "Medium",
+            severity: "Low",
+            impact: "Medium",
+            likelihood: "Low",
+            impact_rationale: "Bounded impact.",
+            likelihood_rationale: "Narrow state.",
+            severity_rationale: "Medium x Low is Low."
+          }
+        ],
+        context: {
+          artifactSet: {
+            triagedFindings: [{ id: "finding-a", summary: "Preserved summary", severity_guess: "Medium" }]
           }
         }
       },

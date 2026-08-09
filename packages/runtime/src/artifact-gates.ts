@@ -1682,6 +1682,10 @@ function semanticArtifactSetForSchema(input: {
     const propertyLenses = semanticPropertyLenses(input.layout);
     return propertyLenses === undefined ? {} : { propertyLenses };
   }
+  if (input.schemaFilename === "severity-classified-findings.schema.json") {
+    const triagedFindings = semanticTriagedFindings(input.layout);
+    return triagedFindings === undefined ? {} : { triagedFindings };
+  }
   if (input.schemaFilename === "report.schema.json") {
     const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout);
     const implementedProperties = semanticImplementedProperties(input.layout);
@@ -1691,6 +1695,13 @@ function semanticArtifactSetForSchema(input: {
     };
   }
   return undefined;
+}
+
+function semanticTriagedFindings(layout: RunLayout): unknown | undefined {
+  const artifactPath = findLogicalNodeArtifact(layout, "triage", "triaged-findings.json");
+  if (artifactPath === undefined) return undefined;
+  assertRegularFileInside(layout.root, artifactPath, "triaged findings semantic context");
+  return readStrictContractDocument(artifactPath, "ultrafuzz/triaged-findings@1");
 }
 
 function semanticCampaignArtifacts(artifactDir: string, node: PlannedGraphNode): SemanticArtifactSetContext {

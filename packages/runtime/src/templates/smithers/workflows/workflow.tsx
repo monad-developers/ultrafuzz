@@ -4399,6 +4399,7 @@ function semanticGateContextForVerifiedOutput(
     propertyCatalog?: unknown;
     propertyLenses?: readonly { sourceNodeId: string; document: unknown }[];
     implementedProperties?: unknown;
+    triagedFindings?: unknown;
   };
   git?: ReturnType<typeof deriveWorkspacePatchGitFacts>;
 } {
@@ -4422,6 +4423,14 @@ function semanticGateContextForVerifiedOutput(
   } else if (output.schemaFile === "properties.schema.json") {
     const propertyLenses = verifiedAncestorPropertyLenses(task);
     context.artifactSet = propertyLenses === undefined ? {} : { propertyLenses };
+  } else if (output.schemaFile === "severity-classified-findings.schema.json") {
+    const triagedFindings = verifiedCurrentAncestorJsonArtifact(
+      task,
+      "triage",
+      "triaged-findings.json",
+      "ultrafuzz/triaged-findings@1"
+    );
+    context.artifactSet = triagedFindings === undefined ? {} : { triagedFindings: triagedFindings.value };
   } else if (output.schemaFile === "report.schema.json") {
     const propertyCatalog = verifiedCurrentAncestorJsonArtifact(
       task,

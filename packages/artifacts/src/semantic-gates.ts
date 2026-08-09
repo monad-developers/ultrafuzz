@@ -37,6 +37,7 @@ export interface SemanticArtifactSetContext {
   propertyCatalog?: unknown;
   propertyLenses?: readonly SemanticPropertyLensContext[];
   implementedProperties?: unknown;
+  triagedFindings?: unknown;
 }
 
 export interface SemanticPlannedGraphContext {
@@ -268,6 +269,107 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
   const a = sortedUnique(left);
   const b = sortedUnique(right);
   return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function strategyDetectionHitIdentityIssues(document: unknown): SemanticGateIssue[] {
+  const issues: SemanticGateIssue[] = [];
+  for (const [detectionIndex, detection] of arrayAt(document, []).entries()) {
+    const seen = new Set<string>();
+    for (const [hitIndex, hit] of arrayAt(detection, ["hits"]).entries()) {
+      if (!isRecord(hit)) continue;
+      const identity = JSON.stringify([
+        hit.strategy,
+        hit.attempt_index ?? null,
+        hit.model_id ?? null,
+        hit.model ?? null,
+        hit.model_index ?? null,
+        hit.loop_index ?? null
+      ]);
+      if (seen.has(identity)) {
+        issues.push(
+          issue(`$[${detectionIndex}].hits[${hitIndex}]`, `Duplicate strategy detection hit identity ${identity}`)
+        );
+      }
+      seen.add(identity);
+    }
+  }
+  return issues;
+}
+
+function severityClassificationMatrixIssues(document: unknown): SemanticGateIssue[] {
+  const issues: SemanticGateIssue[] = [];
+  for (const [index, record] of arrayAt(document, []).entries()) {
+    const impact = stringField(record, "impact");
+    const likelihood = stringField(record, "likelihood");
+    const severity = stringField(record, "severity");
+    if (impact === undefined || likelihood === undefined || severity === undefined) continue;
+    const expected =
+      impact === "Low"
+        ? "Low"
+        : impact === "Medium"
+          ? likelihood === "Low"
+            ? "Low"
+            : "Medium"
+          : likelihood === "Low"
+            ? "Medium"
+            : "High";
+    if (severity !== expected) {
+      issues.push(
+        issue(
+          `$[${index}].severity`,
+          `Severity ${JSON.stringify(severity)} does not equal the ${impact} impact x ${likelihood} likelihood matrix result ${expected}`
+        )
+      );
+    }
+  }
+  return issues;
+}
+
+const SEVERITY_CLASSIFICATION_OWNED_FIELDS = new Set([
+  "severity",
+  "impact",
+  "likelihood",
+  "impact_rationale",
+  "likelihood_rationale",
+  "severity_rationale"
+]);
+
+function severityClassificationPreservationIssues(
+  document: unknown,
+  context: SemanticGateContext
+): SemanticGateIssue[] {
+  const classified = Array.isArray(document) ? document : [];
+  const triaged = Array.isArray(context.artifactSet!.triagedFindings) ? context.artifactSet!.triagedFindings : [];
+  const issues: SemanticGateIssue[] = [];
+  if (classified.length !== triaged.length) {
+    issues.push(
+      issue(
+        "$",
+        `Severity classification record count ${classified.length} does not preserve triaged record count ${triaged.length}`
+      )
+    );
+  }
+  for (let index = 0; index < Math.min(classified.length, triaged.length); index += 1) {
+    const actual = classified[index];
+    const upstream = triaged[index];
+    if (!isRecord(actual) || !isRecord(upstream)) continue;
+    if (stringField(actual, "id") !== stringField(upstream, "id")) {
+      issues.push(issue(`$[${index}].id`, "Severity classification changed or reordered the triaged finding ID"));
+    }
+    const fields = new Set([...Object.keys(upstream), ...Object.keys(actual)]);
+    for (const field of fields) {
+      if (SEVERITY_CLASSIFICATION_OWNED_FIELDS.has(field)) continue;
+      if (!isDeepStrictEqual(actual[field], upstream[field])) {
+        issues.push(
+          issue(
+            `$[${index}].${field}`,
+            `Severity classification did not preserve upstream field ${JSON.stringify(field)}`
+          )
+        );
+      }
+    }
+  }
+  return issues;
 }
 
 function adminConfigJoinIssues(document: unknown): SemanticGateIssue[] {
@@ -2080,6 +2182,12 @@ const gateSpecifications = {
   ),
   "severity-finding-id-uniqueness": documentGate(uniqueFieldGate([[]], "id", "severity finding ID")),
   "severity-finding-evidence-span-consistency": documentGate(findingArrayEvidenceSpanIssues),
+  "severity-classification-matrix": documentGate(severityClassificationMatrixIssues),
+  "severity-classification-upstream-preservation": contextualGate(
+    "cross-artifact",
+    ["artifactSet.triagedFindings"],
+    severityClassificationPreservationIssues
+  ),
   "smithers-task-attempt-id-uniqueness": documentGate(uniqueFieldGate([["tasks"]], "attemptId", "Smithers attempt ID")),
   "smithers-task-workflow-id-uniqueness": documentGate(smithersWorkflowIdentityIssues),
   "smithers-task-document-identity": documentGate(smithersDocumentIdentityIssues),
@@ -2108,6 +2216,7 @@ const gateSpecifications = {
   "strategy-detection-dedupe-key-uniqueness": documentGate(
     uniqueFieldGate([[]], "dedupe_key", "strategy detection dedupe key")
   ),
+  "strategy-detection-hit-identity-uniqueness": documentGate(strategyDetectionHitIdentityIssues),
   "triaged-finding-id-uniqueness": documentGate(uniqueFieldGate([[]], "id", "triaged finding ID")),
   "triaged-finding-evidence-span-consistency": documentGate(findingArrayEvidenceSpanIssues),
   "usage-ledger-event-order": contextualGate("runtime-state", ["usageLedger.entries"], usageEventOrderIssues),

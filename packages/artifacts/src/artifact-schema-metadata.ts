@@ -310,7 +310,12 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/severity-classified-findings@1",
     "severityClassifiedFindingsJsonSchema",
     "severityClassifiedFindingsSchema",
-    ["severity-finding-evidence-span-consistency", "severity-finding-id-uniqueness"]
+    [
+      "severity-finding-evidence-span-consistency",
+      "severity-finding-id-uniqueness",
+      "severity-classification-matrix",
+      "severity-classification-upstream-preservation"
+    ]
   ),
   "smithers-task-manifest.schema.json": runtime("smithersTaskManifestJsonSchema", undefined, [
     "smithers-task-attempt-id-uniqueness",
@@ -326,7 +331,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/strategy-detections@1",
     "strategyDetectionsJsonSchema",
     "strategyDetectionsSchema",
-    ["strategy-detection-dedupe-key-uniqueness"]
+    ["strategy-detection-dedupe-key-uniqueness", "strategy-detection-hit-identity-uniqueness"]
   ),
   "triaged-findings.schema.json": artifact(
     "ultrafuzz/triaged-findings@1",

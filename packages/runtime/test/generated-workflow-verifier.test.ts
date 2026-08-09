@@ -998,6 +998,22 @@ test("generated Smithers fails closed when a contextual gate lacks verified ance
   }
 });
 
+test("generated severity verification authenticates the triaged finding preservation context", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function semanticGateContextForVerifiedOutput");
+  const helperEnd = source.indexOf("\n\nfunction verifyOutputSemanticGates", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = source.slice(helperStart, helperEnd);
+
+  assert.match(helper, /output\.schemaFile === "severity-classified-findings\.schema\.json"/u);
+  assert.match(
+    helper,
+    /verifiedCurrentAncestorJsonArtifact\(\s*task,\s*"triage",\s*"triaged-findings\.json",\s*"ultrafuzz\/triaged-findings@1"\s*\)/u
+  );
+  assert.match(helper, /\{ triagedFindings: triagedFindings\.value \}/u);
+});
+
 test("generated Smithers workflow prepares output directories without creating agent-owned files", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const preparationStart = source.indexOf("function prepareArtifactMirror");

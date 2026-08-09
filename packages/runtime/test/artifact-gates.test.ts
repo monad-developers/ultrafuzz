@@ -454,6 +454,66 @@ test("host artifact validation executes document semantic gates without rewritin
   assert.deepEqual(fs.readFileSync(artifactPath), before);
 });
 
+test("severity classification gates preserve triaged fields and enforce the final matrix", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-severity-preservation" });
+  const upstream = currentFinding("finding-severity", {
+    triage_classification: "true-positive",
+    notes: ["triage_reason=production path is reachable"]
+  });
+  writeArtifact(layout, "triage", "triaged-findings.json", JSON.stringify([upstream]));
+
+  const classified = {
+    ...upstream,
+    severity: "Medium",
+    impact: "High",
+    likelihood: "Low",
+    impact_rationale: "The reachable path can lock assets.",
+    likelihood_rationale: "The path requires narrow timing.",
+    severity_rationale: "High impact x Low likelihood maps to Medium."
+  };
+  const classifiedPath = writeArtifact(
+    layout,
+    "severity-classification",
+    "severity-classified-findings.json",
+    JSON.stringify([classified])
+  );
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "severity-classification",
+    logical_id: "severity-classification",
+    depends_on: ["triage"],
+    artifact_dir: "artifacts/severity-classification",
+    outputs: [boundOutput("severity-classified-findings.json", "ultrafuzz/severity-classified-findings@1", true)]
+  };
+
+  const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  fs.writeFileSync(classifiedPath, JSON.stringify([{ ...classified, summary: "Rewritten downstream summary" }]));
+  const rewritten = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(rewritten.ok, false);
+  assert.ok(
+    rewritten.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "severity-classification-upstream-preservation"
+    ),
+    JSON.stringify(rewritten.diagnostics)
+  );
+
+  fs.writeFileSync(classifiedPath, JSON.stringify([{ ...classified, severity: "High" }]));
+  const wrongMatrix = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(wrongMatrix.ok, false);
+  assert.ok(
+    wrongMatrix.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "severity-classification-matrix"
+    ),
+    JSON.stringify(wrongMatrix.diagnostics)
+  );
+});
+
 test("sealed planned graph distinguishes an absent property track from a missing planned producer", () => {
   const absentLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-no-property-track" });
   const reportNode = {
