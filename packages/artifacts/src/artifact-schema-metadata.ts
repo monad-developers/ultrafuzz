@@ -61,6 +61,30 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "analysis-bundle-path-order",
     "analysis-bundle-file-digest"
   ]),
+  "analysis-bundle-accounting-summary.schema.json": runtime(
+    "analysisAccountingSummaryJsonSchema",
+    "analysisAccountingSummarySchema"
+  ),
+  "analysis-bundle-attempt-history.schema.json": runtime(
+    "analysisAttemptHistoryJsonSchema",
+    "analysisAttemptHistorySchema"
+  ),
+  "analysis-bundle-evaluation-metrics.schema.json": runtime(
+    "analysisEvaluationMetricsJsonSchema",
+    "analysisEvaluationMetricsSchema"
+  ),
+  "analysis-bundle-omissions.schema.json": runtime(
+    "analysisBundleOmissionsJsonSchema",
+    "analysisBundleOmissionsSchema"
+  ),
+  "analysis-bundle-recovery-summary.schema.json": runtime(
+    "analysisRecoverySummaryJsonSchema",
+    "analysisRecoverySummarySchema"
+  ),
+  "analysis-bundle-terminal-status.schema.json": runtime(
+    "analysisTerminalStatusJsonSchema",
+    "analysisTerminalStatusSchema"
+  ),
   "artifact-manifest.schema.json": runtime("artifactManifestJsonSchema", undefined, [
     "artifact-manifest-file-path-uniqueness",
     "artifact-manifest-output-path-uniqueness",

@@ -6,13 +6,26 @@ import { z } from "zod/v4";
 
 import { canonicalTimestampSchema } from "./portable-json-primitives.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
-import { readRegularFileSnapshot } from "./schema-registry.js";
+import { artifactSchemaDirectory, readRegularFileSnapshot } from "./schema-registry.js";
 import { assertRegularFileInside, listSafeFiles, safeResolveInside, sha256Bytes, sha256File } from "./safe-paths.js";
 import { executeSemanticGate } from "./semantic-gates.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
 export const ANALYSIS_BUNDLE_SCHEMA_VERSION = "ultrafuzz.analysis-bundle.v1" as const;
 export const ANALYSIS_BUNDLE_POLICY_VERSION = "ultrafuzz.analysis-bundle-policy.v1" as const;
+export const ANALYSIS_BUNDLE_MANIFEST_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:analysis-bundle:1" as const;
+export const ANALYSIS_BUNDLE_TERMINAL_STATUS_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:artifacts:analysis-bundle-terminal-status:1" as const;
+export const ANALYSIS_BUNDLE_EVALUATION_METRICS_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:artifacts:analysis-bundle-evaluation-metrics:1" as const;
+export const ANALYSIS_BUNDLE_ACCOUNTING_SUMMARY_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:artifacts:analysis-bundle-accounting-summary:1" as const;
+export const ANALYSIS_BUNDLE_ATTEMPT_HISTORY_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:artifacts:analysis-bundle-attempt-history:1" as const;
+export const ANALYSIS_BUNDLE_RECOVERY_SUMMARY_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:artifacts:analysis-bundle-recovery-summary:1" as const;
+export const ANALYSIS_BUNDLE_OMISSIONS_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:artifacts:analysis-bundle-omissions:1" as const;
 export const ANALYSIS_BUNDLE_MANIFEST_FILE = "analysis-bundle.json" as const;
 export const ANALYSIS_BUNDLE_OMISSIONS_FILE = "omissions.json" as const;
 
@@ -466,7 +479,7 @@ const analysisBundleFilesJsonSchema = {
 
 export const analysisBundleManifestJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: "urn:ultrafuzz:schema:artifacts:analysis-bundle:1",
+  $id: ANALYSIS_BUNDLE_MANIFEST_JSON_SCHEMA_ID,
   title: "Ultrafuzz privacy-safe analysis bundle manifest",
   type: "object",
   required: ["schema_version", "policy_version", "files"],
@@ -477,6 +490,44 @@ export const analysisBundleManifestJsonSchema = {
     files: analysisBundleFilesJsonSchema
   }
 } as const;
+
+export const analysisTerminalStatusJsonSchema = loadAnalysisBundleSchemaDocument(
+  "analysis-bundle-terminal-status.schema.json",
+  ANALYSIS_BUNDLE_TERMINAL_STATUS_JSON_SCHEMA_ID
+);
+export const analysisEvaluationMetricsJsonSchema = loadAnalysisBundleSchemaDocument(
+  "analysis-bundle-evaluation-metrics.schema.json",
+  ANALYSIS_BUNDLE_EVALUATION_METRICS_JSON_SCHEMA_ID
+);
+export const analysisAccountingSummaryJsonSchema = loadAnalysisBundleSchemaDocument(
+  "analysis-bundle-accounting-summary.schema.json",
+  ANALYSIS_BUNDLE_ACCOUNTING_SUMMARY_JSON_SCHEMA_ID
+);
+export const analysisAttemptHistoryJsonSchema = loadAnalysisBundleSchemaDocument(
+  "analysis-bundle-attempt-history.schema.json",
+  ANALYSIS_BUNDLE_ATTEMPT_HISTORY_JSON_SCHEMA_ID
+);
+export const analysisRecoverySummaryJsonSchema = loadAnalysisBundleSchemaDocument(
+  "analysis-bundle-recovery-summary.schema.json",
+  ANALYSIS_BUNDLE_RECOVERY_SUMMARY_JSON_SCHEMA_ID
+);
+export const analysisBundleOmissionsJsonSchema = loadAnalysisBundleSchemaDocument(
+  "analysis-bundle-omissions.schema.json",
+  ANALYSIS_BUNDLE_OMISSIONS_JSON_SCHEMA_ID
+);
+
+function loadAnalysisBundleSchemaDocument(filename: string, expectedId: string): Readonly<Record<string, unknown>> {
+  const schemaPath = path.join(artifactSchemaDirectory(), filename);
+  const parsed = parseStrictJsonBytes(readRegularFileSnapshot(schemaPath, 1024 * 1024));
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`analysis bundle schema must be an object: ${filename}`);
+  }
+  const document = parsed as Readonly<Record<string, unknown>>;
+  if (document.$id !== expectedId) {
+    throw new Error(`analysis bundle schema has an invalid identity: ${filename}`);
+  }
+  return document;
+}
 
 function analysisBundleFileEntryJsonSchema(kind: AnalysisBundleFileKind, relativePath: string): object {
   return {
