@@ -686,7 +686,7 @@
             "attempts": {
               "type": "array",
               "items": {
-                "$ref": "urn:ultrafuzz:schema:artifacts:run-state:3#/properties/nodes/additionalProperties"
+                "$ref": "urn:ultrafuzz:schema:artifacts:run-state:4#/properties/nodes/additionalProperties"
               }
             }
           }
