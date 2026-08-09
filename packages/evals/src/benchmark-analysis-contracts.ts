@@ -106,7 +106,7 @@ export interface BenchmarkFindingProvenance {
   title: string;
   source_strategies: string[];
   classification: BenchmarkClassification;
-  matched_source: string | null;
+  matched_source: "canonical-ground-truth" | null;
   matched_candidate_id: string | null;
   matched_identity: string | null;
   ground_truth_label: string | null;

@@ -1,5 +1,12 @@
 import {
+  EVAL_ADJUDICATION_HANDOFF_SCHEMA_ID,
+  EVAL_BENCHMARK_ANALYSIS_MANIFEST_SCHEMA_ID,
+  EVAL_BENCHMARK_PROVENANCE_SCHEMA_ID,
+  EVAL_BENCHMARK_SOURCE_MANIFEST_SCHEMA_ID,
   EVAL_FINDING_SCORE_SCHEMA_ID,
+  EVAL_FINDING_MANIFEST_SCHEMA_ID,
+  EVAL_GROUND_TRUTH_CREDITS_SCHEMA_ID,
+  EVAL_INSTANCE_CLUSTERS_SCHEMA_ID,
   EVAL_MATRIX_SCHEMA_ID,
   EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID,
   EVAL_RUN_MANIFEST_SCHEMA_ID,
@@ -8,6 +15,16 @@ import {
   EVAL_SCORE_SUMMARY_SCHEMA_ID,
   evalSchemaRegistry
 } from "./eval-schema-registry.js";
+import type {
+  AdjudicationHandoff,
+  BenchmarkAnalysisManifest,
+  BenchmarkFindingManifest,
+  BenchmarkGroundTruthCredits,
+  BenchmarkInstanceCluster,
+  BenchmarkInstanceClusters,
+  BenchmarkProvenance,
+  BenchmarkSourceManifest
+} from "./benchmark-analysis-contracts.js";
 import type {
   EvalFindingScore,
   EvalMatrixRow,
@@ -37,7 +54,14 @@ export interface EvalRecoveryEquivalenceSemanticIssue {
 type EvalSemanticGate = (value: unknown) => EvalSemanticGateIssue[];
 
 const gateHandlers: Readonly<Record<string, EvalSemanticGate>> = Object.freeze({
+  "eval-adjudication-handoff-canonical-path": adjudicationHandoffCanonicalPath,
+  "eval-benchmark-analysis-manifest-identity-joins": benchmarkAnalysisManifestIdentityJoins,
+  "eval-benchmark-provenance-identity-joins": benchmarkProvenanceIdentityJoins,
+  "eval-benchmark-source-manifest-identity-joins": benchmarkSourceManifestIdentityJoins,
   "eval-finding-score-decision-coupling": findingScoreDecisionCoupling,
+  "eval-finding-manifest-identity-joins": findingManifestIdentityJoins,
+  "eval-ground-truth-credits-identity-joins": groundTruthCreditsIdentityJoins,
+  "eval-instance-clusters-identity-joins": instanceClustersIdentityJoins,
   "eval-matrix-identity-joins": matrixIdentityJoins,
   "eval-review-queue-decision-coupling": reviewQueueDecisionCoupling,
   [EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE]: recoveryEquivalenceCoupling,
@@ -50,7 +74,14 @@ const gateHandlers: Readonly<Record<string, EvalSemanticGate>> = Object.freeze({
 });
 
 const gatesBySchema: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  [EVAL_ADJUDICATION_HANDOFF_SCHEMA_ID]: ["eval-adjudication-handoff-canonical-path"],
+  [EVAL_BENCHMARK_ANALYSIS_MANIFEST_SCHEMA_ID]: ["eval-benchmark-analysis-manifest-identity-joins"],
+  [EVAL_BENCHMARK_PROVENANCE_SCHEMA_ID]: ["eval-benchmark-provenance-identity-joins"],
+  [EVAL_BENCHMARK_SOURCE_MANIFEST_SCHEMA_ID]: ["eval-benchmark-source-manifest-identity-joins"],
   [EVAL_FINDING_SCORE_SCHEMA_ID]: ["eval-finding-score-decision-coupling"],
+  [EVAL_FINDING_MANIFEST_SCHEMA_ID]: ["eval-finding-manifest-identity-joins"],
+  [EVAL_GROUND_TRUTH_CREDITS_SCHEMA_ID]: ["eval-ground-truth-credits-identity-joins"],
+  [EVAL_INSTANCE_CLUSTERS_SCHEMA_ID]: ["eval-instance-clusters-identity-joins"],
   [EVAL_MATRIX_SCHEMA_ID]: ["eval-matrix-identity-joins"],
   [EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID]: ["eval-review-queue-decision-coupling"],
   [EVAL_RUN_MANIFEST_SCHEMA_ID]: ["eval-run-manifest-suite-joins"],
@@ -98,6 +129,356 @@ export function assertEvalSemanticGateRegistry(): void {
       `eval semantic gate registry mismatch${unknown.length === 0 ? "" : `; unknown: ${unknown.join(", ")}`}${unregistered.length === 0 ? "" : `; unregistered: ${unregistered.join(", ")}`}${scopeMismatch.length === 0 ? "" : `; scope: ${scopeMismatch.join(", ")}`}`
     );
   }
+}
+
+function adjudicationHandoffCanonicalPath(value: unknown): EvalSemanticGateIssue[] {
+  const handoff = value as AdjudicationHandoff;
+  const segments = handoff.provenance.outputPath.split("/");
+  return segments.some((segment) => segment === "." || segment === "..")
+    ? [
+        issue(
+          "eval-adjudication-handoff-canonical-path",
+          "$.provenance.outputPath",
+          "outputPath must not contain dot path segments"
+        )
+      ]
+    : [];
+}
+
+function findingManifestIdentityJoins(value: unknown): EvalSemanticGateIssue[] {
+  const manifest = value as BenchmarkFindingManifest;
+  const gate = "eval-finding-manifest-identity-joins";
+  const issues: EvalSemanticGateIssue[] = [
+    ...uniqueFieldIssues(manifest.rows, (row) => row.rowId, "$.rows", "row ID", gate),
+    ...uniqueFieldIssues(manifest.rows, (row) => row.order, "$.rows", "row order", gate),
+    ...uniqueFieldIssues(manifest.rows, (row) => row.rowArchivePath, "$.rows", "row archive path", gate),
+    ...uniqueFieldIssues(manifest.rows, (row) => row.runMetadataPath, "$.rows", "run metadata path", gate),
+    ...uniqueFieldIssues(manifest.rows, (row) => row.runId, "$.rows", "run ID", gate),
+    ...uniqueFieldIssues(
+      manifest.candidateCatalog,
+      (candidate) => candidate.candidateId,
+      "$.candidateCatalog",
+      "candidate ID",
+      gate
+    ),
+    ...uniqueFieldIssues(
+      manifest.candidateCatalog,
+      (candidate) => candidate.label,
+      "$.candidateCatalog",
+      "candidate label",
+      gate
+    ),
+    ...uniqueFieldIssues(
+      manifest.findingInstances,
+      (finding) => finding.findingInstanceId,
+      "$.findingInstances",
+      "finding instance ID",
+      gate
+    ),
+    ...uniqueFieldIssues(
+      manifest.findingInstances,
+      (finding) => `${finding.rowId}\0${finding.issueIndex}`,
+      "$.findingInstances",
+      "row/issue index",
+      gate
+    ),
+    ...uniqueFieldIssues(
+      manifest.findingInstances,
+      (finding) => `${finding.rowId}\0${finding.findingId}`,
+      "$.findingInstances",
+      "row/finding ID",
+      gate
+    )
+  ];
+  const rowIds = new Set(manifest.rows.map((row) => row.rowId));
+  const findingCounts = new Map<string, number>();
+  manifest.findingInstances.forEach((finding, index) => {
+    findingCounts.set(finding.rowId, (findingCounts.get(finding.rowId) ?? 0) + 1);
+    if (!rowIds.has(finding.rowId)) {
+      issues.push(
+        issue(gate, `$.findingInstances[${index}].rowId`, `references unknown row ${JSON.stringify(finding.rowId)}`)
+      );
+    }
+  });
+  manifest.rows.forEach((row, index) => {
+    const actual = findingCounts.get(row.rowId) ?? 0;
+    if (actual !== row.findingCount) {
+      issues.push(
+        issue(gate, `$.rows[${index}].findingCount`, `must equal the ${actual} finding instances joined to this row`)
+      );
+    }
+  });
+  return issues;
+}
+
+function instanceClustersIdentityJoins(value: unknown): EvalSemanticGateIssue[] {
+  const document = value as BenchmarkInstanceClusters;
+  const gate = "eval-instance-clusters-identity-joins";
+  const issues: EvalSemanticGateIssue[] = [
+    ...uniqueFieldIssues(
+      document.instances,
+      (instance) => instance.findingInstanceId,
+      "$.instances",
+      "finding instance ID",
+      gate
+    ),
+    ...uniqueFieldIssues(
+      document.instances,
+      (instance) => `${instance.rowId}\0${instance.issueIndex}`,
+      "$.instances",
+      "row/issue index",
+      gate
+    )
+  ];
+  const instances = new Map(document.instances.map((instance) => [instance.findingInstanceId, instance]));
+  document.instances.forEach((instance, index) => {
+    if (instance.duplicateOfFindingInstanceId === null) return;
+    const target = instances.get(instance.duplicateOfFindingInstanceId);
+    const path = `$.instances[${index}].duplicateOfFindingInstanceId`;
+    if (target === undefined) {
+      issues.push(
+        issue(
+          gate,
+          path,
+          `references unknown finding instance ${JSON.stringify(instance.duplicateOfFindingInstanceId)}`
+        )
+      );
+      return;
+    }
+    if (target.findingInstanceId === instance.findingInstanceId) {
+      issues.push(issue(gate, path, "cannot reference the same finding instance"));
+      return;
+    }
+    for (const [field, observed, expected] of [
+      ["rowId", target.rowId, instance.rowId],
+      ["rootCauseClusterId", target.rootCauseClusterId, instance.rootCauseClusterId],
+      ["instanceClassification", target.instanceClassification, instance.instanceClassification]
+    ] as const) {
+      if (observed !== expected) {
+        issues.push(issue(gate, path, `target ${field} must equal ${JSON.stringify(expected)}`));
+      }
+    }
+  });
+  issues.push(...duplicateCycleIssues(document.instances, gate));
+  return issues;
+}
+
+function duplicateCycleIssues(instances: readonly BenchmarkInstanceCluster[], gate: string): EvalSemanticGateIssue[] {
+  const byId = new Map(instances.map((instance, index) => [instance.findingInstanceId, { instance, index }]));
+  const complete = new Set<string>();
+  const issues: EvalSemanticGateIssue[] = [];
+  for (const start of byId.keys()) {
+    if (complete.has(start)) continue;
+    const chain: string[] = [];
+    const positions = new Map<string, number>();
+    let current: string | null = start;
+    while (current !== null && byId.has(current) && !complete.has(current)) {
+      const cycleStart = positions.get(current);
+      if (cycleStart !== undefined) {
+        for (const id of chain.slice(cycleStart)) {
+          const index = byId.get(id)!.index;
+          issues.push(
+            issue(
+              gate,
+              `$.instances[${index}].duplicateOfFindingInstanceId`,
+              "duplicate references must not contain a cycle"
+            )
+          );
+        }
+        break;
+      }
+      positions.set(current, chain.length);
+      chain.push(current);
+      current = byId.get(current)!.instance.duplicateOfFindingInstanceId;
+    }
+    chain.forEach((id) => complete.add(id));
+  }
+  return issues;
+}
+
+function groundTruthCreditsIdentityJoins(value: unknown): EvalSemanticGateIssue[] {
+  const credits = value as BenchmarkGroundTruthCredits;
+  return uniqueFieldIssues(
+    credits.clusters,
+    (cluster) => cluster.rootCauseClusterId,
+    "$.clusters",
+    "root-cause cluster ID",
+    "eval-ground-truth-credits-identity-joins"
+  );
+}
+
+function benchmarkProvenanceIdentityJoins(value: unknown): EvalSemanticGateIssue[] {
+  const provenance = value as BenchmarkProvenance;
+  const gate = "eval-benchmark-provenance-identity-joins";
+  const issues: EvalSemanticGateIssue[] = [
+    ...uniqueFieldIssues(
+      provenance.finding_instances,
+      (finding) => finding.finding_instance_id,
+      "$.finding_instances",
+      "finding instance ID",
+      gate
+    ),
+    ...uniqueFieldIssues(
+      provenance.finding_instances,
+      (finding) => finding.qualified_id,
+      "$.finding_instances",
+      "qualified finding ID",
+      gate
+    ),
+    ...uniqueFieldIssues(
+      provenance.finding_instances,
+      (finding) => `${finding.row_id}\0${finding.finding_id}`,
+      "$.finding_instances",
+      "row/finding ID",
+      gate
+    ),
+    ...uniqueFieldIssues(
+      provenance.root_cause_entities,
+      (entity) => entity.root_cause_cluster_id,
+      "$.root_cause_entities",
+      "root-cause cluster ID",
+      gate
+    ),
+    ...uniqueFieldIssues(provenance.row_statuses, (row) => row.rowId, "$.row_statuses", "row ID", gate)
+  ];
+  const rowStatuses = new Map(provenance.row_statuses.map((row) => [row.rowId, row]));
+  const entityById = new Map(provenance.root_cause_entities.map((entity) => [entity.root_cause_cluster_id, entity]));
+  const findingsByEntity = new Map<string, typeof provenance.finding_instances>();
+  provenance.finding_instances.forEach((finding, index) => {
+    if (finding.qualified_id !== `${finding.row_id}:${finding.finding_id}`) {
+      issues.push(
+        issue(gate, `$.finding_instances[${index}].qualified_id`, "must equal row_id plus ':' plus finding_id")
+      );
+    }
+    const status = rowStatuses.get(finding.row_id);
+    if (status === undefined) {
+      issues.push(
+        issue(
+          gate,
+          `$.finding_instances[${index}].row_id`,
+          `references unknown row status ${JSON.stringify(finding.row_id)}`
+        )
+      );
+    } else if (status.condition !== finding.condition) {
+      issues.push(issue(gate, `$.finding_instances[${index}].condition`, "must equal the joined row status condition"));
+    }
+    if (!entityById.has(finding.root_cause_cluster_id)) {
+      issues.push(
+        issue(
+          gate,
+          `$.finding_instances[${index}].root_cause_cluster_id`,
+          `references unknown root-cause entity ${JSON.stringify(finding.root_cause_cluster_id)}`
+        )
+      );
+    }
+    const members = findingsByEntity.get(finding.root_cause_cluster_id) ?? [];
+    findingsByEntity.set(finding.root_cause_cluster_id, [...members, finding]);
+    issues.push(...benchmarkFindingMatchIssues(finding, index, gate));
+  });
+  provenance.root_cause_entities.forEach((entity, index) => {
+    const members = findingsByEntity.get(entity.root_cause_cluster_id) ?? [];
+    const basePath = `$.root_cause_entities[${index}]`;
+    const memberRows = uniqueSorted(members.map((member) => member.row_id));
+    const qualifiedFindings = uniqueSorted(members.map((member) => member.qualified_id));
+    if (!sameStringSet(entity.rows, memberRows)) {
+      issues.push(issue(gate, `${basePath}.rows`, "must equal the rows projected from joined finding instances"));
+    }
+    if (entity.row_count !== entity.rows.length) {
+      issues.push(issue(gate, `${basePath}.row_count`, "must equal rows.length"));
+    }
+    if (entity.detection_count !== members.length) {
+      issues.push(issue(gate, `${basePath}.detection_count`, "must equal the joined finding instance count"));
+    }
+    if (!sameStringSet(entity.qualified_findings, qualifiedFindings)) {
+      issues.push(
+        issue(
+          gate,
+          `${basePath}.qualified_findings`,
+          "must equal the qualified IDs projected from joined finding instances"
+        )
+      );
+    }
+    const classifications = new Set(members.map((member) => member.classification));
+    if (members.length === 0 || classifications.size !== 1 || !classifications.has(entity.classification)) {
+      issues.push(issue(gate, `${basePath}.classification`, "must equal one unanimous joined finding classification"));
+    }
+    const credits = new Set(members.map((member) => member.ground_truth_tp_credits));
+    if (members.length === 0 || credits.size !== 1 || !credits.has(entity.ground_truth_tp_credits)) {
+      issues.push(issue(gate, `${basePath}.ground_truth_tp_credits`, "must equal joined finding credits"));
+    }
+    const topSeverity = topBenchmarkSeverity(members.map((member) => member.severity));
+    if (topSeverity === null || entity.top_severity !== topSeverity) {
+      issues.push(issue(gate, `${basePath}.top_severity`, "must equal the highest joined finding severity"));
+    }
+  });
+  return issues;
+}
+
+function benchmarkFindingMatchIssues(
+  finding: BenchmarkProvenance["finding_instances"][number],
+  index: number,
+  gate: string
+): EvalSemanticGateIssue[] {
+  const path = `$.finding_instances[${index}]`;
+  const matchValues = [
+    finding.matched_source,
+    finding.matched_identity,
+    finding.ground_truth_label,
+    finding.ground_truth_title
+  ];
+  if (finding.matched_candidate_id === null && matchValues.some((item) => item !== null)) {
+    return [issue(gate, `${path}.matched_candidate_id`, "null candidate IDs require every matched field to be null")];
+  }
+  if (
+    finding.matched_candidate_id !== null &&
+    (finding.matched_source !== "canonical-ground-truth" || matchValues.some((item) => item === null))
+  ) {
+    return [
+      issue(
+        gate,
+        `${path}.matched_candidate_id`,
+        "matched candidate IDs require canonical source, identity, label, and title"
+      )
+    ];
+  }
+  return [];
+}
+
+function benchmarkSourceManifestIdentityJoins(value: unknown): EvalSemanticGateIssue[] {
+  const manifest = value as BenchmarkSourceManifest;
+  const gate = "eval-benchmark-source-manifest-identity-joins";
+  return [
+    ...uniqueFieldIssues(manifest.rows, (row) => row.row_id, "$.rows", "row ID", gate),
+    ...uniqueFieldIssues(manifest.rows, (row) => row.order, "$.rows", "row order", gate)
+  ];
+}
+
+function benchmarkAnalysisManifestIdentityJoins(value: unknown): EvalSemanticGateIssue[] {
+  const manifest = value as BenchmarkAnalysisManifest;
+  return uniqueFieldIssues(
+    manifest.artifacts,
+    (artifact) => artifact.path,
+    "$.artifacts",
+    "artifact path",
+    "eval-benchmark-analysis-manifest-identity-joins"
+  );
+}
+
+function uniqueSorted(values: readonly string[]): string[] {
+  return [...new Set(values)].sort();
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  const sortedLeft = uniqueSorted(left);
+  const sortedRight = uniqueSorted(right);
+  return sortedLeft.length === sortedRight.length && sortedLeft.every((value, index) => value === sortedRight[index]);
+}
+
+function topBenchmarkSeverity(values: readonly ("H" | "M" | "L")[]): "H" | "M" | "L" | null {
+  for (const severity of ["H", "M", "L"] as const) {
+    if (values.includes(severity)) return severity;
+  }
+  return null;
 }
 
 /**
@@ -673,12 +1054,12 @@ function expansionIssues(expansion: EvalRunExpansion, path: string, gate: string
 
 function uniqueFieldIssues<T>(
   values: readonly T[],
-  select: (value: T) => string,
+  select: (value: T) => string | number,
   path: string,
   label: string,
   gate: string
 ): EvalSemanticGateIssue[] {
-  const seen = new Set<string>();
+  const seen = new Set<string | number>();
   const issues: EvalSemanticGateIssue[] = [];
   values.forEach((value, index) => {
     const key = select(value);

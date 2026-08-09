@@ -82,7 +82,9 @@
           "items": { "$ref": "#/$defs/nonEmptyString" }
         },
         "classification": { "$ref": "#/$defs/classification" },
-        "matched_source": { "$ref": "#/$defs/nullableString" },
+        "matched_source": {
+          "oneOf": [{ "const": "canonical-ground-truth" }, { "type": "null" }]
+        },
         "matched_candidate_id": { "$ref": "#/$defs/nullableString" },
         "matched_identity": { "$ref": "#/$defs/nullableString" },
         "ground_truth_label": { "$ref": "#/$defs/nullableString" },
