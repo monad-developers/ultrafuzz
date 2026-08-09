@@ -768,6 +768,19 @@ describe("Modal result collection", () => {
         ["opaque-secret-that-is-not-pattern-shaped"]
       )
     ).toThrow(/unsanitized Modal worker log/u);
+    const duplicateKeyPayload = Buffer.from(
+      '[{"code":"WORKFLOW_SUBMISSION_FAILED","message":"first","message":"shadowed"}]',
+      "utf8"
+    ).toString("base64url");
+    expect(() =>
+      assertSanitizedModalCollectedFiles(
+        {
+          ...files,
+          "worker.log": `2026-01-01T00:00:00.000Z eval-failure-diagnostics ${duplicateKeyPayload}\n`
+        },
+        context
+      )
+    ).toThrow(/unsanitized Modal worker log/u);
   });
 
   it("rejects the removed worker-status shape without retrying", async () => {

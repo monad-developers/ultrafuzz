@@ -1262,7 +1262,7 @@ export function publicEvalFailureDiagnosticLogPayload(
 ): string | undefined {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stdout) as unknown;
+    parsed = parseStrictJsonBytes(Buffer.from(stdout, "utf8"));
   } catch {
     return undefined;
   }

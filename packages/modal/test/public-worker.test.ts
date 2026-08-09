@@ -1019,6 +1019,12 @@ it("publishes only bounded redacted workflow-submission messages from eval JSON"
   expect(JSON.stringify(decoded)).not.toContain(secret);
   expect(JSON.stringify(decoded)).not.toContain("details");
   expect(publicEvalFailureDiagnosticLogPayload("not json", [secret])).toBeUndefined();
+  expect(
+    publicEvalFailureDiagnosticLogPayload(
+      '{"diagnostics":[],"diagnostics":[{"code":"WORKFLOW_SUBMISSION_FAILED","message":"shadowed"}]}',
+      []
+    )
+  ).toBeUndefined();
 
   const longPayload = publicEvalFailureDiagnosticLogPayload(
     JSON.stringify({

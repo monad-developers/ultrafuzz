@@ -3492,7 +3492,7 @@ function isGenericWorkerLifecycleLine(line: string, forbiddenSecretValues: reado
   );
   if (match === null) return false;
   try {
-    const value = JSON.parse(Buffer.from(match[1]!, "base64url").toString("utf8")) as unknown;
+    const value = parseStrictJsonBytes(Buffer.from(match[1]!, "base64url"));
     return (
       Array.isArray(value) &&
       value.length >= 1 &&
