@@ -247,6 +247,13 @@ ultrafuzz eval publish   # post-hoc replay of a recorded run to a provider
 
 The public cohort and lane manifests under `benchmarks/` adapt EVMbench detect
 and the canonical Ultrafuzz benchmark cohort into the same eval-suite types.
+Each cohort family has its own registered whole-document JSON Schema. The lane
+policy is current-only `ultrafuzz.benchmark.lanes.v2`; v1 is not read or
+converted. All three documents are accepted by the canonical JSON Schema
+validator before their retained, non-transforming Zod parsers run. Cohort
+identity joins and the pinned lane policy remain explicit named semantic gates.
+Lane trial counts are required authored fields—omitting
+`trials_per_variant` is invalid and never supplies a default.
 The bounded smoke lane selects the three Foundry, Hardhat, and Vyper
 Ultrafuzz-bench targets and pins GPT-5.6 Luna `high` for bug-finding. It uses
 `benchmarks/smoke-benchmark.yml` instead of filtering the production topology:
@@ -259,7 +266,7 @@ strategy families. The full lane selects every checked-in EVMBench target, pins
 GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, Kimi K3 `max`, and DeepSeek V4 Pro
 `max`, sets the same
 one strategy loop, and explicitly leaves all three disable flags off so the
-complete topology is included. Both default to one trial per variant and use
+complete topology is included. Both currently declare one trial per variant and use
 GPT-5.6 Sol `xhigh` as an independent judge. Public Modal pairs contain one
 runner variant. Repository variables may override the smoke OpenAI model and
 reasoning level, while full workflow dispatch inputs may override any full-lane
