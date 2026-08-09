@@ -7,6 +7,17 @@ import { promisify } from "node:util";
 export const PINNED_SOURCE_BRANCH = "ultrafuzz-pinned" as const;
 export const PINNED_SOURCE_REF = `refs/heads/${PINNED_SOURCE_BRANCH}` as const;
 export const PINNED_SOURCE_PROOF_SCHEMA_VERSION = "ultrafuzz.pinned-source-proof.v1" as const;
+/**
+ * Keep this command-scoped: Git propagates `-c` configuration to the child
+ * processes used by recursive submodule updates without persisting a rewrite
+ * or credential-bearing remote in the materialized checkout.
+ */
+export const GITHUB_HTTPS_SUBMODULE_CONFIG = [
+  "-c",
+  "url.https://github.com/.insteadOf=git@github.com:",
+  "-c",
+  "url.https://github.com/.insteadOf=ssh://git@github.com/"
+] as const;
 
 const fullSha = /^[0-9a-f]{40}$/u;
 const execFileAsync = promisify(execFile);
@@ -69,8 +80,12 @@ export async function materializePinnedSource(input: {
     if (await containsGitlinks(destination, input.signal)) {
       await git(destination, ["remote", "add", "origin", input.repository], input.signal);
       try {
-        await git(destination, ["submodule", "sync", "--recursive"], input.signal);
-        await git(destination, ["submodule", "update", "--init", "--recursive", "--depth", "1"], input.signal);
+        await git(destination, [...GITHUB_HTTPS_SUBMODULE_CONFIG, "submodule", "sync", "--recursive"], input.signal);
+        await git(
+          destination,
+          [...GITHUB_HTTPS_SUBMODULE_CONFIG, "submodule", "update", "--init", "--recursive", "--depth", "1"],
+          input.signal
+        );
       } finally {
         await git(destination, ["remote", "remove", "origin"], input.signal).catch(() => undefined);
       }
