@@ -1,19 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { readRunState, writeFileDurable, type RunState } from "@ultrafuzz/artifacts";
+import { readPlannedGraphDocument, readRunState, writeFileDurable, type RunState } from "@ultrafuzz/artifacts";
 import type { EvalConfig, RuntimeConfigOverrides } from "@ultrafuzz/config";
 import { startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { BENCHMARK_SMOKE_WORKFLOW_PROFILE } from "./benchmark-manifest.js";
 import { evalWorkflowLifecycle, isTerminalWorkflowStatus } from "./efficiency.js";
-import {
-  appendEvalRunRecord,
-  readStrictJsonDocument,
-  writeEvalMatrix,
-  writeEvalRunManifest,
-  writeEvalRunSummary
-} from "./eval-durable.js";
+import { appendEvalRunRecord, writeEvalMatrix, writeEvalRunManifest, writeEvalRunSummary } from "./eval-durable.js";
 import { evalRunExpansion } from "./expansion.js";
 import { NodeTelemetryPump } from "./node-telemetry.js";
 import {
@@ -584,7 +578,15 @@ const defaultRowSync: RowSync = async (input) => {
 
 function readGraph(runRoot: string): unknown {
   const graphPath = path.join(runRoot, "graph.json");
-  return fs.existsSync(graphPath) ? readStrictJsonDocument(graphPath) : undefined;
+  try {
+    fs.lstatSync(graphPath);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+  return readPlannedGraphDocument(graphPath);
 }
 
 function readStateSafe(runRoot: string): RunState | undefined {

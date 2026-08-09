@@ -1,8 +1,8 @@
-import type { ArtifactManifestEntry } from "@ultrafuzz/artifacts";
+import { assertPlannedGraph, type ArtifactManifestEntry } from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import type { EvalMatrixRow, EvalPlanValue, EvalRecoveryEquivalence, EvalRowScore, EvalScoreSummary } from "./types.js";
-import { isRecord, warningDiagnostic } from "./utils.js";
+import { warningDiagnostic } from "./utils.js";
 
 /** The plan handed to reporters is the local plan value — providers never shape it. */
 export type EvalPlan = EvalPlanValue;
@@ -104,55 +104,38 @@ const guardedReporterTargets = new WeakMap<EvalReporter, EvalReporter>();
 
 /**
  * Build the provider-facing row graph from a run's graph.json (PlannedGraph).
- * Tolerant by design: unknown shapes degrade to an empty node list rather than
- * failing telemetry for the whole row.
+ * An absent graph is allowed while a detached run is still planning. Once a
+ * graph is present, telemetry observes the canonical contract without repair.
  */
 export function graphFromPlannedGraph(graph: unknown, rowId: string): EvalRowGraph {
-  if (!isRecord(graph) || !Array.isArray(graph.nodes)) {
+  if (graph === undefined) {
     return { rowId, nodes: [] };
   }
-  const groupNames = isRecord(graph.groups) ? Object.keys(graph.groups) : [];
-  const nodes: EvalRowGraph["nodes"] = [];
-  for (const candidate of graph.nodes) {
-    if (!isRecord(candidate) || typeof candidate.id !== "string") {
-      continue;
-    }
-    const logicalId = typeof candidate.logical_id === "string" ? candidate.logical_id : candidate.id;
-    const fanout = Array.isArray(candidate.model_fanout) ? candidate.model_fanout[0] : undefined;
-    const loop = isRecord(candidate.loop) ? candidate.loop : undefined;
-    nodes.push({
-      id: candidate.id,
-      logicalId,
-      kind: normalizeKind(candidate.kind),
-      group: resolveGroup(candidate, logicalId, groupNames),
-      dependsOn: Array.isArray(candidate.depends_on)
-        ? candidate.depends_on.filter((entry): entry is string => typeof entry === "string")
-        : [],
-      ...(isRecord(fanout) && typeof fanout.model_profile_id === "string"
-        ? { modelProfileId: fanout.model_profile_id }
-        : {}),
-      ...(isRecord(fanout) && typeof fanout.model_name === "string" ? { model: fanout.model_name } : {}),
-      ...(loop && typeof loop.index === "number" ? { loopIndex: loop.index } : {})
-    });
-  }
-  return { rowId, nodes };
+  const planned = assertPlannedGraph(graph);
+  const groupNames = Object.keys(planned.groups);
+  return {
+    rowId,
+    nodes: planned.nodes.map((node) => {
+      const fanout = node.model_fanout[0];
+      return {
+        id: node.id,
+        logicalId: node.logical_id,
+        kind: node.kind,
+        group: resolveGroup(node.logical_id, groupNames),
+        dependsOn: [...node.depends_on],
+        ...(fanout === undefined ? {} : { modelProfileId: fanout.model_profile_id }),
+        ...(fanout?.model_name === undefined ? {} : { model: fanout.model_name }),
+        loopIndex: node.loop.index
+      };
+    })
+  };
 }
 
 export function groupsInGraph(graph: EvalRowGraph): string[] {
   return [...new Set(graph.nodes.map((node) => node.group))].sort();
 }
 
-function normalizeKind(kind: unknown): "agentic" | "meta" | "reference" {
-  if (kind === "meta" || kind === "reference") {
-    return kind;
-  }
-  return "agentic";
-}
-
-function resolveGroup(candidate: Record<string, unknown>, logicalId: string, groupNames: string[]): string {
-  if (typeof candidate.group === "string" && candidate.group.length > 0) {
-    return candidate.group;
-  }
+function resolveGroup(logicalId: string, groupNames: string[]): string {
   for (const names of [groupNames, KNOWN_GROUPS]) {
     for (const name of names) {
       if (logicalId === name || logicalId.startsWith(`${name}-`) || logicalId.startsWith(`${name}.`)) {

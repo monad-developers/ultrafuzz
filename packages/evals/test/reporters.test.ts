@@ -13,6 +13,7 @@ import { EvalError } from "../src/utils.js";
 import type { EvalRunProvenance, EvalScoreSummary } from "../src/types.js";
 import {
   cleanRecoveryEquivalence,
+  currentPlannedGraph,
   currentRowScore,
   recoveryEquivalenceSummary,
   testReportingPolicy,
@@ -181,30 +182,26 @@ describe("provider transport", () => {
 
 describe("graphFromPlannedGraph", () => {
   it("maps planned nodes into the provider row graph with group inference", () => {
-    const graph = graphFromPlannedGraph(
-      {
-        schema_version: "1.0",
-        groups: { setup: {}, strategies: {} },
-        nodes: [
-          {
-            id: "setup-1-a1",
-            logical_id: "setup-1",
-            kind: "agentic",
-            depends_on: [],
-            loop: { index: 0, count: 1 },
-            model_fanout: [{ model_profile_id: "eval-runner", model_name: "gpt-5.4-mini" }]
-          },
-          {
-            id: "strategies-fuzz-a1",
-            logical_id: "strategies-fuzz",
-            kind: "agentic",
-            depends_on: ["setup-1-a1"]
-          },
-          { id: "mystery", logical_id: "mystery", kind: "reference", depends_on: [] }
-        ]
-      },
-      "row-1"
-    );
+    const planned = currentPlannedGraph(["setup-1-a1", "strategies-fuzz-a1", "mystery"], undefined);
+    planned.groups = { setup: {}, strategies: {} };
+    planned.nodes[0]!.logical_id = "setup-1";
+    planned.nodes[0]!.model_fanout[0]!.model_profile_id = "eval-runner";
+    planned.nodes[0]!.model_fanout[0]!.model_name = "gpt-5.4-mini";
+    planned.nodes[1]!.depends_on = ["setup-1-a1"];
+    Object.assign(planned.nodes[2]!, {
+      kind: "reference",
+      prompt_path: "",
+      model_fanout: [],
+      reference: "monad-developers/ultrafuzz",
+      reference_revision: {
+        provider: "github",
+        repo: "monad-developers/ultrafuzz",
+        commit: "a".repeat(40),
+        paths: ["README.md"]
+      }
+    });
+
+    const graph = graphFromPlannedGraph(planned, "row-1");
     expect(graph.rowId).toBe("row-1");
     expect(graph.nodes).toHaveLength(3);
     expect(graph.nodes[0]).toMatchObject({
@@ -219,9 +216,22 @@ describe("graphFromPlannedGraph", () => {
     expect(graph.nodes[2]).toMatchObject({ group: "default", kind: "reference" });
   });
 
-  it("degrades unknown shapes to an empty graph", () => {
+  it("uses an empty graph only when graph.json is absent", () => {
     expect(graphFromPlannedGraph(undefined, "row-1")).toEqual({ rowId: "row-1", nodes: [] });
-    expect(graphFromPlannedGraph({ nodes: "nope" }, "row-1")).toEqual({ rowId: "row-1", nodes: [] });
+  });
+
+  it("rejects every malformed, schema-invalid, or semantically invalid present graph", () => {
+    expect(() => graphFromPlannedGraph({ nodes: "nope" }, "row-1")).toThrow("planned graph is schema-invalid");
+
+    const missingLogicalId = currentPlannedGraph(["setup-1"], undefined);
+    Reflect.deleteProperty(missingLogicalId.nodes[0]!, "logical_id");
+    expect(() => graphFromPlannedGraph(missingLogicalId, "row-1")).toThrow("planned graph is schema-invalid");
+
+    const unknownDependency = currentPlannedGraph(["setup-1"], undefined);
+    unknownDependency.nodes[0]!.depends_on = ["missing-node"];
+    expect(() => graphFromPlannedGraph(unknownDependency, "row-1")).toThrow(
+      'planned graph node "setup-1" depends on unknown node "missing-node"'
+    );
   });
 });
 

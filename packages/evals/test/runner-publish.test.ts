@@ -682,6 +682,71 @@ describe("runner", () => {
     expect(fs.existsSync(path.join(base, "eval-run", "telemetry", `${row.id}.cursor.json`))).toBe(true);
   });
 
+  it("rejects a present graph that would require telemetry repair", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-invalid-graph-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    terminalRunFixture(runRoot);
+    const invalidGraph = currentPlannedGraph(["setup-1"], undefined);
+    Reflect.deleteProperty(invalidGraph.nodes[0]!, "logical_id");
+    fs.writeFileSync(path.join(runRoot, "graph.json"), JSON.stringify(invalidGraph), "utf8");
+    const reporter = new RecordingReporter();
+    const evalRunRoot = path.join(base, "eval-run");
+
+    await expect(
+      watchEvalRow({
+        plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
+        row,
+        record: materializeLaunchedJournal(row, runRoot, evalRunRoot),
+        reporters: [reporter],
+        evalRunRoot,
+        sync: async () => undefined,
+        pollIntervalMs: 1
+      })
+    ).rejects.toThrow("planned graph is schema-invalid");
+    expect(reporter.calls).toEqual([]);
+  });
+
+  it("rejects a graph that disappears after the initial existence inspection", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-graph-race-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    terminalRunFixture(runRoot);
+    const graphPath = path.join(runRoot, "graph.json");
+    const reporter = new RecordingReporter();
+    const evalRunRoot = path.join(base, "eval-run");
+    const record = materializeLaunchedJournal(row, runRoot, evalRunRoot);
+    const originalLstat = fs.lstatSync.bind(fs);
+    let removed = false;
+    const lstat = vi.spyOn(fs, "lstatSync").mockImplementation(((candidate: fs.PathLike) => {
+      const observed = originalLstat(candidate);
+      if (!removed && path.resolve(String(candidate)) === graphPath) {
+        removed = true;
+        fs.unlinkSync(graphPath);
+      }
+      return observed;
+    }) as typeof fs.lstatSync);
+    try {
+      await expect(
+        watchEvalRow({
+          plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
+          row,
+          record,
+          reporters: [reporter],
+          evalRunRoot,
+          sync: async () => undefined,
+          pollIntervalMs: 1
+        })
+      ).rejects.toThrow("cannot open regular file");
+    } finally {
+      lstat.mockRestore();
+    }
+    expect(removed).toBe(true);
+    expect(reporter.calls).toEqual([]);
+  });
+
   it("defers onRowStart until the detached subprocess writes graph.json", async () => {
     const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-race-"));
     const suite = testSuite(path.join(base, "gt"));
