@@ -573,6 +573,46 @@ describe("deterministic scorer math", () => {
     ]);
   });
 
+  it("ignores historical proof aliases when scoring unknown findings", async () => {
+    const suite = testSuite("/tmp/gt");
+    const aliasValue = {
+      scenario: ["Invoke an unrelated operation", "Observe an unrelated result"],
+      language: "text",
+      code: "unrelated();"
+    };
+    const aliasFindings = ["poc", "proof", "reproduction", "trace"].map((alias, index) =>
+      reviewFinding({
+        id: `finding-alias-${index}`,
+        title: `Unsupported historical alias ${index}`,
+        summary: "An unmatched issue without canonical evidence",
+        [alias]: aliasValue
+      })
+    );
+    const scored = await scoreInMemory({
+      suite,
+      row: testRow(suite),
+      findings: [
+        ...aliasFindings,
+        reviewFinding({
+          id: "finding-canonical-proof",
+          title: "Supported canonical proof",
+          summary: "An unmatched issue with canonical proof evidence",
+          proof_of_concept: aliasValue
+        })
+      ],
+      bugs: BUGS
+    });
+
+    expect(scored.rowScore).toMatchObject({ false_positives: 4, human_review_queue_count: 1 });
+    expect(scored.findingScores.map((score) => score.judge_result.reason_code)).toEqual([
+      "weak-unmatched-finding",
+      "weak-unmatched-finding",
+      "weak-unmatched-finding",
+      "weak-unmatched-finding",
+      "strong-novel-finding"
+    ]);
+  });
+
   it("supports a custom FindingJudge (grading never depends on a provider)", async () => {
     const suite = testSuite("/tmp/gt", { judge_panel: { total: 1, quorum: 1 } });
     const row = testRow(suite);

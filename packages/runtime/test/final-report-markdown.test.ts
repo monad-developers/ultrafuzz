@@ -28,10 +28,10 @@ function renderableReport(): Record<string, unknown> {
     issues: [
       {
         schema_version: "ultrafuzz.finding.v2",
-        id: "source-finding",
-        title: "State mismatch",
+        id: "L-01",
+        title: "[L-01] - State mismatch",
         status: "confirmed",
-        severity: "Medium",
+        severity: "Low",
         severity_guess: "Medium",
         confidence: "high",
         summary: "A bounded transition violates the expected relationship.",
@@ -51,14 +51,20 @@ function renderableReport(): Record<string, unknown> {
         strategy_provenance: {
           detection_rates: [{ strategy: "stateful-invariant", detections: 1, configured_loops: 4 }]
         },
-        lifecycle: { dedupe_key: "state-mismatch", source_artifacts: [], strategy_hits: [] }
+        lifecycle: {
+          dedupe_key: "state-mismatch",
+          source_artifacts: [],
+          strategy_hits: [],
+          canonical_severity: "Low"
+        }
       }
     ],
     non_production_outcomes: [],
     property_provenance: [
       {
-        finding_id: "source-finding",
-        title: "State mismatch",
+        finding_id: "L-01",
+        source_finding_id: "source-finding",
+        title: "[L-01] - State mismatch",
         property_ids: ["property-1"],
         sources: [{ source_node_id: "properties", source_property_id: "property-1" }],
         implementation_paths: ["test/Invariant.t.sol"],
@@ -68,19 +74,23 @@ function renderableReport(): Record<string, unknown> {
   };
 }
 
-test("canonical final-report projection returns one canonical JSON and Markdown presentation", () => {
+test("canonical final-report validation renders Markdown without rewriting the validated report", () => {
   const input = renderableReport();
+  const before = structuredClone(input);
   assert.equal(supportsCanonicalFinalReportProjection(input), true);
 
   const first = projectCanonicalFinalReport(input);
   const second = projectCanonicalFinalReport(first.report);
   assert.deepEqual(second, first);
+  assert.deepEqual(first.report, before);
+  assert.deepEqual(input, before);
 
   const issue = (first.report.issues as Array<Record<string, unknown>>)[0]!;
   assert.equal(issue.id, "L-01");
   assert.equal(issue.title, "[L-01] - State mismatch");
   assert.equal(issue.severity, "Low");
   assert.equal(issue.severity_guess, "Medium", "the upstream preliminary estimate must remain unchanged");
+  assert.equal((issue.lifecycle as Record<string, unknown>).canonical_severity, "Low");
   assert.equal((first.report.property_provenance as Array<Record<string, unknown>>)[0]?.finding_id, "L-01");
   assert.equal(
     (first.report.property_provenance as Array<Record<string, unknown>>)[0]?.source_finding_id,
@@ -93,6 +103,46 @@ test("canonical final-report projection returns one canonical JSON and Markdown 
   assert.doesNotMatch(first.markdown, /synthetic-final-report-secret/u);
   assert.doesNotMatch(first.markdown, /\/home\/runner\/private/u);
   assert.equal(isDirectiveConformingFinalReportMarkdown(first.markdown, first.report), true);
+});
+
+test("canonical final-report validation rejects presentation drift instead of repairing it", () => {
+  const legacyAlias = renderableReport();
+  (legacyAlias.issues as Array<Record<string, unknown>>)[0]!.final_severity = "Low";
+  const legacyBefore = structuredClone(legacyAlias);
+  assert.throws(() => projectCanonicalFinalReport(legacyAlias), /validation/u);
+  assert.deepEqual(legacyAlias, legacyBefore);
+
+  const wrongSeverity = renderableReport();
+  (wrongSeverity.issues as Array<Record<string, unknown>>)[0]!.severity = "Medium";
+  assert.throws(
+    () => projectCanonicalFinalReport(wrongSeverity),
+    /expected Low from impact Medium and likelihood Low/u
+  );
+
+  const wrongId = renderableReport();
+  (wrongId.issues as Array<Record<string, unknown>>)[0]!.id = "source-finding";
+  assert.throws(() => projectCanonicalFinalReport(wrongId), /canonical ID L-01/u);
+
+  const wrongTitle = renderableReport();
+  (wrongTitle.issues as Array<Record<string, unknown>>)[0]!.title = "State mismatch";
+  assert.throws(() => projectCanonicalFinalReport(wrongTitle), /must use title/u);
+
+  const staleProvenance = renderableReport();
+  (staleProvenance.property_provenance as Array<Record<string, unknown>>)[0]!.finding_id = "source-finding";
+  assert.throws(() => projectCanonicalFinalReport(staleProvenance), /references unknown finding/u);
+
+  const misordered = renderableReport();
+  const highIssue = structuredClone((misordered.issues as Array<Record<string, unknown>>)[0]!);
+  Object.assign(highIssue, {
+    id: "H-01",
+    title: "[H-01] - High impact mismatch",
+    severity: "High",
+    impact: "High",
+    likelihood: "High"
+  });
+  (misordered.issues as Array<Record<string, unknown>>).push(highIssue);
+  misordered.property_provenance = [];
+  assert.throws(() => projectCanonicalFinalReport(misordered), /not ordered High, Medium, then Low/u);
 });
 
 test("canonical final-report projection supports a meaningful zero-issue report", () => {

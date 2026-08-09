@@ -1290,9 +1290,7 @@ function hasEvidence(finding: unknown): boolean {
   if (Array.isArray(finding.evidence) && finding.evidence.some(hasConcreteEvidenceEntry)) {
     return true;
   }
-  return ["proof_of_concept", "poc", "proof", "reproduction", "trace"].some((key) =>
-    hasConcreteEvidenceValue(finding[key])
-  );
+  return hasConcreteEvidenceValue(finding.proof_of_concept);
 }
 
 function hasConcreteEvidenceEntry(value: unknown): boolean {
