@@ -5,6 +5,8 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as ts from "typescript";
 
+import type { CompiledSmithersWorkflow } from "../src/smithers.js";
+
 export interface RenderedElement {
   type: unknown;
   props: Record<string, unknown>;
@@ -14,6 +16,27 @@ export interface RenderedTask {
   component: string;
   id: string;
   props: Record<string, unknown>;
+}
+
+/** Builds the minimum faithful execution-snapshot layout needed by the in-process workflow harness. */
+export function materializeHarnessWorkflowSnapshot(compiled: CompiledSmithersWorkflow): string {
+  const snapshotRoot = path.join(compiled.runRoot, "smithers", "harness-execution-snapshot");
+  const workflowPath = path.join(snapshotRoot, ".smithers", "workflows", path.basename(compiled.workflowPath));
+  fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
+  fs.copyFileSync(compiled.workflowPath, workflowPath);
+  const dependencies = path.join(snapshotRoot, "dependencies", "manifest.json");
+  const controls = path.join(snapshotRoot, "controls");
+  fs.mkdirSync(path.dirname(dependencies), { recursive: true });
+  fs.mkdirSync(path.join(controls, "rendered-prompts"), { recursive: true });
+  fs.writeFileSync(dependencies, "{}\n", "utf8");
+  fs.writeFileSync(path.join(controls, "plan.json"), "{}\n", "utf8");
+  fs.copyFileSync(path.join(compiled.runRoot, "graph.json"), path.join(controls, "runtime-base-graph.json"));
+  fs.copyFileSync(compiled.tasksPath, path.join(controls, "runtime-base-tasks.json"));
+  for (const task of compiled.tasks) {
+    if (task.renderedPromptPath === undefined) continue;
+    fs.copyFileSync(task.renderedPromptPath, path.join(controls, "rendered-prompts", `${task.attemptId}.md`));
+  }
+  return workflowPath;
 }
 
 let harnessCounter = 0;
@@ -55,16 +78,27 @@ export async function renderGeneratedWorkflow(input: {
     .replaceAll('"smithers-orchestrator"', JSON.stringify(stubs.orchestrator))
     .replaceAll('"react"', JSON.stringify(stubs.react))
     .replaceAll('"zod/v4"', JSON.stringify(stubs.zod))
-    .replaceAll('"../agents/index.ts"', JSON.stringify(stubs.agents));
+    .replaceAll('"../agents/index.ts"', JSON.stringify(stubs.agents))
+    // The harness executes a transpiled sibling, while production executes the admitted workflow
+    // itself. Preserve the product workflow's identity so the persisted-path equality check is real
+    // rather than comparing the temporary harness filename.
+    .replace(
+      "const loadedWorkflowPath = fileURLToPath(import.meta.url);",
+      `const loadedWorkflowPath = ${JSON.stringify(path.resolve(input.workflowPath))};`
+    );
   const harnessPath = path.join(path.dirname(input.workflowPath), `harness-${(harnessCounter += 1)}.mjs`);
   fs.writeFileSync(harnessPath, rewritten, "utf8");
 
   const previousCwd = process.cwd();
   const previousWorker = process.env.ULTRAFUZZ_CLOUD_WORKER;
   const previousRuntime = process.env.ULTRAFUZZ_RUNTIME_MODULE;
+  const previousPersistedWorkflow = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
   process.chdir(input.cwd);
   if (input.workflowInput.cloud_worker === true) process.env.ULTRAFUZZ_CLOUD_WORKER = "1";
   if (input.forbidDynamicMaterialization === true) process.env.ULTRAFUZZ_RUNTIME_MODULE = stubs.runtimeGuard;
+  if (isHarnessExecutionSnapshotWorkflow(input.workflowPath)) {
+    process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = input.workflowPath;
+  }
   try {
     const module = (await import(`${pathToFileURL(harnessPath).href}?harness=${harnessCounter}`)) as {
       default: (ctx: unknown) => RenderedElement;
@@ -74,8 +108,17 @@ export async function renderGeneratedWorkflow(input: {
     process.chdir(previousCwd);
     restoreEnv("ULTRAFUZZ_CLOUD_WORKER", previousWorker);
     restoreEnv("ULTRAFUZZ_RUNTIME_MODULE", previousRuntime);
+    restoreEnv("ULTRAFUZZ_WORKFLOW_PERSISTED_PATH", previousPersistedWorkflow);
     fs.rmSync(harnessPath, { force: true });
   }
+}
+
+function isHarnessExecutionSnapshotWorkflow(workflowPath: string): boolean {
+  const snapshotRoot = path.dirname(path.dirname(path.dirname(path.resolve(workflowPath))));
+  return (
+    fs.existsSync(path.join(snapshotRoot, "dependencies", "manifest.json")) &&
+    fs.existsSync(path.join(snapshotRoot, "controls", "plan.json"))
+  );
 }
 
 function restoreEnv(name: string, previous: string | undefined): void {

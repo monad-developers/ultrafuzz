@@ -1203,6 +1203,11 @@ export async function smithersExecutionControlFiles(
 
   const planPath = path.join(layout.root, "plan.json");
   add(planPath, "controls/plan.json");
+  // Dynamic execution derives mutable graph/task publications from these immutable pre-expansion
+  // controls. Keeping the base bytes in the execution snapshot lets every later lifecycle command
+  // re-derive and verify an extension without trusting the files the workflow updated in place.
+  add(layout.graphPath, "controls/runtime-base-graph.json");
+  add(compiled.tasksPath, "controls/runtime-base-tasks.json");
   const plan = JSON.parse(fs.readFileSync(planPath, "utf8")) as { run_id?: unknown; rendered_prompts?: unknown };
   if (plan.run_id !== layout.runId || !Array.isArray(plan.rendered_prompts)) {
     throw new Error("persisted run plan cannot define the workflow execution closure");

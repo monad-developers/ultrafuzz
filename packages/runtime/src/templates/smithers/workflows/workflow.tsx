@@ -166,6 +166,12 @@ const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
 const loadedWorkflowPath = fileURLToPath(import.meta.url);
 const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
 const admittedWorkflowControls = admitWorkflowControls(loadedWorkflowPath, persistedWorkflowPath);
+const admittedWorkflowRelativePath =
+  admittedWorkflowControls.persistedWorkflowPath === undefined
+    ? __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__
+    : cloudSnapshotRelativePath(admittedWorkflowControls.persistedWorkflowPath, "persisted workflow path");
+const dynamicBaseGraphPath = sealedRuntimeControlPath("runtime-base-graph.json", admittedWorkflowControls);
+const dynamicBaseTasksPath = sealedRuntimeControlPath("runtime-base-tasks.json", admittedWorkflowControls);
 /**
  * Hydrates one serialized task spec against the current project root.
  *
@@ -292,6 +298,13 @@ function sealedTaskPromptPath(attemptId: string, snapshotRoot: string | undefine
   const promptPath = path.join(snapshotRoot, "controls", "rendered-prompts", `${attemptId}.md`);
   if (!existsSync(promptPath)) throw new Error(`sealed rendered prompt is missing for ${attemptId}`);
   return promptPath;
+}
+
+function sealedRuntimeControlPath(name: string, controls: AdmittedWorkflowControls): string | undefined {
+  const snapshotRoot = controls.persistedExecutionSnapshotRoot ?? controls.loadedExecutionSnapshotRoot;
+  if (snapshotRoot === undefined) return undefined;
+  const candidate = path.join(snapshotRoot, "controls", name);
+  return existsSync(candidate) ? candidate : undefined;
 }
 
 function cloudSnapshotRelativePath(value: string, label: string): string {
@@ -966,7 +979,7 @@ function cloudWorkerTaskSpecs(input: Record<string, unknown>): typeof taskSpecs 
       sourceProjectRoot,
       runId: __ULTRAFUZZ_RUN_ID_LITERAL__,
       workflowName: __ULTRAFUZZ_WORKFLOW_NAME__,
-      workflowPath: __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__,
+      workflowPath: admittedWorkflowRelativePath,
       preparationId: `prepare:${attemptId}`,
       verifierId: `verify:${attemptId}`,
       branch: `ultrafuzz/${__ULTRAFUZZ_RUN_ID_LITERAL__}/${attemptId}`
@@ -5957,6 +5970,8 @@ export default smithers((ctx) => {
       runRoot: dynamicRunRoot,
       graphPath: dynamicGraphPath,
       tasksPath: dynamicTasksPath,
+      ...(dynamicBaseGraphPath === undefined ? {} : { baseGraphPath: dynamicBaseGraphPath }),
+      ...(dynamicBaseTasksPath === undefined ? {} : { baseTasksPath: dynamicBaseTasksPath }),
       baseTasks: compiledBaseTasks,
       groups: dynamicGroupSpecs,
       readyGroupIds

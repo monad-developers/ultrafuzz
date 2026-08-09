@@ -34,6 +34,9 @@ export interface DynamicRuntimeMaterializeInput {
   runRoot: string;
   graphPath: string;
   tasksPath: string;
+  /** Immutable pre-expansion controls. Defaults to the publication paths for legacy callers. */
+  baseGraphPath?: string;
+  baseTasksPath?: string;
   baseTasks: readonly CompiledSmithersTask[];
   groups: readonly CompiledSmithersDynamicGroup[];
   readyGroupIds: Iterable<string>;
@@ -52,6 +55,27 @@ export interface DynamicRuntimeMaterialization {
  * and idempotent so Smithers may call it on every reactive render and resume.
  */
 export function materializeDynamicRuntime(input: DynamicRuntimeMaterializeInput): DynamicRuntimeMaterialization {
+  return deriveDynamicRuntime(input, "publish");
+}
+
+/**
+ * Re-derives an already-published dynamic graph/task extension from the sealed base controls and
+ * digest-bound expansion manifests. This is the admission check used before lifecycle commands trust
+ * mutable runtime state; it never creates a manifest, prompt, graph, or task document.
+ */
+export function verifyDynamicRuntimeMaterialization(
+  input: Omit<DynamicRuntimeMaterializeInput, "readyGroupIds">
+): DynamicRuntimeMaterialization {
+  const readyGroupIds = input.groups
+    .map((group) => group.groupNodeId)
+    .filter((groupId) => fs.existsSync(path.join(input.runRoot, "dynamic-expansions", `${groupId}.json`)));
+  return deriveDynamicRuntime({ ...input, readyGroupIds }, "verify");
+}
+
+function deriveDynamicRuntime(
+  input: DynamicRuntimeMaterializeInput,
+  mode: "publish" | "verify"
+): DynamicRuntimeMaterialization {
   const runId = validateSafeId(input.runId, "run ID");
   const projectRoot = path.resolve(input.projectRoot);
   const runRoot = path.resolve(input.runRoot);
@@ -59,7 +83,9 @@ export function materializeDynamicRuntime(input: DynamicRuntimeMaterializeInput)
   assertNoSymlinkComponents(projectRoot, runRoot, "dynamic run root");
   const graphPath = checkedRunFile(runRoot, input.graphPath, "runtime graph");
   const tasksPath = checkedRunFile(runRoot, input.tasksPath, "runtime task plan");
-  const graph = readPlannedGraph(graphPath);
+  const baseGraphPath = checkedRunFile(runRoot, input.baseGraphPath ?? graphPath, "base runtime graph");
+  const baseTasksPath = checkedRunFile(runRoot, input.baseTasksPath ?? tasksPath, "base runtime task plan");
+  const graph = readPlannedGraph(baseGraphPath);
   const ready = new Set(input.readyGroupIds);
   const groups = [...input.groups].sort((left, right) => left.groupNodeId.localeCompare(right.groupNodeId));
   const groupIds = new Set(groups.map((group) => validateSafeId(group.groupNodeId, "dynamic group node ID")));
@@ -138,22 +164,36 @@ export function materializeDynamicRuntime(input: DynamicRuntimeMaterializeInput)
     manifests,
     projectRoot,
     runRoot,
-    runId
+    runId,
+    publishMissing: mode === "publish"
   });
   attachWorkflowGraphMetadata(runtimeGraph, tasks);
 
-  // Publish tasks first. A concurrent synchronizer may temporarily skip an
-  // unknown graph node, while the reverse ordering could finalize a graph node
-  // against stale task identity. Both files are themselves atomically replaced.
-  const previousTaskDocument = readRecord(tasksPath);
-  writeJsonDurable(tasksPath, {
-    ...previousTaskDocument,
-    schema_version: previousTaskDocument.schema_version ?? DYNAMIC_RUNTIME_SCHEMA_VERSION,
-    run_id: previousTaskDocument.run_id ?? runId,
+  const baseTaskDocument = readRecord(baseTasksPath);
+  const runtimeTaskDocument = {
+    ...baseTaskDocument,
+    schema_version: baseTaskDocument.schema_version ?? DYNAMIC_RUNTIME_SCHEMA_VERSION,
+    run_id: baseTaskDocument.run_id ?? runId,
     tasks,
     dynamic_groups: groups
-  });
-  writeJsonDurable(graphPath, runtimeGraph);
+  };
+
+  if (mode === "publish") {
+    // Publish tasks first. A concurrent synchronizer may temporarily skip an
+    // unknown graph node, while the reverse ordering could finalize a graph node
+    // against stale task identity. Both files are themselves atomically replaced.
+    writeJsonDurable(tasksPath, runtimeTaskDocument);
+    writeJsonDurable(graphPath, runtimeGraph);
+  } else {
+    const observedTasks = readRecord(tasksPath);
+    const observedGraph = readPlannedGraph(graphPath);
+    if (jsonFingerprint(observedTasks) !== jsonFingerprint(runtimeTaskDocument)) {
+      throw new Error("persisted dynamic runtime task plan does not match its sealed templates and manifests");
+    }
+    if (jsonFingerprint(observedGraph) !== jsonFingerprint(runtimeGraph)) {
+      throw new Error("persisted dynamic runtime graph does not match its sealed templates and manifests");
+    }
+  }
 
   return {
     tasks,
@@ -374,6 +414,7 @@ function renderReadyRuntimePrompts(input: {
   projectRoot: string;
   runRoot: string;
   runId: string;
+  publishMissing: boolean;
 }): void {
   const groupContext = input.groups[0]?.promptContext;
   if (groupContext === undefined) return;
@@ -426,8 +467,10 @@ function renderReadyRuntimePrompts(input: {
       if (fs.readFileSync(promptPath, "utf8") !== result.renderedMarkdown) {
         throw new Error(`runtime rendered prompt changed for ${task.attemptId}`);
       }
-    } else {
+    } else if (input.publishMissing) {
       writeFileDurable(promptPath, result.renderedMarkdown);
+    } else {
+      throw new Error(`runtime rendered prompt is missing for ${task.attemptId}`);
     }
     task.renderedPromptPath = promptPath;
   }
@@ -601,6 +644,10 @@ function verifierSmithersNodeIdForAttempt(attemptId: string): string {
 
 function unique<T>(values: readonly T[]): T[] {
   return [...new Set(values)];
+}
+
+function jsonFingerprint(value: unknown): string {
+  return sha256Stable(JSON.parse(JSON.stringify(value)) as unknown);
 }
 
 /** Human provenance identifiers are deliberately separate from filesystem-safe IDs. */
