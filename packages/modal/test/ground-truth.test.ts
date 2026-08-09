@@ -18,6 +18,7 @@ describe("Modal audit Markdown conversion", () => {
       { id: "H-9001", title: "Example condition alpha", severity: "high" },
       { id: "M-9002", title: "Example condition beta", severity: "medium" }
     ]);
+    expect(converted.schema_version).toBe("ultrafuzz.eval-ground-truth.v1");
   });
 
   it("enforces the expected finding count", () => {
@@ -28,6 +29,7 @@ describe("Modal audit Markdown conversion", () => {
 
   it("accepts audit headings without punctuation after the issue ID", () => {
     expect(convertAuditMarkdownGroundTruth("## [H-9004] Example condition")).toEqual({
+      schema_version: "ultrafuzz.eval-ground-truth.v1",
       bugs: [{ id: "H-9004", title: "Example condition", severity: "high" }]
     });
   });

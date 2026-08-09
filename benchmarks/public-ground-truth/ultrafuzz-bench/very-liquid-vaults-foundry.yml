@@ -1,3 +1,4 @@
+schema_version: ultrafuzz.eval-ground-truth.v1
 source:
   url: https://www.openzeppelin.com/news/very-liquid-vaults-audit
   retrieved_sha256: a1084bacc2e8df2d0a2e920ca3f7d028ea5e32217e05bb8e130cd44f212d42d2

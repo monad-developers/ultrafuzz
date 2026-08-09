@@ -1,36 +1,98 @@
-import fs from "node:fs";
+import { TextDecoder } from "node:util";
+import { isDeepStrictEqual } from "node:util";
+
+import { readRegularFileSnapshot } from "@ultrafuzz/artifacts";
 import { parse } from "yaml";
 import { z } from "zod/v4";
 
+import { EVAL_GROUND_TRUTH_SCHEMA_ID, validateEvalJsonSchema } from "./eval-schema-registry.js";
 import type { GroundTruthBug } from "./types.js";
 import { EvalError } from "./utils.js";
 
 export const GROUND_TRUTH_SCHEMA_VERSION = "ultrafuzz.eval-ground-truth.v1" as const;
 
 const MAX_GROUND_TRUTH_BYTES = 1024 * 1024;
+const MAX_GROUND_TRUTH_TEXT_CODE_POINTS = 16_384;
+const MAX_GROUND_TRUTH_ID_CODE_POINTS = 256;
+const MAX_GROUND_TRUTH_URL_CODE_POINTS = 2_048;
+const MAX_GROUND_TRUTH_LIST_ITEMS = 256;
+const MAX_GROUND_TRUTH_BUGS = 10_000;
+const MAX_GROUND_TRUTH_CANARIES = 1_000;
 const fullSha = /^[0-9a-f]{40}$/u;
+const httpUrl = /^https?:\/\/[^\s]+$/u;
+
+function boundedNonBlank(maximum: number): z.ZodType<string> {
+  return z
+    .string()
+    .min(1)
+    .regex(/\S/u)
+    .refine((value) => [...value].length <= maximum, `must contain at most ${maximum} Unicode code points`);
+}
+
+function hasUniqueJsonItems(values: readonly unknown[]): boolean {
+  return values.every((value, index) => values.findIndex((candidate) => isDeepStrictEqual(candidate, value)) === index);
+}
+
+const nonBlankText = boundedNonBlank(MAX_GROUND_TRUTH_TEXT_CODE_POINTS);
+const identifier = boundedNonBlank(MAX_GROUND_TRUTH_ID_CODE_POINTS);
+const urlSchema = boundedNonBlank(MAX_GROUND_TRUTH_URL_CODE_POINTS).refine(
+  (value) => httpUrl.test(value),
+  "must be an HTTP(S) URL without whitespace"
+);
+const stringList = z
+  .array(nonBlankText)
+  .max(MAX_GROUND_TRUTH_LIST_ITEMS)
+  .refine(hasUniqueJsonItems, "entries must be unique");
 const bugSchema = z.strictObject({
-  id: z.string().min(1),
-  title: z.string().min(1).optional(),
-  severity: z.string().min(1).optional(),
-  root_cause: z.string().min(1).optional(),
-  root_cause_keywords: z.array(z.string().min(1)).optional(),
-  affected_files: z.array(z.string().min(1)).optional(),
-  affected_functions: z.array(z.string().min(1)).optional(),
-  impact: z.string().min(1).optional(),
-  impact_keywords: z.array(z.string().min(1)).optional(),
-  evidence: z.union([z.string().min(1), z.array(z.string().min(1))]).optional(),
-  evidence_keywords: z.array(z.string().min(1)).optional(),
-  keywords: z.array(z.string().min(1)).optional()
+  id: identifier,
+  title: nonBlankText.optional(),
+  severity: nonBlankText.optional(),
+  root_cause: nonBlankText.optional(),
+  root_cause_keywords: stringList.optional(),
+  affected_files: stringList.optional(),
+  affected_functions: stringList.optional(),
+  impact: nonBlankText.optional(),
+  impact_keywords: stringList.optional(),
+  evidence: z.union([nonBlankText, stringList]).optional(),
+  evidence_keywords: stringList.optional(),
+  keywords: stringList.optional()
 });
 const subjectSchema = z.strictObject({
-  repository: z.string().min(1),
+  repository: urlSchema,
   revision: z.string().regex(fullSha)
 });
-const groundTruthDocumentSchema = z.strictObject({
+const publicSourceSchema = z.strictObject({
+  url: urlSchema,
+  source_commit: z.string().regex(fullSha).optional(),
+  retrieved_sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  note: nonBlankText
+});
+const privateProvenanceSchema = z.strictObject({
+  name: nonBlankText,
+  benchmark_id: z.string().regex(/^[0-9a-f]{32}$/u),
+  ultrafuzz_target_repo: urlSchema,
+  ultrafuzz_target_commit: z.string().regex(fullSha),
+  scfuzzbench_target_repo: urlSchema,
+  scfuzzbench_target_commit: z.string().regex(fullSha),
+  note: nonBlankText
+});
+const canarySchema = z.strictObject({
+  id: identifier,
+  benchmark_name: identifier,
+  title: nonBlankText
+});
+
+export const groundTruthDocumentZodSchema = z.strictObject({
   schema_version: z.literal(GROUND_TRUTH_SCHEMA_VERSION),
   subject: subjectSchema.optional(),
-  bugs: z.array(bugSchema)
+  source: publicSourceSchema.optional(),
+  provenance: privateProvenanceSchema.optional(),
+  canaries: z
+    .array(canarySchema)
+    .max(MAX_GROUND_TRUTH_CANARIES)
+    .refine(hasUniqueJsonItems, "canaries must be unique")
+    .optional(),
+  bugs: z.array(bugSchema).max(MAX_GROUND_TRUTH_BUGS).refine(hasUniqueJsonItems, "bugs must be unique")
 });
 
 export interface GroundTruthSubject {
@@ -38,10 +100,41 @@ export interface GroundTruthSubject {
   revision: string;
 }
 
+export interface GroundTruthPublicSource {
+  url: string;
+  source_commit?: string;
+  retrieved_sha256: string;
+  note: string;
+}
+
+export interface GroundTruthPrivateProvenance {
+  name: string;
+  benchmark_id: string;
+  ultrafuzz_target_repo: string;
+  ultrafuzz_target_commit: string;
+  scfuzzbench_target_repo: string;
+  scfuzzbench_target_commit: string;
+  note: string;
+}
+
+export interface GroundTruthCanary {
+  id: string;
+  benchmark_name: string;
+  title: string;
+}
+
 export interface GroundTruthDocument {
   schema_version: typeof GROUND_TRUTH_SCHEMA_VERSION;
   subject?: GroundTruthSubject;
+  source?: GroundTruthPublicSource;
+  provenance?: GroundTruthPrivateProvenance;
+  canaries?: GroundTruthCanary[];
   bugs: GroundTruthBug[];
+}
+
+export interface GroundTruthSemanticIssue {
+  path: string;
+  message: string;
 }
 
 /**
@@ -84,65 +177,126 @@ export function parseGroundTruthDocument(
   value: unknown,
   options: { requireSubject?: boolean } = {}
 ): GroundTruthDocument {
-  const object = isRecord(value) ? value : undefined;
-  const competingIdentityKeys =
-    object === undefined
-      ? []
-      : ["source", "repository", "revision", "target", "codebase"].filter((key) => key in object);
-  if (competingIdentityKeys.length > 0 && object?.subject !== undefined) {
-    throw new EvalError("EVAL_GROUND_TRUTH_SUBJECT_AMBIGUOUS", "ground truth contains competing subject identities", {
-      fields: competingIdentityKeys
-    });
-  }
-
-  const result = groundTruthDocumentSchema.safeParse(value);
-  if (!result.success) {
+  const canonical = validateEvalJsonSchema(EVAL_GROUND_TRUTH_SCHEMA_ID, value);
+  if (!canonical.ok) {
     throw new EvalError("EVAL_GROUND_TRUTH_INVALID", `ground truth must be a ${GROUND_TRUTH_SCHEMA_VERSION} document`, {
-      issues: result.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
+      schema_id: EVAL_GROUND_TRUTH_SCHEMA_ID,
+      issues: canonical.issues,
+      truncated: canonical.truncated
     });
   }
-
-  if (options.requireSubject === true && result.data.subject === undefined) {
+  const retained = groundTruthDocumentZodSchema.safeParse(value);
+  if (!retained.success) {
+    throw new EvalError(
+      "EVAL_GROUND_TRUTH_SCHEMA_DRIFT",
+      "canonical ground-truth schema and retained Zod parser disagree"
+    );
+  }
+  const document = retained.data as GroundTruthDocument;
+  const semanticIssues = groundTruthSemanticIssues(document);
+  if (semanticIssues.length > 0) {
+    const subjectInvalid = semanticIssues.some((issue) => issue.path.includes("repo"));
+    const ambiguous = semanticIssues.some((issue) => issue.path === "$.source");
+    throw new EvalError(
+      ambiguous
+        ? "EVAL_GROUND_TRUTH_SUBJECT_AMBIGUOUS"
+        : subjectInvalid
+          ? "EVAL_GROUND_TRUTH_SUBJECT_INVALID"
+          : "EVAL_GROUND_TRUTH_INVALID",
+      "ground truth failed semantic validation",
+      { issues: semanticIssues }
+    );
+  }
+  if (options.requireSubject === true && document.subject === undefined) {
     throw new EvalError(
       "EVAL_GROUND_TRUTH_SUBJECT_MISSING",
       "private ground truth must declare exactly one subject binding"
     );
   }
-  if (result.data.subject !== undefined) {
-    const canonicalRepository = canonicalRepositoryIdentity(result.data.subject.repository);
-    if (canonicalRepository !== result.data.subject.repository) {
-      throw new EvalError(
-        "EVAL_GROUND_TRUTH_SUBJECT_INVALID",
-        `ground-truth subject repository must use canonical spelling ${canonicalRepository}`
-      );
+  return document;
+}
+
+export function groundTruthSemanticIssues(document: GroundTruthDocument): GroundTruthSemanticIssue[] {
+  const issues: GroundTruthSemanticIssue[] = [];
+  const bugIds = document.bugs.map((bug) => bug.id);
+  if (new Set(bugIds).size !== bugIds.length) {
+    issues.push({ path: "$.bugs", message: "bug IDs must be unique" });
+  }
+  const canaryIds = (document.canaries ?? []).map((canary) => canary.id);
+  if (new Set(canaryIds).size !== canaryIds.length) {
+    issues.push({ path: "$.canaries", message: "canary IDs must be unique" });
+  }
+  const canaryNames = (document.canaries ?? []).map((canary) => canary.benchmark_name);
+  if (new Set(canaryNames).size !== canaryNames.length) {
+    issues.push({ path: "$.canaries", message: "canary benchmark names must be unique" });
+  }
+  if (canaryIds.some((id) => bugIds.includes(id))) {
+    issues.push({ path: "$.canaries", message: "canary and bug IDs must be disjoint" });
+  }
+  if (document.subject !== undefined && document.source !== undefined) {
+    issues.push({ path: "$.source", message: "public source and private subject identities cannot coexist" });
+  }
+  if (document.provenance !== undefined && document.subject === undefined) {
+    issues.push({ path: "$.provenance", message: "private provenance requires a subject binding" });
+  }
+  if (document.canaries !== undefined && document.provenance === undefined) {
+    issues.push({ path: "$.canaries", message: "private canaries require provenance" });
+  }
+  if (document.subject !== undefined) {
+    pushCanonicalRepositoryIssue(issues, "$.subject.repository", document.subject.repository);
+  }
+  if (document.provenance !== undefined) {
+    pushCanonicalRepositoryIssue(
+      issues,
+      "$.provenance.ultrafuzz_target_repo",
+      document.provenance.ultrafuzz_target_repo
+    );
+    pushCanonicalRepositoryIssue(
+      issues,
+      "$.provenance.scfuzzbench_target_repo",
+      document.provenance.scfuzzbench_target_repo
+    );
+    if (
+      document.subject !== undefined &&
+      (document.provenance.scfuzzbench_target_repo !== document.subject.repository ||
+        document.provenance.scfuzzbench_target_commit !== document.subject.revision)
+    ) {
+      issues.push({ path: "$.provenance", message: "ScFuzzBench provenance must equal the subject binding" });
     }
   }
-  return result.data;
+  return issues;
+}
+
+function pushCanonicalRepositoryIssue(issues: GroundTruthSemanticIssue[], path: string, repository: string): void {
+  try {
+    const canonical = canonicalRepositoryIdentity(repository);
+    if (canonical !== repository) issues.push({ path, message: `must use canonical spelling ${canonical}` });
+  } catch (error) {
+    issues.push({ path, message: error instanceof Error ? error.message : String(error) });
+  }
 }
 
 export function readGroundTruthDocument(
   filePath: string,
   options: { requireSubject?: boolean } = {}
 ): GroundTruthDocument {
-  if (!fs.existsSync(filePath)) {
-    throw new EvalError("EVAL_GROUND_TRUTH_MISSING", `ground truth file is missing: ${filePath}`, { path: filePath });
-  }
-  const stat = fs.statSync(filePath);
-  if (!stat.isFile()) {
-    throw new EvalError("EVAL_GROUND_TRUTH_INVALID", `ground truth path is not a regular file: ${filePath}`, {
-      path: filePath
-    });
-  }
-  if (stat.size > MAX_GROUND_TRUTH_BYTES) {
-    throw new EvalError("EVAL_GROUND_TRUTH_TOO_LARGE", `ground truth file exceeds ${MAX_GROUND_TRUTH_BYTES} bytes`, {
+  let bytes: Buffer;
+  try {
+    bytes = readRegularFileSnapshot(filePath, MAX_GROUND_TRUTH_BYTES);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      throw new EvalError("EVAL_GROUND_TRUTH_MISSING", `ground truth file is missing: ${filePath}`, {
+        path: filePath
+      });
+    }
+    throw new EvalError("EVAL_GROUND_TRUTH_INVALID", `ground truth file is unreadable: ${filePath}`, {
       path: filePath,
-      sizeBytes: stat.size,
-      maxBytes: MAX_GROUND_TRUTH_BYTES
+      reason: error instanceof Error ? error.message : String(error)
     });
   }
   let value: unknown;
   try {
-    value = parse(fs.readFileSync(filePath, "utf8"));
+    value = parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch (error) {
     throw new EvalError("EVAL_GROUND_TRUTH_INVALID", `ground truth file is invalid: ${filePath}`, {
       path: filePath,
@@ -194,6 +348,6 @@ export function assertGroundTruthSubject(
   return { repository: actualRepository, revision: actualRevision };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }

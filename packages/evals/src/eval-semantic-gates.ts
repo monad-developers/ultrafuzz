@@ -8,6 +8,7 @@ import {
   EVAL_EVMBENCH_COHORT_SCHEMA_ID,
   EVAL_FINDING_SCORE_SCHEMA_ID,
   EVAL_FINDING_MANIFEST_SCHEMA_ID,
+  EVAL_GROUND_TRUTH_SCHEMA_ID,
   EVAL_GROUND_TRUTH_CREDITS_SCHEMA_ID,
   EVAL_INSTANCE_CLUSTERS_SCHEMA_ID,
   EVAL_MATRIX_SCHEMA_ID,
@@ -36,6 +37,7 @@ import type {
   BenchmarkProvenance,
   BenchmarkSourceManifest
 } from "./benchmark-analysis-contracts.js";
+import { groundTruthSemanticIssues, type GroundTruthDocument } from "./ground-truth.js";
 import { publicEvalDiagnosticsSemanticIssues, type PublicEvalDiagnostics } from "./public-diagnostics.js";
 import { evalStatusSemanticIssues, type EvalStatusSnapshot } from "./status.js";
 import type {
@@ -75,6 +77,7 @@ const gateHandlers: Readonly<Record<string, EvalSemanticGate>> = Object.freeze({
   "eval-benchmark-source-manifest-identity-joins": benchmarkSourceManifestIdentityJoins,
   "eval-finding-score-decision-coupling": findingScoreDecisionCoupling,
   "eval-finding-manifest-identity-joins": findingManifestIdentityJoins,
+  "eval-ground-truth-integrity": groundTruthIntegrity,
   "eval-ground-truth-credits-identity-joins": groundTruthCreditsIdentityJoins,
   "eval-instance-clusters-identity-joins": instanceClustersIdentityJoins,
   "eval-matrix-identity-joins": matrixIdentityJoins,
@@ -99,6 +102,7 @@ const gatesBySchema: Readonly<Record<string, readonly string[]>> = Object.freeze
   [EVAL_BENCHMARK_SOURCE_MANIFEST_SCHEMA_ID]: ["eval-benchmark-source-manifest-identity-joins"],
   [EVAL_FINDING_SCORE_SCHEMA_ID]: ["eval-finding-score-decision-coupling"],
   [EVAL_FINDING_MANIFEST_SCHEMA_ID]: ["eval-finding-manifest-identity-joins"],
+  [EVAL_GROUND_TRUTH_SCHEMA_ID]: ["eval-ground-truth-integrity"],
   [EVAL_GROUND_TRUTH_CREDITS_SCHEMA_ID]: ["eval-ground-truth-credits-identity-joins"],
   [EVAL_INSTANCE_CLUSTERS_SCHEMA_ID]: ["eval-instance-clusters-identity-joins"],
   [EVAL_MATRIX_SCHEMA_ID]: ["eval-matrix-identity-joins"],
@@ -321,6 +325,12 @@ function publicDiagnosticsConsistency(value: unknown): EvalSemanticGateIssue[] {
 function statusConsistency(value: unknown): EvalSemanticGateIssue[] {
   return evalStatusSemanticIssues(value as EvalStatusSnapshot).map((entry) =>
     issue("eval-status-consistency", entry.path, entry.message)
+  );
+}
+
+function groundTruthIntegrity(value: unknown): EvalSemanticGateIssue[] {
+  return groundTruthSemanticIssues(value as GroundTruthDocument).map((entry) =>
+    issue("eval-ground-truth-integrity", entry.path, entry.message)
   );
 }
 

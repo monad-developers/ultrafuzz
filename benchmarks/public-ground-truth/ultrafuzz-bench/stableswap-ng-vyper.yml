@@ -1,3 +1,4 @@
+schema_version: ultrafuzz.eval-ground-truth.v1
 source:
   url: https://github.com/mixbytes/audits_public/blob/50dea7e8af1cc7e94ef80bf14a6614bf7cee48aa/Curve%20Finance/StableSwapNG/README.md
   source_commit: 50dea7e8af1cc7e94ef80bf14a6614bf7cee48aa

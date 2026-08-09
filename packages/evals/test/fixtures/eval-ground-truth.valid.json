@@ -1,0 +1,35 @@
+{
+  "schema_version": "ultrafuzz.eval-ground-truth.v1",
+  "subject": {
+    "repository": "https://github.com/example/target",
+    "revision": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "provenance": {
+    "name": "Synthetic private benchmark",
+    "benchmark_id": "0123456789abcdef0123456789abcdef",
+    "ultrafuzz_target_repo": "https://github.com/example/upstream",
+    "ultrafuzz_target_commit": "89abcdef0123456789abcdef0123456789abcdef",
+    "scfuzzbench_target_repo": "https://github.com/example/target",
+    "scfuzzbench_target_commit": "0123456789abcdef0123456789abcdef01234567",
+    "note": "Synthetic fixture for the canonical whole-document contract."
+  },
+  "canaries": [
+    {
+      "id": "canary-assertion",
+      "benchmark_name": "assert_canary",
+      "title": "Synthetic harness canary"
+    }
+  ],
+  "bugs": [
+    {
+      "id": "H-1",
+      "title": "Synthetic accounting invariant",
+      "severity": "high",
+      "root_cause_keywords": ["accounting mismatch"],
+      "affected_files": ["src/Target.sol"],
+      "affected_functions": ["updateAccounting"],
+      "impact_keywords": ["insolvency"],
+      "evidence_keywords": ["invariant_accounting"]
+    }
+  ]
+}

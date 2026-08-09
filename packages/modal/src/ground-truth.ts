@@ -12,7 +12,7 @@ export function convertAuditMarkdownGroundTruth(
   markdown: string,
   expectedFindings?: number,
   subject?: GroundTruthSubject
-): { bugs: ModalGroundTruthBug[]; schema_version?: "ultrafuzz.eval-ground-truth.v1"; subject?: GroundTruthSubject } {
+): { bugs: ModalGroundTruthBug[]; schema_version: "ultrafuzz.eval-ground-truth.v1"; subject?: GroundTruthSubject } {
   const bugs = new Map<string, ModalGroundTruthBug>();
   for (const line of markdown.split(/\r?\n/u)) {
     const match = ISSUE_HEADING.exec(line);
@@ -31,7 +31,8 @@ export function convertAuditMarkdownGroundTruth(
   }
   if (bugs.size === 0) throw new Error("audit Markdown did not contain any issue headings");
   return {
-    ...(subject === undefined ? {} : { schema_version: "ultrafuzz.eval-ground-truth.v1" as const, subject }),
+    schema_version: "ultrafuzz.eval-ground-truth.v1",
+    ...(subject === undefined ? {} : { subject }),
     bugs: [...bugs.values()]
   };
 }
