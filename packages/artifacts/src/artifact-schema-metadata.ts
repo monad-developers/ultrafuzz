@@ -63,27 +63,33 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
   ]),
   "analysis-bundle-accounting-summary.schema.json": runtime(
     "analysisAccountingSummaryJsonSchema",
-    "analysisAccountingSummarySchema"
+    "analysisAccountingSummarySchema",
+    ["analysis-bundle-accounting-reconciliation"]
   ),
   "analysis-bundle-attempt-history.schema.json": runtime(
     "analysisAttemptHistoryJsonSchema",
-    "analysisAttemptHistorySchema"
+    "analysisAttemptHistorySchema",
+    ["analysis-bundle-attempt-order"]
   ),
   "analysis-bundle-evaluation-metrics.schema.json": runtime(
     "analysisEvaluationMetricsJsonSchema",
-    "analysisEvaluationMetricsSchema"
+    "analysisEvaluationMetricsSchema",
+    ["analysis-bundle-evaluation-count-reconciliation"]
   ),
   "analysis-bundle-omissions.schema.json": runtime(
     "analysisBundleOmissionsJsonSchema",
-    "analysisBundleOmissionsSchema"
+    "analysisBundleOmissionsSchema",
+    ["analysis-bundle-omission-order", "analysis-bundle-inclusion-omission-coverage"]
   ),
   "analysis-bundle-recovery-summary.schema.json": runtime(
     "analysisRecoverySummaryJsonSchema",
-    "analysisRecoverySummarySchema"
+    "analysisRecoverySummarySchema",
+    ["analysis-bundle-recovery-reconciliation"]
   ),
   "analysis-bundle-terminal-status.schema.json": runtime(
     "analysisTerminalStatusJsonSchema",
-    "analysisTerminalStatusSchema"
+    "analysisTerminalStatusSchema",
+    ["analysis-bundle-terminal-status-reconciliation"]
   ),
   "artifact-manifest.schema.json": runtime("artifactManifestJsonSchema", undefined, [
     "artifact-manifest-file-path-uniqueness",

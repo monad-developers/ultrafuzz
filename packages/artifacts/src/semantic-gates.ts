@@ -78,6 +78,11 @@ export interface SemanticEventLogContext {
   }[];
 }
 
+export interface SemanticAnalysisBundleContext {
+  /** Structurally validated analysis-bundle manifest paired with an omissions document. */
+  manifest: unknown;
+}
+
 /**
  * Host facts available to contextual semantic gates. Every field is read-only;
  * gate execution never writes an artifact, repository, ledger, or filesystem.
@@ -92,6 +97,7 @@ export interface SemanticGateContext {
   usageLedger?: SemanticUsageLedgerContext;
   eventLog?: SemanticEventLogContext;
   validatorPreflight?: SemanticValidatorPreflightContext;
+  analysisBundle?: SemanticAnalysisBundleContext;
 }
 
 export interface SemanticGateExecutionRequest {
@@ -461,6 +467,298 @@ function analysisBundlePathIssues(document: unknown): SemanticGateIssue[] {
     issues.push(issue("$.files", "Analysis bundle must include its omissions manifest"));
   }
   return issues;
+}
+
+const ANALYSIS_BUNDLE_PAYLOAD_KINDS = [
+  "terminal-status",
+  "evaluation-metrics",
+  "accounting-summary",
+  "attempt-history",
+  "recovery-summary"
+] as const;
+
+function analysisBundleTerminalStatusIssues(document: unknown): SemanticGateIssue[] {
+  const counts = at(document, ["status_counts"]);
+  if (!isRecord(document) || !isRecord(counts)) return [];
+  const runCount = numberField(document, "run_count");
+  const countValues = ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled", "unknown"].map(
+    (status) => numberField(counts, status)
+  );
+  if (runCount === undefined || countValues.some((count) => count === undefined)) return [];
+
+  const issues: SemanticGateIssue[] = [];
+  if (countValues.reduce<number>((total, count) => total + (count ?? 0), 0) !== runCount) {
+    issues.push(issue("$.status_counts", "Analysis status counts must sum to run_count"));
+  }
+  const terminalCount =
+    numberField(counts, "succeeded")! +
+    numberField(counts, "failed")! +
+    numberField(counts, "timed-out")! +
+    numberField(counts, "canceled")!;
+  if (booleanField(document, "terminal") !== (runCount > 0 && terminalCount === runCount)) {
+    issues.push(issue("$.terminal", "Analysis terminal flag must match the aggregate status counts"));
+  }
+  if (stringField(document, "status") !== aggregateAnalysisBundleStatus(counts)) {
+    issues.push(issue("$.status", "Analysis status must match the aggregate status counts"));
+  }
+  const startedAt = stringField(document, "started_at");
+  const finishedAt = stringField(document, "finished_at");
+  if (startedAt !== undefined && finishedAt !== undefined && Date.parse(startedAt) > Date.parse(finishedAt)) {
+    issues.push(issue("$.finished_at", "Analysis finish timestamp cannot precede started_at"));
+  }
+  return issues;
+}
+
+function aggregateAnalysisBundleStatus(counts: Readonly<Record<string, unknown>>): string {
+  const statuses = ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled", "unknown"];
+  const populated = statuses.filter((status) => (numberField(counts, status) ?? 0) > 0);
+  if (populated.length === 0) return "unknown";
+  if (populated.length === 1) return populated[0]!;
+  for (const active of ["running", "paused", "pending"]) {
+    if ((numberField(counts, active) ?? 0) > 0) return active;
+  }
+  return "mixed";
+}
+
+function analysisBundleEvaluationCountIssues(document: unknown): SemanticGateIssue[] {
+  const totals = at(document, ["totals"]);
+  if (!isRecord(totals)) return [];
+  const groundTruth = bigintField(totals, "ground_truth_bug_count");
+  const findingCount = bigintField(totals, "finding_count");
+  const truePositives = bigintField(totals, "true_positives");
+  const falsePositives = bigintField(totals, "false_positives");
+  const missed = bigintField(totals, "missed");
+  const review = bigintField(totals, "human_review_queue_count");
+  const duplicates = bigintField(totals, "duplicate_count");
+  if (
+    groundTruth === undefined ||
+    findingCount === undefined ||
+    truePositives === undefined ||
+    falsePositives === undefined ||
+    missed === undefined ||
+    review === undefined ||
+    duplicates === undefined
+  ) {
+    return [];
+  }
+  return [
+    ...(groundTruth === truePositives + missed
+      ? []
+      : [issue("$.totals.ground_truth_bug_count", "Ground-truth count must equal true positives plus missed")]),
+    ...(findingCount === truePositives + falsePositives + duplicates + review
+      ? []
+      : [issue("$.totals.finding_count", "Finding count must equal all classified finding counts")])
+  ];
+}
+
+function analysisBundleAccountingIssues(document: unknown): SemanticGateIssue[] {
+  if (!isRecord(document)) return [];
+  const runCount = numberField(document, "run_count");
+  const accountedRunCount = numberField(document, "accounted_run_count");
+  const runtimeObservedRunCount = numberField(document, "runtime_observed_run_count");
+  const eventCount = bigintField(document, "event_count");
+  const pricedEventCount = bigintField(document, "priced_event_count");
+  const unpricedEventCount = bigintField(document, "unpriced_event_count");
+  const totalTokens = bigintField(document, "total_tokens");
+  const tokenComponents = [
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens"
+  ].map((field) => bigintField(document, field));
+  const issues: SemanticGateIssue[] = [];
+  if (runCount !== undefined && accountedRunCount !== undefined && accountedRunCount > runCount) {
+    issues.push(issue("$.accounted_run_count", "Accounted run count cannot exceed run_count"));
+  }
+  if (runCount !== undefined && runtimeObservedRunCount !== undefined && runtimeObservedRunCount > runCount) {
+    issues.push(issue("$.runtime_observed_run_count", "Runtime-observed run count cannot exceed run_count"));
+  }
+  if (
+    eventCount !== undefined &&
+    pricedEventCount !== undefined &&
+    unpricedEventCount !== undefined &&
+    eventCount !== pricedEventCount + unpricedEventCount
+  ) {
+    issues.push(issue("$.event_count", "Event count must equal priced_event_count plus unpriced_event_count"));
+  }
+  if (
+    unpricedEventCount !== undefined &&
+    unpricedEventCount > 0n &&
+    booleanField(document, "partial_pricing") !== true
+  ) {
+    issues.push(issue("$.partial_pricing", "Partial pricing must be true when events are unpriced"));
+  }
+  if (
+    runtimeObservedRunCount !== undefined &&
+    (at(document, ["runtime_seconds"]) === null) !== (runtimeObservedRunCount === 0)
+  ) {
+    issues.push(issue("$.runtime_seconds", "Runtime must be present exactly when runtime observations exist"));
+  }
+  if (
+    totalTokens !== undefined &&
+    tokenComponents.every((component) => component !== undefined) &&
+    totalTokens !== tokenComponents.reduce((total, component) => total + component!, 0n)
+  ) {
+    issues.push(issue("$.total_tokens", "Total tokens must equal the exact token component sum"));
+  }
+  return issues;
+}
+
+function analysisBundleAttemptOrderIssues(document: unknown): SemanticGateIssue[] {
+  const issues: SemanticGateIssue[] = [];
+  arrayAt(document, ["attempts"]).forEach((attempt, index) => {
+    if (!isRecord(attempt)) return;
+    if (numberField(attempt, "ordinal") !== index + 1) {
+      issues.push(issue(`$.attempts[${index}].ordinal`, "Attempt ordinal must be contiguous and one-based"));
+    }
+    const startedAt = stringField(attempt, "started_at");
+    const finishedAt = stringField(attempt, "finished_at");
+    if (startedAt !== undefined && finishedAt !== undefined && Date.parse(startedAt) > Date.parse(finishedAt)) {
+      issues.push(issue(`$.attempts[${index}].finished_at`, "Attempt finish timestamp cannot precede started_at"));
+    }
+  });
+  return issues;
+}
+
+function analysisBundleRecoveryIssues(document: unknown): SemanticGateIssue[] {
+  if (!isRecord(document)) return [];
+  const totalGenerations = bigintField(document, "total_generations");
+  const startReasons = at(document, ["start_reasons"]);
+  const terminalReasons = at(document, ["terminal_reasons"]);
+  const terminalClasses = at(document, ["terminal_classes"]);
+  if (
+    totalGenerations === undefined ||
+    !isRecord(startReasons) ||
+    !isRecord(terminalReasons) ||
+    !isRecord(terminalClasses)
+  ) {
+    return [];
+  }
+  const countGroups = [
+    sumBigintFields(document, ["terminal_generations", "active_generations"]),
+    sumBigintFields(document, ["progress_generations", "no_progress_generations", "unknown_progress_generations"]),
+    sumBigintFields(document, [
+      "model_work_generations",
+      "no_model_work_generations",
+      "unknown_model_work_generations"
+    ]),
+    sumRecordBigints(startReasons),
+    sumRecordBigints(terminalReasons),
+    sumRecordBigints(terminalClasses)
+  ];
+  const issues: SemanticGateIssue[] = [];
+  if (countGroups.some((count) => count === undefined || count !== totalGenerations)) {
+    issues.push(issue("$.total_generations", "Total generations must reconcile with every count group"));
+  }
+  appendBigintEqualityIssue(
+    issues,
+    bigintField(document, "genuine_failures"),
+    bigintField(terminalClasses, "genuine-worker-failure"),
+    "$.genuine_failures",
+    "Genuine failures must match terminal classes"
+  );
+  appendBigintEqualityIssue(
+    issues,
+    bigintField(document, "rotations"),
+    bigintField(terminalClasses, "controller-rotation"),
+    "$.rotations",
+    "Rotations must match terminal classes"
+  );
+  appendBigintEqualityIssue(
+    issues,
+    bigintField(document, "resumptions"),
+    bigintField(startReasons, "post-model-resume"),
+    "$.resumptions",
+    "Resumptions must match start reasons"
+  );
+  appendBigintEqualityIssue(
+    issues,
+    bigintField(document, "active_generations"),
+    bigintField(terminalReasons, "active"),
+    "$.active_generations",
+    "Active generations must match active terminal reasons"
+  );
+
+  const expectedTerminalClasses: Readonly<Record<string, bigint | undefined>> = {
+    active: bigintField(terminalReasons, "active"),
+    succeeded: bigintField(terminalReasons, "succeeded"),
+    "genuine-worker-failure": bigintField(terminalReasons, "genuine-worker-failure"),
+    "operational-failure": bigintField(terminalReasons, "operational-failure"),
+    "controller-rotation": sumBigintFields(terminalReasons, [
+      "image-rollout",
+      "stale-probe-rotation",
+      "operator-request"
+    ]),
+    timeout: bigintField(terminalReasons, "timeout"),
+    "resource-termination": bigintField(terminalReasons, "resource-termination"),
+    "recovery-budget-exhausted": bigintField(terminalReasons, "recovery-budget-exhausted"),
+    unknown: bigintField(terminalReasons, "unknown")
+  };
+  for (const [terminalClass, expected] of Object.entries(expectedTerminalClasses)) {
+    appendBigintEqualityIssue(
+      issues,
+      bigintField(terminalClasses, terminalClass),
+      expected,
+      `$.terminal_classes.${terminalClass}`,
+      "Terminal class must reconcile with terminal reasons"
+    );
+  }
+  return issues;
+}
+
+function analysisBundleOmissionOrderIssues(document: unknown): SemanticGateIssue[] {
+  const paths = arrayAt(document, ["omissions"]).flatMap((entry) => stringField(entry, "path") ?? []);
+  const sorted = [...paths].sort();
+  return paths.some((entry, index) => entry !== sorted[index])
+    ? [issue("$.omissions", "Analysis bundle omissions must be sorted by path")]
+    : [];
+}
+
+function analysisBundleCoverageIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+  const manifest = context.analysisBundle?.manifest;
+  const files = arrayAt(manifest, ["files"]);
+  const omissions = arrayAt(document, ["omissions"]);
+  return ANALYSIS_BUNDLE_PAYLOAD_KINDS.flatMap((kind) => {
+    const included = files.filter((entry) => stringField(entry, "kind") === kind).length;
+    const omitted = omissions.filter((entry) => stringField(entry, "kind") === kind).length;
+    return included + omitted === 1
+      ? []
+      : [issue("$.omissions", `analysis bundle ${kind} must be either included or omitted exactly once`)];
+  });
+}
+
+function bigintField(value: unknown, key: string): bigint | undefined {
+  const candidate = numberField(value, key);
+  return candidate !== undefined && Number.isSafeInteger(candidate) ? BigInt(candidate) : undefined;
+}
+
+function sumBigintFields(value: unknown, fields: readonly string[]): bigint | undefined {
+  const values = fields.map((field) => bigintField(value, field));
+  return values.some((entry) => entry === undefined)
+    ? undefined
+    : values.reduce<bigint>((total, entry) => total + (entry ?? 0n), 0n);
+}
+
+function sumRecordBigints(value: Readonly<Record<string, unknown>>): bigint | undefined {
+  let total = 0n;
+  for (const entry of Object.values(value)) {
+    if (typeof entry !== "number" || !Number.isSafeInteger(entry)) return undefined;
+    total += BigInt(entry);
+  }
+  return total;
+}
+
+function appendBigintEqualityIssue(
+  issues: SemanticGateIssue[],
+  actual: bigint | undefined,
+  expected: bigint | undefined,
+  pathValue: string,
+  message: string
+): void {
+  if (actual !== undefined && expected !== undefined && actual !== expected) {
+    issues.push(issue(pathValue, message));
+  }
 }
 
 function artifactVerificationDigestIssues(document: unknown): SemanticGateIssue[] {
@@ -2048,7 +2346,18 @@ const gateSpecifications = {
   "analysis-bundle-file-digest": contextualGate("filesystem", ["filesystem.rootDirectory"], (document, context) =>
     filesystemManifestIssues(document, context, ["files"])
   ),
+  "analysis-bundle-accounting-reconciliation": documentGate(analysisBundleAccountingIssues),
+  "analysis-bundle-attempt-order": documentGate(analysisBundleAttemptOrderIssues),
+  "analysis-bundle-evaluation-count-reconciliation": documentGate(analysisBundleEvaluationCountIssues),
+  "analysis-bundle-inclusion-omission-coverage": contextualGate(
+    "cross-artifact",
+    ["analysisBundle.manifest"],
+    analysisBundleCoverageIssues
+  ),
+  "analysis-bundle-omission-order": documentGate(analysisBundleOmissionOrderIssues),
   "analysis-bundle-path-order": documentGate(analysisBundlePathIssues),
+  "analysis-bundle-recovery-reconciliation": documentGate(analysisBundleRecoveryIssues),
+  "analysis-bundle-terminal-status-reconciliation": documentGate(analysisBundleTerminalStatusIssues),
   "artifact-manifest-file-digest": contextualGate("filesystem", ["filesystem.rootDirectory"], (document, context) =>
     filesystemManifestIssues(document, context, ["files"])
   ),
