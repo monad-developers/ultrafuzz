@@ -27,16 +27,6 @@ import {
   type RuntimeConfigOverrides
 } from "./types.js";
 
-const NAMED_SEMANTIC_ZOD_ISSUES = new Set([
-  "CONFIG_AGENT_DEEPSEEK_AUTH_UNSUPPORTED",
-  "CONFIG_EXECUTION_LOCAL_PROVIDER",
-  "CONFIG_EXECUTION_LOCAL_PROVIDER_SETTINGS",
-  "CONFIG_EXECUTION_PROVIDER_REQUIRED",
-  "CONFIG_EXECUTION_PROVIDER_SETTINGS_REQUIRED",
-  "CONFIG_MODEL_DEEPSEEK_REASONING_UNSUPPORTED",
-  "CONFIG_MODEL_KIMI_REASONING_UNSUPPORTED"
-]);
-
 export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<ResolvedConfig> {
   const diagnostics: ConfigDiagnostic[] = [];
   const config = createDefaultResolvedConfig();
@@ -69,7 +59,7 @@ export function validateResolvedConfig(
   env: Record<string, string | undefined> = process.env
 ): ConfigDiagnostic[] {
   const diagnostics = schemaIssues(resolvedConfigZodSchema, config)
-    .filter((issue) => issue.code !== "custom" || !NAMED_SEMANTIC_ZOD_ISSUES.has(issue.message))
+    .filter((issue) => !isNamedSemanticSchemaIssue(issue))
     .map((issue) => resolvedConfigDiagnostic(issue, config));
   diagnostics.push(...validateAgentConfigs(config.agents));
   diagnostics.push(...validateTriageConfig(config.triage));
@@ -524,6 +514,16 @@ function applyIntegerEnv(
 function schemaIssues(schema: ZodType, value: unknown): ZodIssue[] {
   const parsed = schema.safeParse(value);
   return parsed.success ? [] : parsed.error.issues;
+}
+
+/**
+ * The canonical JSON Schema conditionals are mirrored as named Zod refinements
+ * for validator parity. The named validators in this module own their
+ * user-facing diagnostics; mapping the mirrored issue as a structural failure
+ * would report the same error twice with a generic structural message.
+ */
+function isNamedSemanticSchemaIssue(issue: ZodIssue): boolean {
+  return issue.code === "custom" && issue.message.startsWith("CONFIG_");
 }
 
 function resolvedConfigDiagnostic(issue: ZodIssue, config: ResolvedConfig): ConfigDiagnostic {

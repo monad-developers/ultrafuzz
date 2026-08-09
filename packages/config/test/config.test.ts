@@ -19,6 +19,8 @@ import {
   resolveConfig,
   restoreRedactedConfig,
   serializeRedactedResolvedConfigToml,
+  type ConfigDiagnostic,
+  type ProjectConfigInput,
   validateExecutionNodeOverrides,
   validateTriageConfig
 } from "../src/index.js";
@@ -483,6 +485,146 @@ describe("redaction", () => {
   });
 });
 
+describe("resolved config named semantic diagnostics", () => {
+  const cases: Array<{
+    label: string;
+    projectConfig: ProjectConfigInput;
+    diagnostics: ConfigDiagnostic[];
+  }> = [
+    {
+      label: "unsupported Kimi reasoning",
+      projectConfig: {
+        models: {
+          profiles: {
+            "kimi-invalid": {
+              agent: "KimiAgent",
+              model: "kimi-k3",
+              reasoning: "xhigh"
+            }
+          }
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_MODEL_KIMI_REASONING_UNSUPPORTED",
+          "Kimi model profile `kimi-invalid` reasoning must be low, high, or max",
+          ["models", "kimi-invalid", "reasoning"]
+        )
+      ]
+    },
+    {
+      label: "unsupported DeepSeek reasoning",
+      projectConfig: {
+        models: {
+          profiles: {
+            "deepseek-invalid": {
+              agent: "DeepSeekAgent",
+              model: "deepseek-v4-pro",
+              reasoning: "xhigh"
+            }
+          }
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_MODEL_DEEPSEEK_REASONING_UNSUPPORTED",
+          "DeepSeek model profile `deepseek-invalid` reasoning must be low, high, or max",
+          ["models", "deepseek-invalid", "reasoning"]
+        )
+      ]
+    },
+    {
+      label: "unsupported DeepSeek subscription authentication",
+      projectConfig: {
+        agents: {
+          DeepSeekAgent: {
+            auth: "subscription"
+          }
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_AGENT_DEEPSEEK_AUTH_UNSUPPORTED",
+          "DeepSeekAgent supports only api-key authentication",
+          ["agents", "DeepSeekAgent", "auth"]
+        )
+      ]
+    },
+    {
+      label: "a cloud provider selected for local execution",
+      projectConfig: {
+        execution: {
+          provider: "modal"
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_EXECUTION_LOCAL_PROVIDER",
+          "execution.provider is only valid when execution.mode is cloud",
+          ["execution", "provider"]
+        )
+      ]
+    },
+    {
+      label: "cloud provider settings configured for local execution",
+      projectConfig: {
+        execution: {
+          providers: {
+            modal: {
+              app: "node-runs",
+              image: "runner:stable",
+              credentialEnv: ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
+            }
+          }
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_EXECUTION_LOCAL_PROVIDER_SETTINGS",
+          "cloud provider settings are only valid when execution.mode is cloud",
+          ["execution", "providers", "modal"]
+        )
+      ]
+    },
+    {
+      label: "cloud execution without a provider",
+      projectConfig: {
+        execution: {
+          mode: "cloud"
+        }
+      },
+      diagnostics: [
+        validationDiagnostic("CONFIG_EXECUTION_PROVIDER_REQUIRED", "cloud execution requires an execution provider", [
+          "execution",
+          "provider"
+        ])
+      ]
+    },
+    {
+      label: "cloud execution without selected-provider settings",
+      projectConfig: {
+        execution: {
+          mode: "cloud",
+          provider: "modal"
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_EXECUTION_PROVIDER_SETTINGS_REQUIRED",
+          "cloud execution requires settings for the selected provider",
+          ["execution", "providers", "modal"]
+        )
+      ]
+    }
+  ];
+
+  it.each(cases)("reports only the named semantic diagnostic for $label", ({ projectConfig, diagnostics }) => {
+    const resolved = resolveConfig({ env: {}, projectConfig });
+
+    expect(resolved).toEqual({ ok: false, diagnostics });
+  });
+});
+
 describe("model profile and triage validation", () => {
   it("clears default reasoning whenever an agent override switches agents", () => {
     const agentOnly = resolveConfig({ env: {} });
@@ -680,3 +822,13 @@ describe("model profile and triage validation", () => {
     expect(resolved.diagnostics.map((entry) => entry.code)).toContain("CONFIG_TRIAGE_QUORUM_EXCEEDS_PANEL");
   });
 });
+
+function validationDiagnostic(code: string, message: string, path: string[]): ConfigDiagnostic {
+  return {
+    code,
+    severity: "error",
+    message,
+    path,
+    source: "validation"
+  };
+}
