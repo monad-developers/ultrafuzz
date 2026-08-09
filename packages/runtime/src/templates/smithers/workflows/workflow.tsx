@@ -78,19 +78,67 @@ const {
   WORKSPACE_PATCH_PREPARATION_SCHEMA_VERSION
 } = await import(runtimeModule);
 
-const inputTaskSchema = z.object({
-  id: z.string(),
+const inputTaskSchema = z.strictObject({
+  id: z.string().min(1).max(4_096),
   prompt: z.string().optional(),
   prompt_path: z.string().optional()
 });
 
-const inputSchema = z.looseObject({
-  tasks: z.array(inputTaskSchema).default([]),
-  operator_prompt: z.string().optional(),
-  operator_input: z.unknown().optional(),
-  cloud_worker: z.boolean().optional(),
-  task_id: z.string().optional()
+const MAX_WORKFLOW_INPUT_TASKS = 100_000;
+const MAX_OPERATOR_INPUT_DEPTH = 128;
+const MAX_OPERATOR_INPUT_ITEMS = 1_000_000;
+const MAX_OPERATOR_INPUT_PROPERTIES = 1_000_000;
+const jsonPrimitiveSchema = z.union([z.null(), z.boolean(), z.number(), z.string()]);
+
+function boundedJsonValueSchema(depth: number): z.ZodType<unknown> {
+  if (depth >= MAX_OPERATOR_INPUT_DEPTH) return jsonPrimitiveSchema;
+  const nested = boundedJsonValueSchema(depth + 1);
+  return z.union([jsonPrimitiveSchema, z.array(nested), z.record(z.string(), nested)]);
+}
+
+const operatorInputSchema = boundedJsonValueSchema(0).superRefine((value, ctx) => {
+  const pending = [value];
+  let items = 0;
+  let properties = 0;
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (Array.isArray(current)) {
+      items += current.length;
+      if (items > MAX_OPERATOR_INPUT_ITEMS) {
+        ctx.addIssue({ code: "custom", message: `operator input exceeds ${MAX_OPERATOR_INPUT_ITEMS} array items` });
+        return;
+      }
+      pending.push(...current);
+    } else if (current !== null && typeof current === "object") {
+      const entries = Object.values(current);
+      properties += entries.length;
+      if (properties > MAX_OPERATOR_INPUT_PROPERTIES) {
+        ctx.addIssue({
+          code: "custom",
+          message: `operator input exceeds ${MAX_OPERATOR_INPUT_PROPERTIES} object properties`
+        });
+        return;
+      }
+      pending.push(...entries);
+    }
+  }
 });
+
+const localWorkflowInputSchema = z.strictObject({
+  schema_version: z.literal("ultrafuzz.smithers.workflow.v2"),
+  run_id: z.literal(__ULTRAFUZZ_RUN_ID_LITERAL__),
+  tasks: z.array(inputTaskSchema).max(MAX_WORKFLOW_INPUT_TASKS),
+  operator_prompt: z.string().optional(),
+  operator_input: operatorInputSchema.optional()
+});
+
+const cloudWorkerInputSchema = z.strictObject({
+  cloud_worker: z.literal(true),
+  task_id: z.string().min(1).max(4_096),
+  operator_prompt: z.string().optional()
+});
+
+const inputSchema = z.union([localWorkflowInputSchema, cloudWorkerInputSchema]);
 
 const taskOutput = z.object({
   summary: z.string().min(1)
@@ -4672,17 +4720,13 @@ function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ 
 }
 
 export default smithers((ctx) => {
-  const inputTasks = new Map(
-    ((ctx.input as { tasks?: Array<{ id: string; prompt?: string; prompt_path?: string }> }).tasks ?? []).map(
-      (task) => [task.id, task]
-    )
-  );
+  const cloudWorker = "cloud_worker" in ctx.input && ctx.input.cloud_worker === true;
+  const inputTasks = new Map((cloudWorker ? [] : ctx.input.tasks).map((task) => [task.id, task]));
   const operatorPromptInput =
     typeof ctx.input.operator_prompt === "string" && ctx.input.operator_prompt.length > 0
       ? ctx.input.operator_prompt
       : undefined;
   const operatorPrompt = operatorPromptInput === undefined ? "" : `${operatorPromptInput}\n\n`;
-  const cloudWorker = ctx.input.cloud_worker === true;
   const selectedTaskSpecs = cloudWorker ? taskSpecs.filter((task) => task.id === ctx.input.task_id) : taskSpecs;
   if (cloudWorker && selectedTaskSpecs.length !== 1) {
     throw new Error("cloud worker task selection must identify exactly one concrete attempt");

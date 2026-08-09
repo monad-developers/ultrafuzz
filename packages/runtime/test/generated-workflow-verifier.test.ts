@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +20,62 @@ import {
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
+
+function loadGeneratedWorkflowInputSchema(): { safeParse(value: unknown): { success: boolean } } {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const schemaStart = source.indexOf("const inputTaskSchema");
+  const schemaEnd = source.indexOf("\n\nconst taskOutput", schemaStart);
+  assert.ok(schemaStart >= 0, source);
+  assert.ok(schemaEnd > schemaStart, source);
+  const schemaSource = source
+    .slice(schemaStart, schemaEnd)
+    .replaceAll("__ULTRAFUZZ_RUN_ID_LITERAL__", JSON.stringify("run-1"));
+  const compiled = ts.transpileModule(schemaSource, {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const require = createRequire(import.meta.url);
+  const smithersRoot = packageRootForEntry(require.resolve("smithers-orchestrator"));
+  const z = (createRequire(path.join(smithersRoot, "package.json"))("zod/v4") as { z: unknown }).z;
+  return new Function("z", `${compiled}; return inputSchema;`)(z) as ReturnType<
+    typeof loadGeneratedWorkflowInputSchema
+  >;
+}
+
+test("generated workflow input is an exact current-only envelope with bounded JSON operator data", () => {
+  const inputSchema = loadGeneratedWorkflowInputSchema();
+  const local = {
+    schema_version: "ultrafuzz.smithers.workflow.v2",
+    run_id: "run-1",
+    tasks: [{ id: "node:one", prompt_path: ".ultrafuzz/prompts/one.md" }],
+    operator_prompt: "focus",
+    operator_input: { tickets: [1, true, null, "three"] }
+  };
+  assert.equal(inputSchema.safeParse(local).success, true);
+  assert.equal(
+    inputSchema.safeParse({ cloud_worker: true, task_id: "node:one", operator_prompt: "focus" }).success,
+    true
+  );
+
+  for (const invalid of [
+    { ...local, unexpected: true },
+    { ...local, schema_version: "ultrafuzz.smithers.workflow.v1" },
+    { ...local, run_id: "foreign-run" },
+    { schema_version: local.schema_version, run_id: local.run_id },
+    { ...local, tasks: [{ ...local.tasks[0], extra: true }] },
+    { cloud_worker: true, task_id: "node:one", tasks: [] },
+    { cloud_worker: false, task_id: "node:one" }
+  ]) {
+    assert.equal(inputSchema.safeParse(invalid).success, false, JSON.stringify(invalid));
+  }
+
+  let tooDeep: unknown = null;
+  for (let depth = 0; depth <= 128; depth += 1) tooDeep = [tooDeep];
+  assert.equal(inputSchema.safeParse({ ...local, operator_input: tooDeep }).success, false);
+
+  const template = fs.readFileSync(workflowTemplatePath, "utf8");
+  assert.doesNotMatch(template, /z\.looseObject|\.default\(|z\.unknown\(\)/u);
+  assert.match(template, /const inputSchema = z\.union\(\[localWorkflowInputSchema, cloudWorkerInputSchema\]\)/u);
+});
 
 function loadRetryFailureAwareArgs(): (
   args: { prompt?: unknown } | undefined,
@@ -2418,4 +2475,13 @@ function findRuntimePackageRoot(start: string): string {
     current = path.dirname(current);
   }
   throw new Error("could not locate @ultrafuzz/runtime package root");
+}
+
+function packageRootForEntry(entryPath: string): string {
+  let current = path.dirname(entryPath);
+  while (current !== path.dirname(current)) {
+    if (fs.existsSync(path.join(current, "package.json"))) return current;
+    current = path.dirname(current);
+  }
+  throw new Error(`could not locate package root for ${entryPath}`);
 }
