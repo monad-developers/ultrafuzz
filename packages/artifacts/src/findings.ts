@@ -549,12 +549,23 @@ function splitLineReference(value: string):
     }
   | undefined {
   const describedLineMatch =
-    /^(?<path>.+):(?<line>[1-9][0-9]*)(?:-(?<endLine>[1-9][0-9]*))?: (?<detail>\S(?:[^\r\n]*\S)?)$/u.exec(value);
+    /^(?<path>.+):(?<line>[1-9][0-9]*)(?:-(?<endLine>[1-9][0-9]*))?(?<detailSeparator>: |; )(?<detail>\S(?:[^\r\n]*\S)?)$/u.exec(
+      value
+    );
   const describedLinePath = describedLineMatch?.groups?.path;
   const describedLine = describedLineMatch?.groups?.line;
   const describedEndLine = describedLineMatch?.groups?.endLine;
+  const describedDetailSeparator = describedLineMatch?.groups?.detailSeparator;
   const describedDetail = describedLineMatch?.groups?.detail;
-  if (describedLinePath !== undefined && describedLine !== undefined && describedDetail !== undefined) {
+  if (
+    describedLinePath !== undefined &&
+    describedLine !== undefined &&
+    describedDetailSeparator !== undefined &&
+    describedDetail !== undefined
+  ) {
+    if (describedDetailSeparator === "; " && /^[0-9]/u.test(describedDetail)) {
+      return undefined;
+    }
     const parsedLine = parseLineReferenceNumber(describedLine);
     const parsedEndLine = describedEndLine === undefined ? undefined : parseLineReferenceNumber(describedEndLine);
     if (parsedEndLine !== undefined && parsedEndLine < parsedLine) {

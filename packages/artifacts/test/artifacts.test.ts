@@ -1392,6 +1392,36 @@ test("findings normalize source evidence line suffixes", () => {
     path.join(nodeDir, "findings.json"),
     JSON.stringify([
       {
+        title: "Source range with semicolon-delimited detail",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "A source range and short description anchor the issue.",
+        evidence: [
+          { kind: "source", path: "PoolRegistry.sol:305-327; tests" },
+          {
+            kind: "source",
+            path: "PoolRegistry.sol:305-327; tests",
+            line: 305,
+            end_line: 327,
+            detail: "tests"
+          }
+        ]
+      }
+    ])
+  );
+
+  const semicolonDetailReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(semicolonDetailReport.findings[0]!.evidence, [
+    { kind: "source", path: "PoolRegistry.sol", line: 305, end_line: 327, detail: "tests" },
+    { kind: "source", path: "PoolRegistry.sol", line: 305, end_line: 327, detail: "tests" }
+  ]);
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
         title: "Disjoint source ranges with matching detail",
         status: "candidate",
         severity_guess: "medium",
@@ -1552,7 +1582,10 @@ test("findings normalize source evidence line suffixes", () => {
   for (const evidence of [
     { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`, line: 103 },
     { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`, end_line: 106 },
-    { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`, detail: "different detail" }
+    { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`, detail: "different detail" },
+    { kind: "source", path: "PoolRegistry.sol:305-327; tests", line: 304 },
+    { kind: "source", path: "PoolRegistry.sol:305-327; tests", end_line: 328 },
+    { kind: "source", path: "PoolRegistry.sol:305-327; tests", detail: "different detail" }
   ]) {
     fs.writeFileSync(
       path.join(nodeDir, "findings.json"),
@@ -1574,7 +1607,8 @@ test("findings normalize source evidence line suffixes", () => {
     "VeryLiquidVault.sol:105-107,185-154",
     "CurveStableSwapNG.vy:17-19;35-33",
     "VToken.sol:698-728 and 1478-1463",
-    "VeryLiquidVault.sol:105-104: descending inline range"
+    "VeryLiquidVault.sol:105-104: descending inline range",
+    "PoolRegistry.sol:327-305; tests"
   ]) {
     fs.writeFileSync(
       path.join(nodeDir, "findings.json"),
@@ -1601,10 +1635,15 @@ test("findings normalize source evidence line suffixes", () => {
     ["CurveStableSwapNG.vy:17-19;33-35,40", /unsafe segment/u],
     ["VToken.sol:698-728 and 1463-1478,1500-1501", /unsafe segment/u],
     ["VeryLiquidVault.sol:104-105: ", /unsafe segment/u],
+    ["PoolRegistry.sol:305-327; ", /unsafe segment/u],
+    ["PoolRegistry.sol:305-327; 411-419", /unsafe segment/u],
     ["VeryLiquidVault.sol:latest: prose", /unsafe segment/u],
+    ["PoolRegistry.sol:latest; tests", /unsafe segment/u],
     ["../VeryLiquidVault.sol:104-105: prose", /traverse/u],
+    ["../PoolRegistry.sol:305-327; tests", /traverse/u],
     ["VeryLiquidVault.sol:9007199254740992,154-185", /positive safe integer/u],
-    ["VeryLiquidVault.sol:9007199254740992: prose", /positive safe integer/u]
+    ["VeryLiquidVault.sol:9007199254740992: prose", /positive safe integer/u],
+    ["PoolRegistry.sol:9007199254740992; tests", /positive safe integer/u]
   ] as const) {
     fs.writeFileSync(
       path.join(nodeDir, "findings.json"),
@@ -1635,6 +1674,10 @@ test("findings normalize source evidence line suffixes", () => {
           {
             kind: "validation",
             path: "forge test --match-path VeryLiquidVault.sol:104-105: inline prose"
+          },
+          {
+            kind: "validation",
+            path: "forge test --match-path PoolRegistry.sol:305-327; tests"
           }
         ]
       }
@@ -1647,6 +1690,10 @@ test("findings normalize source evidence line suffixes", () => {
     {
       kind: "validation",
       command: "forge test --match-path VeryLiquidVault.sol:104-105: inline prose"
+    },
+    {
+      kind: "validation",
+      command: "forge test --match-path PoolRegistry.sol:305-327; tests"
     }
   ]);
 
