@@ -300,6 +300,23 @@ test("analysis bundle validation rejects modified payload bytes", () => {
   assert.throws(() => validateAnalysisBundle(output), /checksum mismatch/u);
 });
 
+test("analysis bundle validation rejects duplicate manifest keys without changing bytes", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-duplicate-key-"));
+  const output = path.join(root, "bundle");
+  writeAnalysisBundle({ outputDir: output, payloads: {} });
+  const manifestPath = path.join(output, ANALYSIS_BUNDLE_MANIFEST_FILE);
+  const original = fs.readFileSync(manifestPath, "utf8");
+  const duplicated = original.replace(
+    '"schema_version": "ultrafuzz.analysis-bundle.v1",',
+    '"schema_version": "ultrafuzz.analysis-bundle.v1",\n  "schema_version": "ultrafuzz.analysis-bundle.v1",'
+  );
+  assert.notEqual(duplicated, original);
+  fs.writeFileSync(manifestPath, duplicated, "utf8");
+
+  assert.throws(() => validateAnalysisBundle(output), /duplicate property name/u);
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), duplicated);
+});
+
 test("analysis bundle validation rejects directories outside the fixed layout", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-tree-"));
   const output = path.join(root, "bundle");

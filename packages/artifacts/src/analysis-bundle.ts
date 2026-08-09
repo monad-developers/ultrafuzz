@@ -5,7 +5,9 @@ import path from "node:path";
 import { z } from "zod/v4";
 
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
+import { readRegularFileSnapshot } from "./schema-registry.js";
 import { assertRegularFileInside, listSafeFiles, safeResolveInside, sha256Bytes, sha256File } from "./safe-paths.js";
+import { parseStrictJsonBytes } from "./strict-json.js";
 
 export const ANALYSIS_BUNDLE_SCHEMA_VERSION = "ultrafuzz.analysis-bundle.v1" as const;
 export const ANALYSIS_BUNDLE_POLICY_VERSION = "ultrafuzz.analysis-bundle-policy.v1" as const;
@@ -806,10 +808,12 @@ function replaceDirectoryAtomically(staging: string, output: string): void {
 }
 
 function readJsonBounded(filePath: string): unknown {
-  if (fs.statSync(filePath).size > 1024 * 1024) {
-    throw new Error(`analysis bundle JSON exceeds the size limit: ${path.basename(filePath)}`);
-  }
-  return JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+  return parseStrictJsonBytes(readRegularFileSnapshot(filePath, 1024 * 1024), {
+    maxBytes: 1024 * 1024,
+    maxDepth: 128,
+    maxItems: 100_000,
+    maxProperties: 100_000
+  });
 }
 
 function assertStrictBundleTree(root: string, expectedFiles: string[]): void {
