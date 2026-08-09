@@ -23,7 +23,14 @@ import {
   validateStrictJsonlHistory,
   type StrictJsonlCodec
 } from "./strict-jsonl.js";
-import { NODE_STATE_STATUSES, RUN_STATE_STATUSES } from "./state.js";
+import {
+  NODE_STATE_STATUSES,
+  RUN_STATE_STATUSES,
+  SMITHERS_NODE_STATES,
+  SMITHERS_RUN_STATES,
+  SMITHERS_RUN_STATUSES
+} from "./state.js";
+export { SMITHERS_NODE_STATES, SMITHERS_RUN_STATES, SMITHERS_RUN_STATUSES } from "./state.js";
 
 export const EVENT_SCHEMA_VERSION = "ultrafuzz.event-record.v2" as const;
 export const EVENT_QUERY_FACADE_SCHEMA_VERSION = "ultrafuzz.event-query-facade.v1" as const;
@@ -119,47 +126,6 @@ const workflowActionSchema = z.enum(["start", "resume", "replay", "fork"]);
 const lifecycleActionSchema = z.enum(["resume", "replay", "fork"]);
 const runStatusSchema = z.enum(RUN_STATE_STATUSES);
 const nodeStatusSchema = z.enum(NODE_STATE_STATUSES);
-export const SMITHERS_RUN_STATUSES = [
-  "running",
-  "waiting-approval",
-  "waiting-event",
-  "waiting-timer",
-  "waiting-quota",
-  "paused",
-  "finished",
-  "continued",
-  "failed",
-  "cancelled"
-] as const;
-export const SMITHERS_RUN_STATES = [
-  "running",
-  "waiting-approval",
-  "waiting-event",
-  "waiting-timer",
-  "waiting-quota",
-  "paused",
-  "recovering",
-  "stale",
-  "orphaned",
-  "failed",
-  "cancelled",
-  "succeeded",
-  "unknown"
-] as const;
-export const SMITHERS_NODE_STATES = [
-  "pending",
-  "waiting-approval",
-  "waiting-event",
-  "waiting-timer",
-  "waiting-quota",
-  "waiting-bound",
-  "bound-stale",
-  "in-progress",
-  "finished",
-  "failed",
-  "cancelled",
-  "skipped"
-] as const;
 const smithersRunStatusSchema = z.enum(SMITHERS_RUN_STATUSES);
 const smithersRunStateSchema = z.enum(SMITHERS_RUN_STATES);
 const smithersNodeStateSchema = z.enum(SMITHERS_NODE_STATES);

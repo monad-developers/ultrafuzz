@@ -47,6 +47,7 @@ import {
   type PropertyReferenceInput,
   type RunLayout,
   type RunState,
+  type NodeProvenanceReasonCode,
   type SemanticArtifactSetContext,
   type SemanticGateContext,
   type SemanticGitContext,
@@ -62,12 +63,14 @@ import { deriveWorkspacePatchGitFacts } from "./workspace-handoff.js";
 
 const MAX_ARTIFACT_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 
-export interface DependencyGateDecision {
-  ok: boolean;
-  reason_code?: string;
-  reason?: string;
-  blocked_by?: string[];
-}
+export type DependencyGateDecision =
+  | { ok: true }
+  | {
+      ok: false;
+      reason_code: NodeProvenanceReasonCode;
+      reason: string;
+      blocked_by: string[];
+    };
 
 export interface RequiredArtifactGate {
   ok: boolean;
@@ -2107,7 +2110,8 @@ function readLensSuppliedExpectationIds(
     // Only declared, pinned-reference inputs can authorize provenance. In
     // particular, an agentic setup/lens node or unrelated reference elsewhere
     // in the run cannot authorize an ID for this lens.
-    if (state.nodes[dependencyId]?.provenance?.origin !== "pinned-reference") continue;
+    const provenance = state.nodes[dependencyId]?.provenance;
+    if (provenance === undefined || !("origin" in provenance) || provenance.origin !== "pinned-reference") continue;
     const dependencyDir = getNodeArtifactDir(layout, dependencyId);
     const expectationPaths = [
       ...(declaresReferenceExpectationCatalog(state.nodes[dependencyId]?.outputs, "references/expectations.json")
@@ -2122,7 +2126,7 @@ function readLensSuppliedExpectationIds(
     ];
     if (expectationPaths.length === 0) continue;
     catalogSupplied = true;
-    const metadata = state.nodes[dependencyId]?.provenance?.reference_expectations;
+    const metadata = provenance.reference_expectations;
     if (
       !isRecord(metadata) ||
       metadata.source !== "operator-supplied" ||
@@ -3630,15 +3634,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function markNodeBlockedByDependencies(
   layout: RunLayout,
   node: PlannedGraphNode,
-  decision: DependencyGateDecision
+  decision: Extract<DependencyGateDecision, { ok: false }>
 ): RunState {
   return updateNodeState(layout, node.id, {
     status: "skipped",
     finished_at: new Date().toISOString(),
-    last_error: decision.reason ?? "dependency gate blocked node",
+    last_error: decision.reason,
     provenance: {
-      reason_code: decision.reason_code ?? "DEPENDENCY_NOT_SATISFIED",
-      blocked_by: decision.blocked_by ?? []
+      reason_code: decision.reason_code,
+      blocked_by: decision.blocked_by
     }
   });
 }

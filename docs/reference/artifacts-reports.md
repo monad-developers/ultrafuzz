@@ -81,10 +81,17 @@ root-owned, read-only `/usr/local/bin/ultrafuzz` entrypoint and preflight.
 
 ## State
 
-`state.json` has schema version `ultrafuzz.run-state.v3` and schema ID
-`urn:ultrafuzz:schema:artifacts:run-state:3`. Older run-state versions are
+`state.json` has schema version `ultrafuzz.run-state.v4` and schema ID
+`urn:ultrafuzz:schema:artifacts:run-state:4`. Older run-state versions are
 unsupported by the current runtime and fail explicitly rather than entering a
 compatibility reader.
+
+The v4 provenance contract is closed. Run-level provenance records the full
+sealed workflow binding. Each node provenance object is exactly one of an
+execution record, a pinned-reference record, or a dependency-block record.
+Execution records use `output_contracts` and complete Smithers agent/verifier
+identities; the former `required_artifacts` spelling and partial/generic
+provenance objects are invalid.
 
 Run statuses are:
 

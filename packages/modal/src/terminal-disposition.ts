@@ -1,5 +1,5 @@
-import { lstatSync, readFileSync } from "node:fs";
-import { readFile, readdir } from "node:fs/promises";
+import { lstatSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -7,6 +7,7 @@ import {
   assertSmithersTaskManifestMatchesPlannedGraph,
   parseSmithersTaskManifestBytes,
   parseStrictJsonBytes,
+  readRunState,
   readRegularFileSnapshot,
   type SmithersTaskManifestDocument
 } from "@ultrafuzz/artifacts";
@@ -50,10 +51,11 @@ export function operationalDispositionForError(error: unknown): OperationalFailu
 interface TaskBinding {
   attemptId: string;
   concreteNodeId: string;
+  preparationSmithersNodeId: string;
   smithersNodeId: string;
+  verifierSmithersNodeId: string;
 }
 
-const COMPLETED_WORKFLOW_STATES = new Set(["finished", "succeeded", "success", "complete", "completed"]);
 const TERMINAL_DISPOSITION_SCHEMA_VERSION = "ultrafuzz.terminal-disposition.v1";
 
 export function classifyTerminalDisposition(stateValue: unknown, manifestValue: unknown): TerminalDisposition {
@@ -165,10 +167,10 @@ export async function inspectTerminalDisposition(projectRoot: string): Promise<T
     for (const run of runs.sort().reverse()) {
       const runRoot = path.join(runsRoot, run);
       try {
-        const state = JSON.parse(await readFile(path.join(runRoot, "state.json"), "utf8")) as unknown;
-        if (record(state)?.nodes !== undefined) candidates.push({ runRoot, state });
-      } catch {
-        // Ignore entries without a durable state.
+        candidates.push({ runRoot, state: readRunState(path.join(runRoot, "state.json")) });
+      } catch (error) {
+        if (isEnoent(error)) continue;
+        return operationalFailure();
       }
     }
     if (candidates.length !== 1) return operationalFailure();
@@ -186,7 +188,7 @@ export function inspectTerminalDispositionAtRunRoot(runRoot: string): TerminalDi
     const stat = lstatSync(statePath);
     if (!stat.isFile() || stat.isSymbolicLink()) return operationalFailure();
     const manifest = readSealedTaskManifest(runRoot);
-    return classifyTerminalDisposition(JSON.parse(readFileSync(statePath, "utf8")) as unknown, manifest);
+    return classifyTerminalDisposition(readRunState(statePath), manifest);
   } catch {
     return operationalFailure();
   }
@@ -229,23 +231,36 @@ export function canScoreBenchmarkRow(
 
 function taskBindings(tasks: readonly unknown[]): Map<string, TaskBinding> | undefined {
   const result = new Map<string, TaskBinding>();
-  const smithersNodeIds = new Set<string>();
+  const workflowTaskIds = new Set<string>();
   for (const value of tasks) {
     const task = record(value);
     const attemptId = nonEmptyString(task?.attemptId);
     const concreteNodeId = nonEmptyString(task?.concreteNodeId);
+    const preparationSmithersNodeId = nonEmptyString(task?.preparationSmithersNodeId);
     const smithersNodeId = nonEmptyString(task?.smithersNodeId);
+    const verifierSmithersNodeId = nonEmptyString(task?.verifierSmithersNodeId);
     if (
       attemptId === undefined ||
       concreteNodeId === undefined ||
+      preparationSmithersNodeId === undefined ||
       smithersNodeId === undefined ||
-      result.has(attemptId) ||
-      smithersNodeIds.has(smithersNodeId)
+      verifierSmithersNodeId === undefined ||
+      result.has(attemptId)
     ) {
       return undefined;
     }
-    result.set(attemptId, { attemptId, concreteNodeId, smithersNodeId });
-    smithersNodeIds.add(smithersNodeId);
+    const taskIds = [preparationSmithersNodeId, smithersNodeId, verifierSmithersNodeId];
+    if (new Set(taskIds).size !== taskIds.length || taskIds.some((taskId) => workflowTaskIds.has(taskId))) {
+      return undefined;
+    }
+    result.set(attemptId, {
+      attemptId,
+      concreteNodeId,
+      preparationSmithersNodeId,
+      smithersNodeId,
+      verifierSmithersNodeId
+    });
+    for (const taskId of taskIds) workflowTaskIds.add(taskId);
   }
   return result;
 }
@@ -306,7 +321,15 @@ function aggregateAttemptStatuses(statuses: readonly string[]): string {
 
 function hasExactTaskBinding(node: Record<string, unknown>, binding: TaskBinding): boolean {
   const workflow = record(record(node.provenance)?.workflow);
-  return workflow?.task_id === binding.smithersNodeId && nonEmptyString(workflow.run_id) !== undefined;
+  if (workflow === undefined) return false;
+  return (
+    nonEmptyString(workflow.run_id) !== undefined &&
+    workflow.agent_task_id === binding.smithersNodeId &&
+    workflow.verifier_task_id === binding.verifierSmithersNodeId &&
+    [binding.preparationSmithersNodeId, binding.smithersNodeId, binding.verifierSmithersNodeId].includes(
+      String(workflow.task_id)
+    )
+  );
 }
 
 function isGenuineTaskFailure(node: Record<string, unknown>, binding: TaskBinding, workflowRunId: string): boolean {
@@ -334,18 +357,20 @@ function hasCompletedTaskEvidence(node: Record<string, unknown>, binding: TaskBi
   const provenance = record(node.provenance);
   const workflow = record(provenance?.workflow);
   if (
-    workflow?.task_id !== binding.smithersNodeId ||
+    workflow?.task_id !== binding.verifierSmithersNodeId ||
+    workflow.agent_task_id !== binding.smithersNodeId ||
+    workflow.verifier_task_id !== binding.verifierSmithersNodeId ||
     workflow.run_id !== workflowRunId ||
     !isCompletedWorkflowState(workflow.state)
   ) {
     return false;
   }
-  const required = record(provenance?.required_artifacts);
-  return required?.ok === true && Array.isArray(required.missing) && required.missing.length === 0;
+  const outputContracts = record(provenance?.output_contracts);
+  return outputContracts?.ok === true && Array.isArray(outputContracts.missing) && outputContracts.missing.length === 0;
 }
 
 function isCompletedWorkflowState(value: unknown): boolean {
-  return typeof value === "string" && COMPLETED_WORKFLOW_STATES.has(value.toLowerCase());
+  return value === "finished";
 }
 
 function operationalFailure(): TerminalDisposition {
@@ -360,4 +385,8 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function isEnoent(error: unknown): boolean {
+  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT";
 }

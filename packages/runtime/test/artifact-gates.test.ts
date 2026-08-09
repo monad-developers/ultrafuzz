@@ -2268,6 +2268,7 @@ test("property lens gate accepts a bound pinned expectation catalog without rewr
         outputs: [catalogOutput],
         provenance: {
           origin: "pinned-reference",
+          reference: "reference-properties-recon",
           reference_expectations: {
             source: "operator-supplied",
             path: "reference-expectations.json",
@@ -2381,6 +2382,7 @@ test("property lens gate rejects every unauthorized catalog spelling without con
         outputs: [catalogOutput],
         provenance: {
           origin: "pinned-reference",
+          reference: "reference-properties-recon",
           reference_expectations: {
             source: "operator-supplied",
             path: "reference-expectations.json",
@@ -2455,6 +2457,7 @@ test("property lens gate rejects a digest-bound schema-invalid expectation catal
         outputs: [catalogOutput],
         provenance: {
           origin: "pinned-reference",
+          reference: "reference-properties-recon",
           reference_expectations: {
             source: "operator-supplied",
             path: "reference-expectations.json",
@@ -2518,7 +2521,7 @@ test("ordinary pinned references without expectation catalogs do not require cat
             primary: true
           }
         ],
-        provenance: { origin: "pinned-reference" }
+        provenance: { origin: "pinned-reference", reference: "reference-properties-example" }
       }
     ]
   });

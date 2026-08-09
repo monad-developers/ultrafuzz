@@ -372,11 +372,18 @@ queued, active, and idle durations. Lost-controller recovery MUST use an atomic
 takeover claim and MUST NOT repeat completed work. Workflow deadlines and
 recovery decisions MUST be testable with a fake clock.
 
-Current run state MUST use schema version `ultrafuzz.run-state.v3` and schema ID
-`urn:ultrafuzz:schema:artifacts:run-state:3`. Older persisted state and graph
+Current run state MUST use schema version `ultrafuzz.run-state.v4` and schema ID
+`urn:ultrafuzz:schema:artifacts:run-state:4`. Older persisted state and graph
 versions MAY fail to resume, inspect, or render, but the failure MUST identify
 the unsupported version. The runtime MUST NOT add a historical reader that
 coerces old state into the current contract.
+
+Run provenance MUST contain the complete sealed workflow binding. Node
+provenance, when present, MUST match exactly one closed variant: execution,
+pinned reference, or dependency blocker. Execution provenance MUST use the
+canonical `output_contracts` field and complete agent/verifier task identities;
+generic JSON values, `required_artifacts`, partial identities, and workflow-state
+aliases MUST be rejected rather than normalized.
 
 Completed node attempts MUST be appended immutably to `attempts.jsonl` with
 stable strategy-attempt, executor-retry, checkpoint-generation,

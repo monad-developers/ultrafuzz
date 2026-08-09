@@ -29,6 +29,7 @@ import type {
   RunListValue,
   RunProgressSummary,
   RunStatusValue,
+  PublicRunState,
   WorkflowCommandSummary
 } from "./types.js";
 import { summarizeRunProgress } from "./run-progress.js";
@@ -850,38 +851,15 @@ function publicRunMetadata(metadata: RunMetadataDocument): Record<string, unknow
   };
 }
 
-function publicRunState(state: RunState): RunState {
+function publicRunState(state: RunState): PublicRunState {
   const provenance = state.provenance;
   if (provenance === undefined) {
     return state;
   }
-  const workflow = provenance.workflow;
-  if (!workflow || typeof workflow !== "object" || Array.isArray(workflow)) {
-    const publicProvenance = { ...provenance };
-    delete publicProvenance.workflow;
-    return { ...state, provenance: publicProvenance };
-  }
-  const workflowRecord = workflow as Record<string, unknown>;
-  const inspection = workflowRecord.inspection;
-  const inspectionRecord =
-    inspection && typeof inspection === "object" && !Array.isArray(inspection)
-      ? (inspection as Record<string, unknown>)
-      : undefined;
+  const { executionSnapshot: _privateExecutionSnapshot, ...workflow } = provenance.workflow;
   return {
     ...state,
-    provenance: {
-      ...provenance,
-      workflow: {
-        ...(typeof inspectionRecord?.runId === "string" ? { inspection: { runId: inspectionRecord.runId } } : {}),
-        ...(typeof workflowRecord.runId === "string" ? { runId: workflowRecord.runId } : {}),
-        ...(typeof workflowRecord.compiledRunId === "string" ? { compiledRunId: workflowRecord.compiledRunId } : {}),
-        ...(typeof workflowRecord.name === "string" ? { name: workflowRecord.name } : {}),
-        ...(typeof workflowRecord.controlGeneration === "string"
-          ? { controlGeneration: workflowRecord.controlGeneration }
-          : {}),
-        ...(typeof workflowRecord.linkId === "string" ? { linkId: workflowRecord.linkId } : {})
-      }
-    }
+    provenance: { workflow }
   };
 }
 

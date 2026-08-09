@@ -873,7 +873,7 @@ test("run state schema covers all required node states and rejects malformed sta
   });
 
   assert.equal(validateRunStateSchema(state).ok, true);
-  assert.equal(state.schema_version, "ultrafuzz.run-state.v3");
+  assert.equal(state.schema_version, "ultrafuzz.run-state.v4");
   assert.equal(state.nodes["node-1"]?.wait_reason, "ready");
   assert.equal(state.nodes["node-1"]?.next_eligible_action, "dispatch");
   assert.equal(state.controller_lease.status, "active");
@@ -1259,8 +1259,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(invariantLedgerSnapshot, invariantLedgerJsonSchema);
   assert.deepEqual(invariantSourceProofSnapshot, invariantSourceProofJsonSchema);
   assert.deepEqual(nodeAttemptLedgerSnapshot, nodeAttemptLedgerJsonSchema);
-  assert.equal(runStateSnapshot.$id, runStateJsonSchema.$id);
-  assert.deepEqual(runStateSnapshot.required, runStateJsonSchema.required);
+  assert.deepEqual(runStateSnapshot, runStateJsonSchema);
   const runStateContractEnum = (
     runStateSnapshot.properties as {
       nodes?: {

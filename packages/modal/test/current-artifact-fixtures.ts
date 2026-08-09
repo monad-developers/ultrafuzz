@@ -164,7 +164,7 @@ export function currentRunState(
     })
   );
   return {
-    schema_version: "ultrafuzz.run-state.v3",
+    schema_version: "ultrafuzz.run-state.v4",
     run_id: "fixture-run",
     status: Object.values(nodes).some((node) => node.status === "failed") ? "failed" : "succeeded",
     graph_fingerprint: "a".repeat(64),
@@ -200,8 +200,14 @@ export function currentGenuineTaskFailureState(attemptId: string): Record<string
       finished_at: "2026-07-20T00:00:00.000Z",
       last_error: "task output did not pass final validation",
       provenance: {
-        workflow: { run_id: "workflow-one", task_id: `node:${attemptId}`, state: "finished" },
-        required_artifacts: { ok: true, missing: [] },
+        workflow: {
+          run_id: "workflow-one",
+          task_id: `verify:${attemptId}`,
+          agent_task_id: `node:${attemptId}`,
+          verifier_task_id: `verify:${attemptId}`,
+          state: "finished"
+        },
+        output_contracts: { ok: true, missing: [] },
         terminal_disposition: {
           schema_version: "ultrafuzz.terminal-disposition.v1",
           kind: "task-output-validation-failure"
@@ -212,8 +218,14 @@ export function currentGenuineTaskFailureState(attemptId: string): Record<string
       status: "succeeded",
       finished_at: "2026-07-20T00:00:00.000Z",
       provenance: {
-        workflow: { run_id: "workflow-one", task_id: "node:final-report", state: "finished" },
-        required_artifacts: { ok: true, missing: [] }
+        workflow: {
+          run_id: "workflow-one",
+          task_id: "verify:final-report",
+          agent_task_id: "node:final-report",
+          verifier_task_id: "verify:final-report",
+          state: "finished"
+        },
+        output_contracts: { ok: true, missing: [] }
       }
     }
   });

@@ -218,6 +218,134 @@ test("Ajv and retained Zod parsers agree on canonical unique-array constraints",
   assert.deepEqual(mismatches, [], `Zod accepted JSON-Schema-invalid unique arrays: ${mismatches.join("; ")}`);
 });
 
+test("run-state v4 JSON Schema and Zod agree on every closed provenance variant", () => {
+  const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === "run-state.schema.json");
+  assert.ok(entry?.zodParser !== undefined);
+  const parser = (artifactExports as unknown as Record<string, unknown>)[entry.zodParser] as ZodLikeParser;
+  const base = createInitialRunState({
+    runId: "run-1",
+    graphFingerprint: "a".repeat(64),
+    configFingerprint: "b".repeat(64),
+    nodes: []
+  });
+  const withNodeProvenance = (provenance: unknown): unknown => ({
+    ...base,
+    nodes: {
+      "node-1": {
+        node_id: "node-1",
+        status: "succeeded",
+        retry_count: 0,
+        timed_out: false,
+        provenance
+      }
+    }
+  });
+  const taskWorkflow = {
+    run_id: "workflow-1",
+    task_id: "verify:node-1",
+    agent_task_id: "node:node-1",
+    verifier_task_id: "verify:node-1",
+    state: "finished",
+    attempt: 1
+  };
+  const cases: Array<{ label: string; value: unknown; expected: boolean }> = [
+    {
+      label: "run-workflow",
+      value: {
+        ...base,
+        provenance: {
+          workflow: {
+            inspection: { runId: "workflow-1" },
+            runId: "workflow-1",
+            compiledRunId: "workflow-1",
+            name: "workflow",
+            controlGeneration: "c".repeat(64),
+            linkId: "00000000-0000-4000-8000-000000000001",
+            executionSnapshot: `smithers/execution-snapshots/${"d".repeat(64)}`
+          }
+        }
+      },
+      expected: true
+    },
+    {
+      label: "execution-task",
+      value: withNodeProvenance({
+        workflow: taskWorkflow,
+        output_contracts: { ok: true, missing: [] },
+        findings_count: 0
+      }),
+      expected: true
+    },
+    {
+      label: "execution-aggregate",
+      value: withNodeProvenance({
+        workflow: { run_id: "workflow-1", aggregate_attempt_statuses: ["failed", "succeeded"] }
+      }),
+      expected: true
+    },
+    {
+      label: "reference",
+      value: withNodeProvenance({
+        origin: "pinned-reference",
+        reference: "baseline",
+        repo: "https://example.invalid/reference.git",
+        commit: "e".repeat(40),
+        reference_expectations: {
+          source: "operator-supplied",
+          path: "references/expectations.json",
+          sha256: "f".repeat(64)
+        }
+      }),
+      expected: true
+    },
+    {
+      label: "blocked",
+      value: withNodeProvenance({
+        reason_code: "DEPENDENCY_NOT_SATISFIED",
+        blocked_by: ["dependency-1"]
+      }),
+      expected: true
+    },
+    {
+      label: "legacy-generic-object",
+      value: withNodeProvenance({ arbitrary: { nested: true } }),
+      expected: false
+    },
+    {
+      label: "partial-task-identity",
+      value: withNodeProvenance({ workflow: { run_id: "workflow-1", task_id: "node:node-1" } }),
+      expected: false
+    },
+    {
+      label: "empty-aggregate",
+      value: withNodeProvenance({ workflow: { run_id: "workflow-1", aggregate_attempt_statuses: [] } }),
+      expected: false
+    },
+    {
+      label: "partial-reference-revision",
+      value: withNodeProvenance({ origin: "pinned-reference", reference: "baseline", repo: "repo" }),
+      expected: false
+    },
+    {
+      label: "empty-blocker-list",
+      value: withNodeProvenance({ reason_code: "DEPENDENCY_NOT_SATISFIED", blocked_by: [] }),
+      expected: false
+    },
+    {
+      label: "duplicate-output-missing-path",
+      value: withNodeProvenance({
+        workflow: taskWorkflow,
+        output_contracts: { ok: false, missing: ["result.json", "result.json"] }
+      }),
+      expected: false
+    }
+  ];
+
+  for (const fixture of cases) {
+    assertParity(entry.id, parser, fixture.value, fixture.expected, `run-state:${fixture.label}`);
+  }
+});
+
 test("node-attempt JSON Schema and Zod agree on portable outcome conditionals", () => {
   const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === "node-attempt-ledger.schema.json");
   assert.ok(entry?.zodParser !== undefined);

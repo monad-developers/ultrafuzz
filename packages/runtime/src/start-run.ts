@@ -19,11 +19,11 @@ import {
   writeRunState,
   type RunMetadataDocument,
   type RunMetadataWorkflow,
+  type RunWorkflowProvenance,
   type RunLayout,
   type AppendEventInput,
   type SmithersTaskManifestDocument,
-  type SmithersTaskManifestTask,
-  type StateJsonValue
+  type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 import { parseResolvedConfigJsonBytes, type ResolvedConfig } from "@ultrafuzz/config";
 
@@ -868,8 +868,7 @@ function reconcilePendingWorkflowRunLink(projectRoot: string, layout: RunLayout)
       workflow_ids: [pending.workflow_run_id],
       workflow: binding.metadataWorkflow
     });
-    const existingProvenance = state.provenance ?? {};
-    state.provenance = { ...existingProvenance, workflow: binding.stateWorkflow };
+    state.provenance = { workflow: binding.stateWorkflow };
     writeRunState(layout, state);
     finalizeWorkflowRunLink(layout, pending);
     return;
@@ -901,7 +900,7 @@ function initialWorkflowBinding(
   executionSnapshotRoot: string,
   taskDocument: SmithersTaskManifestDocument,
   link: WorkflowRunLinkJournalEntry
-): { metadataWorkflow: RunMetadataWorkflow; stateWorkflow: Record<string, StateJsonValue> } {
+): { metadataWorkflow: RunMetadataWorkflow; stateWorkflow: RunWorkflowProvenance } {
   const workflowName = taskDocument.workflow_name;
   const taskNodeIds = taskDocument.tasks.map((task) => task.smithersNodeId);
   const executionSnapshot = runRelativePath(layout, executionSnapshotRoot);
@@ -958,7 +957,7 @@ function metadataMatchesInitialWorkflowBinding(
 
 function stateMatchesInitialWorkflowBinding(
   state: ReturnType<typeof readRunState>,
-  expectedWorkflow: Record<string, StateJsonValue>
+  expectedWorkflow: RunWorkflowProvenance
 ): boolean {
   return exactRecordMatches(objectRecord(objectRecord(state.provenance).workflow), expectedWorkflow, ["linkId"]);
 }
@@ -1000,12 +999,11 @@ function writeLinkedWorkflowBinding(
       workflow_link_id: link.link_id
     }
   });
-  const existingProvenance = objectRecord(state.provenance);
-  const existingWorkflowProvenance = objectRecord(existingProvenance.workflow);
+  const existingProvenance = state.provenance;
+  if (existingProvenance === undefined) throw new Error("workflow replacement requires existing state provenance");
   state.provenance = {
-    ...existingProvenance,
     workflow: {
-      ...existingWorkflowProvenance,
+      ...existingProvenance.workflow,
       inspection: { runId: link.workflow_run_id },
       runId: link.workflow_run_id,
       controlGeneration: link.control_generation,

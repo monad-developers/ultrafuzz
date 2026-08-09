@@ -388,7 +388,7 @@ describe("public post-eval diagnostics", () => {
     ).toThrow();
 
     const invalid = evalFixture();
-    fs.writeFileSync(path.join(invalid.runRoot, "state.json"), '{"schema_version":"ultrafuzz.run-state.v3"}\n');
+    fs.writeFileSync(path.join(invalid.runRoot, "state.json"), '{"schema_version":"ultrafuzz.run-state.v4"}\n');
     expect(() =>
       createPublicEvalDiagnostics({
         config: CONFIG,
@@ -498,10 +498,10 @@ describe("public post-eval diagnostics", () => {
             last_error: `private failure detail ${index} sk-ant-secret-value`,
             provenance: {
               failure: {
-                category:
-                  index === 0 ? "artifact-contract" : index === 1 ? "provider-interruption" : "private-category",
+                category: index === 0 ? "artifact-contract" : index === 1 ? "provider-interruption" : "agent-failure",
                 causal_task_id: `/private/workspace/${nodeId}`,
-                causal_failure_category: "private-causal-category",
+                causal_failure_category:
+                  index === 0 ? "artifact-contract" : index === 1 ? "provider-interruption" : "agent-failure",
                 dependent_task_ids: ["private-dependent-task"]
               },
               ...(index === 0
@@ -551,6 +551,7 @@ describe("public post-eval diagnostics", () => {
         node_id: "failed-node-02",
         status: "failed",
         timed_out: false,
+        failure_category: "agent-failure",
         failure_message: "private failure detail 2 <redacted>"
       }
     ]);

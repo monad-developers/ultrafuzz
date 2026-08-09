@@ -8,10 +8,8 @@ import { validateSafeId, writeJsonDurable } from "./safe-paths.js";
 import { readRegularFileSnapshot } from "./schema-registry.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
-export const STATE_SCHEMA_VERSION = "ultrafuzz.run-state.v3" as const;
-export const RUN_STATE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-state:3" as const;
-
-export type StateJsonValue = null | boolean | number | string | StateJsonValue[] | { [key: string]: StateJsonValue };
+export const STATE_SCHEMA_VERSION = "ultrafuzz.run-state.v4" as const;
+export const RUN_STATE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-state:4" as const;
 
 export const RUN_STATE_STATUSES = [
   "pending",
@@ -88,6 +86,137 @@ export const CONTROLLER_LEASE_STATUSES = ["active", "expired", "recovering"] as 
 
 export type ControllerLeaseStatus = (typeof CONTROLLER_LEASE_STATUSES)[number];
 
+export const SMITHERS_RUN_STATUSES = [
+  "running",
+  "waiting-approval",
+  "waiting-event",
+  "waiting-timer",
+  "waiting-quota",
+  "paused",
+  "finished",
+  "continued",
+  "failed",
+  "cancelled"
+] as const;
+
+export const SMITHERS_RUN_STATES = [
+  "running",
+  "waiting-approval",
+  "waiting-event",
+  "waiting-timer",
+  "waiting-quota",
+  "paused",
+  "recovering",
+  "stale",
+  "orphaned",
+  "failed",
+  "cancelled",
+  "succeeded",
+  "unknown"
+] as const;
+
+export const SMITHERS_NODE_STATES = [
+  "pending",
+  "waiting-approval",
+  "waiting-event",
+  "waiting-timer",
+  "waiting-quota",
+  "waiting-bound",
+  "bound-stale",
+  "in-progress",
+  "finished",
+  "failed",
+  "cancelled",
+  "skipped"
+] as const;
+
+export const NODE_PROVENANCE_FAILURE_CATEGORIES = [
+  "dependency-cascade",
+  "artifact-contract",
+  "provider-interruption",
+  "agent-failure"
+] as const;
+
+export const NODE_PROVENANCE_REASON_CODES = ["CAUSAL_MANIFEST_MISMATCH", "DEPENDENCY_NOT_SATISFIED"] as const;
+
+export type NodeProvenanceReasonCode = (typeof NODE_PROVENANCE_REASON_CODES)[number];
+
+export const TERMINAL_DISPOSITION_SCHEMA_VERSION = "ultrafuzz.terminal-disposition.v1" as const;
+
+export interface RunWorkflowProvenance {
+  inspection: { runId: string };
+  runId: string;
+  compiledRunId: string;
+  name: string;
+  controlGeneration: string;
+  linkId: string;
+  executionSnapshot: string;
+}
+
+export interface RunProvenance {
+  workflow: RunWorkflowProvenance;
+}
+
+export interface TaskNodeWorkflowProvenance {
+  run_id: string;
+  task_id: string;
+  agent_task_id: string;
+  verifier_task_id: string;
+  state?: (typeof SMITHERS_NODE_STATES)[number];
+  attempt?: number;
+}
+
+export interface AggregateNodeWorkflowProvenance {
+  run_id: string;
+  aggregate_attempt_statuses: NodeStatus[];
+}
+
+export type NodeWorkflowProvenance = TaskNodeWorkflowProvenance | AggregateNodeWorkflowProvenance;
+
+export interface NodeOutputContractProvenance {
+  ok: boolean;
+  missing: string[];
+}
+
+export interface NodeFailureProvenance {
+  category: (typeof NODE_PROVENANCE_FAILURE_CATEGORIES)[number];
+  causal_task_id: string;
+  causal_failure_category: (typeof NODE_PROVENANCE_FAILURE_CATEGORIES)[number];
+  dependent_task_ids: string[];
+}
+
+export interface NodeReferenceExpectationProvenance {
+  source: "operator-supplied";
+  path: string;
+  sha256: string;
+}
+
+export interface ExecutionNodeProvenance {
+  workflow?: NodeWorkflowProvenance;
+  output_contracts?: NodeOutputContractProvenance;
+  findings_count?: number;
+  failure?: NodeFailureProvenance;
+  terminal_disposition?: {
+    schema_version: typeof TERMINAL_DISPOSITION_SCHEMA_VERSION;
+    kind: "task-output-validation-failure";
+  };
+}
+
+export interface ReferenceNodeProvenance {
+  origin: "pinned-reference";
+  reference: string;
+  repo?: string;
+  commit?: string;
+  reference_expectations?: NodeReferenceExpectationProvenance;
+}
+
+export interface BlockedNodeProvenance {
+  reason_code: NodeProvenanceReasonCode;
+  blocked_by: string[];
+}
+
+export type NodeProvenance = ExecutionNodeProvenance | ReferenceNodeProvenance | BlockedNodeProvenance;
+
 export interface NodeStateInput {
   id: string;
   logicalNodeId?: string;
@@ -102,7 +231,7 @@ export interface NodeStateInput {
   waitReason?: NodeWaitReason;
   nextEligibleAction?: NodeNextEligibleAction;
   waitSince?: string;
-  provenance?: Record<string, StateJsonValue>;
+  provenance?: NodeProvenance;
 }
 
 export interface NodeOutputContract {
@@ -136,7 +265,7 @@ export interface NodeState {
   wait_since?: string;
   wait_reason?: NodeWaitReason;
   next_eligible_action?: NodeNextEligibleAction;
-  provenance?: Record<string, StateJsonValue>;
+  provenance?: NodeProvenance;
 }
 
 export interface ControllerLeaseState {
@@ -173,7 +302,7 @@ export interface RunState {
   last_transition_at: string;
   controller_lease: ControllerLeaseState;
   concurrency: RunConcurrencyState;
-  provenance?: Record<string, StateJsonValue>;
+  provenance?: RunProvenance;
 }
 
 export interface CreateInitialRunStateInput {
@@ -186,7 +315,7 @@ export interface CreateInitialRunStateInput {
   controllerLeaseSeconds?: number;
   requestedConcurrency?: number;
   nodes?: NodeStateInput[];
-  provenance?: Record<string, StateJsonValue>;
+  provenance?: RunProvenance;
 }
 
 export interface RunLayoutStateLike {

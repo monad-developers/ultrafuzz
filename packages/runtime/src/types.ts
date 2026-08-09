@@ -7,7 +7,8 @@ import type {
   PlannedGraphNodeDocument,
   PlannedGraphOutput,
   RunLayout,
-  RunState
+  RunState,
+  RunWorkflowProvenance
 } from "@ultrafuzz/artifacts";
 import type { ResolvedConfig, RuntimeConfigOverrides } from "@ultrafuzz/config";
 import type { PromptArtifactReference } from "@ultrafuzz/prompts";
@@ -194,8 +195,14 @@ export interface WorkflowCommandSummary {
   has_json: boolean;
 }
 
+export type PublicRunWorkflowProvenance = Omit<RunWorkflowProvenance, "executionSnapshot">;
+
+export type PublicRunState = Omit<RunState, "provenance"> & {
+  provenance?: { workflow: PublicRunWorkflowProvenance };
+};
+
 export interface RunStatusValue extends RunListEntry {
-  state?: RunState;
+  state?: PublicRunState;
   events: number;
   attempts: NodeAttemptLedgerSummary;
   graph?: unknown;

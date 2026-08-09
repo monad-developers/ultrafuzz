@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:artifacts:run-state:3",
+  "$id": "urn:ultrafuzz:schema:artifacts:run-state:4",
   "title": "Ultrafuzz run state",
   "type": "object",
   "required": [
@@ -18,7 +18,7 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "ultrafuzz.run-state.v3"
+      "const": "ultrafuzz.run-state.v4"
     },
     "run_id": {
       "type": "string",
@@ -132,10 +132,7 @@
       }
     },
     "provenance": {
-      "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/jsonValue"
-      }
+      "$ref": "#/$defs/runProvenance"
     },
     "nodes": {
       "type": "object",
@@ -397,43 +394,301 @@
             ]
           },
           "provenance": {
-            "type": "object",
-            "additionalProperties": {
-              "$ref": "#/$defs/jsonValue"
-            }
+            "$ref": "#/$defs/nodeProvenance"
           }
         }
       }
     }
   },
   "$defs": {
-    "jsonValue": {
-      "anyOf": [
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "number"
-        },
-        {
-          "type": "string"
-        },
-        {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/jsonValue"
-          }
-        },
-        {
+    "runProvenance": {
+      "type": "object",
+      "required": ["workflow"],
+      "additionalProperties": false,
+      "properties": {
+        "workflow": {
+          "$ref": "#/$defs/runWorkflowProvenance"
+        }
+      }
+    },
+    "runWorkflowProvenance": {
+      "type": "object",
+      "required": ["inspection", "runId", "compiledRunId", "name", "controlGeneration", "linkId", "executionSnapshot"],
+      "additionalProperties": false,
+      "properties": {
+        "inspection": {
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/jsonValue"
+          "required": ["runId"],
+          "additionalProperties": false,
+          "properties": {
+            "runId": {
+              "type": "string",
+              "minLength": 1
+            }
           }
+        },
+        "runId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "compiledRunId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "controlGeneration": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "linkId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "executionSnapshot": {
+          "type": "string",
+          "pattern": "^smithers/execution-snapshots/[0-9a-f]{64}$"
+        }
+      }
+    },
+    "nodeProvenance": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/executionNodeProvenance"
+        },
+        {
+          "$ref": "#/$defs/referenceNodeProvenance"
+        },
+        {
+          "$ref": "#/$defs/blockedNodeProvenance"
         }
       ]
+    },
+    "executionNodeProvenance": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "workflow": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/taskWorkflowProvenance"
+            },
+            {
+              "$ref": "#/$defs/aggregateWorkflowProvenance"
+            }
+          ]
+        },
+        "output_contracts": {
+          "$ref": "#/$defs/outputContractProvenance"
+        },
+        "findings_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failure": {
+          "$ref": "#/$defs/failureProvenance"
+        },
+        "terminal_disposition": {
+          "$ref": "#/$defs/terminalDisposition"
+        }
+      }
+    },
+    "taskWorkflowProvenance": {
+      "type": "object",
+      "required": ["run_id", "task_id", "agent_task_id", "verifier_task_id"],
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agent_task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verifier_task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "waiting-approval",
+            "waiting-event",
+            "waiting-timer",
+            "waiting-quota",
+            "waiting-bound",
+            "bound-stale",
+            "in-progress",
+            "finished",
+            "failed",
+            "cancelled",
+            "skipped"
+          ]
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "aggregateWorkflowProvenance": {
+      "type": "object",
+      "required": ["run_id", "aggregate_attempt_statuses"],
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aggregate_attempt_statuses": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "pending",
+              "ready",
+              "runnable",
+              "running",
+              "succeeded",
+              "failed",
+              "skipped",
+              "timed-out",
+              "reused-from-prior-run",
+              "invalidated"
+            ]
+          }
+        }
+      }
+    },
+    "outputContractProvenance": {
+      "type": "object",
+      "required": ["ok", "missing"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "missing": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "failureProvenance": {
+      "type": "object",
+      "required": ["category", "causal_task_id", "causal_failure_category", "dependent_task_ids"],
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "enum": ["dependency-cascade", "artifact-contract", "provider-interruption", "agent-failure"]
+        },
+        "causal_task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "causal_failure_category": {
+          "enum": ["dependency-cascade", "artifact-contract", "provider-interruption", "agent-failure"]
+        },
+        "dependent_task_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "terminalDisposition": {
+      "type": "object",
+      "required": ["schema_version", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.terminal-disposition.v1"
+        },
+        "kind": {
+          "const": "task-output-validation-failure"
+        }
+      }
+    },
+    "referenceNodeProvenance": {
+      "type": "object",
+      "required": ["origin", "reference"],
+      "additionalProperties": false,
+      "dependentRequired": {
+        "repo": ["commit"],
+        "commit": ["repo"]
+      },
+      "properties": {
+        "origin": {
+          "const": "pinned-reference"
+        },
+        "reference": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "reference_expectations": {
+          "$ref": "#/$defs/referenceExpectationProvenance"
+        }
+      }
+    },
+    "referenceExpectationProvenance": {
+      "type": "object",
+      "required": ["source", "path", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "const": "operator-supplied"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "blockedNodeProvenance": {
+      "type": "object",
+      "required": ["reason_code", "blocked_by"],
+      "additionalProperties": false,
+      "properties": {
+        "reason_code": {
+          "enum": ["CAUSAL_MANIFEST_MISMATCH", "DEPENDENCY_NOT_SATISFIED"]
+        },
+        "blocked_by": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
     }
   }
 }

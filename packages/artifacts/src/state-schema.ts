@@ -3,12 +3,16 @@ import { z } from "zod/v4";
 import { ARTIFACT_CONTRACT_IDS, NON_JSON_ARTIFACT_CONTRACT_IDS } from "./artifact-contract-ids.js";
 import {
   CONTROLLER_LEASE_STATUSES,
+  NODE_PROVENANCE_FAILURE_CATEGORIES,
+  NODE_PROVENANCE_REASON_CODES,
   NODE_NEXT_ELIGIBLE_ACTIONS,
   NODE_STATE_STATUSES,
   NODE_WAIT_REASONS,
   RUN_STATE_STATUSES,
   RUN_STATE_JSON_SCHEMA_ID,
+  SMITHERS_NODE_STATES,
   STATE_SCHEMA_VERSION,
+  TERMINAL_DISPOSITION_SCHEMA_VERSION,
   TERMINAL_NODE_STATE_STATUSES,
   isTerminalNodeStatus,
   type NodeState,
@@ -18,7 +22,86 @@ import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from
 
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
-const jsonRecord = z.record(z.string(), z.json());
+const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
+const uniqueNonEmptyStrings = z.array(nonEmptyString).superRefine((value, context) => {
+  if (new Set(value).size !== value.length) {
+    context.addIssue({ code: "custom", message: "entries must be unique" });
+  }
+});
+const runWorkflowProvenanceSchema = z.strictObject({
+  inspection: z.strictObject({ runId: nonEmptyString }),
+  runId: nonEmptyString,
+  compiledRunId: nonEmptyString,
+  name: nonEmptyString,
+  controlGeneration: sha256,
+  linkId: z.uuid(),
+  executionSnapshot: z.string().regex(/^smithers\/execution-snapshots\/[0-9a-f]{64}$/u)
+});
+const runProvenanceSchema = z.strictObject({ workflow: runWorkflowProvenanceSchema });
+const taskWorkflowProvenanceSchema = z.strictObject({
+  run_id: nonEmptyString,
+  task_id: nonEmptyString,
+  agent_task_id: nonEmptyString,
+  verifier_task_id: nonEmptyString,
+  state: z.enum(SMITHERS_NODE_STATES).optional(),
+  attempt: nonNegativeInteger.optional()
+});
+const aggregateWorkflowProvenanceSchema = z.strictObject({
+  run_id: nonEmptyString,
+  aggregate_attempt_statuses: z.array(z.enum(NODE_STATE_STATUSES)).min(1)
+});
+const outputContractProvenanceSchema = z.strictObject({
+  ok: z.boolean(),
+  missing: uniqueNonEmptyStrings
+});
+const failureProvenanceSchema = z.strictObject({
+  category: z.enum(NODE_PROVENANCE_FAILURE_CATEGORIES),
+  causal_task_id: nonEmptyString,
+  causal_failure_category: z.enum(NODE_PROVENANCE_FAILURE_CATEGORIES),
+  dependent_task_ids: uniqueNonEmptyStrings
+});
+const terminalDispositionSchema = z.strictObject({
+  schema_version: z.literal(TERMINAL_DISPOSITION_SCHEMA_VERSION),
+  kind: z.literal("task-output-validation-failure")
+});
+const executionNodeProvenanceSchema = z
+  .strictObject({
+    workflow: z.union([taskWorkflowProvenanceSchema, aggregateWorkflowProvenanceSchema]).optional(),
+    output_contracts: outputContractProvenanceSchema.optional(),
+    findings_count: nonNegativeInteger.optional(),
+    failure: failureProvenanceSchema.optional(),
+    terminal_disposition: terminalDispositionSchema.optional()
+  })
+  .refine((value) => Object.keys(value).length > 0, { message: "execution provenance must not be empty" });
+const referenceExpectationProvenanceSchema = z.strictObject({
+  source: z.literal("operator-supplied"),
+  path: nonEmptyString,
+  sha256
+});
+const referenceNodeProvenanceSchema = z
+  .strictObject({
+    origin: z.literal("pinned-reference"),
+    reference: nonEmptyString,
+    repo: nonEmptyString.optional(),
+    commit: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/u)
+      .optional(),
+    reference_expectations: referenceExpectationProvenanceSchema.optional()
+  })
+  .refine((value) => (value.repo === undefined) === (value.commit === undefined), {
+    message: "repo and commit must be present together",
+    path: ["repo"]
+  });
+const blockedNodeProvenanceSchema = z.strictObject({
+  reason_code: z.enum(NODE_PROVENANCE_REASON_CODES),
+  blocked_by: uniqueNonEmptyStrings.min(1)
+});
+const nodeProvenanceSchema = z.union([
+  executionNodeProvenanceSchema,
+  referenceNodeProvenanceSchema,
+  blockedNodeProvenanceSchema
+]);
 const outputContractSchema = z
   .strictObject({
     path: nonEmptyString,
@@ -77,7 +160,7 @@ export const nodeStateSchema = z.strictObject({
   wait_since: nonEmptyString.optional(),
   wait_reason: z.enum(NODE_WAIT_REASONS).optional(),
   next_eligible_action: z.enum(NODE_NEXT_ELIGIBLE_ACTIONS).optional(),
-  provenance: jsonRecord.optional()
+  provenance: nodeProvenanceSchema.optional()
 });
 
 const controllerLeaseSchema = z.strictObject({
@@ -114,7 +197,7 @@ export const runStateSchema = z
     last_transition_at: nonEmptyString,
     controller_lease: controllerLeaseSchema,
     concurrency: concurrencySchema,
-    provenance: jsonRecord.optional(),
+    provenance: runProvenanceSchema.optional(),
     nodes: z.record(z.string(), nodeStateSchema)
   })
   .superRefine((value, ctx) => {
@@ -206,7 +289,7 @@ export const runStateJsonSchema = {
         observed_at: { type: "string", minLength: 1 }
       }
     },
-    provenance: { type: "object", additionalProperties: { $ref: "#/$defs/jsonValue" } },
+    provenance: { $ref: "#/$defs/runProvenance" },
     nodes: {
       type: "object",
       additionalProperties: {
@@ -288,21 +371,147 @@ export const runStateJsonSchema = {
           wait_since: { type: "string", minLength: 1 },
           wait_reason: { enum: [...NODE_WAIT_REASONS] },
           next_eligible_action: { enum: [...NODE_NEXT_ELIGIBLE_ACTIONS] },
-          provenance: { type: "object", additionalProperties: { $ref: "#/$defs/jsonValue" } }
+          provenance: { $ref: "#/$defs/nodeProvenance" }
         }
       }
     }
   },
   $defs: {
-    jsonValue: {
-      anyOf: [
-        { type: "null" },
-        { type: "boolean" },
-        { type: "number" },
-        { type: "string" },
-        { type: "array", items: { $ref: "#/$defs/jsonValue" } },
-        { type: "object", additionalProperties: { $ref: "#/$defs/jsonValue" } }
+    runProvenance: {
+      type: "object",
+      required: ["workflow"],
+      additionalProperties: false,
+      properties: { workflow: { $ref: "#/$defs/runWorkflowProvenance" } }
+    },
+    runWorkflowProvenance: {
+      type: "object",
+      required: ["inspection", "runId", "compiledRunId", "name", "controlGeneration", "linkId", "executionSnapshot"],
+      additionalProperties: false,
+      properties: {
+        inspection: {
+          type: "object",
+          required: ["runId"],
+          additionalProperties: false,
+          properties: { runId: { type: "string", minLength: 1 } }
+        },
+        runId: { type: "string", minLength: 1 },
+        compiledRunId: { type: "string", minLength: 1 },
+        name: { type: "string", minLength: 1 },
+        controlGeneration: { type: "string", pattern: "^[0-9a-f]{64}$" },
+        linkId: { type: "string", format: "uuid" },
+        executionSnapshot: {
+          type: "string",
+          pattern: "^smithers/execution-snapshots/[0-9a-f]{64}$"
+        }
+      }
+    },
+    nodeProvenance: {
+      oneOf: [
+        { $ref: "#/$defs/executionNodeProvenance" },
+        { $ref: "#/$defs/referenceNodeProvenance" },
+        { $ref: "#/$defs/blockedNodeProvenance" }
       ]
+    },
+    executionNodeProvenance: {
+      type: "object",
+      minProperties: 1,
+      additionalProperties: false,
+      properties: {
+        workflow: {
+          oneOf: [{ $ref: "#/$defs/taskWorkflowProvenance" }, { $ref: "#/$defs/aggregateWorkflowProvenance" }]
+        },
+        output_contracts: { $ref: "#/$defs/outputContractProvenance" },
+        findings_count: { type: "integer", minimum: 0 },
+        failure: { $ref: "#/$defs/failureProvenance" },
+        terminal_disposition: { $ref: "#/$defs/terminalDisposition" }
+      }
+    },
+    taskWorkflowProvenance: {
+      type: "object",
+      required: ["run_id", "task_id", "agent_task_id", "verifier_task_id"],
+      additionalProperties: false,
+      properties: {
+        run_id: { type: "string", minLength: 1 },
+        task_id: { type: "string", minLength: 1 },
+        agent_task_id: { type: "string", minLength: 1 },
+        verifier_task_id: { type: "string", minLength: 1 },
+        state: { enum: [...SMITHERS_NODE_STATES] },
+        attempt: { type: "integer", minimum: 0 }
+      }
+    },
+    aggregateWorkflowProvenance: {
+      type: "object",
+      required: ["run_id", "aggregate_attempt_statuses"],
+      additionalProperties: false,
+      properties: {
+        run_id: { type: "string", minLength: 1 },
+        aggregate_attempt_statuses: {
+          type: "array",
+          minItems: 1,
+          items: { enum: [...NODE_STATE_STATUSES] }
+        }
+      }
+    },
+    outputContractProvenance: {
+      type: "object",
+      required: ["ok", "missing"],
+      additionalProperties: false,
+      properties: {
+        ok: { type: "boolean" },
+        missing: { type: "array", uniqueItems: true, items: { type: "string", minLength: 1 } }
+      }
+    },
+    failureProvenance: {
+      type: "object",
+      required: ["category", "causal_task_id", "causal_failure_category", "dependent_task_ids"],
+      additionalProperties: false,
+      properties: {
+        category: { enum: [...NODE_PROVENANCE_FAILURE_CATEGORIES] },
+        causal_task_id: { type: "string", minLength: 1 },
+        causal_failure_category: { enum: [...NODE_PROVENANCE_FAILURE_CATEGORIES] },
+        dependent_task_ids: { type: "array", uniqueItems: true, items: { type: "string", minLength: 1 } }
+      }
+    },
+    terminalDisposition: {
+      type: "object",
+      required: ["schema_version", "kind"],
+      additionalProperties: false,
+      properties: {
+        schema_version: { const: TERMINAL_DISPOSITION_SCHEMA_VERSION },
+        kind: { const: "task-output-validation-failure" }
+      }
+    },
+    referenceNodeProvenance: {
+      type: "object",
+      required: ["origin", "reference"],
+      additionalProperties: false,
+      dependentRequired: { repo: ["commit"], commit: ["repo"] },
+      properties: {
+        origin: { const: "pinned-reference" },
+        reference: { type: "string", minLength: 1 },
+        repo: { type: "string", minLength: 1 },
+        commit: { type: "string", pattern: "^[0-9a-f]{40}$" },
+        reference_expectations: { $ref: "#/$defs/referenceExpectationProvenance" }
+      }
+    },
+    referenceExpectationProvenance: {
+      type: "object",
+      required: ["source", "path", "sha256"],
+      additionalProperties: false,
+      properties: {
+        source: { const: "operator-supplied" },
+        path: { type: "string", minLength: 1 },
+        sha256: { type: "string", pattern: "^[0-9a-f]{64}$" }
+      }
+    },
+    blockedNodeProvenance: {
+      type: "object",
+      required: ["reason_code", "blocked_by"],
+      additionalProperties: false,
+      properties: {
+        reason_code: { enum: [...NODE_PROVENANCE_REASON_CODES] },
+        blocked_by: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1 } }
+      }
     }
   }
 } as const;

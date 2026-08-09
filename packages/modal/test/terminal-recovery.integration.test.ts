@@ -39,8 +39,8 @@ describe("terminal artifact-gate recovery", () => {
         finished_at: "2026-01-01T00:01:00.000Z",
         last_error: "required artifact missing",
         provenance: {
-          workflow: { run_id: "workflow-one", task_id: "node:task-one", state: "finished" },
-          required_artifacts: { ok: false, missing: ["required"] },
+          workflow: taskWorkflow("task-one", "workflow-one"),
+          output_contracts: { ok: false, missing: ["required"] },
           failure: {
             category: "artifact-contract",
             causal_task_id: "verify:task-one",
@@ -51,7 +51,7 @@ describe("terminal artifact-gate recovery", () => {
       }
     });
     const manifest = {
-      tasks: [{ attemptId: "task-one", concreteNodeId: "task-one", smithersNodeId: "node:task-one" }]
+      tasks: [taskBinding("task-one")]
     };
     const disposition = classifyTerminalDisposition(durableState, manifest);
     expect(disposition).toEqual({ kind: "operational-failure", failedTasks: 0, operationalFailures: 1 });
@@ -222,11 +222,28 @@ const RECOVERY_POLICY: ModalRecoveryPolicy = {
 };
 const WORKFLOW_RUN_ID = "workflow-artifact-gate";
 const TASK_MANIFEST = {
-  tasks: [
-    { attemptId: "setup", concreteNodeId: "setup", smithersNodeId: "node:setup" },
-    { attemptId: "task-one", concreteNodeId: "task-one", smithersNodeId: "node:task-one" }
-  ]
+  tasks: [taskBinding("setup"), taskBinding("task-one")]
 };
+
+function taskBinding(attemptId: string) {
+  return {
+    attemptId,
+    concreteNodeId: attemptId,
+    preparationSmithersNodeId: `prepare:${attemptId}`,
+    smithersNodeId: `node:${attemptId}`,
+    verifierSmithersNodeId: `verify:${attemptId}`
+  };
+}
+
+function taskWorkflow(attemptId: string, runId = WORKFLOW_RUN_ID) {
+  return {
+    run_id: runId,
+    task_id: `verify:${attemptId}`,
+    agent_task_id: `node:${attemptId}`,
+    verifier_task_id: `verify:${attemptId}`,
+    state: "finished"
+  };
+}
 
 /** The strategy node whose only declared output carries the findings contract. */
 function findingsNode(): PlannedGraphNode {
@@ -253,20 +270,19 @@ function findingsNode(): PlannedGraphNode {
 
 /** Durable state whose failing node carries the gate verdict it actually got. */
 function durableStateForGate(gate: { ok: boolean; missing: string[] }): unknown {
-  const workflow = (taskId: string) => ({ run_id: WORKFLOW_RUN_ID, task_id: taskId, state: "finished" });
   return currentRunState({
     setup: {
       status: "succeeded",
       finished_at: "2026-01-01T00:00:30.000Z",
-      provenance: { workflow: workflow("node:setup"), required_artifacts: { ok: true, missing: [] } }
+      provenance: { workflow: taskWorkflow("setup"), output_contracts: { ok: true, missing: [] } }
     },
     "task-one": {
       status: gate.ok ? "succeeded" : "failed",
       finished_at: "2026-01-01T00:01:00.000Z",
       ...(gate.ok ? {} : { last_error: "required artifact contract violated" }),
       provenance: {
-        workflow: workflow("node:task-one"),
-        required_artifacts: { ok: gate.ok, missing: gate.missing },
+        workflow: taskWorkflow("task-one"),
+        output_contracts: { ok: gate.ok, missing: gate.missing },
         ...(gate.ok
           ? {}
           : {
@@ -299,8 +315,8 @@ function canonicalProgress(state: unknown, lastTransitionAt: string): ModalRecov
 function canonicalSuccessfulNodes(state: unknown): number {
   const nodes = (state as { nodes: Record<string, Record<string, unknown>> }).nodes;
   return Object.values(nodes).filter((node) => {
-    const required = (node.provenance as { required_artifacts?: { ok?: boolean } } | undefined)?.required_artifacts;
-    return node.status === "succeeded" && required?.ok === true;
+    const outputContracts = (node.provenance as { output_contracts?: { ok?: boolean } } | undefined)?.output_contracts;
+    return node.status === "succeeded" && outputContracts?.ok === true;
   }).length;
 }
 

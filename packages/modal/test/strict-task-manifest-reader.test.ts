@@ -6,12 +6,14 @@ import { expect, it } from "vitest";
 import { inspectTerminalDispositionAtRunRoot } from "../src/terminal-disposition.js";
 import { currentGenuineTaskFailureState, writeCurrentSmithersTaskFixture } from "./current-artifact-fixtures.js";
 
-function genuineFailureRun(): { runRoot: string; tasksPath: string; graphPath: string } {
+function genuineFailureRun(): { runRoot: string; statePath: string; tasksPath: string; graphPath: string } {
   const runRoot = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-strict-task-reader-"));
-  fs.writeFileSync(path.join(runRoot, "state.json"), `${JSON.stringify(currentGenuineTaskFailureState("task-one"))}\n`);
+  const statePath = path.join(runRoot, "state.json");
+  fs.writeFileSync(statePath, `${JSON.stringify(currentGenuineTaskFailureState("task-one"))}\n`);
   writeCurrentSmithersTaskFixture(runRoot, "task-one");
   return {
     runRoot,
+    statePath,
     tasksPath: path.join(runRoot, "smithers", "tasks.json"),
     graphPath: path.join(runRoot, "graph.json")
   };
@@ -24,6 +26,19 @@ it("classifies only a current strict task manifest joined to its planned graph",
     failedTasks: 1,
     operationalFailures: 0
   });
+
+  const currentState = fs.readFileSync(fixture.statePath, "utf8");
+  fs.writeFileSync(
+    fixture.statePath,
+    currentState.replace(
+      '"schema_version":"ultrafuzz.run-state.v4"',
+      '"schema_version":"ultrafuzz.run-state.v4","schema_version":"ultrafuzz.run-state.v4"'
+    )
+  );
+  expect(inspectTerminalDispositionAtRunRoot(fixture.runRoot).kind).toBe("operational-failure");
+  fs.writeFileSync(fixture.statePath, currentState.replace("ultrafuzz.run-state.v4", "ultrafuzz.run-state.v3"));
+  expect(inspectTerminalDispositionAtRunRoot(fixture.runRoot).kind).toBe("operational-failure");
+  fs.writeFileSync(fixture.statePath, currentState);
 
   const currentTasks = fs.readFileSync(fixture.tasksPath, "utf8");
   fs.writeFileSync(

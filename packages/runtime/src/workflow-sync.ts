@@ -44,6 +44,9 @@ import {
   type NodeAttemptFailureCategory,
   type NodeAttemptLedgerEntry,
   type NodeAttemptOutcome,
+  type ExecutionNodeProvenance,
+  type NodeFailureProvenance,
+  type NodeProvenance,
   type NodeState,
   type NodeStatus,
   type RunLayout,
@@ -52,7 +55,6 @@ import {
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestTask,
   PLANNED_GRAPH_SCHEMA_VERSION,
-  type StateJsonValue,
   type UsageLedgerEntry,
   type UsageLedgerReplay
 } from "@ultrafuzz/artifacts";
@@ -264,7 +266,7 @@ interface NodeFinalization {
   status: NodeStatus;
   diagnostics: RuntimeDiagnostic[];
   lastError?: string;
-  provenance: Record<string, StateJsonValue>;
+  provenance: Omit<ExecutionNodeProvenance, "workflow">;
   events: PendingNodeEvent[];
 }
 
@@ -2469,17 +2471,16 @@ function dependencyCascadeFailure(
   layout: RunLayout,
   task: StoredWorkflowTask,
   tasksByAttempt: Map<string, StoredWorkflowTask>
-): Record<string, StateJsonValue> {
+): NodeFailureProvenance {
   const state = readRunState(layout);
   for (const dependencyId of task.dependencies) {
-    const failure = recordField(state.nodes[dependencyId]?.provenance, "failure");
-    const causalTaskId = stringField(failure, "causal_task_id");
-    const causalFailureCategory = stringField(failure, "causal_failure_category") ?? stringField(failure, "category");
-    if (causalTaskId !== undefined && causalFailureCategory !== undefined) {
+    const provenance = state.nodes[dependencyId]?.provenance;
+    const failure = provenance !== undefined && "failure" in provenance ? provenance.failure : undefined;
+    if (failure !== undefined) {
       return {
         category: "dependency-cascade",
-        causal_task_id: causalTaskId,
-        causal_failure_category: causalFailureCategory,
+        causal_task_id: failure.causal_task_id,
+        causal_failure_category: failure.causal_failure_category,
         dependent_task_ids: [task.smithersNodeId]
       };
     }
@@ -3217,11 +3218,8 @@ function sameJsonValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function withoutTerminalDisposition(
-  provenance: Record<string, StateJsonValue> | undefined
-): Record<string, StateJsonValue> {
-  if (provenance === undefined) return {};
-  const result = { ...provenance };
+function withoutTerminalDisposition(provenance: NodeProvenance | undefined): ExecutionNodeProvenance {
+  const result = { ...executionNodeProvenance(provenance) };
   delete result.terminal_disposition;
   return result;
 }
@@ -3235,14 +3233,22 @@ function withoutTerminalDisposition(
 // category in the public eval row. Never clears a failure the current
 // finalization recorded.
 function withoutSupersededFailure(
-  provenance: Record<string, StateJsonValue>,
+  provenance: ExecutionNodeProvenance,
   status: NodeStatus,
   finalization: NodeFinalization
-): Record<string, StateJsonValue> {
+): ExecutionNodeProvenance {
   if (!NODE_RECOVERED_STATUSES.has(status) || finalization.provenance.failure !== undefined) return provenance;
   const result = { ...provenance };
   delete result.failure;
   return result;
+}
+
+function executionNodeProvenance(provenance: NodeProvenance | undefined): ExecutionNodeProvenance {
+  if (provenance === undefined) return {};
+  if ("origin" in provenance || "reason_code" in provenance) {
+    throw new Error("cannot replace non-execution node provenance during workflow synchronization");
+  }
+  return provenance;
 }
 
 function eventsByWorkflowNode(events: WorkflowEvent[]): Map<string, WorkflowEvent[]> {
@@ -3483,8 +3489,8 @@ function workflowSnapshotDiagnostic(snapshot: SmithersCommandSnapshot, code: str
   };
 }
 
-function recordField(value: Record<string, unknown> | undefined, key: string): Record<string, unknown> | undefined {
-  const field = value?.[key];
+function recordField(value: unknown, key: string): Record<string, unknown> | undefined {
+  const field = isRecord(value) ? value[key] : undefined;
   return isRecord(field) ? field : undefined;
 }
 
