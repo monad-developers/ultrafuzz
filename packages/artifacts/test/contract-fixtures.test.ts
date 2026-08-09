@@ -1004,6 +1004,141 @@ function zodPositiveFixture(filename: string, contractIds: readonly string[]): u
     return fixture.valid;
   }
   switch (filename) {
+    case "analysis-bundle-accounting-summary.schema.json":
+      return {
+        schema_version: "ultrafuzz.analysis-bundle.v1",
+        run_count: 1,
+        accounted_run_count: 1,
+        runtime_observed_run_count: 1,
+        runtime_seconds: 2,
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_read_tokens: 3,
+        cache_write_tokens: 4,
+        reasoning_tokens: 5,
+        total_tokens: 15,
+        estimated_spend_usd: 0.25,
+        partial_pricing: false,
+        event_count: 1,
+        priced_event_count: 1,
+        unpriced_event_count: 0
+      };
+    case "analysis-bundle-attempt-history.schema.json":
+      return {
+        schema_version: "ultrafuzz.analysis-bundle.v1",
+        attempts: [
+          {
+            ordinal: 1,
+            launcher_status: "launched",
+            workflow_status: "succeeded",
+            started_at: "2026-08-09T00:00:00.000Z",
+            finished_at: "2026-08-09T00:00:01.000Z"
+          }
+        ]
+      };
+    case "analysis-bundle-evaluation-metrics.schema.json":
+      return {
+        schema_version: "ultrafuzz.analysis-bundle.v1",
+        row_count: 1,
+        totals: {
+          ground_truth_bug_count: 1,
+          finding_count: 1,
+          true_positives: 1,
+          false_positives: 0,
+          missed: 0,
+          human_review_queue_count: 0,
+          duplicate_count: 0
+        },
+        metrics: {
+          precision: 1,
+          recall: 1,
+          f1_score: 1,
+          full_match_rate: 1,
+          severity_accuracy: 1,
+          true_positive_accuracy: 1,
+          duplicate_rate: 0,
+          report_schema_valid_rate: 1
+        }
+      };
+    case "analysis-bundle-omissions.schema.json":
+      return {
+        schema_version: "ultrafuzz.analysis-bundle.v1",
+        omissions: [
+          {
+            kind: "recovery-summary",
+            path: "data/recovery-summary.json",
+            reason: "source-missing"
+          }
+        ]
+      };
+    case "analysis-bundle-recovery-summary.schema.json":
+      return {
+        schema_version: "ultrafuzz.analysis-bundle.v1",
+        total_generations: 1,
+        terminal_generations: 1,
+        active_generations: 0,
+        progress_generations: 1,
+        no_progress_generations: 0,
+        unknown_progress_generations: 0,
+        model_work_generations: 1,
+        no_model_work_generations: 0,
+        unknown_model_work_generations: 0,
+        genuine_failures: 0,
+        rotations: 0,
+        resumptions: 0,
+        start_reasons: {
+          initial: 1,
+          "pre-model-retry": 0,
+          "post-model-resume": 0,
+          "image-rollout": 0,
+          "stale-probe-rotation": 0,
+          "operator-restart": 0,
+          unknown: 0
+        },
+        terminal_reasons: {
+          active: 0,
+          succeeded: 1,
+          "genuine-worker-failure": 0,
+          "operational-failure": 0,
+          "image-rollout": 0,
+          "stale-probe-rotation": 0,
+          "operator-request": 0,
+          timeout: 0,
+          "resource-termination": 0,
+          "recovery-budget-exhausted": 0,
+          unknown: 0
+        },
+        terminal_classes: {
+          active: 0,
+          succeeded: 1,
+          "genuine-worker-failure": 0,
+          "operational-failure": 0,
+          "controller-rotation": 0,
+          timeout: 0,
+          "resource-termination": 0,
+          "recovery-budget-exhausted": 0,
+          unknown: 0
+        }
+      };
+    case "analysis-bundle-terminal-status.schema.json":
+      return {
+        schema_version: "ultrafuzz.analysis-bundle.v1",
+        terminal: true,
+        status: "succeeded",
+        run_count: 1,
+        status_counts: {
+          pending: 0,
+          running: 0,
+          paused: 0,
+          succeeded: 1,
+          failed: 0,
+          "timed-out": 0,
+          canceled: 0,
+          unknown: 0
+        },
+        started_at: "2026-08-09T00:00:00.000Z",
+        finished_at: "2026-08-09T00:00:01.000Z"
+      };
     case "analysis-bundle.schema.json":
       return {
         schema_version: "ultrafuzz.analysis-bundle.v1",

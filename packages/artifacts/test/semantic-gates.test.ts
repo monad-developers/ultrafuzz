@@ -91,6 +91,71 @@ const pinnedSubmoduleExpectation = {
   total_file_bytes: 0
 };
 
+const analysisBundleAccountingGatePositive = {
+  run_count: 1,
+  accounted_run_count: 1,
+  runtime_observed_run_count: 1,
+  runtime_seconds: 2,
+  input_tokens: 1,
+  output_tokens: 2,
+  cache_read_tokens: 3,
+  cache_write_tokens: 4,
+  reasoning_tokens: 5,
+  total_tokens: 15,
+  partial_pricing: false,
+  event_count: 1,
+  priced_event_count: 1,
+  unpriced_event_count: 0
+};
+
+const analysisBundleRecoveryGatePositive = {
+  total_generations: 1,
+  terminal_generations: 1,
+  active_generations: 0,
+  progress_generations: 1,
+  no_progress_generations: 0,
+  unknown_progress_generations: 0,
+  model_work_generations: 1,
+  no_model_work_generations: 0,
+  unknown_model_work_generations: 0,
+  genuine_failures: 0,
+  rotations: 0,
+  resumptions: 0,
+  start_reasons: {
+    initial: 1,
+    "pre-model-retry": 0,
+    "post-model-resume": 0,
+    "image-rollout": 0,
+    "stale-probe-rotation": 0,
+    "operator-restart": 0,
+    unknown: 0
+  },
+  terminal_reasons: {
+    active: 0,
+    succeeded: 1,
+    "genuine-worker-failure": 0,
+    "operational-failure": 0,
+    "image-rollout": 0,
+    "stale-probe-rotation": 0,
+    "operator-request": 0,
+    timeout: 0,
+    "resource-termination": 0,
+    "recovery-budget-exhausted": 0,
+    unknown: 0
+  },
+  terminal_classes: {
+    active: 0,
+    succeeded: 1,
+    "genuine-worker-failure": 0,
+    "operational-failure": 0,
+    "controller-rotation": 0,
+    timeout: 0,
+    "resource-termination": 0,
+    "recovery-budget-exhausted": 0,
+    unknown: 0
+  }
+};
+
 const fixtures = {
   "admin-config-surface-id-uniqueness": {
     positive: { surfaces: [{ surface_id: "a" }] },
@@ -126,6 +191,46 @@ const fixtures = {
       support_files: [{ destination_path: "/w/a", destination_relative_path: "b" }]
     }
   },
+  "analysis-bundle-accounting-reconciliation": {
+    positive: analysisBundleAccountingGatePositive,
+    negative: { ...analysisBundleAccountingGatePositive, total_tokens: 14 }
+  },
+  "analysis-bundle-attempt-order": {
+    positive: {
+      attempts: [{ ordinal: 1, started_at: "2026-01-01T00:00:00Z", finished_at: "2026-01-01T00:00:01Z" }]
+    },
+    negative: {
+      attempts: [{ ordinal: 2, started_at: "2026-01-01T00:00:00Z", finished_at: "2026-01-01T00:00:01Z" }]
+    }
+  },
+  "analysis-bundle-evaluation-count-reconciliation": {
+    positive: {
+      totals: {
+        ground_truth_bug_count: 2,
+        finding_count: 3,
+        true_positives: 1,
+        false_positives: 1,
+        missed: 1,
+        human_review_queue_count: 0,
+        duplicate_count: 1
+      }
+    },
+    negative: {
+      totals: {
+        ground_truth_bug_count: 2,
+        finding_count: 2,
+        true_positives: 1,
+        false_positives: 1,
+        missed: 1,
+        human_review_queue_count: 0,
+        duplicate_count: 1
+      }
+    }
+  },
+  "analysis-bundle-omission-order": {
+    positive: { omissions: [{ path: "data/a.json" }, { path: "data/b.json" }] },
+    negative: { omissions: [{ path: "data/b.json" }, { path: "data/a.json" }] }
+  },
   "analysis-bundle-path-order": {
     positive: { files: [{ kind: "omissions", path: "omissions.json" }] },
     negative: {
@@ -133,6 +238,46 @@ const fixtures = {
         { kind: "omissions", path: "omissions.json" },
         { kind: "terminal-status", path: "data/a.json" }
       ]
+    }
+  },
+  "analysis-bundle-recovery-reconciliation": {
+    positive: analysisBundleRecoveryGatePositive,
+    negative: { ...analysisBundleRecoveryGatePositive, total_generations: 2 }
+  },
+  "analysis-bundle-terminal-status-reconciliation": {
+    positive: {
+      terminal: true,
+      status: "succeeded",
+      run_count: 1,
+      status_counts: {
+        pending: 0,
+        running: 0,
+        paused: 0,
+        succeeded: 1,
+        failed: 0,
+        "timed-out": 0,
+        canceled: 0,
+        unknown: 0
+      },
+      started_at: "2026-01-01T00:00:00Z",
+      finished_at: "2026-01-01T00:00:01Z"
+    },
+    negative: {
+      terminal: true,
+      status: "failed",
+      run_count: 1,
+      status_counts: {
+        pending: 0,
+        running: 0,
+        paused: 0,
+        succeeded: 1,
+        failed: 0,
+        "timed-out": 0,
+        canceled: 0,
+        unknown: 0
+      },
+      started_at: "2026-01-01T00:00:00Z",
+      finished_at: "2026-01-01T00:00:01Z"
     }
   },
   "artifact-manifest-file-path-uniqueness": {
@@ -807,6 +952,26 @@ test("every contextual registration executes real positive and negative checks",
         positive: { files: [{ path: "artifact.json", sha256: digest, size_bytes: 9 }] },
         negative: { files: [{ path: "artifact.json", sha256: "0".repeat(64), size_bytes: 9 }] },
         context: { filesystem: { rootDirectory: root } }
+      },
+      "analysis-bundle-inclusion-omission-coverage": {
+        positive: {
+          omissions: [
+            { kind: "terminal-status" },
+            { kind: "evaluation-metrics" },
+            { kind: "accounting-summary" },
+            { kind: "attempt-history" },
+            { kind: "recovery-summary" }
+          ]
+        },
+        negative: {
+          omissions: [
+            { kind: "terminal-status" },
+            { kind: "evaluation-metrics" },
+            { kind: "accounting-summary" },
+            { kind: "attempt-history" }
+          ]
+        },
+        context: { analysisBundle: { manifest: { files: [] } } }
       },
       "artifact-manifest-file-digest": {
         positive: { files: [{ path: "artifact.json", sha256: digest, size_bytes: 9 }] },
