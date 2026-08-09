@@ -67,23 +67,25 @@ function plannedNode(paths: string[]): PlannedGraphNode {
     outputs: paths.map((outputPath, index) => ({
       path: outputPath,
       contract:
-        outputPath === "generated-tests.json"
-          ? "ultrafuzz/generated-tests@1"
-          : outputPath === "findings.json"
-            ? "ultrafuzz/findings@1"
-            : outputPath === "properties.json"
-              ? "ultrafuzz/properties@1"
-              : outputPath === "implemented-properties.json"
-                ? "ultrafuzz/implemented-properties@1"
-                : outputPath === "setup/invariant-evidence-ledger.json"
-                  ? "ultrafuzz/invariant-ledger@1"
-                  : ["echidna-results.json", "medusa-results.json", "recon-fuzzer-results.json"].includes(outputPath)
-                    ? "ultrafuzz/property-campaign@1"
-                    : outputPath === "campaign-summary.json"
-                      ? "ultrafuzz/json-object@1"
-                      : outputPath === "report.json"
-                        ? "ultrafuzz/report@1"
-                        : "ultrafuzz/nonempty-markdown@1",
+        outputPath === "workspace-patch.json"
+          ? "ultrafuzz/workspace-patch@1"
+          : outputPath === "generated-tests.json"
+            ? "ultrafuzz/generated-tests@1"
+            : outputPath === "findings.json"
+              ? "ultrafuzz/findings@1"
+              : outputPath === "properties.json"
+                ? "ultrafuzz/properties@1"
+                : outputPath === "implemented-properties.json"
+                  ? "ultrafuzz/implemented-properties@1"
+                  : outputPath === "setup/invariant-evidence-ledger.json"
+                    ? "ultrafuzz/invariant-ledger@1"
+                    : ["echidna-results.json", "medusa-results.json", "recon-fuzzer-results.json"].includes(outputPath)
+                      ? "ultrafuzz/property-campaign@1"
+                      : outputPath === "campaign-summary.json"
+                        ? "ultrafuzz/json-object@1"
+                        : outputPath === "report.json"
+                          ? "ultrafuzz/report@1"
+                          : "ultrafuzz/nonempty-markdown@1",
       contract_digest: "a".repeat(64),
       primary: index === 0
     })),
@@ -168,6 +170,44 @@ test("required artifact gate validates generated-test manifest shape and listed 
   const valid = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
   assert.deepEqual(valid.diagnostics, []);
   assert.equal(valid.ok, true);
+});
+
+test("workspace patch exclusions pass the contract gate but surface a durable warning", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-workspace-exclusion" });
+  const artifactDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const node = plannedNode(["workspace-patch.json"]);
+  fs.writeFileSync(
+    path.join(artifactDir, "workspace-patch.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.workspace-patch.v1",
+      base_commit: "a".repeat(40),
+      base_tree: "b".repeat(40),
+      result_tree: "c".repeat(40),
+      patch_sha256: "d".repeat(64),
+      files: [{ path: "test/Handlers.t.sol" }],
+      excluded_files: [
+        {
+          path: "test/recon/corpus-deep/seed.bin",
+          diff_bytes_at_least: 33_865_139,
+          reason: "git-diff-overflow"
+        }
+      ]
+    }),
+    "utf8"
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+  assert.equal(result.ok, true);
+  const warning = result.diagnostics.find((entry) => entry.code === "WORKSPACE_PATCH_FILES_EXCLUDED");
+  assert.equal(warning?.severity, "warning");
+  assert.match(warning?.message ?? "", /test\/recon\/corpus-deep\/seed\.bin/u);
+  assert.deepEqual(warning?.details?.excluded_files, [
+    {
+      path: "test/recon/corpus-deep/seed.bin",
+      diff_bytes_at_least: 33_865_139,
+      reason: "git-diff-overflow"
+    }
+  ]);
 });
 
 test("required artifact gate rejects contract-invalid empty files and final-component symlinks", () => {

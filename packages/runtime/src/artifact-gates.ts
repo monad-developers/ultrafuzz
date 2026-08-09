@@ -36,7 +36,8 @@ import {
   type PropertyCampaignArtifact,
   type PropertyReferenceInput,
   type RunLayout,
-  type RunState
+  type RunState,
+  type WorkspacePatchManifest
 } from "@ultrafuzz/artifacts";
 
 import type { PlannedGraph, PlannedGraphNode, RuntimeDiagnostic } from "./types.js";
@@ -1477,6 +1478,26 @@ function verifyRequiredArtifactShape(
     path: issue.path,
     details: { contract: output.contract, contract_digest: output.contract_digest }
   }));
+  if (contract.ok && output.contract === "ultrafuzz/workspace-patch@1") {
+    const manifest = contract.value as WorkspacePatchManifest;
+    const excluded = manifest.excluded_files ?? [];
+    if (excluded.length > 0) {
+      const visible = excluded.slice(0, 5).map((entry) => entry.path);
+      diagnostics.push({
+        code: "WORKSPACE_PATCH_FILES_EXCLUDED",
+        message: `Workspace patch omitted ${excluded.length} measured overflow file${excluded.length === 1 ? "" : "s"}: ${visible.join(", ")}${excluded.length > visible.length ? ` (and ${excluded.length - visible.length} more)` : ""}`,
+        severity: "warning",
+        source: "workspace-patch",
+        path: absolutePath,
+        details: {
+          reason: "git-diff-overflow",
+          excluded_file_count: excluded.length,
+          excluded_files: excluded.slice(0, 20)
+        }
+      });
+    }
+    return diagnostics;
+  }
   if (!contract.ok || output.contract !== "ultrafuzz/generated-tests@1") {
     return diagnostics;
   }

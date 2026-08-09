@@ -70,17 +70,21 @@ const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "art
  * index would simply keep the baseline blob and an authored edit would vanish from the patch with no
  * error and a manifest that still validates.
  *
- * The pathspecs are root-anchored, matching where `recon fuzz .` writes. A nested `test/recon-corpus/`
- * is not excluded; the prompts do invite adapting corpus directories to local conventions, so that
- * remains a gap a size ceiling would close and a name list cannot.
+ * The pathspecs are root-anchored, matching where `recon fuzz .` writes. Agent-chosen variants are not
+ * guessed here. `captureWorkspacePatch` handles those only after a real diff crosses the patch ceiling,
+ * then excludes measured untracked contributors at exact-file granularity (issue #368).
  */
 const WORKSPACE_GENERATED_ROOTS = ["recon-corpus", "echidna", "magic"] as const;
 
-/** The generated roots the prompts expose as CLI flags, and so the only ones an agent renames (#368). */
-const WORKSPACE_GENERATED_ROOT_PREFIXES: readonly string[] = ["recon-corpus", "echidna"];
-
 export interface WorkspacePatchFile {
   path: string;
+}
+
+/** An exact untracked file omitted only after its measured Git diff contribution overflowed the patch. */
+export interface WorkspacePatchExcludedFile {
+  path: string;
+  diff_bytes_at_least: number;
+  reason: "git-diff-overflow";
 }
 
 export interface WorkspacePatchManifest {
@@ -90,6 +94,7 @@ export interface WorkspacePatchManifest {
   result_tree: string;
   patch_sha256: string;
   files: WorkspacePatchFile[];
+  excluded_files?: WorkspacePatchExcludedFile[];
 }
 
 export interface WorkspacePatchCapture {
@@ -111,55 +116,63 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
   assertObjectId(baselineTree, "workspace patch baseline tree");
   const baseCommit = runGit(workspaceRoot, ["rev-parse", "HEAD"]).trim();
   const capture = withTemporaryIndex(workspaceRoot, (index) => {
+    const excluded = new Map<string, WorkspacePatchExcludedFile>();
+    const diffArgs = workspacePatchDiffArgs(baselineTree);
     runGit(workspaceRoot, ["read-tree", baselineTree], index);
-    stageWorkspaceTree(workspaceRoot, index);
-    const resultTree = runGit(workspaceRoot, ["write-tree"], index).trim();
-    const patch = runGit(
-      workspaceRoot,
-      // Every flag after `--no-renames` pins some part of the output format against inherited git
-      // config. `git` reads the system and user config files, and nothing in the sandbox image
-      // guarantees any of these are unset. All verified on git 2.43:
-      //
-      //   `--src-prefix`/`--dst-prefix`  `diff.noprefix` renders `diff --git x x` and
-      //                                  `diff.mnemonicPrefix` renders `diff --git c/x i/x`.
-      //   `--no-color`                   `color.ui=always` prefixes the header with an ANSI escape,
-      //                                  `\e[1mdiff --git a/x b/x\e[m`.
-      //   `-U3`                          `diff.context=0` emits no context lines at all (measured: 0
-      //                                  where the default emits 6).
-      //   `--no-textconv`                a `diff.<driver>.textconv` from `core.attributesFile` replaces
-      //                                  the patch BODY with the driver's output.
-      //
-      // None of these is only an attribution problem. `git apply` defaults to `-p1` and rejects a
-      // coloured header outright (`No valid patches in input`), and zero-context hunks fail to apply.
-      //
-      // textconv splits by change shape, and the split matters. For a MODIFIED tracked file the patch
-      // simply fails to apply (`error: middle.txt: patch does not apply`) -- loud, and caught here. For
-      // an ADDED file it applies cleanly and installs the driver's output as the file's content, which
-      // is the dangerous half: it surfaces downstream as a result-tree mismatch with nothing pointing
-      // back at this line. An earlier version of this comment claimed the second behaviour for both
-      // cases; only the added-file half was measured, and only that half is true.
-      [
-        "diff",
-        "--cached",
-        "--binary",
-        "--no-ext-diff",
-        "--no-renames",
-        "--no-textconv",
-        "--no-color",
-        "-U3",
-        "--src-prefix=a/",
-        "--dst-prefix=b/",
-        baselineTree
-      ],
-      index
-    );
-    const names = runGit(workspaceRoot, ["diff", "--cached", "--name-only", "-z", baselineTree], index);
-    const files = parseChangedPaths(names);
-    for (const entry of files) assertWorkspacePatchPath(workspaceRoot, entry.path);
-    if (Buffer.byteLength(patch, "utf8") > MAX_PATCH_BYTES) {
-      throw new Error(`workspace patch exceeds ${MAX_PATCH_BYTES} bytes`);
+    const staged = stageWorkspaceTree(workspaceRoot, index);
+
+    for (let attempt = 0; ; attempt += 1) {
+      // Retry against the frozen staged snapshot, removing only exact measured entries from the temporary
+      // index. Re-reading the live worktree here would let a concurrently replaced path inherit stale
+      // evidence from different bytes measured on the preceding pass.
+      const resultTree = runGit(workspaceRoot, ["write-tree"], index).trim();
+      const changedPaths = splitNulBuffer(
+        runGitBuffer(workspaceRoot, ["diff", "--cached", "--name-only", "-z", "--no-renames", baselineTree], index)
+      );
+      const diff = captureWorkspaceDiff(workspaceRoot, diffArgs, index);
+      const measuredBytes = diff.bytes.length;
+
+      if (diff.overflowError !== undefined || measuredBytes > MAX_PATCH_BYTES) {
+        const candidates = selectOverflowExclusions(
+          measuredDiffFileContributions(
+            diff.bytes,
+            changedPaths,
+            staged.untrackedPaths,
+            diff.overflowError !== undefined
+          ),
+          measuredBytes
+        );
+        if (candidates.length === 0 || attempt >= WORKSPACE_DIFF_EXCLUSION_ATTEMPTS - 1) {
+          if (diff.overflowError !== undefined) rethrowOversizedGitOutput(diffArgs, diff.overflowError);
+          throw new Error(`workspace patch exceeds ${MAX_PATCH_BYTES} bytes`);
+        }
+        for (const candidate of candidates) {
+          excluded.set(candidate.key, {
+            path: candidate.manifestPath,
+            diff_bytes_at_least: candidate.bytes,
+            reason: "git-diff-overflow"
+          });
+        }
+        removeIndexPaths(
+          workspaceRoot,
+          index,
+          candidates.map((candidate) => candidate.rawPath)
+        );
+        continue;
+      }
+
+      const patch = diff.bytes.toString("utf8");
+      // Preserve the pre-recovery ceiling on the string that is actually published. Invalid UTF-8 can
+      // expand when decoded to replacement characters and re-encoded; that is not a real Git-diff byte
+      // measurement, so it must fail loudly rather than authorise another exclusion pass.
+      if (Buffer.byteLength(patch, "utf8") > MAX_PATCH_BYTES) {
+        throw new Error(`workspace patch exceeds ${MAX_PATCH_BYTES} bytes`);
+      }
+      const files = parseChangedPaths(Buffer.concat(changedPaths.flatMap((entry) => [entry, NUL])).toString("utf8"));
+      for (const entry of files) assertWorkspacePatchPath(workspaceRoot, entry.path);
+      const excludedFiles = [...excluded.values()].sort((left, right) => left.path.localeCompare(right.path));
+      return { resultTree, patch, files, excludedFiles };
     }
-    return { resultTree, patch, files };
   });
 
   return {
@@ -170,9 +183,38 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
       base_tree: baselineTree,
       result_tree: capture.resultTree,
       patch_sha256: sha256(capture.patch),
-      files: capture.files
+      files: capture.files,
+      ...(capture.excludedFiles.length === 0 ? {} : { excluded_files: capture.excludedFiles })
     }
   };
+}
+
+/**
+ * Every flag after `--no-renames` pins output against inherited git config. `git` reads system and user
+ * config, and sandbox images do not promise these are unset. Verified on git 2.43:
+ *
+ * - prefixes defeat `diff.noprefix` and `diff.mnemonicPrefix`;
+ * - `--no-color` defeats `color.ui=always`;
+ * - `-U3` defeats `diff.context=0`;
+ * - `--no-textconv` prevents a configured driver from replacing an added file's body with its output.
+ *
+ * These flags are application correctness, not presentation: coloured or zero-context patches can fail
+ * to apply, while textconv on an added file can apply the wrong bytes successfully.
+ */
+function workspacePatchDiffArgs(baselineTree: string): string[] {
+  return [
+    "diff",
+    "--cached",
+    "--binary",
+    "--no-ext-diff",
+    "--no-renames",
+    "--no-textconv",
+    "--no-color",
+    "-U3",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+    baselineTree
+  ];
 }
 
 /** Apply one validated dependency patch to a clean downstream worktree. */
@@ -201,8 +243,15 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
  */
 export function validateWorkspacePatchCapture(workspaceRoot: string, capture: WorkspacePatchCapture): void {
   validateManifest(capture.manifest);
-  if (Buffer.byteLength(capture.patch, "utf8") > MAX_PATCH_BYTES) {
+  const patchBytes = Buffer.byteLength(capture.patch, "utf8");
+  if (patchBytes > MAX_PATCH_BYTES) {
     throw new Error(`workspace patch exceeds ${MAX_PATCH_BYTES} bytes`);
+  }
+  if (capture.manifest.excluded_files !== undefined) {
+    const excludedBytes = capture.manifest.excluded_files.reduce((sum, entry) => sum + entry.diff_bytes_at_least, 0);
+    if (!Number.isSafeInteger(excludedBytes) || patchBytes + excludedBytes <= MAX_PATCH_BYTES) {
+      throw new Error("workspace patch exclusions do not carry enough measured diff-overflow evidence");
+    }
   }
   if (sha256(capture.patch) !== capture.manifest.patch_sha256) {
     throw new Error("workspace patch digest mismatch");
@@ -289,22 +338,22 @@ function parseChangedPaths(raw: string): WorkspacePatchFile[] {
  * in the index and nothing here ever names a root path, so their entries are `treeish` by
  * construction.
  */
-function stageWorkspaceTree(workspaceRoot: string, index: string): void {
+function stageWorkspaceTree(workspaceRoot: string, index: string): { untrackedPaths: ReadonlyMap<string, Buffer> } {
   // A listed path can vanish before it is staged — agent subprocesses are still running during
   // capture — and `git add --pathspec-from-file` fails the whole invocation when a name matches
   // nothing (`--ignore-errors` does not suppress it). Re-list and retry rather than aborting the
   // run, which is the failure this whole function exists to avoid.
   for (let attempt = 0; ; attempt += 1) {
-    const pathspecs = stageableWorkspacePaths(workspaceRoot, index);
-    if (pathspecs.length === 0) return;
+    const stageable = stageableWorkspacePaths(workspaceRoot, index);
+    if (stageable.pathspecs.length === 0) return { untrackedPaths: stageable.untrackedPaths };
     try {
       runGit(
         workspaceRoot,
         ["--literal-pathspecs", "add", "-A", "--force", "--pathspec-from-file=-", "--pathspec-file-nul"],
         index,
-        Buffer.concat(pathspecs.flatMap((entry) => [entry, NUL]))
+        Buffer.concat(stageable.pathspecs.flatMap((entry) => [entry, NUL]))
       );
-      return;
+      return { untrackedPaths: stageable.untrackedPaths };
     } catch (error) {
       const vanished = /did not match any files/u.test(error instanceof Error ? error.message : String(error));
       if (!vanished || attempt >= WORKSPACE_STAGE_ATTEMPTS - 1) throw error;
@@ -313,9 +362,14 @@ function stageWorkspaceTree(workspaceRoot: string, index: string): void {
 }
 
 const WORKSPACE_STAGE_ATTEMPTS = 3;
+const WORKSPACE_DIFF_EXCLUSION_ATTEMPTS = 64;
+const MAX_MEASURED_EXCLUSION_CANDIDATES = 4096;
 
 /** Every path git would stage, minus the runtime roots and any directory entry. */
-function stageableWorkspacePaths(workspaceRoot: string, index: string): Buffer[] {
+function stageableWorkspacePaths(
+  workspaceRoot: string,
+  index: string
+): { pathspecs: Buffer[]; untrackedPaths: ReadonlyMap<string, Buffer> } {
   // Two listings rather than one, so the generated-root exclusions apply to UNTRACKED paths only.
   // Excluding a tracked path here would be silent data loss: staging runs after `read-tree <baseline>`,
   // so the index keeps the baseline blob, the agent's edit never reaches the patch, and
@@ -337,46 +391,13 @@ function stageableWorkspacePaths(workspaceRoot: string, index: string): Buffer[]
       "--",
       ".",
       ...WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}/**`),
-      // Prefix for the CLI-configurable corpus roots, exact for the rest (issue #368). R53 died on an
-      // image that already carried the #305 exclusion because the agent wrote its deep fuzzing pass to
-      // `recon-corpus-deep/` and `echidna-deep/`. Those names appear nowhere in the prompts; the agent
-      // invented them, and one file under `recon-corpus-deep` contributed >=33.8 MB of DIFF, over the
-      // whole 32 MiB capture buffer on its own.
-      //
-      // Only `recon-corpus` and `echidna` get the prefix. They are the two the prompts expose as CLI
-      // flags (`--recon-corpus-dir`, `--corpus-dir`), which is the lever the agent actually pulled, and
-      // both observed variants are of the form `<root>-<suffix>`. `magic/` is a fixed destination the
-      // prompts name literally, no variant of it has ever been observed, and `magic` is a common enough
-      // word that widening it would cost authored directories for no evidence. Adding a prefix without
-      // an observation is how a name list acquires collateral damage.
-      //
-      // Reusing the existing pathspec keeps three properties that a bespoke rule would have to re-earn,
-      // and that PR #372's size ceiling lost: it applies to the UNTRACKED listing only, so a tracked
-      // edit can never be dropped; it is root-anchored, so a corpus NESTED inside an authored tree does
-      // not take that tree with it; and it is a fixed string, so capture and apply agree without
-      // consulting the filesystem.
-      //
-      // The cost, stated plainly because it is a real widening: an UNTRACKED top-level directory whose
-      // name merely STARTS with one of these roots is now dropped, silently and with no manifest
-      // record. `echidna-handlers/` and `recon-corpus-notes/` would go. A git pathspec without `:(glob)`
-      // magic also lets `*` cross `/`, so the drop reaches arbitrarily deep inside such a directory.
-      // That is the same class of loss as #372's, narrower but not different in kind, and it is
-      // accepted only because the durable fix is measurement-triggered rather than name-triggered.
-      //
-      // What still escapes, so the limitation list is not read as exhaustive: a differently-named root
-      // (`corpus-deep/`), a corpus nested under an authored tree (`test/recon-corpus/`), a top-level
-      // generated FILE (`recon-corpus-deep.bin` — `/**` cannot match a slash-less path), case variants,
-      // and aggregate overflow across many roots each under the buffer. The durable fix is to retry on
-      // MEASURED overflow using diff-byte ranking; see #368, including a granularity defect recorded
-      // there that the naive form of that design would hit.
-      ...WORKSPACE_GENERATED_ROOT_PREFIXES.map((root) => `:(exclude)${root}*/**`),
-      ...WORKSPACE_GENERATED_ROOTS.filter((root) => !WORKSPACE_GENERATED_ROOT_PREFIXES.includes(root)).map(
-        (root) => `:(exclude)${root}/**`
-      )
+      // The prompt-owned destinations remain exact. Prefix matching was added as an incident stopgap,
+      // but silently dropped authored paths such as `echidna-config/NewAuthored.sol`. Unknown, nested,
+      // case-variant and slash-less generated paths are handled by measured overflow recovery instead.
+      ...WORKSPACE_GENERATED_ROOTS.map((root) => `:(exclude)${root}/**`)
     ],
     index
   );
-  const listed = Buffer.concat([tracked, untracked]);
   // Deliberately the RUNTIME roots only. The name check below exists to catch a top-level *file* named
   // like a root, which the `/**` pathspecs cannot match. That is right for runtime roots, which are never
   // authored content, but a file named like a fuzzer output directory plausibly is authored, and the
@@ -386,21 +407,243 @@ function stageableWorkspacePaths(workspaceRoot: string, index: string): Buffer[]
   // any symlink rather than something these exclusions introduce.
   const runtimeRoots = new Set<string>(WORKSPACE_RUNTIME_ROOTS);
   const pathspecs: Buffer[] = [];
-  for (const entry of splitNulBuffer(listed)) {
+  const untrackedPaths = new Map<string, Buffer>();
+  const append = (entry: Buffer, isUntracked: boolean): void => {
     // `ls-files --others` reports an untracked nested repository as a directory. Naming it aborts
     // `git add` when it has no commit checked out — an interrupted `forge install` or clone produces
     // exactly that — and when it does have one, git records a gitlink pointing at an object that
     // lives only in the nested repository, which `assertPatchPathsMatchManifest` later refuses. So a
     // captured baseline containing one could never yield an applicable patch.
-    if (entry[entry.length - 1] === 0x2f) continue;
+    if (entry[entry.length - 1] === 0x2f) return;
     const separator = entry.indexOf(0x2f);
     // Runtime-root names are ASCII and Node rejects overlong encodings, so no non-UTF-8 sequence can
     // decode into one. Covers a top-level *file* named like a root, which the pathspecs above do not.
     const top = (separator < 0 ? entry : entry.subarray(0, separator)).toString("utf8");
-    if (top === ".git" || runtimeRoots.has(top)) continue;
+    if (top === ".git" || runtimeRoots.has(top)) return;
+    const key = workspacePathKey(entry);
     pathspecs.push(entry);
+    if (isUntracked) untrackedPaths.set(key, entry);
+  };
+  for (const entry of splitNulBuffer(tracked)) append(entry, false);
+  for (const entry of splitNulBuffer(untracked)) append(entry, true);
+  return { pathspecs, untrackedPaths };
+}
+
+/** A byte-exact key; Git paths need not be UTF-8. */
+function workspacePathKey(entry: Buffer): string {
+  return entry.toString("base64");
+}
+
+/** Remove exact untracked entries from the frozen temporary index without consulting the live files. */
+function removeIndexPaths(workspaceRoot: string, index: string, paths: readonly Buffer[]): void {
+  if (paths.length === 0) return;
+  runGit(
+    workspaceRoot,
+    ["update-index", "--force-remove", "-z", "--stdin"],
+    index,
+    Buffer.concat(paths.flatMap((entry) => [entry, NUL]))
+  );
+}
+
+interface WorkspaceDiffCapture {
+  bytes: Buffer;
+  overflowError?: unknown;
+}
+
+/**
+ * Capture the patch as bytes so an ENOBUFS retry can use the exact prefix Git wrote. The ordinary
+ * `runGit` wrapper deliberately turns ENOBUFS into the #311 diagnostic immediately; this caller first
+ * gets one chance to remove measured untracked contributors, and delegates back to that diagnostic when
+ * no safe progress is possible. A stderr overflow is never a workspace-size signal and is delegated
+ * immediately.
+ */
+function captureWorkspaceDiff(workspaceRoot: string, args: string[], index: string): WorkspaceDiffCapture {
+  const env = { ...process.env, GIT_INDEX_FILE: index };
+  try {
+    return {
+      bytes: execFileSync("git", args, {
+        cwd: workspaceRoot,
+        env,
+        maxBuffer: MAX_GIT_CAPTURE_BYTES
+      })
+    };
+  } catch (error) {
+    if (!(error instanceof Error) || (error as { code?: unknown }).code !== "ENOBUFS") {
+      decodeSpawnCaptures(error);
+      throw error;
+    }
+    const record = error as unknown as { stdout?: unknown; stderr?: unknown };
+    const stdout = spawnCaptureBuffer(record.stdout);
+    const stderr = spawnCaptureBuffer(record.stderr);
+    if (stdout.length === 0 || stderr.length > stdout.length) rethrowOversizedGitOutput(args, error);
+    return { bytes: stdout, overflowError: error };
   }
-  return pathspecs;
+}
+
+function spawnCaptureBuffer(value: unknown): Buffer {
+  return Buffer.isBuffer(value) ? value : Buffer.from(typeof value === "string" ? value : "", "utf8");
+}
+
+interface MeasuredDiffFileContribution {
+  key: string;
+  rawPath: Buffer;
+  manifestPath: string;
+  bytes: number;
+}
+
+const DIFF_FILE_HEADER_PREFIX = "diff --git ";
+
+/**
+ * Attribute each observed patch span to the corresponding `--name-only -z` entry.
+ *
+ * Both commands use the same index, baseline and `--no-renames`, so their file order is identical while
+ * the NUL list keeps arbitrary path bytes unambiguous. Patch bodies cannot masquerade as a header: text
+ * lines carry a `+`, `-` or space prefix, and Git's binary-patch encoding contains no spaces. The final
+ * span may be truncated by ENOBUFS, which is why the manifest calls every measurement a lower bound.
+ */
+function measuredDiffFileContributions(
+  diff: Buffer,
+  changedPaths: readonly Buffer[],
+  untrackedPaths: ReadonlyMap<string, Buffer>,
+  truncated: boolean
+): MeasuredDiffFileContribution[] {
+  const view = diff.toString("latin1");
+  const header = /^diff --git /gmu;
+  const contributions: MeasuredDiffFileContribution[] = [];
+  const record = (position: number, start: number, end: number): void => {
+    const rawPath = changedPaths[position];
+    if (rawPath === undefined) return;
+    const key = workspacePathKey(rawPath);
+    const stagedUntrackedPath = untrackedPaths.get(key);
+    if (stagedUntrackedPath === undefined) return;
+    const manifestPath = rawPath.toString("utf8");
+    try {
+      if (normalizeWorkspacePatchPath(manifestPath, "workspace patch excluded file path") !== manifestPath) return;
+      rejectSensitivePath(manifestPath);
+    } catch {
+      // If the manifest cannot name a path losslessly and safely, keep the existing loud overflow rather
+      // than omit content that no artifact consumer could audit.
+      return;
+    }
+    if (end <= start) return;
+    retainMeasuredExclusionCandidate(contributions, {
+      key,
+      rawPath: stagedUntrackedPath,
+      manifestPath,
+      bytes: end - start
+    });
+  };
+  let pending: { position: number; start: number } | undefined;
+  let position = 0;
+  for (let match = header.exec(view); match !== null; match = header.exec(view)) {
+    if (pending !== undefined) record(pending.position, pending.start, match.index);
+    pending = { position, start: match.index };
+    position += 1;
+  }
+  if (pending !== undefined) {
+    // ENOBUFS can cut through the NEXT header before the regex sees its complete prefix. Conservatively
+    // withhold the maximum partial-prefix length from the preceding file so `diff_bytes_at_least` can
+    // never overstate that exact file's contribution.
+    const end = truncated
+      ? Math.max(pending.start, diff.length - (Buffer.byteLength(DIFF_FILE_HEADER_PREFIX) - 1))
+      : diff.length;
+    record(pending.position, pending.start, end);
+  }
+  return contributions;
+}
+
+/**
+ * Keep only the largest measured candidates in a min-heap. An overflow can contain hundreds of
+ * thousands of tiny file patches, and materialising an object for every header immediately after Node
+ * refused a buffer allocation would turn recovery into a second memory failure. Iterative retries expose
+ * further candidates after the retained exact files are removed.
+ */
+function retainMeasuredExclusionCandidate(
+  heap: MeasuredDiffFileContribution[],
+  candidate: MeasuredDiffFileContribution
+): void {
+  if (heap.length < MAX_MEASURED_EXCLUSION_CANDIDATES) {
+    heap.push(candidate);
+    let current = heap.length - 1;
+    while (current > 0) {
+      const parent = Math.floor((current - 1) / 2);
+      const parentEntry = heap[parent];
+      const currentEntry = heap[current];
+      if (
+        parentEntry === undefined ||
+        currentEntry === undefined ||
+        compareMeasuredContributions(currentEntry, parentEntry) >= 0
+      )
+        break;
+      heap[parent] = currentEntry;
+      heap[current] = parentEntry;
+      current = parent;
+    }
+    return;
+  }
+  const smallest = heap[0];
+  if (smallest === undefined || compareMeasuredContributions(candidate, smallest) <= 0) return;
+  heap[0] = candidate;
+  let current = 0;
+  for (;;) {
+    const left = current * 2 + 1;
+    const right = left + 1;
+    let smallestIndex = current;
+    const leftEntry = heap[left];
+    const smallestEntry = heap[smallestIndex];
+    if (
+      leftEntry !== undefined &&
+      smallestEntry !== undefined &&
+      compareMeasuredContributions(leftEntry, smallestEntry) < 0
+    ) {
+      smallestIndex = left;
+    }
+    const rightEntry = heap[right];
+    const selectedEntry = heap[smallestIndex];
+    if (
+      rightEntry !== undefined &&
+      selectedEntry !== undefined &&
+      compareMeasuredContributions(rightEntry, selectedEntry) < 0
+    ) {
+      smallestIndex = right;
+    }
+    if (smallestIndex === current) break;
+    const currentEntry = heap[current];
+    const replacement = heap[smallestIndex];
+    if (currentEntry === undefined || replacement === undefined) break;
+    heap[current] = replacement;
+    heap[smallestIndex] = currentEntry;
+    current = smallestIndex;
+  }
+}
+
+/** Positive means `left` is a better exclusion candidate than `right`. */
+function compareMeasuredContributions(left: MeasuredDiffFileContribution, right: MeasuredDiffFileContribution): number {
+  return left.bytes - right.bytes || right.manifestPath.localeCompare(left.manifestPath);
+}
+
+/**
+ * Choose the fewest largest exact files whose observed spans can account for the excess. When the bounded
+ * candidate heap or the ENOBUFS prefix cannot account for all of it, exclude the measured set and retry:
+ * no omission ships unless a later complete patch actually fits. If tracked content alone is too large,
+ * the retry eventually has no candidate and the existing loud failure remains.
+ */
+function selectOverflowExclusions(
+  contributions: readonly MeasuredDiffFileContribution[],
+  measuredBytes: number
+): MeasuredDiffFileContribution[] {
+  const ranked = [...contributions].sort(
+    (left, right) => right.bytes - left.bytes || left.manifestPath.localeCompare(right.manifestPath)
+  );
+  const required = Math.max(1, measuredBytes - MAX_PATCH_BYTES);
+  const selected: MeasuredDiffFileContribution[] = [];
+  let measured = 0;
+  for (const entry of ranked) {
+    selected.push(entry);
+    measured += entry.bytes;
+    if (measured >= required) break;
+  }
+  return selected;
 }
 
 const NUL = Buffer.from([0]);
@@ -505,6 +748,31 @@ function validateManifest(manifest: WorkspacePatchManifest): void {
   if (!/^[0-9a-f]{64}$/u.test(manifest.patch_sha256)) {
     throw new Error("workspace patch digest is invalid");
   }
+  const excluded = new Set<string>();
+  if (manifest.excluded_files !== undefined) {
+    if (!Array.isArray(manifest.excluded_files) || manifest.excluded_files.length === 0) {
+      throw new Error("workspace patch excluded files must be a non-empty array");
+    }
+    for (const entry of manifest.excluded_files) {
+      if (
+        entry === null ||
+        typeof entry !== "object" ||
+        Object.keys(entry).sort().join("\0") !== "diff_bytes_at_least\0path\0reason" ||
+        typeof entry.path !== "string" ||
+        !Number.isSafeInteger(entry.diff_bytes_at_least) ||
+        entry.diff_bytes_at_least <= 0 ||
+        entry.reason !== "git-diff-overflow"
+      ) {
+        throw new Error("workspace patch excluded file entry is invalid");
+      }
+      const normalized = normalizeWorkspacePatchPath(entry.path, "workspace patch excluded file path");
+      if (normalized !== entry.path || excluded.has(normalized)) {
+        throw new Error(`workspace patch excluded file path is not canonical or is duplicated: ${entry.path}`);
+      }
+      rejectSensitivePath(normalized);
+      excluded.add(normalized);
+    }
+  }
   if (!Array.isArray(manifest.files)) throw new Error("workspace patch files must be an array");
   const seen = new Set<string>();
   for (const entry of manifest.files) {
@@ -514,6 +782,9 @@ function validateManifest(manifest: WorkspacePatchManifest): void {
     const normalized = normalizeWorkspacePatchPath(entry.path, "workspace patch file path");
     if (normalized !== entry.path || seen.has(normalized)) {
       throw new Error(`workspace patch file path is not canonical or is duplicated: ${entry.path}`);
+    }
+    if (excluded.has(normalized)) {
+      throw new Error(`workspace patch path is both included and excluded: ${entry.path}`);
     }
     rejectSensitivePath(normalized);
     seen.add(normalized);
