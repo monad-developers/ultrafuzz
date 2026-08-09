@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync, type Stats } from "node:fs";
-import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import { z } from "zod/v4";
@@ -26,6 +26,8 @@ import {
   type ModalRecoveryStartReason,
   type ModalRecoveryTerminalReason
 } from "./recovery-lifecycle.js";
+import { MODAL_LAUNCH_STATE_SCHEMA_ID } from "./modal-contracts.js";
+import { readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
 import { OPERATIONAL_DISPOSITION_CATEGORIES } from "./terminal-disposition.js";
 import { WORKER_DIAGNOSTIC_CODES, WORKER_RESULT_SCHEMA_VERSION, type WorkerResultContract } from "./worker-result.js";
 
@@ -965,7 +967,7 @@ export function isTransientModalError(error: unknown): boolean {
 
 export async function readModalLaunchState(statePath: string): Promise<ModalLaunchState | undefined> {
   try {
-    return parseModalLaunchState(JSON.parse(await readFile(path.resolve(statePath), "utf8")) as unknown);
+    return parseModalLaunchState(readModalDocument(path.resolve(statePath), MODAL_LAUNCH_STATE_SCHEMA_ID).value);
   } catch (error) {
     if (isNodeError(error, "ENOENT")) return undefined;
     throw error;
@@ -975,26 +977,11 @@ export async function readModalLaunchState(statePath: string): Promise<ModalLaun
 export async function writeModalLaunchState(statePath: string, state: ModalLaunchState): Promise<void> {
   const target = path.resolve(statePath);
   const checked = parseModalLaunchState(state);
-  await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
-  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-  let handle;
-  try {
-    handle = await open(temporary, "wx", 0o600);
-    await handle.writeFile(`${JSON.stringify(checked, null, 2)}\n`, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await rename(temporary, target);
-    const directory = await open(path.dirname(target), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
-  } finally {
-    await handle?.close().catch(() => undefined);
-    await unlink(temporary).catch(() => undefined);
-  }
+  const trustedRoot = path.dirname(target);
+  await mkdir(trustedRoot, { recursive: true, mode: 0o700 });
+  await writeModalDocumentAtomic(target, MODAL_LAUNCH_STATE_SCHEMA_ID, checked, {
+    trustedRoot
+  });
 }
 
 export interface ModalLaunchLockOptions {
@@ -1230,7 +1217,9 @@ function parseProcessStartTicks(contents: string): string | undefined {
 }
 
 function isNodeError(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
+  if (!(error instanceof Error)) return false;
+  if ("code" in error && error.code === code) return true;
+  return "cause" in error && isNodeError(error.cause, code);
 }
 
 function sleep(ms: number): Promise<void> {

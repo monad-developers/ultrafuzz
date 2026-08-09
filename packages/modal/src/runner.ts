@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, mkdtempSync, openSync, rmSync } from "node:fs";
-import { access, chmod, lstat, mkdir, mkdtemp, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, mkdtemp, open, rename, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -1557,7 +1557,7 @@ export async function overseeModalBenchmarkOnce(
   const recoveryPolicy = modalRecoveryPolicyForNodeTimeout(config.node_timeout_seconds, input.policy);
 
   return withModalLaunchStateLock(statePath, async () => {
-    const launchState = parseModalLaunchState(JSON.parse(await readFile(statePath, "utf8")) as unknown);
+    const launchState = await requiredModalLaunchStateDocument(statePath);
     if (launchState.logical_run_id !== config.run_id) {
       throw new Error(`launch state belongs to ${launchState.logical_run_id}, not ${config.run_id}`);
     }
@@ -3054,17 +3054,8 @@ async function requiredLaunchStateForInspection(
   statePath: string,
   modal: ModalClient
 ): Promise<{ state: ModalLaunchState; app: App; image: Image }> {
-  const absolute = path.resolve(statePath);
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await readFile(absolute, "utf8")) as unknown;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      throw new Error(`Modal launch state not found: ${absolute}`, { cause: error });
-    }
-    throw error;
-  }
-  const { state, image } = await resolveModalLaunchStateImageForInspection(raw, modal.images);
+  const state = await requiredModalLaunchStateDocument(statePath);
+  const { image } = await resolveModalLaunchStateImageForInspection(state, modal.images);
   const app = await modal.apps.fromName(state.app, { createIfMissing: false });
   return { state, app, image };
 }
@@ -3090,19 +3081,16 @@ async function requiredCurrentLaunchStateForTermination(
   statePath: string,
   modal: ModalClient
 ): Promise<{ state: ModalLaunchState; app: App }> {
-  const absolute = path.resolve(statePath);
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await readFile(absolute, "utf8")) as unknown;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      throw new Error(`Modal launch state not found: ${absolute}`, { cause: error });
-    }
-    throw error;
-  }
-  const state = parseModalLaunchState(raw);
+  const state = await requiredModalLaunchStateDocument(statePath);
   const app = await modal.apps.fromName(state.app, { createIfMissing: false });
   return { state, app };
+}
+
+async function requiredModalLaunchStateDocument(statePath: string): Promise<ModalLaunchState> {
+  const absolute = path.resolve(statePath);
+  const state = await readModalLaunchState(absolute);
+  if (state === undefined) throw new Error(`Modal launch state not found: ${absolute}`);
+  return state;
 }
 
 function assertStateImage(state: ModalLaunchState, image: Image): void {

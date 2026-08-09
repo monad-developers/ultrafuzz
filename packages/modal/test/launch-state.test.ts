@@ -388,6 +388,19 @@ describe("Modal lineage", () => {
     expect(() => parseModalLaunchState(legacy)).toThrow();
   });
 
+  it("rejects duplicate launch-state keys through the canonical strict JSON reader", async () => {
+    const state = launchState();
+    const serialized = JSON.stringify(state);
+    const field = `"logical_run_id":"${state.logical_run_id}"`;
+    const duplicate = serialized.replace(field, `${field},"logical_run_id":"shadow-run"`);
+    expect(duplicate).not.toBe(serialized);
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-duplicate-state-"));
+    const statePath = path.join(root, "launch-state.json");
+    fs.writeFileSync(statePath, duplicate, { mode: 0o600 });
+
+    await expect(readModalLaunchState(statePath)).rejects.toThrow(/duplicate|strict JSON/u);
+  });
+
   it("fails closed on every incompatible checkpoint fingerprint", () => {
     const state = launchState();
     const expected = {
