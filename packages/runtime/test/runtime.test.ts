@@ -1611,7 +1611,23 @@ test(
     });
     assert.equal(crashed.status, 86, crashed.stderr);
     assert.equal(fs.existsSync(codexPath), false);
-    assert.equal(fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-recovery")), true);
+    const recoveryMarkerPath = path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-recovery");
+    assert.equal(fs.existsSync(recoveryMarkerPath), true);
+    const marker = fs.readFileSync(recoveryMarkerPath, "utf8");
+    const duplicated = marker.replace(
+      '"target_basename":"codex.ts"',
+      '"target_basename":"codex.ts","target_basename":"codex.ts"'
+    );
+    assert.notEqual(duplicated, marker);
+    fs.writeFileSync(recoveryMarkerPath, duplicated, "utf8");
+
+    const rejected = initProject({ projectRoot: project });
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.diagnostics[0]?.code, "INIT_PATH_UNSAFE");
+    assert.equal(fs.readFileSync(recoveryMarkerPath, "utf8"), duplicated);
+    assert.equal(fs.existsSync(codexPath), false);
+
+    fs.writeFileSync(recoveryMarkerPath, marker, "utf8");
 
     const recovered = initProject({ projectRoot: project });
 
@@ -1626,7 +1642,7 @@ test(
 );
 
 test(
-  "stock adapter migration recovers after process death immediately after marker creation",
+  "stock adapter migration rejects a torn present recovery marker without repairing it",
   { concurrency: false, skip: process.platform === "win32" },
   () => {
     const project = tempProject();
@@ -1662,14 +1678,15 @@ test(
     assert.equal(fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-prepared")), true);
     assert.equal(fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-previous")), true);
 
-    const recovered = initProject({ projectRoot: project });
+    const entries = fs.readdirSync(agentsDirectory).sort();
+    const rejected = initProject({ projectRoot: project });
 
-    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
-    assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
-    assert.equal(
-      fs.readdirSync(agentsDirectory).some((entry) => entry.includes(".ultrafuzz-init-")),
-      false
-    );
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.diagnostics[0]?.code, "INIT_PATH_UNSAFE");
+    assert.equal(fs.statSync(recoveryMarkerPath).size, 0);
+    assert.deepEqual(fs.readdirSync(agentsDirectory).sort(), entries);
+    assert.equal(fs.existsSync(codexPath), true);
+    assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
   }
 );
 
@@ -9990,6 +10007,37 @@ test("legacy workflow evidence gaps fail closed without reconstructing trust", a
     assert.equal(fs.existsSync(missingPath), false, "legacy evidence must never be synthesized");
     assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
   }
+});
+
+test("a duplicate-key workflow link journal is terminal and is never rewritten or treated as missing", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const runId = "duplicate-key-workflow-link";
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const journalPath = path.join(run.value!.run_root, "smithers", "workflow-run-link-journal.json");
+  const original = fs.readFileSync(journalPath, "utf8");
+  const duplicated = original.replace(
+    '"schema_version": "ultrafuzz.workflow-run-link-journal.v1",',
+    '"schema_version": "ultrafuzz.workflow-run-link-journal.v1",\n  "schema_version": "ultrafuzz.workflow-run-link-journal.v1",'
+  );
+  assert.notEqual(duplicated, original);
+  fs.writeFileSync(journalPath, duplicated, "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, false);
+  if (!evidence.ok) {
+    assert.equal(evidence.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+    assert.match(evidence.diagnostics[0]?.message ?? "", /duplicate property name/u);
+  }
+  const resumed = await resumeRun({ projectRoot: project, runId, env });
+  assert.equal(resumed.ok, false);
+  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+  assert.equal(fs.readFileSync(journalPath, "utf8"), duplicated);
+  assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
 });
 
 test("a symlinked control seal remains invalid evidence rather than being labeled legacy", async () => {

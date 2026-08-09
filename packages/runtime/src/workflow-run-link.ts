@@ -7,6 +7,7 @@ import {
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
+  parseStrictJsonBytes,
   readRunState,
   replayEvents,
   writeJsonDurable,
@@ -367,7 +368,12 @@ function readWorkflowRunLinkJournal(layout: RunLayout): WorkflowRunLinkJournal {
     fs.closeSync(descriptor);
   }
   assertRegularFileInside(layout.root, journalPath, "workflow run link journal");
-  const parsed = JSON.parse(contents.toString("utf8")) as unknown;
+  const parsed = parseStrictJsonBytes(contents, {
+    maxBytes: WORKFLOW_RUN_LINK_JOURNAL_MAX_BYTES,
+    maxDepth: 16,
+    maxItems: 10_000,
+    maxProperties: 250_000
+  });
   if (
     !isObjectRecord(parsed) ||
     parsed.schema_version !== WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION ||
