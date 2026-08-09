@@ -1,4 +1,6 @@
 import {
+  SMITHERS_NODE_STATES,
+  SMITHERS_RUN_STATES,
   isTerminalRunStatus,
   isTerminalNodeStatus,
   type NodeNextEligibleAction,
@@ -14,13 +16,16 @@ export interface WorkflowControlTask {
   concreteNodeId: string;
 }
 
+type WorkflowNodeState = (typeof SMITHERS_NODE_STATES)[number];
+type WorkflowRunState = (typeof SMITHERS_RUN_STATES)[number];
+
 export interface WorkflowControlProjectionInput {
   previousState: RunState;
   state: RunState;
   graph: PlannedGraph;
   tasks: readonly WorkflowControlTask[];
-  workflowStates: ReadonlyMap<string, string>;
-  workflowState?: string;
+  workflowStates: ReadonlyMap<string, WorkflowNodeState>;
+  workflowState?: WorkflowRunState;
   nowMs: number;
 }
 
@@ -32,10 +37,13 @@ export interface WorkflowControlProjection {
   recoveryDue: boolean;
 }
 
-const ACTIVE_WORKFLOW_STATES = new Set(["in-progress", "running", "started"]);
-const LOST_CONTROLLER_WORKFLOW_STATES = new Set(["orphaned", "stale"]);
+const ACTIVE_WORKFLOW_STATES = new Set<WorkflowNodeState>(["in-progress"]);
+const LOST_CONTROLLER_WORKFLOW_STATES = new Set<WorkflowRunState>(["orphaned", "stale"]);
+const EXACT_WORKFLOW_NODE_STATES = new Set<WorkflowNodeState>(SMITHERS_NODE_STATES);
+const EXACT_WORKFLOW_RUN_STATES = new Set<WorkflowRunState>(SMITHERS_RUN_STATES);
 
 export function projectWorkflowControlState(input: WorkflowControlProjectionInput): WorkflowControlProjection {
+  assertExactWorkflowStates(input.workflowStates, input.workflowState);
   const now = new Date(input.nowMs).toISOString();
   const state = structuredClone(input.state);
   const previous = input.previousState;
@@ -50,18 +58,21 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
 
   const activeAttempts = new Set(
     input.tasks
-      .filter((task) => ACTIVE_WORKFLOW_STATES.has(normalizeWorkflowState(input.workflowStates.get(task.attemptId))))
+      .filter((task) => ACTIVE_WORKFLOW_STATES.has(input.workflowStates.get(task.attemptId) ?? "pending"))
       .map((task) => task.attemptId)
   );
   const activeWork = activeAttempts.size;
   const leaseDurationMs = controllerLeaseDurationMs(previous);
-  const workflowState = normalizeWorkflowState(input.workflowState);
-  const explicitlyLostController = LOST_CONTROLLER_WORKFLOW_STATES.has(workflowState);
+  const workflowState = input.workflowState;
+  const explicitlyLostController = workflowState !== undefined && LOST_CONTROLLER_WORKFLOW_STATES.has(workflowState);
   const recoveryInProgress = workflowState === "recovering";
   const hasHealthyExternalWait = [...input.workflowStates.values()].some((value) =>
-    isHealthyExternalWaitWorkflowState(normalizeWorkflowState(value))
+    isHealthyExternalWaitWorkflowState(value)
   );
-  const transitionAgeMs = Math.max(0, input.nowMs - timestampMs(previous.last_transition_at, input.nowMs));
+  const transitionAgeMs = Math.max(
+    0,
+    input.nowMs - timestampMs(previous.last_transition_at, input.nowMs, "run state last_transition_at")
+  );
   const noTransitionStall =
     workflowState === "running" &&
     activeWork === 0 &&
@@ -85,10 +96,12 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
     const task = taskByAttempt.get(nodeId);
     const concreteNodeId = task?.concreteNodeId ?? nodeId;
     const taskIds = taskIdsByConcrete.get(concreteNodeId) ?? [];
-    const directWorkflowState = normalizeWorkflowState(input.workflowStates.get(nodeId));
-    const relatedWorkflowStates = taskIds.map((id) => normalizeWorkflowState(input.workflowStates.get(id)));
+    const directWorkflowState = input.workflowStates.get(nodeId);
+    const relatedWorkflowStates = taskIds.map((id) => input.workflowStates.get(id));
     const relatedActive = taskIds.some((id) => activeAttempts.has(id));
-    const workflowWait = waitFromWorkflowState(directWorkflowState || relatedWorkflowStates.find(Boolean) || "");
+    const workflowWait = waitFromWorkflowState(
+      directWorkflowState ?? relatedWorkflowStates.find((value) => value !== undefined)
+    );
     if (workflowWait !== undefined) {
       provisional.set(nodeId, workflowWait);
       if (
@@ -136,7 +149,11 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
     node.next_eligible_action = next.nextEligibleAction;
   }
 
-  const previousObservedAtMs = timestampMs(previous.concurrency?.observed_at, input.nowMs);
+  const previousObservedAtMs = timestampMs(
+    previous.concurrency?.observed_at,
+    input.nowMs,
+    "run state concurrency.observed_at"
+  );
   const elapsedMs = Math.max(0, input.nowMs - previousObservedAtMs);
   const previousActive = previous.concurrency?.active_work ?? 0;
   const previousQueued = previous.concurrency?.ready_queue_depth ?? 0;
@@ -159,7 +176,9 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
       status: "expired",
       duration_ms: leaseDurationMs,
       renewed_at: previousLease?.renewed_at ?? previous.created_at,
-      expires_at: new Date(Math.min(input.nowMs, timestampMs(previousLease?.expires_at, input.nowMs))).toISOString(),
+      expires_at: new Date(
+        Math.min(input.nowMs, timestampMs(previousLease?.expires_at, input.nowMs, "controller lease expires_at"))
+      ).toISOString(),
       recovery_attempts: (previousLease?.recovery_attempts ?? 0) + (previousLease?.status === "expired" ? 0 : 1)
     };
   } else {
@@ -178,7 +197,7 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
   state.last_transition_at = controlTransition ? now : previous.last_transition_at;
   const deadlineExceeded =
     state.workflow_deadline_at !== undefined &&
-    input.nowMs >= timestampMs(state.workflow_deadline_at, Number.POSITIVE_INFINITY) &&
+    input.nowMs >= timestampMs(state.workflow_deadline_at, Number.POSITIVE_INFINITY, "workflow deadline") &&
     !isTerminalRunStatus(state.status);
 
   return {
@@ -190,6 +209,20 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
   };
 }
 
+function assertExactWorkflowStates(
+  nodeStates: ReadonlyMap<string, WorkflowNodeState>,
+  runState: WorkflowRunState | undefined
+): void {
+  for (const [nodeId, state] of nodeStates) {
+    if (!EXACT_WORKFLOW_NODE_STATES.has(state)) {
+      throw new Error(`workflow node ${nodeId} has an invalid current state: ${String(state)}`);
+    }
+  }
+  if (runState !== undefined && !EXACT_WORKFLOW_RUN_STATES.has(runState)) {
+    throw new Error(`workflow run has an invalid current state: ${String(runState)}`);
+  }
+}
+
 interface WaitState {
   reason: NodeWaitReason;
   nextEligibleAction: NodeNextEligibleAction;
@@ -199,29 +232,26 @@ function waitState(reason: NodeWaitReason, nextEligibleAction: NodeNextEligibleA
   return { reason, nextEligibleAction };
 }
 
-function waitFromWorkflowState(state: string): WaitState | undefined {
+function waitFromWorkflowState(state: WorkflowNodeState | undefined): WaitState | undefined {
   switch (state) {
-    case "noderetrying":
-    case "retrying":
-      return waitState("backoff", "retry");
-    case "nodequeued":
-    case "queued":
+    case "waiting-quota":
+    case "waiting-bound":
+    case "bound-stale":
       return waitState("capacity", "capacity-available");
-    case "nodewaitingapproval":
     case "waiting-approval":
       return waitState("approval", "approve");
-    case "nodewaitingevent":
     case "waiting-event":
       return waitState("event", "signal");
-    case "nodewaitingtimer":
     case "waiting-timer":
       return waitState("timer", "timer-fire");
     default:
-      return ACTIVE_WORKFLOW_STATES.has(state) ? waitState("active", "task-complete") : undefined;
+      return state !== undefined && ACTIVE_WORKFLOW_STATES.has(state)
+        ? waitState("active", "task-complete")
+        : undefined;
   }
 }
 
-function isHealthyExternalWaitWorkflowState(state: string): boolean {
+function isHealthyExternalWaitWorkflowState(state: WorkflowNodeState): boolean {
   const wait = waitFromWorkflowState(state);
   return wait !== undefined && !["active", "capacity"].includes(wait.reason);
 }
@@ -246,24 +276,21 @@ function clearWait(node: NodeState): void {
   delete node.next_eligible_action;
 }
 
-function normalizeWorkflowState(value: string | undefined): string {
-  return value?.trim().toLowerCase() ?? "";
-}
-
 function controllerLeaseDurationMs(state: RunState): number {
   const configuredDuration = state.controller_lease?.duration_ms;
+  const renewed = timestampMs(state.controller_lease?.renewed_at, 0, "controller lease renewed_at");
+  const expires = timestampMs(state.controller_lease?.expires_at, renewed + 30_000, "controller lease expires_at");
   if (Number.isInteger(configuredDuration) && configuredDuration >= 1_000) {
     return configuredDuration;
   }
-  const renewed = timestampMs(state.controller_lease?.renewed_at, 0);
-  const expires = timestampMs(state.controller_lease?.expires_at, renewed + 30_000);
   return Math.max(1_000, expires - renewed);
 }
 
-function timestampMs(value: string | undefined, fallback: number): number {
+function timestampMs(value: string | undefined, fallback: number, label: string): number {
   if (value === undefined) return fallback;
   const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
+  if (!Number.isFinite(parsed)) throw new Error(`${label} must be an exact parseable timestamp`);
+  return parsed;
 }
 
 function controlStateChanged(previous: RunState, current: RunState): boolean {
