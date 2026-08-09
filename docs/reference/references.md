@@ -41,12 +41,12 @@ vulnerability-database.web3:
   kind: vulnerability-database
   provider: github
   repo: aviggiano/web3-vulnerability-database
-  commit: e46c0e472c28596f30decbb08549c9d9630f47cb
+  commit: 74c2a5114b7adbd208eb49e47c137daa49b4a395
   paths:
     - database.yml
     - capabilities.yml
     - catalog.json
-  resolved_at: "2026-08-06T23:31:09Z"
+  resolved_at: "2026-08-09T01:15:37Z"
 ```
 
 The shipped `.ultrafuzz/references.yml` defines exactly this entry, so a clean
@@ -58,7 +58,7 @@ before running offline.
 #### Public unauthenticated materialization
 
 `aviggiano/web3-vulnerability-database` is public, so the immutable commit
-`e46c0e472c28596f30decbb08549c9d9630f47cb` is fetched
+`74c2a5114b7adbd208eb49e47c137daa49b4a395` is fetched
 anonymously by `ultrafuzz references sync`, including in the detached Modal
 worker's pre-model phase. This reference needs no GitHub token, App installation,
 SSH agent, or credential helper.
@@ -66,18 +66,19 @@ SSH agent, or credential helper.
 The pin was verified from a fresh unauthenticated fetch of the full commit. The
 three contract files carry these digests:
 
-| Path               |  Bytes | SHA-256                                                            |
-| ------------------ | -----: | ------------------------------------------------------------------ |
-| `database.yml`     |     96 | `0da89f82af4680a9d62770c520073d9937f55d932f2a16f737024e48633694f1` |
-| `capabilities.yml` |  6,176 | `fabaae6efe20335b53e978699fe90049d9a8bf90bd51813a80ca60bd9f39ac82` |
-| `catalog.json`     | 44,680 | `8710705a3fb50707c32ccfe55775f7fca4cb87cb7c0fece54af62ea557f35402` |
+| Path               |   Bytes | SHA-256                                                            |
+| ------------------ | ------: | ------------------------------------------------------------------ |
+| `database.yml`     |      97 | `7c74b02face305b84d3af7bfbda75d47827fd1f8cb7e757a810d3838bc99d601` |
+| `capabilities.yml` |  20,097 | `22c3cdd7dd6c5d1f8474814644fc09b795ca05ef8b5714270e1c9f9445cbd607` |
+| `catalog.json`     | 412,076 | `1da846ce98905da0f58a24c0d77b17a0dc9d334743eb8682bfa0f06530423bbc` |
 
-The catalog declares `schemaVersion: 1`, `algorithm: sha256`, aggregate digest
-`62b7fb8047b3e74783283cd1aa23eca14c24846d8c62233b34fa47e44cc5ff91`,
-28 capabilities, and 23 records (all currently `draft`) across the `accounting`,
-`authorization`, `cross-chain`, `derivatives`, `governance`, `integrations`,
-`lending`, `numeric`, `operations`, and `oracle` categories. Ultrafuzz does not trust
-repository visibility or the mutable default branch as integrity evidence: it
+The catalog declares `schemaVersion: 3`, `algorithm: sha256`, aggregate digest
+`c66a85c323d09464ce4f1a750786f2cdd92dab4213935c29233d6662475c4215`,
+68 capabilities, and 141 records (all currently `draft`) across the `accounting`,
+`amm`, `auctions`, `authorization`, `coverage`, `cross-chain`, `derivatives`,
+`distribution`, `governance`, `integrations`, `lending`, `numeric`, `operations`,
+`oracle`, `randomness`, `stablecoin`, `staking`, `trading`, and `yield` domains.
+Ultrafuzz does not trust repository visibility or the mutable default branch as integrity evidence: it
 fetches the exact 40-character commit, verifies the selected Git tree and every
 declared file digest, recomputes the catalog aggregate, and records the pinned
 source identity in the materialized manifest.
@@ -85,21 +86,24 @@ source identity in the materialized manifest.
 Replace the commit only with another reviewed database release commit. The three
 configured paths are fixed. Ultrafuzz reads the canonically ordered record
 paths from `catalog.json`, verifies that the pinned Git tree contains exactly
-those regular Markdown files below `classes/`, and adds them to the same
+those regular YAML files below `classes/`, and adds them to the same
 digest-checked cache entry. Mutable branches and an external checkout that has
 not yet published the contract fail closed.
 
-The pinned commit publishes the upstream v1 contract: `database.yml` declares
-`schema_version: 1` with `classes/**/*.md`, `capabilities.yml`, and
-`catalog.json`; `capabilities.yml` declares the controlled capability registry
-with optional aliases; and `catalog.json` carries `schemaVersion`, `algorithm`,
-`aggregateSha256`, capability definitions, and records with dotted IDs,
-`sourcePath`, `selectedArtifactPath`, `sha256`, `bytes`, `routing`,
-`applicability`, `sources`, and `reviewStatus`. Ultrafuzz validates that shape
-strictly, recomputes the upstream aggregate digest over the canonical catalog
-payload, and only then normalizes it into its own digest-bound planner catalog.
-Nothing from an external repository is executed, and no unvalidated upstream
-field reaches a planner prompt.
+The pinned commit publishes the upstream v3 contract: `database.yml` declares
+`schema_version: 3` with `classes/**/*.yml`, `capabilities.yml`, and
+`catalog.json`; `capabilities.yml` keeps registry schema v1 while allowing a
+deprecated entry to name its `supersededBy` replacement; and each YAML class
+stores its seven sections under `sections`, with detection guidance split into
+`strategy`, non-empty `codeSurfaces`, and closed typed `steps`. Ultrafuzz accepts
+the historical v1 Markdown contract for existing immutable pins, dispatches the
+record and path validators by database schema, recomputes the upstream aggregate
+digest over the canonical catalog payload, and only then normalizes it into its
+own digest-bound planner catalog. The planner's string `detection_guidance`
+remains the v3 `detection.strategy`; exact selected YAML snapshots preserve the
+structured surfaces and checks for focused hunters. Nothing from an external
+repository is executed, and no unvalidated upstream field reaches a planner
+prompt.
 
 ### Private references
 
@@ -187,11 +191,12 @@ A `kind: vulnerability-database` reference instead materializes the exact
 upstream database files below `vulnerability-db/` in its node artifact
 directory. Its primary output is `vulnerability-db/catalog.json`, the unmodified
 upstream file. Validation independently checks the upstream top-level schema and
-digest algorithm, the capability registry against `capabilities.yml`, strict
-record frontmatter and the required upstream sections, safe class and selected
-artifact paths, the domain/category/path agreement rule, capability references,
-canonical ordering, every source digest and byte size, and the recomputed
-aggregate digest. The runtime never executes code from the external repository.
+digest algorithm, the capability registry against `capabilities.yml`, strict v1
+Markdown or v3 YAML record structure and required sections, typed v3 detection
+steps, safe class and selected artifact paths, the domain/category/path agreement
+rule, capability references and replacements, canonical ordering, every source
+digest and byte size, and the recomputed aggregate digest. The runtime never
+executes code from the external repository.
 
 Planning then normalizes the validated upstream catalog into the internal
 planner catalog (`ultrafuzz.vulnerability-db.planner-catalog.v1`) written to
@@ -201,7 +206,7 @@ function of the validated upstream bytes and records both digests:
 exact upstream file it was derived from. Goal plans bind the planner catalog by
 its own digest. The normalized records also carry the validated required class
 sections, including hunter instructions and examples, so goal planning retains
-its class-replacement context without reconstructing Markdown. A planner
+its class-replacement context without reconstructing source records. A planner
 catalog that does not re-derive from the pinned database fails closed.
 
 Every reference node must also write:

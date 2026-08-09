@@ -175,10 +175,10 @@ Set the fixed roaming record to:
 ```
 
 Use each catalog record's source digest, byte size, and selected artifact path
-for `selected_class_records`; do not reconstruct Markdown from the catalog's
+for `selected_class_records`; do not reconstruct source records from the catalog's
 structured guidance. After the agent returns, Ultrafuzz deterministically
 materializes `{{artifact_path}}/vulnerability-db-manifest.json` and the exact
-Markdown bytes for only those selected records beneath the task artifact
+source bytes for only those selected records beneath the task artifact
 directory at `vulnerability-db/selected/`. It fails closed if the plan,
 catalog, bundled database, manifest, or selected bytes disagree. Write only
 `goal-plan.json` yourself: never create `vulnerability-db-manifest.json` or

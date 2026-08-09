@@ -3873,9 +3873,9 @@ test("a clean scaffold pins the reviewed vulnerability database verbatim", () =>
   assert.equal(pinned.kind, "vulnerability-database");
   assert.equal(pinned.provider, "github");
   assert.equal(pinned.repo, "aviggiano/web3-vulnerability-database");
-  assert.equal(pinned.commit, "e46c0e472c28596f30decbb08549c9d9630f47cb");
+  assert.equal(pinned.commit, "74c2a5114b7adbd208eb49e47c137daa49b4a395");
   assert.deepEqual([...pinned.paths], ["database.yml", "capabilities.yml", "catalog.json"]);
-  assert.equal(pinned.resolved_at, "2026-08-06T23:31:09Z");
+  assert.equal(pinned.resolved_at, "2026-08-09T01:15:37Z");
 });
 
 test("a clean scaffold publishes the canonical artifact schema files the prompts reference", () => {

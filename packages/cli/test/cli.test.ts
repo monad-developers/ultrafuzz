@@ -264,7 +264,7 @@ test("init and validate emit schema-versioned launch JSON", async () => {
   // vulnerability-database reference is part of the scaffolded catalog.
   const shippedReferences = fs.readFileSync(path.join(project, ".ultrafuzz", "references.yml"), "utf8");
   assert.match(shippedReferences, /^ {2}vulnerability-database\.web3:$/mu);
-  assert.match(shippedReferences, /^ {4}commit: e46c0e472c28596f30decbb08549c9d9630f47cb$/mu);
+  assert.match(shippedReferences, /^ {4}commit: 74c2a5114b7adbd208eb49e47c137daa49b4a395$/mu);
   const validate = await cli(project, ["validate", "--json"]);
   const body = parseJson(validate);
   assert.equal(validate.code, 0, validate.stderr);
