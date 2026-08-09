@@ -2,11 +2,11 @@
 
 Ultrafuzz checks in complete Draft 2020-12 JSON Schema documents under
 `packages/artifacts/schema/`, `packages/evals/schema/`,
-`packages/modal/schema/`, and `packages/topology/schema/`. JSON Schema is the
-canonical whole-document shape contract. TypeScript types describe consumers;
-where a Zod parser remains useful, parity tests require it to accept and reject
-the same structures without coercion, defaults, transforms, aliases, or
-property stripping.
+`packages/modal/schema/`, `packages/references/schema/`, and
+`packages/topology/schema/`. JSON Schema is the canonical whole-document shape
+contract. TypeScript types describe consumers; where a Zod parser remains
+useful, parity tests require it to accept and reject the same structures without
+coercion, defaults, transforms, aliases, or property stripping.
 
 Schema IDs are stable, fragment-free URNs such as:
 
@@ -14,6 +14,7 @@ Schema IDs are stable, fragment-free URNs such as:
 - `urn:ultrafuzz:schema:artifacts:generated-tests:2`
 - `urn:ultrafuzz:schema:evals:run-record:2`
 - `urn:ultrafuzz:schema:modal:node-input:1`
+- `urn:ultrafuzz:schema:references:reference-cache-manifest:1`
 - `urn:ultrafuzz:schema:topology:expanded-graph:3`
 
 The IDs identify schemas and resolve bundled `$ref` values; they are never
@@ -64,6 +65,11 @@ historical readers are not supported across this transition. Agent-authored
 bytes are immutable after the agent session returns: validation, publication,
 reporting, dashboards, and bundles may reject them, but may not normalize,
 synthesize, reseal, or rewrite them.
+
+Runtime-owned documents follow the same rule before publication. For example,
+reference cache manifests use only
+`ultrafuzz.reference-cache-manifest.v1`; caches carrying the old generic
+`"1.0"` literal are rejected and must be fetched again.
 
 The host also does not request a correction turn after the session returns,
 retry the model for an artifact-shape failure, create a canonical empty file,

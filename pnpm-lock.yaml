@@ -87,6 +87,9 @@ importers:
       '@ultrafuzz/modal':
         specifier: workspace:*
         version: link:../modal
+      '@ultrafuzz/references':
+        specifier: workspace:*
+        version: link:../references
       '@ultrafuzz/runtime':
         specifier: workspace:*
         version: link:../runtime

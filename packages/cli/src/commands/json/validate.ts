@@ -10,6 +10,7 @@ import {
 } from "@ultrafuzz/artifacts";
 import { evalSchemaBundleDigest, evalSchemaRegistry } from "@ultrafuzz/evals";
 import { modalSchemaBundleDigest, modalSchemaRegistry } from "@ultrafuzz/modal";
+import { referenceSchemaBundleDigest, referenceSchemaRegistry } from "@ultrafuzz/references";
 import { topologySchemaBundleDigest, topologySchemaRegistry } from "@ultrafuzz/topology";
 
 import { cliIo, emitCommandResult, globalFlags, type CommandResult } from "../../command-shared.js";
@@ -73,6 +74,7 @@ function cliSchemaRegistry(): {
     { entries: artifactSchemaRegistry(), bundle: artifactSchemaBundleDigest() },
     { entries: evalSchemaRegistry(), bundle: evalSchemaBundleDigest() },
     { entries: modalSchemaRegistry(), bundle: modalSchemaBundleDigest() },
+    { entries: referenceSchemaRegistry(), bundle: referenceSchemaBundleDigest() },
     { entries: topologySchemaRegistry(), bundle: topologySchemaBundleDigest() }
   ];
   const entries = owners.flatMap((owner) => [...owner.entries]);

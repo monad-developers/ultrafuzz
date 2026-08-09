@@ -8,6 +8,12 @@ import { artifactSchemaDirectory } from "@ultrafuzz/artifacts";
 import { EVAL_PUBLICATION_STATE_SCHEMA_ID, evalSchemaBundleDigest, evalSchemaDirectory } from "@ultrafuzz/evals";
 import { MODAL_NODE_INPUT_SCHEMA_ID, modalSchemaBundleDigest, modalSchemaDirectory } from "@ultrafuzz/modal";
 import {
+  REFERENCE_CACHE_MANIFEST_JSON_SCHEMA_ID,
+  REFERENCE_CACHE_SCHEMA_VERSION,
+  referenceSchemaBundleDigest,
+  referenceSchemaDirectory
+} from "@ultrafuzz/references";
+import {
   EXPANDED_GRAPH_JSON_SCHEMA_ID,
   TOPOLOGY_SCHEMA_BUNDLE_DIGEST,
   topologySchemaDirectory
@@ -223,6 +229,49 @@ test("json validate recognizes the pinned Modal schema and reports the owning Mo
     const tamperedSchema = path.join(temporary, "modal-node-input.schema.json");
     fs.writeFileSync(tamperedSchema, `${fs.readFileSync(schema, "utf8")} `, "utf8");
     const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", nodeInput]);
+    assert.equal(tamperedCapture.code, 2);
+    assert.match(tamperedCapture.stderr, /JSON_SCHEMA_DIGEST_MISMATCH/u);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("json validate recognizes the pinned reference cache schema and its owning bundle", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-reference-"));
+  try {
+    const schema = path.join(referenceSchemaDirectory(), "reference-cache-manifest.schema.json");
+    const manifest = path.join(temporary, "reference-cache-manifest.json");
+    fs.writeFileSync(
+      manifest,
+      `${JSON.stringify({
+        schema_version: REFERENCE_CACHE_SCHEMA_VERSION,
+        provider: "github",
+        repo: "example/reference",
+        commit: "a".repeat(40),
+        fetched_at: "2026-08-09T00:00:00Z",
+        files: [{ path: "README.md", size_bytes: 10, sha256: "b".repeat(64) }]
+      })}\n`,
+      "utf8"
+    );
+
+    const validCapture = await capture(["json", "validate", "--schema", schema, "--file", manifest, "--json"]);
+    assert.equal(validCapture.code, 0);
+    const envelope = JSON.parse(validCapture.stdout) as {
+      ok: boolean;
+      data: {
+        status: string;
+        schema: { id: string; bundle_sha256: string; registered: boolean };
+      };
+    };
+    assert.equal(envelope.ok, true);
+    assert.equal(envelope.data.status, "valid");
+    assert.equal(envelope.data.schema.registered, true);
+    assert.equal(envelope.data.schema.id, REFERENCE_CACHE_MANIFEST_JSON_SCHEMA_ID);
+    assert.equal(envelope.data.schema.bundle_sha256, referenceSchemaBundleDigest());
+
+    const tamperedSchema = path.join(temporary, "reference-cache-manifest.schema.json");
+    fs.writeFileSync(tamperedSchema, `${fs.readFileSync(schema, "utf8")} `, "utf8");
+    const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", manifest]);
     assert.equal(tamperedCapture.code, 2);
     assert.match(tamperedCapture.stderr, /JSON_SCHEMA_DIGEST_MISMATCH/u);
   } finally {

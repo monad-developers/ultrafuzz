@@ -12,16 +12,38 @@ import {
   readRegularFileSnapshot,
   safeResolveInside,
   sha256File,
-  writeFileDurable,
-  writeJsonDurable
+  validateArtifactContractBytes,
+  validateRegisteredJsonBytesSync,
+  writeFileDurable
 } from "@ultrafuzz/artifacts";
 import { parse, stringify } from "yaml";
+
+import {
+  REFERENCE_CACHE_MANIFEST_JSON_SCHEMA_ID,
+  REFERENCE_CACHE_SCHEMA_VERSION,
+  referenceCacheManifestJsonSchema
+} from "./reference-cache-schema.js";
+import {
+  referenceSchemaBundleDigest,
+  referenceSchemaDirectory,
+  referenceSchemaEntry,
+  referenceSchemaRegistry
+} from "./schema-registry.js";
+
+export {
+  REFERENCE_CACHE_MANIFEST_JSON_SCHEMA_ID,
+  REFERENCE_CACHE_SCHEMA_VERSION,
+  referenceCacheManifestJsonSchema,
+  referenceSchemaBundleDigest,
+  referenceSchemaDirectory,
+  referenceSchemaEntry,
+  referenceSchemaRegistry
+};
 
 export const PROJECT_REFERENCES_FILE = ".ultrafuzz/references.yml";
 export const REFERENCES_VERSION = 1;
 export const CACHE_MANIFEST_FILE = ".ultrafuzz-reference-manifest.json";
 export const RUN_REFERENCE_MANIFEST_FILE = "references/manifest.json";
-export const REFERENCE_CACHE_SCHEMA_VERSION = "1.0";
 export const RUN_REFERENCE_MANIFEST_SCHEMA_VERSION = "ultrafuzz.reference-manifest.v1";
 
 export type ReferenceProvider = "github";
@@ -376,7 +398,22 @@ export function materializeReferenceArtifacts(input: {
     source_files: cacheManifest.files.filter((file) => reference.paths.includes(file.path)),
     artifacts: [manifestFileForPath(artifactDir, primaryArtifact)]
   };
-  writeJsonDurable(manifestArtifact, runManifest);
+  const runManifestBytes = Buffer.from(`${JSON.stringify(runManifest, null, 2)}\n`, "utf8");
+  const runManifestValidation = validateArtifactContractBytes(
+    "ultrafuzz/reference-manifest@1",
+    runManifestBytes,
+    manifestArtifact
+  );
+  if (!runManifestValidation.ok) {
+    throw referenceError(
+      "INVALID_RUN_REFERENCE_MANIFEST",
+      `reference \`${input.id}\` generated an invalid run manifest: ${runManifestValidation.issues
+        .map((issue) => `${issue.path}: ${issue.message}`)
+        .join("; ")}`,
+      { id: input.id, path: manifestArtifact }
+    );
+  }
+  writeFileDurable(manifestArtifact, runManifestBytes);
 
   for (const required of input.outputs.map((output) => output.path)) {
     const requiredPath = safeResolveInside(artifactDir, required, "required reference artifact");
@@ -394,9 +431,9 @@ export function materializeReferenceArtifacts(input: {
 
 export function readCacheManifest(id: string, cacheDir: string): ReferenceCacheManifest {
   const manifestPath = path.join(cacheDir, CACHE_MANIFEST_FILE);
-  let manifest: unknown;
+  let bytes: Buffer;
   try {
-    manifest = parseStrictJsonBytes(readRegularFileSnapshot(manifestPath, 16 * 1024 * 1024));
+    bytes = readRegularFileSnapshot(manifestPath, 16 * 1024 * 1024);
   } catch (error) {
     throw referenceError(
       "INVALID_CACHE_MANIFEST",
@@ -404,7 +441,50 @@ export function readCacheManifest(id: string, cacheDir: string): ReferenceCacheM
       { id, path: manifestPath }
     );
   }
-  return normalizeCacheManifest(id, manifest, manifestPath);
+  return parseReferenceCacheManifestBytes(id, bytes, manifestPath);
+}
+
+/** Validate one immutable cache-manifest byte snapshot without repairing or normalizing it. */
+export function parseReferenceCacheManifestBytes(
+  id: string,
+  input: Uint8Array,
+  source = CACHE_MANIFEST_FILE
+): ReferenceCacheManifest {
+  const bytes = Buffer.from(input);
+  const entry = referenceSchemaEntry(REFERENCE_CACHE_MANIFEST_JSON_SCHEMA_ID);
+  const validation = validateRegisteredJsonBytesSync({
+    schemaPath: path.join(referenceSchemaDirectory(), entry.filename),
+    instanceBytes: bytes,
+    schemaRegistry: referenceSchemaRegistry(),
+    schemaBundleSha256: referenceSchemaBundleDigest()
+  });
+  if (validation.status !== "valid") {
+    const diagnostics = validation.diagnostics
+      .map((diagnostic) => `${diagnostic.instancePath ?? "/"}: ${diagnostic.message}`)
+      .join("; ");
+    throw referenceError(
+      "INVALID_CACHE_MANIFEST",
+      `cached reference \`${id}\` has invalid manifest at ${source}${diagnostics.length === 0 ? "" : `: ${diagnostics}`}`,
+      { id, path: source }
+    );
+  }
+  const manifest = parseStrictJsonBytes(bytes, {
+    maxBytes: 16 * 1024 * 1024,
+    maxDepth: 128,
+    maxItems: 1_000_000,
+    maxProperties: 1_000_000
+  }) as ReferenceCacheManifest;
+  assertReferenceCacheManifestSemantics(id, manifest, source);
+  for (const file of manifest.files) Object.freeze(file);
+  Object.freeze(manifest.files);
+  return Object.freeze(manifest);
+}
+
+/** Serialize and validate the exact bytes that the cache publisher will persist. */
+export function serializeReferenceCacheManifest(id: string, value: ReferenceCacheManifest): Buffer {
+  const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+  parseReferenceCacheManifestBytes(id, bytes, CACHE_MANIFEST_FILE);
+  return bytes;
 }
 
 function normalizeReferenceCatalog(value: unknown): ReferenceCatalog {
@@ -646,14 +726,15 @@ function fetchReference(id: string, reference: ReferenceEntry, cacheDir: string)
       files.push(manifestFileForPath(staging, referencePath));
     }
     files.sort((left, right) => left.path.localeCompare(right.path));
-    writeJsonDurable(path.join(staging, CACHE_MANIFEST_FILE), {
+    const cacheManifest = {
       schema_version: REFERENCE_CACHE_SCHEMA_VERSION,
       provider: reference.provider,
       repo: reference.repo,
       commit: reference.commit,
       fetched_at: new Date().toISOString().replace(/\.\d{3}Z$/u, "Z"),
       files
-    } satisfies ReferenceCacheManifest);
+    } satisfies ReferenceCacheManifest;
+    writeFileDurable(path.join(staging, CACHE_MANIFEST_FILE), serializeReferenceCacheManifest(id, cacheManifest));
     replaceCacheDir(staging, cacheDir, tempRoot);
     return true;
   } finally {
@@ -798,71 +879,27 @@ function manifestFileForPath(root: string, relativePath: string): ReferenceManif
   };
 }
 
-function normalizeCacheManifest(id: string, value: unknown, manifestPath: string): ReferenceCacheManifest {
-  if (!isRecord(value)) {
-    throw referenceError("INVALID_CACHE_MANIFEST", `cached reference \`${id}\` manifest must be an object`, {
-      id,
-      path: manifestPath
-    });
+function assertReferenceCacheManifestSemantics(id: string, manifest: ReferenceCacheManifest, source: string): void {
+  let previous: string | undefined;
+  const seen = new Set<string>();
+  for (const file of manifest.files) {
+    if (seen.has(file.path)) {
+      throw referenceError(
+        "INVALID_CACHE_MANIFEST",
+        `cached reference \`${id}\` manifest at ${source} repeats path \`${file.path}\``,
+        { id, path: source, file: file.path, gate: "reference-cache-manifest-path-uniqueness" }
+      );
+    }
+    seen.add(file.path);
+    if (previous !== undefined && previous.localeCompare(file.path) >= 0) {
+      throw referenceError(
+        "INVALID_CACHE_MANIFEST",
+        `cached reference \`${id}\` manifest at ${source} paths are not in strictly ascending order`,
+        { id, path: source, gate: "reference-cache-manifest-path-ordering" }
+      );
+    }
+    previous = file.path;
   }
-  if (!hasExactKeys(value, ["schema_version", "provider", "repo", "commit", "fetched_at", "files"])) {
-    throw referenceError("INVALID_CACHE_MANIFEST", `cached reference \`${id}\` manifest has invalid shape`, {
-      id,
-      path: manifestPath
-    });
-  }
-  if (value.provider !== "github" || typeof value.repo !== "string" || typeof value.commit !== "string") {
-    throw referenceError("INVALID_CACHE_MANIFEST", `cached reference \`${id}\` manifest has invalid identity`, {
-      id,
-      path: manifestPath
-    });
-  }
-  if (value.schema_version !== REFERENCE_CACHE_SCHEMA_VERSION || typeof value.fetched_at !== "string") {
-    throw referenceError("INVALID_CACHE_MANIFEST", `cached reference \`${id}\` manifest has invalid metadata`, {
-      id,
-      path: manifestPath
-    });
-  }
-  if (!Array.isArray(value.files)) {
-    throw referenceError("INVALID_CACHE_MANIFEST", `cached reference \`${id}\` manifest files must be an array`, {
-      id,
-      path: manifestPath
-    });
-  }
-  value.files.forEach((file, index) => validateManifestFile(id, file, `${manifestPath}:files[${index}]`));
-  return value as unknown as ReferenceCacheManifest;
-}
-
-function validateManifestFile(id: string, value: unknown, location: string): void {
-  if (
-    !isRecord(value) ||
-    !hasExactKeys(value, ["path", "size_bytes", "sha256"]) ||
-    typeof value.path !== "string" ||
-    typeof value.sha256 !== "string"
-  ) {
-    throw referenceError("INVALID_CACHE_MANIFEST", `cached reference \`${id}\` manifest file entry is invalid`, {
-      id,
-      location
-    });
-  }
-  if (!Number.isInteger(value.size_bytes) || (value.size_bytes as number) < 0) {
-    throw referenceError("INVALID_CACHE_MANIFEST", `cached reference \`${id}\` manifest file size is invalid`, {
-      id,
-      location
-    });
-  }
-  validateReferencePath(id, value.path);
-  if (!/^[0-9a-f]{64}$/u.test(value.sha256)) {
-    throw referenceError("INVALID_CACHE_MANIFEST", `cached reference \`${id}\` manifest sha256 is invalid`, {
-      id,
-      location
-    });
-  }
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function defaultReferenceCatalogCandidates(): string[] {

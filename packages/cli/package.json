@@ -35,6 +35,7 @@
     "@ultrafuzz/dashboard": "workspace:*",
     "@ultrafuzz/evals": "workspace:*",
     "@ultrafuzz/modal": "workspace:*",
+    "@ultrafuzz/references": "workspace:*",
     "@ultrafuzz/runtime": "workspace:*",
     "@ultrafuzz/topology": "workspace:*",
     "adm-zip": "^0.5.18",
