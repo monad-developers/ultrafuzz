@@ -11,8 +11,10 @@ import {
   loadBenchmarkLanesManifest
 } from "../src/benchmark-manifest.js";
 import {
+  EVAL_HISTORY_CANDIDATE_REPOSITORY_PATTERN_SOURCE,
   EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION,
   EVAL_HISTORY_SCHEMA_VERSION,
+  EVAL_HISTORY_TIMESTAMP_PATTERN_SOURCE,
   aggregateEvalHistoryBenchmarkRuns,
   aggregateEvalHistoryModelPerformanceCost,
   assertPublicBenchmarkGeneration,
@@ -26,7 +28,7 @@ import {
   renderEvalHistoryCharts,
   type EvalHistoryObservation
 } from "../src/history.js";
-import { EVAL_HISTORY_SCHEMA_ID, validateEvalJsonSchema } from "../src/eval-schema-registry.js";
+import { EVAL_HISTORY_SCHEMA_ID, evalHistoryJsonSchema, validateEvalJsonSchema } from "../src/eval-schema-registry.js";
 import { executeEvalSchemaSemanticGates } from "../src/eval-semantic-gates.js";
 import { PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION } from "../src/public-diagnostics.js";
 import type { EvalMatrixRow, EvalRowScore, EvalScoreSummary, EvalSuiteSpec } from "../src/types.js";
@@ -377,6 +379,9 @@ function publicDiagnostics(
 describe("longitudinal eval history", () => {
   it("keeps history v2 and observation v6 structurally exact across JSON Schema and retained Zod", () => {
     const fixture = JSON.parse(fs.readFileSync(new URL("./fixtures/eval-history.valid.json", import.meta.url), "utf8"));
+    const definitions = evalHistoryJsonSchema.$defs as Record<string, Record<string, unknown>>;
+    expect(definitions.timestamp?.pattern).toBe(EVAL_HISTORY_TIMESTAMP_PATTERN_SOURCE);
+    expect(definitions.githubRepositoryUrl?.pattern).toBe(EVAL_HISTORY_CANDIDATE_REPOSITORY_PATTERN_SOURCE);
     expectHistoryStructuralParity(fixture, true);
     expect(executeEvalSchemaSemanticGates(EVAL_HISTORY_SCHEMA_ID, fixture)).toEqual([]);
     expect(parseEvalHistory(fixture)).toEqual(fixture);
@@ -392,9 +397,33 @@ describe("longitudinal eval history", () => {
     invalidPath.observations[0].target_publication.publication_location.bundle_path = "../public-results.json";
     const oversizedId = structuredClone(fixture);
     oversizedId.observations[0].id = "🙂".repeat(501);
-    for (const invalid of [extraRoot, extraObservation, wrongVersion, unsafeCount, invalidPath, oversizedId]) {
+    const offsetTimestamp = structuredClone(fixture);
+    offsetTimestamp.observations[0].run_timestamp = "2026-07-19T00:00:00.000+00:00";
+    const missingMilliseconds = structuredClone(fixture);
+    missingMilliseconds.observations[0].run_timestamp = "2026-07-19T00:00:00Z";
+    const trailingRepositorySlash = structuredClone(fixture);
+    trailingRepositorySlash.observations[0].candidate_repository_url = "https://github.com/monad-developers/ultrafuzz/";
+    for (const invalid of [
+      extraRoot,
+      extraObservation,
+      wrongVersion,
+      unsafeCount,
+      invalidPath,
+      oversizedId,
+      offsetTimestamp,
+      missingMilliseconds,
+      trailingRepositorySlash
+    ]) {
       expectHistoryStructuralParity(invalid, false);
     }
+
+    const impossibleDate = structuredClone(fixture);
+    impossibleDate.observations[0].run_timestamp = "2026-02-30T00:00:00.000Z";
+    expectHistoryStructuralParity(impossibleDate, true);
+    expect(executeEvalSchemaSemanticGates(EVAL_HISTORY_SCHEMA_ID, impossibleDate)).toEqual([
+      expect.objectContaining({ gate: "eval-history-integrity", path: "$" })
+    ]);
+    expect(() => parseEvalHistory(impossibleDate)).toThrow(/invalid run timestamp/u);
 
     const inconsistent = structuredClone(fixture);
     inconsistent.observations[0].target_publication.target = "other-target";
@@ -992,7 +1021,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         suite,
@@ -1004,10 +1033,10 @@ describe("longitudinal eval history", () => {
         ])
       })
     ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_SOURCE_INVALID" }));
-    const observations = createEvalHistoryObservations({
+    const generationInput: Parameters<typeof createEvalHistoryObservations>[0] = {
       benchmark: "evmbench",
       lane: "smoke",
-      runTimestamp: "2026-07-19T00:00:00Z",
+      runTimestamp: "2026-07-19T00:00:00.000Z",
       candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
       sourceArtifact: "artifact-1",
       publicationUrl: "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts",
@@ -1018,8 +1047,21 @@ describe("longitudinal eval history", () => {
         [first.id, new Set(["bug-a", "bug-b"])],
         [second.id, new Set(["bug-b"])]
       ])
-    });
+    };
+    const observations = createEvalHistoryObservations(generationInput);
     expect(observations).toHaveLength(1);
+    expect(observations[0]?.run_timestamp).toBe(generationInput.runTimestamp);
+    for (const runTimestamp of ["2026-07-19T00:00:00Z", "2026-07-19T00:00:00.000+00:00", "2026-02-30T00:00:00.000Z"]) {
+      expect(() => createEvalHistoryObservations({ ...generationInput, runTimestamp })).toThrowError(
+        expect.objectContaining({ code: "EVAL_HISTORY_TIMESTAMP_INVALID" })
+      );
+    }
+    expect(() =>
+      createEvalHistoryObservations({
+        ...generationInput,
+        candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz/"
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_REPOSITORY_INVALID" }));
     expect(observations[0]).toMatchObject({
       status: "succeeded",
       trial_count: 2,
@@ -1069,7 +1111,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1099,7 +1141,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1128,7 +1170,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1148,7 +1190,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1173,7 +1215,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1192,7 +1234,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1211,7 +1253,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1229,7 +1271,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1249,7 +1291,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1321,7 +1363,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,

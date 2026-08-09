@@ -118,8 +118,11 @@ const finiteNonNegative = z.number().finite().nonnegative();
 const ratio = z.number().finite().min(0).max(1);
 // eslint-disable-next-line no-control-regex -- matches the canonical JSON Schema control-character exclusion
 const safeTextPattern = /^[^\u0000-\u001f\u007f]+$/u;
-const timestampPattern =
-  /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$/u;
+export const EVAL_HISTORY_TIMESTAMP_PATTERN_SOURCE =
+  "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$" as const;
+export const EVAL_HISTORY_CANDIDATE_REPOSITORY_PATTERN_SOURCE =
+  "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" as const;
+const timestampPattern = new RegExp(EVAL_HISTORY_TIMESTAMP_PATTERN_SOURCE, "u");
 const relativePathPattern =
   // eslint-disable-next-line no-control-regex -- matches the canonical JSON Schema path-character exclusion
   /^(?!\/)(?![A-Za-z]:\/)(?!.*\/\/)(?!\.?\.?$)(?!\.\.?\/)(?!.*\/\.\.?(?:\/|$))[^\\\u0000-\u001f\u007f]+$/u;
@@ -142,7 +145,7 @@ const publicationUrlSchema = boundedCodePointString(1_000, /^https:\/\/[^\s]+$/u
 const repositoryUrlSchema = boundedCodePointString(2_048, /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s]+$/u);
 const githubRepositoryUrl = boundedCodePointString(
   2_048,
-  /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/u
+  new RegExp(EVAL_HISTORY_CANDIDATE_REPOSITORY_PATTERN_SOURCE, "u")
 );
 const timestampSchema = z.string().regex(timestampPattern);
 const publicationStatusSchema = z.enum(["succeeded", "genuine-task-failures", "failed"]);
@@ -579,8 +582,8 @@ export interface EvalHistoryGenerationInput {
 
 export function createEvalHistoryObservations(input: EvalHistoryGenerationInput): EvalHistoryObservation[] {
   const provenance = completeProvenance(input.summary);
-  const timestamp = normalizedTimestamp(input.runTimestamp);
-  const repositoryUrl = normalizedRepositoryUrl(input.candidateRepositoryUrl);
+  const timestamp = requiredCanonicalTimestamp(input.runTimestamp);
+  const repositoryUrl = requiredCanonicalRepositoryUrl(input.candidateRepositoryUrl);
   if (!sourceArtifactSchema.safeParse(input.sourceArtifact).success) {
     throw new EvalError("EVAL_HISTORY_SOURCE_INVALID", "source artifact reference must be a safe opaque ID or URL");
   }
@@ -2583,18 +2586,21 @@ function observationId(evalRunId: string, target: string, variant: string, profi
   return [evalRunId, target, variant, profile].join(":");
 }
 
-function normalizedTimestamp(value: string): string {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) throw new EvalError("EVAL_HISTORY_TIMESTAMP_INVALID", "run timestamp is invalid");
-  return new Date(timestamp).toISOString();
+function requiredCanonicalTimestamp(value: string): string {
+  if (!timestampSchema.safeParse(value).success || !isValidTimestamp(value)) {
+    throw new EvalError("EVAL_HISTORY_TIMESTAMP_INVALID", "run timestamp must be a canonical UTC calendar instant");
+  }
+  return value;
 }
 
-function normalizedRepositoryUrl(value: string): string {
-  const normalized = value.replace(/\/$/u, "");
-  if (!githubRepositoryUrl.safeParse(normalized).success) {
-    throw new EvalError("EVAL_HISTORY_REPOSITORY_INVALID", "candidate repository must be a public GitHub URL");
+function requiredCanonicalRepositoryUrl(value: string): string {
+  if (!githubRepositoryUrl.safeParse(value).success || !isValidAbsoluteUrl(value)) {
+    throw new EvalError(
+      "EVAL_HISTORY_REPOSITORY_INVALID",
+      "candidate repository must be a canonical public GitHub URL without a trailing slash"
+    );
   }
-  return normalized;
+  return value;
 }
 
 function mean(values: number[]): number {
@@ -2652,7 +2658,8 @@ function compareText(left: string, right: string): number {
 }
 
 function isValidTimestamp(value: string): boolean {
-  return Number.isFinite(Date.parse(value));
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
 }
 
 function isValidAbsoluteUrl(value: string): boolean {
