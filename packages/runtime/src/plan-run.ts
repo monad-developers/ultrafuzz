@@ -790,8 +790,9 @@ function materializeReferenceNodesForPlan(input: {
         origin: "pinned-reference",
         metadata: {
           reference: node.reference,
-          repo: node.reference_revision?.repo,
-          commit: node.reference_revision?.commit,
+          ...(node.reference_revision === undefined
+            ? {}
+            : { repo: node.reference_revision.repo, commit: node.reference_revision.commit }),
           reference_artifact: materialized.referenceArtifact,
           manifest_artifact: materialized.manifestArtifact,
           ...(input.provision === undefined
