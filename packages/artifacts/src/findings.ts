@@ -422,13 +422,20 @@ function normalizeFindingMetadataPathReference(
 function splitLineReference(
   value: string
 ): { path: string; line?: number; endLine?: number; detail?: string } | undefined {
-  const lineListMatch = /^(?<path>.+):(?<ranges>[1-9][0-9]*(?:-[1-9][0-9]*)?(?:,[1-9][0-9]*(?:-[1-9][0-9]*)?)+)$/u.exec(
-    value
-  );
+  const lineListMatch =
+    /^(?<path>.+):(?<ranges>[1-9][0-9]*(?:-[1-9][0-9]*)?(?:[;,][1-9][0-9]*(?:-[1-9][0-9]*)?)+)$/u.exec(value);
   const lineListPath = lineListMatch?.groups?.path;
   const lineListRanges = lineListMatch?.groups?.ranges;
   if (lineListPath !== undefined && lineListRanges !== undefined) {
-    for (const range of lineListRanges.split(",")) {
+    const separators = lineListRanges.match(/[;,]/gu);
+    if (separators === null) {
+      return undefined;
+    }
+    const separator = separators[0];
+    if (separator === undefined || separators.some((candidate) => candidate !== separator)) {
+      return undefined;
+    }
+    for (const range of lineListRanges.split(separator)) {
       const dashIndex = range.indexOf("-");
       const start = parseLineReferenceNumber(dashIndex === -1 ? range : range.slice(0, dashIndex));
       const end = dashIndex === -1 ? undefined : parseLineReferenceNumber(range.slice(dashIndex + 1));

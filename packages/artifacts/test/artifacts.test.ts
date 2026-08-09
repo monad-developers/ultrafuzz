@@ -1113,6 +1113,26 @@ test("findings normalize source evidence line suffixes", () => {
     path.join(nodeDir, "findings.json"),
     JSON.stringify([
       {
+        title: "Semicolon-separated source ranges",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "Two semicolon-separated source ranges anchor the issue.",
+        evidence: [{ kind: "source", path: "CurveStableSwapNG.vy:17-19;33-35" }]
+      }
+    ])
+  );
+
+  const semicolonListReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(semicolonListReport.findings[0]!.evidence, [
+    { kind: "source", path: "CurveStableSwapNG.vy", detail: "lines 17-19;33-35" }
+  ]);
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
         title: "Disjoint source ranges with matching detail",
         status: "candidate",
         severity_guess: "medium",
@@ -1156,27 +1176,30 @@ test("findings normalize source evidence line suffixes", () => {
     assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /line list conflicts/u);
   }
 
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Descending disjoint source range",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "A descending member of the list must fail closed.",
-        evidence: [{ kind: "source", path: "VeryLiquidVault.sol:105-107,185-154" }]
-      }
-    ])
-  );
-  assert.throws(
-    () => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }),
-    /line range must not descend/u
-  );
+  for (const descendingPath of ["VeryLiquidVault.sol:105-107,185-154", "CurveStableSwapNG.vy:17-19;35-33"]) {
+    fs.writeFileSync(
+      path.join(nodeDir, "findings.json"),
+      JSON.stringify([
+        {
+          title: "Descending disjoint source range",
+          status: "candidate",
+          severity_guess: "medium",
+          confidence: "medium",
+          summary: "A descending member of the list must fail closed.",
+          evidence: [{ kind: "source", path: descendingPath }]
+        }
+      ])
+    );
+    assert.throws(
+      () => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }),
+      /line range must not descend/u
+    );
+  }
 
   for (const [unsafePath, expectedError] of [
     ["../VeryLiquidVault.sol:105-107,154-185", /traverse/u],
     ["VeryLiquidVault.sol:105-107,latest", /unsafe segment/u],
+    ["CurveStableSwapNG.vy:17-19;33-35,40", /unsafe segment/u],
     ["VeryLiquidVault.sol:9007199254740992,154-185", /positive safe integer/u]
   ] as const) {
     fs.writeFileSync(
