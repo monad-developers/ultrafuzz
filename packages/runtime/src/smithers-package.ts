@@ -173,10 +173,7 @@ export function assertSmithersPackageManifest(value: unknown): void {
   }
   for (const [section, expected] of Object.entries(REQUIRED_SMITHERS_DEPENDENCIES)) {
     const actual = value[section];
-    const validSection =
-      isRecord(actual) &&
-      (section === "dependencies" ? hasDependencyEntries(actual) : hasExactKeys(actual, Object.keys(expected)));
-    if (!validSection) {
+    if (!isRecord(actual) || !hasDependencyEntries(actual)) {
       throw modifiedManifestError();
     }
     for (const [name, version] of Object.entries(expected)) {
