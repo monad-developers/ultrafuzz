@@ -13,6 +13,7 @@ export * from "./invariant-source-proof.js";
 export * from "./invariant-suite-manifest.js";
 export * from "./json-schema-validator.js";
 export * from "./json-file-validator.js";
+export * from "./json-validator-preflight.js";
 export * from "./manifests.js";
 export * from "./property-provenance.js";
 export * from "./release-validation.js";

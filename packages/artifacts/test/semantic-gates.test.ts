@@ -900,6 +900,39 @@ test("every contextual registration executes real positive and negative checks",
         negative: { commit: "wrong", tree: "t", files: [{ content: "snapshot", sha256: contentDigest }] },
         context: { git: { commit: "c", tree: "t" } }
       },
+      "json-validator-preflight-current-identity": {
+        positive: {
+          data: {
+            schema: {
+              id: "schema-id",
+              sha256: "a".repeat(64),
+              bundle_sha256: "b".repeat(64),
+              validator_build: "validator-build"
+            },
+            artifact_sha256: "c".repeat(64)
+          }
+        },
+        negative: {
+          data: {
+            schema: {
+              id: "wrong-schema-id",
+              sha256: "a".repeat(64),
+              bundle_sha256: "b".repeat(64),
+              validator_build: "validator-build"
+            },
+            artifact_sha256: "c".repeat(64)
+          }
+        },
+        context: {
+          validatorPreflight: {
+            schemaId: "schema-id",
+            schemaSha256: "a".repeat(64),
+            schemaBundleSha256: "b".repeat(64),
+            validatorBuild: "validator-build",
+            artifactSha256: "c".repeat(64)
+          }
+        }
+      },
       "property-source-join": {
         positive: { properties: [{ sources: [{ source_node_id: "lens", source_property_id: "a" }] }] },
         negative: { properties: [{ sources: [{ source_node_id: "lens", source_property_id: "missing" }] }] },

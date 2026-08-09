@@ -60,6 +60,14 @@ export interface SemanticUsageLedgerContext {
   entries: readonly unknown[];
 }
 
+export interface SemanticValidatorPreflightContext {
+  schemaId: string;
+  schemaSha256: string;
+  schemaBundleSha256: string;
+  validatorBuild: string;
+  artifactSha256: string;
+}
+
 export interface SemanticEventLogContext {
   events: readonly {
     workflow_run_id: string;
@@ -83,6 +91,7 @@ export interface SemanticGateContext {
   runtimeState?: SemanticRuntimeStateContext;
   usageLedger?: SemanticUsageLedgerContext;
   eventLog?: SemanticEventLogContext;
+  validatorPreflight?: SemanticValidatorPreflightContext;
 }
 
 export interface SemanticGateExecutionRequest {
@@ -176,6 +185,21 @@ function booleanField(value: unknown, key: string): boolean | undefined {
 
 function displayPath(keys: readonly string[]): string {
   return keys.length === 0 ? "$" : `$.${keys.join(".")}`;
+}
+
+function jsonValidatorPreflightIdentityIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+  const expected = context.validatorPreflight;
+  if (expected === undefined) return [issue("$", "Validator preflight identity context is unavailable")];
+  const checks = [
+    ["$.data.schema.id", at(document, ["data", "schema", "id"]), expected.schemaId],
+    ["$.data.schema.sha256", at(document, ["data", "schema", "sha256"]), expected.schemaSha256],
+    ["$.data.schema.bundle_sha256", at(document, ["data", "schema", "bundle_sha256"]), expected.schemaBundleSha256],
+    ["$.data.schema.validator_build", at(document, ["data", "schema", "validator_build"]), expected.validatorBuild],
+    ["$.data.artifact_sha256", at(document, ["data", "artifact_sha256"]), expected.artifactSha256]
+  ] as const;
+  return checks.flatMap(([pathValue, actual, wanted]) =>
+    actual === wanted ? [] : [issue(pathValue, "Validator preflight identity does not match the trusted context")]
+  );
 }
 
 function projectedUniquenessIssues(
@@ -2210,6 +2234,17 @@ const gateSpecifications = {
         : [];
     });
   }),
+  "json-validator-preflight-current-identity": contextualGate(
+    "runtime-state",
+    [
+      "validatorPreflight.schemaId",
+      "validatorPreflight.schemaSha256",
+      "validatorPreflight.schemaBundleSha256",
+      "validatorPreflight.validatorBuild",
+      "validatorPreflight.artifactSha256"
+    ],
+    jsonValidatorPreflightIdentityIssues
+  ),
   "planned-graph-acyclicity": documentGate(plannedAcyclicityIssues),
   "planned-graph-artifact-dir-identity": documentGate(plannedArtifactDirIssues),
   "planned-graph-contract-identity": documentGate(plannedContractIdentityIssues),

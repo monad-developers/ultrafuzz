@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
 
-import { parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
+import {
+  JSON_VALIDATOR_PREFLIGHT_SUCCESS_JSON_SCHEMA_ID,
+  jsonValidatorPreflightSuccessJsonSchema,
+  parseStrictJsonBytes,
+  readRegularFileSnapshot
+} from "@ultrafuzz/artifacts";
 import { dashboardSchemaBundleDigest, dashboardSchemaRegistry } from "@ultrafuzz/dashboard";
 import {
   EVMBENCH_CLI_RESULT_JSON_SCHEMA_ID,
@@ -121,6 +126,27 @@ test("every known command has exactly one result discriminator", () => {
 test("eval status CLI data references the eval-owned whole-document contract", () => {
   const definitions = cliResultJsonSchema.$defs as Record<string, unknown>;
   assert.deepEqual(definitions.evalStatusData, { $ref: "urn:ultrafuzz:schema:evals:status:1" });
+});
+
+test("json validate success consumes the artifacts-owned whole-envelope definition", () => {
+  const definitions = cliResultJsonSchema.$defs as Record<string, unknown>;
+  const template = definitions["commandTemplate-json-validate"] as {
+    then: { then: unknown };
+  };
+  assert.deepEqual(template.then.then, {
+    $ref: `${JSON_VALIDATOR_PREFLIGHT_SUCCESS_JSON_SCHEMA_ID}#/$defs/validationSuccessEnvelope`
+  });
+  assert.equal(definitions.jsonValidationData, undefined);
+  assert.notEqual(
+    (jsonValidatorPreflightSuccessJsonSchema.$defs as Record<string, unknown>).validationSuccessEnvelope,
+    undefined
+  );
+  const failure = definitions.jsonValidationFailureData as {
+    properties: { schema: { oneOf: unknown[] } };
+  };
+  assert.deepEqual(failure.properties.schema.oneOf[1], {
+    $ref: `${JSON_VALIDATOR_PREFLIGHT_SUCCESS_JSON_SCHEMA_ID}#/$defs/validationSchemaIdentity`
+  });
 });
 
 test("CLI result v2 rejects legacy, open, and mistyped envelopes", () => {

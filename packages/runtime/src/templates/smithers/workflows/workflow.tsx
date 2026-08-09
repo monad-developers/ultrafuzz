@@ -32,7 +32,6 @@ const runtimeModule = process.env.ULTRAFUZZ_RUNTIME_MODULE ?? __ULTRAFUZZ_RUNTIM
 const {
   artifactContractDefinition,
   artifactContractSchemaBinding,
-  artifactSchemaBundleDigest,
   artifactSchemaRegistry,
   artifactValidatorSmokeFixturePath,
   assertValidInvariantSuiteManifest,
@@ -46,6 +45,7 @@ const {
   INVARIANT_SUITE_MANIFEST_SCHEMA_VERSION,
   normalizeNodeAttemptFailureMessage,
   parseInvariantSuiteManifestBytes,
+  parseJsonValidatorPreflightSuccessEnvelope,
   parseStrictJsonBytes,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
@@ -55,8 +55,7 @@ const {
   validateInvariantLedgerSchema,
   validateInvariantSourceProofSchema,
   validatePropertiesSchema,
-  writeFileDurable,
-  VALIDATOR_BUILD_IDENTITY
+  writeFileDurable
 } = await import(artifactsModule);
 const {
   applyWorkspacePatch,
@@ -948,36 +947,12 @@ function preflightJsonValidator(schemaDirectory: string): void {
       { cause: error }
     );
   }
-  let parsed: {
-    ok?: unknown;
-    data?: {
-      status?: unknown;
-      schema?: {
-        id?: unknown;
-        sha256?: unknown;
-        bundle_sha256?: unknown;
-        validator_build?: unknown;
-        registered?: unknown;
-      };
-    };
-  };
   try {
-    parsed = parseStrictJsonBytes(Buffer.from(stdout, "utf8")) as typeof parsed;
+    parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(stdout, "utf8"));
   } catch (error) {
-    throw new Error("artifact-contract failure: JSON validator preflight returned invalid strict JSON", {
+    throw new Error("artifact-contract failure: JSON validator preflight returned an invalid success envelope", {
       cause: error
     });
-  }
-  if (
-    parsed.ok !== true ||
-    parsed.data?.status !== "valid" ||
-    parsed.data.schema?.registered !== true ||
-    parsed.data.schema.id !== findings.id ||
-    parsed.data.schema.sha256 !== findings.sha256 ||
-    parsed.data.schema.bundle_sha256 !== artifactSchemaBundleDigest() ||
-    parsed.data.schema.validator_build !== VALIDATOR_BUILD_IDENTITY
-  ) {
-    throw new Error("artifact-contract failure: JSON validator preflight build/schema identity mismatch");
   }
 }
 

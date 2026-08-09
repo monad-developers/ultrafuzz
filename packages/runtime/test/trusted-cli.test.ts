@@ -5,7 +5,15 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { artifactSchemaDirectory, createRunLayout, validateRegisteredJsonFileSync } from "@ultrafuzz/artifacts";
+import {
+  artifactSchemaBundleDigest,
+  artifactSchemaDirectory,
+  artifactSchemaRegistry,
+  ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+  createRunLayout,
+  validateRegisteredJsonFileSync,
+  VALIDATOR_BUILD_IDENTITY
+} from "@ultrafuzz/artifacts";
 
 import { composeSmithersCommandPath } from "../src/smithers.js";
 import {
@@ -30,7 +38,7 @@ function fakeCliEntrypoint(root: string, fixedOutput?: string): string {
           "const args = process.argv.slice(2);",
           "const value = (flag) => args[args.indexOf(flag) + 1];",
           "const result = await validateJsonFile({ schemaPath: value('--schema'), filePath: value('--file') });",
-          "process.stdout.write(JSON.stringify({ ok: result.status === 'valid', data: result }));",
+          "process.stdout.write(JSON.stringify({ schema_version: 'ultrafuzz.cli.result.v2', command: 'json validate', ok: result.status === 'valid', diagnostics: [], data: result }));",
           "process.exitCode = result.status === 'valid' ? 0 : result.status === 'instance-error' ? 1 : 2;",
           ""
         ].join("\n")
@@ -39,6 +47,30 @@ function fakeCliEntrypoint(root: string, fixedOutput?: string): string {
   );
   fs.chmodSync(entrypoint, 0o500);
   return entrypoint;
+}
+
+function preflightEnvelope(): Record<string, unknown> {
+  const findings = artifactSchemaRegistry().find((entry) => entry.filename === "findings.schema.json");
+  assert.ok(findings);
+  return {
+    schema_version: "ultrafuzz.cli.result.v2",
+    command: "json validate",
+    ok: true,
+    diagnostics: [],
+    data: {
+      status: "valid",
+      diagnostics: [],
+      schema: {
+        id: findings.id,
+        sha256: findings.sha256,
+        bundle_sha256: artifactSchemaBundleDigest(),
+        validator_build: VALIDATOR_BUILD_IDENTITY,
+        registered: true
+      },
+      artifact_sha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+      truncated: false
+    }
+  };
 }
 
 test("schema-backed producers require an explicit trusted CLI entrypoint", () => {
@@ -107,6 +139,26 @@ test("trusted CLI preflight rejects duplicate-key validator output", () => {
   const trusted = prepareTrustedCliEnvironment({ layout, cliEntrypoint: entrypoint });
 
   assert.throws(() => runTrustedJsonValidatorPreflight({ layout, trusted }), /duplicate property name/u);
+});
+
+test("trusted CLI preflight rejects incomplete and extensible success envelopes", () => {
+  for (const [label, mutate] of [
+    ["missing command", (value: Record<string, unknown>) => delete value.command],
+    ["unknown field", (value: Record<string, unknown>) => Object.assign(value, { legacy: true })],
+    [
+      "nonempty diagnostics",
+      (value: Record<string, unknown>) => Object.assign(value, { diagnostics: [{ severity: "info" }] })
+    ]
+  ] as const) {
+    const root = temporaryRoot();
+    const layout = createRunLayout({ projectRoot: root, runId: `invalid-${label.replaceAll(" ", "-")}` });
+    const value = preflightEnvelope();
+    mutate(value);
+    const entrypoint = fakeCliEntrypoint(root, JSON.stringify(value));
+    const trusted = prepareTrustedCliEnvironment({ layout, cliEntrypoint: entrypoint });
+
+    assert.throws(() => runTrustedJsonValidatorPreflight({ layout, trusted }), /success envelope is invalid/u, label);
+  }
 });
 
 test("resume rejects missing, tampered, and stale trusted CLI identity", () => {
