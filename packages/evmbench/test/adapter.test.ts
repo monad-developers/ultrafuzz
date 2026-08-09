@@ -8,11 +8,10 @@ import {
   applyEvmbenchProfile,
   capEvmbenchTopologyTimeouts,
   copyFinalMarkdown,
-  EVMBENCH_PROFILE_VERSION,
   runEvmbenchAdapter,
-  seedSmithersDependencies,
-  type EvmbenchProfile
+  seedSmithersDependencies
 } from "../src/adapter.js";
+import { EVMBENCH_PROFILE_VERSION, type EvmbenchProfile } from "../src/contracts.js";
 
 const temporaryDirectories: string[] = [];
 const profile: EvmbenchProfile = {
@@ -102,10 +101,10 @@ describe("EVMBench adapter", () => {
         const command = args[0];
         if (command === "status") {
           statusCalls += 1;
-          return success({ verdict: statusCalls === 1 ? "progressing" : "done" });
+          return success("status", statusData(statusCalls === 1 ? "progressing" : "done"));
         }
-        if (command === "report") return success({ markdown_path: reportPath });
-        return success({});
+        if (command === "report") return success("report", reportData(reportPath));
+        return defaultSuccess(command, auditRoot);
       }
     });
 
@@ -171,7 +170,10 @@ describe("EVMBench adapter", () => {
         wait: async () => {
           throw new Error("adapter should not wait");
         },
-        execute: (args) => (args[0] === "status" ? success({ verdict, reason }) : success({}))
+        execute: (args) =>
+          args[0] === "status"
+            ? success("status", statusData(verdict as "blocked" | "paused", reason))
+            : defaultSuccess(args[0], fixture.auditRoot)
       })
     ).rejects.toThrow(`cannot complete unattended while ${verdict}: ${reason}`);
   });
@@ -181,17 +183,58 @@ describe("EVMBench adapter", () => {
     await expect(
       runEvmbenchAdapter({
         ...missing,
-        execute: (args) => (args[0] === "status" ? success({}) : success({}))
+        execute: (args) =>
+          args[0] === "status"
+            ? success("status", { ...statusData("progressing"), verdict: undefined })
+            : defaultSuccess(args[0], missing.auditRoot)
       })
-    ).rejects.toThrow("status without a verdict");
+    ).rejects.toThrow("verdict");
 
     const unknown = adapterFixture();
     await expect(
       runEvmbenchAdapter({
         ...unknown,
-        execute: (args) => (args[0] === "status" ? success({ verdict: "synthetic-status" }) : success({}))
+        execute: (args) =>
+          args[0] === "status"
+            ? success("status", { ...statusData("progressing"), verdict: "synthetic-status" })
+            : defaultSuccess(args[0], unknown.auditRoot)
       })
-    ).rejects.toThrow("unknown status verdict: synthetic-status");
+    ).rejects.toThrow("verdict");
+  });
+
+  it("rejects legacy, mislabeled, and open-ended CLI envelopes", async () => {
+    const legacy = adapterFixture();
+    await expect(
+      runEvmbenchAdapter({
+        ...legacy,
+        execute: (args) =>
+          args[0] === "init"
+            ? { ok: true, data: initData(legacy.auditRoot) }
+            : defaultSuccess(args[0], legacy.auditRoot)
+      })
+    ).rejects.toThrow("schema_version");
+
+    const mislabeled = adapterFixture();
+    await expect(
+      runEvmbenchAdapter({
+        ...mislabeled,
+        execute: (args) =>
+          args[0] === "init"
+            ? success("run", initData(mislabeled.auditRoot))
+            : defaultSuccess(args[0], mislabeled.auditRoot)
+      })
+    ).rejects.toThrow("command");
+
+    const openEnded = adapterFixture();
+    await expect(
+      runEvmbenchAdapter({
+        ...openEnded,
+        execute: (args) =>
+          args[0] === "init"
+            ? success("init", { ...initData(openEnded.auditRoot), legacy_fallback: true })
+            : defaultSuccess(args[0], openEnded.auditRoot)
+      })
+    ).rejects.toThrow("Unrecognized key");
   });
 });
 
@@ -218,8 +261,114 @@ function baseConfig(): string {
   ].join("\n");
 }
 
-function success(data: Record<string, unknown>): unknown {
-  return { ok: true, data };
+function success(command: string, data: Record<string, unknown>): unknown {
+  return {
+    schema_version: "ultrafuzz.cli.result.v1",
+    command,
+    ok: true,
+    diagnostics: [],
+    data
+  };
+}
+
+function defaultSuccess(command: string | undefined, auditRoot: string): unknown {
+  if (command === "init") return success(command, initData(auditRoot));
+  if (command === "run") {
+    return success(command, {
+      run_id: "evmbench-smoke",
+      run_root: path.join(auditRoot, ".ultrafuzz", "runs", "evmbench-smoke"),
+      status: "running",
+      graph_fingerprint: "a".repeat(64),
+      config_fingerprint: "b".repeat(64),
+      workflow_ids: ["evmbench-smoke"]
+    });
+  }
+  if (command === "resume") {
+    return success(command, {
+      run_id: "evmbench-smoke",
+      workflow_run_id: "evmbench-smoke",
+      workflow_path: path.join(auditRoot, ".ultrafuzz", "runs", "evmbench-smoke", "workflow.ts"),
+      action: "resume",
+      submitted: true
+    });
+  }
+  throw new Error(`unexpected synthetic command: ${command ?? "missing"}`);
+}
+
+function initData(auditRoot: string): Record<string, unknown> {
+  return { project_root: auditRoot, created: [], preserved: [], overwritten: [] };
+}
+
+function reportData(markdownPath: string): Record<string, unknown> {
+  return {
+    markdown_path: markdownPath,
+    json_path: path.join(path.dirname(markdownPath), "report.json"),
+    source: "validated-agent-report"
+  };
+}
+
+function statusData(
+  verdict:
+    | "done"
+    | "running-healthy"
+    | "progressing"
+    | "stalled"
+    | "blocked"
+    | "waiting-quota"
+    | "paused"
+    | "cancelled"
+    | "failed",
+  reason = "synthetic status"
+): Record<string, unknown> {
+  const terminal = new Set(["done", "blocked", "paused", "cancelled", "failed"]).has(verdict);
+  return {
+    run_id: "evmbench-smoke",
+    run_root: "/synthetic/.ultrafuzz/runs/evmbench-smoke",
+    status: verdict === "done" ? "succeeded" : "running",
+    workflow_ids: ["evmbench-smoke"],
+    workflow_run_id: "evmbench-smoke",
+    workflow_status: verdict === "done" ? "succeeded" : "running",
+    verdict,
+    reason,
+    counts: {
+      finished: verdict === "done" ? 1 : 0,
+      in_progress: terminal ? 0 : 1,
+      pending: 0,
+      failed: verdict === "failed" ? 1 : 0,
+      waiting_approval: verdict === "blocked" ? 1 : 0,
+      waiting_event: 0,
+      waiting_timer: 0,
+      skipped: 0,
+      other: 0,
+      total: 1
+    },
+    model_mix: [{ engine: "codex", model: "synthetic-model", attempts: 1, quota_parked: false }],
+    throughput: { recent_finished: 0, window_ms: 60_000, total_finished: 0, last_finished_at_ms: null },
+    progress: {
+      percent: verdict === "done" ? 100 : 0,
+      finished: verdict === "done" ? 1 : 0,
+      in_progress: terminal ? 0 : 1,
+      pending: 0,
+      failed: verdict === "failed" ? 1 : 0,
+      skipped: 0,
+      remaining: verdict === "done" ? 0 : 1,
+      total: 1
+    },
+    eta: terminal
+      ? { available: false, seconds: null, basis: null, unavailable_reason: "run-terminal" }
+      : { available: true, seconds: 10, basis: "run-throughput", unavailable_reason: null },
+    current_step: {
+      node_id: terminal ? null : "review",
+      iteration: terminal ? null : 0,
+      started_at: terminal ? null : "2026-08-09T00:00:00.000Z",
+      elapsed_seconds: terminal ? null : 1,
+      running_count: terminal ? 0 : 1
+    },
+    gating: [],
+    gating_omitted: 0,
+    quota: null,
+    generated_at_ms: 1
+  };
 }
 
 function adapterFixture(): Omit<Parameters<typeof runEvmbenchAdapter>[0], "execute"> {

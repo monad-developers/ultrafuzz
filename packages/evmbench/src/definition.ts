@@ -3,63 +3,28 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { parseStrictJsonBytes, readRegularFileSnapshot, writeFileDurable } from "@ultrafuzz/artifacts";
 import { parse as parseYaml } from "yaml";
-import { z } from "zod/v4";
 
-export const EVMBENCH_DEFINITION_VERSION = "ultrafuzz.evmbench.lock.v1" as const;
-export const EVMBENCH_CATALOG_VERSION = "ultrafuzz.evmbench.catalog.v1" as const;
+import {
+  EVMBENCH_CATALOG_VERSION,
+  EVMBENCH_DEFINITION_VERSION,
+  evmbenchCatalogAuditSchema,
+  evmbenchCatalogSchema,
+  evmbenchCommitSchema,
+  evmbenchLockSchema,
+  evmbenchPublicSnapshotRepositorySchema,
+  evmbenchSafeIdSchema,
+  parseEvmbenchCatalogBytes,
+  parseEvmbenchLockBytes,
+  serializeEvmbenchCatalog,
+  serializeEvmbenchLock,
+  type EvmbenchCatalog,
+  type EvmbenchCatalogAudit,
+  type EvmbenchLock
+} from "./contracts.js";
 
-const commitSchema = z.string().regex(/^[0-9a-f]{40}$/u);
-const digestSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/u);
-const safeIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
-const publicSnapshotRepositorySchema = z
-  .string()
-  .url()
-  .refine((value) => value.startsWith("https://github.com/evmbench-org/") && value.endsWith(".git"), {
-    message: "target repository must be a public EVMBench snapshot"
-  });
-
-const catalogAuditSchema = z
-  .object({
-    id: safeIdSchema,
-    repository: publicSnapshotRepositorySchema,
-    framework: z.string().min(1).nullable(),
-    target_commit: commitSchema,
-    audit_context_sha256: digestSchema,
-    ground_truth_manifest_sha256: digestSchema
-  })
-  .strict();
-
-export const evmbenchCatalogSchema = z
-  .object({
-    schema_version: z.literal(EVMBENCH_CATALOG_VERSION),
-    audits: z.array(catalogAuditSchema).min(1)
-  })
-  .strict();
-
-export const evmbenchLockSchema = z
-  .object({
-    schema_version: z.literal(EVMBENCH_DEFINITION_VERSION),
-    evmbench: z
-      .object({ repository: z.literal("https://github.com/paradigmxyz/evmbench.git"), commit: commitSchema })
-      .strict(),
-    frontier_evals: z
-      .object({ repository: z.literal("https://github.com/openai/frontier-evals.git"), commit: commitSchema })
-      .strict(),
-    selected_split: z.literal("detect-tasks"),
-    splits: z
-      .object({
-        debug: z.array(safeIdSchema).min(1),
-        "detect-tasks": z.array(safeIdSchema).min(1)
-      })
-      .strict(),
-    catalog: z.object({ path: z.literal("audit-catalog.json"), sha256: digestSchema }).strict()
-  })
-  .strict();
-
-export type EvmbenchCatalog = z.infer<typeof evmbenchCatalogSchema>;
-export type EvmbenchCatalogAudit = z.infer<typeof catalogAuditSchema>;
-export type EvmbenchLock = z.infer<typeof evmbenchLockSchema>;
+const MAX_DEFINITION_BYTES = 64 * 1024 * 1024;
 
 export interface EvmbenchDefinition {
   lock: EvmbenchLock;
@@ -70,15 +35,15 @@ export type TargetCommitResolver = (repository: string, auditId: string) => Prom
 
 export function loadEvmbenchDefinition(benchmarkDir: string): EvmbenchDefinition {
   const lockPath = path.join(benchmarkDir, "benchmark.lock.json");
-  const lock = evmbenchLockSchema.parse(readJson(lockPath));
+  const lock = parseEvmbenchLockBytes(readRegularFileSnapshot(lockPath, MAX_DEFINITION_BYTES), lockPath);
   const catalogPath = path.resolve(benchmarkDir, lock.catalog.path);
   assertInside(benchmarkDir, catalogPath, "catalog path");
-  const catalogText = fs.readFileSync(catalogPath, "utf8");
-  const actualDigest = sha256(catalogText);
+  const catalogBytes = readRegularFileSnapshot(catalogPath, MAX_DEFINITION_BYTES);
+  const actualDigest = sha256(catalogBytes);
   if (actualDigest !== lock.catalog.sha256) {
     throw new Error(`audit catalog digest mismatch: expected ${lock.catalog.sha256}, got ${actualDigest}`);
   }
-  const catalog = evmbenchCatalogSchema.parse(JSON.parse(catalogText) as unknown);
+  const catalog = parseEvmbenchCatalogBytes(catalogBytes, catalogPath);
   validateDefinitionRelationships(lock, catalog);
   return { lock, catalog };
 }
@@ -101,7 +66,7 @@ export async function generateEvmbenchDefinition(input: {
     audits.push(await catalogAudit(projectRoot, auditId, input.resolveTargetCommit));
   }
   const catalog = evmbenchCatalogSchema.parse({ schema_version: EVMBENCH_CATALOG_VERSION, audits });
-  const catalogText = serializeJson(catalog);
+  const catalogBytes = serializeEvmbenchCatalog(catalog);
   const lock = evmbenchLockSchema.parse({
     schema_version: EVMBENCH_DEFINITION_VERSION,
     evmbench: {
@@ -114,7 +79,7 @@ export async function generateEvmbenchDefinition(input: {
     },
     selected_split: "detect-tasks",
     splits: { debug, "detect-tasks": detect },
-    catalog: { path: "audit-catalog.json", sha256: sha256(catalogText) }
+    catalog: { path: "audit-catalog.json", sha256: sha256(catalogBytes) }
   });
   validateDefinitionRelationships(lock, catalog);
   return { lock, catalog };
@@ -145,25 +110,23 @@ export async function verifyEvmbenchDefinition(input: {
 
 export function writeEvmbenchDefinition(benchmarkDir: string, definition: EvmbenchDefinition): void {
   fs.mkdirSync(benchmarkDir, { recursive: true });
-  const catalogText = serializeJson(definition.catalog);
-  if (sha256(catalogText) !== definition.lock.catalog.sha256) {
+  const catalogBytes = serializeEvmbenchCatalog(definition.catalog);
+  const lockBytes = serializeEvmbenchLock(definition.lock);
+  if (sha256(catalogBytes) !== definition.lock.catalog.sha256) {
     throw new Error("refusing to write a definition with a stale catalog digest");
   }
-  fs.writeFileSync(path.join(benchmarkDir, "audit-catalog.json"), catalogText, { encoding: "utf8", mode: 0o644 });
-  fs.writeFileSync(path.join(benchmarkDir, "benchmark.lock.json"), serializeJson(definition.lock), {
-    encoding: "utf8",
-    mode: 0o644
-  });
+  writeFileDurable(path.join(benchmarkDir, "audit-catalog.json"), catalogBytes);
+  writeFileDurable(path.join(benchmarkDir, "benchmark.lock.json"), lockBytes);
 }
 
 export async function resolvePublicTargetHead(repository: string): Promise<string> {
-  publicSnapshotRepositorySchema.parse(repository);
+  evmbenchPublicSnapshotRepositorySchema.parse(repository);
   const output = execFileSync("git", ["ls-remote", repository, "HEAD"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   }).trim();
   const commit = output.split(/\s+/u)[0]?.toLowerCase();
-  return commitSchema.parse(commit);
+  return evmbenchCommitSchema.parse(commit);
 }
 
 export function buildPinnedAuditDockerfile(input: {
@@ -172,8 +135,8 @@ export function buildPinnedAuditDockerfile(input: {
   targetCommit: string;
   baseImage: string;
 }): string {
-  publicSnapshotRepositorySchema.parse(input.repository);
-  commitSchema.parse(input.targetCommit);
+  evmbenchPublicSnapshotRepositorySchema.parse(input.repository);
+  evmbenchCommitSchema.parse(input.targetCommit);
   if (!/^[A-Za-z0-9][A-Za-z0-9./:@_-]+$/u.test(input.baseImage)) throw new Error("unsafe base image reference");
   const lines = input.dockerfile.split(/\r?\n/u);
   const cloneIndexes = lines.flatMap((line, index) => (line.includes("git clone") ? [index] : []));
@@ -267,7 +230,7 @@ async function catalogAudit(
   if (vulnerabilities.length === 0) throw new Error(`audit ${auditId} has no findings`);
   const findingEntries = vulnerabilities.map((value, index) => {
     const finding = record(value, `${auditId} finding ${index + 1}`);
-    const id = safeIdSchema.parse(finding.id);
+    const id = evmbenchSafeIdSchema.parse(finding.id);
     const findingPath = path.join(auditDir, "findings", `${id}.md`);
     const findingStat = fs.statSync(findingPath, { throwIfNoEntry: false });
     if (findingStat === undefined || !findingStat.isFile()) {
@@ -282,7 +245,7 @@ async function catalogAudit(
 
   const dockerfile = fs.readFileSync(dockerfilePath, "utf8");
   const repository = repositoryFromDockerfile(dockerfile);
-  const targetCommit = commitSchema.parse((await resolveTargetCommit(repository, auditId)).toLowerCase());
+  const targetCommit = evmbenchCommitSchema.parse((await resolveTargetCommit(repository, auditId)).toLowerCase());
   const contextFiles = localDockerContextFiles(dockerfile);
   const contextManifest = contextFiles.map((relative) => {
     const absolute = path.resolve(auditDir, relative);
@@ -299,7 +262,7 @@ async function catalogAudit(
     targetCommit,
     baseImage: "ultrafuzz/evmbench-base:pinned"
   });
-  return catalogAuditSchema.parse({
+  return evmbenchCatalogAuditSchema.parse({
     id: auditId,
     repository,
     framework: typeof config.framework === "string" && config.framework.length > 0 ? config.framework : null,
@@ -318,7 +281,7 @@ function repositoryFromDockerfile(dockerfile: string): string {
     )
   ];
   if (repositories.length !== 1) throw new Error(`expected one target repository, found ${repositories.length}`);
-  return publicSnapshotRepositorySchema.parse(repositories[0]);
+  return evmbenchPublicSnapshotRepositorySchema.parse(repositories[0]);
 }
 
 function readSplit(projectRoot: string, split: "debug" | "detect-tasks"): string[] {
@@ -327,7 +290,7 @@ function readSplit(projectRoot: string, split: "debug" | "detect-tasks"): string
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
-    .map((line) => safeIdSchema.parse(line));
+    .map((line) => evmbenchSafeIdSchema.parse(line));
   assertUnique(ids, `${split} audit ID`);
   return ids;
 }
@@ -354,7 +317,7 @@ function evmbenchProjectRoot(harnessRoot: string): string {
 }
 
 function readJson(filePath: string): unknown {
-  return JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+  return parseStrictJsonBytes(readRegularFileSnapshot(filePath, MAX_DEFINITION_BYTES));
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {

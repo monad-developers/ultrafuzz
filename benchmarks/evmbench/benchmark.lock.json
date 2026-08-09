@@ -1,5 +1,5 @@
 {
-  "schema_version": "ultrafuzz.evmbench.lock.v1",
+  "schema_version": "ultrafuzz.evmbench.lock.v2",
   "evmbench": {
     "repository": "https://github.com/paradigmxyz/evmbench.git",
     "commit": "2d5c7ab71e7f4abd135565b41feef387d3fe8a3d"
@@ -56,6 +56,6 @@
   },
   "catalog": {
     "path": "audit-catalog.json",
-    "sha256": "sha256:7491d2a6796519802683922c25f624f14372faad45bf6f1192cf4a9438f07912"
+    "sha256": "sha256:bc8617044e6c83a39ab46423ccbe1b3031b982a2f99523600718d72bc2a4c76f"
   }
 }

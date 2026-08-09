@@ -1,5 +1,5 @@
 {
-  "schema_version": "ultrafuzz.evmbench.profile.v1",
+  "schema_version": "ultrafuzz.evmbench.profile.v2",
   "id": "smoke",
   "max_concurrency": 2,
   "poll_interval_seconds": 15,

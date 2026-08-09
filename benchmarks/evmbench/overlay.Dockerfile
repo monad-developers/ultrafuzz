@@ -22,7 +22,7 @@ ARG FRONTIER_EVALS_COMMIT
 COPY --from=builder /opt/ultrafuzz /opt/ultrafuzz
 COPY --from=builder /opt/ultrafuzz-smithers /opt/ultrafuzz-smithers
 COPY benchmarks/evmbench/profiles/${PROFILE}.json /opt/ultrafuzz/evmbench-profile.json
-RUN ["node", "-e", "const fs=require('node:fs');const p='/opt/ultrafuzz/evmbench-profile.json';const model=process.env.MODEL;const reasoning=process.env.REASONING;if(!model||!reasoning)throw new Error('missing profile override');const v=JSON.parse(fs.readFileSync(p,'utf8'));v.model=model;v.reasoning=reasoning;fs.writeFileSync(p,JSON.stringify(v,null,2)+'\\n')"]
+RUN ["node", "--input-type=module", "-e", "import{readFileSync}from'node:fs';import{writeFileDurable}from'/opt/ultrafuzz/packages/artifacts/dist/index.js';import{parseEvmbenchProfileBytes,serializeEvmbenchProfile}from'/opt/ultrafuzz/packages/evmbench/dist/index.js';const p='/opt/ultrafuzz/evmbench-profile.json';const model=process.env.MODEL;const reasoning=process.env.REASONING;if(!model||!reasoning)throw new Error('missing profile override');const base=parseEvmbenchProfileBytes(readFileSync(p),p);writeFileDurable(p,serializeEvmbenchProfile({...base,model,reasoning}))"]
 
 LABEL org.opencontainers.image.revision="${ULTRAFUZZ_COMMIT}" \
       org.ultrafuzz.evmbench.commit="${EVMBENCH_COMMIT}" \

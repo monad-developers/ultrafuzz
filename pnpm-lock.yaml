@@ -195,6 +195,9 @@ importers:
 
   packages/evmbench:
     dependencies:
+      '@ultrafuzz/artifacts':
+        specifier: workspace:*
+        version: link:../artifacts
       yaml:
         specifier: ^2.8.0
         version: 2.9.0

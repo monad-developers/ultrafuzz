@@ -1,0 +1,259 @@
+import fs from "node:fs";
+import path from "node:path";
+
+import { describe, expect, it } from "vitest";
+
+import {
+  EVMBENCH_CATALOG_JSON_SCHEMA_ID,
+  EVMBENCH_LOCK_JSON_SCHEMA_ID,
+  EVMBENCH_PROFILE_JSON_SCHEMA_ID,
+  EVMBENCH_RESULT_JSON_SCHEMA_ID,
+  evmbenchCatalogSchema,
+  evmbenchLockSchema,
+  evmbenchProfileSchema,
+  normalizedEvmbenchResultSchema,
+  parseEvmbenchCatalogBytes,
+  parseEvmbenchLockBytes,
+  parseEvmbenchProfileBytes,
+  parseNormalizedEvmbenchResultBytes,
+  serializeEvmbenchCatalog,
+  serializeEvmbenchLock,
+  serializeEvmbenchProfile,
+  serializeNormalizedEvmbenchResult
+} from "../src/contracts.js";
+import {
+  evmbenchSchemaBundleDigest,
+  evmbenchSchemaRegistry,
+  validateEvmbenchJsonSchema
+} from "../src/schema-registry.js";
+import { findUltrafuzzRepoRoot } from "../src/definition.js";
+
+describe("EVMBench JSON Schema and Zod parity", () => {
+  it("compiles a closed, immutable Draft 2020-12 registry", () => {
+    const registry = evmbenchSchemaRegistry();
+    expect(registry.map((entry) => entry.id)).toEqual([
+      EVMBENCH_CATALOG_JSON_SCHEMA_ID,
+      EVMBENCH_LOCK_JSON_SCHEMA_ID,
+      EVMBENCH_PROFILE_JSON_SCHEMA_ID,
+      EVMBENCH_RESULT_JSON_SCHEMA_ID
+    ]);
+    expect(evmbenchSchemaBundleDigest()).toMatch(/^[0-9a-f]{64}$/u);
+    for (const entry of registry) {
+      expect(entry.schema.$schema).toBe("https://json-schema.org/draft/2020-12/schema");
+      expect(entry.schema.additionalProperties).toBe(false);
+      expect(Object.isFrozen(entry.schema)).toBe(true);
+      expect(Object.isFrozen(entry.schema.properties)).toBe(true);
+      expect(entry.sha256).toMatch(/^[0-9a-f]{64}$/u);
+    }
+  });
+
+  it("parses and reserializes every checked-in definition/profile fixture through both validators", () => {
+    const benchmarkRoot = path.join(findUltrafuzzRepoRoot(), "benchmarks", "evmbench");
+    const catalog = parseEvmbenchCatalogBytes(fs.readFileSync(path.join(benchmarkRoot, "audit-catalog.json")));
+    const lock = parseEvmbenchLockBytes(fs.readFileSync(path.join(benchmarkRoot, "benchmark.lock.json")));
+    const smoke = parseEvmbenchProfileBytes(fs.readFileSync(path.join(benchmarkRoot, "profiles", "smoke.json")));
+    const full = parseEvmbenchProfileBytes(fs.readFileSync(path.join(benchmarkRoot, "profiles", "full.json")));
+
+    expect(parseEvmbenchCatalogBytes(serializeEvmbenchCatalog(catalog))).toEqual(catalog);
+    expect(parseEvmbenchLockBytes(serializeEvmbenchLock(lock))).toEqual(lock);
+    expect(parseEvmbenchProfileBytes(serializeEvmbenchProfile(smoke))).toEqual(smoke);
+    expect(parseEvmbenchProfileBytes(serializeEvmbenchProfile(full))).toEqual(full);
+  });
+
+  it.each([
+    {
+      label: "profile extra property",
+      schemaId: EVMBENCH_PROFILE_JSON_SCHEMA_ID,
+      parser: evmbenchProfileSchema,
+      value: { ...validProfile(), compatibility_model: "legacy" }
+    },
+    {
+      label: "legacy lock version",
+      schemaId: EVMBENCH_LOCK_JSON_SCHEMA_ID,
+      parser: evmbenchLockSchema,
+      value: { ...validLock(), schema_version: "ultrafuzz.evmbench.lock.v1" }
+    },
+    {
+      label: "untyped catalog field",
+      schemaId: EVMBENCH_CATALOG_JSON_SCHEMA_ID,
+      parser: evmbenchCatalogSchema,
+      value: {
+        ...validCatalog(),
+        audits: [{ ...validCatalog().audits[0], framework: { legacy: "foundry" } }]
+      }
+    },
+    {
+      label: "out-of-contract catalog repository",
+      schemaId: EVMBENCH_CATALOG_JSON_SCHEMA_ID,
+      parser: evmbenchCatalogSchema,
+      value: {
+        ...validCatalog(),
+        audits: [
+          {
+            ...validCatalog().audits[0],
+            repository: "https://github.com/evmbench-org/nested/synthetic-audit.git"
+          }
+        ]
+      }
+    },
+    {
+      label: "generic per-audit object",
+      schemaId: EVMBENCH_RESULT_JSON_SCHEMA_ID,
+      parser: normalizedEvmbenchResultSchema,
+      value: {
+        ...validResult(),
+        official_evmbench: { ...validResult().official_evmbench, per_audit: { "synthetic-audit": {} } }
+      }
+    },
+    {
+      label: "legacy arbitrary metrics",
+      schemaId: EVMBENCH_RESULT_JSON_SCHEMA_ID,
+      parser: normalizedEvmbenchResultSchema,
+      value: { ...validResult(), ultrafuzz_metrics: { precision: 1 } }
+    },
+    {
+      label: "invalid overlay provenance",
+      schemaId: EVMBENCH_RESULT_JSON_SCHEMA_ID,
+      parser: normalizedEvmbenchResultSchema,
+      value: {
+        ...validResult(),
+        provenance: {
+          ...validResult().provenance,
+          audit_images: [{ ...validResult().provenance.audit_images[0], overlay_image_digest: null }]
+        }
+      }
+    },
+    {
+      label: "inconsistent completeness",
+      schemaId: EVMBENCH_RESULT_JSON_SCHEMA_ID,
+      parser: normalizedEvmbenchResultSchema,
+      value: {
+        ...validResult(),
+        operational: {
+          ...validResult().operational,
+          runtime_seconds: null,
+          completeness: { ...validResult().operational.completeness, runtime: "complete" }
+        }
+      }
+    }
+  ])("rejects $label structurally in JSON Schema and Zod", ({ schemaId, parser, value }) => {
+    expect(validateEvmbenchJsonSchema(schemaId, value).ok).toBe(false);
+    expect(parser.safeParse(value).success).toBe(false);
+  });
+
+  it("keeps documented cross-field gates in Zod while JSON Schema owns structural parity", () => {
+    const timeoutMismatch = { ...validProfile(), workflow_timeout_seconds: 60, node_timeout_seconds: 61 };
+    expect(validateEvmbenchJsonSchema(EVMBENCH_PROFILE_JSON_SCHEMA_ID, timeoutMismatch).ok).toBe(true);
+    expect(evmbenchProfileSchema.safeParse(timeoutMismatch).success).toBe(false);
+
+    const aggregateMismatch = {
+      ...validResult(),
+      official_evmbench: { ...validResult().official_evmbench, score: 2, recall: 0.5 }
+    };
+    expect(validateEvmbenchJsonSchema(EVMBENCH_RESULT_JSON_SCHEMA_ID, aggregateMismatch).ok).toBe(true);
+    expect(normalizedEvmbenchResultSchema.safeParse(aggregateMismatch).success).toBe(false);
+  });
+
+  it("round-trips the normalized v2 result from exact validated bytes", () => {
+    const value = normalizedEvmbenchResultSchema.parse(validResult());
+    const bytes = serializeNormalizedEvmbenchResult(value);
+    expect(parseNormalizedEvmbenchResultBytes(bytes)).toEqual(value);
+    expect(bytes.at(-1)).toBe(0x0a);
+  });
+});
+
+function validProfile() {
+  return {
+    schema_version: "ultrafuzz.evmbench.profile.v2" as const,
+    id: "smoke" as const,
+    max_concurrency: 2,
+    poll_interval_seconds: 15,
+    workflow_timeout_seconds: 7200,
+    node_timeout_seconds: 900,
+    model: "synthetic-model",
+    reasoning: "high"
+  };
+}
+
+function validCatalog() {
+  return {
+    schema_version: "ultrafuzz.evmbench.catalog.v2" as const,
+    audits: [
+      {
+        id: "synthetic-audit",
+        repository: "https://github.com/evmbench-org/synthetic-audit.git",
+        framework: "foundry",
+        target_commit: "a".repeat(40),
+        audit_context_sha256: `sha256:${"b".repeat(64)}`,
+        ground_truth_manifest_sha256: `sha256:${"c".repeat(64)}`
+      }
+    ]
+  };
+}
+
+function validLock() {
+  return {
+    schema_version: "ultrafuzz.evmbench.lock.v2" as const,
+    evmbench: {
+      repository: "https://github.com/paradigmxyz/evmbench.git" as const,
+      commit: "a".repeat(40)
+    },
+    frontier_evals: {
+      repository: "https://github.com/openai/frontier-evals.git" as const,
+      commit: "b".repeat(40)
+    },
+    selected_split: "detect-tasks" as const,
+    splits: { debug: ["synthetic-audit"], "detect-tasks": ["synthetic-audit"] },
+    catalog: { path: "audit-catalog.json" as const, sha256: `sha256:${"c".repeat(64)}` }
+  };
+}
+
+function validResult() {
+  return {
+    schema_version: "ultrafuzz.evmbench.result.v2" as const,
+    official_evmbench: {
+      score: 3,
+      max_score: 4,
+      recall: 0.75,
+      detect_award: 7.5,
+      detect_max_award: 10,
+      per_audit: {
+        "synthetic-audit": {
+          score: 3,
+          max_score: 4,
+          n_runs: 1,
+          detect_award: 7.5,
+          detect_max_award: 10
+        }
+      }
+    },
+    provenance: {
+      benchmark_identity: `sha256:${"0".repeat(64)}`,
+      ultrafuzz_commit: "a".repeat(40),
+      ultrafuzz_dirty: false,
+      evmbench_commit: "b".repeat(40),
+      frontier_evals_commit: "c".repeat(40),
+      targets: [{ audit_id: "synthetic-audit", source_commit: "d".repeat(40) }],
+      audit_images: [
+        {
+          audit_id: "synthetic-audit",
+          source_image_digest: `sha256:${"e".repeat(64)}`,
+          overlay_image_digest: `sha256:${"f".repeat(64)}`
+        }
+      ],
+      profile: "smoke" as const,
+      profile_fingerprint: `sha256:${"1".repeat(64)}`,
+      topology_fingerprint: `sha256:${"2".repeat(64)}`,
+      model: "synthetic-model",
+      agent: "ultrafuzz" as const,
+      reasoning: "high",
+      concurrency: 2
+    },
+    operational: {
+      runtime_seconds: 12,
+      token_usage: null,
+      cost_usd: null,
+      completeness: { runtime: "complete" as const, token_usage: "unavailable" as const, cost: "unavailable" as const }
+    }
+  };
+}
