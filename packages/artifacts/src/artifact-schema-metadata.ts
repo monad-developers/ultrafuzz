@@ -25,7 +25,11 @@ function artifact(
   };
 }
 
-function runtime(typescriptExport: string, zodParser?: string, semanticGates: readonly string[] = []): ArtifactSchemaMetadata {
+function runtime(
+  typescriptExport: string,
+  zodParser?: string,
+  semanticGates: readonly string[] = []
+): ArtifactSchemaMetadata {
   return {
     role: "runtime-state",
     contractIds: [],
@@ -87,11 +91,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "campaignSummarySchema",
     ["campaign-summary-backend-uniqueness", "campaign-summary-count-coupling"]
   ),
-  "coverage-goal.schema.json": artifact(
-    "ultrafuzz/coverage-goal@1",
-    "coverageGoalJsonSchema",
-    "coverageGoalSchema"
-  ),
+  "coverage-goal.schema.json": artifact("ultrafuzz/coverage-goal@1", "coverageGoalJsonSchema", "coverageGoalSchema"),
   "dependency-scope-matrix.schema.json": artifact(
     "ultrafuzz/dependency-scope-matrix@1",
     "dependencyScopeMatrixJsonSchema",
@@ -203,11 +203,10 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "invariantLedgerSchema",
     ["invariant-ledger-id-joins", "invariant-ledger-projected-id-uniqueness"]
   ),
-  "invariant-source-proof.schema.json": runtime(
-    "invariantSourceProofJsonSchema",
-    "invariantSourceProofSchema",
-    ["invariant-source-proof-path-uniqueness", "invariant-source-proof-git-binding"]
-  ),
+  "invariant-source-proof.schema.json": runtime("invariantSourceProofJsonSchema", "invariantSourceProofSchema", [
+    "invariant-source-proof-path-uniqueness",
+    "invariant-source-proof-git-binding"
+  ]),
   "node-attempt-ledger.schema.json": runtime("nodeAttemptLedgerJsonSchema", "nodeAttemptLedgerEntrySchema", [
     "attempt-parent-link",
     "attempt-outcome-digest-coupling",
@@ -285,6 +284,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "triagedFindingsSchema",
     ["triaged-finding-id-uniqueness"]
   ),
+  "trusted-cli.schema.json": runtime("trustedCliMetadataJsonSchema"),
   "usage-ledger.schema.json": runtime("usageLedgerJsonSchema", "usageLedgerEntrySchema", [
     "usage-ledger-event-order",
     "usage-ledger-source-event-join"

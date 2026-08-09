@@ -13,13 +13,19 @@ import {
   writeFileDurable,
   writeJsonDurable
 } from "./safe-paths.js";
-import { ARTIFACT_CONTRACT_IDS, type ArtifactContractId } from "./artifact-contract-ids.js";
+import {
+  ARTIFACT_CONTRACT_IDS,
+  NON_JSON_ARTIFACT_CONTRACT_IDS,
+  type ArtifactContractId
+} from "./artifact-contract-ids.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
 export const ARTIFACT_MANIFEST_SCHEMA_VERSION = "ultrafuzz.artifact-manifest.v2" as const;
 export const ARTIFACT_MANIFEST_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:artifact-manifest:2" as const;
 export const ARTIFACT_MANIFEST_FILE = "artifact-manifest.json";
+
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 export interface ArtifactProvenance {
   producer_node_id: string;
@@ -35,7 +41,7 @@ export interface ArtifactProvenance {
   workflow_task_id?: string;
   source_run_id?: string;
   origin?: string;
-  metadata?: Record<string, unknown>;
+  metadata?: Record<string, JsonValue>;
 }
 
 export interface ArtifactManifestEntry {
@@ -84,38 +90,13 @@ export interface WriteArtifactManifestInput {
   createdAt?: string;
 }
 
-const sha256JsonSchema = { type: "string", pattern: "^[0-9a-f]{64}$" } as const;
-const safeIdJsonSchema = { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" } as const;
-const artifactProvenanceJsonSchema = {
-  type: "object",
-  required: ["producer_node_id"],
-  additionalProperties: false,
-  properties: {
-    producer_node_id: safeIdJsonSchema,
-    run_id: { type: "string", minLength: 1 },
-    logical_node_id: { type: "string", minLength: 1 },
-    attempt_index: { type: "integer", minimum: 0 },
-    loop_index: { type: "integer", minimum: 0 },
-    model_id: { type: "string", minLength: 1 },
-    model: { type: "string", minLength: 1 },
-    model_index: { type: "integer", minimum: 0 },
-    agent_ref: { type: "string", minLength: 1 },
-    workflow_run_id: { type: "string", minLength: 1 },
-    workflow_task_id: { type: "string", minLength: 1 },
-    source_run_id: { type: "string", minLength: 1 },
-    origin: { type: "string", minLength: 1 },
-    metadata: { type: "object" }
-  }
-} as const;
-const schemaBindingCompletenessJsonSchema = {
-  dependentRequired: {
-    schema_file: ["schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"],
-    schema_id: ["schema_file", "schema_sha256", "schema_bundle_sha256", "validator_build"],
-    schema_sha256: ["schema_file", "schema_id", "schema_bundle_sha256", "validator_build"],
-    schema_bundle_sha256: ["schema_file", "schema_id", "schema_sha256", "validator_build"],
-    validator_build: ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256"]
-  }
-} as const;
+const schemaBindingFieldNames = [
+  "schema_file",
+  "schema_id",
+  "schema_sha256",
+  "schema_bundle_sha256",
+  "validator_build"
+] as const;
 
 export const artifactManifestJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -137,8 +118,8 @@ export const artifactManifestJsonSchema = {
   properties: {
     schema_version: { const: ARTIFACT_MANIFEST_SCHEMA_VERSION },
     run_id: { type: "string", minLength: 1 },
-    node_id: safeIdJsonSchema,
-    producer_node_id: safeIdJsonSchema,
+    node_id: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    producer_node_id: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
     created_at: { type: "string", format: "date-time" },
     files: {
       type: "array",
@@ -147,10 +128,10 @@ export const artifactManifestJsonSchema = {
         required: ["path", "size_bytes", "sha256", "provenance"],
         additionalProperties: false,
         properties: {
-          path: { type: "string", minLength: 1 },
-          size_bytes: { type: "integer", minimum: 0 },
-          sha256: sha256JsonSchema,
-          provenance: artifactProvenanceJsonSchema
+          path: { $ref: "#/$defs/safePath" },
+          size_bytes: { type: "integer", minimum: 0, maximum: 9_007_199_254_740_991 },
+          sha256: { $ref: "#/$defs/sha256" },
+          provenance: { $ref: "#/$defs/provenance" }
         }
       }
     },
@@ -161,17 +142,33 @@ export const artifactManifestJsonSchema = {
         required: ["path", "contract", "contract_digest", "primary"],
         additionalProperties: false,
         properties: {
-          path: { type: "string", minLength: 1 },
-          contract: { enum: [...ARTIFACT_CONTRACT_IDS] },
-          contract_digest: sha256JsonSchema,
-          schema_file: { type: "string", pattern: "^[^/\\\\]+\\.schema\\.json$" },
-          schema_id: { type: "string", minLength: 1 },
-          schema_sha256: sha256JsonSchema,
-          schema_bundle_sha256: sha256JsonSchema,
-          validator_build: { type: "string", minLength: 1 },
+          path: { $ref: "#/$defs/safePath" },
+          contract: { enum: ARTIFACT_CONTRACT_IDS },
+          contract_digest: { $ref: "#/$defs/sha256" },
+          schema_file: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$" },
+          schema_id: { type: "string", minLength: 1, pattern: "^urn:ultrafuzz:schema:" },
+          schema_sha256: { $ref: "#/$defs/sha256" },
+          schema_bundle_sha256: { $ref: "#/$defs/sha256" },
+          validator_build: { type: "string", pattern: "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$" },
           primary: { type: "boolean" }
         },
-        allOf: [schemaBindingCompletenessJsonSchema]
+        allOf: [
+          {
+            if: {
+              properties: { contract: { enum: NON_JSON_ARTIFACT_CONTRACT_IDS } },
+              required: ["contract"]
+            },
+            then: {
+              not: {
+                anyOf: schemaBindingFieldNames.map((field) => ({ properties: { [field]: true }, required: [field] }))
+              }
+            },
+            else: {
+              properties: Object.fromEntries(schemaBindingFieldNames.map((field) => [field, true])),
+              required: schemaBindingFieldNames
+            }
+          }
+        ]
       }
     },
     prerequisite_manifests: {
@@ -180,10 +177,48 @@ export const artifactManifestJsonSchema = {
         type: "object",
         required: ["node_id", "sha256"],
         additionalProperties: false,
-        properties: { node_id: safeIdJsonSchema, sha256: sha256JsonSchema }
+        properties: {
+          node_id: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+          sha256: { $ref: "#/$defs/sha256" }
+        }
       }
     },
-    provenance: artifactProvenanceJsonSchema
+    provenance: { $ref: "#/$defs/provenance" }
+  },
+  $defs: {
+    safePath: { type: "string", pattern: "^[A-Za-z0-9._-]{1,128}(?:/[A-Za-z0-9._-]{1,128})*$" },
+    sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+    provenance: {
+      type: "object",
+      additionalProperties: false,
+      required: ["producer_node_id"],
+      properties: {
+        producer_node_id: { type: "string", minLength: 1 },
+        run_id: { type: "string", minLength: 1 },
+        logical_node_id: { type: "string", minLength: 1 },
+        attempt_index: { type: "integer", minimum: 0, maximum: 9_007_199_254_740_991 },
+        loop_index: { type: "integer", minimum: 0, maximum: 9_007_199_254_740_991 },
+        model_id: { type: "string", minLength: 1 },
+        model: { type: "string", minLength: 1 },
+        model_index: { type: "integer", minimum: 0, maximum: 9_007_199_254_740_991 },
+        agent_ref: { type: "string", minLength: 1 },
+        workflow_run_id: { type: "string", minLength: 1 },
+        workflow_task_id: { type: "string", minLength: 1 },
+        source_run_id: { type: "string", minLength: 1 },
+        origin: { type: "string", minLength: 1 },
+        metadata: { type: "object", additionalProperties: { $ref: "#/$defs/jsonValue" } }
+      }
+    },
+    jsonValue: {
+      anyOf: [
+        { type: "null" },
+        { type: "boolean" },
+        { type: "number" },
+        { type: "string" },
+        { type: "array", items: { $ref: "#/$defs/jsonValue" } },
+        { type: "object", additionalProperties: { $ref: "#/$defs/jsonValue" } }
+      ]
+    }
   }
 } as const;
 

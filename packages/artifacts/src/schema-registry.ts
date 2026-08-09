@@ -4,7 +4,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
-import { ARTIFACT_SCHEMA_METADATA } from "./artifact-schema-metadata.js";
+import { ARTIFACT_SCHEMA_METADATA, type ArtifactSchemaMetadata } from "./artifact-schema-metadata.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
 export type SchemaRole = "artifact-contract" | "runtime-state" | "subschema" | "topology";
@@ -31,120 +31,7 @@ export interface SchemaRegistryEntry {
 
 export type ArtifactSchemaRegistryEntry = SchemaRegistryEntry;
 
-interface SchemaMetadata {
-  role: SchemaRole;
-  contractIds?: readonly string[];
-  semanticGates?: readonly string[];
-  typescriptExport: string;
-  zodParser?: string;
-}
-
-const foundationMetadataByFilename: Readonly<Record<string, SchemaMetadata>> = Object.freeze({
-  "analysis-bundle.schema.json": {
-    role: "artifact-contract",
-    contractIds: ["ultrafuzz/analysis-bundle@1"],
-    typescriptExport: "analysisBundleManifestJsonSchema",
-    zodParser: "analysisBundleManifestSchema",
-    semanticGates: ["analysis-bundle-path-order", "analysis-bundle-file-digest"]
-  },
-  "artifact-manifest.schema.json": {
-    role: "runtime-state",
-    typescriptExport: "artifactManifestJsonSchema",
-    semanticGates: [
-      "artifact-manifest-safe-paths",
-      "artifact-manifest-file-digest",
-      "artifact-manifest-prerequisite-join"
-    ]
-  },
-  "finding.schema.json": {
-    role: "subschema",
-    typescriptExport: "findingJsonSchema",
-    zodParser: "findingSchema",
-    semanticGates: ["finding-safe-paths", "finding-projected-reference-uniqueness"]
-  },
-  "findings.schema.json": {
-    role: "artifact-contract",
-    contractIds: ["ultrafuzz/findings@2"],
-    typescriptExport: "findingsJsonSchema",
-    zodParser: "findingsSchema",
-    semanticGates: ["findings-id-uniqueness", "findings-cross-artifact-provenance"]
-  },
-  "generated-tests.schema.json": {
-    role: "artifact-contract",
-    contractIds: ["ultrafuzz/generated-tests@2"],
-    typescriptExport: "generatedTestsJsonSchema",
-    zodParser: "generatedTestManifestSchema",
-    semanticGates: ["generated-test-path-exists", "generated-test-path-uniqueness"]
-  },
-  "invariant-evidence-ledger.schema.json": {
-    role: "artifact-contract",
-    contractIds: ["ultrafuzz/invariant-ledger@1"],
-    typescriptExport: "invariantLedgerJsonSchema",
-    zodParser: "invariantLedgerSchema",
-    semanticGates: ["invariant-ledger-id-joins", "invariant-ledger-projected-id-uniqueness"]
-  },
-  "invariant-source-proof.schema.json": {
-    role: "runtime-state",
-    typescriptExport: "invariantSourceProofJsonSchema",
-    zodParser: "invariantSourceProofSchema",
-    semanticGates: ["invariant-source-proof-path-uniqueness", "invariant-source-proof-git-binding"]
-  },
-  "node-attempt-ledger.schema.json": {
-    role: "runtime-state",
-    typescriptExport: "nodeAttemptLedgerJsonSchema",
-    zodParser: "nodeAttemptLedgerEntrySchema",
-    semanticGates: ["attempt-parent-link", "attempt-outcome-digest-coupling", "attempt-order"]
-  },
-  "properties.schema.json": {
-    role: "artifact-contract",
-    contractIds: ["ultrafuzz/properties@1"],
-    typescriptExport: "propertiesJsonSchema",
-    zodParser: "propertiesSchema",
-    semanticGates: ["property-id-uniqueness", "property-source-join"]
-  },
-  "property-lens.schema.json": {
-    role: "artifact-contract",
-    contractIds: ["ultrafuzz/property-lens@1"],
-    typescriptExport: "lensPropertiesJsonSchema",
-    zodParser: "lensPropertiesSchema",
-    semanticGates: ["property-lens-id-uniqueness"]
-  },
-  "reference-expectations.schema.json": {
-    role: "artifact-contract",
-    contractIds: ["ultrafuzz/reference-expectations@1"],
-    typescriptExport: "referenceExpectationsJsonSchema",
-    zodParser: "referenceExpectationsSchema",
-    semanticGates: ["reference-expectation-id-uniqueness"]
-  },
-  "run-state.schema.json": {
-    role: "runtime-state",
-    typescriptExport: "runStateJsonSchema",
-    zodParser: "runStateSchema",
-    semanticGates: ["run-state-fingerprint", "run-state-node-key-equality"]
-  },
-  "trusted-cli.schema.json": {
-    role: "runtime-state",
-    typescriptExport: "trustedCliMetadataJsonSchema"
-  },
-  "usage-ledger.schema.json": {
-    role: "runtime-state",
-    typescriptExport: "usageLedgerJsonSchema",
-    zodParser: "usageLedgerEntrySchema",
-    semanticGates: ["usage-ledger-event-order", "usage-ledger-source-event-join"]
-  },
-  "workspace-patch.schema.json": {
-    role: "artifact-contract",
-    contractIds: ["ultrafuzz/workspace-patch@1"],
-    typescriptExport: "workspacePatchJsonSchema",
-    zodParser: "workspacePatchSchema",
-    semanticGates: ["workspace-patch-path-uniqueness", "workspace-patch-git-binding"]
-  }
-});
-
-const metadataByFilename: Readonly<Record<string, SchemaMetadata>> = Object.freeze({
-  ...foundationMetadataByFilename,
-  ...ARTIFACT_SCHEMA_METADATA
-});
+const metadataByFilename: Readonly<Record<string, ArtifactSchemaMetadata>> = ARTIFACT_SCHEMA_METADATA;
 
 export const VALIDATOR_BUILD_IDENTITY = validatorBuildIdentity();
 
