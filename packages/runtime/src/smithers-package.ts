@@ -173,7 +173,7 @@ export function assertSmithersPackageManifest(value: unknown): void {
   }
   for (const [section, expected] of Object.entries(REQUIRED_SMITHERS_DEPENDENCIES)) {
     const actual = value[section];
-    if (!isRecord(actual) || !hasExactKeys(actual, Object.keys(expected))) {
+    if (!isRecord(actual) || !hasDependencyEntries(actual)) {
       throw modifiedManifestError();
     }
     for (const [name, version] of Object.entries(expected)) {
@@ -198,4 +198,15 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
   const actual = Object.keys(value).sort();
   const canonical = [...expected].sort();
   return actual.length === canonical.length && actual.every((key, index) => key === canonical[index]);
+}
+
+function hasDependencyEntries(value: Record<string, unknown>): boolean {
+  return Object.entries(value).every(
+    ([name, version]) =>
+      name.length > 0 &&
+      name.trim() === name &&
+      typeof version === "string" &&
+      version.length > 0 &&
+      version.trim() === version
+  );
 }
