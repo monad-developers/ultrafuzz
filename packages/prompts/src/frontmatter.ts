@@ -31,6 +31,7 @@ export type PromptErrorCode =
   | "missing-template-variable"
   | "not-ancestor"
   | "symlink-prompt-path"
+  | "unsafe-validation-command-path"
   | "unclosed-frontmatter"
   | "unclosed-template-variable";
 

@@ -284,7 +284,7 @@ function tasksFor(graph: PlannedGraph): WorkflowControlTask[] {
 
 function syntheticGraph(nodes: PlannedGraphNode[]): PlannedGraph {
   return {
-    schema_version: "1.0",
+    schema_version: "2.0",
     graph_version: "synthetic",
     topology_version: 1,
     groups: {},

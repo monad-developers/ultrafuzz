@@ -1699,7 +1699,7 @@ test("generated Smithers dependency verification fails closed before descendant 
     "verifyGeneratedTestFiles",
     "rememberExpectedInvariantSuitePublications",
     `const ARTIFACT_VERIFICATION_MARKER = ".ultrafuzz-artifact-verification.json";
-   const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";
+   const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v2";
    ${helper}; return assertVerifiedDependency;`
   )(
     path,
@@ -1764,7 +1764,7 @@ test("generated Smithers dependency verification fails closed before descendant 
     fs.writeFileSync(
       path.join(runRoot, ".ultrafuzz-verification", `${attemptId}.json`),
       `${JSON.stringify({
-        schema_version: "ultrafuzz.artifact-verification.v1",
+        schema_version: "ultrafuzz.artifact-verification.v2",
         attempt_id: attemptId,
         artifacts,
         publications
@@ -1894,7 +1894,7 @@ test("generated Smithers dependency verification fails closed before descendant 
   fs.writeFileSync(
     markerPath,
     `${JSON.stringify({
-      schema_version: "ultrafuzz.artifact-verification.v1",
+      schema_version: "ultrafuzz.artifact-verification.v2",
       attempt_id: "property-specification-fanin"
     })}\n`,
     "utf8"

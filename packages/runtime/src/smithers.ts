@@ -42,6 +42,11 @@ import {
   smithersDependencyInstallArgs
 } from "./smithers-package.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
+import {
+  ULTRAFUZZ_SCHEMA_BUNDLE_SHA256_ENV,
+  ULTRAFUZZ_TRUSTED_BIN_ENV,
+  ULTRAFUZZ_VALIDATOR_BUILD_ENV
+} from "./trusted-cli.js";
 import { stableJson } from "./utils.js";
 
 const execFileAsync = promisify(execFile);
@@ -964,6 +969,9 @@ const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_CONFIG_PATH",
   "ULTRAFUZZ_MODAL_MODULE",
   "ULTRAFUZZ_RUNTIME_MODULE",
+  ULTRAFUZZ_SCHEMA_BUNDLE_SHA256_ENV,
+  ULTRAFUZZ_TRUSTED_BIN_ENV,
+  ULTRAFUZZ_VALIDATOR_BUILD_ENV,
   ULTRAFUZZ_WORKFLOW_PERSISTED_PATH,
   "USER",
   "USERPROFILE",
@@ -3367,11 +3375,9 @@ function smithersCommandEnv(
   }
   const forwarded = new Set(environmentVariableNames.map((name) => name.toUpperCase()));
   const merged: NodeJS.ProcessEnv = {};
-  let sourcePath: string | undefined;
   for (const [key, value] of Object.entries(source)) {
     const normalizedKey = key.toUpperCase();
     if (normalizedKey === "PATH") {
-      sourcePath = value;
       continue;
     }
     if (
@@ -3384,11 +3390,22 @@ function smithersCommandEnv(
       merged[key] = value;
     }
   }
+  merged.PATH = composeSmithersCommandPath(projectRoot, source);
+  return merged;
+}
+
+export function composeSmithersCommandPath(
+  projectRoot: string,
+  source: Readonly<Record<string, string | undefined>>
+): string {
+  const trustedBin = source[ULTRAFUZZ_TRUSTED_BIN_ENV];
   const localBin = path.join(projectRoot, ".smithers", "node_modules", ".bin");
-  merged.PATH = [localBin, sourcePath]
+  const sourceEntries = (source.PATH ?? "")
+    .split(path.delimiter)
+    .filter((entry) => entry.length > 0 && entry !== trustedBin && entry !== localBin);
+  return [trustedBin, localBin, ...sourceEntries]
     .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
     .join(path.delimiter);
-  return merged;
 }
 
 function smithersBinaryName(): string {

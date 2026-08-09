@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:topology:expanded-graph:2",
+  "$id": "urn:ultrafuzz:schema:topology:expanded-graph:3",
   "title": "Ultrafuzz expanded graph",
   "type": "object",
   "required": ["graphVersion", "topologyVersion", "groups", "nodes"],
   "additionalProperties": false,
   "properties": {
     "graphVersion": {
-      "const": "2"
+      "const": "3"
     },
     "runId": {
       "type": "string",
@@ -180,8 +180,39 @@
                 "contractDigest": {
                   "type": "string",
                   "pattern": "^[0-9a-f]{64}$"
+                },
+                "schemaFile": {
+                  "type": "string",
+                  "pattern": "^[^/\\\\]+\\.schema\\.json$"
+                },
+                "schemaId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "schemaSha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "schemaBundleSha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "validatorBuild": {
+                  "type": "string",
+                  "minLength": 1
                 }
-              }
+              },
+              "allOf": [
+                {
+                  "dependentRequired": {
+                    "schemaFile": ["schemaId", "schemaSha256", "schemaBundleSha256", "validatorBuild"],
+                    "schemaId": ["schemaFile", "schemaSha256", "schemaBundleSha256", "validatorBuild"],
+                    "schemaSha256": ["schemaFile", "schemaId", "schemaBundleSha256", "validatorBuild"],
+                    "schemaBundleSha256": ["schemaFile", "schemaId", "schemaSha256", "validatorBuild"],
+                    "validatorBuild": ["schemaFile", "schemaId", "schemaSha256", "schemaBundleSha256"]
+                  }
+                }
+              ]
             }
           },
           "modelFanout": {

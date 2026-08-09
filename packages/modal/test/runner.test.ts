@@ -1270,8 +1270,12 @@ describe("Modal worker identity", () => {
     ).toBe("permanent-operational-failure");
   });
 
-  it("makes the compiled source tree readable by the non-root worker", () => {
-    expect(modalImageBuildCommand()).toContain("chown -R ubuntu:ubuntu /opt/ultrafuzz");
+  it("keeps the validator toolchain root-owned and installs a trusted image entrypoint", () => {
+    expect(modalImageBuildCommand()).not.toContain("chown -R ubuntu:ubuntu /opt/ultrafuzz");
+    expect(modalImageBuildCommand()).toContain("install -m 0555 -o root -g root");
+    expect(modalImageBuildCommand()).toContain("/usr/local/bin/ultrafuzz json validate");
+    expect(modalImageBuildCommand()).toContain("validator-smoke.valid.json");
+    expect(modalImageBuildCommand()).toContain("chmod -R a+rX,go-w /opt/ultrafuzz");
     expect(modalImageBuildCommand()).toContain("@moonshot-ai/kimi-code@0.29.1");
   });
 

@@ -103,6 +103,11 @@ export interface NodeOutputContract {
   path: string;
   contract: ArtifactContractId;
   contract_digest: string;
+  schema_file?: string;
+  schema_id?: string;
+  schema_sha256?: string;
+  schema_bundle_sha256?: string;
+  validator_build?: string;
   primary: boolean;
 }
 

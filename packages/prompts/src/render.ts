@@ -311,7 +311,7 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
 
   const schemaDirectory = taskSchemaDirectory(input);
   const schemaGuidance = outputs.some((output) => output.schemaFile !== undefined)
-    ? `Where an entry above names a schema to validate against, that file is a JSON Schema already present in your workspace under \`${schemaDirectory}\`. Read it and check your artifact against it before you finish. It is the authority on field names, types, and which fields are required; prefer it over any example when the two appear to disagree.\n\n`
+    ? `Where an entry above names a schema to validate against, that file is an orchestrator-supplied JSON Schema under ${markdownCodeSpan(schemaDirectory)}. Read it before authoring the artifact. It is the authority on field names, types, and required fields; prefer it over any example when they disagree.\n\n`
     : "";
   const contract = renderOutputContractTemplate("output-contract.mdx", {
     schema_guidance: schemaGuidance,
@@ -328,7 +328,13 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
           // file it just wrote rather than discover a bad field from a failed node.
           ...(output.schemaFile === undefined
             ? []
-            : [`  Validate against: \`${path.join(schemaDirectory, output.schemaFile)}\``]),
+            : [
+                `  Validate against: ${markdownCodeSpan(path.join(schemaDirectory, output.schemaFile))}`,
+                `  Validation command: ${validationCommand(
+                  path.join(schemaDirectory, output.schemaFile),
+                  path.join(input.node.artifactDir, output.path)
+                )}`
+              ]),
           `  ${empty}`
         ].join("\n");
       })
@@ -336,6 +342,33 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
   });
 
   return `${rendered.trimEnd()}\n\n${contract.trimEnd()}\n`;
+}
+
+function validationCommand(schemaPath: string, artifactPath: string): string {
+  const command = [
+    "ultrafuzz json validate",
+    "--schema",
+    shellSingleQuote(schemaPath),
+    "--file",
+    shellSingleQuote(artifactPath)
+  ].join(" ");
+  return markdownCodeSpan(command);
+}
+
+function shellSingleQuote(value: string): string {
+  if (/[\u0000-\u001f\u007f-\u009f]/u.test(value)) {
+    throw new PromptError(
+      "unsafe-validation-command-path",
+      "JSON validation command paths must not contain control characters"
+    );
+  }
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function markdownCodeSpan(value: string): string {
+  const longestRun = Math.max(0, ...(value.match(/`+/gu) ?? []).map((run) => run.length));
+  const fence = "`".repeat(longestRun + 1);
+  return longestRun === 0 ? `${fence}${value}${fence}` : `${fence} ${value} ${fence}`;
 }
 
 const outputContractTemplateCache = new Map<string, string>();

@@ -400,7 +400,7 @@ describe("Modal node sandbox provider", () => {
       fs.writeFileSync(
         marker,
         `${JSON.stringify({
-          schema_version: "ultrafuzz.artifact-verification.v1",
+          schema_version: "ultrafuzz.artifact-verification.v2",
           attempt_id: "attempt-one",
           artifacts: [],
           publications: [
@@ -952,7 +952,7 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
       fs.chmodSync(retainedWorkflow, 0o600);
       fs.writeFileSync(
         retainedWorkflow,
-        'const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";\n'
+        'const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v2";\n'
       );
       expect(workerResultPublicationMode(retry.projectRoot, retry.input, retry.hasCompletedCheckpoint)).toBe(
         "verified-v2"
@@ -1716,7 +1716,7 @@ function createProjectFixture(options: { smithersCli?: string } = {}) {
     fs.writeFileSync(
       path.join(markerRoot, `${path.basename(dependency)}.json`),
       `${JSON.stringify({
-        schema_version: "ultrafuzz.artifact-verification.v1",
+        schema_version: "ultrafuzz.artifact-verification.v2",
         attempt_id: path.basename(dependency),
         artifacts: [],
         publications: []
@@ -1906,7 +1906,7 @@ function sha256Hex(contents: string): string {
 function verificationMarkerFixture(findingSha256: string): string {
   return `${JSON.stringify(
     {
-      schema_version: "ultrafuzz.artifact-verification.v1",
+      schema_version: "ultrafuzz.artifact-verification.v2",
       attempt_id: "attempt-one",
       node_id: "property-lens",
       artifacts: [

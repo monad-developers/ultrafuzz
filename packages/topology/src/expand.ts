@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-import { artifactContractDefinition } from "@ultrafuzz/artifacts";
+import { artifactContractDefinition, artifactContractSchemaBinding } from "@ultrafuzz/artifacts";
 import { loadReferenceCatalog, type ReferenceCatalog, type ReferenceEntry } from "@ultrafuzz/references";
 
 import { topologyError } from "./errors.js";
@@ -87,10 +87,22 @@ function expandNode(
       mode: node.loop_mode,
       attemptIndex: loopIndex
     },
-    outputs: node.outputs.map((output) => ({
-      ...output,
-      contractDigest: artifactContractDefinition(output.contract).digest
-    })),
+    outputs: node.outputs.map((output) => {
+      const binding = artifactContractSchemaBinding(output.contract);
+      return {
+        ...output,
+        contractDigest: artifactContractDefinition(output.contract).digest,
+        ...(binding === undefined
+          ? {}
+          : {
+              schemaFile: binding.schema_file,
+              schemaId: binding.schema_id,
+              schemaSha256: binding.schema_sha256,
+              schemaBundleSha256: binding.schema_bundle_sha256,
+              validatorBuild: binding.validator_build
+            })
+      };
+    }),
     modelFanout: modelFanoutFor(node, topology, loopIndex, options)
   };
 }

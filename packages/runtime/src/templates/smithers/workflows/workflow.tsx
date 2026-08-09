@@ -30,6 +30,10 @@ const artifactsModule = process.env.ULTRAFUZZ_ARTIFACTS_MODULE ?? __ULTRAFUZZ_AR
 const runtimeModule = process.env.ULTRAFUZZ_RUNTIME_MODULE ?? __ULTRAFUZZ_RUNTIME_MODULE__;
 const {
   artifactContractDefinition,
+  artifactContractSchemaBinding,
+  artifactSchemaBundleDigest,
+  artifactSchemaRegistry,
+  artifactValidatorSmokeFixturePath,
   assertRegularFileInside,
   checkInvariantSourcePinned,
   invariantPinnedSourceRefExists,
@@ -40,7 +44,8 @@ const {
   validateImplementedPropertiesSchema,
   validateInvariantLedgerSchema,
   validateInvariantSourceProofSchema,
-  writeFileDurable
+  writeFileDurable,
+  VALIDATOR_BUILD_IDENTITY
 } = await import(artifactsModule);
 const { applyWorkspacePatch, captureWorkspacePatch, captureWorkspaceTree, validateWorkspacePatchCapture } =
   await import(runtimeModule);
@@ -73,6 +78,11 @@ const verificationOutput = z.object({
       path: z.string().min(1),
       contract: z.string().min(1),
       contract_digest: z.string().regex(/^[0-9a-f]{64}$/u),
+      schema_file: z.string().min(1).optional(),
+      schema_id: z.string().min(1).optional(),
+      schema_sha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
+      schema_bundle_sha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
+      validator_build: z.string().min(1).optional(),
       sha256: z.string().regex(/^[0-9a-f]{64}$/u),
       primary: z.boolean()
     })
@@ -80,7 +90,7 @@ const verificationOutput = z.object({
   primary_artifact: z.string().min(1)
 });
 
-const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";
+const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v2";
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 const unreachableCommitCountCommand =
   'set -euo pipefail; git fsck --connectivity-only --unreachable --no-reflogs --no-progress 2>&1 | awk \'$1 == "unreachable" && $2 == "commit" { count++ } END { print count + 0 }\'';
@@ -499,7 +509,9 @@ function prepareArtifactMirror(
 ): z.infer<typeof preparationOutput> {
   preservePinnedSourceProof(task);
   const workspaceRoot = realpathSync(task.workspacePath);
-  materializePromptSchemas(path.join(workspaceRoot, ".ultrafuzz", "schemas"));
+  const schemaDirectory = path.join(workspaceRoot, ".ultrafuzz", "schemas");
+  materializePromptSchemas(schemaDirectory);
+  preflightJsonValidator(schemaDirectory);
   assertTaskInputs(task, workspaceRoot);
   materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true);
   restoreInvariantSuiteWorkspaceSnapshot(task, {
@@ -534,6 +546,63 @@ function prepareArtifactMirror(
     }
   }
   return { prepared: true };
+}
+
+function preflightJsonValidator(schemaDirectory: string): void {
+  const findings = artifactSchemaRegistry().find(
+    (entry: { filename: string }) => entry.filename === "findings.schema.json"
+  );
+  if (findings === undefined) throw new Error("artifact-contract failure: validator preflight schema is unavailable");
+  let stdout: string;
+  try {
+    stdout = execFileSync(
+      "ultrafuzz",
+      [
+        "json",
+        "validate",
+        "--schema",
+        path.join(schemaDirectory, findings.filename),
+        "--file",
+        artifactValidatorSmokeFixturePath(),
+        "--json"
+      ],
+      { encoding: "utf8", maxBuffer: 1024 * 1024, timeout: 15_000, windowsHide: true }
+    );
+  } catch (error) {
+    throw new Error(
+      `artifact-contract failure: JSON validator preflight failed: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
+  }
+  let parsed: {
+    ok?: unknown;
+    data?: {
+      status?: unknown;
+      schema?: {
+        id?: unknown;
+        sha256?: unknown;
+        bundle_sha256?: unknown;
+        validator_build?: unknown;
+        registered?: unknown;
+      };
+    };
+  };
+  try {
+    parsed = JSON.parse(stdout);
+  } catch (error) {
+    throw new Error("artifact-contract failure: JSON validator preflight returned invalid JSON", { cause: error });
+  }
+  if (
+    parsed.ok !== true ||
+    parsed.data?.status !== "valid" ||
+    parsed.data.schema?.registered !== true ||
+    parsed.data.schema.id !== findings.id ||
+    parsed.data.schema.sha256 !== findings.sha256 ||
+    parsed.data.schema.bundle_sha256 !== artifactSchemaBundleDigest() ||
+    parsed.data.schema.validator_build !== VALIDATOR_BUILD_IDENTITY
+  ) {
+    throw new Error("artifact-contract failure: JSON validator preflight build/schema identity mismatch");
+  }
 }
 
 function taskPublishesWorkspacePatch(task: (typeof taskSpecs)[number]): boolean {
@@ -1565,6 +1634,11 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
         path: string;
         contract: string;
         contract_digest: string;
+        schema_file?: string;
+        schema_id?: string;
+        schema_sha256?: string;
+        schema_bundle_sha256?: string;
+        validator_build?: string;
         sha256: string;
         primary: boolean;
       };
@@ -1577,6 +1651,11 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
         expected === undefined ||
         expected.contract !== entry.contract ||
         expected.contractDigest !== entry.contract_digest ||
+        expected.schemaFile !== entry.schema_file ||
+        expected.schemaId !== entry.schema_id ||
+        expected.schemaSha256 !== entry.schema_sha256 ||
+        expected.schemaBundleSha256 !== entry.schema_bundle_sha256 ||
+        expected.validatorBuild !== entry.validator_build ||
         expected.primary !== entry.primary
       ) {
         throw new Error(`verification marker artifact is not a declared output ${entry.path}`);
@@ -1593,6 +1672,18 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
       const definition = artifactContractDefinition(entry.contract as Parameters<typeof artifactContractDefinition>[0]);
       if (definition.digest !== entry.contract_digest) {
         throw new Error(`verified dependency contract changed ${entry.path}`);
+      }
+      const currentBinding = artifactContractSchemaBinding(
+        entry.contract as Parameters<typeof artifactContractSchemaBinding>[0]
+      );
+      if (
+        currentBinding?.schema_file !== entry.schema_file ||
+        currentBinding?.schema_id !== entry.schema_id ||
+        currentBinding?.schema_sha256 !== entry.schema_sha256 ||
+        currentBinding?.schema_bundle_sha256 !== entry.schema_bundle_sha256 ||
+        currentBinding?.validator_build !== entry.validator_build
+      ) {
+        throw new Error(`verified dependency schema binding changed ${entry.path}`);
       }
       const artifactSha = createHash("sha256").update(bytes).digest("hex");
       if (artifactSha !== entry.sha256) {
@@ -3789,6 +3880,15 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
       path: output.path,
       contract: output.contract,
       contract_digest: output.contractDigest,
+      ...(output.schemaFile === undefined
+        ? {}
+        : {
+            schema_file: output.schemaFile,
+            schema_id: output.schemaId,
+            schema_sha256: output.schemaSha256,
+            schema_bundle_sha256: output.schemaBundleSha256,
+            validator_build: output.validatorBuild
+          }),
       sha256: createHash("sha256").update(bytes).digest("hex"),
       primary: output.primary
     };
@@ -4138,6 +4238,11 @@ function writeArtifactVerificationMarker(
     path: string;
     contract: string;
     contract_digest: string;
+    schema_file?: string;
+    schema_id?: string;
+    schema_sha256?: string;
+    schema_bundle_sha256?: string;
+    validator_build?: string;
     sha256: string;
     primary: boolean;
   }[],

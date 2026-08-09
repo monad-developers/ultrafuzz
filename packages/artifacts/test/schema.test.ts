@@ -22,6 +22,7 @@ import {
   PROPERTY_CAMPAIGN_SCHEMA_VERSION,
   USAGE_LEDGER_SCHEMA_VERSION,
   ARTIFACT_CONTRACT_IDS,
+  artifactManifestJsonSchema,
   analysisBundleManifestJsonSchema,
   artifactContractDefinition,
   createInitialRunState,
@@ -57,7 +58,8 @@ import {
   artifactContractSchemaFile,
   isArtifactContractId,
   type ArtifactContractId,
-  type PropertyCampaignArtifact
+  type PropertyCampaignArtifact,
+  trustedCliMetadataJsonSchema
 } from "../src/index.js";
 
 const packageRoot = findPackageRoot(path.dirname(fileURLToPath(import.meta.url)));
@@ -1199,7 +1201,7 @@ test("run state schema covers all required node states and rejects malformed sta
   });
 
   assert.equal(validateRunStateSchema(state).ok, true);
-  assert.equal(state.schema_version, "1.1");
+  assert.equal(state.schema_version, "2.0");
   assert.equal(state.nodes["node-1"]?.wait_reason, "ready");
   assert.equal(state.nodes["node-1"]?.next_eligible_action, "dispatch");
   assert.equal(state.controller_lease.status, "active");
@@ -1218,6 +1220,38 @@ test("run state schema covers all required node states and rejects malformed sta
 
   assert.equal(invalid.ok, false);
   assert.ok(invalid.issues.some((issue) => issue.path.endsWith(".status")));
+
+  const partialBinding = validateRunStateSchema({
+    ...state,
+    nodes: {
+      "node-1": {
+        ...state.nodes["node-1"],
+        outputs: [{ ...state.nodes["node-1"]!.outputs![0]!, schema_file: "findings.schema.json" }]
+      }
+    }
+  });
+  assert.equal(partialBinding.ok, false);
+  assert.ok(partialBinding.issues.some((issue) => issue.path.endsWith(".schema_file")));
+
+  const completeBinding = validateRunStateSchema({
+    ...state,
+    nodes: {
+      "node-1": {
+        ...state.nodes["node-1"],
+        outputs: [
+          {
+            ...state.nodes["node-1"]!.outputs![0]!,
+            schema_file: "findings.schema.json",
+            schema_id: "urn:ultrafuzz:schema:artifacts:findings:1",
+            schema_sha256: "b".repeat(64),
+            schema_bundle_sha256: "c".repeat(64),
+            validator_build: "test-validator-build"
+          }
+        ]
+      }
+    }
+  });
+  assert.equal(completeBinding.ok, true);
 
   const missingWait = structuredClone(state);
   delete missingWait.nodes["node-1"]?.wait_since;
@@ -1398,6 +1432,7 @@ test("node attempt ledger schema accepts only bounded optional failure messages"
 test("artifact schema snapshots are present and aligned with exported schema constants", () => {
   const findingSnapshot = readSchemaSnapshot("finding.schema.json");
   const analysisBundleSnapshot = readSchemaSnapshot("analysis-bundle.schema.json");
+  const artifactManifestSnapshot = readSchemaSnapshot("artifact-manifest.schema.json");
   const generatedTestsSnapshot = readSchemaSnapshot("generated-tests.schema.json");
   const invariantLedgerSnapshot = readSchemaSnapshot("invariant-evidence-ledger.schema.json");
   const invariantSourceProofSnapshot = readSchemaSnapshot("invariant-source-proof.schema.json");
@@ -1406,10 +1441,12 @@ test("artifact schema snapshots are present and aligned with exported schema con
   const lensPropertiesSnapshot = readSchemaSnapshot("property-lens.schema.json");
   const referenceExpectationsSnapshot = readSchemaSnapshot("reference-expectations.schema.json");
   const runStateSnapshot = readSchemaSnapshot("run-state.schema.json");
+  const trustedCliSnapshot = readSchemaSnapshot("trusted-cli.schema.json");
   const usageLedgerSnapshot = readSchemaSnapshot("usage-ledger.schema.json");
   const workspacePatchSnapshot = readSchemaSnapshot("workspace-patch.schema.json");
 
   assert.deepEqual(analysisBundleSnapshot, analysisBundleManifestJsonSchema);
+  assert.deepEqual(artifactManifestSnapshot, artifactManifestJsonSchema);
   // Checking only $id and required let the published finding snapshot keep "const": "1.0" after the
   // exported schema had moved on, so the snapshot is compared whole like its siblings.
   assert.deepEqual(findingSnapshot, findingJsonSchema);
@@ -1433,6 +1470,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(propertiesSnapshot, propertiesJsonSchema);
   assert.deepEqual(lensPropertiesSnapshot, lensPropertiesJsonSchema);
   assert.deepEqual(referenceExpectationsSnapshot, referenceExpectationsJsonSchema);
+  assert.deepEqual(trustedCliSnapshot, trustedCliMetadataJsonSchema);
   assert.deepEqual(usageLedgerSnapshot, usageLedgerJsonSchema);
   assert.deepEqual(workspacePatchSnapshot, workspacePatchJsonSchema);
 });

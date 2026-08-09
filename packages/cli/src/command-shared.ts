@@ -1,4 +1,5 @@
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { Flags, type Command } from "@oclif/core";
 import { loadProjectConfig, resolveConfig, type EvalConfig } from "@ultrafuzz/config";
@@ -47,6 +48,10 @@ export function cliIo(): CliIo {
 
 export function projectRoot(flags: { project?: string }): string {
   return path.resolve(flags.project ?? cliIo().cwd);
+}
+
+export function cliEntrypoint(): string {
+  return fileURLToPath(new URL("./index.js", import.meta.url));
 }
 
 /**

@@ -20,12 +20,31 @@ export const RUN_STATE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-stat
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
 const looseRecord = z.record(z.string(), z.unknown());
-const outputContractSchema = z.strictObject({
-  path: nonEmptyString,
-  contract: z.enum(ARTIFACT_CONTRACT_IDS),
-  contract_digest: z.string().regex(/^[0-9a-f]{64}$/u),
-  primary: z.boolean()
-});
+const outputContractSchema = z
+  .strictObject({
+    path: nonEmptyString,
+    contract: z.enum(ARTIFACT_CONTRACT_IDS),
+    contract_digest: z.string().regex(/^[0-9a-f]{64}$/u),
+    schema_file: z.string().regex(/^[^/\\]+\.schema\.json$/u).optional(),
+    schema_id: nonEmptyString.optional(),
+    schema_sha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
+    schema_bundle_sha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
+    validator_build: nonEmptyString.optional(),
+    primary: z.boolean()
+  })
+  .refine(
+    (output) => {
+      const fields = [
+        output.schema_file,
+        output.schema_id,
+        output.schema_sha256,
+        output.schema_bundle_sha256,
+        output.validator_build
+      ];
+      return fields.every((value) => value === undefined) || fields.every((value) => value !== undefined);
+    },
+    { message: "Schema-backed outputs must persist a complete validator binding", path: ["schema_file"] }
+  );
 
 export const nodeStateSchema = z.strictObject({
   node_id: nonEmptyString,
@@ -108,6 +127,16 @@ export const runStateSchema = z
       }
     }
   });
+
+const schemaBindingCompletenessJsonSchema = {
+  dependentRequired: {
+    schema_file: ["schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"],
+    schema_id: ["schema_file", "schema_sha256", "schema_bundle_sha256", "validator_build"],
+    schema_sha256: ["schema_file", "schema_id", "schema_bundle_sha256", "validator_build"],
+    schema_bundle_sha256: ["schema_file", "schema_id", "schema_sha256", "validator_build"],
+    validator_build: ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256"]
+  }
+} as const;
 
 export const runStateJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -215,8 +244,14 @@ export const runStateJsonSchema = {
                 path: { type: "string", minLength: 1 },
                 contract: { enum: [...ARTIFACT_CONTRACT_IDS] },
                 contract_digest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+                schema_file: { type: "string", pattern: "^[^/\\\\]+\\.schema\\.json$" },
+                schema_id: { type: "string", minLength: 1 },
+                schema_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+                schema_bundle_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+                validator_build: { type: "string", minLength: 1 },
                 primary: { type: "boolean" }
-              }
+              },
+              allOf: [schemaBindingCompletenessJsonSchema]
             }
           },
           attempt_index: { type: "integer", minimum: 0 },

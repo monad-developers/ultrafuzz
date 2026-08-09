@@ -5,6 +5,11 @@ import path from "node:path";
 import test from "node:test";
 
 import { artifactSchemaDirectory } from "@ultrafuzz/artifacts";
+import {
+  EXPANDED_GRAPH_JSON_SCHEMA_ID,
+  TOPOLOGY_SCHEMA_BUNDLE_DIGEST,
+  topologySchemaDirectory
+} from "@ultrafuzz/topology";
 
 import { runCli } from "../src/index.js";
 
@@ -70,6 +75,64 @@ test("json validate exposes the strict validator through the primary CLI", async
     assert.deepEqual(fs.readFileSync(schema), schemaBefore);
     assert.deepEqual(fs.readFileSync(valid), validBefore);
     assert.deepEqual(fs.readFileSync(invalid), invalidBefore);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a producer can correct an invalid draft in-session and rerun to exit zero", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-correction-"));
+  try {
+    const schema = path.join(artifactSchemaDirectory(), "properties.schema.json");
+    const artifact = path.join(temporary, "producer-artifact.json");
+    const invalidDraft = '{"schema_version":"ultrafuzz.properties.v1","properties":[],"extra":true}\n';
+    fs.writeFileSync(artifact, invalidDraft, "utf8");
+
+    const rejected = await capture(["json", "validate", "--schema", schema, "--file", artifact]);
+    assert.equal(rejected.code, 1);
+    assert.match(rejected.stderr, /JSON_SCHEMA_VIOLATION/u);
+    assert.equal(fs.readFileSync(artifact, "utf8"), invalidDraft, "the validator must not rewrite the draft");
+
+    fs.writeFileSync(artifact, '{"schema_version":"ultrafuzz.properties.v1","properties":[]}\n', "utf8");
+    const corrected = await capture(["json", "validate", "--schema", schema, "--file", artifact]);
+    assert.equal(corrected.code, 0);
+    assert.match(corrected.stdout, /^valid:/u);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("json validate recognizes the pinned topology schema and rejects a same-name mutation", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-topology-"));
+  try {
+    const schema = path.join(topologySchemaDirectory(), "expanded-graph.schema.json");
+    const graph = path.join(temporary, "expanded-graph.json");
+    fs.writeFileSync(
+      graph,
+      `${JSON.stringify({ graphVersion: "3", topologyVersion: 2, groups: {}, nodes: [] })}\n`,
+      "utf8"
+    );
+
+    const validCapture = await capture(["json", "validate", "--schema", schema, "--file", graph, "--json"]);
+    assert.equal(validCapture.code, 0);
+    const envelope = JSON.parse(validCapture.stdout) as {
+      ok: boolean;
+      data: {
+        status: string;
+        schema: { id: string; bundle_sha256: string; registered: boolean };
+      };
+    };
+    assert.equal(envelope.ok, true);
+    assert.equal(envelope.data.status, "valid");
+    assert.equal(envelope.data.schema.registered, true);
+    assert.equal(envelope.data.schema.id, EXPANDED_GRAPH_JSON_SCHEMA_ID);
+    assert.equal(envelope.data.schema.bundle_sha256, TOPOLOGY_SCHEMA_BUNDLE_DIGEST);
+
+    const tamperedSchema = path.join(temporary, "expanded-graph.schema.json");
+    fs.writeFileSync(tamperedSchema, `${fs.readFileSync(schema, "utf8")} `, "utf8");
+    const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", graph]);
+    assert.equal(tamperedCapture.code, 2);
+    assert.match(tamperedCapture.stderr, /JSON_SCHEMA_DIGEST_MISMATCH/u);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }

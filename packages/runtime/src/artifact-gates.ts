@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  artifactContractSchemaBinding,
+  artifactSchemaDirectory,
   assertRegularFileInside,
   checkInvariantSourcePinned,
   getNodeArtifactDir,
@@ -27,6 +29,7 @@ import {
   validatePropertiesSchema,
   validatePropertyCampaignSchema,
   validatePropertyReferences,
+  validateRegisteredJsonFileSync,
   verifyArtifactManifestPrerequisites,
   type ImplementedPropertiesArtifact,
   type InvariantLedgerEntry,
@@ -1459,15 +1462,20 @@ function verifyRequiredArtifactShape(
   absolutePath: string,
   output: PlannedGraphNode["outputs"][number]
 ): RuntimeDiagnostic[] {
+  const schemaDiagnostics = verifyRequiredArtifactSchemaBinding(absolutePath, output);
+  if (schemaDiagnostics.some((diagnostic) => diagnostic.severity === "error")) return schemaDiagnostics;
   const contract = validateArtifactContract(output.contract, fs.readFileSync(absolutePath, "utf8"), absolutePath);
-  const diagnostics: RuntimeDiagnostic[] = contract.issues.map((issue) => ({
-    code: issue.code,
-    message: issue.message,
-    severity: "error",
-    source: "artifact-contracts",
-    path: issue.path,
-    details: { contract: output.contract, contract_digest: output.contract_digest }
-  }));
+  const diagnostics: RuntimeDiagnostic[] = [
+    ...schemaDiagnostics,
+    ...contract.issues.map((issue) => ({
+      code: issue.code,
+      message: issue.message,
+      severity: "error" as const,
+      source: "artifact-contracts",
+      path: issue.path,
+      details: { contract: output.contract, contract_digest: output.contract_digest }
+    }))
+  ];
   if (contract.ok && output.contract === "ultrafuzz/workspace-patch@1") {
     const manifest = contract.value as WorkspacePatchManifest;
     const excluded = manifest.excluded_files ?? [];
@@ -1536,6 +1544,78 @@ function verifyRequiredArtifactShape(
   }
 
   return diagnostics;
+}
+
+function verifyRequiredArtifactSchemaBinding(
+  absolutePath: string,
+  output: PlannedGraphNode["outputs"][number]
+): RuntimeDiagnostic[] {
+  const expected = artifactContractSchemaBinding(output.contract);
+  const actual = {
+    schema_file: output.schema_file,
+    schema_id: output.schema_id,
+    schema_sha256: output.schema_sha256,
+    schema_bundle_sha256: output.schema_bundle_sha256,
+    validator_build: output.validator_build
+  };
+  if (
+    expected?.schema_file !== actual.schema_file ||
+    expected?.schema_id !== actual.schema_id ||
+    expected?.schema_sha256 !== actual.schema_sha256 ||
+    expected?.schema_bundle_sha256 !== actual.schema_bundle_sha256 ||
+    expected?.validator_build !== actual.validator_build
+  ) {
+    return [
+      {
+        code: "ARTIFACT_SCHEMA_BINDING_MISMATCH",
+        message: `Planned schema identity for ${output.path} does not match validator build ${expected?.validator_build ?? "unbound"}`,
+        severity: "error",
+        source: "artifact-schema",
+        path: absolutePath,
+        details: { contract: output.contract, expected: expected ?? null, actual }
+      }
+    ];
+  }
+  if (expected === undefined) return [];
+
+  const validation = validateRegisteredJsonFileSync({
+    schemaPath: path.join(artifactSchemaDirectory(), expected.schema_file),
+    filePath: absolutePath
+  });
+  if (
+    validation.schema?.id !== expected.schema_id ||
+    validation.schema?.sha256 !== expected.schema_sha256 ||
+    validation.schema?.bundle_sha256 !== expected.schema_bundle_sha256 ||
+    validation.schema?.validator_build !== expected.validator_build
+  ) {
+    return [
+      {
+        code: "ARTIFACT_VALIDATOR_IDENTITY_MISMATCH",
+        message: `Host validator identity for ${output.path} does not match the planned schema binding`,
+        severity: "error",
+        source: "artifact-schema",
+        path: absolutePath,
+        details: { contract: output.contract, expected, actual: validation.schema }
+      }
+    ];
+  }
+  if (validation.status === "valid") return [];
+  return validation.diagnostics.map((diagnostic) => ({
+    code: diagnostic.code,
+    message: diagnostic.message,
+    severity: "error" as const,
+    source: "artifact-schema",
+    path: `${absolutePath}${diagnostic.instancePath === undefined ? "" : `#${diagnostic.instancePath || "/"}`}`,
+    details: {
+      contract: output.contract,
+      schema_id: expected.schema_id,
+      schema_sha256: expected.schema_sha256,
+      schema_bundle_sha256: expected.schema_bundle_sha256,
+      validator_build: expected.validator_build,
+      ...(diagnostic.schemaPath === undefined ? {} : { schema_path: diagnostic.schemaPath }),
+      ...(diagnostic.keyword === undefined ? {} : { keyword: diagnostic.keyword })
+    }
+  }));
 }
 
 function verifySeverityMatrixArtifacts(artifactDir: string, node: PlannedGraphNode): RuntimeDiagnostic[] {

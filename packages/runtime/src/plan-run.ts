@@ -9,7 +9,7 @@ import {
   assertRegularFileInside,
   createInitialRunState,
   artifactContractDefinition,
-  artifactContractSchemaFile,
+  artifactContractSchemaBinding,
   createRunLayout,
   getNodeArtifactDir,
   layoutForRunRoot,
@@ -528,7 +528,7 @@ function parsePersistedPromptPlan(contents: string): {
 
 function readPersistedPlannedGraph(graphPath: string): PlannedGraph {
   const value = JSON.parse(fs.readFileSync(graphPath, "utf8")) as Partial<PlannedGraph>;
-  if (value.schema_version !== "1.0" || !Array.isArray(value.nodes) || typeof value.groups !== "object") {
+  if (value.schema_version !== "2.0" || !Array.isArray(value.nodes) || typeof value.groups !== "object") {
     throw new Error("persisted planned graph is invalid");
   }
   return value as PlannedGraph;
@@ -680,6 +680,7 @@ function provisionReferenceExpectationOutput(
     );
   }
   const contract = artifactContractDefinition(REFERENCE_EXPECTATIONS_CONTRACT);
+  const schemaBinding = artifactContractSchemaBinding(REFERENCE_EXPECTATIONS_CONTRACT);
   const referenceNodes = graph.nodes.filter((node) => node.kind === "reference");
   if (referenceNodes.length === 0) {
     throw new Error("reference expectation catalog requires at least one pinned reference node");
@@ -700,6 +701,7 @@ function provisionReferenceExpectationOutput(
         path: "references/expectations.json",
         contract: REFERENCE_EXPECTATIONS_CONTRACT,
         contract_digest: contract.digest,
+        ...(schemaBinding ?? {}),
         primary: false
       });
     }
@@ -720,6 +722,15 @@ function provisionReferenceExpectationOutput(
           path: "references/expectations.json",
           contract: REFERENCE_EXPECTATIONS_CONTRACT,
           contractDigest: contract.digest,
+          ...(schemaBinding === undefined
+            ? {}
+            : {
+                schemaFile: schemaBinding.schema_file,
+                schemaId: schemaBinding.schema_id,
+                schemaSha256: schemaBinding.schema_sha256,
+                schemaBundleSha256: schemaBinding.schema_bundle_sha256,
+                validatorBuild: schemaBinding.validator_build
+              }),
           primary: false
         });
       }
@@ -837,7 +848,7 @@ export function toPlannedGraph(expanded: ExpandedGraph, catalog?: PromptCatalog)
   const executableNodes = expanded.nodes.filter((node) => node.kind !== "meta");
   const nodeById = new Map(expanded.nodes.map((node) => [node.id, node]));
   return {
-    schema_version: "1.0",
+    schema_version: "2.0",
     graph_version: expanded.graphVersion,
     topology_version: expanded.topologyVersion,
     groups: expanded.groups,
@@ -862,6 +873,15 @@ function toPlannedGraphNode(
       path: output.path,
       contract: output.contract,
       contract_digest: output.contractDigest,
+      ...(output.schemaFile === undefined
+        ? {}
+        : {
+            schema_file: output.schemaFile,
+            schema_id: output.schemaId!,
+            schema_sha256: output.schemaSha256!,
+            schema_bundle_sha256: output.schemaBundleSha256!,
+            validator_build: output.validatorBuild!
+          }),
       primary: output.primary
     })),
     prompt_id: promptEntry?.id ?? node.logicalId,
@@ -1010,14 +1030,13 @@ function promptLogicalNodes(graph: PlannedGraph, layout: PlanRunValue["layout"])
       dependsOn: dependencies,
       outputs: node.outputs.map((output) => {
         const definition = artifactContractDefinition(output.contract);
-        const schemaFile = artifactContractSchemaFile(output.contract);
         return {
           path: output.path,
           contract: output.contract,
           primary: output.primary,
           description: definition.description,
           ...(definition.validEmptyExample === undefined ? {} : { validEmptyExample: definition.validEmptyExample }),
-          ...(schemaFile === undefined ? {} : { schemaFile })
+          ...(output.schema_file === undefined ? {} : { schemaFile: output.schema_file })
         };
       }),
       artifactDirs,

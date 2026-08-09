@@ -7,10 +7,13 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  artifactContractSchemaBinding,
+  artifactSchemaDirectory,
   createInitialRunState,
   createRunLayout,
   getNodeArtifactDir,
   writeArtifact,
+  validateRegisteredJsonFileSync,
   writeArtifactManifest
 } from "@ultrafuzz/artifacts";
 import { loadBuiltInPromptAssets } from "@ultrafuzz/prompts";
@@ -64,9 +67,8 @@ function plannedNode(paths: string[]): PlannedGraphNode {
     kind: "agentic",
     depends_on: [],
     artifact_dir: "artifacts/strategy-a",
-    outputs: paths.map((outputPath, index) => ({
-      path: outputPath,
-      contract:
+    outputs: paths.map((outputPath, index) => {
+      const contract =
         outputPath === "workspace-patch.json"
           ? "ultrafuzz/workspace-patch@1"
           : outputPath === "generated-tests.json"
@@ -78,17 +80,24 @@ function plannedNode(paths: string[]): PlannedGraphNode {
                 : outputPath === "implemented-properties.json"
                   ? "ultrafuzz/implemented-properties@1"
                   : outputPath === "setup/invariant-evidence-ledger.json"
-                    ? "ultrafuzz/invariant-ledger@1"
+                  ? "ultrafuzz/invariant-ledger@1"
+                  : outputPath.startsWith("properties/") && outputPath.endsWith(".json")
+                    ? "ultrafuzz/property-lens@1"
                     : ["echidna-results.json", "medusa-results.json", "recon-fuzzer-results.json"].includes(outputPath)
                       ? "ultrafuzz/property-campaign@1"
                       : outputPath === "campaign-summary.json"
                         ? "ultrafuzz/json-object@1"
                         : outputPath === "report.json"
                           ? "ultrafuzz/report@1"
-                          : "ultrafuzz/nonempty-markdown@1",
-      contract_digest: "a".repeat(64),
-      primary: index === 0
-    })),
+                          : "ultrafuzz/nonempty-markdown@1";
+      return {
+        path: outputPath,
+        contract,
+        contract_digest: "a".repeat(64),
+        ...(artifactContractSchemaBinding(contract) ?? {}),
+        primary: index === 0
+      };
+    }),
     prompt_id: "strategy-a",
     prompt_path: "strategies/strategy-a.md",
     loop: {
@@ -141,7 +150,7 @@ test("required artifact gate validates generated-test manifest shape and listed 
 
   const legacy = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
   assert.equal(legacy.ok, false);
-  assert.ok(legacy.diagnostics.some((diagnostic) => diagnostic.code === "GENERATED_TEST_MANIFEST_SCHEMA_INVALID"));
+  assert.ok(legacy.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"));
 
   fs.writeFileSync(
     manifestPath,
@@ -240,7 +249,7 @@ test("artifact contracts reject malformed outputs and accept canonical empty out
   fs.writeFileSync(path.join(artifactDir, "notes.md"), "", "utf8");
   const malformed = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
   assert.equal(malformed.ok, false);
-  assert.ok(malformed.diagnostics.some((diagnostic) => diagnostic.code === "FINDINGS_SCHEMA_INVALID"));
+  assert.ok(malformed.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"));
   assert.ok(malformed.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_MARKDOWN_EMPTY"));
 
   fs.writeFileSync(path.join(artifactDir, "findings.json"), "[]", "utf8");
@@ -325,11 +334,19 @@ test("project discovery gate requires ledger evidence to survive in the markdown
 
   const missingSourceLedger = structuredClone(ledger);
   missingSourceLedger.entries[0]!.source_path = "docs/missing.md";
-  writeArtifact(
+  const missingSourcePath = writeArtifact(
     layout,
     "project-discovery",
     "setup/invariant-evidence-ledger.json",
     JSON.stringify(missingSourceLedger)
+  );
+  assert.equal(
+    validateRegisteredJsonFileSync({
+      schemaPath: path.join(artifactSchemaDirectory(), "invariant-evidence-ledger.schema.json"),
+      filePath: missingSourcePath
+    }).status,
+    "valid",
+    "portable document shape must pass before the named filesystem context gate"
   );
   const missingSource = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(missingSource.ok, false);
@@ -338,8 +355,7 @@ test("project discovery gate requires ledger evidence to survive in the markdown
   writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", "{");
   const malformedLedger = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(malformedLedger.ok, false);
-  assert.ok(malformedLedger.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_JSON_INVALID"));
-  assert.ok(malformedLedger.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_EVIDENCE_READ_FAILED"));
+  assert.ok(malformedLedger.diagnostics.some((diagnostic) => diagnostic.code === "JSON_INSTANCE_INVALID"));
 
   writeArtifact(
     layout,
@@ -354,7 +370,7 @@ test("project discovery gate requires ledger evidence to survive in the markdown
   );
   const emptyLedger = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(emptyLedger.ok, false);
-  assert.ok(emptyLedger.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SCHEMA_INVALID"));
+  assert.ok(emptyLedger.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"));
 
   writeArtifact(
     layout,
@@ -390,6 +406,18 @@ test("project discovery gate requires ledger evidence to survive in the markdown
   assert.ok(
     missingEvidence.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING")
   );
+});
+
+test("artifact validation rejects a persisted schema binding that differs from the current registry", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-schema-binding-mismatch" });
+  const artifactDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const node = plannedNode(["findings.json"]);
+  node.outputs[0]!.schema_sha256 = "0".repeat(64);
+  fs.writeFileSync(path.join(artifactDir, "findings.json"), "[]\n", "utf8");
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_SCHEMA_BINDING_MISMATCH"));
 });
 
 test("project discovery gate accepts a repository-root scan probe", () => {
@@ -454,7 +482,7 @@ test("project discovery gate rejects an empty ledger that does not justify the a
   const unjustified = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(unjustified.ok, false, JSON.stringify(unjustified.diagnostics));
   assert.ok(
-    unjustified.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_NO_INVARIANTS_UNJUSTIFIED"),
+    unjustified.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"),
     JSON.stringify(unjustified.diagnostics)
   );
 
@@ -493,7 +521,7 @@ test("project discovery gate rejects an empty ledger that does not justify the a
   const contradictory = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(contradictory.ok, false);
   assert.ok(
-    contradictory.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SCHEMA_INVALID"),
+    contradictory.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"),
     JSON.stringify(contradictory.diagnostics)
   );
 });
@@ -2611,7 +2639,7 @@ test("property lens authority sanitizer keeps the verification marker digest con
   fs.writeFileSync(
     markerPath,
     `${JSON.stringify({
-      schema_version: "ultrafuzz.artifact-verification.v1",
+      schema_version: "ultrafuzz.artifact-verification.v2",
       attempt_id: node.id,
       node_id: node.id,
       artifacts: [
@@ -2722,7 +2750,7 @@ test("property lens authority gate reports a marker digest that drifted from dis
   fs.mkdirSync(markerDir, { recursive: true });
   const markerPath = path.join(markerDir, `${node.id}.json`);
   const stale = `${JSON.stringify({
-    schema_version: "ultrafuzz.artifact-verification.v1",
+    schema_version: "ultrafuzz.artifact-verification.v2",
     attempt_id: node.id,
     node_id: node.id,
     artifacts: [{ path: "properties/recon.json", sha256: "0".repeat(64), primary: true }],
@@ -2772,7 +2800,7 @@ test("property lens authority gate accepts a marker digest that matches disk", (
   fs.writeFileSync(
     path.join(markerDir, `${node.id}.json`),
     `${JSON.stringify({
-      schema_version: "ultrafuzz.artifact-verification.v1",
+      schema_version: "ultrafuzz.artifact-verification.v2",
       attempt_id: node.id,
       node_id: node.id,
       artifacts: [{ path: "properties/recon.json", sha256: sha, primary: true }],
@@ -2968,7 +2996,15 @@ test("property lens authority sanitizer does not mutate non-lens JSON outputs", 
   const node = {
     ...base,
     id: "recon-properties",
-    logical_id: "recon-properties"
+    logical_id: "recon-properties",
+    outputs: [
+      {
+        path: "properties/recon.json",
+        contract: "ultrafuzz/nonempty-markdown@1" as const,
+        contract_digest: "a".repeat(64),
+        primary: true
+      }
+    ]
   };
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));

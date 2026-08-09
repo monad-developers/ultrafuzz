@@ -7,16 +7,18 @@ import {
   listSafeFiles,
   normalizeSafeRelativePath,
   prepareSafeFilePath,
-  readJsonFile,
   safeResolveInside,
   sha256File,
   validateSafeId,
   writeFileDurable,
   writeJsonDurable
 } from "./safe-paths.js";
-import type { ArtifactContractId } from "./artifact-contracts.js";
+import { ARTIFACT_CONTRACT_IDS, type ArtifactContractId } from "./artifact-contract-ids.js";
+import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
+import { parseStrictJsonBytes } from "./strict-json.js";
 
-export const ARTIFACT_MANIFEST_SCHEMA_VERSION = "1.0";
+export const ARTIFACT_MANIFEST_SCHEMA_VERSION = "ultrafuzz.artifact-manifest.v2" as const;
+export const ARTIFACT_MANIFEST_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:artifact-manifest:2" as const;
 export const ARTIFACT_MANIFEST_FILE = "artifact-manifest.json";
 
 export interface ArtifactProvenance {
@@ -44,7 +46,7 @@ export interface ArtifactManifestEntry {
 }
 
 export interface ArtifactManifest {
-  schema_version: string;
+  schema_version: typeof ARTIFACT_MANIFEST_SCHEMA_VERSION;
   run_id: string;
   node_id: string;
   producer_node_id: string;
@@ -59,6 +61,11 @@ export interface ArtifactManifestOutputContract {
   path: string;
   contract: ArtifactContractId;
   contract_digest: string;
+  schema_file?: string;
+  schema_id?: string;
+  schema_sha256?: string;
+  schema_bundle_sha256?: string;
+  validator_build?: string;
   primary: boolean;
 }
 
@@ -75,6 +82,113 @@ export interface WriteArtifactManifestInput {
   outputs?: ArtifactManifestOutputContract[];
   prerequisiteNodeIds?: string[];
   createdAt?: string;
+}
+
+const sha256JsonSchema = { type: "string", pattern: "^[0-9a-f]{64}$" } as const;
+const safeIdJsonSchema = { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" } as const;
+const artifactProvenanceJsonSchema = {
+  type: "object",
+  required: ["producer_node_id"],
+  additionalProperties: false,
+  properties: {
+    producer_node_id: safeIdJsonSchema,
+    run_id: { type: "string", minLength: 1 },
+    logical_node_id: { type: "string", minLength: 1 },
+    attempt_index: { type: "integer", minimum: 0 },
+    loop_index: { type: "integer", minimum: 0 },
+    model_id: { type: "string", minLength: 1 },
+    model: { type: "string", minLength: 1 },
+    model_index: { type: "integer", minimum: 0 },
+    agent_ref: { type: "string", minLength: 1 },
+    workflow_run_id: { type: "string", minLength: 1 },
+    workflow_task_id: { type: "string", minLength: 1 },
+    source_run_id: { type: "string", minLength: 1 },
+    origin: { type: "string", minLength: 1 },
+    metadata: { type: "object" }
+  }
+} as const;
+const schemaBindingCompletenessJsonSchema = {
+  dependentRequired: {
+    schema_file: ["schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"],
+    schema_id: ["schema_file", "schema_sha256", "schema_bundle_sha256", "validator_build"],
+    schema_sha256: ["schema_file", "schema_id", "schema_bundle_sha256", "validator_build"],
+    schema_bundle_sha256: ["schema_file", "schema_id", "schema_sha256", "validator_build"],
+    validator_build: ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256"]
+  }
+} as const;
+
+export const artifactManifestJsonSchema = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: ARTIFACT_MANIFEST_JSON_SCHEMA_ID,
+  title: "Ultrafuzz artifact manifest",
+  type: "object",
+  required: [
+    "schema_version",
+    "run_id",
+    "node_id",
+    "producer_node_id",
+    "created_at",
+    "files",
+    "output_contracts",
+    "prerequisite_manifests",
+    "provenance"
+  ],
+  additionalProperties: false,
+  properties: {
+    schema_version: { const: ARTIFACT_MANIFEST_SCHEMA_VERSION },
+    run_id: { type: "string", minLength: 1 },
+    node_id: safeIdJsonSchema,
+    producer_node_id: safeIdJsonSchema,
+    created_at: { type: "string", format: "date-time" },
+    files: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["path", "size_bytes", "sha256", "provenance"],
+        additionalProperties: false,
+        properties: {
+          path: { type: "string", minLength: 1 },
+          size_bytes: { type: "integer", minimum: 0 },
+          sha256: sha256JsonSchema,
+          provenance: artifactProvenanceJsonSchema
+        }
+      }
+    },
+    output_contracts: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["path", "contract", "contract_digest", "primary"],
+        additionalProperties: false,
+        properties: {
+          path: { type: "string", minLength: 1 },
+          contract: { enum: [...ARTIFACT_CONTRACT_IDS] },
+          contract_digest: sha256JsonSchema,
+          schema_file: { type: "string", pattern: "^[^/\\\\]+\\.schema\\.json$" },
+          schema_id: { type: "string", minLength: 1 },
+          schema_sha256: sha256JsonSchema,
+          schema_bundle_sha256: sha256JsonSchema,
+          validator_build: { type: "string", minLength: 1 },
+          primary: { type: "boolean" }
+        },
+        allOf: [schemaBindingCompletenessJsonSchema]
+      }
+    },
+    prerequisite_manifests: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["node_id", "sha256"],
+        additionalProperties: false,
+        properties: { node_id: safeIdJsonSchema, sha256: sha256JsonSchema }
+      }
+    },
+    provenance: artifactProvenanceJsonSchema
+  }
+} as const;
+
+export function validateArtifactManifest(value: unknown): JsonSchemaValidationResult {
+  return validateRegisteredJsonSchema(ARTIFACT_MANIFEST_JSON_SCHEMA_ID, value);
 }
 
 export function writeArtifact(
@@ -126,6 +240,7 @@ export function writeArtifactManifest(input: WriteArtifactManifestInput): Artifa
     prerequisite_manifests: prerequisiteManifestDigests(input.layout, input.prerequisiteNodeIds ?? []),
     provenance
   };
+  assertValidArtifactManifest(manifest);
   writeJsonDurable(path.join(nodeDir, ARTIFACT_MANIFEST_FILE), manifest);
   return manifest;
 }
@@ -187,7 +302,11 @@ function prerequisiteManifestDigests(layout: RunLayout, nodeIds: string[]): Prer
 }
 
 export function readArtifactManifest(layout: RunLayout, nodeId: string): ArtifactManifest {
-  return readJsonFile<ArtifactManifest>(path.join(getNodeArtifactDir(layout, nodeId), ARTIFACT_MANIFEST_FILE));
+  const manifestPath = path.join(getNodeArtifactDir(layout, nodeId), ARTIFACT_MANIFEST_FILE);
+  assertRegularFileInside(layout.artifactsDir, manifestPath, "artifact manifest path");
+  const manifest = parseStrictJsonBytes(fs.readFileSync(manifestPath));
+  assertValidArtifactManifest(manifest);
+  return manifest as ArtifactManifest;
 }
 
 export interface RunArtifactIndexEntry extends ArtifactManifestEntry {
@@ -217,7 +336,7 @@ export function buildRunArtifactIndex(layout: RunLayout): RunArtifactIndex {
       continue;
     }
     assertRegularFileInside(layout.artifactsDir, manifestPath, "artifact manifest path");
-    const manifest = readJsonFile<ArtifactManifest>(manifestPath);
+    const manifest = readArtifactManifest(layout, nodeId);
     for (const file of manifest.files) {
       const artifactPath = safeResolveInside(nodeDir, file.path, "artifact manifest file path");
       assertRegularFileInside(nodeDir, artifactPath, "artifact manifest file path");
@@ -231,6 +350,15 @@ export function buildRunArtifactIndex(layout: RunLayout): RunArtifactIndex {
 
   artifacts.sort((left, right) => left.node_id.localeCompare(right.node_id) || left.path.localeCompare(right.path));
   return { schema_version: ARTIFACT_MANIFEST_SCHEMA_VERSION, run_id: layout.runId, artifacts };
+}
+
+function assertValidArtifactManifest(value: unknown): void {
+  const validation = validateArtifactManifest(value);
+  if (validation.ok) return;
+  const first = validation.issues[0];
+  throw new Error(
+    `artifact manifest is schema-invalid${first === undefined ? "" : ` at ${first.instancePath || "/"}: ${first.message}`}`
+  );
 }
 
 export function normalizeArtifactProvenance(

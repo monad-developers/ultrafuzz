@@ -3490,6 +3490,15 @@ function loadSynchronizationInputs(
   let tasks: StoredWorkflowTask[] | undefined;
   try {
     graph = JSON.parse(contents.graph.toString("utf8")) as PlannedGraph;
+    if (graph.schema_version !== "2.0") {
+      diagnostics.push({
+        code: "RUN_GRAPH_VERSION_UNSUPPORTED",
+        message: `Persisted planned graph schema version ${JSON.stringify(graph.schema_version)} is unsupported`,
+        severity: "error",
+        source: "runtime",
+        path: "graph.json#$.schema_version"
+      });
+    }
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "runtime", "RUN_GRAPH_READ_FAILED"));
   }

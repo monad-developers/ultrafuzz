@@ -10,9 +10,15 @@ interface ExternalSchemaSnapshot {
   schema: Record<string, unknown>;
 }
 
+interface RegisteredSchemaSnapshot {
+  id: string;
+  schema: Readonly<Record<string, unknown>>;
+}
+
 interface WorkerRequest {
   instanceBytes: Uint8Array;
   registeredSchemaId?: string;
+  registeredSchemas?: RegisteredSchemaSnapshot[];
   externalRootPath?: string;
   externalSchemas?: ExternalSchemaSnapshot[];
   maxErrors: number;
@@ -48,7 +54,8 @@ try {
   }
 
   const ajv = createStrictAjv();
-  for (const entry of artifactSchemaRegistry()) ajv.addSchema(structuredClone(entry.schema), entry.id);
+  const registeredSchemas = request.registeredSchemas ?? artifactSchemaRegistry();
+  for (const entry of registeredSchemas) ajv.addSchema(structuredClone(entry.schema), entry.id);
   let validator;
   if (request.registeredSchemaId !== undefined) {
     validator = ajv.getSchema(request.registeredSchemaId);

@@ -22,7 +22,7 @@ export interface TopologySchemaValidationResult<T> {
   value?: T;
 }
 
-export const EXPANDED_GRAPH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:topology:expanded-graph:2" as const;
+export const EXPANDED_GRAPH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:topology:expanded-graph:3" as const;
 
 export const expandedGraphJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -106,8 +106,24 @@ export const expandedGraphJsonSchema = {
                 path: { type: "string", minLength: 1 },
                 contract: { enum: [...ARTIFACT_CONTRACT_IDS] },
                 primary: { type: "boolean" },
-                contractDigest: { type: "string", pattern: "^[0-9a-f]{64}$" }
-              }
+                contractDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+                schemaFile: { type: "string", pattern: "^[^/\\\\]+\\.schema\\.json$" },
+                schemaId: { type: "string", minLength: 1 },
+                schemaSha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+                schemaBundleSha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+                validatorBuild: { type: "string", minLength: 1 }
+              },
+              allOf: [
+                {
+                  dependentRequired: {
+                    schemaFile: ["schemaId", "schemaSha256", "schemaBundleSha256", "validatorBuild"],
+                    schemaId: ["schemaFile", "schemaSha256", "schemaBundleSha256", "validatorBuild"],
+                    schemaSha256: ["schemaFile", "schemaId", "schemaBundleSha256", "validatorBuild"],
+                    schemaBundleSha256: ["schemaFile", "schemaId", "schemaSha256", "validatorBuild"],
+                    validatorBuild: ["schemaFile", "schemaId", "schemaSha256", "schemaBundleSha256"]
+                  }
+                }
+              ]
             }
           },
           modelFanout: {
@@ -231,7 +247,40 @@ function validateOutputs(value: unknown, path: string, issues: TopologySchemaVal
         "contractDigest must be a SHA-256 digest"
       );
     }
+    validateOutputSchemaBinding(output, outputPath, issues);
   });
+}
+
+function validateOutputSchemaBinding(
+  output: Record<string, unknown>,
+  path: string,
+  issues: TopologySchemaValidationIssue[]
+): void {
+  const keys = ["schemaFile", "schemaId", "schemaSha256", "schemaBundleSha256", "validatorBuild"] as const;
+  const present = keys.filter((key) => output[key] !== undefined);
+  if (present.length === 0) return;
+  if (present.length !== keys.length) {
+    issue(
+      issues,
+      path,
+      "EXPANDED_NODE_OUTPUT_SCHEMA_BINDING_INCOMPLETE",
+      "schema-backed outputs must persist the complete validator binding"
+    );
+    return;
+  }
+  if (typeof output.schemaFile !== "string" || !/^[^/\\]+\.schema\.json$/u.test(output.schemaFile)) {
+    issue(issues, `${path}.schemaFile`, "EXPANDED_NODE_OUTPUT_SCHEMA_FILE_INVALID", "schemaFile must be a filename");
+  }
+  for (const key of ["schemaId", "validatorBuild"] as const) {
+    if (typeof output[key] !== "string" || output[key].length === 0) {
+      issue(issues, `${path}.${key}`, "EXPANDED_NODE_OUTPUT_SCHEMA_IDENTITY_INVALID", `${key} must be non-empty`);
+    }
+  }
+  for (const key of ["schemaSha256", "schemaBundleSha256"] as const) {
+    if (typeof output[key] !== "string" || !/^[0-9a-f]{64}$/u.test(output[key])) {
+      issue(issues, `${path}.${key}`, "EXPANDED_NODE_OUTPUT_SCHEMA_DIGEST_INVALID", `${key} must be a SHA-256 digest`);
+    }
+  }
 }
 
 function validateReferenceRevision(value: unknown, path: string, issues: TopologySchemaValidationIssue[]): void {

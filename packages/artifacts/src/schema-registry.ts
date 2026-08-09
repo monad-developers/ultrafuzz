@@ -7,14 +7,14 @@ import { fileURLToPath } from "node:url";
 import { ARTIFACT_SCHEMA_METADATA } from "./artifact-schema-metadata.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
-export type SchemaRole = "artifact-contract" | "runtime-state" | "subschema";
+export type SchemaRole = "artifact-contract" | "runtime-state" | "subschema" | "topology";
 
 const MAX_REGISTERED_SCHEMA_BYTES = 4 * 1024 * 1024;
 const MAX_REGISTERED_BUNDLE_BYTES = 16 * 1024 * 1024;
 const MAX_REGISTERED_PATTERNS = 256;
 const MAX_REGISTERED_PATTERN_LENGTH = 1_024;
 
-export interface ArtifactSchemaRegistryEntry {
+export interface SchemaRegistryEntry {
   filename: string;
   id: string;
   role: SchemaRole;
@@ -28,6 +28,8 @@ export interface ArtifactSchemaRegistryEntry {
   /** Name of a non-transforming Zod parser, when runtime typed parsing remains useful. */
   zodParser?: string;
 }
+
+export type ArtifactSchemaRegistryEntry = SchemaRegistryEntry;
 
 interface SchemaMetadata {
   role: SchemaRole;
@@ -44,6 +46,15 @@ const foundationMetadataByFilename: Readonly<Record<string, SchemaMetadata>> = O
     typescriptExport: "analysisBundleManifestJsonSchema",
     zodParser: "analysisBundleManifestSchema",
     semanticGates: ["analysis-bundle-path-order", "analysis-bundle-file-digest"]
+  },
+  "artifact-manifest.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "artifactManifestJsonSchema",
+    semanticGates: [
+      "artifact-manifest-safe-paths",
+      "artifact-manifest-file-digest",
+      "artifact-manifest-prerequisite-join"
+    ]
   },
   "finding.schema.json": {
     role: "subschema",
@@ -111,6 +122,10 @@ const foundationMetadataByFilename: Readonly<Record<string, SchemaMetadata>> = O
     zodParser: "runStateSchema",
     semanticGates: ["run-state-fingerprint", "run-state-node-key-equality"]
   },
+  "trusted-cli.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "trustedCliMetadataJsonSchema"
+  },
   "usage-ledger.schema.json": {
     role: "runtime-state",
     typescriptExport: "usageLedgerJsonSchema",
@@ -145,6 +160,16 @@ export function artifactSchemaDirectory(): string {
   const stat = fs.lstatSync(source);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`artifact schema source is unsafe: ${source}`);
   return source;
+}
+
+/** A checked-in, byte-stable instance used to prove the real validator command before model work. */
+export function artifactValidatorSmokeFixturePath(): string {
+  const fixture = path.join(artifactSchemaDirectory(), "validator-smoke.valid.json");
+  const snapshot = readRegularFileSnapshot(fixture, 1_024);
+  if (!snapshot.equals(Buffer.from("[]\n", "utf8"))) {
+    throw new Error(`validator smoke fixture differs from its pinned bytes: ${fixture}`);
+  }
+  return fixture;
 }
 
 export function artifactSchemaRegistry(): readonly ArtifactSchemaRegistryEntry[] {
@@ -215,7 +240,12 @@ export function artifactSchemaRegistry(): readonly ArtifactSchemaRegistryEntry[]
 }
 
 export function artifactSchemaBundleDigest(): string {
-  const manifest = artifactSchemaRegistry()
+  return schemaRegistryBundleDigest(artifactSchemaRegistry());
+}
+
+export function schemaRegistryBundleDigest(registry: readonly SchemaRegistryEntry[]): string {
+  const manifest = [...registry]
+    .sort((left, right) => left.filename.localeCompare(right.filename) || left.id.localeCompare(right.id))
     .map((entry) => `${entry.filename}\u0000${entry.id}\u0000${entry.sha256}`)
     .join("\n");
   return sha256(Buffer.from(manifest, "utf8"));

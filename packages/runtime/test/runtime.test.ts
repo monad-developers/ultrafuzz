@@ -7360,7 +7360,7 @@ test("syncRun re-seals the verification marker after it normalizes a producer's 
   fs.writeFileSync(
     markerPath,
     `${JSON.stringify({
-      schema_version: "ultrafuzz.artifact-verification.v1",
+      schema_version: "ultrafuzz.artifact-verification.v2",
       attempt_id: "project-discovery",
       node_id: "project-discovery",
       artifacts: [

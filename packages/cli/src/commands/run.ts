@@ -6,6 +6,7 @@ import { startRun } from "@ultrafuzz/runtime";
 
 import {
   cliIo,
+  cliEntrypoint,
   commandFailure,
   commandFromRuntime,
   emitCommandResult,
@@ -45,6 +46,7 @@ export default class Run extends Command {
     }
     const result = await startRun({
       projectRoot: root,
+      ultrafuzzCliEntrypoint: cliEntrypoint(),
       runId: flags["run-id"],
       referenceExpectationsPath: flags["reference-expectations"],
       prompt: flags.prompt,

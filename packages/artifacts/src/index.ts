@@ -22,6 +22,7 @@ export * from "./schema-registry.js";
 export * from "./state.js";
 export * from "./state-schema.js";
 export * from "./strict-json.js";
+export * from "./trusted-cli-schema.js";
 export * from "./usage-ledger.js";
 export * from "./workspace-patch.js";
 export * from "./workflow-contracts.js";

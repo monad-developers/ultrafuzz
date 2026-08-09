@@ -97,6 +97,8 @@ export interface ValidateProjectResult {
 }
 
 export interface PlanRunInput extends ValidateProjectInput {
+  /** Absolute entrypoint of the invoking CLI, used to create the producer-visible trusted launcher. */
+  ultrafuzzCliEntrypoint?: string;
   runId?: string;
   sourceRunId?: string;
   /** Optional trusted benchmark catalog copied into pinned reference inputs. */
@@ -156,11 +158,16 @@ export interface PlannedArtifactOutput {
   path: string;
   contract: ArtifactContractId;
   contract_digest: string;
+  schema_file?: string;
+  schema_id?: string;
+  schema_sha256?: string;
+  schema_bundle_sha256?: string;
+  validator_build?: string;
   primary: boolean;
 }
 
 export interface PlannedGraph {
-  schema_version: "1.0";
+  schema_version: "2.0";
   graph_version: string;
   topology_version: number;
   groups: Record<string, unknown>;
@@ -464,6 +471,7 @@ export interface CleanGeneratedValue {
 export interface WorkflowLifecycleInput {
   projectRoot: string;
   runId: string;
+  ultrafuzzCliEntrypoint?: string;
   maxConcurrency?: number;
   forkFrame?: number;
   resetNode?: string;

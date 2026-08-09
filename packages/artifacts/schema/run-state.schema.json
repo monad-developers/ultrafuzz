@@ -295,10 +295,41 @@
                   "type": "string",
                   "pattern": "^[0-9a-f]{64}$"
                 },
+                "schema_file": {
+                  "type": "string",
+                  "pattern": "^[^/\\\\]+\\.schema\\.json$"
+                },
+                "schema_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "schema_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "schema_bundle_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "validator_build": {
+                  "type": "string",
+                  "minLength": 1
+                },
                 "primary": {
                   "type": "boolean"
                 }
-              }
+              },
+              "allOf": [
+                {
+                  "dependentRequired": {
+                    "schema_file": ["schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"],
+                    "schema_id": ["schema_file", "schema_sha256", "schema_bundle_sha256", "validator_build"],
+                    "schema_sha256": ["schema_file", "schema_id", "schema_bundle_sha256", "validator_build"],
+                    "schema_bundle_sha256": ["schema_file", "schema_id", "schema_sha256", "validator_build"],
+                    "validator_build": ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256"]
+                  }
+                }
+              ]
             }
           },
           "attempt_index": {

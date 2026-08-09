@@ -6,6 +6,14 @@ import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 
 import {
+  artifactSchemaBundleDigest,
+  artifactSchemaDirectory,
+  artifactSchemaRegistry,
+  artifactValidatorSmokeFixturePath,
+  VALIDATOR_BUILD_IDENTITY
+} from "@ultrafuzz/artifacts";
+
+import {
   modalAttemptVerificationMarkerName,
   parseModalNodeWorkerInput,
   readModalExecutionDependencyClosure,
@@ -19,7 +27,7 @@ const DURABLE_CHECKPOINT_DIRECTORY = "checkpoints";
 const DURABLE_CHECKPOINT_INDEX = "index.json";
 const DURABLE_RESTORE_MARKER = "restore.json";
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
-const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";
+const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v2";
 const MAX_VERIFICATION_MARKER_BYTES = 4 * 1024 * 1024;
 
 type DurableCheckpointStage = "prepared" | "running" | "failed" | "completed";
@@ -76,6 +84,7 @@ async function main(): Promise<void> {
       durableWorkspace.recordCheckpoint("prepared");
     }
     syncDurableData(projectRoot);
+    preflightModalJsonValidator();
     const localRunId = `${input.run_id}-${crypto.createHash("sha256").update(input.task_id).digest("hex").slice(0, 12)}`;
     if (!durableWorkspace.hasCompletedCheckpoint) {
       durableWorkspace.recordCheckpoint("running");
@@ -193,6 +202,59 @@ async function main(): Promise<void> {
   }
 }
 
+export function preflightModalJsonValidator(cliPath = "/usr/local/bin/ultrafuzz"): void {
+  assertRootOwnedReadOnlyFile(cliPath, "Modal Ultrafuzz launcher");
+  const findings = artifactSchemaRegistry().find((entry) => entry.filename === "findings.schema.json");
+  if (findings === undefined) throw new Error("Modal validator preflight schema is not registered");
+  const schemaPath = path.join(artifactSchemaDirectory(), findings.filename);
+  assertRootOwnedReadOnlyFile(schemaPath, "Modal validator schema");
+  let stdout: string;
+  try {
+    stdout = execFileSync(
+      cliPath,
+      ["json", "validate", "--schema", schemaPath, "--file", artifactValidatorSmokeFixturePath(), "--json"],
+      { encoding: "utf8", maxBuffer: 1024 * 1024, timeout: 15_000, windowsHide: true }
+    );
+  } catch (error) {
+    throw new Error(
+      `Modal JSON validator preflight failed: ${error instanceof Error ? error.message : String(error)}`,
+      {
+        cause: error
+      }
+    );
+  }
+  const parsed = JSON.parse(stdout) as {
+    ok?: unknown;
+    data?: {
+      status?: unknown;
+      schema?: {
+        id?: unknown;
+        sha256?: unknown;
+        bundle_sha256?: unknown;
+        validator_build?: unknown;
+        registered?: unknown;
+      };
+    };
+  };
+  if (
+    parsed.ok !== true ||
+    parsed.data?.status !== "valid" ||
+    parsed.data.schema?.registered !== true ||
+    parsed.data.schema.id !== findings.id ||
+    parsed.data.schema.sha256 !== findings.sha256 ||
+    parsed.data.schema.bundle_sha256 !== artifactSchemaBundleDigest() ||
+    parsed.data.schema.validator_build !== VALIDATOR_BUILD_IDENTITY
+  ) {
+    throw new Error("Modal JSON validator preflight returned a mismatched build or schema identity");
+  }
+}
+
+function assertRootOwnedReadOnlyFile(filePath: string, label: string): void {
+  const stat = fs.lstatSync(filePath);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== 0 || (stat.mode & 0o022) !== 0) {
+    throw new Error(`${label} must be a root-owned, non-writable regular file`);
+  }
+}
 function sealedSmithersExecutable(snapshotRoot: string): string {
   const closure = readModalExecutionDependencyClosure(snapshotRoot);
   const smithers = regularSnapshotFile(snapshotRoot, closure.smithersBin, "sealed Smithers executable");

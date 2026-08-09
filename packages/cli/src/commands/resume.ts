@@ -1,7 +1,14 @@
 import { Args, Command, Flags } from "@oclif/core";
 import { resumeRun } from "@ultrafuzz/runtime";
 
-import { cliIo, commandFromRuntime, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
+import {
+  cliEntrypoint,
+  cliIo,
+  commandFromRuntime,
+  emitCommandResult,
+  globalFlags,
+  projectRoot
+} from "../command-shared.js";
 
 export default class Resume extends Command {
   static override summary = "Resume a linked run";
@@ -18,6 +25,7 @@ export default class Resume extends Command {
     const { args, flags } = await this.parse(Resume);
     const result = await resumeRun({
       projectRoot: projectRoot(flags),
+      ultrafuzzCliEntrypoint: cliEntrypoint(),
       runId: args.runId,
       maxConcurrency: flags["max-concurrency"],
       force: flags.force,

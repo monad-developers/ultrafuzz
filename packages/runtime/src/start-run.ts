@@ -27,6 +27,7 @@ import {
 } from "./types.js";
 import { planRun, repairMissingRenderedPromptsFromExecutionSnapshot } from "./plan-run.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
+import { prepareTrustedCliEnvironment, runTrustedJsonValidatorPreflight } from "./trusted-cli.js";
 import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import {
   compileSmithersWorkflow,
@@ -77,6 +78,9 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_CONFIG_PATH",
   "ULTRAFUZZ_MODAL_MODULE",
   "ULTRAFUZZ_RUNTIME_MODULE",
+  "ULTRAFUZZ_SCHEMA_BUNDLE_SHA256",
+  "ULTRAFUZZ_TRUSTED_BIN",
+  "ULTRAFUZZ_VALIDATOR_BUILD",
   "ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR",
   "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT",
   "ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR",
@@ -141,6 +145,15 @@ export async function startRun(input: StartRunInput) {
       env: input.env
     });
     persistForgeGuardMetadata(plan.layout, plan.resolved_config, forgeGuard.active);
+    const trustedCli = prepareTrustedCliEnvironment({
+      layout: plan.layout,
+      cliEntrypoint: input.ultrafuzzCliEntrypoint,
+      env: forgeGuard.env,
+      required: compiled.tasks.some((task) =>
+        task.metadata.artifacts.outputs.some((output) => output.schemaFile !== undefined)
+      )
+    });
+    runTrustedJsonValidatorPreflight({ layout: plan.layout, trusted: trustedCli });
     const submission = await submitSmithersWorkflow({
       compiled,
       projectRoot: plan.validation.project_root,
@@ -148,14 +161,15 @@ export async function startRun(input: StartRunInput) {
       keepWorkspaces: plan.resolved_config.run.keepWorkspaces,
       controllerLeaseSeconds: plan.resolved_config.run.controllerLeaseSeconds,
       workflowPath: prepared.executionSnapshot.workflowPath,
-      env: { ...(forgeGuard.env ?? {}), ...prepared.executionSnapshot.env },
+      env: { ...trustedCli.env, ...prepared.executionSnapshot.env },
       environmentVariableNames: mergeEnvironmentVariableNames(
         agentEnvironmentVariableNames(
           plan.resolved_config,
           compiled.tasks.map((task) => task.agentRef),
           forgeGuard.env
         ),
-        forgeGuard.environmentVariableNames
+        forgeGuard.environmentVariableNames,
+        trustedCli.environmentVariableNames
       ),
       inputJson: prepared.executionSnapshot.inputJson
     });
@@ -271,6 +285,13 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       env: input.env
     });
     persistForgeGuardMetadata(evidence.layout, sealedConfig, forgeGuard.active);
+    const trustedCli = prepareTrustedCliEnvironment({
+      layout: evidence.layout,
+      cliEntrypoint: input.ultrafuzzCliEntrypoint,
+      env: forgeGuard.env,
+      required: sealedTasksRequireTrustedCli(evidence.verifiedControl.contents.tasks)
+    });
+    runTrustedJsonValidatorPreflight({ layout: evidence.layout, trusted: trustedCli });
     const controllerInvocation = appendEvent(evidence.layout, {
       eventType: "workflow-lifecycle-invoking",
       status: "running",
@@ -302,10 +323,11 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       },
       keepWorkspaces: sealedConfig.run.keepWorkspaces,
       controllerLeaseSeconds: sealedConfig.run.controllerLeaseSeconds,
-      env: linkedWorkflowExecutionEnvironment(evidence, forgeGuard.env),
+      env: linkedWorkflowExecutionEnvironment(evidence, trustedCli.env),
       environmentVariableNames: mergeEnvironmentVariableNames(
         linkedWorkflowEnvironmentVariableNames(sealedConfig, evidence.verifiedControl.contents.tasks, forgeGuard.env),
-        forgeGuard.environmentVariableNames
+        forgeGuard.environmentVariableNames,
+        trustedCli.environmentVariableNames
       )
     });
     const workflowRunId = lifecycleResult.workflowRunId ?? evidence.smithersRunId;
@@ -374,6 +396,24 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
   } catch (error) {
     return runtimeFailure<WorkflowLifecycleValue>([smithersDiagnostic(error, "WORKFLOW_LIFECYCLE_FAILED")]);
   }
+}
+
+function sealedTasksRequireTrustedCli(contents: Buffer): boolean {
+  const document = JSON.parse(contents.toString("utf8")) as { tasks?: unknown };
+  if (!Array.isArray(document.tasks)) return false;
+  return document.tasks.some((task) => {
+    if (typeof task !== "object" || task === null || Array.isArray(task)) return false;
+    const outputs = (task as { outputs?: unknown }).outputs;
+    return Array.isArray(outputs)
+      ? outputs.some(
+          (output) =>
+            typeof output === "object" &&
+            output !== null &&
+            !Array.isArray(output) &&
+            typeof (output as { schemaFile?: unknown }).schemaFile === "string"
+        )
+      : false;
+  });
 }
 
 async function persistSmithersEvidence(

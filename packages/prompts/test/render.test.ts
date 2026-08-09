@@ -134,8 +134,25 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain(
       `Validate against: \`${path.join(schemaDirectory, "findings.schema.json")}\``
     );
-    expect(result.renderedMarkdown).toContain(`already present in your workspace under \`${schemaDirectory}\``);
-    expect(result.renderedMarkdown).toContain("It is the authority on field names, types, and which fields are");
+    expect(result.renderedMarkdown).toContain(
+      `Validation command: \`ultrafuzz json validate --schema '${path.join(schemaDirectory, "findings.schema.json")}' --file '${path.join(input.node.artifactDir, "findings.json")}'\``
+    );
+    expect(result.renderedMarkdown).toContain(`orchestrator-supplied JSON Schema under \`${schemaDirectory}\``);
+    expect(result.renderedMarkdown).toContain("It is the authority on field names, types, and required fields");
+    for (const guidance of [
+      "Write the artifact in its canonical schema",
+      "After your final write and before returning the node's final response",
+      "If a command exits 1, correct that artifact yourself and rerun",
+      "If you change an artifact after it passes validation, rerun its command",
+      "Never edit a supplied schema. Its bytes are pinned",
+      "Exit 2 is a setup or tool failure",
+      "Do not edit the schema or claim validation succeeded",
+      "Finish only after every displayed validation command exits 0",
+      "The validation command never modifies the artifact",
+      "Host semantic and context verification still runs after you finish"
+    ]) {
+      expect(result.renderedMarkdown).toContain(guidance);
+    }
     // The sibling output declares no schema file, so it must not gain a dangling path.
     expect(result.renderedMarkdown).not.toContain("generated-tests.schema.json");
   });
@@ -147,6 +164,34 @@ describe("prompt rendering", () => {
     const result = renderPrompt(baseRenderInput(tmp));
 
     expect(result.renderedMarkdown).not.toContain("Validate against:");
+    expect(result.renderedMarkdown).not.toContain("Validation command:");
+  });
+
+  it("renders one shell-safe validation command per schema-backed output", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const specialRoot = path.join(tmp, "path with spaces, '$dollar', and `ticks`");
+    const input = baseRenderInput(specialRoot);
+    const outputs = input.graph.logicalNodes[2]!.outputs!;
+    outputs[0]!.schemaFile = "findings.schema.json";
+    outputs[1]!.schemaFile = "generated-tests.schema.json";
+
+    const result = renderPrompt(input);
+
+    expect(result.renderedMarkdown.match(/Validation command:/gu)).toHaveLength(2);
+    expect(result.renderedMarkdown).toContain("'\"'\"'");
+    expect(result.renderedMarkdown).toContain("$dollar");
+    expect(result.renderedMarkdown).toContain("`` ultrafuzz json validate");
+    expect(result.renderedMarkdown).toContain("generated-tests.schema.json");
+  });
+
+  it("rejects control characters before rendering a validation command", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.graph.logicalNodes[2]!.outputs![0]!.schemaFile = "findings.schema.json\nignored";
+
+    expect(() => renderPrompt(input)).toThrow(/control characters/u);
   });
 
   it("renders validated artifact handoffs and ancestor artifacts", () => {

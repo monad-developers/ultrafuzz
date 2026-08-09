@@ -1305,7 +1305,7 @@ function modalRecoveryAnalysisSummary(summary: ModalRecoveryLifecycleSummary): A
 }
 
 export function modalImageBuildCommand(): string {
-  return "install -m 0444 -o root -g root /tmp/ultrafuzz-source.tgz /opt/ultrafuzz-source.tgz && rm -rf /opt/ultrafuzz && mkdir -p /opt/ultrafuzz && tar --no-same-owner --no-same-permissions -xzf /opt/ultrafuzz-source.tgz -C /opt/ultrafuzz && npm install -g @moonshot-ai/kimi-code@0.29.1 && cd /opt/ultrafuzz && pnpm install --frozen-lockfile && pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/modal build && chown -R ubuntu:ubuntu /opt/ultrafuzz";
+  return "install -m 0444 -o root -g root /tmp/ultrafuzz-source.tgz /opt/ultrafuzz-source.tgz && rm -rf /opt/ultrafuzz && mkdir -p /opt/ultrafuzz && tar --no-same-owner --no-same-permissions -xzf /opt/ultrafuzz-source.tgz -C /opt/ultrafuzz && npm install -g @moonshot-ai/kimi-code@0.29.1 && cd /opt/ultrafuzz && pnpm install --frozen-lockfile && pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/modal build && install -m 0555 -o root -g root packages/modal/scripts/ultrafuzz-launcher /usr/local/bin/ultrafuzz && /usr/local/bin/ultrafuzz json validate --schema /opt/ultrafuzz/packages/artifacts/schema/findings.schema.json --file /opt/ultrafuzz/packages/artifacts/schema/validator-smoke.valid.json --json >/dev/null && chmod -R a+rX,go-w /opt/ultrafuzz";
 }
 
 export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvider): string {

@@ -5,9 +5,10 @@ import { pathToFileURL } from "node:url";
 import { MessageChannel, receiveMessageOnPort, Worker, type MessagePort } from "node:worker_threads";
 
 import {
-  artifactSchemaBundleDigest,
   artifactSchemaRegistry,
   readRegularFileSnapshot,
+  schemaRegistryBundleDigest,
+  type SchemaRegistryEntry,
   VALIDATOR_BUILD_IDENTITY
 } from "./schema-registry.js";
 import { parseStrictJsonBytes, StrictJsonError } from "./strict-json.js";
@@ -33,6 +34,10 @@ export interface ValidateJsonFileOptions {
   refPaths?: readonly string[];
   maxErrors?: number;
   deadlineMs?: number;
+  /** Trusted schemas made available to the isolated validator worker. */
+  schemaRegistry?: readonly SchemaRegistryEntry[];
+  /** Identity to persist for the registry that owns the selected schema. */
+  schemaBundleSha256?: string;
 }
 
 export type JsonFileValidationStatus = "instance-error" | "setup-error" | "valid";
@@ -64,9 +69,15 @@ interface ExternalSchemaSnapshot {
   schema: Record<string, unknown>;
 }
 
+interface RegisteredSchemaSnapshot {
+  id: string;
+  schema: Readonly<Record<string, unknown>>;
+}
+
 interface WorkerRequest {
   instanceBytes: Uint8Array;
   registeredSchemaId?: string;
+  registeredSchemas?: RegisteredSchemaSnapshot[];
   externalRootPath?: string;
   externalSchemas?: ExternalSchemaSnapshot[];
   maxErrors: number;
@@ -95,7 +106,19 @@ export async function validateJsonFile(options: ValidateJsonFileOptions): Promis
     return failure("setup-error", "JSON_SCHEMA_UNREADABLE", errorMessage(error));
   }
 
-  const registry = artifactSchemaRegistry();
+  let registry: readonly SchemaRegistryEntry[];
+  let schemaBundleSha256: string;
+  try {
+    registry = options.schemaRegistry ?? artifactSchemaRegistry();
+    assertUnambiguousRegistry(registry);
+    schemaBundleSha256 = options.schemaBundleSha256 ?? schemaRegistryBundleDigest(registry);
+    if (!/^[0-9a-f]{64}$/u.test(schemaBundleSha256)) {
+      throw new Error("schema bundle identity must be a lowercase SHA-256 digest");
+    }
+  } catch (error) {
+    return failure("setup-error", "JSON_SCHEMA_REGISTRY_INVALID", errorMessage(error));
+  }
+  const registeredSchemas = registry.map((entry) => ({ id: entry.id, schema: entry.schema }));
   const filenameRegistration = registry.find((entry) => entry.filename === path.basename(schemaPath));
   const schemaSha256 = sha256(schemaBytes);
   const digestRegistration = registry.find((entry) => entry.sha256 === schemaSha256);
@@ -113,13 +136,14 @@ export async function validateJsonFile(options: ValidateJsonFileOptions): Promis
     const registration = digestRegistration ?? filenameRegistration!;
     schemaId = registration.id;
     registered = true;
-    request = { instanceBytes, registeredSchemaId: schemaId, maxErrors };
+    request = { instanceBytes, registeredSchemaId: schemaId, registeredSchemas, maxErrors };
   } else {
-    const prepared = prepareExternalSchemas(schemaPath, schemaBytes, options.refPaths ?? []);
+    const prepared = prepareExternalSchemas(schemaPath, schemaBytes, options.refPaths ?? [], registry);
     if ("failure" in prepared) return prepared.failure;
     schemaId = typeof prepared.root.schema.$id === "string" ? prepared.root.schema.$id : null;
     request = {
       instanceBytes,
+      registeredSchemas,
       externalRootPath: prepared.root.filePath,
       externalSchemas: prepared.schemas,
       maxErrors
@@ -132,7 +156,7 @@ export async function validateJsonFile(options: ValidateJsonFileOptions): Promis
     schema: {
       id: schemaId,
       sha256: schemaSha256,
-      bundle_sha256: artifactSchemaBundleDigest(),
+      bundle_sha256: schemaBundleSha256,
       validator_build: VALIDATOR_BUILD_IDENTITY,
       registered
     },
@@ -150,6 +174,8 @@ export function validateRegisteredJsonFileSync(options: {
   filePath: string;
   maxErrors?: number;
   deadlineMs?: number;
+  schemaRegistry?: readonly SchemaRegistryEntry[];
+  schemaBundleSha256?: string;
 }): JsonFileValidationResult {
   const schemaPath = path.resolve(options.schemaPath);
   const filePath = path.resolve(options.filePath);
@@ -165,8 +191,28 @@ export function validateRegisteredJsonFileSync(options: {
   } catch (error) {
     return failure("setup-error", "JSON_SCHEMA_UNREADABLE", errorMessage(error));
   }
+  let registry: readonly SchemaRegistryEntry[];
+  let schemaBundleSha256: string;
+  try {
+    registry = options.schemaRegistry ?? artifactSchemaRegistry();
+    assertUnambiguousRegistry(registry);
+    schemaBundleSha256 = options.schemaBundleSha256 ?? schemaRegistryBundleDigest(registry);
+    if (!/^[0-9a-f]{64}$/u.test(schemaBundleSha256)) {
+      throw new Error("schema bundle identity must be a lowercase SHA-256 digest");
+    }
+  } catch (error) {
+    return failure("setup-error", "JSON_SCHEMA_REGISTRY_INVALID", errorMessage(error));
+  }
   const schemaSha256 = sha256(schemaBytes);
-  const registration = artifactSchemaRegistry().find((entry) => entry.sha256 === schemaSha256);
+  const filenameRegistration = registry.find((entry) => entry.filename === path.basename(schemaPath));
+  if (filenameRegistration !== undefined && filenameRegistration.sha256 !== schemaSha256) {
+    return failure(
+      "setup-error",
+      "JSON_SCHEMA_DIGEST_MISMATCH",
+      `Registered schema ${filenameRegistration.filename} does not match its pinned digest`
+    );
+  }
+  const registration = registry.find((entry) => entry.sha256 === schemaSha256);
   if (registration === undefined) {
     return failure(
       "setup-error",
@@ -178,6 +224,7 @@ export function validateRegisteredJsonFileSync(options: {
     {
       instanceBytes,
       registeredSchemaId: registration.id,
+      registeredSchemas: registry.map((entry) => ({ id: entry.id, schema: entry.schema })),
       maxErrors: Math.min(Math.max(options.maxErrors ?? 50, 1), 1_000)
     },
     options.deadlineMs ?? DEFAULT_DEADLINE_MS
@@ -187,7 +234,7 @@ export function validateRegisteredJsonFileSync(options: {
     schema: {
       id: registration.id,
       sha256: registration.sha256,
-      bundle_sha256: artifactSchemaBundleDigest(),
+      bundle_sha256: schemaBundleSha256,
       validator_build: VALIDATOR_BUILD_IDENTITY,
       registered: true
     },
@@ -198,7 +245,8 @@ export function validateRegisteredJsonFileSync(options: {
 function prepareExternalSchemas(
   rootPath: string,
   rootBytes: Buffer,
-  explicitRefPaths: readonly string[]
+  explicitRefPaths: readonly string[],
+  registry: readonly SchemaRegistryEntry[]
 ): { root: ExternalSchemaSnapshot; schemas: ExternalSchemaSnapshot[] } | { failure: JsonFileValidationResult } {
   try {
     const allowedRoots = new Set<string>([fs.realpathSync(path.dirname(rootPath))]);
@@ -269,7 +317,7 @@ function prepareExternalSchemas(
       throw new Error("an external root schema referenced by another schema must declare a non-empty $id");
     }
 
-    const bundledIds = new Set(artifactSchemaRegistry().map((entry) => entry.id));
+    const bundledIds = new Set(registry.map((entry) => entry.id));
     const externalIds = new Set<string>();
     for (const snapshot of byPath.values()) {
       const id = snapshot.schema.$id;
@@ -281,6 +329,20 @@ function prepareExternalSchemas(
   } catch (error) {
     const code = error instanceof StrictJsonError ? "JSON_SCHEMA_INVALID_JSON" : "JSON_SCHEMA_SETUP_ERROR";
     return { failure: failure("setup-error", code, errorMessage(error)) };
+  }
+}
+
+function assertUnambiguousRegistry(registry: readonly SchemaRegistryEntry[]): void {
+  const filenames = new Set<string>();
+  const ids = new Set<string>();
+  const digests = new Set<string>();
+  for (const entry of registry) {
+    if (filenames.has(entry.filename)) throw new Error(`duplicate registered schema filename: ${entry.filename}`);
+    if (ids.has(entry.id)) throw new Error(`duplicate registered schema $id: ${entry.id}`);
+    if (digests.has(entry.sha256)) throw new Error(`duplicate registered schema digest: ${entry.sha256}`);
+    filenames.add(entry.filename);
+    ids.add(entry.id);
+    digests.add(entry.sha256);
   }
 }
 
