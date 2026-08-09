@@ -3,9 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   parsePublicEvalDiagnostics,
   PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION,
+  publicEvalDiagnosticsZodSchema,
   summarizePublicEvalDiagnosticsRows,
   type PublicEvalDiagnosticsRow
 } from "../src/public-diagnostics.js";
+import { EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID, validateEvalJsonSchema } from "../src/eval-schema-registry.js";
+import { executeEvalSchemaSemanticGates } from "../src/eval-semantic-gates.js";
 import { boundedEvalId } from "../src/utils.js";
 
 const LOGICAL_RUN_ID = "ci-empty-diagnostics-smoke";
@@ -48,6 +51,65 @@ describe("public eval diagnostics summary", () => {
     expect(summary.scoring_ready).toBe(true);
   });
 
+  it("keeps the canonical JSON Schema and non-transforming Zod parser aligned", () => {
+    const canonical = diagnosticsDocument([scoreableRow("target-alpha"), scoreableRow("target-beta")]);
+    expectStructuralParity(canonical, true);
+    expect(parsePublicEvalDiagnostics(canonical)).toEqual(canonical);
+
+    const unicodeModel = structuredClone(canonical);
+    unicodeModel.model = "🙂".repeat(200);
+    unicodeModel.reasoning = "🙂".repeat(32);
+    expectStructuralParity(unicodeModel, true);
+
+    const missingStage = structuredClone(canonical) as Partial<typeof canonical>;
+    delete missingStage.stage;
+    const wrongTimeoutFlag = structuredClone(canonical);
+    wrongTimeoutFlag.rows[0]!.failed_nodes = [{ node_id: "node-a", status: "timed-out", timed_out: false }];
+    const duplicateWorkflowId = structuredClone(canonical);
+    duplicateWorkflowId.rows[0]!.workflow_ids = ["workflow-one", "workflow-one"];
+    const duplicateRow = structuredClone(canonical);
+    duplicateRow.rows = [duplicateRow.rows[0]!, structuredClone(duplicateRow.rows[0]!)];
+    const invalidTimestamp = structuredClone(canonical);
+    invalidTimestamp.created_at = "not-a-timestamp";
+    const unsafeGeneration = structuredClone(canonical);
+    unsafeGeneration.lineage.generation = Number.MAX_SAFE_INTEGER + 1;
+    const unknownLineageField = structuredClone(canonical);
+    (unknownLineageField.lineage as unknown as Record<string, unknown>).unexpected = true;
+    const unknownRowField = structuredClone(canonical);
+    (unknownRowField.rows[0] as unknown as Record<string, unknown>).unexpected = true;
+    const unknownFailedNodeField = structuredClone(canonical);
+    unknownFailedNodeField.rows[0]!.failed_nodes = [
+      { node_id: "node-a", status: "failed", timed_out: false, unexpected: true } as never
+    ];
+    const oversizedModel = structuredClone(canonical);
+    oversizedModel.model = "🙂".repeat(257);
+    const oversizedFailureMessage = structuredClone(canonical);
+    oversizedFailureMessage.rows[0]!.failed_nodes = [
+      { node_id: "node-a", status: "failed", timed_out: false, failure_message: "x".repeat(1001) }
+    ];
+    const emptyRows = structuredClone(canonical);
+    emptyRows.rows = [];
+
+    for (const invalid of [
+      { ...canonical, schema_version: "ultrafuzz.modal.public-eval-diagnostics.v1" },
+      { ...canonical, unexpected: true },
+      missingStage,
+      wrongTimeoutFlag,
+      duplicateWorkflowId,
+      duplicateRow,
+      invalidTimestamp,
+      unsafeGeneration,
+      unknownLineageField,
+      unknownRowField,
+      unknownFailedNodeField,
+      oversizedModel,
+      oversizedFailureMessage,
+      emptyRows
+    ]) {
+      expectStructuralParity(invalid, false);
+    }
+  });
+
   it("accepts a bounded failed-node message and rejects an oversized one", () => {
     const row = {
       ...scoreableRow("target-alpha"),
@@ -68,7 +130,39 @@ describe("public eval diagnostics summary", () => {
     );
     const oversized = structuredClone(document);
     oversized.rows[0]!.failed_nodes[0]!.failure_message = "🙂".repeat(251);
+    expectStructuralParity(oversized, true);
+    expect(executeEvalSchemaSemanticGates(EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID, oversized)).toEqual([
+      expect.objectContaining({
+        gate: "eval-public-diagnostics-consistency",
+        path: "$.rows[0].failed_nodes[0].failure_message"
+      })
+    ]);
     expect(() => parsePublicEvalDiagnostics(oversized)).toThrow();
+  });
+
+  it("keeps projected identity and summary checks in the named semantic gate", () => {
+    const duplicateNodeIds = diagnosticsDocument([
+      {
+        ...scoreableRow("target-alpha"),
+        failed_nodes: [
+          { node_id: "same-node", status: "failed", timed_out: false },
+          { node_id: "same-node", status: "timed-out", timed_out: true }
+        ]
+      }
+    ]);
+    expectStructuralParity(duplicateNodeIds, true);
+    expect(executeEvalSchemaSemanticGates(EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID, duplicateNodeIds)).toEqual([
+      expect.objectContaining({ path: "$.rows[0].failed_nodes", message: expect.stringContaining("unique") })
+    ]);
+    expect(() => parsePublicEvalDiagnostics(duplicateNodeIds)).toThrow();
+
+    const inconsistentSummary = diagnosticsDocument([scoreableRow("target-alpha")]);
+    inconsistentSummary.summary.launched = 0;
+    expectStructuralParity(inconsistentSummary, true);
+    expect(executeEvalSchemaSemanticGates(EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID, inconsistentSummary)).toEqual([
+      expect.objectContaining({ path: "$.summary" })
+    ]);
+    expect(() => parsePublicEvalDiagnostics(inconsistentSummary)).toThrow();
   });
 
   it("rejects a document that describes no rows at all", () => {
@@ -105,4 +199,12 @@ function diagnosticsDocument(rows: PublicEvalDiagnosticsRow[]) {
     summary: summarizePublicEvalDiagnosticsRows(rows),
     rows
   };
+}
+
+function expectStructuralParity(value: unknown, expected: boolean): void {
+  const canonical = validateEvalJsonSchema(EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID, value).ok;
+  const retained = publicEvalDiagnosticsZodSchema.safeParse(value);
+  expect(canonical).toBe(expected);
+  expect(retained.success).toBe(expected);
+  if (retained.success) expect(retained.data).toEqual(value);
 }

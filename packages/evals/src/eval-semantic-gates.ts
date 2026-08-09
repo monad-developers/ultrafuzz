@@ -8,6 +8,7 @@ import {
   EVAL_GROUND_TRUTH_CREDITS_SCHEMA_ID,
   EVAL_INSTANCE_CLUSTERS_SCHEMA_ID,
   EVAL_MATRIX_SCHEMA_ID,
+  EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID,
   EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID,
   EVAL_RUN_MANIFEST_SCHEMA_ID,
   EVAL_RUN_RECORD_SCHEMA_ID,
@@ -25,6 +26,7 @@ import type {
   BenchmarkProvenance,
   BenchmarkSourceManifest
 } from "./benchmark-analysis-contracts.js";
+import { publicEvalDiagnosticsSemanticIssues, type PublicEvalDiagnostics } from "./public-diagnostics.js";
 import type {
   EvalFindingScore,
   EvalMatrixRow,
@@ -63,6 +65,7 @@ const gateHandlers: Readonly<Record<string, EvalSemanticGate>> = Object.freeze({
   "eval-ground-truth-credits-identity-joins": groundTruthCreditsIdentityJoins,
   "eval-instance-clusters-identity-joins": instanceClustersIdentityJoins,
   "eval-matrix-identity-joins": matrixIdentityJoins,
+  "eval-public-diagnostics-consistency": publicDiagnosticsConsistency,
   "eval-review-queue-decision-coupling": reviewQueueDecisionCoupling,
   [EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE]: recoveryEquivalenceCoupling,
   "eval-run-manifest-suite-joins": runManifestSuiteJoins,
@@ -83,6 +86,7 @@ const gatesBySchema: Readonly<Record<string, readonly string[]>> = Object.freeze
   [EVAL_GROUND_TRUTH_CREDITS_SCHEMA_ID]: ["eval-ground-truth-credits-identity-joins"],
   [EVAL_INSTANCE_CLUSTERS_SCHEMA_ID]: ["eval-instance-clusters-identity-joins"],
   [EVAL_MATRIX_SCHEMA_ID]: ["eval-matrix-identity-joins"],
+  [EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID]: ["eval-public-diagnostics-consistency"],
   [EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID]: ["eval-review-queue-decision-coupling"],
   [EVAL_RUN_MANIFEST_SCHEMA_ID]: ["eval-run-manifest-suite-joins"],
   [EVAL_RUN_RECORD_SCHEMA_ID]: ["eval-run-record-lifecycle-coupling", EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE],
@@ -143,6 +147,11 @@ function adjudicationHandoffCanonicalPath(value: unknown): EvalSemanticGateIssue
         )
       ]
     : [];
+}
+
+function publicDiagnosticsConsistency(value: unknown): EvalSemanticGateIssue[] {
+  const gate = "eval-public-diagnostics-consistency";
+  return publicEvalDiagnosticsSemanticIssues(value as PublicEvalDiagnostics).map((entry) => ({ gate, ...entry }));
 }
 
 function findingManifestIdentityJoins(value: unknown): EvalSemanticGateIssue[] {

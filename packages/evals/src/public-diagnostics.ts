@@ -1,6 +1,9 @@
+import { isDeepStrictEqual } from "node:util";
+
 import { z } from "zod/v4";
 import { MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "@ultrafuzz/artifacts";
 
+import { EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID, validateEvalJsonSchema } from "./eval-schema-registry.js";
 import { boundedEvalId } from "./utils.js";
 
 export const PUBLIC_EVAL_DIAGNOSTICS_FILE = "public-eval-diagnostics.json" as const;
@@ -55,6 +58,17 @@ const failedNodeStatus = z.enum(PUBLIC_EVAL_FAILED_NODE_STATUSES);
 const failureCategory = z.enum(PUBLIC_EVAL_FAILURE_CATEGORIES);
 const failureCode = z.enum(PUBLIC_EVAL_FAILURE_CODES);
 
+function boundedCodePointString(maximum: number): z.ZodType<string> {
+  return z
+    .string()
+    .min(1)
+    .refine((value) => [...value].length <= maximum, `must contain at most ${maximum} Unicode code points`);
+}
+
+function hasUniqueJsonItems(values: readonly unknown[]): boolean {
+  return values.every((value, index) => values.findIndex((candidate) => isDeepStrictEqual(candidate, value)) === index);
+}
+
 const failedNodeSchema = z
   .strictObject({
     node_id: safeId,
@@ -62,12 +76,7 @@ const failedNodeSchema = z
     timed_out: z.boolean(),
     failure_category: failureCategory.optional(),
     failure_code: failureCode.optional(),
-    failure_message: z
-      .string()
-      .min(1)
-      .max(MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES)
-      .refine((value) => Buffer.byteLength(value, "utf8") <= MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES)
-      .optional()
+    failure_message: boundedCodePointString(MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES).optional()
   })
   .refine((node) => node.timed_out === (node.status === "timed-out"), {
     message: "failed node timeout flag does not match its status"
@@ -95,11 +104,17 @@ const rowSchema = z.strictObject({
   workflow_terminal: z.boolean(),
   terminal_disposition: terminalDisposition,
   terminal_report_present: z.boolean(),
-  workflow_ids: z.array(workflowId).max(32),
-  diagnostic_codes: z.array(safeId).max(64),
-  failed_nodes: z.array(failedNodeSchema).max(MAX_PUBLIC_EVAL_FAILED_NODES_PER_ROW),
+  workflow_ids: z.array(workflowId).max(32).refine(hasUniqueJsonItems, "workflow IDs must be unique"),
+  diagnostic_codes: z.array(safeId).max(64).refine(hasUniqueJsonItems, "diagnostic codes must be unique"),
+  failed_nodes: z
+    .array(failedNodeSchema)
+    .max(MAX_PUBLIC_EVAL_FAILED_NODES_PER_ROW)
+    .refine(hasUniqueJsonItems, "failed node entries must be unique"),
   scoring_ready: z.boolean(),
-  reason_codes: z.array(reasonCode).max(reasonCode.options.length)
+  reason_codes: z
+    .array(reasonCode)
+    .max(reasonCode.options.length)
+    .refine(hasUniqueJsonItems, "reason codes must be unique")
 });
 
 const summarySchema = z.strictObject({
@@ -120,22 +135,22 @@ const diagnosticsShape = {
   benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
   lane: z.enum(["smoke", "full"]),
   model_slug: safeId,
-  model: z.string().min(1).max(256),
-  reasoning: z.string().min(1).max(64),
+  model: boundedCodePointString(256),
+  reasoning: boundedCodePointString(64),
   candidate_commit: z.string().regex(/^[0-9a-f]{40}$/u),
   eval_run_id: safeId,
   created_at: z.string().datetime({ offset: true }),
   lineage: lineageSchema,
   summary: summarySchema,
-  rows: z.array(rowSchema).min(1).max(MAX_ROWS)
+  rows: z.array(rowSchema).min(1).max(MAX_ROWS).refine(hasUniqueJsonItems, "diagnostic rows must be unique")
 } as const;
 
-const diagnosticsSchema = z.strictObject({
+export const publicEvalDiagnosticsZodSchema = z.strictObject({
   schema_version: z.literal(PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION),
   ...diagnosticsShape
 });
 
-export type PublicEvalDiagnostics = z.infer<typeof diagnosticsSchema>;
+export type PublicEvalDiagnostics = z.infer<typeof publicEvalDiagnosticsZodSchema>;
 export type PublicEvalDiagnosticsRow = z.infer<typeof rowSchema>;
 export type PublicEvalDiagnosticsReasonCode = z.infer<typeof reasonCode>;
 export type PublicEvalFailedNode = z.infer<typeof failedNodeSchema>;
@@ -144,43 +159,83 @@ export function comparePublicEvalDiagnosticIds(left: string, right: string): num
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+export interface PublicEvalDiagnosticsSemanticIssue {
+  path: string;
+  message: string;
+}
+
 export function parsePublicEvalDiagnostics(value: unknown): PublicEvalDiagnostics {
-  const parsed = diagnosticsSchema.parse(value);
+  const canonical = validateEvalJsonSchema(EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID, value);
+  if (!canonical.ok) {
+    const summary = canonical.issues
+      .slice(0, 8)
+      .map((issue) => `${issue.instancePath || "/"} ${issue.keyword}: ${issue.message}`)
+      .join("; ");
+    throw new Error(`public eval diagnostics failed canonical schema validation: ${summary}`);
+  }
+  const retained = publicEvalDiagnosticsZodSchema.safeParse(value);
+  if (!retained.success) {
+    throw new Error("canonical public eval diagnostics schema and retained Zod parser disagree");
+  }
+  const parsed = retained.data;
+  const semanticIssues = publicEvalDiagnosticsSemanticIssues(parsed);
+  if (semanticIssues.length > 0) {
+    const first = semanticIssues[0]!;
+    throw new Error(`public eval diagnostics failed ${first.path}: ${first.message}`);
+  }
+  return parsed;
+}
+
+export function publicEvalDiagnosticsSemanticIssues(
+  parsed: PublicEvalDiagnostics
+): PublicEvalDiagnosticsSemanticIssue[] {
+  const issues: PublicEvalDiagnosticsSemanticIssue[] = [];
   if (parsed.eval_run_id !== boundedEvalId([parsed.lineage.logical_run_id, parsed.model_slug], 128)) {
-    throw new Error("public eval diagnostics eval run does not match its lineage");
+    issues.push({ path: "$.eval_run_id", message: "must match the bounded lineage and model slug" });
   }
   const rowIds = new Set(parsed.rows.map((row) => row.row_id));
-  if (rowIds.size !== parsed.rows.length) throw new Error("public eval diagnostics contains duplicate rows");
-  for (const row of parsed.rows) {
-    if (
-      new Set(row.workflow_ids).size !== row.workflow_ids.length ||
-      new Set(row.diagnostic_codes).size !== row.diagnostic_codes.length ||
-      new Set(row.failed_nodes.map((node) => node.node_id)).size !== row.failed_nodes.length ||
-      new Set(row.reason_codes).size !== row.reason_codes.length
-    ) {
-      throw new Error(`public eval diagnostics row contains duplicate values: ${row.row_id}`);
+  if (rowIds.size !== parsed.rows.length) {
+    issues.push({ path: "$.rows", message: "row IDs must be unique" });
+  }
+  for (const [rowIndex, row] of parsed.rows.entries()) {
+    if (new Set(row.failed_nodes.map((node) => node.node_id)).size !== row.failed_nodes.length) {
+      issues.push({ path: `$.rows[${rowIndex}].failed_nodes`, message: "failed node IDs must be unique" });
     }
     const sortedFailedNodeIds = row.failed_nodes.map((node) => node.node_id).sort(comparePublicEvalDiagnosticIds);
     if (JSON.stringify(row.failed_nodes.map((node) => node.node_id)) !== JSON.stringify(sortedFailedNodeIds)) {
-      throw new Error(`public eval diagnostics row failed nodes are not deterministic: ${row.row_id}`);
+      issues.push({ path: `$.rows[${rowIndex}].failed_nodes`, message: "failed nodes must be sorted by node ID" });
+    }
+    for (const [nodeIndex, node] of row.failed_nodes.entries()) {
+      if (
+        node.failure_message !== undefined &&
+        Buffer.byteLength(node.failure_message, "utf8") > MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES
+      ) {
+        issues.push({
+          path: `$.rows[${rowIndex}].failed_nodes[${nodeIndex}].failure_message`,
+          message: `must not exceed ${MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES} UTF-8 bytes`
+        });
+      }
     }
     const expectedReasons = publicEvalDiagnosticsReadinessReasonCodes(row);
     if (
       JSON.stringify(row.reason_codes) !== JSON.stringify(expectedReasons) ||
       row.scoring_ready !== (expectedReasons.length === 0)
     ) {
-      throw new Error(`public eval diagnostics row readiness is inconsistent: ${row.row_id}`);
+      issues.push({
+        path: `$.rows[${rowIndex}].reason_codes`,
+        message: "row readiness is inconsistent with reason codes or row evidence"
+      });
     }
   }
   const expected = summarizePublicEvalDiagnosticsRows(parsed.rows);
   if (JSON.stringify(parsed.summary) !== JSON.stringify(expected)) {
-    throw new Error("public eval diagnostics summary is inconsistent");
+    issues.push({ path: "$.summary", message: "is inconsistent with the summary projected from rows" });
   }
   const serialized = JSON.stringify(parsed);
   if (Buffer.byteLength(serialized, "utf8") > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES) {
-    throw new Error("public eval diagnostics exceeds the size limit");
+    issues.push({ path: "$", message: `must not exceed ${MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES} UTF-8 bytes` });
   }
-  return parsed;
+  return issues;
 }
 
 // A zero-row set is never scoreable: an eval that planned nothing has nothing to

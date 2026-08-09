@@ -11,6 +11,7 @@ const sourceSchemaRoot = path.join(packageRoot, "schema");
 const distSchemaRoot = path.join(packageRoot, "dist", "schema");
 const registryModule = await import("../dist/eval-schema-registry.js");
 const semanticGateModule = await import("../dist/eval-semantic-gates.js");
+const zodModule = await import("../dist/index.js");
 
 const schemaFilenames = (directory) =>
   fs
@@ -42,6 +43,17 @@ assert.deepStrictEqual(
   exportedSchemaNames,
   "eval schema metadata must name every TypeScript schema export exactly once"
 );
+const metadataZodParsers = Object.values(registryModule.EVAL_SCHEMA_METADATA)
+  .flatMap((metadata) => (metadata.zodParser === undefined ? [] : [metadata.zodParser]))
+  .sort();
+assert.strictEqual(
+  new Set(metadataZodParsers).size,
+  metadataZodParsers.length,
+  "eval schema metadata must not reuse retained Zod parsers"
+);
+for (const parserName of metadataZodParsers) {
+  assert.strictEqual(typeof zodModule[parserName]?.safeParse, "function", `missing eval Zod parser ${parserName}`);
+}
 
 const evalRegistryIds = new Set(registry.map((entry) => entry.id));
 assert.strictEqual(evalRegistryIds.size, registry.length, "eval schema IDs must be unique");
@@ -75,6 +87,7 @@ for (const entry of registry) {
     metadata.typescriptExport,
     `${entry.filename} registry export differs from metadata`
   );
+  assert.strictEqual(entry.zodParser, metadata.zodParser, `${entry.filename} Zod parser metadata differs`);
   assert.deepStrictEqual(
     entry.semanticGates,
     metadata.semanticGates,

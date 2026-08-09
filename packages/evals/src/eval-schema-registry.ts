@@ -35,6 +35,7 @@ export const EVAL_FINDING_SCORE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:finding-
 export const EVAL_SCORE_SUMMARY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:score-summary:1" as const;
 export const EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID = "urn:ultrafuzz:schema:evals:review-queue-item:2" as const;
 export const EVAL_PUBLICATION_STATE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:publication-state:1" as const;
+export const EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:public-eval-diagnostics:2" as const;
 export const EVAL_TELEMETRY_CURSOR_SCHEMA_ID = "urn:ultrafuzz:schema:evals:telemetry-cursor:1" as const;
 
 const MAX_EVAL_SCHEMA_BYTES = 2 * 1024 * 1024;
@@ -42,6 +43,7 @@ const MAX_EVAL_SCHEMA_BYTES = 2 * 1024 * 1024;
 interface EvalSchemaMetadata {
   role: "runtime-state" | "subschema";
   typescriptExport: keyof typeof EVAL_SCHEMA_EXPORTS;
+  zodParser?: "evalSuiteInputSchema" | "publicEvalDiagnosticsZodSchema";
   semanticGates: readonly string[];
 }
 
@@ -86,6 +88,12 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
     typescriptExport: "evalPublicationStateJsonSchema",
     semanticGates: []
   },
+  "eval-public-diagnostics.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalPublicDiagnosticsJsonSchema",
+    zodParser: "publicEvalDiagnosticsZodSchema",
+    semanticGates: ["eval-public-diagnostics-consistency"]
+  },
   "eval-review-queue-item.schema.json": {
     role: "runtime-state",
     typescriptExport: "evalReviewQueueItemJsonSchema",
@@ -122,6 +130,7 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
   "eval-suite.schema.json": {
     role: "runtime-state",
     typescriptExport: "evalSuiteJsonSchema",
+    zodParser: "evalSuiteInputSchema",
     semanticGates: []
   },
   "finding-manifest.schema.json": {
@@ -179,6 +188,7 @@ export const evalFindingManifestJsonSchema = loadSchemaDocument("finding-manifes
 export const evalGroundTruthCreditsJsonSchema = loadSchemaDocument("ground-truth-credits.schema.json");
 export const evalInstanceClustersJsonSchema = loadSchemaDocument("instance-clusters.schema.json");
 export const evalMatrixJsonSchema = loadSchemaDocument("eval-matrix.schema.json");
+export const evalPublicDiagnosticsJsonSchema = loadSchemaDocument("eval-public-diagnostics.schema.json");
 export const evalPublicationStateJsonSchema = loadSchemaDocument("eval-publication-state.schema.json");
 export const evalReviewQueueItemJsonSchema = loadSchemaDocument("eval-review-queue-item.schema.json");
 export const evalRunManifestJsonSchema = loadSchemaDocument("eval-run-manifest.schema.json");
@@ -199,6 +209,7 @@ export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalGroundTruthCreditsJsonSchema,
   evalInstanceClustersJsonSchema,
   evalMatrixJsonSchema,
+  evalPublicDiagnosticsJsonSchema,
   evalPublicationStateJsonSchema,
   evalReviewQueueItemJsonSchema,
   evalRunManifestJsonSchema,
@@ -217,6 +228,7 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "eval-common.schema.json": evalCommonJsonSchema,
   "eval-finding-score.schema.json": evalFindingScoreJsonSchema,
   "eval-matrix.schema.json": evalMatrixJsonSchema,
+  "eval-public-diagnostics.schema.json": evalPublicDiagnosticsJsonSchema,
   "eval-publication-state.schema.json": evalPublicationStateJsonSchema,
   "eval-review-queue-item.schema.json": evalReviewQueueItemJsonSchema,
   "eval-run-manifest.schema.json": evalRunManifestJsonSchema,
@@ -287,7 +299,8 @@ export function evalSchemaRegistry(): readonly SchemaRegistryEntry[] {
         schema,
         localReferences: Object.freeze([...collectReferences(schema)].sort()),
         semanticGates: Object.freeze([...metadata.semanticGates]),
-        typescriptExport: metadata.typescriptExport
+        typescriptExport: metadata.typescriptExport,
+        ...(metadata.zodParser === undefined ? {} : { zodParser: metadata.zodParser })
       });
     })
   );
