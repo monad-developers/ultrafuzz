@@ -776,8 +776,19 @@ export function readPublicBenchmarkBundle(
     MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
     "public benchmark bundle exceeds the size limit"
   );
+  return parsePublicBenchmarkBundleBytes(contents, forbiddenSecretValues);
+}
+
+export function parsePublicBenchmarkBundleBytes(
+  contents: Uint8Array,
+  forbiddenSecretValues: readonly string[] = []
+): PublicBenchmarkBundle {
+  const bytes = Buffer.from(contents);
+  if (bytes.byteLength > MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES) {
+    throw new Error("public benchmark bundle exceeds the size limit");
+  }
   return parsePublicBenchmarkBundle(
-    parseBundleJson(contents, "public benchmark bundle", MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES),
+    parseBundleJson(bytes, "public benchmark bundle", MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES),
     forbiddenSecretValues
   );
 }

@@ -12,6 +12,7 @@ import {
   createPublicBenchmarkBundle,
   extractPublicBenchmarkBundle,
   parsePublicBenchmarkBundle,
+  parsePublicBenchmarkBundleBytes,
   readPublicBenchmarkBundle
 } from "../src/public-bundle.js";
 import { PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION } from "../src/public-eval-diagnostics.js";
@@ -122,6 +123,11 @@ describe("public Modal benchmark bundles", () => {
         files: bundle.files.map((file, index) => (index === 0 ? { ...file, path: "../eval.json" } : file))
       })
     ).toThrow();
+    const serialized = JSON.stringify(bundle);
+    const field = `"schema_version":"${PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION}"`;
+    const duplicate = serialized.replace(field, `${field},"schema_version":"shadow-version"`);
+    expect(duplicate).not.toBe(serialized);
+    expect(() => parsePublicBenchmarkBundleBytes(Buffer.from(duplicate, "utf8"))).toThrow(/strict JSON/u);
   });
 
   it("bounds encoded file payloads and rejects an oversized local bundle before reading it", () => {

@@ -111,7 +111,7 @@ import {
 } from "./layout.js";
 import {
   MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
-  parsePublicBenchmarkBundle,
+  parsePublicBenchmarkBundleBytes,
   type PublicBenchmarkBundle
 } from "./public-bundle.js";
 import {
@@ -2690,8 +2690,8 @@ export async function collectModalBenchmark(input: {
           const contents = files[MODAL_PUBLIC_RESULT_FILE];
           if (contents === undefined) throw new Error(`public benchmark result is not ready for ${launch.slug}`);
           if (configuredModel === undefined) throw new Error(`public benchmark config is missing ${launch.slug}`);
-          const bundle = parsePublicBenchmarkBundle(
-            JSON.parse(contents) as unknown,
+          const bundle = parsePublicBenchmarkBundleBytes(
+            Buffer.from(contents, "utf8"),
             await publicBenchmarkCollectionSecretValues(
               publicCollection!.config,
               configuredModel,
