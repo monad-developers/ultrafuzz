@@ -299,6 +299,7 @@ test("invariant evidence ledger rejects duplicate entries, duplicate inventory j
     ...structuredClone(base),
     entries: [],
     inventory_rows: [],
+    no_invariants_justification: "Searched the documented invariant surfaces and found no invariant statements.",
     scan_probes: [
       {
         id: "probe-docs-no-invariants",

@@ -1300,21 +1300,36 @@ function smithersPlannedDependencyJoinIssues(document: unknown, context: Semanti
 function workspacePatchPathIssues(document: unknown): SemanticGateIssue[] {
   const included = arrayAt(document, ["files"]);
   const excluded = arrayAt(document, ["excluded_files"]);
-  return projectedUniquenessIssues([
-    { items: included, path: "$.files", project: (row) => stringField(row, "path"), label: "workspace patch path" },
-    {
-      items: excluded,
-      path: "$.excluded_files",
-      project: (row) => stringField(row, "path"),
-      label: "excluded workspace patch path"
-    },
-    {
-      items: [...included, ...excluded],
-      path: "$",
-      project: (row) => stringField(row, "path"),
-      label: "included/excluded workspace patch path"
+  const issues: SemanticGateIssue[] = [];
+  const includedPaths = new Set<string>();
+  for (const [index, row] of included.entries()) {
+    const rowPath = stringField(row, "path");
+    if (rowPath === undefined) continue;
+    if (includedPaths.has(rowPath)) {
+      issues.push(issue(`$.files[${index}].path`, `Duplicate workspace patch path ${JSON.stringify(rowPath)}`));
     }
-  ]);
+    includedPaths.add(rowPath);
+  }
+  const excludedPaths = new Set<string>();
+  for (const [index, row] of excluded.entries()) {
+    const rowPath = stringField(row, "path");
+    if (rowPath === undefined) continue;
+    if (excludedPaths.has(rowPath)) {
+      issues.push(
+        issue(`$.excluded_files[${index}].path`, `Duplicate excluded workspace patch path ${JSON.stringify(rowPath)}`)
+      );
+    }
+    if (includedPaths.has(rowPath)) {
+      issues.push(
+        issue(
+          `$.excluded_files[${index}].path`,
+          `Workspace patch path is both included and excluded ${JSON.stringify(rowPath)}`
+        )
+      );
+    }
+    excludedPaths.add(rowPath);
+  }
+  return issues;
 }
 
 function resolveArtifactFile(rootDirectory: string, relativePath: string): string | undefined {

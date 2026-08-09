@@ -1,12 +1,45 @@
 import { z } from "zod/v4";
 
 import { validateWithZod, type SchemaValidationIssue, type SchemaValidationResult } from "./schema-validation.js";
+import { executeSemanticGates } from "./semantic-gates.js";
 
 export const INVARIANT_LEDGER_SCHEMA_VERSION = "ultrafuzz.invariant-evidence-ledger.v1" as const;
 
 const nonEmptyString = z.string().min(1);
 const stableId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
 const inventoryId = z.string().regex(/^inventory-[A-Za-z0-9._-]+$/u);
+const inventoryIds = z
+  .array(inventoryId)
+  .min(1)
+  .superRefine((values, context) => {
+    const seen = new Set<string>();
+    for (const [index, value] of values.entries()) {
+      if (seen.has(value)) {
+        context.addIssue({
+          code: "custom",
+          path: [index],
+          message: `Duplicate inventory ID ${JSON.stringify(value)} within ledger entry`
+        });
+      }
+      seen.add(value);
+    }
+  });
+const ledgerIds = z
+  .array(stableId)
+  .min(1)
+  .superRefine((values, context) => {
+    const seen = new Set<string>();
+    for (const [index, value] of values.entries()) {
+      if (seen.has(value)) {
+        context.addIssue({
+          code: "custom",
+          path: [index],
+          message: `Duplicate ledger ID ${JSON.stringify(value)} within inventory row`
+        });
+      }
+      seen.add(value);
+    }
+  });
 
 export const invariantLedgerEntrySchema = z.strictObject({
   id: stableId,
@@ -24,13 +57,13 @@ export const invariantLedgerEntrySchema = z.strictObject({
     "interest"
   ]),
   verbatim: nonEmptyString,
-  inventory_ids: z.array(inventoryId).min(1)
+  inventory_ids: inventoryIds
 });
 
 export const invariantInventoryRowSchema = z.strictObject({
   id: inventoryId,
   description: nonEmptyString,
-  ledger_ids: z.array(stableId).min(1)
+  ledger_ids: ledgerIds
 });
 
 export const invariantLedgerSchema = z
@@ -54,60 +87,36 @@ export const invariantLedgerSchema = z
       .optional()
   })
   .superRefine((artifact, context) => {
-    const ids = new Set<string>();
-    for (const [entryIndex, entry] of artifact.entries.entries()) {
-      if (ids.has(entry.id)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate ledger entry ID ${JSON.stringify(entry.id)}`,
-          path: ["entries", entryIndex, "id"]
-        });
-      }
-      ids.add(entry.id);
-      const entryInventoryIds = new Set<string>();
-      for (const [inventoryIndex, inventoryId] of entry.inventory_ids.entries()) {
-        if (entryInventoryIds.has(inventoryId)) {
-          context.addIssue({
-            code: "custom",
-            message: `Duplicate inventory ID ${JSON.stringify(inventoryId)} within ledger entry`,
-            path: ["entries", entryIndex, "inventory_ids", inventoryIndex]
-          });
-        }
-        entryInventoryIds.add(inventoryId);
-      }
+    if (artifact.inventory_rows === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "An invariant ledger must include inventory_rows",
+        path: ["inventory_rows"]
+      });
     }
-    const probeIds = new Set<string>();
-    for (const [probeIndex, probe] of (artifact.scan_probes ?? []).entries()) {
-      if (probeIds.has(probe.id)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate scan probe ID ${JSON.stringify(probe.id)}`,
-          path: ["scan_probes", probeIndex, "id"]
-        });
-      }
-      probeIds.add(probe.id);
+    if (artifact.scan_probes === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "An invariant ledger must include scan_probes",
+        path: ["scan_probes"]
+      });
     }
     if (artifact.entries.length === 0) {
-      if (artifact.inventory_rows === undefined) {
+      if (artifact.no_invariants_justification === undefined) {
         context.addIssue({
           code: "custom",
-          message: "An empty invariant ledger must include inventory_rows: []",
-          path: ["inventory_rows"]
+          message: "An empty invariant ledger must include no_invariants_justification",
+          path: ["no_invariants_justification"]
         });
-      } else if (artifact.inventory_rows.length > 0) {
+      }
+      if (artifact.inventory_rows !== undefined && artifact.inventory_rows.length > 0) {
         context.addIssue({
           code: "custom",
           message: "An empty invariant ledger must not include inventory rows",
           path: ["inventory_rows"]
         });
       }
-      if (artifact.scan_probes === undefined) {
-        context.addIssue({
-          code: "custom",
-          message: "An invariant ledger must include scan_probes",
-          path: ["scan_probes"]
-        });
-      } else if (artifact.scan_probes.length === 0) {
+      if (artifact.scan_probes !== undefined && artifact.scan_probes.length === 0) {
         context.addIssue({
           code: "custom",
           message: "An empty invariant ledger must include at least one scan probe",
@@ -123,87 +132,12 @@ export const invariantLedgerSchema = z
         path: ["no_invariants_justification"]
       });
     }
-    if (artifact.inventory_rows === undefined) {
+    if (artifact.inventory_rows !== undefined && artifact.inventory_rows.length === 0) {
       context.addIssue({
         code: "custom",
-        message: "A populated invariant ledger must include inventory_rows",
+        message: "A populated invariant ledger must include at least one inventory row",
         path: ["inventory_rows"]
       });
-      return;
-    }
-    if (artifact.scan_probes === undefined) {
-      context.addIssue({
-        code: "custom",
-        message: "A populated invariant ledger must include scan_probes",
-        path: ["scan_probes"]
-      });
-    }
-    const inventoryRowsValue = artifact.inventory_rows;
-    const inventoryRows = new Map<string, number>();
-    for (const [rowIndex, row] of inventoryRowsValue.entries()) {
-      if (inventoryRows.has(row.id)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate inventory row ID ${JSON.stringify(row.id)}`,
-          path: ["inventory_rows", rowIndex, "id"]
-        });
-      }
-      inventoryRows.set(row.id, rowIndex);
-    }
-    const referencedInventoryIds = new Set<string>();
-    const entryInventoryMap = new Map<string, Set<string>>();
-    for (const [entryIndex, entry] of artifact.entries.entries()) {
-      entryInventoryMap.set(entry.id, new Set(entry.inventory_ids));
-      for (const [inventoryIndex, inventoryIdValue] of entry.inventory_ids.entries()) {
-        referencedInventoryIds.add(inventoryIdValue);
-        const rowIndex = inventoryRows.get(inventoryIdValue);
-        if (rowIndex === undefined) {
-          context.addIssue({
-            code: "custom",
-            message: `Ledger entry references unknown inventory row ${JSON.stringify(inventoryIdValue)}`,
-            path: ["entries", entryIndex, "inventory_ids", inventoryIndex]
-          });
-        } else if (!inventoryRowsValue[rowIndex]!.ledger_ids.includes(entry.id)) {
-          context.addIssue({
-            code: "custom",
-            message: `Inventory row ${JSON.stringify(inventoryIdValue)} does not link back to ledger entry ${JSON.stringify(entry.id)}`,
-            path: ["entries", entryIndex, "inventory_ids", inventoryIndex]
-          });
-        }
-      }
-    }
-    for (const [rowIndex, row] of inventoryRowsValue.entries()) {
-      const rowLedgerIds = new Set<string>();
-      for (const [ledgerIndex, ledgerId] of row.ledger_ids.entries()) {
-        if (rowLedgerIds.has(ledgerId)) {
-          context.addIssue({
-            code: "custom",
-            message: `Duplicate ledger ID ${JSON.stringify(ledgerId)} within inventory row`,
-            path: ["inventory_rows", rowIndex, "ledger_ids", ledgerIndex]
-          });
-        }
-        rowLedgerIds.add(ledgerId);
-        if (!ids.has(ledgerId)) {
-          context.addIssue({
-            code: "custom",
-            message: `Inventory row references unknown ledger entry ${JSON.stringify(ledgerId)}`,
-            path: ["inventory_rows", rowIndex, "ledger_ids", ledgerIndex]
-          });
-        } else if (!entryInventoryMap.get(ledgerId)?.has(row.id)) {
-          context.addIssue({
-            code: "custom",
-            message: `Inventory row ${JSON.stringify(row.id)} does not link back to ledger entry ${JSON.stringify(ledgerId)}`,
-            path: ["inventory_rows", rowIndex, "ledger_ids", ledgerIndex]
-          });
-        }
-      }
-      if (!referencedInventoryIds.has(row.id)) {
-        context.addIssue({
-          code: "custom",
-          message: `Inventory row ${JSON.stringify(row.id)} is not referenced by a ledger entry`,
-          path: ["inventory_rows", rowIndex, "id"]
-        });
-      }
     }
   });
 
@@ -215,10 +149,58 @@ export function validateInvariantLedgerSchema(
   value: unknown,
   path = "$"
 ): SchemaValidationResult<InvariantLedgerArtifact> {
-  return validateWithZod(invariantLedgerSchema, value, {
+  const shape = validateWithZod(invariantLedgerSchema, value, {
     path,
     code: "INVARIANT_LEDGER_SCHEMA_INVALID"
   });
+  if (!shape.ok || shape.value === undefined) return shape;
+  const semantics = executeSemanticGates(
+    ["invariant-ledger-id-joins", "invariant-ledger-projected-id-uniqueness"] as const,
+    { document: shape.value }
+  );
+  const failures = semantics.filter((result) => result.status === "failed");
+  if (failures.length === 0) return shape;
+  return {
+    ok: false,
+    issues: failures.flatMap((failure) =>
+      failure.issues.map((semanticIssue) => ({
+        code: "INVARIANT_LEDGER_SCHEMA_INVALID",
+        message: publicInvariantLedgerSemanticMessage(semanticIssue.message),
+        path: prefixedSemanticPath(path, publicInvariantLedgerSemanticPath(semanticIssue.path, semanticIssue.message))
+      }))
+    )
+  };
+}
+
+function prefixedSemanticPath(rootPath: string, semanticPath: string): string {
+  return semanticPath === "$" ? rootPath : `${rootPath}${semanticPath.slice(1)}`;
+}
+
+function publicInvariantLedgerSemanticMessage(message: string): string {
+  if (message.startsWith("Duplicate invariant ledger entry ID ")) {
+    return message.replace("Duplicate invariant ledger entry ID ", "Duplicate ledger entry ID ");
+  }
+  if (message === "Inventory join is not bidirectional") {
+    return "Inventory row does not link back to ledger entry";
+  }
+  if (message === "Ledger join is not bidirectional") {
+    return "Inventory row does not link back to ledger entry";
+  }
+  if (message.startsWith("Unknown inventory row ")) {
+    return message.replace("Unknown inventory row ", "Ledger entry references unknown inventory row ");
+  }
+  if (message.startsWith("Unknown ledger entry ")) {
+    return message.replace("Unknown ledger entry ", "Inventory row references unknown ledger entry ");
+  }
+  return message;
+}
+
+function publicInvariantLedgerSemanticPath(semanticPath: string, message: string): string {
+  return message.startsWith("Duplicate invariant ledger entry ID ") ||
+    message.startsWith("Duplicate inventory row ID ") ||
+    message.startsWith("Duplicate scan probe ID ")
+    ? `${semanticPath}.id`
+    : semanticPath;
 }
 
 export function invariantLedgerSchemaIssues(value: unknown, path = "$"): SchemaValidationIssue[] {

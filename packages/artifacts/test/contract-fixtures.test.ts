@@ -11,15 +11,24 @@ import {
   ARTIFACT_SCHEMA_METADATA,
   JSON_ARTIFACT_CONTRACT_IDS,
   NON_JSON_ARTIFACT_CONTRACT_IDS,
+  analysisBundleManifestSchema,
   artifactContractDefinition,
   artifactContractSchemaFile,
   artifactSchemaRegistry,
   createInitialRunState,
+  executeSemanticGate,
+  invariantLedgerSchema,
+  invariantSourceProofSchema,
   isArtifactContractId,
   parseStrictJson,
+  validateAnalysisBundleManifestSchema,
   validateArtifactContract,
   validateArtifactContractBytes,
-  validateRegisteredJsonSchema
+  validateInvariantLedgerSchema,
+  validateInvariantSourceProofSchema,
+  validateRegisteredJsonSchema,
+  validateWorkspacePatchSchema,
+  workspacePatchSchema
 } from "../src/index.js";
 
 interface ContractFixture {
@@ -156,6 +165,239 @@ test("Ajv and every retained Zod parser agree bidirectionally on positive, negat
       }
     }
   }
+});
+
+test("projected uniqueness, joins, and ordering stay outside structural Zod while public validators run named gates", () => {
+  const analysisSchemaId = registeredSchemaId("analysis-bundle.schema.json");
+  const unsortedAnalysisManifest = {
+    schema_version: "ultrafuzz.analysis-bundle.v1",
+    policy_version: "ultrafuzz.analysis-bundle-policy.v1",
+    files: [
+      {
+        kind: "omissions",
+        path: "omissions.json",
+        media_type: "application/json",
+        size_bytes: 10,
+        sha256: "a".repeat(64)
+      },
+      {
+        kind: "terminal-status",
+        path: "data/terminal-status.json",
+        media_type: "application/json",
+        size_bytes: 20,
+        sha256: "b".repeat(64)
+      }
+    ]
+  };
+  assertParity(
+    analysisSchemaId,
+    analysisBundleManifestSchema,
+    unsortedAnalysisManifest,
+    true,
+    "analysis-bundle:semantic-order"
+  );
+  assert.equal(
+    executeSemanticGate("analysis-bundle-path-order", { document: unsortedAnalysisManifest }).status,
+    "failed"
+  );
+  assert.equal(validateAnalysisBundleManifestSchema(unsortedAnalysisManifest).ok, false);
+
+  const sourceProofSchemaId = registeredSchemaId("invariant-source-proof.schema.json");
+  const duplicateSourceProof = canonicalInvariantSourceProof();
+  duplicateSourceProof.files.push({ ...duplicateSourceProof.files[0]! });
+  assertParity(
+    sourceProofSchemaId,
+    invariantSourceProofSchema,
+    duplicateSourceProof,
+    true,
+    "invariant-source-proof:semantic-path-uniqueness"
+  );
+  assert.equal(
+    executeSemanticGate("invariant-source-proof-path-uniqueness", { document: duplicateSourceProof }).status,
+    "failed"
+  );
+  const sourceProofValidation = validateInvariantSourceProofSchema(duplicateSourceProof);
+  assert.equal(sourceProofValidation.ok, false);
+  assert.equal(sourceProofValidation.issues[0]?.path, "$.files[1].path");
+  assert.match(sourceProofValidation.issues[0]?.message ?? "", /Duplicate source proof path/u);
+
+  const workspacePatchSchemaId = registeredSchemaId("workspace-patch.schema.json");
+  const duplicateWorkspacePatch = canonicalWorkspacePatch();
+  duplicateWorkspacePatch.files.push({ ...duplicateWorkspacePatch.files[0]! });
+  assertParity(
+    workspacePatchSchemaId,
+    workspacePatchSchema,
+    duplicateWorkspacePatch,
+    true,
+    "workspace-patch:semantic-path-uniqueness"
+  );
+  assert.equal(
+    executeSemanticGate("workspace-patch-path-uniqueness", { document: duplicateWorkspacePatch }).status,
+    "failed"
+  );
+  const workspacePatchValidation = validateWorkspacePatchSchema(duplicateWorkspacePatch);
+  assert.equal(workspacePatchValidation.ok, false);
+  assert.equal(workspacePatchValidation.issues.length, 1);
+  assert.equal(workspacePatchValidation.issues[0]?.path, "$.files[1].path");
+
+  const overlappingWorkspacePatch = {
+    ...canonicalWorkspacePatch(),
+    excluded_files: [{ path: "foundry.toml", diff_bytes_at_least: 1, reason: "git-diff-overflow" as const }]
+  };
+  assertParity(
+    workspacePatchSchemaId,
+    workspacePatchSchema,
+    overlappingWorkspacePatch,
+    true,
+    "workspace-patch:semantic-included-excluded-disjointness"
+  );
+  assert.equal(
+    executeSemanticGate("workspace-patch-path-uniqueness", { document: overlappingWorkspacePatch }).status,
+    "failed"
+  );
+  const overlappingWorkspaceValidation = validateWorkspacePatchSchema(overlappingWorkspacePatch);
+  assert.equal(overlappingWorkspaceValidation.ok, false);
+  assert.equal(overlappingWorkspaceValidation.issues.length, 1);
+  assert.equal(overlappingWorkspaceValidation.issues[0]?.path, "$.excluded_files[0].path");
+  assert.match(overlappingWorkspaceValidation.issues[0]?.message ?? "", /both included and excluded/u);
+
+  const invariantLedgerSchemaId = registeredSchemaId("invariant-evidence-ledger.schema.json");
+  const duplicateLedgerId = canonicalInvariantLedger();
+  duplicateLedgerId.entries.push({ ...duplicateLedgerId.entries[0]! });
+  assertParity(
+    invariantLedgerSchemaId,
+    invariantLedgerSchema,
+    duplicateLedgerId,
+    true,
+    "invariant-ledger:semantic-projected-id-uniqueness"
+  );
+  assert.equal(
+    executeSemanticGate("invariant-ledger-projected-id-uniqueness", { document: duplicateLedgerId }).status,
+    "failed"
+  );
+  const duplicateLedgerValidation = validateInvariantLedgerSchema(duplicateLedgerId);
+  assert.equal(duplicateLedgerValidation.ok, false);
+  assert.equal(duplicateLedgerValidation.issues[0]?.path, "$.entries[1].id");
+  assert.match(duplicateLedgerValidation.issues[0]?.message ?? "", /Duplicate ledger entry ID/u);
+
+  const brokenLedgerJoin = canonicalInvariantLedger();
+  brokenLedgerJoin.entries[0]!.inventory_ids = ["inventory-unregistered"];
+  assertParity(
+    invariantLedgerSchemaId,
+    invariantLedgerSchema,
+    brokenLedgerJoin,
+    true,
+    "invariant-ledger:semantic-cross-array-join"
+  );
+  assert.equal(executeSemanticGate("invariant-ledger-id-joins", { document: brokenLedgerJoin }).status, "failed");
+  const brokenLedgerValidation = validateInvariantLedgerSchema(brokenLedgerJoin);
+  assert.equal(brokenLedgerValidation.ok, false);
+  assert.ok(brokenLedgerValidation.issues.some((issue) => /references unknown inventory row/u.test(issue.message)));
+});
+
+test("portable constraints remain identical in Ajv and the four retained structural Zod parsers", () => {
+  const analysisManifestWithoutOmissions = {
+    schema_version: "ultrafuzz.analysis-bundle.v1",
+    policy_version: "ultrafuzz.analysis-bundle-policy.v1",
+    files: [
+      {
+        kind: "terminal-status",
+        path: "data/terminal-status.json",
+        media_type: "application/json",
+        size_bytes: 20,
+        sha256: "a".repeat(64)
+      }
+    ]
+  };
+  assertParity(
+    registeredSchemaId("analysis-bundle.schema.json"),
+    analysisBundleManifestSchema,
+    analysisManifestWithoutOmissions,
+    false,
+    "analysis-bundle:required-kind"
+  );
+
+  const analysisManifestWithLargeJsonInteger = {
+    schema_version: "ultrafuzz.analysis-bundle.v1",
+    policy_version: "ultrafuzz.analysis-bundle-policy.v1",
+    files: [
+      {
+        kind: "omissions",
+        path: "omissions.json",
+        media_type: "application/json",
+        size_bytes: Number.MAX_SAFE_INTEGER + 1,
+        sha256: "a".repeat(64)
+      }
+    ]
+  };
+  assertParity(
+    registeredSchemaId("analysis-bundle.schema.json"),
+    analysisBundleManifestSchema,
+    analysisManifestWithLargeJsonInteger,
+    true,
+    "analysis-bundle:json-integer-range"
+  );
+
+  const analysisManifestWithDuplicateKind = structuredClone(analysisManifestWithLargeJsonInteger);
+  analysisManifestWithDuplicateKind.files.push({ ...analysisManifestWithDuplicateKind.files[0]! });
+  assertParity(
+    registeredSchemaId("analysis-bundle.schema.json"),
+    analysisBundleManifestSchema,
+    analysisManifestWithDuplicateKind,
+    false,
+    "analysis-bundle:portable-kind-cardinality"
+  );
+
+  const sourceProofWithTraversal = canonicalInvariantSourceProof();
+  sourceProofWithTraversal.files[0]!.path = "docs/../secret.txt";
+  assertParity(
+    registeredSchemaId("invariant-source-proof.schema.json"),
+    invariantSourceProofSchema,
+    sourceProofWithTraversal,
+    false,
+    "invariant-source-proof:path-shape"
+  );
+
+  const workspacePatchWithUnsafePath = canonicalWorkspacePatch();
+  workspacePatchWithUnsafePath.files[0]!.path = ".git/config";
+  assertParity(
+    registeredSchemaId("workspace-patch.schema.json"),
+    workspacePatchSchema,
+    workspacePatchWithUnsafePath,
+    false,
+    "workspace-patch:path-shape"
+  );
+
+  const invariantLedgerWithDuplicateScalar = canonicalInvariantLedger();
+  invariantLedgerWithDuplicateScalar.entries[0]!.inventory_ids = ["inventory-solvency", "inventory-solvency"];
+  assertParity(
+    registeredSchemaId("invariant-evidence-ledger.schema.json"),
+    invariantLedgerSchema,
+    invariantLedgerWithDuplicateScalar,
+    false,
+    "invariant-ledger:portable-unique-items"
+  );
+
+  const emptyInvariantLedgerWithoutJustification = {
+    schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+    entries: [],
+    inventory_rows: [],
+    scan_probes: [
+      {
+        id: "probe-docs",
+        source_path: "docs/overview.md",
+        query: "invariant",
+        result: "No invariant found"
+      }
+    ]
+  };
+  assertParity(
+    registeredSchemaId("invariant-evidence-ledger.schema.json"),
+    invariantLedgerSchema,
+    emptyInvariantLedgerWithoutJustification,
+    false,
+    "invariant-ledger:portable-empty-ledger-conditional"
+  );
 });
 
 test("Ajv and retained Zod parsers agree on canonical unique-array constraints", () => {
@@ -583,6 +825,58 @@ function duplicateObjectJson(value: Record<string, unknown>): string {
   assert.ok(key !== undefined);
   const serialized = JSON.stringify(value);
   return `{${JSON.stringify(key)}:${JSON.stringify(value[key])},${serialized.slice(1)}`;
+}
+
+function registeredSchemaId(filename: string): string {
+  const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === filename);
+  assert.ok(entry, `Missing registered schema ${filename}`);
+  return entry.id;
+}
+
+function canonicalInvariantSourceProof() {
+  return {
+    schema_version: "ultrafuzz.invariant-source-proof.v1" as const,
+    attempt_id: "project-discovery",
+    commit: "a".repeat(40),
+    tree: "b".repeat(40),
+    ledger_sha256: "c".repeat(64),
+    files: [{ path: "docs/overview.md", sha256: "d".repeat(64), content: "Invariant source text" }]
+  };
+}
+
+function canonicalWorkspacePatch() {
+  return {
+    schema_version: "ultrafuzz.workspace-patch.v1" as const,
+    base_commit: "a".repeat(40),
+    base_tree: "b".repeat(40),
+    result_tree: "c".repeat(40),
+    patch_sha256: "d".repeat(64),
+    files: [{ path: "foundry.toml" }]
+  };
+}
+
+function canonicalInvariantLedger() {
+  return {
+    schema_version: "ultrafuzz.invariant-evidence-ledger.v1" as const,
+    entries: [
+      {
+        id: "evidence-1",
+        source_path: "docs/overview.md",
+        source_location: "line 10",
+        kind: "invariant" as const,
+        verbatim: "Assets remain solvent",
+        inventory_ids: ["inventory-solvency"]
+      }
+    ],
+    inventory_rows: [
+      {
+        id: "inventory-solvency",
+        description: "Solvency invariant",
+        ledger_ids: ["evidence-1"]
+      }
+    ],
+    scan_probes: []
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

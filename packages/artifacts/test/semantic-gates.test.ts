@@ -634,6 +634,32 @@ test("every document-local gate has a passing and failing non-mutating fixture",
   }
 });
 
+test("workspace patch path gate reports exact nonduplicated field diagnostics", () => {
+  const cases = [
+    {
+      document: { files: [{ path: "a" }, { path: "a" }], excluded_files: [] },
+      issue: { path: "$.files[1].path", message: 'Duplicate workspace patch path "a"' }
+    },
+    {
+      document: { files: [{ path: "a" }], excluded_files: [{ path: "b" }, { path: "b" }] },
+      issue: { path: "$.excluded_files[1].path", message: 'Duplicate excluded workspace patch path "b"' }
+    },
+    {
+      document: { files: [{ path: "a" }], excluded_files: [{ path: "a" }] },
+      issue: {
+        path: "$.excluded_files[0].path",
+        message: 'Workspace patch path is both included and excluded "a"'
+      }
+    }
+  ];
+
+  for (const fixture of cases) {
+    const result = executeSemanticGate("workspace-patch-path-uniqueness", { document: fixture.document });
+    assert.equal(result.status, "failed");
+    assert.deepEqual(result.status === "failed" ? result.issues : [], [fixture.issue]);
+  }
+});
+
 test("canonical finding span semantics run for every embedding schema", () => {
   const cases = [
     {

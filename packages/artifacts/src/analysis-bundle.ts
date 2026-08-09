@@ -7,6 +7,7 @@ import { z } from "zod/v4";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 import { readRegularFileSnapshot } from "./schema-registry.js";
 import { assertRegularFileInside, listSafeFiles, safeResolveInside, sha256Bytes, sha256File } from "./safe-paths.js";
+import { executeSemanticGate } from "./semantic-gates.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
 export const ANALYSIS_BUNDLE_SCHEMA_VERSION = "ultrafuzz.analysis-bundle.v1" as const;
@@ -63,7 +64,7 @@ const ATTEMPT_WORKFLOW_STATUS_VALUES = [
   "unknown"
 ] as const;
 
-const nonNegativeInteger = z.number().int().nonnegative();
+const nonNegativeInteger = z.number().nonnegative().refine(Number.isInteger, { message: "Expected an integer" });
 const nonNegativeNumber = z.number().finite().nonnegative();
 const unitMetric = z.number().finite().min(0).max(1);
 const isoTimestamp = z.string().datetime({ offset: true });
@@ -359,26 +360,23 @@ export const analysisBundleManifestSchema = z
   .strictObject({
     schema_version: z.literal(ANALYSIS_BUNDLE_SCHEMA_VERSION),
     policy_version: z.literal(ANALYSIS_BUNDLE_POLICY_VERSION),
-    files: z.array(manifestEntrySchema)
+    files: z.array(manifestEntrySchema).min(1).max(6)
   })
-  .superRefine((value, ctx) => {
-    if (!isSorted(value.files.map((entry) => entry.path))) {
-      ctx.addIssue({ code: "custom", path: ["files"], message: "must be sorted by path" });
-    }
+  .superRefine((value, context) => {
     const seenKinds = new Set<AnalysisBundleFileKind>();
     const seenPaths = new Set<string>();
     for (const [index, entry] of value.files.entries()) {
       if (seenKinds.has(entry.kind)) {
-        ctx.addIssue({ code: "custom", path: ["files", index, "kind"], message: "must be unique" });
+        context.addIssue({ code: "custom", path: ["files", index, "kind"], message: "must be unique" });
       }
       if (seenPaths.has(entry.path)) {
-        ctx.addIssue({ code: "custom", path: ["files", index, "path"], message: "must be unique" });
+        context.addIssue({ code: "custom", path: ["files", index, "path"], message: "must be unique" });
       }
       seenKinds.add(entry.kind);
       seenPaths.add(entry.path);
     }
     if (!seenKinds.has("omissions")) {
-      ctx.addIssue({ code: "custom", path: ["files"], message: "must include the omission manifest" });
+      context.addIssue({ code: "custom", path: ["files"], message: "must include the omission manifest" });
     }
   });
 
@@ -690,9 +688,20 @@ export function validateAnalysisBundle(bundleRoot: string): AnalysisBundleManife
 }
 
 export function validateAnalysisBundleManifestSchema(value: unknown): SchemaValidationResult<AnalysisBundleManifest> {
-  return validateWithZod(analysisBundleManifestSchema, value, {
+  const shape = validateWithZod(analysisBundleManifestSchema, value, {
     code: "ANALYSIS_BUNDLE_MANIFEST_SCHEMA_INVALID"
   });
+  if (!shape.ok || shape.value === undefined) return shape;
+  const semantics = executeSemanticGate("analysis-bundle-path-order", { document: shape.value });
+  if (semantics.status !== "failed") return shape;
+  return {
+    ok: false,
+    issues: semantics.issues.map((semanticIssue) => ({
+      code: "ANALYSIS_BUNDLE_MANIFEST_SCHEMA_INVALID",
+      path: semanticIssue.path,
+      message: semanticIssue.message
+    }))
+  };
 }
 
 export function assertAnalysisBundleManifest(value: unknown): AnalysisBundleManifest {
