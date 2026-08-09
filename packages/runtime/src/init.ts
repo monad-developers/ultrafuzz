@@ -515,12 +515,11 @@ function writeProjectFileNoFollow(
         : fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW ?? 0);
     fileDescriptor = fs.openSync(accessPath, flags, 0o666);
     const opened = fs.fstatSync(fileDescriptor, { bigint: true });
-    if (
-      !opened.isFile() ||
-      opened.nlink !== 1n ||
-      opened.dev !== directory.dev ||
-      (expected !== undefined && !sameStableInitFile(opened, expected))
-    ) {
+    // Modal's virtual filesystem can report one device for an opened
+    // directory and another for stable children created through that dirfd.
+    // The child is authenticated against its lexical dev/ino below; requiring
+    // it to share the parent's device rejects that valid, still-anchored shape.
+    if (!opened.isFile() || opened.nlink !== 1n || (expected !== undefined && !sameStableInitFile(opened, expected))) {
       throw new Error("generated project file changed while it was opened");
     }
     const lexicalBeforeWrite = fs.lstatSync(filePath, { bigint: true });
@@ -1005,8 +1004,7 @@ function publishAgentAdapterAtomically(
       !openedDirectory.isDirectory() ||
       !lexicalDirectory.isDirectory() ||
       openedDirectory.dev !== lexicalDirectory.dev ||
-      openedDirectory.ino !== lexicalDirectory.ino ||
-      openedDirectory.dev !== original.dev
+      openedDirectory.ino !== lexicalDirectory.ino
     ) {
       throw new Error("generated agent adapter directory changed before atomic publication");
     }
@@ -1020,11 +1018,14 @@ function publishAgentAdapterAtomically(
       Number(original.mode & 0o7777n)
     );
     temporaryIdentity = fs.fstatSync(temporaryDescriptor, { bigint: true });
+    // Publication uses hard links and renames between sibling files. Require
+    // every sidecar to share the target file's device, which is the relevant
+    // cross-device boundary even when the parent directory reports another.
     if (
       !temporaryIdentity.isFile() ||
       temporaryIdentity.nlink !== 1n ||
       temporaryIdentity.size !== 0n ||
-      temporaryIdentity.dev !== openedDirectory.dev ||
+      temporaryIdentity.dev !== original.dev ||
       temporaryIdentity.uid !== original.uid ||
       temporaryIdentity.gid !== original.gid
     ) {
@@ -1036,7 +1037,7 @@ function publishAgentAdapterAtomically(
       !temporaryIdentity.isFile() ||
       temporaryIdentity.nlink !== 1n ||
       temporaryIdentity.size !== 0n ||
-      temporaryIdentity.dev !== openedDirectory.dev ||
+      temporaryIdentity.dev !== original.dev ||
       temporaryIdentity.mode !== original.mode ||
       temporaryIdentity.uid !== original.uid ||
       temporaryIdentity.gid !== original.gid
@@ -1061,7 +1062,7 @@ function publishAgentAdapterAtomically(
       !displacementIdentity.isFile() ||
       displacementIdentity.nlink !== 1n ||
       displacementIdentity.size !== 0n ||
-      displacementIdentity.dev !== openedDirectory.dev
+      displacementIdentity.dev !== original.dev
     ) {
       throw new Error("generated agent adapter displacement reservation is unsafe");
     }
@@ -1089,7 +1090,7 @@ function publishAgentAdapterAtomically(
       !recoveryMarkerIdentity.isFile() ||
       recoveryMarkerIdentity.nlink !== 1n ||
       recoveryMarkerIdentity.size > 4096n ||
-      recoveryMarkerIdentity.dev !== openedDirectory.dev
+      recoveryMarkerIdentity.dev !== original.dev
     ) {
       throw new Error("generated agent adapter recovery marker is unsafe");
     }

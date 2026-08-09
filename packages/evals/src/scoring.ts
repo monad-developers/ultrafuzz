@@ -2,7 +2,6 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { assertRegularFileInside, validateArtifactContract } from "@ultrafuzz/artifacts";
-import { parse } from "yaml";
 import { z } from "zod/v4";
 
 import { summarizeEvalTerminal } from "./efficiency.js";
@@ -16,6 +15,12 @@ import {
 import { runIndependentJudgePanel } from "./evaluator/judge-panel.js";
 import { boundedResponseText } from "./reporters/http.js";
 import { buildEvalSummaryProvenance } from "./lineage.js";
+import {
+  assertGroundTruthSubject,
+  readGroundTruthDocument,
+  type GroundTruthDocument,
+  type GroundTruthSubject
+} from "./ground-truth.js";
 import {
   classifyRecoveryEquivalence,
   reconcileEvalRunRecords,
@@ -56,29 +61,8 @@ import {
 
 const DEFAULT_EVAL_JUDGE_ENDPOINT = "https://gateway.braintrust.dev/v1/chat/completions";
 const PRIVATE_DATA_JUDGE_ACK = "ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA";
-const MAX_GROUND_TRUTH_BYTES = 1024 * 1024;
 const LLM_JUDGE_MAX_ATTEMPTS = 3;
 const MIN_CONCRETE_EVIDENCE_TEXT_LENGTH = 8;
-
-const groundTruthBugSchema = z.looseObject({
-  id: z.string().min(1),
-  title: z.string().min(1).optional(),
-  severity: z.string().min(1).optional(),
-  root_cause: z.string().min(1).optional(),
-  root_cause_keywords: z.array(z.string().min(1)).optional(),
-  affected_files: z.array(z.string().min(1)).optional(),
-  affected_functions: z.array(z.string().min(1)).optional(),
-  impact: z.string().min(1).optional(),
-  impact_keywords: z.array(z.string().min(1)).optional(),
-  evidence: z.union([z.string().min(1), z.array(z.string().min(1))]).optional(),
-  evidence_keywords: z.array(z.string().min(1)).optional(),
-  keywords: z.array(z.string().min(1)).optional()
-});
-
-const groundTruthSchema = z.union([
-  z.array(groundTruthBugSchema),
-  z.looseObject({ bugs: z.array(groundTruthBugSchema) })
-]);
 
 const llmJudgeSchema = z.looseObject({
   matched_ground_truth_bug_id: z.string().min(1).nullable().optional(),
@@ -115,6 +99,8 @@ export interface ScoreFindingsAgainstGroundTruthInput {
   row: EvalMatrixRow;
   findings: unknown[];
   bugs: GroundTruthBug[];
+  /** Validated document metadata for callers that score an in-memory report. */
+  groundTruthSubject?: GroundTruthSubject;
   matchMode?: "report" | "candidate";
   reportPath?: string;
   reportSchemaValid?: boolean;
@@ -360,6 +346,7 @@ export async function scoreFindingsAgainstGroundTruth(input: ScoreFindingsAgains
     reportPath: input.reportPath ?? "inline-findings",
     findings: input.findings,
     bugs: input.bugs,
+    groundTruthSubject: input.groundTruthSubject,
     reportSchemaValid: input.reportSchemaValid ?? true,
     matchMode: input.matchMode ?? "report",
     llmJudge: resolveJudge(input.llmJudge, input.env)
@@ -652,7 +639,19 @@ async function scoreRow(input: {
   findingScores: EvalFindingScore[];
   reviewQueue: HumanReviewQueueItem[];
 }> {
-  const bugs = loadGroundTruth(input.row.target.ground_truth_path, input.suite.ground_truth_root);
+  const groundTruth = loadGroundTruthDocument(
+    input.row.target.ground_truth_path,
+    input.suite.ground_truth_root,
+    input.row.target.sensitivity === "private"
+  );
+  const bugs = groundTruth.bugs;
+  const groundTruthSubject =
+    input.row.target.sensitivity === "private"
+      ? assertGroundTruthSubject(groundTruth.subject, {
+          repository: input.row.target.repo,
+          revision: input.row.target.ref
+        })
+      : groundTruth.subject;
   const report = readReport(input.reportPath);
   return scoreFindings({
     suite: input.suite,
@@ -661,6 +660,7 @@ async function scoreRow(input: {
     reportPath: input.reportPath,
     findings: report.findings,
     bugs,
+    groundTruthSubject,
     reportSchemaValid: report.schemaValid,
     matchMode: "report",
     llmJudge: input.llmJudge
@@ -674,6 +674,7 @@ async function scoreFindings(input: {
   reportPath: string;
   findings: unknown[];
   bugs: GroundTruthBug[];
+  groundTruthSubject?: GroundTruthSubject;
   reportSchemaValid: boolean;
   matchMode: "report" | "candidate";
   llmJudge?: FindingJudge;
@@ -682,6 +683,19 @@ async function scoreFindings(input: {
   findingScores: EvalFindingScore[];
   reviewQueue: HumanReviewQueueItem[];
 }> {
+  if (input.row.target.sensitivity === "private" && input.groundTruthSubject === undefined) {
+    throw new EvalError(
+      "EVAL_GROUND_TRUTH_SUBJECT_MISSING",
+      "private in-memory scoring requires a validated ground-truth subject binding",
+      { target: input.row.target_id }
+    );
+  }
+  if (input.row.target.sensitivity === "private" && input.groundTruthSubject !== undefined) {
+    assertGroundTruthSubject(input.groundTruthSubject, {
+      repository: input.row.target.repo,
+      revision: input.row.target.ref
+    });
+  }
   const judgePanel = resolveJudgePanelConfig(input.suite.judge_panel);
   const matches: EvalFindingScore[] = [];
   const reviewQueue: HumanReviewQueueItem[] = [];
@@ -1155,6 +1169,14 @@ function candidateMatchScore(signals: FindingMatchSignalScores): number {
 }
 
 export function loadGroundTruth(filePath: string, groundTruthRoot: string | undefined): GroundTruthBug[] {
+  return loadGroundTruthDocument(filePath, groundTruthRoot).bugs;
+}
+
+function loadGroundTruthDocument(
+  filePath: string,
+  groundTruthRoot: string | undefined,
+  requireSubject = false
+): GroundTruthDocument {
   if (groundTruthRoot === undefined) {
     throw new EvalError("EVAL_GROUND_TRUTH_ROOT_REQUIRED", "ground truth root is required when scoring", {
       path: filePath
@@ -1171,23 +1193,7 @@ export function loadGroundTruth(filePath: string, groundTruthRoot: string | unde
       reason: error instanceof Error ? error.message : String(error)
     });
   }
-  const sizeBytes = fs.statSync(filePath).size;
-  if (sizeBytes > MAX_GROUND_TRUTH_BYTES) {
-    throw new EvalError("EVAL_GROUND_TRUTH_TOO_LARGE", `ground truth file exceeds ${MAX_GROUND_TRUTH_BYTES} bytes`, {
-      path: filePath,
-      sizeBytes,
-      maxBytes: MAX_GROUND_TRUTH_BYTES
-    });
-  }
-  const parsed = parse(fs.readFileSync(filePath, "utf8"));
-  const result = groundTruthSchema.safeParse(parsed);
-  if (!result.success) {
-    throw new EvalError("EVAL_GROUND_TRUTH_INVALID", `ground truth file is invalid: ${filePath}`, {
-      path: filePath,
-      issues: result.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
-    });
-  }
-  return (Array.isArray(result.data) ? result.data : result.data.bugs) as GroundTruthBug[];
+  return readGroundTruthDocument(filePath, { requireSubject });
 }
 
 function readReport(filePath: string): { schemaValid: boolean; findings: unknown[] } {

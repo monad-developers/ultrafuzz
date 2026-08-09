@@ -333,18 +333,23 @@ export function appendLineDurable(filePath: string, line: string, trustedRoot?: 
     fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW,
     0o600
   );
-  try {
+  runWithClosedDescriptor(fd, `failed to durably append ${filePath} and close its descriptor`, () => {
     if (!fs.fstatSync(fd).isFile()) {
       throw new ArtifactPathError("not-file", `append path must be a regular file: ${filePath}`);
     }
     if (trustedRoot !== undefined) {
       assertNoSymlinkComponents(trustedRoot, filePath, "append path");
     }
-    fs.writeSync(fd, line.endsWith("\n") ? line : `${line}\n`);
+    const bytes = Buffer.from(line.endsWith("\n") ? line : `${line}\n`, "utf8");
+    const written = fs.writeSync(fd, bytes);
+    if (written !== bytes.length) {
+      throw new ArtifactPathError(
+        "short-write",
+        `durable append wrote ${written} of ${bytes.length} bytes: ${filePath}`
+      );
+    }
     fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
+  });
   fsyncDirectory(directory);
 }
 
@@ -572,15 +577,58 @@ function isUnsupportedHardLinkError(error: unknown): boolean {
   );
 }
 
+function isUnsupportedDirectoryFsyncError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    // POSIX reports EINVAL when the descriptor's object cannot be synchronized;
+    // some filesystems expose the equivalent unsupported-operation codes.
+    ["EINVAL", "ENOTSUP", "EOPNOTSUPP"].includes(String(error.code))
+  );
+}
+
 function fsyncDirectory(directory: string): void {
+  let fd: number;
   try {
-    const fd = fs.openSync(directory, "r");
-    try {
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
+    fd = fs.openSync(directory, "r");
+  } catch (error) {
+    if (isUnsupportedDirectoryFsyncError(error)) return;
+    throw error;
+  }
+
+  runWithClosedDescriptor(
+    fd,
+    `failed to fsync ${directory} and close its descriptor`,
+    () => fs.fsyncSync(fd),
+    isUnsupportedDirectoryFsyncError
+  );
+}
+
+function runWithClosedDescriptor(
+  fd: number,
+  aggregateMessage: string,
+  operation: () => void,
+  ignoreOperationError: (error: unknown) => boolean = () => false
+): void {
+  let operationFailed = false;
+  let operationError: unknown;
+  try {
+    operation();
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
+  }
+
+  try {
+    fs.closeSync(fd);
+  } catch (closeError) {
+    if (operationFailed) {
+      throw new AggregateError([operationError, closeError], aggregateMessage, { cause: closeError });
     }
-  } catch {
-    // Directory fsync is best effort on filesystems that do not expose it.
+    throw closeError;
+  }
+
+  if (operationFailed && !ignoreOperationError(operationError)) {
+    throw operationError;
   }
 }

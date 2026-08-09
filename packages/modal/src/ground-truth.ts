@@ -1,3 +1,5 @@
+import type { GroundTruthSubject } from "@ultrafuzz/evals";
+
 export interface ModalGroundTruthBug {
   id: string;
   title: string;
@@ -8,8 +10,9 @@ const ISSUE_HEADING = /\[([A-Za-z][A-Za-z0-9_-]*-\d{1,4})\](?:\s*[-–—:]\s*|\
 
 export function convertAuditMarkdownGroundTruth(
   markdown: string,
-  expectedFindings?: number
-): { bugs: ModalGroundTruthBug[] } {
+  expectedFindings?: number,
+  subject?: GroundTruthSubject
+): { bugs: ModalGroundTruthBug[]; schema_version?: "ultrafuzz.eval-ground-truth.v1"; subject?: GroundTruthSubject } {
   const bugs = new Map<string, ModalGroundTruthBug>();
   for (const line of markdown.split(/\r?\n/u)) {
     const match = ISSUE_HEADING.exec(line);
@@ -27,7 +30,10 @@ export function convertAuditMarkdownGroundTruth(
     throw new Error(`expected ${expectedFindings} ground-truth findings, found ${bugs.size}`);
   }
   if (bugs.size === 0) throw new Error("audit Markdown did not contain any issue headings");
-  return { bugs: [...bugs.values()] };
+  return {
+    ...(subject === undefined ? {} : { schema_version: "ultrafuzz.eval-ground-truth.v1" as const, subject }),
+    bugs: [...bugs.values()]
+  };
 }
 
 function cleanMarkdownTitle(value: string): string {

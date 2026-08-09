@@ -63,6 +63,11 @@ function isSafeWorkspacePatchPath(value: string): boolean {
 }
 
 export const workspacePatchFileSchema = z.strictObject({ path: workspacePatchPath });
+export const workspacePatchExcludedFileSchema = z.strictObject({
+  path: workspacePatchPath,
+  diff_bytes_at_least: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  reason: z.literal("git-diff-overflow")
+});
 export const workspacePatchSchema = z
   .strictObject({
     schema_version: z.literal(WORKSPACE_PATCH_SCHEMA_VERSION),
@@ -70,7 +75,8 @@ export const workspacePatchSchema = z
     base_tree: gitObjectId,
     result_tree: gitObjectId,
     patch_sha256: sha256,
-    files: z.array(workspacePatchFileSchema)
+    files: z.array(workspacePatchFileSchema),
+    excluded_files: z.array(workspacePatchExcludedFileSchema).min(1).optional()
   })
   .superRefine((manifest, context) => {
     const seen = new Set<string>();
@@ -83,6 +89,24 @@ export const workspacePatchSchema = z
         });
       }
       seen.add(entry.path);
+    }
+    const excluded = new Set<string>();
+    for (const [index, entry] of (manifest.excluded_files ?? []).entries()) {
+      if (excluded.has(entry.path)) {
+        context.addIssue({
+          code: "custom",
+          message: `Duplicate excluded workspace patch path ${JSON.stringify(entry.path)}`,
+          path: ["excluded_files", index, "path"]
+        });
+      }
+      if (seen.has(entry.path)) {
+        context.addIssue({
+          code: "custom",
+          message: `Workspace patch path is both included and excluded ${JSON.stringify(entry.path)}`,
+          path: ["excluded_files", index, "path"]
+        });
+      }
+      excluded.add(entry.path);
     }
   });
 
@@ -111,6 +135,33 @@ export const workspacePatchJsonSchema = {
     base_tree: { type: "string", pattern: "^[0-9a-f]{40,64}$" },
     result_tree: { type: "string", pattern: "^[0-9a-f]{40,64}$" },
     patch_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+    excluded_files: {
+      type: "array",
+      minItems: 1,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["path", "diff_bytes_at_least", "reason"],
+        properties: {
+          path: {
+            type: "string",
+            minLength: 1,
+            pattern: "^[A-Za-z0-9._-]{1,128}(?:/[A-Za-z0-9._-]{1,128})*$",
+            allOf: [
+              { not: { pattern: "^/" } },
+              { not: { pattern: "^[A-Za-z]:" } },
+              { not: { pattern: "(^|/)\\.(?:/|$)" } },
+              { not: { pattern: "(^|/)\\.\\.(?:/|$)" } },
+              { not: { pattern: "(^|/)(?:\\.git|\\.ultrafuzz|\\.smithers|node_modules|artifacts)(?:/|$)" } },
+              { not: { pattern: "(^|/)\\.env(?:\\.|/|$)" } },
+              { not: { pattern: "(^|/)(?:\\.envrc|\\.npmrc)(?:/|$)" } }
+            ]
+          },
+          diff_bytes_at_least: { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+          reason: { const: "git-diff-overflow" }
+        }
+      }
+    },
     files: {
       type: "array",
       items: {

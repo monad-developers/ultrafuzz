@@ -114,6 +114,32 @@ Use this configured invariant testing fuzzer timeout:
      originating backend and raw record reference on every pre-deduplication
      failure and preserve all contributing backend provenance on the final
      deduplicated finding.
+   - On every property-derived finding, put the exact failures it deduplicates
+     in a non-empty top-level `contributing_backend_failures` array. Across all
+     property-derived findings, these arrays must partition every
+     property-derived failure from the sibling backend result records exactly
+     once: do not omit a failure or claim it in more than one finding. For the
+     shipped single-backend campaign, use each failure's exact `id` string. In
+     a project-owned multi-backend campaign, a plain ID is valid only when it is
+     unique across every sibling result record; otherwise use
+     `{"fuzzer_backend":"<backend>","failure_id":"<id>"}` to disambiguate it.
+   - Put `deduplication.pre_dedup_count` on every property-derived finding and
+     set it to the number of entries in that finding's
+     `contributing_backend_failures`. Every contributed failure's
+     `property_ids` must be a subset of the finding's `property_ids`, and the
+     finding's `property_ids` must be the exact union across those contributed
+     failures. Never borrow a property from a failure assigned to another
+     finding.
+   - Put backend provenance directly on every backend-derived object in
+     `findings.json`. Use the top-level string `fuzzer_backend` when exactly one
+     sibling result record contributed, or omit it and use a top-level unique,
+     lexicographically sorted `fuzzer_backends` array when several result
+     records contributed to the same deduplicated finding. Never emit both
+     fields. Copy each value exactly from the contributing result record's
+     `fuzzer_backend`; for this shipped single-backend campaign the value is
+     `"recon"`. Omit both fields when no backend contributed. Nested detail such
+     as `backend_provenance` may supplement these join fields but does not
+     replace them.
    - When an implemented invariant property caused a failure, copy its exact
      canonical ID from `implemented-properties.json` into a non-empty
      `property_ids` array on that backend failure. Omit `property_ids` for
@@ -156,8 +182,17 @@ Use this configured invariant testing fuzzer timeout:
      budget can be checked against the campaign that actually ran.
    - In the campaign summary, record the outcome, shared implemented
      property-suite references, campaign-plan reference, the backend result
-     reference and status, pre- and post-deduplication failure counts, final
-     finding references, and reproducer or reproduction-blocker references.
+     reference and status, final finding references, and reproducer or
+     reproduction-blocker references. Put the failure counts under exactly
+     `failure_counts.pre_deduplication` and
+     `failure_counts.post_deduplication`. `pre_deduplication` is the total
+     number of entries across every sibling backend record's `failures` array,
+     including failures without `property_ids`; `post_deduplication` is the
+     total number of objects in `findings.json`, including non-property
+     findings. These are artifact-population accounting counts. They make
+     omissions visible but do not prove that every finding is a distinct root
+     cause. The `contributing_backend_failures` arrays provide the separately
+     validated deduplication partition.
 
 ## Required Outputs
 
@@ -168,6 +203,22 @@ Write the campaign plan to:
 Write the backend-neutral structured summary to:
 
 {{artifact_dir}}/campaign-summary.json
+
+Include this exact failure-count object in the summary, using the populations
+defined above:
+
+```json
+{
+  "failure_counts": {
+    "pre_deduplication": 29,
+    "post_deduplication": 2
+  }
+}
+```
+
+The numbers above illustrate the shape only. Replace both with counts computed
+from this run's sibling backend records and `findings.json`; never copy the
+example values.
 
 Write the backend-neutral campaign report to:
 
@@ -215,6 +266,22 @@ Write structured findings to:
 The findings file must be a JSON array. Use an empty array only when the
 backend record is finalized and the campaign observed no fuzzer failures or
 deterministic reproducers.
+
+Every property-derived finding must include this accounting shape (the values
+below are illustrative):
+
+```json
+{
+  "id": "failure-1",
+  "property_ids": ["property-1"],
+  "contributing_backend_failures": ["failure-1", "failure-2"],
+  "deduplication": {
+    "pre_dedup_count": 2
+  }
+}
+```
+
+Compute the array and count from this run. Do not copy the example values.
 
 If you changed files in the isolated workspace, save a patch at:
 

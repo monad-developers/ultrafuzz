@@ -17,6 +17,7 @@ import {
 import { validateThreatModel } from "./threat-model.js";
 
 export const ARTIFACT_CONTRACT_IDS = [
+  "ultrafuzz/campaign-summary@1",
   "ultrafuzz/findings@1",
   "ultrafuzz/generated-tests@1",
   "ultrafuzz/goal-plan@1",
@@ -141,13 +142,25 @@ const terminalReportSchema = z.looseObject({
   property_provenance: z.union([z.literal("unavailable"), reportPropertyProvenanceSchema]).optional(),
   property_implementation_coverage: propertyImplementationCoverageSchema.optional()
 });
+const campaignSummarySchema = z.looseObject({
+  failure_counts: z.looseObject({
+    pre_deduplication: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    post_deduplication: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
+  })
+});
 
 const definitions = defineContracts([
+  {
+    id: "ultrafuzz/campaign-summary@1",
+    format: "json",
+    description:
+      "A current invariant campaign summary. failure_counts.pre_deduplication must count every sibling backend failure and failure_counts.post_deduplication must count every sibling finding. This contract also marks current campaign plans whose property-derived findings must carry the explicit contributing_backend_failures deduplication partition."
+  },
   {
     id: "ultrafuzz/findings@1",
     format: "json",
     description:
-      'A JSON array of findings. Every entry must satisfy the Ultrafuzz finding schema, including id, title, status, severity_guess, confidence, and summary. schema_version is optional; when present it must be the literal "1.0" or the alias "ultrafuzz.finding.v1". A populated entry looks like {"id":"finding-0","title":"...","status":"candidate","severity_guess":"medium","confidence":"low","summary":"..."}.',
+      'A JSON array of findings. Every entry must satisfy the Ultrafuzz finding schema, including id, title, status, severity_guess, confidence, and summary. Every finding, including one that is or may become a non-production record, must set severity_guess to exactly "High", "Medium", or "Low"; do not emit lowercase or any other severity vocabulary. schema_version is optional; when present it must be the literal "1.0" or the alias "ultrafuzz.finding.v1". A populated entry looks like {"id":"finding-0","title":"...","status":"candidate","severity_guess":"Medium","confidence":"low","summary":"..."}.',
     validEmptyExample: "[]"
   },
   {
@@ -322,6 +335,20 @@ export function validateArtifactContract(
     return isRecord(parsed)
       ? { ok: true, issues: [], value: parsed }
       : failure("ARTIFACT_JSON_OBJECT_REQUIRED", "Artifact must be a JSON object", artifactPath);
+  }
+  if (contract === "ultrafuzz/campaign-summary@1") {
+    const result = campaignSummarySchema.safeParse(parsed);
+    if (!result.success) {
+      return {
+        ok: false,
+        issues: expandSchemaIssues(result.error.issues).map((issue) => ({
+          code: "CAMPAIGN_SUMMARY_SCHEMA_INVALID",
+          message: issue.message,
+          path: `${artifactPath}#${issue.path.join(".")}`
+        }))
+      };
+    }
+    return { ok: true, issues: [], value: result.data };
   }
   if (contract === "ultrafuzz/findings@1") {
     const result = validateFindingsSchema(parsed, artifactPath);

@@ -1079,6 +1079,87 @@ const V0_0_2_STOCK_CODEX_ADAPTER = [
   ""
 ].join("\n");
 
+test(
+  "init supports Modal-style directory and child device splits without weakening file identity checks",
+  { concurrency: false, skip: process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
+  () => {
+    const fstatDescriptor = Object.getOwnPropertyDescriptor(fs, "fstatSync")!;
+    const lstatDescriptor = Object.getOwnPropertyDescriptor(fs, "lstatSync")!;
+    const statDescriptor = Object.getOwnPropertyDescriptor(fs, "statSync")!;
+    const originalFstatSync = fs.fstatSync;
+    const originalLstatSync = fs.lstatSync;
+    const originalStatSync = fs.statSync;
+    let mismatchedPath: string | undefined;
+    let mismatchInjected = false;
+
+    const modalizeDirectoryDevice = <T extends fs.Stats | fs.BigIntStats | undefined>(value: T): T => {
+      if (value !== undefined && value.isDirectory()) {
+        if (typeof value.dev === "bigint") (value as fs.BigIntStats).dev += 1_000_000n;
+        else (value as fs.Stats).dev += 1_000_000;
+      }
+      return value;
+    };
+
+    Object.defineProperty(fs, "fstatSync", {
+      ...fstatDescriptor,
+      value: (...args: unknown[]) => {
+        const result = modalizeDirectoryDevice(Reflect.apply(originalFstatSync, fs, args) as fs.Stats | fs.BigIntStats);
+        if (mismatchedPath !== undefined && !result.isDirectory()) {
+          try {
+            if (fs.readlinkSync(`/proc/self/fd/${String(args[0])}`) === mismatchedPath) {
+              const mutable = result as fs.BigIntStats;
+              mutable.ino += 1n;
+              mismatchInjected = true;
+            }
+          } catch {
+            // Let the real descriptor operation determine invalid-fd behavior.
+          }
+        }
+        return result;
+      }
+    });
+    Object.defineProperty(fs, "lstatSync", {
+      ...lstatDescriptor,
+      value: (...args: unknown[]) =>
+        modalizeDirectoryDevice(Reflect.apply(originalLstatSync, fs, args) as fs.Stats | fs.BigIntStats | undefined)
+    });
+    Object.defineProperty(fs, "statSync", {
+      ...statDescriptor,
+      value: (...args: unknown[]) =>
+        modalizeDirectoryDevice(Reflect.apply(originalStatSync, fs, args) as fs.Stats | fs.BigIntStats | undefined)
+    });
+
+    try {
+      const project = tempProject();
+      const initialized = initProject({ projectRoot: project, force: true });
+      assert.equal(initialized.ok, true, JSON.stringify(initialized.diagnostics));
+      assert.notEqual(
+        fs.lstatSync(project, { bigint: true }).dev,
+        fs.lstatSync(path.join(project, "ultrafuzz.toml"), { bigint: true }).dev
+      );
+
+      const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+      fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+      const upgraded = initProject({ projectRoot: project });
+      assert.equal(upgraded.ok, true, JSON.stringify(upgraded.diagnostics));
+      assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+
+      const attackedProject = tempProject();
+      mismatchedPath = path.join(attackedProject, "ultrafuzz.toml");
+      fs.writeFileSync(mismatchedPath, "# must remain intact\n", "utf8");
+      const rejected = initProject({ projectRoot: attackedProject, force: true });
+      assert.equal(mismatchInjected, true);
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.diagnostics[0]?.code, "INIT_PATH_UNSAFE");
+      assert.equal(fs.readFileSync(mismatchedPath, "utf8"), "# must remain intact\n");
+    } finally {
+      Object.defineProperty(fs, "fstatSync", fstatDescriptor);
+      Object.defineProperty(fs, "lstatSync", lstatDescriptor);
+      Object.defineProperty(fs, "statSync", statDescriptor);
+    }
+  }
+);
+
 test("init preserves existing project-owned files and validate exposes launch posture", async () => {
   const project = tempProject();
   fs.writeFileSync(path.join(project, "ultrafuzz.toml"), "# custom\n", "utf8");
@@ -1228,6 +1309,15 @@ test("non-force init upgrades an exact historical stock agent adapter and is ide
   assert.match(upgradedSource, /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
   assert.match(upgradedSource, /workflowControlChildEnvironment/u);
   assert.equal(fs.existsSync(environmentPath), true);
+  const recreatedEnvironmentSource = fs.readFileSync(environmentPath, "utf8");
+  for (const name of [
+    "ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR",
+    "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT",
+    "ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR",
+    "ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT"
+  ]) {
+    assert.match(recreatedEnvironmentSource, new RegExp(`"${name}"`, "u"));
+  }
 
   const repeated = initProject({ projectRoot: project });
   assert.equal(repeated.ok, true, JSON.stringify(repeated.diagnostics));
@@ -1976,16 +2066,35 @@ test(
     const source = {
       ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: persistedWorkflow,
       ULTRAFUZZ_CONFIG_PATH: configPath,
+      ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR: "3",
+      ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT: snapshotRoot,
+      ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR: "17",
+      ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT: `/proc/${process.pid}/fd/17`,
       MY_ALIAS: aliasedControlPath
     };
     const { createCodexAgent, workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
     const sanitized = workflowControlChildEnvironment(
-      { CODEX_API_KEY: aliasedControlPath, REAL_API_KEY: "real-key" },
+      {
+        CODEX_API_KEY: aliasedControlPath,
+        REAL_API_KEY: "real-key",
+        ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR: "3",
+        ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT: snapshotRoot,
+        ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR: "19",
+        ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT: `/proc/${process.pid}/fd/19`
+      },
       source
     );
     assert.equal(sanitized.CODEX_API_KEY, "");
     assert.equal(sanitized.MY_ALIAS, "");
     assert.equal(sanitized.REAL_API_KEY, "real-key");
+    for (const name of [
+      "ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR",
+      "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT",
+      "ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR",
+      "ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT"
+    ]) {
+      assert.equal(sanitized[name], "", `${name} escaped into a model child environment`);
+    }
 
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
@@ -3498,7 +3607,13 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   const plan = await planRun({ projectRoot: project, runId: "planned-run", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.equal(fs.existsSync(path.join(plan.value!.run_root, "plan.json")), true);
-  assert.equal(fs.existsSync(path.join(plan.value!.run_root, "artifacts/project-discovery/prompt.rendered.md")), true);
+  const renderedPromptPath = path.join(plan.value!.run_root, "artifacts/project-discovery/prompt.rendered.md");
+  assert.equal(fs.existsSync(renderedPromptPath), true);
+  const renderedPrompt = fs.readFileSync(renderedPromptPath, "utf8");
+  assert.match(renderedPrompt, /severity_guess to exactly "High", "Medium", or "Low"/u);
+  assert.match(renderedPrompt, /including one that is or may become a non-production record/u);
+  assert.match(renderedPrompt, /"severity_guess":"Medium"/u);
+  assert.doesNotMatch(renderedPrompt, /"severity_guess":"medium"/u);
   const persistedPlan = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "plan.json"), "utf8")) as {
     execution?: { mode?: string; retentionDays?: number };
     rendered_prompts: Array<{ rendered_prompt_snapshot_path?: string }>;
@@ -4671,7 +4786,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /function artifactAwareAgent/);
   assert.match(
     workflowSource,
-    /const result = await agent\.generate\(args\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\);/
+    /const result = await agent\.generate\(attemptArgs\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\);/
   );
   assert.match(workflowSource, /materializeMissingMarkdownArtifacts\(task, result\)/);
   assert.match(workflowSource, /normalizeLegacyFindingFields\(task\)/);
@@ -6009,6 +6124,666 @@ test("startRun patches every described runner compatibility workaround", async (
     );
   }
 });
+
+test(
+  "the patched runner admits engine and supervisor process-owned execution snapshot descriptors",
+  { skip: process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
+  async () => {
+    const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+    const descriptorPatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "process_snapshot_anchor");
+    const supervisorPatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "supervisor_descriptor");
+    assert.ok(descriptorPatch, "the process snapshot anchor compatibility patch is missing");
+    assert.ok(supervisorPatch, "the supervisor descriptor compatibility patch is missing");
+
+    const root = tempProject();
+    const controlsDirectory = path.join(root, "controls");
+    const workflowDirectory = path.join(root, ".smithers", "workflows");
+    const configPath = path.join(controlsDirectory, "ultrafuzz.toml");
+    const workflowPath = path.join(workflowDirectory, "detached-anchor.tsx");
+    const scriptPath = path.join(root, "descriptor-chain.mjs");
+    const logPath = path.join(root, "detached.log");
+    const readyPath = path.join(root, "detached-ready.json");
+    const engineReadyPath = path.join(root, "engine-ready.json");
+    const supervisorReadyPath = path.join(root, "supervisor-ready.json");
+    const goPath = path.join(root, "controller-descriptor-reused");
+    const engineResultPath = path.join(root, "engine-result.json");
+    const supervisorResultPath = path.join(root, "supervisor-result.json");
+    const replacementPath = path.join(root, "replacement.txt");
+    fs.mkdirSync(controlsDirectory, { recursive: true });
+    fs.mkdirSync(workflowDirectory, { recursive: true });
+    fs.writeFileSync(configPath, "sealed-config\n", "utf8");
+    fs.writeFileSync(workflowPath, "sealed-workflow\n", "utf8");
+    fs.writeFileSync(replacementPath, "not-a-directory\n", "utf8");
+    fs.writeFileSync(
+      scriptPath,
+      `import { spawn } from "node:child_process";
+import crypto from "node:crypto";
+import { closeSync, existsSync, openSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, relative, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+function detachedAdmissionMarker(nonce) {
+  return "SMITHERS_DETACHED_ADMISSION=run:" + nonce;
+}
+
+async function waitForDetachedAdmission({ child, logFile, nonce, timeoutMs }) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const tail = existsSync(logFile) ? readFileSync(logFile, "utf8") : "";
+    if (tail.includes(detachedAdmissionMarker(nonce))) return { admitted: true, tail };
+    if (child.exitCode !== null || child.signalCode !== null) {
+      return { admitted: false, reason: "supervisor exited before snapshot admission", tail };
+    }
+    if (Date.now() >= deadline) {
+      return { admitted: false, reason: "supervisor snapshot admission timed out", tail };
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+}
+
+function terminateUnadmittedChild(child) {
+  try { child.kill("SIGKILL"); } catch {}
+}
+
+${descriptorPatch.patched}
+
+const sleepArray = new Int32Array(new SharedArrayBuffer(4));
+const sleep = (milliseconds) => Atomics.wait(sleepArray, 0, 0, milliseconds);
+
+async function launchSupervisor(child, logFile, workflowArgument) {
+  const cliPath = process.argv[1];
+  const supervisorArgs = [cliPath, "supervisor", workflowArgument];
+  let supervisorPid;
+  const fail = (failure) => ({ failure });
+${supervisorPatch.patched}
+  return { supervisorPid };
+}
+
+const phase = process.argv[2];
+const workflowArgument = process.argv[3];
+if (phase === "parent") {
+  process.env.UFZ_DESCRIPTOR_PARENT_PID = String(process.pid);
+  const child = spawn(process.execPath, [process.argv[1], "engine", workflowArgument], {
+    detached: true,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+    }
+  });
+  child.unref();
+  let deadline = Date.now() + 5_000;
+  while (!existsSync(process.env.UFZ_DESCRIPTOR_ENGINE_READY_PATH) && Date.now() < deadline) sleep(10);
+  if (!existsSync(process.env.UFZ_DESCRIPTOR_ENGINE_READY_PATH)) process.exit(81);
+
+  const supervisorLaunch = await launchSupervisor(child, process.env.UFZ_DESCRIPTOR_LOG_PATH, workflowArgument);
+  if (supervisorLaunch.failure || supervisorLaunch.supervisorPid === undefined) process.exit(82);
+  deadline = Date.now() + 5_000;
+  while (!existsSync(process.env.UFZ_DESCRIPTOR_SUPERVISOR_READY_PATH) && Date.now() < deadline) sleep(10);
+  if (!existsSync(process.env.UFZ_DESCRIPTOR_SUPERVISOR_READY_PATH)) process.exit(83);
+  writeFileSync(
+    process.env.UFZ_DESCRIPTOR_READY_PATH,
+    JSON.stringify({
+      launcher_pid: process.pid,
+      engine: JSON.parse(readFileSync(process.env.UFZ_DESCRIPTOR_ENGINE_READY_PATH, "utf8")),
+      supervisor: JSON.parse(readFileSync(process.env.UFZ_DESCRIPTOR_SUPERVISOR_READY_PATH, "utf8"))
+    })
+  );
+  process.exit(0);
+}
+
+if (phase === "engine" || phase === "supervisor") {
+  const readyPath = phase === "engine"
+    ? process.env.UFZ_DESCRIPTOR_ENGINE_READY_PATH
+    : process.env.UFZ_DESCRIPTOR_SUPERVISOR_READY_PATH;
+  const resultPath = phase === "engine"
+    ? process.env.UFZ_DESCRIPTOR_ENGINE_RESULT_PATH
+    : process.env.UFZ_DESCRIPTOR_SUPERVISOR_RESULT_PATH;
+  writeFileSync(
+    readyPath,
+    JSON.stringify({
+      pid: process.pid,
+      config_path: process.env.ULTRAFUZZ_CONFIG_PATH,
+      workflow_path: workflowArgument
+    })
+  );
+  const parentPid = Number(process.env.UFZ_DESCRIPTOR_PARENT_PID);
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    let parentAlive = true;
+    try { process.kill(parentPid, 0); } catch { parentAlive = false; }
+    if (!parentAlive && existsSync(process.env.UFZ_DESCRIPTOR_GO_PATH)) break;
+    if (Date.now() >= deadline) {
+      writeFileSync(resultPath, JSON.stringify({ error: "handoff-timeout" }));
+      process.exit(84);
+    }
+    sleep(10);
+  }
+  try {
+    writeFileSync(
+      resultPath,
+      JSON.stringify({
+        phase,
+        pid: process.pid,
+        config_path: process.env.ULTRAFUZZ_CONFIG_PATH,
+        workflow_path: workflowArgument,
+        config: readFileSync(process.env.ULTRAFUZZ_CONFIG_PATH, "utf8"),
+        workflow: readFileSync(workflowArgument, "utf8")
+      })
+    );
+  } catch (error) {
+    writeFileSync(
+      resultPath,
+      JSON.stringify({ error: error instanceof Error ? error.message : String(error) })
+    );
+    process.exit(85);
+  }
+}
+`,
+      "utf8"
+    );
+
+    const sourceDescriptor = fs.openSync(
+      root,
+      fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0)
+    );
+    let replacementDescriptor: number | undefined;
+    const detachedPids: number[] = [];
+    try {
+      const controllerRoot = `/proc/${process.pid}/fd/${sourceDescriptor}`;
+      const parent = spawnSync(
+        process.execPath,
+        [scriptPath, "parent", path.join(controllerRoot, ".smithers", "workflows", path.basename(workflowPath))],
+        {
+          cwd: root,
+          encoding: "utf8",
+          timeout: 10_000,
+          env: {
+            ...process.env,
+            ULTRAFUZZ_CONFIG_PATH: path.join(controllerRoot, "controls", "ultrafuzz.toml"),
+            ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: workflowPath,
+            UFZ_DESCRIPTOR_LOG_PATH: logPath,
+            UFZ_DESCRIPTOR_READY_PATH: readyPath,
+            UFZ_DESCRIPTOR_ENGINE_READY_PATH: engineReadyPath,
+            UFZ_DESCRIPTOR_SUPERVISOR_READY_PATH: supervisorReadyPath,
+            UFZ_DESCRIPTOR_GO_PATH: goPath,
+            UFZ_DESCRIPTOR_ENGINE_RESULT_PATH: engineResultPath,
+            UFZ_DESCRIPTOR_SUPERVISOR_RESULT_PATH: supervisorResultPath
+          }
+        }
+      );
+      assert.equal(parent.status, 0, parent.stderr);
+      const ready = JSON.parse(fs.readFileSync(readyPath, "utf8")) as {
+        launcher_pid?: number;
+        engine?: { pid?: number; config_path?: string; workflow_path?: string };
+        supervisor?: { pid?: number; config_path?: string; workflow_path?: string };
+      };
+      for (const processReady of [ready.engine, ready.supervisor]) {
+        assert.equal(typeof processReady?.pid, "number");
+        detachedPids.push(processReady!.pid!);
+        assert.match(
+          processReady?.config_path ?? "",
+          new RegExp(`^/proc/${processReady!.pid}/fd/\\d+/controls/ultrafuzz\\.toml$`, "u")
+        );
+        assert.match(
+          processReady?.workflow_path ?? "",
+          new RegExp(`^/proc/${processReady!.pid}/fd/\\d+/.smithers/workflows/`, "u")
+        );
+        assert.doesNotMatch(
+          processReady?.config_path ?? "",
+          new RegExp(`^/proc/${process.pid}/fd/${sourceDescriptor}/`, "u")
+        );
+        assert.doesNotMatch(processReady?.config_path ?? "", new RegExp(`^/proc/${ready.launcher_pid}/fd/`, "u"));
+      }
+      assert.notEqual(ready.engine?.pid, ready.supervisor?.pid);
+
+      fs.closeSync(sourceDescriptor);
+      replacementDescriptor = fs.openSync(replacementPath, fs.constants.O_RDONLY);
+      assert.equal(replacementDescriptor, sourceDescriptor, "the controller descriptor was not reused by the fixture");
+      fs.writeFileSync(goPath, "go\n", "utf8");
+
+      const deadline = Date.now() + 5_000;
+      while ((!fs.existsSync(engineResultPath) || !fs.existsSync(supervisorResultPath)) && Date.now() < deadline) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+      }
+      for (const resultPath of [engineResultPath, supervisorResultPath]) {
+        assert.equal(fs.existsSync(resultPath), true, `${path.basename(resultPath)} was not published`);
+        const result = JSON.parse(fs.readFileSync(resultPath, "utf8")) as {
+          error?: string;
+          config?: string;
+          workflow?: string;
+        };
+        assert.equal(result.error, undefined);
+        assert.equal(result.config, "sealed-config\n");
+        assert.equal(result.workflow, "sealed-workflow\n");
+      }
+    } finally {
+      if (replacementDescriptor !== undefined) fs.closeSync(replacementDescriptor);
+      else {
+        try {
+          fs.closeSync(sourceDescriptor);
+        } catch {
+          // The descriptor was already closed before a later assertion failed.
+        }
+      }
+      for (const detachedPid of detachedPids) {
+        try {
+          process.kill(detachedPid, "SIGKILL");
+        } catch {
+          // The detached fixture normally exits before cleanup.
+        }
+      }
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+);
+
+test(
+  "fixed fd transfer survives launcher and supervisor reuse before stable-path resumes start",
+  { skip: process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
+  async () => {
+    const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+    const descriptorPatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "process_snapshot_anchor");
+    const detachedTransferPatch = SMITHERS_COMPATIBILITY_PATCHES.find(
+      (patch) => patch.id === "detached_snapshot_transfer"
+    );
+    const supervisorPatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "supervisor_descriptor");
+    const resumeTransferPatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "resume_snapshot_transfer");
+    assert.ok(descriptorPatch);
+    assert.ok(detachedTransferPatch);
+    assert.ok(supervisorPatch);
+    assert.ok(resumeTransferPatch);
+
+    const root = tempProject();
+    const coordinationRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-snapshot-transfer-"));
+    const workflowPath = path.join(root, ".smithers", "workflows", "fd-transfer.tsx");
+    const configPath = path.join(root, "controls", "ultrafuzz.toml");
+    const scriptPath = path.join(root, "descriptor-generations.mjs");
+    const logPath = path.join(coordinationRoot, "detached.log");
+    const launcherRecordPath = path.join(coordinationRoot, "launcher.json");
+    const supervisorRecordPath = path.join(coordinationRoot, "supervisor.json");
+    const resumeLaunchPath = path.join(coordinationRoot, "resume-launch.json");
+    const engineResultPath = path.join(coordinationRoot, "engine.json");
+    const loggedResumeResultPath = path.join(coordinationRoot, "resume-logged.json");
+    const ignoredResumeResultPath = path.join(coordinationRoot, "resume-ignored.json");
+    const goPath = path.join(coordinationRoot, "go");
+    const replacementPath = path.join(coordinationRoot, "replacement.txt");
+    fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(workflowPath, "sealed-workflow\n", "utf8");
+    fs.writeFileSync(configPath, "sealed-config\n", "utf8");
+    fs.writeFileSync(replacementPath, "regular-file-replacement\n", "utf8");
+    fs.writeFileSync(
+      scriptPath,
+      `import { spawn } from "node:child_process";
+import { closeSync, existsSync, openSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, relative, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+${descriptorPatch.patched}
+
+const DETACHED_RUN_LOG_FILE_ENV = "SMITHERS_DETACHED_RUN_LOG_FILE";
+const DETACHED_ADMISSION_NONCE_ENV = "SMITHERS_DETACHED_ADMISSION_NONCE";
+const sleepArray = new Int32Array(new SharedArrayBuffer(4));
+const sleep = (milliseconds) => Atomics.wait(sleepArray, 0, 0, milliseconds);
+
+function evidence(workflowArgument) {
+  return {
+    pid: process.pid,
+    parent_pid: process.ppid,
+    process_descriptor: Number(process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR),
+    process_root: process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT,
+    persisted_root: process.env.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT,
+    inherited_descriptor_present: Object.prototype.hasOwnProperty.call(
+      process.env,
+      "ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"
+    ),
+    config_path: process.env.ULTRAFUZZ_CONFIG_PATH,
+    workflow_path: workflowArgument,
+    monitor_suppressed: process.env.SMITHERS_MONITOR_SUPPRESS,
+    autopsy_suppressed: process.env.SMITHERS_POST_FAILURE
+  };
+}
+
+function closeAndReuseProcessDescriptor() {
+  const descriptor = Number(process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR);
+  if (!Number.isSafeInteger(descriptor) || descriptor < 0) throw new Error("missing process descriptor");
+  closeSync(descriptor);
+  const replacements = [];
+  for (let index = 0; index < 256; index += 1) {
+    const replacement = openSync(process.env.UFZ_REPLACEMENT_PATH, "r");
+    replacements.push(replacement);
+    if (replacement === descriptor) return descriptor;
+    if (replacement > descriptor) break;
+  }
+  throw new Error("could not reuse process descriptor " + descriptor);
+}
+
+function launchEngine(workflowArgument) {
+  const cliPath = process.argv[1];
+  const childArgs = ["engine", workflowArgument];
+  const admissionNonce = "fixture-engine";
+  const logFile = process.env.UFZ_LOG_PATH;
+  const fd = openSync(logFile, "a");
+  let child;
+  try {
+${detachedTransferPatch.patched}
+  } finally {
+    closeSync(fd);
+  }
+  child.unref();
+  return child.pid;
+}
+
+function launchSupervisor() {
+  const supervisorArgs = [process.argv[1], "supervisor"];
+  const logFile = process.env.UFZ_LOG_PATH;
+  let supervisorPid;
+${supervisorPatch.patched}
+  return supervisorPid;
+}
+
+function launchResume(phase, withLog) {
+  const stableRoot = process.env.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT;
+  const args = [resolve(stableRoot, "descriptor-generations.mjs"), phase, process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH];
+  const cwd = process.cwd();
+  const logFd = withLog ? openSync(process.env.UFZ_LOG_PATH, "a") : null;
+  try {
+${resumeTransferPatch.patched}
+    child.unref();
+    return { pid: child.pid, args };
+  } finally {
+    if (logFd !== null) closeSync(logFd);
+  }
+}
+
+const phase = process.argv[2];
+const workflowArgument = process.argv[3];
+if (phase === "probe-anchor") {
+  process.stdout.write(JSON.stringify(evidence(workflowArgument)));
+  process.exit(0);
+}
+
+if (phase === "reject-partial-engine") {
+  delete process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT;
+  try {
+    launchEngine(workflowArgument);
+  } catch (error) {
+    process.stdout.write(error instanceof Error ? error.message : String(error));
+    process.exit(0);
+  }
+  process.exit(90);
+}
+
+if (phase === "reject-malformed-supervisor") {
+  process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR = "   ";
+  try {
+    launchSupervisor();
+  } catch (error) {
+    process.stdout.write(error instanceof Error ? error.message : String(error));
+    process.exit(0);
+  }
+  process.exit(91);
+}
+
+if (phase === "reject-partial-resume") {
+  delete process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR;
+  try {
+    launchResume("resume-ignored", false);
+  } catch (error) {
+    process.stdout.write(error instanceof Error ? error.message : String(error));
+    process.exit(0);
+  }
+  process.exit(92);
+}
+
+if (phase === "launcher") {
+  process.env.UFZ_PARENT_PID = String(process.pid);
+  const ownEvidence = evidence(workflowArgument);
+  const enginePid = launchEngine(workflowArgument);
+  const supervisorPid = launchSupervisor();
+  const reusedDescriptor = closeAndReuseProcessDescriptor();
+  writeFileSync(
+    process.env.UFZ_LAUNCHER_RECORD_PATH,
+    JSON.stringify({ ...ownEvidence, engine_pid: enginePid, supervisor_pid: supervisorPid, reused_descriptor: reusedDescriptor })
+  );
+  process.exit(0);
+}
+
+if (phase === "supervisor") {
+  process.env.UFZ_PARENT_PID = String(process.pid);
+  const ownEvidence = evidence(undefined);
+  const logged = launchResume("resume-logged", true);
+  const ignored = launchResume("resume-ignored", false);
+  writeFileSync(process.env.UFZ_RESUME_LAUNCH_PATH, JSON.stringify({ logged: logged.args, ignored: ignored.args }));
+  const reusedDescriptor = closeAndReuseProcessDescriptor();
+  writeFileSync(
+    process.env.UFZ_SUPERVISOR_RECORD_PATH,
+    JSON.stringify({ ...ownEvidence, logged_pid: logged.pid, ignored_pid: ignored.pid, reused_descriptor: reusedDescriptor })
+  );
+  process.exit(0);
+}
+
+if (phase === "engine" || phase === "resume-logged" || phase === "resume-ignored") {
+  const resultPath = phase === "engine"
+    ? process.env.UFZ_ENGINE_RESULT_PATH
+    : phase === "resume-logged"
+      ? process.env.UFZ_LOGGED_RESUME_RESULT_PATH
+      : process.env.UFZ_IGNORED_RESUME_RESULT_PATH;
+  const parentPid = Number(process.env.UFZ_PARENT_PID);
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    let parentAlive = true;
+    try { process.kill(parentPid, 0); } catch { parentAlive = false; }
+    if (!parentAlive && existsSync(process.env.UFZ_GO_PATH)) break;
+    if (Date.now() >= deadline) {
+      writeFileSync(resultPath, JSON.stringify({ error: "parent-handoff-timeout" }));
+      process.exit(81);
+    }
+    sleep(10);
+  }
+  try {
+    writeFileSync(
+      resultPath,
+      JSON.stringify({
+        phase,
+        ...evidence(workflowArgument),
+        config: readFileSync(process.env.ULTRAFUZZ_CONFIG_PATH, "utf8"),
+        workflow: readFileSync(workflowArgument, "utf8")
+      })
+    );
+  } catch (error) {
+    writeFileSync(resultPath, JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+    process.exit(82);
+  }
+}
+`,
+      "utf8"
+    );
+
+    const sourceDescriptor = fs.openSync(
+      root,
+      fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0)
+    );
+    let replacementDescriptor: number | undefined;
+    const pids = new Set<number>();
+    try {
+      const controllerRoot = `/proc/${process.pid}/fd/${sourceDescriptor}`;
+      const controllerWorkflowPath = path.join(controllerRoot, ".smithers", "workflows", path.basename(workflowPath));
+      const fixtureEnvironment: NodeJS.ProcessEnv = {
+        ...process.env,
+        ULTRAFUZZ_CONFIG_PATH: path.join(controllerRoot, "controls", "ultrafuzz.toml"),
+        ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: workflowPath,
+        UFZ_LOG_PATH: logPath,
+        UFZ_LAUNCHER_RECORD_PATH: launcherRecordPath,
+        UFZ_SUPERVISOR_RECORD_PATH: supervisorRecordPath,
+        UFZ_RESUME_LAUNCH_PATH: resumeLaunchPath,
+        UFZ_ENGINE_RESULT_PATH: engineResultPath,
+        UFZ_LOGGED_RESUME_RESULT_PATH: loggedResumeResultPath,
+        UFZ_IGNORED_RESUME_RESULT_PATH: ignoredResumeResultPath,
+        UFZ_GO_PATH: goPath,
+        UFZ_REPLACEMENT_PATH: replacementPath
+      };
+      for (const name of [
+        "ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR",
+        "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT",
+        "ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR",
+        "ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT"
+      ]) {
+        delete fixtureEnvironment[name];
+      }
+
+      for (const phase of ["reject-partial-engine", "reject-malformed-supervisor", "reject-partial-resume"]) {
+        const rejected = spawnSync(process.execPath, [scriptPath, phase, controllerWorkflowPath], {
+          cwd: root,
+          encoding: "utf8",
+          timeout: 10_000,
+          env: fixtureEnvironment
+        });
+        assert.equal(rejected.status, 0, `${phase}: ${rejected.stderr}`);
+        assert.match(rejected.stdout, /execution snapshot transfer capability/u, phase);
+      }
+
+      for (const inheritedDescriptor of ["invalid", "0", "4"]) {
+        const rejected = spawnSync(process.execPath, [scriptPath, "probe-anchor", controllerWorkflowPath], {
+          cwd: root,
+          encoding: "utf8",
+          timeout: 10_000,
+          stdio: ["ignore", "pipe", "pipe", sourceDescriptor],
+          env: {
+            ...fixtureEnvironment,
+            ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR: inheritedDescriptor
+          }
+        });
+        assert.notEqual(rejected.status, 0, `inherited fd ${inheritedDescriptor} was accepted`);
+        assert.match(rejected.stderr, /inherited execution snapshot descriptor must be fixed fd 3/u);
+      }
+
+      const anchoredProbe = spawnSync(process.execPath, [scriptPath, "probe-anchor", controllerWorkflowPath], {
+        cwd: root,
+        encoding: "utf8",
+        timeout: 10_000,
+        stdio: ["ignore", "pipe", "pipe", sourceDescriptor],
+        env: {
+          ...fixtureEnvironment,
+          ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR: "3"
+        }
+      });
+      assert.equal(anchoredProbe.status, 0, anchoredProbe.stderr);
+      assertProcessOwnedSnapshotEvidence(JSON.parse(anchoredProbe.stdout) as TransferEvidence);
+
+      const launcher = spawnSync(process.execPath, [scriptPath, "launcher", controllerWorkflowPath], {
+        cwd: root,
+        encoding: "utf8",
+        timeout: 10_000,
+        env: fixtureEnvironment
+      });
+      assert.equal(launcher.status, 0, launcher.stderr);
+      const launcherEvidence = readTransferEvidence(launcherRecordPath);
+      assertProcessOwnedSnapshotEvidence(launcherEvidence);
+      assert.equal(launcherEvidence.reused_descriptor, launcherEvidence.process_descriptor);
+      addEvidencePids(pids, launcherEvidence, "engine_pid", "supervisor_pid");
+
+      fs.closeSync(sourceDescriptor);
+      replacementDescriptor = fs.openSync(replacementPath, fs.constants.O_RDONLY);
+      assert.equal(replacementDescriptor, sourceDescriptor, "controller snapshot descriptor was not reused");
+      fs.writeFileSync(goPath, "go\n", "utf8");
+
+      const deadline = Date.now() + 10_000;
+      const awaited = [
+        supervisorRecordPath,
+        resumeLaunchPath,
+        engineResultPath,
+        loggedResumeResultPath,
+        ignoredResumeResultPath
+      ];
+      while (awaited.some((file) => !fs.existsSync(file)) && Date.now() < deadline) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+      }
+      for (const file of awaited) assert.equal(fs.existsSync(file), true, `${path.basename(file)} was not published`);
+
+      const supervisorEvidence = readTransferEvidence(supervisorRecordPath);
+      assertProcessOwnedSnapshotEvidence(supervisorEvidence);
+      assert.equal(supervisorEvidence.reused_descriptor, supervisorEvidence.process_descriptor);
+      addEvidencePids(pids, supervisorEvidence, "logged_pid", "ignored_pid");
+
+      const resumeLaunch = JSON.parse(fs.readFileSync(resumeLaunchPath, "utf8")) as {
+        logged?: string[];
+        ignored?: string[];
+      };
+      assert.deepEqual(resumeLaunch.logged, [scriptPath, "resume-logged", workflowPath]);
+      assert.deepEqual(resumeLaunch.ignored, [scriptPath, "resume-ignored", workflowPath]);
+
+      for (const resultPath of [engineResultPath, loggedResumeResultPath, ignoredResumeResultPath]) {
+        const result = readTransferEvidence(resultPath);
+        assert.equal(result.error, undefined);
+        assertProcessOwnedSnapshotEvidence(result);
+        assert.equal(result.config, "sealed-config\n");
+        assert.equal(result.workflow, "sealed-workflow\n");
+        assert.match(result.workflow_path ?? "", new RegExp(`^/proc/${result.pid}/fd/\\d+/.smithers/workflows/`, "u"));
+        if (result.pid !== undefined) pids.add(result.pid);
+      }
+    } finally {
+      if (replacementDescriptor !== undefined) fs.closeSync(replacementDescriptor);
+      else {
+        try {
+          fs.closeSync(sourceDescriptor);
+        } catch {
+          // The descriptor was already closed before a later assertion failed.
+        }
+      }
+      for (const pid of pids) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // The detached fixtures normally exit before cleanup.
+        }
+      }
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(coordinationRoot, { recursive: true, force: true });
+    }
+  }
+);
+
+type TransferEvidence = {
+  error?: string;
+  pid?: number;
+  process_descriptor?: number;
+  process_root?: string;
+  inherited_descriptor_present?: boolean;
+  config_path?: string;
+  workflow_path?: string;
+  monitor_suppressed?: string;
+  autopsy_suppressed?: string;
+  reused_descriptor?: number;
+  config?: string;
+  workflow?: string;
+  [key: string]: unknown;
+};
+
+function readTransferEvidence(file: string): TransferEvidence {
+  return JSON.parse(fs.readFileSync(file, "utf8")) as TransferEvidence;
+}
+
+function assertProcessOwnedSnapshotEvidence(evidence: TransferEvidence): void {
+  assert.equal(typeof evidence.pid, "number");
+  assert.equal(typeof evidence.process_descriptor, "number");
+  assert.equal(evidence.process_root, `/proc/${evidence.pid}/fd/${evidence.process_descriptor}`);
+  assert.equal(evidence.inherited_descriptor_present, false);
+  assert.match(
+    evidence.config_path ?? "",
+    new RegExp(`^/proc/${evidence.pid}/fd/\\d+/controls/ultrafuzz\\.toml$`, "u")
+  );
+  assert.equal(evidence.monitor_suppressed, "1");
+  assert.equal(evidence.autopsy_suppressed, "0");
+}
+
+function addEvidencePids(pids: Set<number>, evidence: TransferEvidence, ...keys: string[]): void {
+  if (evidence.pid !== undefined) pids.add(evidence.pid);
+  for (const key of keys) {
+    const value = evidence[key];
+    if (typeof value === "number") pids.add(value);
+  }
+}
 
 // The test above proves the patcher rewrites sources that carry the expected
 // shape, but it supplies those sources itself, so it cannot notice upstream

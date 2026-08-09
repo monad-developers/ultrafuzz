@@ -787,7 +787,7 @@ nodes:
       - path: campaign-report.md
         contract: ultrafuzz/nonempty-markdown@1
       - path: campaign-summary.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/campaign-summary@1
       - path: recon-fuzzer-results.json
         contract: ultrafuzz/property-campaign@1
       - path: generated-tests.json

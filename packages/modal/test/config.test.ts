@@ -4,8 +4,19 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { fingerprintModalConfigFile, fingerprintModalModel, parseModalBenchmarkConfig } from "../src/config.js";
-import { DEFAULT_BENCHMARK_MODELS, MODAL_BENCHMARK_SCHEMA_VERSION } from "../src/defaults.js";
+import {
+  configuredModalSandboxTimeoutMs,
+  fingerprintModalConfigFile,
+  fingerprintModalModel,
+  parseModalBenchmarkConfig
+} from "../src/config.js";
+import {
+  DEFAULT_BENCHMARK_MODELS,
+  MODAL_BENCHMARK_SCHEMA_VERSION,
+  MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS,
+  MODAL_PUBLIC_SANDBOX_TIMEOUT_MS,
+  MODAL_SANDBOX_TIMEOUT_MS
+} from "../src/defaults.js";
 
 function minimalConfig(): Record<string, unknown> {
   return {
@@ -22,6 +33,34 @@ function minimalConfig(): Record<string, unknown> {
 }
 
 describe("Modal benchmark config", () => {
+  it("bounds new public sandboxes without cutting off the accepted full-lane envelope", () => {
+    const privateConfig = parseModalBenchmarkConfig(minimalConfig());
+    const model = DEFAULT_BENCHMARK_MODELS[0]!;
+    const publicConfig = parseModalBenchmarkConfig({
+      schema_version: MODAL_BENCHMARK_SCHEMA_VERSION,
+      run_id: "public-run",
+      braintrust: { project: "public-evals" },
+      public_benchmark: {
+        benchmark: "ultrafuzz-bench",
+        lane: "smoke",
+        runner_model_profile: model.slug,
+        candidate_repository: "https://github.com/monad-developers/ultrafuzz",
+        candidate_commit: "a".repeat(40)
+      },
+      models: [model]
+    });
+    if (!("public_benchmark" in publicConfig)) throw new Error("expected a public benchmark config");
+    const publicFullConfig = parseModalBenchmarkConfig({
+      ...publicConfig,
+      run_id: "public-full-run",
+      public_benchmark: { ...publicConfig.public_benchmark, benchmark: "evmbench", lane: "full" }
+    });
+
+    expect(configuredModalSandboxTimeoutMs(publicConfig)).toBe(MODAL_PUBLIC_SANDBOX_TIMEOUT_MS);
+    expect(configuredModalSandboxTimeoutMs(publicFullConfig)).toBe(MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS);
+    expect(configuredModalSandboxTimeoutMs(privateConfig)).toBe(MODAL_SANDBOX_TIMEOUT_MS);
+  });
+
   it("defaults to the eight benchmark models and production strategy loops", () => {
     const config = parseModalBenchmarkConfig(minimalConfig());
 

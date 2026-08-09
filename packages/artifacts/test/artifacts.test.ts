@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  ArtifactPathError,
   appendUsageEvents,
   appendNodeAttempt,
   appendEvent,
@@ -38,6 +39,12 @@ import {
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-artifacts-"));
+}
+
+function errnoError(code: string): NodeJS.ErrnoException {
+  const error = new Error(`injected ${code}`) as NodeJS.ErrnoException;
+  error.code = code;
+  return error;
 }
 
 test("createRunLayout persists product-owned run evidence outside checkpoints", () => {
@@ -740,6 +747,159 @@ test("durable append rejects a symlinked parent before creating outside director
     /crosses symlink/u
   );
   assert.equal(fs.existsSync(path.join(outside, "created")), false);
+});
+
+test("durable append rejects a half write without retrying the record", (t) => {
+  const root = tempProject();
+  const filePath = path.join(root, "audit.jsonl");
+  const expected = Buffer.from("0123456789\n", "utf8");
+  const partialLength = Math.floor(expected.length / 2);
+  const realWriteSync = fs.writeSync;
+  const realCloseSync = fs.closeSync;
+  const writeSync = t.mock.method(fs, "writeSync", (fd: number, bytes: Uint8Array) =>
+    realWriteSync(fd, Buffer.from(bytes).subarray(0, partialLength))
+  );
+  const closeSync = t.mock.method(fs, "closeSync", (fd: number) => realCloseSync(fd));
+
+  assert.throws(
+    () => appendLineDurable(filePath, "0123456789"),
+    (error: unknown) => {
+      assert.ok(error instanceof ArtifactPathError);
+      assert.equal(error.code, "short-write");
+      assert.match(error.message, new RegExp(`wrote ${partialLength} of ${expected.length} bytes`, "u"));
+      return true;
+    }
+  );
+
+  assert.equal(writeSync.mock.callCount(), 1);
+  assert.equal(closeSync.mock.callCount(), 1);
+  assert.deepEqual(fs.readFileSync(filePath), expected.subarray(0, partialLength));
+});
+
+test("durable append rejects a zero write without retrying the record", (t) => {
+  const root = tempProject();
+  const filePath = path.join(root, "audit.jsonl");
+  const realCloseSync = fs.closeSync;
+  const writeSync = t.mock.method(fs, "writeSync", () => 0);
+  const closeSync = t.mock.method(fs, "closeSync", (fd: number) => realCloseSync(fd));
+
+  assert.throws(
+    () => appendLineDurable(filePath, "entry"),
+    (error: unknown) => {
+      assert.ok(error instanceof ArtifactPathError);
+      assert.equal(error.code, "short-write");
+      assert.match(error.message, /wrote 0 of 6 bytes/u);
+      return true;
+    }
+  );
+
+  assert.equal(writeSync.mock.callCount(), 1);
+  assert.equal(closeSync.mock.callCount(), 1);
+  assert.equal(fs.readFileSync(filePath, "utf8"), "");
+});
+
+test("durable append propagates a directory fsync I/O failure", (t) => {
+  const root = tempProject();
+  const filePath = path.join(root, "audit.jsonl");
+  const realFsyncSync = fs.fsyncSync;
+  const realCloseSync = fs.closeSync;
+  let fsyncCall = 0;
+  const fsyncSync = t.mock.method(fs, "fsyncSync", (fd: number) => {
+    fsyncCall += 1;
+    if (fsyncCall === 1) {
+      realFsyncSync(fd);
+      return;
+    }
+    throw errnoError("EIO");
+  });
+  const closeSync = t.mock.method(fs, "closeSync", (fd: number) => realCloseSync(fd));
+
+  assert.throws(
+    () => appendLineDurable(filePath, "entry"),
+    (error: unknown) => {
+      assert.ok(error instanceof Error && "code" in error);
+      assert.equal(error.code, "EIO");
+      return true;
+    }
+  );
+
+  assert.equal(fsyncSync.mock.callCount(), 2);
+  assert.equal(closeSync.mock.callCount(), 2);
+  assert.equal(fs.readFileSync(filePath, "utf8"), "entry\n");
+});
+
+test("durable append tolerates only an unsupported directory fsync operation", (t) => {
+  const root = tempProject();
+  const filePath = path.join(root, "audit.jsonl");
+  const realFsyncSync = fs.fsyncSync;
+  const realCloseSync = fs.closeSync;
+  let fsyncCall = 0;
+  const fsyncSync = t.mock.method(fs, "fsyncSync", (fd: number) => {
+    fsyncCall += 1;
+    if (fsyncCall === 1) {
+      realFsyncSync(fd);
+      return;
+    }
+    throw errnoError("EINVAL");
+  });
+  const closeSync = t.mock.method(fs, "closeSync", (fd: number) => realCloseSync(fd));
+
+  appendLineDurable(filePath, "entry");
+
+  assert.equal(fsyncSync.mock.callCount(), 2);
+  assert.equal(closeSync.mock.callCount(), 2);
+  assert.equal(fs.readFileSync(filePath, "utf8"), "entry\n");
+});
+
+test("durable append propagates a close failure without retrying close", (t) => {
+  const root = tempProject();
+  const filePath = path.join(root, "audit.jsonl");
+  const realCloseSync = fs.closeSync;
+  const closeSync = t.mock.method(fs, "closeSync", (fd: number) => {
+    realCloseSync(fd);
+    throw errnoError("EIO");
+  });
+
+  assert.throws(
+    () => appendLineDurable(filePath, "entry"),
+    (error: unknown) => {
+      assert.ok(error instanceof Error && "code" in error);
+      assert.equal(error.code, "EIO");
+      return true;
+    }
+  );
+
+  assert.equal(closeSync.mock.callCount(), 1);
+  assert.equal(fs.readFileSync(filePath, "utf8"), "entry\n");
+});
+
+test("durable append aggregates an operation failure with its close failure", (t) => {
+  const root = tempProject();
+  const filePath = path.join(root, "audit.jsonl");
+  const realCloseSync = fs.closeSync;
+  const writeSync = t.mock.method(fs, "writeSync", () => {
+    throw errnoError("EIO");
+  });
+  const closeSync = t.mock.method(fs, "closeSync", (fd: number) => {
+    realCloseSync(fd);
+    throw errnoError("EBADF");
+  });
+
+  assert.throws(
+    () => appendLineDurable(filePath, "entry"),
+    (error: unknown) => {
+      assert.ok(error instanceof AggregateError);
+      assert.deepEqual(
+        error.errors.map((entry: unknown) => (entry instanceof Error && "code" in entry ? entry.code : undefined)),
+        ["EIO", "EBADF"]
+      );
+      return true;
+    }
+  );
+
+  assert.equal(writeSync.mock.callCount(), 1);
+  assert.equal(closeSync.mock.callCount(), 1);
+  assert.equal(fs.readFileSync(filePath, "utf8"), "");
 });
 
 test("findings normalize schema-versioned findings arrays", () => {
