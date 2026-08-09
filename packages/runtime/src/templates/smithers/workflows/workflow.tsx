@@ -34,6 +34,7 @@ const {
   checkInvariantSourcePinned,
   invariantPinnedSourceRefExists,
   materializePromptSchemas,
+  normalizeEvidenceLineRangeCardinality,
   normalizeNodeAttemptFailureMessage,
   publishFileDurableExclusive,
   validateArtifactContract,
@@ -339,9 +340,9 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
         prepareArtifactMirror(task, { replayWorkspacePatches: false });
         materializeMissingMarkdownArtifacts(task, result);
         materializeMissingDedupeArtifact(task);
-        materializeMissingFinalReportArtifacts(task);
         normalizeLegacyFindingFields(task);
         normalizeLegacyReportProvenance(task);
+        materializeMissingFinalReportArtifacts(task);
         normalizeLegacyGeneratedTestManifests(task);
         materializeGeneratedTestCompanions(task);
         materializeInvariantSuiteCompanions(task);
@@ -2362,6 +2363,11 @@ function normalizeLegacyFindingRecord(entry: unknown): { value: unknown; changed
   const evidence = finding.evidence;
   if (typeof evidence === "string" || (typeof evidence === "object" && evidence !== null && !Array.isArray(evidence))) {
     finding.evidence = [evidence];
+    changed = true;
+  }
+  const normalizedEvidence = normalizeEvidenceLineRangeCardinality(finding.evidence);
+  if (normalizedEvidence.changed) {
+    finding.evidence = normalizedEvidence.value;
     changed = true;
   }
   return changed ? { value: finding, changed: true } : { value: entry, changed: false };

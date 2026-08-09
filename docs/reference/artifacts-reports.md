@@ -212,6 +212,8 @@ safe artifact-relative paths and must not embed anchors or line selectors. Use
 positive integer `line` and optional `end_line` for one source span. Use
 `line_ranges` for disjoint spans; it contains at least two objects with a
 required positive integer `line` and an optional non-descending `end_line`.
+Never use a one-entry `line_ranges`, or combine `line_ranges` with scalar
+`line` or `end_line` fields.
 Explanatory `detail` remains independent and is not replaced by structural
 selectors.
 

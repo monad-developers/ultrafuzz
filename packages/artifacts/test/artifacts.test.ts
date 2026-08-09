@@ -17,6 +17,7 @@ import {
   normalizeSafeRelativePath,
   manifestDigest,
   MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
+  normalizeEvidenceLineRangeCardinality,
   normalizeNodeAttemptFailureMessage,
   publishFileDurableExclusive,
   queryNodeAttempts,
@@ -1046,6 +1047,164 @@ test("findings normalize markdown evidence path fragments", () => {
   );
 
   assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /fragment conflicts/);
+});
+
+test("findings canonicalize a singleton typed evidence range without mutating producer metadata", () => {
+  const independentDetail = "  The source span establishes the bounded StableSwap loop.  ";
+  const evidence = [
+    "scope",
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      detail: independentDetail,
+      line_ranges: [{ line: 318, end_line: 337 }]
+    }
+  ];
+  const original = structuredClone(evidence);
+
+  const canonical = normalizeEvidenceLineRangeCardinality(evidence);
+
+  assert.equal(canonical.changed, true);
+  assert.deepEqual(evidence, original, "the shared producer normalizer must be pure");
+  assert.deepEqual(canonical.value, [
+    "scope",
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      detail: independentDetail,
+      line: 318,
+      end_line: 337
+    }
+  ]);
+
+  assert.deepEqual(
+    normalizeEvidenceLineRangeCardinality([
+      {
+        kind: "source",
+        path: "contracts/main/CurveStableSwapNG.vy",
+        detail: independentDetail,
+        line_ranges: [{ line: 318 }]
+      }
+    ]),
+    {
+      changed: true,
+      value: [
+        {
+          kind: "source",
+          path: "contracts/main/CurveStableSwapNG.vy",
+          detail: independentDetail,
+          line: 318
+        }
+      ]
+    }
+  );
+
+  const disjoint = [
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      detail: independentDetail,
+      line_ranges: [
+        { line: 318, end_line: 337 },
+        { line: 411, end_line: 419 }
+      ]
+    }
+  ];
+  const unchanged = normalizeEvidenceLineRangeCardinality(disjoint);
+  assert.deepEqual(unchanged, { value: disjoint, changed: false });
+  assert.equal(unchanged.value, disjoint);
+
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const finding = {
+    title: "StableSwap source span",
+    status: "candidate",
+    severity_guess: "Medium",
+    confidence: "medium",
+    summary: "A bounded loop is anchored to one source span.",
+    evidence
+  };
+  fs.writeFileSync(path.join(nodeDir, "findings.json"), JSON.stringify([finding]));
+  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+  assert.deepEqual(report.findings[0]!.evidence, canonical.value);
+
+  for (const invalidEvidence of [
+    { kind: "source", path: "contracts/main/CurveStableSwapNG.vy", line_ranges: [] },
+    { kind: "source", path: "contracts/main/CurveStableSwapNG.vy", line_ranges: null },
+    { kind: "source", path: "contracts/main/CurveStableSwapNG.vy", line_ranges: [{ line: 0 }] },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      line_ranges: [{ line: 337, end_line: 318 }]
+    },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      line_ranges: [{ line: Number.MAX_SAFE_INTEGER + 1 }]
+    },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      line_ranges: [{ line: 318, note: "not canonical" }]
+    },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      line: 318,
+      line_ranges: [{ line: 318, end_line: 337 }]
+    },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      end_line: 337,
+      line_ranges: [{ line: 318, end_line: 337 }]
+    },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      line: 318,
+      line_ranges: [
+        { line: 318, end_line: 337 },
+        { line: 411, end_line: 419 }
+      ]
+    },
+    {
+      kind: "source",
+      path: "../CurveStableSwapNG.vy",
+      line_ranges: [{ line: 318, end_line: 337 }]
+    },
+    {
+      kind: "source",
+      path: " contracts/main/CurveStableSwapNG.vy ",
+      line_ranges: [{ line: 318, end_line: 337 }]
+    },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy:318-337",
+      line_ranges: [{ line: 318, end_line: 337 }]
+    },
+    {
+      kind: "validation",
+      path: "forge test --match-path CurveStableSwapNG.vy",
+      line_ranges: [{ line: 318, end_line: 337 }]
+    },
+    {
+      kind: "source",
+      path: "contracts/main/CurveStableSwapNG.vy",
+      command: "forge test",
+      line_ranges: [{ line: 318, end_line: 337 }]
+    }
+  ]) {
+    fs.writeFileSync(
+      path.join(nodeDir, "findings.json"),
+      JSON.stringify([{ ...finding, evidence: ["scope", invalidEvidence] }])
+    );
+    assert.throws(
+      () => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }),
+      /./u,
+      JSON.stringify(invalidEvidence)
+    );
+  }
 });
 
 test("findings normalize source evidence line suffixes", () => {

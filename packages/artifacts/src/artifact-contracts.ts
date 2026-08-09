@@ -156,7 +156,7 @@ const definitions = defineContracts([
     id: "ultrafuzz/findings@1",
     format: "json",
     description:
-      'A JSON array of findings. Every entry must satisfy the Ultrafuzz finding schema, including id, title, status, severity_guess, confidence, and summary. Every finding, including one that is or may become a non-production record, must set severity_guess to exactly "High", "Medium", or "Low"; do not emit lowercase or any other severity vocabulary. schema_version is optional; when present it must be the literal "1.0" or the alias "ultrafuzz.finding.v1". Evidence object paths must be safe relative paths without line selectors. Represent one source span with positive integer line and optional end_line; represent disjoint spans with at least two typed line_ranges entries such as [{"line":105,"end_line":107},{"line":154,"end_line":185}]. Every end_line must be no smaller than its line. Keep independent prose in detail. A populated entry looks like {"id":"finding-0","title":"...","status":"candidate","severity_guess":"Medium","confidence":"low","summary":"..."}.',
+      'A JSON array of findings. Every entry must satisfy the Ultrafuzz finding schema, including id, title, status, severity_guess, confidence, and summary. Every finding, including one that is or may become a non-production record, must set severity_guess to exactly "High", "Medium", or "Low"; do not emit lowercase or any other severity vocabulary. schema_version is optional; when present it must be the literal "1.0" or the alias "ultrafuzz.finding.v1". Evidence object paths must be safe relative paths without line selectors. Represent one source span with positive integer line and optional end_line; represent disjoint spans with at least two typed line_ranges entries such as [{"line":105,"end_line":107},{"line":154,"end_line":185}]. Never emit a one-entry line_ranges or combine line_ranges with line or end_line. Every end_line must be no smaller than its line. Keep independent prose in detail. A populated entry looks like {"id":"finding-0","title":"...","status":"candidate","severity_guess":"Medium","confidence":"low","summary":"..."}.',
     validEmptyExample: "[]"
   },
   {
@@ -237,7 +237,7 @@ const definitions = defineContracts([
     id: "ultrafuzz/report@1",
     format: "json",
     description:
-      "A terminal report object with non-empty schema_version, run_metadata, canonical normalized issues, and non_production_outcomes. Current invariant runs also include property_implementation_coverage from the implementation handoff. Additional adapter fields are allowed.",
+      "A terminal report object with non-empty schema_version, run_metadata, canonical normalized issues, and non_production_outcomes. In issue evidence, represent one source span with positive integer line and optional end_line; line_ranges is reserved for at least two disjoint spans, must never contain only one entry, and cannot coexist with line or end_line. Current invariant runs also include property_implementation_coverage from the implementation handoff. Additional adapter fields are allowed.",
     validEmptyExample: '{"schema_version":"1.0","run_metadata":{},"issues":[],"non_production_outcomes":[]}'
   },
   {

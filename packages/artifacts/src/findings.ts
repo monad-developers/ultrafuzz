@@ -179,6 +179,10 @@ function normalizeFinding(value: unknown, index: number, input: NormalizeFinding
   validateOptionalStringArray(normalized, "affected_files", true);
   validateOptionalStringArray(normalized, "affected_functions", false);
   validateOptionalStringArray(normalized, "patch_refs", true);
+  const normalizedEvidence = normalizeEvidenceLineRangeCardinality(normalized.evidence);
+  if (normalizedEvidence.changed) {
+    normalized.evidence = normalizedEvidence.value;
+  }
   validateEvidence(normalized.evidence, index);
 
   return normalized as NormalizedFinding;
@@ -304,6 +308,84 @@ function validateFindingMetadataRelativePath(relativePath: string, key: string):
     ) {
       throw new ArtifactPathError("unsafe-path-segment", `${key} contains unsafe segment ${JSON.stringify(segment)}`);
     }
+  }
+}
+
+export function normalizeEvidenceLineRangeCardinality(value: unknown): { value: unknown; changed: boolean } {
+  if (!Array.isArray(value)) {
+    return { value, changed: false };
+  }
+  let changed = false;
+  const normalized = value.map((entry) => {
+    if (!isPlainRecord(entry) || entry.line_ranges === undefined) {
+      return entry;
+    }
+    const hasLine = Object.hasOwn(entry, "line");
+    const hasEndLine = Object.hasOwn(entry, "end_line");
+    if (hasLine || hasEndLine) {
+      throw new FindingsValidationError(`evidence line_ranges conflicts with existing line fields`);
+    }
+    if (!Array.isArray(entry.line_ranges) || entry.line_ranges.length !== 1) {
+      return entry;
+    }
+    if (!isSafeSelectorFreeEvidencePath(entry)) {
+      throw new FindingsValidationError(`single-entry evidence line_ranges requires a safe selector-free path`);
+    }
+    const range = canonicalSingleEvidenceLineRange(entry.line_ranges[0]);
+    const canonical: Record<string, unknown> = {
+      ...entry,
+      line: range.line,
+      ...(range.end_line === undefined ? {} : { end_line: range.end_line })
+    };
+    delete canonical.line_ranges;
+    changed = true;
+    return canonical;
+  });
+  return changed ? { value: normalized, changed: true } : { value, changed: false };
+}
+
+function canonicalSingleEvidenceLineRange(value: unknown): EvidenceLineRange {
+  if (!isPlainRecord(value) || Object.keys(value).some((key) => key !== "line" && key !== "end_line")) {
+    throw new FindingsValidationError(`single-entry evidence line_ranges must contain only line and end_line`);
+  }
+  const line = requiredEvidenceLineNumber(value.line, "line_ranges[0].line");
+  const endLine =
+    value.end_line === undefined ? undefined : requiredEvidenceLineNumber(value.end_line, "line_ranges[0].end_line");
+  if (endLine !== undefined && endLine < line) {
+    throw new FindingsValidationError(`field line_ranges[0].end_line must not precede line`);
+  }
+  return { line, ...(endLine === undefined ? {} : { end_line: endLine }) };
+}
+
+function isSafeSelectorFreeEvidencePath(entry: Record<string, unknown>): boolean {
+  if (Object.hasOwn(entry, "command")) {
+    return false;
+  }
+  const rawEvidencePath = entry.path;
+  if (typeof rawEvidencePath !== "string") {
+    return false;
+  }
+  const evidencePath = optionalString(entry, "path");
+  if (
+    evidencePath === undefined ||
+    rawEvidencePath !== evidencePath ||
+    path.isAbsolute(evidencePath) ||
+    looksLikeEvidenceCommand(evidencePath)
+  ) {
+    return false;
+  }
+  try {
+    const reference = normalizeFindingMetadataPathReference(evidencePath, "evidence path");
+    return (
+      reference.path === evidencePath &&
+      reference.fragment === undefined &&
+      reference.line === undefined &&
+      reference.endLine === undefined &&
+      reference.lineRanges === undefined &&
+      reference.detail === undefined
+    );
+  } catch {
+    return false;
   }
 }
 

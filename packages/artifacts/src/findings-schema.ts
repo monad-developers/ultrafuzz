@@ -67,14 +67,31 @@ const evidenceLineRangeSchema = z
       });
     }
   });
-const evidenceEntrySchema = z.union([
-  nonEmptyString,
-  z.looseObject({
+const evidenceObjectSchema = z
+  .looseObject({
     kind: nonEmptyString.optional(),
     path: nonEmptyString.optional(),
+    line: positiveSafeInteger.optional(),
+    end_line: positiveSafeInteger.optional(),
     line_ranges: z.array(evidenceLineRangeSchema).min(2).optional()
   })
-]);
+  .superRefine((evidence, context) => {
+    if (evidence.line !== undefined && evidence.end_line !== undefined && evidence.end_line < evidence.line) {
+      context.addIssue({
+        code: "custom",
+        message: "end_line must not precede line",
+        path: ["end_line"]
+      });
+    }
+    if (evidence.line_ranges !== undefined && (evidence.line !== undefined || evidence.end_line !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        message: "line_ranges cannot coexist with line or end_line",
+        path: ["line_ranges"]
+      });
+    }
+  });
+const evidenceEntrySchema = z.union([nonEmptyString, evidenceObjectSchema]);
 
 export const findingSchema = z.looseObject({
   // Optional: nothing reads a finding's schema_version, there is only one findings schema, and
@@ -173,6 +190,8 @@ export const findingJsonSchema = {
             properties: {
               kind: { type: "string", minLength: 1 },
               path: { type: "string", minLength: 1 },
+              line: { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+              end_line: { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
               line_ranges: {
                 type: "array",
                 minItems: 2,
@@ -186,6 +205,9 @@ export const findingJsonSchema = {
                   }
                 }
               }
+            },
+            not: {
+              anyOf: [{ required: ["line_ranges", "line"] }, { required: ["line_ranges", "end_line"] }]
             }
           }
         ]
