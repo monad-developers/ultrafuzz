@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The Aave v4 private benchmark ground truth now binds its 12 scored labels to the exact ScFuzzBench fork and immutable revision that contains the injected harness, and regression coverage pins the R60 invariant-only target, exclusions, loop count, timeouts, and concurrency ceiling (#453; related to #404).
 - Detached Smithers engines now replace controller-owned execution-snapshot paths with process-owned descriptor paths before admission, so later renders cannot follow a closed or reused `/proc/<pid>/fd/<n>` after the submitting controller exits (#413).
 - Workflow submissions and lifecycle inspections now execute from a sealed, content-addressed snapshot of workflow controls and their dependency closure, with immutable generation binding and controller-only capabilities withheld from model subprocesses (#165, #413).
 - Runs created before sealed controls and authenticated workflow-link journals keep their stored artifacts, but lifecycle and live-inspection commands now fail closed and require a new run ID instead of synthesizing historical trust. Rerunning `ultrafuzz init` upgrades byte-identical stock agent adapters; customized, symlinked, and hard-linked adapters remain untouched and receive manual upgrade guidance (#165, #413).

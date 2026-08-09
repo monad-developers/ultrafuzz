@@ -8,6 +8,36 @@ import { loadTopology, validateTopology, type ProjectTopology } from "@ultrafuzz
 
 import { promptTextsForCatalog, transformPromptCatalogForRun, transformTopologyForRun } from "../src/plan-run.js";
 
+const AAVE_R60_INVARIANT_ONLY_EXCLUDED_NODE_IDS = [
+  "boundary-tests",
+  "encode-decode",
+  "differential-library-tests",
+  "round-trip",
+  "workflow-property-based-tests",
+  "time-warp-sequences",
+  "expand-coverage",
+  "admin-config-boundaries",
+  "external-dependency-boundaries",
+  "externalized-state-accounting",
+  "amm-boundary-liquidity",
+  "payable-fallback-accounting",
+  "packed-action-parity",
+  "batch-atomicity-unsupported-actions",
+  "router-exact-accounting",
+  "rounding-direction-audit",
+  "market-exhaustion-boundaries",
+  "order-replacement-collateral",
+  "state-machine-boundaries",
+  "lifecycle-view-boundaries",
+  "differential-oracle-planner",
+  "reference-harness-author",
+  "reference-and-lane-auditor",
+  "differential-lane-author",
+  "differential-red-triage",
+  "differential-repair-and-report-review",
+  "dynamic-strategy-generator"
+] as const;
+
 function topology(): ProjectTopology {
   return {
     version: 2,
@@ -109,7 +139,8 @@ test("the invariant-only exclusions retain the whole stateful-invariant chain", 
   const invariantOnlyExcludedNodeIds = source.nodes
     .filter((node) => node.group === "strategies" && !invariantNodeIds.includes(node.id))
     .map((node) => node.id);
-  const transform = { strategyLoops: 1, excludedNodeIds: invariantOnlyExcludedNodeIds };
+  assert.deepEqual(invariantOnlyExcludedNodeIds, AAVE_R60_INVARIANT_ONLY_EXCLUDED_NODE_IDS);
+  const transform = { strategyLoops: 3, excludedNodeIds: invariantOnlyExcludedNodeIds };
   const transformed = transformTopologyForRun(source, transform);
   const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: repositoryRoot }), transform);
   const validation = validateTopology(transformed, {
@@ -118,9 +149,11 @@ test("the invariant-only exclusions retain the whole stateful-invariant chain", 
     promptTexts: promptTextsForCatalog(prompts)
   });
   const nodeIds = new Set(transformed.nodes.map((node) => node.id));
+  const executableNodes = transformed.nodes.filter((node) => node.role !== "start" && node.role !== "finish");
 
   assert.ok(invariantNodeIds.length >= 5, "the shipped topology no longer declares a stateful-invariant chain");
-  assert.ok(invariantOnlyExcludedNodeIds.length > 0);
+  assert.equal(invariantOnlyExcludedNodeIds.length, 27);
+  assert.equal(executableNodes.length, 32);
   assert.ok(invariantNodeIds.every((id) => nodeIds.has(id)));
   assert.ok(invariantOnlyExcludedNodeIds.every((id) => !nodeIds.has(id)));
   assert.deepEqual(transformed.nodes.find((node) => node.id === "stateful-invariant-handlers")?.depends_on, [

@@ -1,4 +1,8 @@
-source:
+schema_version: ultrafuzz.eval-ground-truth.v1
+subject:
+  repository: https://github.com/scfuzzbench/aave-v4-scfuzzbench
+  revision: edd6c82721512540c8c90e7a36a4a8e19fd7bdf3
+provenance:
   name: ScFuzzBench Aave v4 expected invariants
   benchmark_id: a0a57a3e0b5b533094f20079e9a9b7ef
   ultrafuzz_target_repo: https://github.com/aave/aave-v4
