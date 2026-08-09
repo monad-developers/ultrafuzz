@@ -1077,11 +1077,6 @@ export function appendEventRecord(
   appendStrictJsonlRecords(eventsPath, [canonical], eventRecordCodec(expectedRunId), trustedRoot);
 }
 
-/** @deprecated Torn or unterminated event journals are now rejected, never repaired. */
-export function repairTornJsonlTail(eventsPath: string): void {
-  readStrictJsonlSnapshot(eventsPath, eventRecordCodec());
-}
-
 export function replayEvents(layoutOrPath: RunLayout | string, limit = DEFAULT_EVENT_REPLAY_LIMIT): EventReplay {
   if (!Number.isSafeInteger(limit) || limit < 0)
     throw new Error("event replay limit must be a non-negative safe integer");

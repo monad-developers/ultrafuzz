@@ -11,7 +11,6 @@ import {
   appendEventRecord,
   createEventRecord,
   createRunLayout,
-  repairTornJsonlTail,
   replayEvents,
   truncateDurable
 } from "../src/index.js";
@@ -124,13 +123,13 @@ test("strict event journal reads refuse symlinks, FIFOs, and directories without
   const link = path.join(root, "events.jsonl");
   fs.writeFileSync(outside, "", "utf8");
   fs.symlinkSync(outside, link);
-  assert.throws(() => repairTornJsonlTail(link), /cannot open regular file/u);
+  assert.throws(() => replayEvents(link), /cannot open regular file/u);
   assert.equal(fs.readFileSync(outside, "utf8"), "");
 
   const fifo = path.join(root, "events-fifo.jsonl");
   assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
   try {
-    assert.throws(() => repairTornJsonlTail(fifo), /not a regular file/u);
+    assert.throws(() => replayEvents(fifo), /not a regular file/u);
     assert.equal(fs.lstatSync(fifo).isFIFO(), true);
   } finally {
     fs.rmSync(fifo, { force: true });
@@ -138,7 +137,7 @@ test("strict event journal reads refuse symlinks, FIFOs, and directories without
 
   const directory = path.join(root, "events-directory.jsonl");
   fs.mkdirSync(directory);
-  assert.throws(() => repairTornJsonlTail(directory), /not a regular file/u);
+  assert.throws(() => replayEvents(directory), /not a regular file/u);
 });
 
 test("a dangling event-journal symlink is malformed-present rather than missing", () => {
