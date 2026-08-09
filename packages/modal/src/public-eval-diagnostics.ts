@@ -1,9 +1,12 @@
-import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import { open, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 
-import { assertRegularFileInside, normalizeNodeAttemptFailureMessage, readRunState } from "@ultrafuzz/artifacts";
+import {
+  assertRegularFileInside,
+  normalizeNodeAttemptFailureMessage,
+  readRunState,
+  writeJsonDurable
+} from "@ultrafuzz/artifacts";
 import {
   MAX_PUBLIC_EVAL_FAILED_NODES_PER_ROW,
   MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
@@ -214,25 +217,7 @@ export async function writePublicEvalDiagnosticsAtomic(
   if (Buffer.byteLength(contents, "utf8") > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES) {
     throw new Error("public eval diagnostics exceeds the size limit");
   }
-  const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    const handle = await open(temporary, "wx", 0o600);
-    try {
-      await handle.writeFile(contents, "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(temporary, filePath);
-    const directory = await open(path.dirname(filePath), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
-  } finally {
-    await unlink(temporary).catch(() => undefined);
-  }
+  writeJsonDurable(filePath, parsed);
 }
 
 export function publicEvalRecordTerminalDisposition(

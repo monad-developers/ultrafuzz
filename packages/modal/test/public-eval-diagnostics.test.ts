@@ -658,6 +658,13 @@ describe("public post-eval diagnostics", () => {
 
     const expected = collectedLineage();
     expect(() => assertPublicEvalDiagnosticsLineage(diagnostics, expected)).not.toThrow();
+    const serialized = JSON.stringify(diagnostics);
+    const field = '"schema_version":"ultrafuzz.modal.public-eval-diagnostics.v2"';
+    const duplicate = serialized.replace(field, `${field},"schema_version":"shadow-version"`);
+    expect(duplicate).not.toBe(serialized);
+    expect(() => assertSanitizedModalCollectedFiles({ "public-eval-diagnostics.json": duplicate }, expected)).toThrow(
+      /unsanitized public eval diagnostics/u
+    );
     expect(() =>
       assertPublicEvalDiagnosticsLineage(diagnostics, { ...expected, model_fingerprint: "f".repeat(64) })
     ).toThrow(/model fingerprint/u);

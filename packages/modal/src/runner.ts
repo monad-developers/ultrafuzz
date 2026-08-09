@@ -3302,7 +3302,7 @@ export function assertSanitizedModalCollectedFiles(
   if (diagnosticsContents !== undefined) {
     let diagnostics: PublicEvalDiagnostics;
     try {
-      diagnostics = parsePublicEvalDiagnostics(JSON.parse(diagnosticsContents) as unknown);
+      diagnostics = parsePublicEvalDiagnostics(parseJson(diagnosticsContents, "public eval diagnostics"));
       assertPublicEvalDiagnosticsContainsNoSecrets(diagnostics, forbiddenSecretValues);
     } catch (error) {
       throw new Error("refusing to collect unsanitized public eval diagnostics", { cause: error });
