@@ -6,9 +6,13 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -32,6 +36,7 @@ const {
   artifactContractDefinition,
   assertRegularFileInside,
   checkInvariantSourcePinned,
+  derivePropertyImplementationCoverage,
   invariantPinnedSourceRefExists,
   materializePromptSchemas,
   normalizeEvidenceLineRangeCardinality,
@@ -41,13 +46,16 @@ const {
   validateImplementedPropertiesSchema,
   validateInvariantLedgerSchema,
   validateInvariantSourceProofSchema,
+  validatePropertiesSchema,
   writeFileDurable
 } = await import(artifactsModule);
 const {
   applyWorkspacePatch,
   captureWorkspacePatch,
   captureWorkspaceTree,
+  MAX_FINAL_REPORT_JSON_BYTES,
   normalizeFinalReportSeverityRecord,
+  projectCanonicalFinalReport,
   validateWorkspacePatchCapture
 } = await import(runtimeModule);
 
@@ -341,6 +349,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
         materializeMissingMarkdownArtifacts(task, result);
         materializeMissingDedupeArtifact(task);
         normalizeLegacyFindingFields(task);
+        reconstructAuthoritativeReportImplementationCoverage(task);
         normalizeLegacyReportProvenance(task);
         materializeMissingFinalReportArtifacts(task);
         normalizeLegacyGeneratedTestManifests(task);
@@ -2112,32 +2121,71 @@ function materializeMissingFinalReportArtifacts(task: (typeof taskSpecs)[number]
   const reportOutput = task.outputs.find(
     (candidate) => candidate.path === "report.json" && candidate.contract === "ultrafuzz/report@1"
   );
+  const markdownOutput = task.outputs.find(
+    (candidate) => candidate.path === "report.md" && candidate.contract === "ultrafuzz/nonempty-markdown@1"
+  );
   const findingsOutput = task.outputs.find(
     (candidate) => candidate.path === "findings.normalized.json" && candidate.contract === "ultrafuzz/findings@1"
   );
-  if (reportOutput === undefined) {
+  if (reportOutput === undefined || markdownOutput === undefined) {
     return;
   }
 
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
-  const report = meaningfulFinalReport(artifactRoots, reportOutput.path);
+  const recoverableOutputs =
+    findingsOutput === undefined ? [reportOutput, markdownOutput] : [reportOutput, markdownOutput, findingsOutput];
+  if (!recoverableOutputs.some((output) => finalReportOutputNeedsRecovery(artifactRoots, output))) {
+    // Canonical projection is a recovery path, not an additional input
+    // contract for an already complete final-review attempt. The unchanged
+    // verifier below remains authoritative for the declared artifacts.
+    return;
+  }
+  const report = validatedFinalReport(artifactRoots, reportOutput.path);
   if (report === undefined) {
     // Only the final-review worker may decide which findings are production
     // issues. Leave its required output missing so Smithers retries the node.
     return;
   }
-  writeValidatedTaskArtifact(task, reportOutput, report);
-  let findings = normalizedFindingArray(report.issues);
-  if (findingsOutput !== undefined && (findings === undefined || findings.length === 0)) {
-    findings = normalizedFindingsArtifact(artifactRoots, findingsOutput.path) ?? findings;
-  }
-  if (findingsOutput !== undefined && findings !== undefined) {
+  const projection = projectCanonicalFinalReport(report);
+  writeValidatedTaskArtifact(task, reportOutput, projection.report);
+  if (findingsOutput !== undefined) {
+    const findings = normalizedFindingArray(projection.report.issues);
+    if (findings === undefined) {
+      throw new Error("artifact-contract failure: canonical final report issues did not form normalized findings");
+    }
     writeNormalizedFindings(task, findingsOutput.path, findings);
   }
+  writeValidatedTaskArtifactContents(task, markdownOutput, projection.markdown);
 }
 
-function meaningfulFinalReport(
+function finalReportOutputNeedsRecovery(
+  artifactRoots: string[],
+  output: (typeof taskSpecs)[number]["outputs"][number]
+): boolean {
+  for (const candidateRoot of artifactRoots) {
+    let resolvedPath: string;
+    try {
+      resolvedPath = resolveRegularArtifactFile(
+        candidateRoot,
+        path.resolve(candidateRoot, output.path),
+        `artifact-contract failure: output is not a regular file ${output.path}`
+      );
+    } catch {
+      // Match verifier root selection: only a regular file claims this root.
+      continue;
+    }
+    try {
+      const contents = readFileSync(resolvedPath).toString("utf8");
+      return !validateArtifactContract(output.contract, contents, output.path).ok;
+    } catch {
+      return true;
+    }
+  }
+  return true;
+}
+
+function validatedFinalReport(
   artifactRoots: string[],
   relativePath: string
 ): { issues?: unknown; run_metadata?: unknown; non_production_outcomes?: unknown } | undefined {
@@ -2148,45 +2196,15 @@ function meaningfulFinalReport(
         path.resolve(candidateRoot, relativePath),
         `artifact-contract failure: output is not a regular file ${relativePath}`
       );
-      const validation = validateArtifactContract("ultrafuzz/report@1", readFileSync(reportPath, "utf8"), relativePath);
-      if (!validation.ok || !isPlainRecord(validation.value) || isCanonicalEmptyReport(validation.value)) {
+      const validation = validateArtifactContract(
+        "ultrafuzz/report@1",
+        readBoundedFinalReportJson(reportPath),
+        relativePath
+      );
+      if (!validation.ok || !isPlainRecord(validation.value)) {
         continue;
       }
       return validation.value;
-    } catch {
-      // Try the task's other exact artifact root.
-    }
-  }
-  return undefined;
-}
-
-function isCanonicalEmptyReport(value: Record<string, unknown>): boolean {
-  return (
-    isPlainRecord(value.run_metadata) &&
-    Object.keys(value.run_metadata).length === 0 &&
-    Array.isArray(value.issues) &&
-    value.issues.length === 0 &&
-    Array.isArray(value.non_production_outcomes) &&
-    value.non_production_outcomes.length === 0
-  );
-}
-
-function normalizedFindingsArtifact(artifactRoots: string[], relativePath: string): unknown[] | undefined {
-  for (const candidateRoot of artifactRoots) {
-    try {
-      const findingsPath = resolveRegularArtifactFile(
-        candidateRoot,
-        path.resolve(candidateRoot, relativePath),
-        `artifact-contract failure: output is not a regular file ${relativePath}`
-      );
-      const validation = validateArtifactContract(
-        "ultrafuzz/findings@1",
-        readFileSync(findingsPath, "utf8"),
-        relativePath
-      );
-      if (validation.ok && Array.isArray(validation.value) && validation.value.length > 0) {
-        return validation.value;
-      }
     } catch {
       // Try the task's other exact artifact root.
     }
@@ -2198,10 +2216,9 @@ function normalizedFindingArray(value: unknown): unknown[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
   }
-  const normalized = value.map((entry) => normalizeLegacyFindingRecord(entry).value);
-  const serialized = `${JSON.stringify(normalized, null, 2)}\n`;
+  const serialized = `${JSON.stringify(value, null, 2)}\n`;
   const validation = validateArtifactContract("ultrafuzz/findings@1", serialized, "findings.normalized.json");
-  return validation.ok && Array.isArray(validation.value) ? validation.value : undefined;
+  return validation.ok ? value : undefined;
 }
 
 function writeNormalizedFindings(task: (typeof taskSpecs)[number], relativePath: string, findings: unknown[]): void {
@@ -2220,7 +2237,15 @@ function writeValidatedTaskArtifact(
   value: unknown
 ): void {
   const serialized = `${JSON.stringify(value, null, 2)}\n`;
-  if (!validateArtifactContract(output.contract, serialized, output.path).ok) {
+  writeValidatedTaskArtifactContents(task, output, serialized);
+}
+
+function writeValidatedTaskArtifactContents(
+  task: (typeof taskSpecs)[number],
+  output: (typeof task.outputs)[number],
+  contents: string
+): void {
+  if (!validateArtifactContract(output.contract, contents, output.path).ok) {
     throw new Error(`artifact-contract failure: recovered value did not form ${output.path}`);
   }
 
@@ -2229,38 +2254,41 @@ function writeValidatedTaskArtifact(
   if (!isStrictlyInsideDirectory(canonicalRoot, canonicalPath)) {
     throw new Error(`artifact-contract failure: unsafe output path ${output.path}`);
   }
+  let existingCanonical: string | undefined;
   try {
-    const existingCanonical = resolveRegularArtifactFile(
+    existingCanonical = resolveRegularArtifactFile(
       canonicalRoot,
       canonicalPath,
       `artifact-contract failure: output is not a regular file ${output.path}`
     );
-    writeFileSync(existingCanonical, serialized, { encoding: "utf8", flag: "w", mode: 0o600 });
-    return;
   } catch {
-    if (!existsSync(canonicalPath)) {
-      writeFileSync(canonicalPath, serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
-      return;
-    }
-    // An unsafe canonical path is left untouched; publish through the exact
-    // task-owned mirror so the strict verifier can fail closed or reconcile it.
+    // A missing canonical path may be created below. An unsafe existing path
+    // is left untouched and the exact task-owned mirror remains available.
   }
+  if (existingCanonical !== undefined) {
+    writeFileDurable(existingCanonical, contents);
+    return;
+  }
+  if (!existsSync(canonicalPath)) {
+    writeFileDurable(canonicalPath, contents);
+    return;
+  }
+  // An unsafe canonical path is left untouched; publish through the exact
+  // task-owned mirror so the strict verifier can fail closed or reconcile it.
 
   const mirrorRoot = realpathSync(mirroredArtifactDir(task));
   const mirrorPath = path.resolve(mirrorRoot, output.path);
   if (!isStrictlyInsideDirectory(mirrorRoot, mirrorPath)) {
     throw new Error(`artifact-contract failure: unsafe output path ${output.path}`);
   }
-  let flag: "w" | "wx" = "wx";
   if (existsSync(mirrorPath)) {
     resolveRegularArtifactFile(
       mirrorRoot,
       mirrorPath,
       `artifact-contract failure: output is not a regular file ${output.path}`
     );
-    flag = "w";
   }
-  writeFileSync(mirrorPath, serialized, { encoding: "utf8", flag, mode: 0o600 });
+  writeFileDurable(mirrorPath, contents);
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -2396,6 +2424,220 @@ function normalizeLegacyPathReference(value: string): { value: string; changed: 
   const colonLineSuffix = withoutHashLineSuffix.match(/^(.+?):\d+(?::\d+)?$/u);
   const normalized = colonLineSuffix?.[1] ?? withoutHashLineSuffix;
   return normalized === value ? { value, changed: false } : { value: normalized, changed: true };
+}
+
+function readBoundedFinalReportJson(reportPath: string): string {
+  const descriptor = openSync(reportPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile()) {
+      throw new Error("artifact-contract failure: final report JSON must be a regular file");
+    }
+    if (stat.size > MAX_FINAL_REPORT_JSON_BYTES) {
+      throw new Error(
+        `artifact-contract failure: final report JSON exceeds the ${MAX_FINAL_REPORT_JSON_BYTES}-byte read limit`
+      );
+    }
+    const contents = readFileSync(descriptor);
+    if (contents.byteLength > MAX_FINAL_REPORT_JSON_BYTES) {
+      throw new Error(
+        `artifact-contract failure: final report JSON exceeds the ${MAX_FINAL_REPORT_JSON_BYTES}-byte read limit`
+      );
+    }
+    return contents.toString("utf8");
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function reconstructAuthoritativeReportImplementationCoverage(task: (typeof taskSpecs)[number]): void {
+  if (task.metadata.node.logicalNodeId !== "final-report") {
+    return;
+  }
+  const reportOutput = task.outputs.find(
+    (output) => output.path === "report.json" && output.contract === "ultrafuzz/report@1"
+  );
+  if (reportOutput === undefined) {
+    return;
+  }
+
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const reportPaths = taskArtifactRoots(task, artifactDir).flatMap((artifactRoot) => {
+    try {
+      return [
+        resolveRegularArtifactFile(
+          artifactRoot,
+          path.resolve(artifactRoot, reportOutput.path),
+          `artifact-contract failure: output is not a regular file ${reportOutput.path}`
+        )
+      ];
+    } catch {
+      return [];
+    }
+  });
+  if (reportPaths.length === 0) {
+    return;
+  }
+
+  const implementationArtifact = verifiedAncestorJsonArtifact(
+    task,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    "ultrafuzz/implemented-properties@2",
+    "ultrafuzz/implemented-properties@1"
+  );
+  // Historical plans declare @1 and intentionally retain their agent-authored
+  // unavailable/no-selection behavior.
+  if (implementationArtifact === undefined) {
+    return;
+  }
+  const catalogArtifact = verifiedAncestorJsonArtifact(
+    task,
+    "property-specification-fanin",
+    "properties.json",
+    "ultrafuzz/properties@1"
+  );
+  if (catalogArtifact === undefined) {
+    throw new Error("artifact-contract failure: authoritative property catalog is unavailable for final-report");
+  }
+  const catalog = validatePropertiesSchema(catalogArtifact.value, catalogArtifact.path);
+  const implementation = validateImplementedPropertiesSchema(
+    implementationArtifact.value,
+    implementationArtifact.path,
+    { requireSelection: true }
+  );
+  if (!catalog.ok || catalog.value === undefined || !implementation.ok || implementation.value === undefined) {
+    throw new Error(
+      `artifact-contract failure: authoritative property implementation coverage is invalid: ${formatSchemaValidationIssues(
+        [...catalog.issues, ...implementation.issues]
+      )}`
+    );
+  }
+  const configured = configuredInvariantPrioritySelection(task);
+  const derived = derivePropertyImplementationCoverage(catalog.value, implementation.value, {
+    configuredSelection: configured.selection,
+    requireConfiguredSelection: true,
+    catalogPath: catalogArtifact.path,
+    implementationPath: implementationArtifact.path,
+    configPath: configured.path
+  });
+  if (!derived.ok || derived.value === undefined) {
+    throw new Error(
+      `artifact-contract failure: authoritative property implementation coverage is invalid: ${formatSchemaValidationIssues(derived.issues)}`
+    );
+  }
+
+  for (const reportPath of reportPaths) {
+    const reconstructed = replaceReportImplementationCoverage(readBoundedFinalReportJson(reportPath), derived.value);
+    if (reconstructed !== undefined) {
+      writeFileDurable(reportPath, reconstructed);
+    }
+  }
+}
+
+function verifiedAncestorJsonArtifact(
+  task: (typeof taskSpecs)[number],
+  logicalNodeId: string,
+  relativePath: string,
+  contract: string,
+  historicalContract?: string
+): { path: string; value: unknown } | undefined {
+  const declaredProducers = taskSpecs.filter((candidate) => candidate.metadata.node.logicalNodeId === logicalNodeId);
+  // Some selected topologies deliberately omit this producer. The shipped
+  // smoke benchmark, for example, has no invariant-implementation phase, so
+  // there is no authoritative coverage handoff to reconstruct. Once a
+  // topology declares a producer, however, its handoff must be an ancestor
+  // and every current-contract verification below remains fail-closed.
+  if (declaredProducers.length === 0) {
+    return undefined;
+  }
+  const candidates = task.dependencyArtifactDirs.flatMap((dependency) => {
+    const dependencyTask = declaredProducers.find((candidate) => candidate.attemptId === path.basename(dependency));
+    if (dependencyTask === undefined) {
+      return [];
+    }
+    return dependencyTask.outputs
+      .filter((output) => output.path === relativePath)
+      .map((output) => ({ dependency, dependencyTask, output }));
+  });
+  if (candidates.length === 0) {
+    throw new Error(`artifact-contract failure: authoritative ${relativePath} handoff is unavailable`);
+  }
+  if (candidates.length !== 1) {
+    throw new Error(`artifact-contract failure: authoritative ${relativePath} handoff is ambiguous`);
+  }
+  const candidate = candidates[0]!;
+  if (historicalContract !== undefined && candidate.output.contract === historicalContract) {
+    return undefined;
+  }
+  if (candidate.output.contract !== contract) {
+    throw new Error(
+      `artifact-contract failure: authoritative ${relativePath} handoff declares unexpected contract ${JSON.stringify(candidate.output.contract)}; expected ${JSON.stringify(contract)}`
+    );
+  }
+  // Re-check the runtime-owned marker and every published digest after the
+  // model returns, immediately before consuming this ancestor as authority.
+  assertVerifiedDependency(task, candidate.dependency);
+  const dependencyRoot = realpathSync(candidate.dependency);
+  const artifactPath = resolveRegularArtifactFile(
+    dependencyRoot,
+    path.resolve(dependencyRoot, relativePath),
+    `artifact-contract failure: verified dependency artifact is missing ${relativePath}`
+  );
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(artifactPath, "utf8")) as unknown;
+  } catch (error) {
+    throw new Error(`artifact-contract failure: authoritative ${relativePath} handoff is malformed`, { cause: error });
+  }
+  return { path: artifactPath, value };
+}
+
+function configuredInvariantPrioritySelection(task: (typeof taskSpecs)[number]): {
+  path: string;
+  selection?: { priority_threshold: "high" | "medium" | "low"; priorities: ("high" | "medium" | "low")[] };
+} {
+  const runRoot = realpathSync(path.resolve(process.cwd(), task.runRoot));
+  const configPath = path.join(runRoot, "config.resolved.toml");
+  let resolvedConfig: string;
+  try {
+    resolvedConfig = resolveRegularArtifactFile(
+      runRoot,
+      configPath,
+      "artifact-contract failure: resolved invariant priority configuration is unavailable"
+    );
+  } catch {
+    return { path: configPath };
+  }
+  const contents = readFileSync(resolvedConfig, "utf8");
+  const match = /^\s*property_priority_threshold\s*=\s*["'](high|medium|low)["']\s*$/mu.exec(contents);
+  if (match === null) {
+    return { path: resolvedConfig };
+  }
+  const priority_threshold = match[1] as "high" | "medium" | "low";
+  const order = ["high", "medium", "low"] as const;
+  return {
+    path: resolvedConfig,
+    selection: {
+      priority_threshold,
+      priorities: order.slice(0, order.indexOf(priority_threshold) + 1)
+    }
+  };
+}
+
+function replaceReportImplementationCoverage(contents: string, coverage: unknown): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (!isPlainRecord(parsed)) {
+    return undefined;
+  }
+  const report = { ...parsed };
+  delete report.property_implementation_coverage;
+  return `${JSON.stringify({ ...report, property_implementation_coverage: coverage }, null, 2)}\n`;
 }
 
 function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void {
