@@ -30,9 +30,15 @@ function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cli-"));
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
+  const inspectStatePath = path.join(project, "fake-smithers-inspect-state");
+  fs.writeFileSync(inspectStatePath, "running\n", "utf8");
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
     smithers,
@@ -40,15 +46,131 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "#!/bin/sh",
       'if [ -n "$SMITHERS_FAKE_LOG" ]; then printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"; fi',
       'case "$1" in',
+      "  ps)",
+      `    printf '%s\\n' ${shellQuote(
+        JSON.stringify({
+          ok: true,
+          data: {
+            runs: [
+              {
+                id: "ultrafuzz-cli-run",
+                workflow: "ultrafuzz-cli-run",
+                status: "running",
+                dbStatus: "running",
+                state: "running",
+                step: "project-discovery",
+                started: "2026-08-09T00:00:00Z"
+              }
+            ]
+          },
+          meta: { command: "ps", duration: "1ms" }
+        })
+      )}`,
+      "    ;;",
+      "  inspect)",
+      "    inspect_state=$(tr -d '\\n' < \"$SMITHERS_FAKE_INSPECT_STATE\")",
+      '    inspect_status="running"',
+      '    inspect_nodes="[]"',
+      '    if [ "$inspect_state" = "succeeded" ]; then',
+      '      inspect_status="finished"',
+      '      inspect_nodes=\'[{"nodeId":"node:project-discovery","state":"finished","attempt":1,"label":"node:project-discovery"},{"nodeId":"verify:project-discovery","state":"finished","attempt":1,"label":"verify:project-discovery"}]\'',
+      "    fi",
+      `    printf '{"ok":true,"data":{"run":{"id":"%s","workflow":"workflow","status":"%s","started":"2026-08-09T00:00:00.000Z","elapsed":"1s"},"runState":{"runId":"%s","state":"%s","computedAt":"2026-08-09T00:00:01.000Z"},"steps":%s,"nodes":%s},"meta":{"command":"inspect","duration":"1ms"}}\\n' "$2" "$inspect_status" "$2" "$inspect_state" "$inspect_nodes" "$inspect_nodes"`,
+      "    ;;",
+      "  events)",
+      '    case "$*" in',
+      `      *--full-output*) printf '%s\\n' ${shellQuote(
+        JSON.stringify({ ok: true, data: [], meta: { command: "events", duration: "1ms" } })
+      )} ;;`,
+      "      *)",
+      '        if [ "$(tr -d \'\\n\' < "$SMITHERS_FAKE_INSPECT_STATE")" = "succeeded" ]; then',
+      `          printf '%s\\n' ${[
+        {
+          runId: "ultrafuzz-cli-run",
+          seq: 1,
+          timestampMs: 1_775_865_600_000,
+          type: "NodeStarted",
+          payload: {
+            runId: "ultrafuzz-cli-run",
+            timestampMs: 1_775_865_600_000,
+            type: "NodeStarted",
+            nodeId: "node:project-discovery",
+            iteration: 0,
+            attempt: 1
+          }
+        },
+        {
+          runId: "ultrafuzz-cli-run",
+          seq: 2,
+          timestampMs: 1_775_865_601_000,
+          type: "NodeFinished",
+          payload: {
+            runId: "ultrafuzz-cli-run",
+            timestampMs: 1_775_865_601_000,
+            type: "NodeFinished",
+            nodeId: "node:project-discovery",
+            iteration: 0,
+            attempt: 1
+          }
+        },
+        {
+          runId: "ultrafuzz-cli-run",
+          seq: 3,
+          timestampMs: 1_775_865_602_000,
+          type: "RunFinished",
+          payload: {
+            runId: "ultrafuzz-cli-run",
+            timestampMs: 1_775_865_602_000,
+            type: "RunFinished"
+          }
+        }
+      ]
+        .map((event) => shellQuote(JSON.stringify(event)))
+        .join(" ")}`,
+      "        fi",
+      "        ;;",
+      "    esac",
+      "    ;;",
       "  fork)",
-      "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-cli-run-forked\"}'",
+      '    printf \'%s\\n\' \'{"ok":true,"data":{"forkedRunId":"ultrafuzz-cli-run-forked"}}\'',
+      "    ;;",
+      "  replay)",
+      '    printf \'%s\\n\' \'{"ok":true,"data":{"forkedRunId":"ultrafuzz-cli-run-replayed"}}\'',
       "    ;;",
       "  pause)",
-      "    printf '%s\\n' '{\"status\":\"pause-requested\"}'",
+      '    printf \'%s\\n\' \'{"ok":true,"data":{"status":"pause-requested"}}\'',
       "    exit 2",
       "    ;;",
       "  status)",
-      '    printf \'%s\\n\' \'{"data":{"status":"running","verdict":"running-healthy","reason":"1 running, 2 finished in last 10m","counts":{"finished":2,"inProgress":1,"pending":3,"failed":0,"waitingApproval":0,"waitingEvent":0,"waitingTimer":0,"skipped":0,"other":0,"total":6},"modelMix":[{"engine":"codex","model":"gpt-test","attempts":3,"quotaParked":false}],"throughput":{"recentFinished":2,"windowMs":600000,"totalFinished":2,"lastFinishedAtMs":1000},"bottleneck":[{"nodeId":"project-discovery","iteration":0,"state":"in-progress","detail":"running 1m"}],"bottleneckOmitted":0,"quota":null,"generatedAtMs":2000}}\'',
+      `    printf '%s\\n' ${shellQuote(
+        JSON.stringify({
+          ok: true,
+          data: {
+            status: "running",
+            verdict: "running-healthy",
+            reason: "1 running, 2 finished in last 10m",
+            counts: {
+              finished: 2,
+              inProgress: 1,
+              pending: 3,
+              failed: 0,
+              waitingApproval: 0,
+              waitingEvent: 0,
+              waitingTimer: 0,
+              skipped: 0,
+              other: 0,
+              total: 6
+            },
+            modelMix: [{ engine: "codex", model: "gpt-test", attempts: 3, quotaParked: false }],
+            throughput: { recentFinished: 2, windowMs: 600_000, totalFinished: 2, lastFinishedAtMs: 1_000 },
+            bottleneck: [{ nodeId: "project-discovery", iteration: 0, state: "in-progress", detail: "running 1m" }],
+            bottleneckOmitted: 0,
+            quota: null,
+            generatedAtMs: 2_000
+          },
+          meta: { command: "status", duration: "1ms" }
+        })
+      )}`,
       "    ;;",
       "  *)",
       "    printf '%s\\n' '{\"ok\":true}'",
@@ -62,7 +184,8 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
+    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+    SMITHERS_FAKE_INSPECT_STATE: inspectStatePath
   };
 }
 
@@ -563,6 +686,23 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   };
   fs.writeFileSync(statePath, `${JSON.stringify(restored, null, 2)}\n`, "utf8");
 
+  const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.writeFileSync(path.join(artifactDir, "stdout.txt"), "generated stdout\n", "utf8");
+  writeArtifactManifest({
+    layout: layoutForRunRoot(runData.run_root, runData.run_id),
+    nodeId: "project-discovery",
+    include: ["stdout.txt"],
+    outputs: [
+      {
+        path: "stdout.txt",
+        contract: "ultrafuzz/text@1",
+        contract_digest: artifactContractDefinition("ultrafuzz/text@1").digest,
+        primary: true
+      }
+    ]
+  });
+
   let resolveFirstStatusLine!: () => void;
   let rejectFirstStatusLine!: (error: Error) => void;
   let sawFirstStatusLine = false;
@@ -590,6 +730,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   } catch (error) {
     const terminalState = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
     fs.writeFileSync(statePath, `${JSON.stringify({ ...terminalState, status: "succeeded" }, null, 2)}\n`, "utf8");
+    fs.writeFileSync(path.join(project, "fake-smithers-inspect-state"), "succeeded\n", "utf8");
     await watching;
     throw error;
   } finally {
@@ -597,6 +738,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   }
   const terminalState = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
   fs.writeFileSync(statePath, `${JSON.stringify({ ...terminalState, status: "succeeded" }, null, 2)}\n`, "utf8");
+  fs.writeFileSync(path.join(project, "fake-smithers-inspect-state"), "succeeded\n", "utf8");
   const watched = await watching;
   assert.equal(watched.code, 0, watched.stderr);
   const watchedLines = watched.stdout.split("\n").filter(Boolean);
@@ -610,9 +752,6 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal((watchedEnvelopes[0]!.data as { status: string }).status, "running");
   assert.equal((watchedEnvelopes[1]!.data as { status: string }).status, "succeeded");
 
-  const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
-  fs.mkdirSync(artifactDir, { recursive: true });
-  fs.writeFileSync(path.join(artifactDir, "stdout.txt"), "generated stdout\n", "utf8");
   writeRunAccounting(runData.run_root, {
     totalTokens: 123,
     tokensUsed: "123",
@@ -677,7 +816,10 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     assertNoSmithersSurface(lifecycleBody);
     const lifecycleData = lifecycleBody.data as { submitted: boolean; workflow_run_id: string };
     assert.equal(lifecycleData.submitted, true);
-    assert.equal(lifecycleData.workflow_run_id, "ultrafuzz-cli-run");
+    assert.equal(
+      lifecycleData.workflow_run_id,
+      command === "replay" ? "ultrafuzz-cli-run-replayed" : "ultrafuzz-cli-run"
+    );
   }
 
   const retried = await cli(
@@ -690,7 +832,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assertNoSmithersSurface(retriedBody);
   const retriedData = retriedBody.data as { submitted: boolean; workflow_run_id: string };
   assert.equal(retriedData.submitted, true);
-  assert.equal(retriedData.workflow_run_id, "ultrafuzz-cli-run");
+  assert.equal(retriedData.workflow_run_id, "ultrafuzz-cli-run-replayed");
 
   const fork = await cli(
     project,

@@ -99,6 +99,7 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
   fs.writeFileSync(
     whyPath,
     `${JSON.stringify({
+      ok: true,
       data: {
         runId: WORKFLOW_RUN_ID,
         status: "running",
@@ -118,49 +119,59 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
             maxAttempts: 3
           }
         ]
-      }
+      },
+      meta: { command: "why", duration: "1ms" }
     })}\n`,
     "utf8"
   );
   fs.writeFileSync(
     timelinePath,
     `${JSON.stringify({
-      timeline: {
-        runId: WORKFLOW_RUN_ID,
-        branch: "main",
-        frames: [
-          { frameNo: 2, createdAtMs: 1_700_000_000_000, contentHash: "hash-2", forks: [] },
-          { frameNo: 7, createdAtMs: 1_700_000_500_000, contentHash: "hash-7", forks: [] }
-        ],
-        children: []
-      }
+      ok: true,
+      data: {
+        timeline: {
+          runId: WORKFLOW_RUN_ID,
+          branch: "main",
+          frames: [
+            { frameNo: 2, createdAtMs: 1_700_000_000_000, contentHash: "hash-2", forks: [] },
+            { frameNo: 7, createdAtMs: 1_700_000_500_000, contentHash: "hash-7", forks: [] }
+          ],
+          children: []
+        }
+      },
+      meta: { command: "timeline", duration: "1ms" }
     })}\n`,
     "utf8"
   );
   fs.writeFileSync(
     snapshotsPath,
     `${JSON.stringify({
-      snapshots: [
-        {
-          seq: 4,
-          nodeId: "node:project-discovery",
-          iteration: 0,
-          attempt: 1,
-          tier: 1,
-          source: "node-finish",
-          label: null,
-          commitId: "commit-1",
-          operationId: "op-1",
-          cwd: "/workspace",
-          createdAtMs: 1_700_000_400_000
-        }
-      ]
+      ok: true,
+      data: {
+        snapshots: [
+          {
+            seq: 4,
+            nodeId: "node:project-discovery",
+            iteration: 0,
+            attempt: 1,
+            tier: 1,
+            source: "node-finish",
+            label: null,
+            commitId: "commit-1",
+            operationId: "op-1",
+            cwd: "/workspace",
+            createdAtMs: 1_700_000_400_000
+          }
+        ]
+      },
+      meta: { command: "snapshots", duration: "1ms" }
     })}\n`,
     "utf8"
   );
   fs.writeFileSync(
     nodePath,
     `${JSON.stringify({
+      ok: true,
       data: {
         node: {
           runId: WORKFLOW_RUN_ID,
@@ -206,7 +217,8 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
         output: { validated: null, raw: null, source: "none", cacheKey: null },
         approval: null,
         limits: { toolPayloadBytesHuman: 1, validatedOutputBytesHuman: 1 }
-      }
+      },
+      meta: { command: "node", duration: "1ms" }
     })}\n`,
     "utf8"
   );
@@ -218,14 +230,27 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
         seq: 1,
         timestampMs: 1_700_000_000_000,
         type: "node.started",
-        payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1, state: "in-progress" }
+        payload: {
+          runId: WORKFLOW_RUN_ID,
+          timestampMs: 1_700_000_000_000,
+          type: "node.started",
+          nodeId: "node:project-discovery",
+          iteration: 0,
+          attempt: 1,
+          state: "in-progress"
+        }
       }),
       JSON.stringify({
         runId: WORKFLOW_RUN_ID,
         seq: 2,
         timestampMs: 1_700_000_060_000,
         type: "run.progress",
-        payload: { status: "running" }
+        payload: {
+          runId: WORKFLOW_RUN_ID,
+          timestampMs: 1_700_000_060_000,
+          type: "run.progress",
+          status: "running"
+        }
       })
     ].join("\n")}\n`,
     "utf8"
@@ -243,8 +268,42 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
       `  snapshots) cat ${shellQuote(snapshotsPath)} ;;`,
       `  node) cat ${shellQuote(nodePath)} ;;`,
       `  events) cat ${shellQuote(eventsPath)} ;;`,
+      "  inspect)",
+      `    printf '{"ok":true,"data":{"run":{"id":"%s","workflow":"workflow","status":"running","started":"2026-08-09T00:00:00.000Z","elapsed":"1s"},"runState":{"runId":"%s","state":"running","computedAt":"2026-08-09T00:00:01.000Z"},"steps":[],"nodes":[]},"meta":{"command":"inspect","duration":"1ms"}}\\n' "$2" "$2"`,
+      "    ;;",
+      "  status)",
+      `    printf '%s\\n' ${shellQuote(
+        JSON.stringify({
+          ok: true,
+          data: {
+            status: "running",
+            verdict: "blocked",
+            reason: "run `smithers why` for the blocking node",
+            counts: {
+              finished: 1,
+              inProgress: 0,
+              pending: 5,
+              failed: 0,
+              waitingApproval: 1,
+              waitingEvent: 0,
+              waitingTimer: 0,
+              skipped: 0,
+              other: 0,
+              total: 6
+            },
+            modelMix: [],
+            throughput: { recentFinished: 0, windowMs: 600_000, totalFinished: 1, lastFinishedAtMs: 1_000 },
+            bottleneck: [],
+            bottleneckOmitted: 0,
+            quota: null,
+            generatedAtMs: 2_000
+          },
+          meta: { command: "status", duration: "1ms" }
+        })
+      )}`,
+      "    ;;",
       "  cancel)",
-      `    printf '%s\\n' '{"data":{"status":"${options.cancelStatus ?? "cancel-requested"}"}}'`,
+      `    printf '%s\\n' '{"ok":true,"data":{"status":"${options.cancelStatus ?? "cancel-requested"}"},"meta":{"command":"cancel","duration":"1ms"}}'`,
       "    exit 2",
       "    ;;",
       "  *) printf '%s\\n' '{\"ok\":true}' ;;",
@@ -517,32 +576,41 @@ test("status recommends ultrafuzz why instead of the engine command", async () =
     [
       "#!/bin/sh",
       'case "$1" in',
+      "  inspect)",
+      `    printf '{"ok":true,"data":{"run":{"id":"%s","workflow":"workflow","status":"running","started":"2026-08-09T00:00:00.000Z","elapsed":"1s"},"runState":{"runId":"%s","state":"running","computedAt":"2026-08-09T00:00:01.000Z"},"steps":[],"nodes":[]},"meta":{"command":"inspect","duration":"1ms"}}\\n' "$2" "$2"`,
+      "    ;;",
+      "  events)",
+      "    ;;",
       "  status)",
-      `    printf '%s\\n' '${JSON.stringify({
-        data: {
-          status: "running",
-          verdict: "blocked",
-          reason: "run `smithers why` for the blocking node",
-          counts: {
-            finished: 1,
-            inProgress: 0,
-            pending: 5,
-            failed: 0,
-            waitingApproval: 1,
-            waitingEvent: 0,
-            waitingTimer: 0,
-            skipped: 0,
-            other: 0,
-            total: 6
+      `    printf '%s\\n' ${shellQuote(
+        JSON.stringify({
+          ok: true,
+          data: {
+            status: "running",
+            verdict: "blocked",
+            reason: "run `smithers why` for the blocking node",
+            counts: {
+              finished: 1,
+              inProgress: 0,
+              pending: 5,
+              failed: 0,
+              waitingApproval: 1,
+              waitingEvent: 0,
+              waitingTimer: 0,
+              skipped: 0,
+              other: 0,
+              total: 6
+            },
+            modelMix: [],
+            throughput: { recentFinished: 0, windowMs: 600_000, totalFinished: 1, lastFinishedAtMs: 1_000 },
+            bottleneck: [],
+            bottleneckOmitted: 0,
+            quota: null,
+            generatedAtMs: 2_000
           },
-          modelMix: [],
-          throughput: { recentFinished: 0, windowMs: 600_000, totalFinished: 1, lastFinishedAtMs: 1000 },
-          bottleneck: [],
-          bottleneckOmitted: 0,
-          quota: null,
-          generatedAtMs: 2000
-        }
-      })}'`,
+          meta: { command: "status", duration: "1ms" }
+        })
+      )}`,
       "    ;;",
       "  *) printf '%s\\n' '{\"ok\":true}' ;;",
       "esac",

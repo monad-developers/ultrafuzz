@@ -29,6 +29,7 @@ test("eval status renders disclosure-safe table and JSON snapshots without mutat
     groundTruth: "secret-ground-truth.yml"
   });
   writeEvalMatrix(path.join(evalRoot, "matrix.json"), [matrixRow]);
+  fs.writeFileSync(path.join(evalRoot, "runs.jsonl"), "", "utf8");
   appendEvalRunRecord(
     path.join(evalRoot, "runs.jsonl"),
     launchedRecord({
@@ -145,6 +146,7 @@ test("eval status watch exits when remaining rows cannot progress", async () => 
     groundTruth: "secret-invalid-ground-truth.yml"
   });
   writeEvalMatrix(path.join(evalRoot, "matrix.json"), [matrixRow]);
+  fs.writeFileSync(path.join(evalRoot, "runs.jsonl"), "", "utf8");
   appendEvalRunRecord(
     path.join(evalRoot, "runs.jsonl"),
     launchedRecord({
