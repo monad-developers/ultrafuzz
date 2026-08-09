@@ -10,7 +10,6 @@ import { summarizeEvalTerminal } from "../src/efficiency.js";
 import { appendEvalRunRecord, readEvalMatrix, readEvalRunRecords } from "../src/eval-durable.js";
 import { publishEvalRun } from "../src/publish.js";
 import { launchEvalRow, runEvalSuite, watchEvalRow } from "../src/runner.js";
-import { readJsonLines } from "../src/utils.js";
 import {
   RecordingReporter,
   cleanRecoveryEquivalence,
@@ -373,7 +372,7 @@ describe("runner", () => {
     });
     expect(record.status).toBe("failed");
     expect(record.diagnostics[0]?.message).toContain("smithers unavailable");
-    const lines = readJsonLines<{ row_id: string; status: string }>(path.join(base, "eval-run", "runs.jsonl"));
+    const lines = readEvalRunRecords(path.join(base, "eval-run", "runs.jsonl"));
     expect(lines).toEqual([expect.objectContaining({ row_id: row.id, status: "failed" })]);
   });
 
@@ -499,7 +498,7 @@ describe("runner", () => {
       workflow: { status: "succeeded", terminal: true }
     });
     expect(result.incomplete).toBe(0);
-    expect(readJsonLines(path.join(result.eval_run_root, "runs.jsonl"))).toHaveLength(2);
+    expect(readEvalRunRecords(path.join(result.eval_run_root, "runs.jsonl"))).toHaveLength(2);
   });
 
   it("counts a watched row as incomplete when it misses the watch deadline", async () => {
@@ -660,10 +659,7 @@ describe("runner", () => {
 
     expect(watched.record.final_status).toBe("succeeded");
     expect(watched.record.workflow).toMatchObject({ status: "succeeded", terminal: true, finished_at: T1 });
-    expect(
-      readJsonLines<{ workflow?: { finished_at?: string } }>(path.join(base, "eval-run", "runs.jsonl")).at(-1)?.workflow
-        ?.finished_at
-    ).toBe(T1);
+    expect(readEvalRunRecords(path.join(base, "eval-run", "runs.jsonl")).at(-1)?.workflow?.finished_at).toBe(T1);
     const methods = reporter.calls.map((call) => call.method);
     expect(methods[0]).toBe("onRowStart");
     expect(methods[methods.length - 1]).toBe("onRowFinish");
@@ -819,7 +815,7 @@ describe("runner", () => {
       }
     );
     expect(
-      readJsonLines<{ diagnostics: Array<{ code: string }> }>(path.join(base, "eval-run", "runs.jsonl"))
+      readEvalRunRecords(path.join(base, "eval-run", "runs.jsonl"))
         .at(-1)
         ?.diagnostics.map((diagnostic) => diagnostic.code)
     ).toContain("EVAL_ROW_SYNC_FAILED");
@@ -922,7 +918,7 @@ describe("eval publish (post-hoc replay)", () => {
       })
     ).rejects.toMatchObject({ code: "EVAL_OUTPUT_NON_PUBLISHABLE" });
 
-    const records = readJsonLines<{ recovery_equivalence?: unknown }>(runsPath);
+    const records = readEvalRunRecords(runsPath);
     expect(records).toHaveLength(1);
     expect(records[0]).not.toHaveProperty("recovery_equivalence");
   });

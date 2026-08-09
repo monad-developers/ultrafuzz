@@ -2,12 +2,9 @@ import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { TextDecoder } from "node:util";
 
 import {
-  appendLineDurable,
   assertPlannedGraph,
-  parseStrictJson,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   safeResolveInside,
@@ -119,7 +116,7 @@ export function resolveTerminalReportPath(input: { runRoot?: string }): Terminal
   if (!fs.existsSync(graphPath)) {
     return { reason: "run graph is unavailable" };
   }
-  const graph = assertPlannedGraph(jsonFile(graphPath));
+  const graph = assertPlannedGraph(readStrictJsonFile(graphPath));
   const candidates = terminalReportCandidates(runRoot, graph);
   if (candidates.length === 1) {
     return {
@@ -263,28 +260,8 @@ export function evalRunRoot(projectRoot: string, evalRunId: string): string {
   );
 }
 
-export function jsonFile<T = unknown>(filePath: string): T {
-  return parseStrictJsonBytes(readRegularFileSnapshot(filePath, 64 * 1024 * 1024)) as T;
-}
-
-export function appendJsonLine(filePath: string, value: unknown): void {
-  appendLineDurable(filePath, JSON.stringify(value));
-}
-
-export function readJsonLines<T = unknown>(filePath: string): T[] {
-  if (!fs.existsSync(filePath)) {
-    return [];
-  }
-  const bytes = readRegularFileSnapshot(filePath, 64 * 1024 * 1024);
-  const contents = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  if (contents.length === 0) return [];
-  const lines = contents.split("\n");
-  if (lines.at(-1) === "") lines.pop();
-  return lines.map((rawLine, index) => {
-    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-    if (line.trim().length === 0) throw new SyntaxError(`blank JSONL record at ${filePath}:${index + 1}`);
-    return parseStrictJson(line) as T;
-  });
+function readStrictJsonFile(filePath: string): unknown {
+  return parseStrictJsonBytes(readRegularFileSnapshot(filePath, 64 * 1024 * 1024));
 }
 
 export function roundMetric(value: number): number {

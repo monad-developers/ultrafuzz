@@ -226,6 +226,53 @@ describe("graphFromPlannedGraph", () => {
 });
 
 describe("BraintrustReporter", () => {
+  it.each(["", "{", '{"id":"first","id":"shadow"}', "[]"])(
+    "rejects a non-strict Braintrust success response instead of substituting an empty object: %j",
+    async (payload) => {
+      const suite = testSuite("/tmp/gt");
+      const reporter = new BraintrustReporter({
+        apiKey: "secret",
+        project: "ultrafuzz-evals",
+        evalRunId: "eval-invalid-response",
+        policy: testReportingPolicy(),
+        fetchImpl: (async () => new Response(payload, { status: 200 })) as typeof fetch
+      });
+
+      await expect(
+        reporter.onPlan({
+          suite_path: "suite.yml",
+          project_root: "/tmp/project",
+          suite,
+          matrix: [testRow(suite)]
+        })
+      ).rejects.toMatchObject({ code: "EVAL_BRAINTRUST_RESPONSE_INVALID" });
+    }
+  );
+
+  it("requires every successful Braintrust response to be a JSON object", async () => {
+    const suite = testSuite("/tmp/gt");
+    let request = 0;
+    const reporter = new BraintrustReporter({
+      apiKey: "secret",
+      project: "ultrafuzz-evals",
+      evalRunId: "eval-invalid-insert-response",
+      policy: testReportingPolicy(),
+      fetchImpl: (async () => {
+        request += 1;
+        return new Response(request < 3 ? `{"id":"provider-${request}"}` : "[]", { status: 200 });
+      }) as typeof fetch
+    });
+
+    await expect(
+      reporter.onPlan({
+        suite_path: "suite.yml",
+        project_root: "/tmp/project",
+        suite,
+        matrix: [testRow(suite)]
+      })
+    ).rejects.toMatchObject({ code: "EVAL_BRAINTRUST_RESPONSE_INVALID" });
+  });
+
   it("mirrors comparison lineage and runtime fingerprints into provider metadata", async () => {
     const { requests, fetchImpl } = fakeFetch();
     const suite = testSuite("/tmp/generated-ground-truth");
