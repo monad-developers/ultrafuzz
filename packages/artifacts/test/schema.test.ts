@@ -27,6 +27,7 @@ import {
   artifactManifestJsonSchema,
   analysisBundleManifestJsonSchema,
   artifactContractDefinition,
+  artifactContractSchemaBinding,
   createInitialRunState,
   findingJsonSchema,
   generatedTestsJsonSchema,
@@ -747,6 +748,7 @@ test("run state schema covers all required node states and rejects malformed sta
             path: "findings.json",
             contract: "ultrafuzz/findings@2",
             contract_digest: "a".repeat(64),
+            ...artifactContractSchemaBinding("ultrafuzz/findings@2"),
             primary: true
           }
         ],
@@ -760,7 +762,7 @@ test("run state schema covers all required node states and rejects malformed sta
   });
 
   assert.equal(validateRunStateSchema(state).ok, true);
-  assert.equal(state.schema_version, "2.0");
+  assert.equal(state.schema_version, "ultrafuzz.run-state.v3");
   assert.equal(state.nodes["node-1"]?.wait_reason, "ready");
   assert.equal(state.nodes["node-1"]?.next_eligible_action, "dispatch");
   assert.equal(state.controller_lease.status, "active");
@@ -780,15 +782,9 @@ test("run state schema covers all required node states and rejects malformed sta
   assert.equal(invalid.ok, false);
   assert.ok(invalid.issues.some((issue) => issue.path.endsWith(".status")));
 
-  const partialBinding = validateRunStateSchema({
-    ...state,
-    nodes: {
-      "node-1": {
-        ...state.nodes["node-1"],
-        outputs: [{ ...state.nodes["node-1"]!.outputs![0]!, schema_file: "findings.schema.json" }]
-      }
-    }
-  });
+  const partialBindingState = structuredClone(state);
+  delete partialBindingState.nodes["node-1"]!.outputs![0]!.schema_id;
+  const partialBinding = validateRunStateSchema(partialBindingState);
   assert.equal(partialBinding.ok, false);
   assert.ok(partialBinding.issues.some((issue) => issue.path.endsWith(".schema_file")));
 

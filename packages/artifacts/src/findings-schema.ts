@@ -5,8 +5,7 @@ import {
   FINDING_SEVERITIES,
   FINDING_STATUSES,
   FINDINGS_SCHEMA_VERSION,
-  TRIAGE_CLASSIFICATIONS,
-  type NormalizedFinding
+  TRIAGE_CLASSIFICATIONS
 } from "./findings.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
@@ -217,6 +216,8 @@ export const findingSchema = z
       });
     }
   });
+
+export type NormalizedFinding = z.infer<typeof findingSchema>;
 
 export const findingsSchema = z.array(findingSchema).meta({
   $id: FINDINGS_JSON_SCHEMA_ID,

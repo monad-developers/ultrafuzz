@@ -11,7 +11,8 @@ import {
   validateSafeId,
   writeJsonDurable,
   writeRunState,
-  type RunLayout
+  type RunLayout,
+  type StateJsonValue
 } from "@ultrafuzz/artifacts";
 import type { ResolvedConfig } from "@ultrafuzz/config";
 
@@ -824,7 +825,7 @@ function reconcilePendingWorkflowRunLink(projectRoot: string, layout: RunLayout)
       workflow_ids: [pending.workflow_run_id],
       workflow: binding.metadataWorkflow
     });
-    const existingProvenance = objectRecord(state.provenance);
+    const existingProvenance = state.provenance ?? {};
     state.provenance = { ...existingProvenance, workflow: binding.stateWorkflow };
     writeRunState(layout, state);
     finalizeWorkflowRunLink(layout, pending);
@@ -857,7 +858,7 @@ function initialWorkflowBinding(
   executionSnapshotRoot: string,
   taskDocument: Record<string, unknown>,
   link: WorkflowRunLinkJournalEntry
-): { metadataWorkflow: Record<string, unknown>; stateWorkflow: Record<string, unknown> } {
+): { metadataWorkflow: Record<string, unknown>; stateWorkflow: Record<string, StateJsonValue> } {
   const workflowName = taskDocument.workflow_name;
   const tasks = taskDocument.tasks;
   if (typeof workflowName !== "string" || !Array.isArray(tasks)) {
@@ -928,7 +929,7 @@ function metadataMatchesInitialWorkflowBinding(
 
 function stateMatchesInitialWorkflowBinding(
   state: ReturnType<typeof readRunState>,
-  expectedWorkflow: Record<string, unknown>
+  expectedWorkflow: Record<string, StateJsonValue>
 ): boolean {
   return exactRecordMatches(objectRecord(objectRecord(state.provenance).workflow), expectedWorkflow, ["linkId"]);
 }

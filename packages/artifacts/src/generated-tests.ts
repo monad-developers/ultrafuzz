@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { z } from "zod/v4";
 
+import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { normalizeArtifactProvenance, type ArtifactProvenance } from "./manifests.js";
 import { getNodeArtifactDir, type RunLayout } from "./run-layout.js";
 import {
@@ -11,12 +12,13 @@ import {
   ensureSafeDirectory,
   normalizeSafeRelativePath,
   prepareSafeFilePath,
-  readJsonFile,
   sha256File,
   writeFileDurable,
   writeJsonDurable
 } from "./safe-paths.js";
-import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
+import { readRegularFileSnapshot } from "./schema-registry.js";
+import { validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
+import { parseStrictJsonBytes } from "./strict-json.js";
 
 export const GENERATED_TESTS_SCHEMA_VERSION = "ultrafuzz.generated-tests.v2" as const;
 export const GENERATED_TESTS_DIR = "generated-tests";
@@ -89,16 +91,18 @@ export const generatedTestEntrySchema = z.strictObject({
   description: nonEmptyString.optional()
 });
 
-export const generatedTestManifestSchema = z.strictObject({
-  schema_version: z.literal(GENERATED_TESTS_SCHEMA_VERSION),
-  run_id: nonEmptyString,
-  node_id: nonEmptyString,
-  generated_tests: z.array(generatedTestEntrySchema),
-  provenance: generatedTestProvenanceSchema.optional()
-}).meta({
-  $id: GENERATED_TESTS_JSON_SCHEMA_ID,
-  title: "Ultrafuzz generated tests manifest"
-});
+export const generatedTestManifestSchema = z
+  .strictObject({
+    schema_version: z.literal(GENERATED_TESTS_SCHEMA_VERSION),
+    run_id: nonEmptyString,
+    node_id: nonEmptyString,
+    generated_tests: z.array(generatedTestEntrySchema),
+    provenance: generatedTestProvenanceSchema.optional()
+  })
+  .meta({
+    $id: GENERATED_TESTS_JSON_SCHEMA_ID,
+    title: "Ultrafuzz generated tests manifest"
+  });
 
 export const generatedTestsJsonSchema = z.toJSONSchema(generatedTestManifestSchema);
 
@@ -113,11 +117,27 @@ export function validateGeneratedTestManifestSchema(
 }
 
 export function assertGeneratedTestManifestSchema(value: unknown): GeneratedTestManifest {
-  const result = validateGeneratedTestManifestSchema(value);
-  if (!result.ok || !result.value) {
-    throw new Error(schemaErrorMessage("generated tests manifest", result.issues));
+  const result = validateRegisteredJsonSchema(GENERATED_TESTS_JSON_SCHEMA_ID, value);
+  if (!result.ok) {
+    throw new Error(
+      `generated tests manifest is schema-invalid: ${result.issues
+        .map((issue) => `${issue.instancePath || "/"} ${issue.message}`)
+        .join("; ")}`
+    );
   }
-  return result.value;
+  const manifest = value as GeneratedTestManifest;
+  assertGeneratedTestManifestSemantics(manifest);
+  return manifest;
+}
+
+export function assertGeneratedTestManifestSemantics(manifest: GeneratedTestManifest): void {
+  const paths = new Set<string>();
+  for (const entry of manifest.generated_tests) {
+    if (paths.has(entry.path)) {
+      throw new Error(`generated tests manifest repeats path ${JSON.stringify(entry.path)}`);
+    }
+    paths.add(entry.path);
+  }
 }
 
 export function writeGeneratedTestManifest(input: {
@@ -137,13 +157,15 @@ export function writeGeneratedTestManifest(input: {
     generated_tests,
     provenance
   };
+  assertGeneratedTestManifestSchema(manifest);
   writeJsonDurable(path.join(nodeDir, GENERATED_TESTS_MANIFEST), manifest);
   return manifest;
 }
 
 export function readGeneratedTestManifest(layout: RunLayout, nodeId: string): GeneratedTestManifest {
+  const manifestPath = path.join(getNodeArtifactDir(layout, nodeId), GENERATED_TESTS_MANIFEST);
   return assertGeneratedTestManifestSchema(
-    readJsonFile(path.join(getNodeArtifactDir(layout, nodeId), GENERATED_TESTS_MANIFEST))
+    parseStrictJsonBytes(readRegularFileSnapshot(manifestPath, 64 * 1024 * 1024))
   );
 }
 

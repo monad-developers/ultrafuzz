@@ -238,13 +238,6 @@ export function writeArtifact(
   return artifactPath;
 }
 
-export function writeArtifactJson(layout: RunLayout, nodeId: string, relativePath: string, value: unknown): string {
-  const nodeDir = getNodeArtifactDir(layout, nodeId, { create: true });
-  const artifactPath = prepareSafeFilePath(nodeDir, relativePath);
-  writeJsonDurable(artifactPath, value);
-  return artifactPath;
-}
-
 export function writeArtifactManifest(input: WriteArtifactManifestInput): ArtifactManifest {
   const nodeId = validateSafeId(input.nodeId, "node ID");
   const nodeDir = getNodeArtifactDir(input.layout, nodeId, { create: true });

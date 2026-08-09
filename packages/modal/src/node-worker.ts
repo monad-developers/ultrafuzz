@@ -10,6 +10,10 @@ import {
   artifactSchemaDirectory,
   artifactSchemaRegistry,
   artifactValidatorSmokeFixturePath,
+  assertArtifactVerificationMarkerSemantics,
+  parseStrictJsonBytes,
+  validateArtifactVerificationMarker,
+  type ArtifactVerificationMarker,
   VALIDATOR_BUILD_IDENTITY
 } from "@ultrafuzz/artifacts";
 
@@ -27,7 +31,6 @@ const DURABLE_CHECKPOINT_DIRECTORY = "checkpoints";
 const DURABLE_CHECKPOINT_INDEX = "index.json";
 const DURABLE_RESTORE_MARKER = "restore.json";
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
-const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v2";
 const MAX_VERIFICATION_MARKER_BYTES = 4 * 1024 * 1024;
 
 type DurableCheckpointStage = "prepared" | "running" | "failed" | "completed";
@@ -1272,38 +1275,25 @@ function readVerificationMarkerPublications(markerPath: string, attemptId: strin
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(fs.readFileSync(markerFile, "utf8"));
+    parsed = parseStrictJsonBytes(fs.readFileSync(markerFile));
   } catch (error) {
     throw new Error("cloud publication verification marker is invalid JSON", { cause: error });
   }
-  if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    Array.isArray(parsed) ||
-    (parsed as { schema_version?: unknown }).schema_version !== ARTIFACT_VERIFICATION_SCHEMA_VERSION ||
-    (parsed as { attempt_id?: unknown }).attempt_id !== attemptId ||
-    !Array.isArray((parsed as { publications?: unknown }).publications)
-  ) {
+  const shape = validateArtifactVerificationMarker(parsed);
+  if (!shape.ok) {
     throw new Error("cloud publication verification marker is invalid");
   }
+  const marker = parsed as ArtifactVerificationMarker;
+  if (marker.attempt_id !== attemptId) throw new Error("cloud publication verification marker is invalid");
+  assertArtifactVerificationMarkerSemantics(marker);
   const publications = new Map<string, string>();
-  for (const publication of (parsed as { publications: unknown[] }).publications) {
-    if (
-      typeof publication !== "object" ||
-      publication === null ||
-      Array.isArray(publication) ||
-      typeof (publication as { path?: unknown }).path !== "string" ||
-      typeof (publication as { sha256?: unknown }).sha256 !== "string" ||
-      !/^[0-9a-f]{64}$/u.test((publication as { sha256: string }).sha256)
-    ) {
-      throw new Error("cloud publication verification marker publication is invalid");
-    }
-    const relativePath = (publication as { path: string }).path;
+  for (const publication of marker.publications) {
+    const relativePath = publication.path;
     assertSafeVerifiedPublicationRelativePath(relativePath);
     if (publications.has(relativePath)) {
       throw new Error(`cloud publication verification marker has duplicate publication: ${relativePath}`);
     }
-    publications.set(relativePath, (publication as { sha256: string }).sha256);
+    publications.set(relativePath, publication.sha256);
   }
   if (publications.size === 0) {
     throw new Error("cloud publication verification marker has no publications");

@@ -817,8 +817,9 @@ function materializeReferenceNodesForPlan(input: {
       provenance: {
         origin: "pinned-reference",
         reference: node.reference,
-        repo: node.reference_revision?.repo,
-        commit: node.reference_revision?.commit,
+        ...(node.reference_revision === undefined
+          ? {}
+          : { repo: node.reference_revision.repo, commit: node.reference_revision.commit }),
         ...(input.provision === undefined
           ? {}
           : {
@@ -836,8 +837,9 @@ function materializeReferenceNodesForPlan(input: {
       status: "succeeded",
       payload: {
         reference: node.reference,
-        repo: node.reference_revision?.repo,
-        commit: node.reference_revision?.commit,
+        ...(node.reference_revision === undefined
+          ? {}
+          : { repo: node.reference_revision.repo, commit: node.reference_revision.commit }),
         artifact: materialized.referenceArtifact,
         manifest: materialized.manifestArtifact
       }

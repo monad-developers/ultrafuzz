@@ -3,6 +3,7 @@ import {
   NON_JSON_ARTIFACT_CONTRACT_IDS,
   type ArtifactContractId
 } from "./artifact-contract-ids.js";
+import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 
 export const ARTIFACT_VERIFICATION_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:artifact-verification:2" as const;
 export const AGENT_SOURCE_PROOF_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:agent-source-proof:1" as const;
@@ -164,4 +165,38 @@ export interface ArtifactVerificationMarker {
   node_id: string;
   artifacts: ArtifactVerificationEntry[];
   publications: Array<{ path: string; sha256: string }>;
+}
+
+export function validateArtifactVerificationMarker(value: unknown): JsonSchemaValidationResult {
+  return validateRegisteredJsonSchema(ARTIFACT_VERIFICATION_JSON_SCHEMA_ID, value);
+}
+
+export function assertArtifactVerificationMarkerSemantics(marker: ArtifactVerificationMarker): void {
+  const artifactPaths = new Set<string>();
+  let primaryCount = 0;
+  for (const artifact of marker.artifacts) {
+    if (artifactPaths.has(artifact.path)) {
+      throw new Error(`artifact verification marker repeats artifact path ${JSON.stringify(artifact.path)}`);
+    }
+    artifactPaths.add(artifact.path);
+    if (artifact.primary) primaryCount += 1;
+  }
+  if (primaryCount !== 1) {
+    throw new Error(`artifact verification marker must identify exactly one primary artifact, found ${primaryCount}`);
+  }
+
+  const publicationDigests = new Map<string, string>();
+  for (const publication of marker.publications) {
+    if (publicationDigests.has(publication.path)) {
+      throw new Error(`artifact verification marker repeats publication path ${JSON.stringify(publication.path)}`);
+    }
+    publicationDigests.set(publication.path, publication.sha256);
+  }
+  for (const artifact of marker.artifacts) {
+    if (publicationDigests.get(artifact.path) !== artifact.sha256) {
+      throw new Error(
+        `artifact verification marker publication digest does not match artifact ${JSON.stringify(artifact.path)}`
+      );
+    }
+  }
 }

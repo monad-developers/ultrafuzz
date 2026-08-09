@@ -41,6 +41,7 @@ import {
   type NodeStatus,
   type RunLayout,
   type RunStatus,
+  type StateJsonValue,
   type UsageField,
   type UsageIncompleteReason as LedgerUsageIncompleteReason,
   type UsageLedgerEntry,
@@ -276,7 +277,7 @@ interface NodeFinalization {
   status: NodeStatus;
   diagnostics: RuntimeDiagnostic[];
   lastError?: string;
-  provenance: Record<string, unknown>;
+  provenance: Record<string, StateJsonValue>;
   events: PendingNodeEvent[];
 }
 
@@ -293,6 +294,7 @@ export interface WorkflowSynchronizationControl {
 }
 
 interface ArtifactReconciliationGrace {
+  [key: string]: StateJsonValue;
   schema_version: "ultrafuzz.artifact-reconciliation-grace.v1";
   started_at: string;
   deadline_at: string;
@@ -1961,8 +1963,8 @@ async function synchronizeTasks(input: {
           task_id: attemptEvidence.taskId,
           agent_task_id: task.smithersNodeId,
           verifier_task_id: task.verifierSmithersNodeId,
-          state: evidence.workflowState,
-          attempt: evidence.attempt
+          ...(evidence.workflowState === undefined ? {} : { state: evidence.workflowState }),
+          ...(evidence.attempt === undefined ? {} : { attempt: evidence.attempt })
         },
         ...finalization.provenance
       }
@@ -2429,7 +2431,7 @@ function dependencyCascadeFailure(
   layout: RunLayout,
   task: StoredWorkflowTask,
   tasksByAttempt: Map<string, StoredWorkflowTask>
-): Record<string, unknown> {
+): Record<string, StateJsonValue> {
   const state = readRunState(layout);
   for (const dependencyId of task.dependencies) {
     const failure = recordField(state.nodes[dependencyId]?.provenance, "failure");
@@ -3351,7 +3353,9 @@ function sameJsonValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function withoutTerminalDisposition(provenance: Record<string, unknown> | undefined): Record<string, unknown> {
+function withoutTerminalDisposition(
+  provenance: Record<string, StateJsonValue> | undefined
+): Record<string, StateJsonValue> {
   if (provenance === undefined) return {};
   const result = { ...provenance };
   delete result.terminal_disposition;
@@ -3367,10 +3371,10 @@ function withoutTerminalDisposition(provenance: Record<string, unknown> | undefi
 // category in the public eval row. Never clears a failure the current
 // finalization recorded.
 function withoutSupersededFailure(
-  provenance: Record<string, unknown>,
+  provenance: Record<string, StateJsonValue>,
   status: NodeStatus,
   finalization: NodeFinalization
-): Record<string, unknown> {
+): Record<string, StateJsonValue> {
   if (!NODE_RECOVERED_STATUSES.has(status) || finalization.provenance.failure !== undefined) return provenance;
   const result = { ...provenance };
   delete result.failure;

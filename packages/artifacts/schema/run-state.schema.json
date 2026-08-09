@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:artifacts:run-state:2",
+  "$id": "urn:ultrafuzz:schema:artifacts:run-state:3",
   "title": "Ultrafuzz run state",
   "type": "object",
   "required": [
@@ -18,22 +18,14 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "2.0"
+      "const": "ultrafuzz.run-state.v3"
     },
     "run_id": {
       "type": "string",
       "minLength": 1
     },
     "status": {
-      "enum": [
-        "pending",
-        "running",
-        "paused",
-        "succeeded",
-        "failed",
-        "timed-out",
-        "canceled"
-      ]
+      "enum": ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled"]
     },
     "graph_fingerprint": {
       "type": "string"
@@ -67,21 +59,11 @@
     },
     "controller_lease": {
       "type": "object",
-      "required": [
-        "status",
-        "duration_ms",
-        "renewed_at",
-        "expires_at",
-        "recovery_attempts"
-      ],
+      "required": ["status", "duration_ms", "renewed_at", "expires_at", "recovery_attempts"],
       "additionalProperties": false,
       "properties": {
         "status": {
-          "enum": [
-            "active",
-            "expired",
-            "recovering"
-          ]
+          "enum": ["active", "expired", "recovering"]
         },
         "duration_ms": {
           "type": "integer",
@@ -150,45 +132,30 @@
       }
     },
     "provenance": {
-      "type": "object"
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/jsonValue"
+      }
     },
     "nodes": {
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": [
-          "node_id",
-          "status",
-          "retry_count",
-          "timed_out"
-        ],
+        "required": ["node_id", "status", "retry_count", "timed_out"],
         "allOf": [
           {
             "if": {
               "properties": {
                 "status": {
                   "not": {
-                    "enum": [
-                      "succeeded",
-                      "failed",
-                      "skipped",
-                      "timed-out",
-                      "reused-from-prior-run",
-                      "invalidated"
-                    ]
+                    "enum": ["succeeded", "failed", "skipped", "timed-out", "reused-from-prior-run", "invalidated"]
                   }
                 }
               },
-              "required": [
-                "status"
-              ]
+              "required": ["status"]
             },
             "then": {
-              "required": [
-                "wait_since",
-                "wait_reason",
-                "next_eligible_action"
-              ],
+              "required": ["wait_since", "wait_reason", "next_eligible_action"],
               "properties": {
                 "wait_since": {},
                 "wait_reason": {},
@@ -236,12 +203,7 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": [
-                "path",
-                "contract",
-                "contract_digest",
-                "primary"
-              ],
+              "required": ["path", "contract", "contract_digest", "primary"],
               "additionalProperties": false,
               "properties": {
                 "path": {
@@ -321,12 +283,52 @@
               },
               "allOf": [
                 {
-                  "dependentRequired": {
-                    "schema_file": ["schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"],
-                    "schema_id": ["schema_file", "schema_sha256", "schema_bundle_sha256", "validator_build"],
-                    "schema_sha256": ["schema_file", "schema_id", "schema_bundle_sha256", "validator_build"],
-                    "schema_bundle_sha256": ["schema_file", "schema_id", "schema_sha256", "validator_build"],
-                    "validator_build": ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256"]
+                  "if": {
+                    "properties": {
+                      "contract": {
+                        "enum": ["ultrafuzz/nonempty-markdown@1", "ultrafuzz/text@1"]
+                      }
+                    },
+                    "required": ["contract"]
+                  },
+                  "then": {
+                    "not": {
+                      "anyOf": [
+                        {
+                          "properties": {
+                            "schema_file": true
+                          },
+                          "required": ["schema_file"]
+                        },
+                        {
+                          "properties": {
+                            "schema_id": true
+                          },
+                          "required": ["schema_id"]
+                        },
+                        {
+                          "properties": {
+                            "schema_sha256": true
+                          },
+                          "required": ["schema_sha256"]
+                        },
+                        {
+                          "properties": {
+                            "schema_bundle_sha256": true
+                          },
+                          "required": ["schema_bundle_sha256"]
+                        },
+                        {
+                          "properties": {
+                            "validator_build": true
+                          },
+                          "required": ["validator_build"]
+                        }
+                      ]
+                    }
+                  },
+                  "else": {
+                    "required": ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"]
                   }
                 }
               ]
@@ -395,10 +397,43 @@
             ]
           },
           "provenance": {
-            "type": "object"
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/jsonValue"
+            }
           }
         }
       }
+    }
+  },
+  "$defs": {
+    "jsonValue": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        }
+      ]
     }
   }
 }

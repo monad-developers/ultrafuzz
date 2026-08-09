@@ -1,12 +1,13 @@
 import { z } from "zod/v4";
 
-import { ARTIFACT_CONTRACT_IDS } from "./artifact-contracts.js";
+import { ARTIFACT_CONTRACT_IDS, NON_JSON_ARTIFACT_CONTRACT_IDS } from "./artifact-contract-ids.js";
 import {
   CONTROLLER_LEASE_STATUSES,
   NODE_NEXT_ELIGIBLE_ACTIONS,
   NODE_STATE_STATUSES,
   NODE_WAIT_REASONS,
   RUN_STATE_STATUSES,
+  RUN_STATE_JSON_SCHEMA_ID,
   STATE_SCHEMA_VERSION,
   TERMINAL_NODE_STATE_STATUSES,
   isTerminalNodeStatus,
@@ -15,20 +16,27 @@ import {
 } from "./state.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
-export const RUN_STATE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-state:2" as const;
-
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
-const looseRecord = z.record(z.string(), z.unknown());
+const jsonRecord = z.record(z.string(), z.json());
 const outputContractSchema = z
   .strictObject({
     path: nonEmptyString,
     contract: z.enum(ARTIFACT_CONTRACT_IDS),
     contract_digest: z.string().regex(/^[0-9a-f]{64}$/u),
-    schema_file: z.string().regex(/^[^/\\]+\.schema\.json$/u).optional(),
+    schema_file: z
+      .string()
+      .regex(/^[^/\\]+\.schema\.json$/u)
+      .optional(),
     schema_id: nonEmptyString.optional(),
-    schema_sha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
-    schema_bundle_sha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
+    schema_sha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .optional(),
+    schema_bundle_sha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .optional(),
     validator_build: nonEmptyString.optional(),
     primary: z.boolean()
   })
@@ -41,9 +49,13 @@ const outputContractSchema = z
         output.schema_bundle_sha256,
         output.validator_build
       ];
-      return fields.every((value) => value === undefined) || fields.every((value) => value !== undefined);
+      const isNonJson = (NON_JSON_ARTIFACT_CONTRACT_IDS as readonly string[]).includes(output.contract);
+      return isNonJson ? fields.every((value) => value === undefined) : fields.every((value) => value !== undefined);
     },
-    { message: "Schema-backed outputs must persist a complete validator binding", path: ["schema_file"] }
+    {
+      message: "JSON outputs require a complete validator binding and text outputs forbid one",
+      path: ["schema_file"]
+    }
   );
 
 export const nodeStateSchema = z.strictObject({
@@ -65,7 +77,7 @@ export const nodeStateSchema = z.strictObject({
   wait_since: nonEmptyString.optional(),
   wait_reason: z.enum(NODE_WAIT_REASONS).optional(),
   next_eligible_action: z.enum(NODE_NEXT_ELIGIBLE_ACTIONS).optional(),
-  provenance: looseRecord.optional()
+  provenance: jsonRecord.optional()
 });
 
 const controllerLeaseSchema = z.strictObject({
@@ -92,8 +104,8 @@ export const runStateSchema = z
     schema_version: z.literal(STATE_SCHEMA_VERSION),
     run_id: nonEmptyString,
     status: z.enum(RUN_STATE_STATUSES),
-    graph_fingerprint: nonEmptyString,
-    config_fingerprint: nonEmptyString,
+    graph_fingerprint: z.string(),
+    config_fingerprint: z.string(),
     created_at: nonEmptyString,
     source_run_id: nonEmptyString.optional(),
     started_at: nonEmptyString.optional(),
@@ -102,7 +114,7 @@ export const runStateSchema = z
     last_transition_at: nonEmptyString,
     controller_lease: controllerLeaseSchema,
     concurrency: concurrencySchema,
-    provenance: looseRecord.optional(),
+    provenance: jsonRecord.optional(),
     nodes: z.record(z.string(), nodeStateSchema)
   })
   .superRefine((value, ctx) => {
@@ -127,16 +139,6 @@ export const runStateSchema = z
       }
     }
   });
-
-const schemaBindingCompletenessJsonSchema = {
-  dependentRequired: {
-    schema_file: ["schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"],
-    schema_id: ["schema_file", "schema_sha256", "schema_bundle_sha256", "validator_build"],
-    schema_sha256: ["schema_file", "schema_id", "schema_bundle_sha256", "validator_build"],
-    schema_bundle_sha256: ["schema_file", "schema_id", "schema_sha256", "validator_build"],
-    validator_build: ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256"]
-  }
-} as const;
 
 export const runStateJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -204,7 +206,7 @@ export const runStateJsonSchema = {
         observed_at: { type: "string", minLength: 1 }
       }
     },
-    provenance: { type: "object" },
+    provenance: { type: "object", additionalProperties: { $ref: "#/$defs/jsonValue" } },
     nodes: {
       type: "object",
       additionalProperties: {
@@ -251,7 +253,28 @@ export const runStateJsonSchema = {
                 validator_build: { type: "string", minLength: 1 },
                 primary: { type: "boolean" }
               },
-              allOf: [schemaBindingCompletenessJsonSchema]
+              allOf: [
+                {
+                  if: {
+                    properties: { contract: { enum: NON_JSON_ARTIFACT_CONTRACT_IDS } },
+                    required: ["contract"]
+                  },
+                  then: {
+                    not: {
+                      anyOf: [
+                        { properties: { schema_file: true }, required: ["schema_file"] },
+                        { properties: { schema_id: true }, required: ["schema_id"] },
+                        { properties: { schema_sha256: true }, required: ["schema_sha256"] },
+                        { properties: { schema_bundle_sha256: true }, required: ["schema_bundle_sha256"] },
+                        { properties: { validator_build: true }, required: ["validator_build"] }
+                      ]
+                    }
+                  },
+                  else: {
+                    required: ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"]
+                  }
+                }
+              ]
             }
           },
           attempt_index: { type: "integer", minimum: 0 },
@@ -265,9 +288,21 @@ export const runStateJsonSchema = {
           wait_since: { type: "string", minLength: 1 },
           wait_reason: { enum: [...NODE_WAIT_REASONS] },
           next_eligible_action: { enum: [...NODE_NEXT_ELIGIBLE_ACTIONS] },
-          provenance: { type: "object" }
+          provenance: { type: "object", additionalProperties: { $ref: "#/$defs/jsonValue" } }
         }
       }
+    }
+  },
+  $defs: {
+    jsonValue: {
+      anyOf: [
+        { type: "null" },
+        { type: "boolean" },
+        { type: "number" },
+        { type: "string" },
+        { type: "array", items: { $ref: "#/$defs/jsonValue" } },
+        { type: "object", additionalProperties: { $ref: "#/$defs/jsonValue" } }
+      ]
     }
   }
 } as const;

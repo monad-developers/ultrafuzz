@@ -34,13 +34,16 @@ const {
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
   artifactValidatorSmokeFixturePath,
+  assertArtifactVerificationMarkerSemantics,
   assertRegularFileInside,
   checkInvariantSourcePinned,
   invariantPinnedSourceRefExists,
   materializePromptSchemas,
   normalizeNodeAttemptFailureMessage,
+  parseStrictJsonBytes,
   publishFileDurableExclusive,
   validateArtifactContract,
+  validateArtifactVerificationMarker,
   validateImplementedPropertiesSchema,
   validateInvariantLedgerSchema,
   validateInvariantSourceProofSchema,
@@ -80,8 +83,14 @@ const verificationOutput = z.object({
       contract_digest: z.string().regex(/^[0-9a-f]{64}$/u),
       schema_file: z.string().min(1).optional(),
       schema_id: z.string().min(1).optional(),
-      schema_sha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
-      schema_bundle_sha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
+      schema_sha256: z
+        .string()
+        .regex(/^[0-9a-f]{64}$/u)
+        .optional(),
+      schema_bundle_sha256: z
+        .string()
+        .regex(/^[0-9a-f]{64}$/u)
+        .optional(),
       validator_build: z.string().min(1).optional(),
       sha256: z.string().regex(/^[0-9a-f]{64}$/u),
       primary: z.boolean()
@@ -1588,20 +1597,25 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
       markerLocation.path,
       `artifact-contract failure: artifact dependency has not passed verification ${dependencyAttemptId}`
     );
-    const marker = JSON.parse(readFileSync(resolvedMarker, "utf8")) as {
+    const marker = parseStrictJsonBytes(readFileSync(resolvedMarker)) as {
       schema_version?: unknown;
       attempt_id?: unknown;
+      node_id?: unknown;
       artifacts?: unknown;
       publications?: unknown;
     };
+    const markerShape = validateArtifactVerificationMarker(marker);
     if (
+      !markerShape.ok ||
       marker.schema_version !== ARTIFACT_VERIFICATION_SCHEMA_VERSION ||
       marker.attempt_id !== dependencyAttemptId ||
+      marker.node_id !== dependencyTask.metadata.node.logicalNodeId ||
       !Array.isArray(marker.artifacts) ||
       !Array.isArray(marker.publications)
     ) {
       throw new Error("invalid verification marker");
     }
+    assertArtifactVerificationMarkerSemantics(marker);
     if (marker.artifacts.length === 0 || dependencyTask.outputs.length === 0) {
       throw new Error("verification marker has no declared artifacts");
     }
@@ -2059,9 +2073,7 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
   }
   const implementationOutput = task.outputs.find(
     (output) =>
-      output.path === "implemented-properties.json" &&
-      (output.contract === "ultrafuzz/implemented-properties@1" ||
-        output.contract === "ultrafuzz/implemented-properties@2")
+      output.path === "implemented-properties.json" && output.contract === "ultrafuzz/implemented-properties@3"
   );
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
@@ -2083,8 +2095,7 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
         raw = JSON.parse(readFileSync(implementationPath, "utf8")) as unknown;
       } catch {
         // Leave malformed task output for verifyArtifacts, which reports the
-        // typed artifact-contract failure instead of leaking SyntaxError from
-        // this companion-preservation compatibility path.
+        // typed artifact-contract failure instead of leaking a raw SyntaxError.
         continue;
       }
       const parsed = validateImplementedPropertiesSchema(raw, implementationPath);
@@ -4264,17 +4275,23 @@ function writeArtifactVerificationMarker(
   if (publicationEntries.length === 0) {
     throw new Error(`artifact-contract failure: verification marker has no publications ${task.attemptId}`);
   }
-  const marker = `${JSON.stringify(
-    {
-      schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
-      attempt_id: task.attemptId,
-      node_id: task.metadata.node.logicalNodeId,
-      artifacts,
-      publications: publicationEntries
-    },
-    null,
-    2
-  )}\n`;
+  const markerValue = {
+    schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+    attempt_id: task.attemptId,
+    node_id: task.metadata.node.logicalNodeId,
+    artifacts,
+    publications: publicationEntries
+  };
+  const markerShape = validateArtifactVerificationMarker(markerValue);
+  if (!markerShape.ok) {
+    throw new Error(
+      `artifact-contract failure: verification marker is schema-invalid ${markerShape.issues
+        .map((issue) => `${issue.instancePath || "/"} ${issue.message}`)
+        .join("; ")}`
+    );
+  }
+  assertArtifactVerificationMarkerSemantics(markerValue);
+  const marker = `${JSON.stringify(markerValue, null, 2)}\n`;
   publishFileDurableExclusive(location.root, location.relativePath, marker);
 }
 

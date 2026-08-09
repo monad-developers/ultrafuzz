@@ -199,28 +199,16 @@ export function findingFuzzerBackendProvenance(
   return { present: true, valid: true, backends: [...finding.fuzzer_backends].sort() };
 }
 
-/**
- * Resolve the backend set attached to each campaign finding. A finding's own
- * provenance is authoritative because deduplication may combine failures with
- * different IDs. Historical artifacts without those fields retain the old
- * failure-ID join only when it identifies exactly one backend; a multi-backend
- * ID collision is ambiguous and is therefore not guessed.
- */
+/** Resolve only the canonical backend provenance authored on each finding. */
 export function resolveCampaignFindingBackends(
   campaigns: readonly PropertyCampaignArtifact[],
   findings: readonly Readonly<Record<string, unknown>>[]
 ): ReadonlyMap<string, readonly string[]> {
   const knownBackends = new Set<string>();
-  const inferredByFailureId = new Map<string, Set<string>>();
   for (const campaign of campaigns) {
     const backend = campaign.fuzzer_backend;
     if (backend === undefined) continue;
     knownBackends.add(backend);
-    for (const failure of campaign.failures) {
-      const inferred = inferredByFailureId.get(failure.id) ?? new Set<string>();
-      inferred.add(backend);
-      inferredByFailureId.set(failure.id, inferred);
-    }
   }
 
   const ownedByFindingId = new Map<string, Set<string>>();
@@ -241,11 +229,6 @@ export function resolveCampaignFindingBackends(
   }
 
   const resolved = new Map<string, readonly string[]>();
-  for (const [failureId, inferred] of inferredByFailureId) {
-    if (inferred.size === 1 && !ownedByFindingId.has(failureId) && !invalidOwnedFindingIds.has(failureId)) {
-      resolved.set(failureId, [...inferred]);
-    }
-  }
   for (const [findingId, owned] of ownedByFindingId) {
     resolved.set(findingId, [...owned].sort());
   }

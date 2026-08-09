@@ -663,7 +663,10 @@ test("updateNodeState accepts an explicit transition timestamp", () => {
     node_id: "node-a",
     status: "pending",
     retry_count: 0,
-    timed_out: false
+    timed_out: false,
+    wait_since: initial.created_at,
+    wait_reason: "ready",
+    next_eligible_action: "dispatch"
   };
   writeRunState(layout, initial);
 

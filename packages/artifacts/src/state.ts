@@ -2,10 +2,16 @@ import fs from "node:fs";
 
 import { redactSecretsInText } from "@ultrafuzz/security";
 
-import type { ArtifactContractId } from "./artifact-contracts.js";
-import { readJsonFile, validateSafeId, writeJsonDurable } from "./safe-paths.js";
+import type { ArtifactContractId } from "./artifact-contract-ids.js";
+import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
+import { validateSafeId, writeJsonDurable } from "./safe-paths.js";
+import { readRegularFileSnapshot } from "./schema-registry.js";
+import { parseStrictJsonBytes } from "./strict-json.js";
 
-export const STATE_SCHEMA_VERSION = "2.0";
+export const STATE_SCHEMA_VERSION = "ultrafuzz.run-state.v3" as const;
+export const RUN_STATE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-state:3" as const;
+
+export type StateJsonValue = null | boolean | number | string | StateJsonValue[] | { [key: string]: StateJsonValue };
 
 export const RUN_STATE_STATUSES = [
   "pending",
@@ -96,7 +102,7 @@ export interface NodeStateInput {
   waitReason?: NodeWaitReason;
   nextEligibleAction?: NodeNextEligibleAction;
   waitSince?: string;
-  provenance?: Record<string, unknown>;
+  provenance?: Record<string, StateJsonValue>;
 }
 
 export interface NodeOutputContract {
@@ -130,7 +136,7 @@ export interface NodeState {
   wait_since?: string;
   wait_reason?: NodeWaitReason;
   next_eligible_action?: NodeNextEligibleAction;
-  provenance?: Record<string, unknown>;
+  provenance?: Record<string, StateJsonValue>;
 }
 
 export interface ControllerLeaseState {
@@ -153,7 +159,7 @@ export interface RunConcurrencyState {
 }
 
 export interface RunState {
-  schema_version: string;
+  schema_version: typeof STATE_SCHEMA_VERSION;
   run_id: string;
   status: RunStatus;
   graph_fingerprint: string;
@@ -167,7 +173,7 @@ export interface RunState {
   last_transition_at: string;
   controller_lease: ControllerLeaseState;
   concurrency: RunConcurrencyState;
-  provenance?: Record<string, unknown>;
+  provenance?: Record<string, StateJsonValue>;
 }
 
 export interface CreateInitialRunStateInput {
@@ -180,7 +186,7 @@ export interface CreateInitialRunStateInput {
   controllerLeaseSeconds?: number;
   requestedConcurrency?: number;
   nodes?: NodeStateInput[];
-  provenance?: Record<string, unknown>;
+  provenance?: Record<string, StateJsonValue>;
 }
 
 export interface RunLayoutStateLike {
@@ -293,11 +299,41 @@ export function writeRunState(target: RunLayoutStateLike | string, state: RunSta
       node.last_error === undefined ? node : { ...node, last_error: redactSecretsInText(node.last_error) }
     ])
   );
-  writeJsonDurable(resolveStatePath(target), { ...state, nodes });
+  const next = { ...state, nodes };
+  assertCurrentRunState(next);
+  writeJsonDurable(resolveStatePath(target), next);
 }
 
 export function readRunState(target: RunLayoutStateLike | string): RunState {
-  return readJsonFile<RunState>(resolveStatePath(target));
+  const statePath = resolveStatePath(target);
+  const value = parseStrictJsonBytes(readRegularFileSnapshot(statePath, 64 * 1024 * 1024));
+  assertCurrentRunState(value);
+  return value;
+}
+
+function assertCurrentRunState(value: unknown): asserts value is RunState {
+  const version =
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>).schema_version
+      : undefined;
+  if (version !== STATE_SCHEMA_VERSION) {
+    throw new Error(
+      `unsupported run state schema_version ${JSON.stringify(version)}; expected ${JSON.stringify(STATE_SCHEMA_VERSION)}`
+    );
+  }
+  const validation = validateRegisteredJsonSchema(RUN_STATE_JSON_SCHEMA_ID, value, { maxErrors: 50 });
+  if (!validation.ok) {
+    const details = validation.issues.map((issue) => `${issue.instancePath || "/"} ${issue.message}`).join("; ");
+    throw new Error(`run state is schema-invalid${details.length === 0 ? "" : `: ${details}`}`);
+  }
+  const state = value as RunState;
+  for (const [nodeId, node] of Object.entries(state.nodes)) {
+    if (node.node_id !== nodeId) {
+      throw new Error(
+        `run state node key ${JSON.stringify(nodeId)} does not match node_id ${JSON.stringify(node.node_id)}`
+      );
+    }
+  }
 }
 
 export function loadOrCreateRunState(target: RunLayoutStateLike | string, state: RunState): RunState {
@@ -340,11 +376,19 @@ export function updateNodeState(
   const safeNodeId = validateSafeId(nodeId, "node ID");
   const state = readRunState(target);
   const previous = state.nodes[safeNodeId] ?? createNodeState({ id: safeNodeId });
+  const definedPatch = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined)) as Partial<
+    Omit<NodeState, "node_id">
+  >;
   const next: NodeState = {
     ...previous,
-    ...patch,
+    ...definedPatch,
     node_id: safeNodeId
   };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) {
+      delete (next as unknown as Record<string, unknown>)[key];
+    }
+  }
   if (isTerminalNodeStatus(next.status)) {
     delete next.wait_since;
     delete next.wait_reason;
@@ -360,6 +404,9 @@ export function updateNodeState(
     previous.next_eligible_action !== next.next_eligible_action
   ) {
     state.last_transition_at = timestamp;
+    if (!isTerminalNodeStatus(next.status)) {
+      next.wait_since = timestamp;
+    }
   }
   state.nodes[safeNodeId] = next;
   writeRunState(target, state);
