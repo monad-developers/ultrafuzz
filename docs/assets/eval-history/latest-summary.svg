@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="960" height="176" viewBox="0 0 960 176" role="img" aria-labelledby="title desc">
 <title id="title">Latest UltrafuzzBench run</title>
-<desc id="desc">Latest complete ultrafuzz-bench smoke run with 1 model profile. gpt-5.6-luna high: UltrafuzzBench Score 15.4%, 3 of 31 bugs found, cost $11.40, wall clock 8m 35s.</desc>
+<desc id="desc">Latest complete ultrafuzz-bench smoke run with 1 model profile. gpt-5.6-luna high: UltrafuzzBench Score 23.2%, 3 of 31 bugs found, cost $13.58, wall clock 10m 2s · partial 3/3.</desc>
 <rect width="960" height="176" rx="12" fill="#f9fafb"/>
 <text x="40" y="36" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">Latest UltrafuzzBench run</text>
 <text x="40" y="62" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">ultrafuzz-bench · smoke · 1 profile · 3 targets each · 2026-08-09</text>
-<a href="https://github.com/monad-developers/ultrafuzz/commit/cb672c67bbe1255a0c96dc2e89653e7422f2246b" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/cb672c67bbe1255a0c96dc2e89653e7422f2246b"><text x="920" y="36" text-anchor="end" font-family="ui-monospace, monospace" font-size="13" fill="#2563eb">cb672c6</text></a>
+<a href="https://github.com/monad-developers/ultrafuzz/commit/6d1db74df734ad9503069c86c6eea51eff51d569" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/6d1db74df734ad9503069c86c6eea51eff51d569"><text x="920" y="36" text-anchor="end" font-family="ui-monospace, monospace" font-size="13" fill="#2563eb">6d1db74</text></a>
 <text x="40" y="96" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Model profile</text>
 <text x="400" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">UltrafuzzBench Score (macro-F1)</text>
 <text x="600" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Bugs found</text>
@@ -14,8 +14,8 @@
 <line x1="40" y1="106" x2="920" y2="106" stroke="#d1d5db"/>
 <rect x="40" y="112" width="880" height="34" rx="6" fill="#ffffff" stroke="#e5e7eb"/>
 <text x="52" y="135" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#111827"><title>smoke · benchmark-smoke-gpt-5-6-luna-high</title>gpt-5.6-luna · high</text>
-<text x="400" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#0f766e">15.4%</text>
+<text x="400" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#0f766e">23.2%</text>
 <text x="600" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">3 / 31</text>
-<text data-metric="cost_usd" data-status="complete" data-available-target-count="3" data-expected-target-count="3" x="760" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><title>Cost: $11.40</title>$11.40</text>
-<text data-metric="wall_clock_seconds" data-status="complete" data-available-target-count="3" data-expected-target-count="3" x="920" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><title>Wall clock: 8m 35s</title>8m 35s</text>
+<text data-metric="cost_usd" data-status="complete" data-available-target-count="3" data-expected-target-count="3" x="760" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><title>Cost: $13.58</title>$13.58</text>
+<text data-metric="wall_clock_seconds" data-status="partial" data-available-target-count="3" data-expected-target-count="3" x="920" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" fill="#374151"><title>Wall clock: 10m 2s · partial 3/3 (node-attempt-timestamps-final-attempt-only)</title>10m 2s · partial 3/3</text>
 </svg>
