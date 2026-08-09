@@ -6,7 +6,7 @@ import path from "node:path";
 import { test } from "node:test";
 
 import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
-import { initProject } from "@ultrafuzz/runtime";
+import { initProject, planRun } from "@ultrafuzz/runtime";
 
 import {
   assertDashboardHttpDocument,
@@ -332,7 +332,7 @@ test("dashboard validates the serialized bytes and identities of every preview A
     ];
     for (const [route, definition, documentType] of routes) {
       const response = await fetch(apiUrl(handle.url, route));
-      assert.equal(response.status, 200, route);
+      if (response.status !== 200) assert.fail(`${route}: ${await response.text()}`);
       const document = await parseHttpResponse(response, definition);
       assert.equal(document.schema_version, DASHBOARD_HTTP_SCHEMA_VERSION, route);
       assert.equal(document.document_type, documentType, route);
@@ -342,6 +342,32 @@ test("dashboard validates the serialized bytes and identities of every preview A
     assert.equal(missing.status, 404);
     const error = await parseHttpResponse(missing, "errorResponse");
     assert.equal(error.document_type, "error");
+  } finally {
+    await handle.close();
+  }
+});
+
+test("dashboard validates persisted run-state v4 documents through the composed schema registry", async () => {
+  const projectRoot = makeProject();
+  writeSmallTopology(projectRoot);
+  const runId = "dashboard-persisted";
+  const plan = await planRun({ projectRoot, runId, env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const handle = await serveDashboard({ projectRoot, runId, port: 0 });
+  try {
+    const routes: Array<[string, DashboardHttpDefinition, string]> = [
+      ["/api/run", "runOverviewResponse", "run-overview"],
+      ["/api/flow", "flowResponse", "flow"],
+      ["/api/nodes/project-discovery", "nodeDetailResponse", "node-detail"],
+      ["/api/events", "eventsResponse", "events"]
+    ];
+    for (const [route, definition, documentType] of routes) {
+      const response = await fetch(apiUrl(handle.url, route));
+      if (response.status !== 200) assert.fail(`${route}: ${await response.text()}`);
+      const document = await parseHttpResponse(response, definition);
+      assert.equal(document.schema_version, DASHBOARD_HTTP_SCHEMA_VERSION, route);
+      assert.equal(document.document_type, documentType, route);
+    }
   } finally {
     await handle.close();
   }
@@ -399,6 +425,36 @@ function makeProject(): string {
   const result = initProject({ projectRoot, force: true });
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
   return projectRoot;
+}
+
+function writeSmallTopology(projectRoot: string): void {
+  fs.writeFileSync(
+    path.join(projectRoot, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: project-discovery
+    kind: agentic
+    prompt: setup/project-discovery.md
+    depends_on:
+      - __start__
+    outputs:
+      - path: report.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on:
+      - project-discovery
+`,
+    "utf8"
+  );
 }
 
 async function getJson<T>(url: string, definition: DashboardHttpDefinition): Promise<T> {

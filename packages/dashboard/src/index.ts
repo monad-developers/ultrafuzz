@@ -2123,14 +2123,7 @@ function readTextIfExists(filePath: string): string | undefined {
 }
 
 function readJsonIfExists(filePath: string): unknown | undefined {
-  try {
-    return readJsonFile(filePath);
-  } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") {
-      return undefined;
-    }
-    throw error;
-  }
+  return lstatIfPresent(filePath) === undefined ? undefined : readJsonFile(filePath);
 }
 
 function lstatIfPresent(filePath: string): fs.Stats | undefined {
