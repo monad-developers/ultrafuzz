@@ -294,6 +294,18 @@ describe("eval durable readers and writers", () => {
     expect(() => parseEvalRunRecord({ ...fixtures.record, schema_version: "ultrafuzz.eval.run.v1" })).toThrow();
     expect(() => parseEvalRunSummary({ ...fixtures.runSummary, schema_version: "1.0" })).toThrow();
     expect(() => parseEvalScoreSummary({ ...fixtures.scoreSummary, schema_version: "1.0" })).toThrow();
+    expect(() =>
+      parseEvalScoreSummary({
+        ...fixtures.scoreSummary,
+        rows: fixtures.scoreSummary.rows.map((row) => ({ ...row, runtime_seconds: row.efficiency.wall_time_seconds }))
+      })
+    ).toThrow();
+    expect(() =>
+      parseEvalScoreSummary({
+        ...fixtures.scoreSummary,
+        rows: fixtures.scoreSummary.rows.map((row) => ({ ...row, cost_estimate: row.efficiency.cost_usd }))
+      })
+    ).toThrow();
   });
 
   it("requires a materialized run journal, accepts its canonical empty state, and rejects malformed rows", () => {

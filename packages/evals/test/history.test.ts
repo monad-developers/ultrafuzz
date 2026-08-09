@@ -201,8 +201,6 @@ function rowScore(rowId: string, overrides: Partial<EvalRowScore> = {}): EvalRow
     severity_accuracy: 1,
     true_positive_accuracy: 1,
     duplicate_rate: 0,
-    runtime_seconds: 60,
-    cost_estimate: 0.5,
     lifecycle: {
       launcher: {
         status: "succeeded",

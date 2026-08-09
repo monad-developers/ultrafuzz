@@ -482,10 +482,10 @@ from complete cost. Usage and cost remain unavailable until the durable workflow
 is terminal. Active time is the union of node execution intervals, so parallel
 nodes are not double-counted; wait time is wall time minus that union. Runs with
 retries remain typed as unavailable when the durable state does not retain every
-attempt interval. The legacy `runtime_seconds` and `cost_estimate` row fields
-remain aliases of the structured wall-time and cost values for compatibility.
-The same fields are rendered from that structure into `summary.md`, which is
-read by `ultrafuzz eval report`.
+attempt interval. Row timing and cost exist only in the structured `efficiency`
+block; the historical `runtime_seconds` and `cost_estimate` aliases are rejected.
+Those canonical fields are rendered into `summary.md`, which is read by
+`ultrafuzz eval report`.
 The row records include graph/config and execution artifact identities when
 available. `ultrafuzz eval score` writes per-row scores to `scores.jsonl` and
 the variant ranking plus scoring lineage to `summary.json`, including the

@@ -207,12 +207,7 @@ function accountingSummary(records: EvalRunRecordSource[], rows: EvalRowMetricsS
       "eval analysis requires one distinct accounting source per scored run"
     );
   }
-  const runtimes = rows.map((row) => {
-    if (row.runtime_seconds === null) {
-      throw new EvalError("EVAL_ANALYSIS_ACCOUNTING_INCOMPLETE", `eval row ${row.row_id} has no authoritative runtime`);
-    }
-    return row.runtime_seconds;
-  });
+  const runtimes = rows.map((row) => row.efficiency.wall_time_seconds);
   const costs = summaries.flatMap((summary) =>
     summary.estimated_spend_usd === undefined ? [] : [summary.estimated_spend_usd]
   );

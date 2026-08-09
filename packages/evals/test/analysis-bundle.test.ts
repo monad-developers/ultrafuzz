@@ -82,8 +82,6 @@ function scoreRow(row: EvalMatrixRow, overrides: Partial<EvalRowScore> = {}): Ev
     severity_accuracy: 1,
     true_positive_accuracy: 0.5,
     duplicate_rate: 0,
-    runtime_seconds: 60,
-    cost_estimate: null,
     efficiency: {
       ...base.efficiency,
       wall_time_seconds: 60,
@@ -181,7 +179,6 @@ describe("privacy-safe eval analysis bundles", () => {
       precision: 1,
       recall: 1,
       f1_score: 1,
-      runtime_seconds: 90,
       efficiency: {
         ...currentRowScore(secondRow).efficiency,
         wall_time_seconds: 90,

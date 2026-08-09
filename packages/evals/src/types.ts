@@ -595,10 +595,6 @@ export interface EvalRowScore {
   severity_accuracy: number | null;
   true_positive_accuracy: number;
   duplicate_rate: number;
-  /** @deprecated Use `efficiency.wall_time_seconds`. */
-  runtime_seconds: number | null;
-  /** @deprecated Use `efficiency.cost_usd`. */
-  cost_estimate: number | null;
   lifecycle: EvalRowLifecycle;
   efficiency: EvalEfficiency;
   /** Node-level expansion and concurrency re-derived for every current score. */

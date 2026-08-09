@@ -1254,8 +1254,6 @@
         "severity_accuracy",
         "true_positive_accuracy",
         "duplicate_rate",
-        "runtime_seconds",
-        "cost_estimate",
         "lifecycle",
         "efficiency",
         "expansion",
@@ -1283,8 +1281,6 @@
         },
         "true_positive_accuracy": { "$ref": "#/$defs/unitMetric" },
         "duplicate_rate": { "$ref": "#/$defs/unitMetric" },
-        "runtime_seconds": { "$ref": "#/$defs/nullableNonNegativeNumber" },
-        "cost_estimate": { "$ref": "#/$defs/nullableNonNegativeNumber" },
         "lifecycle": {
           "type": "object",
           "additionalProperties": false,

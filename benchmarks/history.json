@@ -8708,7 +8708,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v5",
+      "schema_version": "ultrafuzz.eval.history.observation.v6",
       "id": "ci-31328743204-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -8771,14 +8771,13 @@
           "bundle_path": "public-results.json",
           "report_paths": [
             "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/report.md",
-            "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/report.json",
-            "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
+            "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/report.json"
           ]
         }
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v5",
+      "schema_version": "ultrafuzz.eval.history.observation.v6",
       "id": "ci-31328743204-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -8841,14 +8840,13 @@
           "bundle_path": "public-results.json",
           "report_paths": [
             "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/report.md",
-            "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/report.json",
-            "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
+            "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/report.json"
           ]
         }
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v5",
+      "schema_version": "ultrafuzz.eval.history.observation.v6",
       "id": "ci-31328743204-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -8911,8 +8909,7 @@
           "bundle_path": "public-results.json",
           "report_paths": [
             "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/report.md",
-            "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/report.json",
-            "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
+            "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/report.json"
           ]
         }
       }

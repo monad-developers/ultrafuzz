@@ -440,8 +440,6 @@ export function currentRowScore(row: EvalMatrixRow, overrides: Partial<EvalRowSc
     severity_accuracy: 1,
     true_positive_accuracy: 1,
     duplicate_rate: 0,
-    runtime_seconds: 60,
-    cost_estimate: 0.01,
     lifecycle: {
       launcher: { status: "succeeded", started_at: TEST_TIMESTAMP, finished_at: TEST_TIMESTAMP },
       workflow: {

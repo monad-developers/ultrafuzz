@@ -910,8 +910,6 @@ describe("deterministic scorer math", () => {
     const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
     expect(summary.eval_run_id).toBe(fixture.evalRunId);
     expect(summary.rows[0]).toMatchObject({
-      runtime_seconds: 60,
-      cost_estimate: 0.456,
       lifecycle: {
         launcher: { status: "succeeded", finished_at: "2026-07-09T00:00:00.000Z" },
         workflow: { status: "succeeded", terminal: true, finished_at: "2026-07-09T00:01:00.000Z" }
@@ -927,6 +925,8 @@ describe("deterministic scorer math", () => {
         cost: { status: "complete", reason: null }
       }
     });
+    expect(summary.rows[0]).not.toHaveProperty("runtime_seconds");
+    expect(summary.rows[0]).not.toHaveProperty("cost_estimate");
     for (const [filePath, contents] of fixture.outputContents) {
       expect(fs.readFileSync(filePath, "utf8")).not.toBe(contents);
     }
