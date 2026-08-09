@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:artifacts:event-record:1",
+  "title": "Ultrafuzz event record",
+  "type": "object",
+  "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.event-record.v1" },
+    "event_id": { "type": "string", "pattern": "^evt-[a-f0-9]{24}$" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "run_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "event_type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "payload": {},
+    "node_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "status": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "provenance": { "type": "object" }
+  }
+}

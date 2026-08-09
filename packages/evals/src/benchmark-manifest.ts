@@ -2,6 +2,8 @@ import fs from "node:fs";
 
 import { z } from "zod/v4";
 
+import { readStrictJsonDocument } from "./eval-durable.js";
+
 import { EVAL_SPEC_SCHEMA_VERSION, type EvalSuiteSpec } from "./types.js";
 import { EvalError } from "./utils.js";
 
@@ -321,7 +323,7 @@ function assertUnique(values: string[], description: string, filePath: string): 
 
 function readJson(filePath: string): unknown {
   try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return readStrictJsonDocument(filePath);
   } catch (error) {
     throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", `failed to read benchmark manifest ${filePath}`, {
       reason: error instanceof Error ? error.message : String(error)

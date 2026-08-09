@@ -11,13 +11,15 @@ import {
   assertRegularFileInside,
   layoutForRunRoot,
   listSafeFiles,
+  parseStrictJsonBytes,
   queryEvents,
   readJsonFile,
+  readRunMetadataDocument,
   readRunState,
   replayEvents,
   safeResolveInside,
   sha256Bytes,
-  validateArtifactContract,
+  validateArtifactContractBytes,
   validateSafeId,
   writeFileDurable,
   type ArtifactContractId,
@@ -440,20 +442,11 @@ class DashboardApp {
       .readdirSync(runsRoot, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => {
-        try {
-          const runId = validateSafeId(entry.name, "run ID");
-          const root = path.join(runsRoot, runId);
-          const metadata = readJsonIfExists<JsonObject>(path.join(root, "run.json"));
-          return {
-            runId,
-            createdAt: typeof metadata?.created_at === "string" ? metadata.created_at : "",
-            mtimeMs: fs.statSync(root).mtimeMs
-          };
-        } catch {
-          return undefined;
-        }
+        const runId = validateSafeId(entry.name, "run ID");
+        const root = path.join(runsRoot, runId);
+        const metadata = readRunMetadataDocument(path.join(root, "run.json"), runId);
+        return { runId, createdAt: metadata.created_at, mtimeMs: fs.statSync(root).mtimeMs };
       })
-      .filter((entry): entry is { runId: string; createdAt: string; mtimeMs: number } => entry !== undefined)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.mtimeMs - left.mtimeMs);
     return candidates[0]?.runId;
   }
@@ -614,7 +607,9 @@ class DashboardApp {
       mode: context.persisted ? "persisted" : "preview",
       restart_eligible: Boolean(state?.finished_at),
       report_path: typeof report.markdown_path === "string" ? report.markdown_path : undefined,
-      run_metadata: context.persisted ? readJsonIfExists<JsonObject>(path.join(context.runRoot, "run.json")) : {}
+      run_metadata: context.persisted
+        ? readRunMetadataDocument(path.join(context.runRoot, "run.json"), context.runId)
+        : {}
     };
   }
 
@@ -1643,9 +1638,13 @@ async function readBodyObject(request: http.IncomingMessage): Promise<JsonObject
   if (chunks.length === 0) {
     return {};
   }
-  const text = Buffer.concat(chunks).toString("utf8");
   try {
-    const parsed = JSON.parse(text) as unknown;
+    const parsed = parseStrictJsonBytes(Buffer.concat(chunks), {
+      maxBytes: MAX_REQUEST_BODY_BYTES,
+      maxDepth: 128,
+      maxItems: 100_000,
+      maxProperties: 100_000
+    });
     if (!isRecord(parsed)) {
       throw new Error("body must be a JSON object");
     }
@@ -1915,7 +1914,7 @@ function readValidatedArtifact(
   if (stat.size > MAX_DASHBOARD_ARTIFACT_BYTES) {
     throw new Error(`${label} exceeds the ${MAX_DASHBOARD_ARTIFACT_BYTES}-byte limit: ${filePath}`);
   }
-  const validation = validateArtifactContract(contract, fs.readFileSync(filePath, "utf8"), filePath);
+  const validation = validateArtifactContractBytes(contract, fs.readFileSync(filePath), filePath);
   if (!validation.ok) {
     throw new Error(
       `${label} failed ${contract} validation: ${validation.issues

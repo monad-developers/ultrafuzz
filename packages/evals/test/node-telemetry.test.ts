@@ -7,7 +7,15 @@ import { describe, expect, it } from "vitest";
 
 import { NodeTelemetryPump, loadTelemetryCursor } from "../src/node-telemetry.js";
 import { guardReporter, type EvalNodeEventEnvelope } from "../src/reporter.js";
-import { RecordingReporter, testReportingPolicy, testRow, testSuite, writeRunFixture } from "./helpers.js";
+import {
+  currentPlannedGraph,
+  currentRunState,
+  RecordingReporter,
+  testReportingPolicy,
+  testRow,
+  testSuite,
+  writeRunFixture
+} from "./helpers.js";
 
 function setup(overrides: { policy?: ReturnType<typeof testReportingPolicy> } = {}) {
   const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-pump-"));
@@ -60,22 +68,13 @@ describe("NodeTelemetryPump", () => {
         { event_id: "evt-4", event_type: "node-synced", timestamp: T2, node_id: "setup-1", status: "succeeded" },
         { event_id: "evt-5", event_type: "workflow-synced", timestamp: T2, payload: {} }
       ],
-      state: {
-        schema_version: "1.0",
-        run_id: "run-1",
+      state: currentRunState({
+        runId: "run-1",
         status: "running",
-        created_at: T0,
-        nodes: {
-          "setup-1": {
-            node_id: "setup-1",
-            status: "succeeded",
-            retry_count: 0,
-            timed_out: false,
-            started_at: T0,
-            finished_at: T2
-          }
-        }
-      },
+        nodes: { "setup-1": { started_at: T0, finished_at: T2 } },
+        overrides: { created_at: T0, started_at: T0, last_transition_at: T2 }
+      }),
+      graph: currentPlannedGraph(["setup-1"], undefined),
       artifacts: {
         "setup-1": {
           "report.md": "# report",
@@ -359,29 +358,32 @@ describe("NodeTelemetryPump", () => {
     writeRunFixture({
       runRoot,
       events: [],
-      state: {
-        schema_version: "1.0",
-        run_id: "run-1",
+      state: currentRunState({
+        runId: "run-1",
         status: "running",
-        created_at: T0,
         nodes: {
           "strategies-1": {
-            node_id: "strategies-1",
             status: "running",
-            retry_count: 0,
-            timed_out: false,
-            started_at: T0
+            started_at: T0,
+            finished_at: undefined,
+            wait_since: T0,
+            wait_reason: "active",
+            next_eligible_action: "task-complete"
           },
           "strategies-2": {
-            node_id: "strategies-2",
             status: "running",
             retry_count: 2,
-            timed_out: false,
-            started_at: T0
+            started_at: T0,
+            finished_at: undefined,
+            wait_since: T0,
+            wait_reason: "active",
+            next_eligible_action: "task-complete"
           },
-          "setup-1": { node_id: "setup-1", status: "succeeded", retry_count: 0, timed_out: false }
-        }
-      }
+          "setup-1": {}
+        },
+        overrides: { created_at: T0, started_at: T0, last_transition_at: T0 }
+      }),
+      graph: currentPlannedGraph(["strategies-1", "strategies-2", "setup-1"], undefined)
     });
     await pump().drain();
     const heartbeats = reporter.envelopes().filter((envelope) => envelope.event.type === "node-heartbeat");

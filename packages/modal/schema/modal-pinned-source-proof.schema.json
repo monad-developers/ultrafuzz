@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:pinned-source-proof:1",
+  "title": "Ultrafuzz pinned source proof",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "commit", "tree", "base_ref", "refs", "remotes", "revision_count", "commit_object_count"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.pinned-source-proof.v1" },
+    "commit": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },
+    "tree": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },
+    "base_ref": { "const": "refs/heads/ultrafuzz-pinned" },
+    "refs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "object"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^refs/heads/ultrafuzz(?:-pinned|/.+)$", "maxLength": 1024 },
+          "object": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" }
+        }
+      }
+    },
+    "remotes": { "type": "array", "maxItems": 0 },
+    "revision_count": { "const": 1 },
+    "commit_object_count": { "const": 1 }
+  }
+}

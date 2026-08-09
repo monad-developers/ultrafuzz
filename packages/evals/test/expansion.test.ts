@@ -1,83 +1,101 @@
-import { mkdtempSync } from "node:fs";
+import fs, { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import type { NodeState, RunState } from "@ultrafuzz/artifacts";
+
 import { summarizeEvalTerminal } from "../src/efficiency.js";
 import { evalRunExpansion, MAX_EVAL_EXPANSION_NODE_IDS } from "../src/expansion.js";
-import { EVAL_RUN_SCHEMA_VERSION, type EvalRunRecord } from "../src/types.js";
-import { writeRunFixture } from "./helpers.js";
+import type { EvalRunRecord } from "../src/types.js";
+import {
+  currentEvalRunRecord,
+  currentPlannedGraph,
+  currentRunState,
+  testRow,
+  testSuite,
+  writeCurrentRunEvidence
+} from "./helpers.js";
 
-function node(id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return { node_id: id, status: "succeeded", retry_count: 0, timed_out: false, ...overrides };
+function node(id: string, overrides: Partial<NodeState> = {}): Partial<NodeState> {
+  const status = overrides.status ?? "succeeded";
+  const terminal = ["succeeded", "failed", "skipped", "timed-out", "reused-from-prior-run", "invalidated"].includes(
+    status
+  );
+  return {
+    node_id: id,
+    status,
+    retry_count: 0,
+    timed_out: false,
+    ...(terminal
+      ? {}
+      : { wait_since: "2026-07-09T00:00:01.000Z", wait_reason: "active", next_eligible_action: "task-complete" }),
+    ...overrides
+  };
 }
 
-function runState(nodes: Record<string, unknown>, concurrency?: Record<string, unknown>): Record<string, unknown> {
-  return {
-    schema_version: "1.0",
-    run_id: "expansion-run",
-    status: "succeeded",
-    created_at: "2026-07-09T00:00:00.000Z",
-    started_at: "2026-07-09T00:00:01.000Z",
-    finished_at: "2026-07-09T00:00:09.000Z",
+function runState(nodes: Record<string, Partial<NodeState>>, concurrency?: Partial<RunState["concurrency"]>): RunState {
+  const state = currentRunState({
+    runId: "expansion-run",
     nodes,
-    ...(concurrency === undefined ? {} : { concurrency })
-  };
+    overrides: {
+      created_at: "2026-07-09T00:00:00.000Z",
+      started_at: "2026-07-09T00:00:01.000Z",
+      finished_at: "2026-07-09T00:00:09.000Z",
+      last_transition_at: "2026-07-09T00:00:09.000Z"
+    }
+  });
+  if (concurrency !== undefined) state.concurrency = { ...state.concurrency, ...concurrency };
+  return state;
 }
 
 function record(runRoot: string): EvalRunRecord {
-  return {
-    schema_version: EVAL_RUN_SCHEMA_VERSION,
-    eval_run_id: "eval-expansion",
-    row_id: "expansion-row",
+  const row = testRow(testSuite("/ground-truth"), {
+    id: "expansion-row",
     target_id: "expansion-target",
     variant_id: "baseline",
-    trial_id: "trial-1",
-    ultrafuzz_run_id: "expansion-run",
-    ultrafuzz_run_root: runRoot,
-    status: "launched",
-    workflow_ids: ["expansion-workflow"],
-    diagnostics: []
-  };
+    trial_id: "trial-1"
+  });
+  return currentEvalRunRecord({
+    row,
+    runRoot,
+    runId: "expansion-run",
+    evalRunId: "eval-expansion",
+    overrides: { workflow_ids: ["expansion-workflow"] }
+  });
 }
 
 describe("eval run expansion", () => {
   it("separates dynamic children from the declared graph and keeps their lineage", () => {
-    // The claim the gate exists to make: a dynamic child is independently
-    // visible, not folded into one opaque agent node. A node present in
-    // state.json but absent from graph.json was added while the run was in
-    // flight, which needs no cooperation from the runtime to detect.
     const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-"));
-    writeRunFixture({
+    const state = runState(
+      {
+        "threat-model": node("threat-model"),
+        "dedupe-findings": node("dedupe-findings", { status: "failed" }),
+        "goal-reentrancy": node("goal-reentrancy", {
+          logical_node_id: "goal-lane",
+          status: "running",
+          retry_count: 2,
+          provenance: { source_node_id: "threat-model" }
+        }),
+        "goal-oracle": node("goal-oracle", { status: "timed-out", timed_out: true })
+      },
+      { requested_concurrency: 8, effective_concurrency: 6, ready_queue_depth: 14, active_work: 6 }
+    );
+    writeCurrentRunEvidence({
       runRoot,
       runId: "expansion-run",
-      graph: { nodes: [{ id: "threat-model" }, { id: "dedupe-findings" }] },
-      state: runState(
-        {
-          "threat-model": node("threat-model"),
-          "dedupe-findings": node("dedupe-findings", { status: "failed" }),
-          "goal-reentrancy": node("goal-reentrancy", {
-            logical_node_id: "goal-lane",
-            status: "running",
-            retry_count: 2,
-            provenance: { source_node_id: "threat-model" }
-          }),
-          "goal-oracle": node("goal-oracle", { status: "timed-out", timed_out: true })
-        },
-        { requested_concurrency: 8, effective_concurrency: 6, ready_queue_depth: 14, active_work: 6 }
-      )
+      state,
+      graph: currentPlannedGraph(["threat-model", "dedupe-findings"], undefined)
     });
 
-    const expansion = evalRunExpansion({ runRoot, state: undefined });
-    expect(expansion.node_count).toBe(0);
-    expect(expansion.nodes).toEqual({ status: "unavailable", reason: "workflow-state-unavailable" });
-
-    const observed = summarizeEvalTerminal(record(runRoot)).expansion;
-    expect(observed.node_count).toBe(4);
-    expect(observed.static_node_count).toBe(2);
-    expect(observed.dynamic_node_count).toBe(2);
-    expect(observed.dynamic_nodes).toEqual([
+    const direct = evalRunExpansion({ runRoot, state });
+    expect(direct).toEqual(summarizeEvalTerminal(record(runRoot)).expansion);
+    expect(direct.node_count).toBe(4);
+    expect(direct.static_node_count).toBe(2);
+    expect(direct.dynamic_node_count).toBe(2);
+    expect(direct.dynamic_nodes).toEqual([
       {
         node_id: "goal-oracle",
         logical_node_id: null,
@@ -95,29 +113,29 @@ describe("eval run expansion", () => {
         timed_out: false
       }
     ]);
-    expect(observed.dynamic_status_counts?.running).toBe(1);
-    expect(observed.dynamic_status_counts?.["timed-out"]).toBe(1);
-    expect(observed.status_counts.succeeded).toBe(1);
-    expect(observed.status_counts.failed).toBe(1);
-    expect(observed.failed_node_ids).toEqual(["dedupe-findings"]);
-    expect(observed.timed_out_node_ids).toEqual(["goal-oracle"]);
-    expect(observed.retried_node_count).toBe(1);
-    expect(observed.truncated).toBe(false);
-    expect(observed.lineage).toEqual({ status: "complete", reason: null });
+    expect(direct.dynamic_status_counts.running).toBe(1);
+    expect(direct.dynamic_status_counts["timed-out"]).toBe(1);
+    expect(direct.status_counts.succeeded).toBe(1);
+    expect(direct.status_counts.failed).toBe(1);
+    expect(direct.failed_node_ids).toEqual(["dedupe-findings"]);
+    expect(direct.timed_out_node_ids).toEqual(["goal-oracle"]);
+    expect(direct.retried_node_count).toBe(1);
+    expect(direct.truncated).toBe(false);
+    expect(direct.nodes).toEqual({ status: "complete", reason: null });
+    expect(direct.lineage).toEqual({ status: "complete", reason: null });
   });
 
   it("records requested against effective concurrency and the ready queue behind it", () => {
-    // The second claim: a wide ready queue was admitted under the configured
-    // limit rather than serialized. Requested alone cannot show that.
     const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-concurrency-"));
-    writeRunFixture({
+    const state = runState(
+      { a: node("a", { status: "running" }), b: node("b", { status: "ready" }) },
+      { requested_concurrency: 12, effective_concurrency: 12, ready_queue_depth: 40, active_work: 12 }
+    );
+    writeCurrentRunEvidence({
       runRoot,
       runId: "expansion-run",
-      graph: { nodes: [] },
-      state: runState(
-        { a: node("a", { status: "running" }), b: node("b", { status: "ready" }) },
-        { requested_concurrency: 12, effective_concurrency: 12, ready_queue_depth: 40, active_work: 12 }
-      )
+      state,
+      graph: currentPlannedGraph([], undefined)
     });
 
     const observed = summarizeEvalTerminal(record(runRoot)).expansion;
@@ -132,34 +150,36 @@ describe("eval run expansion", () => {
     expect(observed.status_counts.ready).toBe(1);
   });
 
-  it("reports missing evidence instead of implying a graph with no dynamic children", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-nograph-"));
-    writeRunFixture({ runRoot, runId: "expansion-run", state: runState({ a: node("a") }) });
+  it("rejects absent or malformed state and graph evidence", () => {
+    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-invalid-"));
+    const state = runState({ a: node("a") });
+    writeCurrentRunEvidence({ runRoot, runId: "expansion-run", state, graph: currentPlannedGraph([], undefined) });
+    fs.rmSync(path.join(runRoot, "graph.json"));
+    expect(() => summarizeEvalTerminal(record(runRoot))).toThrow(/failed to read durable JSON/u);
 
-    const observed = summarizeEvalTerminal(record(runRoot)).expansion;
-    expect(observed.node_count).toBe(1);
-    expect(observed.static_node_count).toBeNull();
-    expect(observed.dynamic_node_count).toBeNull();
-    expect(observed.dynamic_nodes).toBeNull();
-    expect(observed.lineage).toEqual({ status: "unavailable", reason: "run-graph-unavailable" });
-    expect(observed.concurrency).toEqual({
-      requested: null,
-      effective: null,
-      ready_queue_depth: null,
-      active_work: null
-    });
-    expect(observed.concurrency_evidence).toEqual({ status: "unavailable", reason: "concurrency-unavailable" });
+    writeCurrentRunEvidence({ runRoot, runId: "expansion-run", state, graph: currentPlannedGraph([], undefined) });
+    fs.writeFileSync(path.join(runRoot, "graph.json"), '{"nodes":[],"nodes":[]}\n');
+    expect(() => summarizeEvalTerminal(record(runRoot))).toThrow(/durable JSON is invalid/u);
+
+    fs.rmSync(path.join(runRoot, "state.json"));
+    expect(() => summarizeEvalTerminal(record(runRoot))).toThrow(/cannot open regular file/u);
   });
 
-  it("keeps counts exact and flags a capped identifier list rather than truncating silently", () => {
+  it("keeps counts exact and flags capped identifier lists", () => {
     const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-cap-"));
     const total = MAX_EVAL_EXPANSION_NODE_IDS + 5;
-    const nodes: Record<string, unknown> = {};
+    const nodes: Record<string, Partial<NodeState>> = {};
     for (let index = 0; index < total; index += 1) {
       const id = `goal-${String(index).padStart(4, "0")}`;
       nodes[id] = node(id, { status: "failed" });
     }
-    writeRunFixture({ runRoot, runId: "expansion-run", graph: { nodes: [] }, state: runState(nodes) });
+    const state = runState(nodes);
+    writeCurrentRunEvidence({
+      runRoot,
+      runId: "expansion-run",
+      state,
+      graph: currentPlannedGraph([], undefined)
+    });
 
     const observed = summarizeEvalTerminal(record(runRoot)).expansion;
     expect(observed.node_count).toBe(total);

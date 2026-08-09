@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:launch-state:3",
+  "title": "Ultrafuzz Modal launch state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "logical_run_id",
+    "generation",
+    "generation_mode",
+    "generation_start_reason",
+    "app",
+    "image",
+    "image_id",
+    "timeout_ms",
+    "source_revision",
+    "fingerprints",
+    "launches",
+    "attempt_history",
+    "recovery_lifecycle"
+  ],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.modal.launch-state.v3" },
+    "logical_run_id": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" },
+    "generation": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/positiveInteger" },
+    "generation_mode": { "enum": ["resume", "fresh"] },
+    "generation_start_reason": {
+      "enum": ["initial", "pre-model-retry", "post-model-resume", "image-rollout", "stale-probe-rotation", "operator-restart", "unknown"]
+    },
+    "app": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonEmptyString" },
+    "image": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonEmptyString" },
+    "image_id": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonEmptyString" },
+    "timeout_ms": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/positiveInteger" },
+    "source_revision": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonEmptyString" },
+    "fingerprints": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/lineageFingerprints" },
+    "launches": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/launchRecord" }
+    },
+    "attempt_history": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/attemptProvenance" }
+    },
+    "recovery_lifecycle": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/recoveryLifecycleRecord" }
+    }
+  }
+}

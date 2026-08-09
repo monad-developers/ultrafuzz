@@ -101,10 +101,7 @@ export function prepareTrustedCliEnvironment(input: {
   };
 }
 
-export function runTrustedJsonValidatorPreflight(input: {
-  layout: RunLayout;
-  trusted: TrustedCliEnvironment;
-}): void {
+export function runTrustedJsonValidatorPreflight(input: { layout: RunLayout; trusted: TrustedCliEnvironment }): void {
   if (!input.trusted.active || input.trusted.launcherPath === undefined) return;
   assertTrustedCliLauncher({ layout: input.layout, launcherPath: input.trusted.launcherPath });
   const findings = artifactSchemaRegistry().find((entry) => entry.filename === "findings.schema.json");
@@ -128,7 +125,7 @@ export function runTrustedJsonValidatorPreflight(input: {
       windowsHide: true
     }
   );
-  const parsed = JSON.parse(stdout) as {
+  const parsed = parseStrictJsonBytes(Buffer.from(stdout, "utf8")) as {
     ok?: unknown;
     data?: {
       status?: unknown;
@@ -212,13 +209,23 @@ function trustedCliLauncher(entrypoint: string): string {
   if (process.platform === "win32") {
     return `@echo off\r\n"${process.execPath.replaceAll('"', '""')}" "${entrypoint.replaceAll('"', '""')}" %*\r\n`;
   }
-  return ["#!/bin/sh", "set -eu", `exec ${shellSingleQuote(process.execPath)} ${shellSingleQuote(entrypoint)} "$@"`, ""].join(
-    "\n"
-  );
+  return [
+    "#!/bin/sh",
+    "set -eu",
+    `exec ${shellSingleQuote(process.execPath)} ${shellSingleQuote(entrypoint)} "$@"`,
+    ""
+  ].join("\n");
 }
 
 function shellSingleQuote(value: string): string {
-  if (/[\u0000-\u001f\u007f-\u009f]/u.test(value)) throw new Error("launcher path contains control characters");
+  if (
+    [...value].some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+    })
+  ) {
+    throw new Error("launcher path contains control characters");
+  }
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 

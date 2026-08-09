@@ -4,7 +4,9 @@ import path from "node:path";
 import {
   ANALYSIS_BUNDLE_SCHEMA_VERSION,
   assertRegularFileInside,
-  validateRunStateSchema,
+  parseStrictJsonBytes,
+  readRunState,
+  readRegularFileSnapshot,
   writeAnalysisBundle,
   type AnalysisAccountingSummary,
   type AnalysisAttemptHistory,
@@ -16,63 +18,21 @@ import {
   type RunStatus,
   type WriteAnalysisBundleResult
 } from "@ultrafuzz/artifacts";
-import { z } from "zod/v4";
 
 import { EvalError, evalRunRoot } from "./utils.js";
+import { readEvalRunRecords, readEvalScoreSummary } from "./eval-durable.js";
+import type { EvalRowScore, EvalRunRecord, EvalScoreSummary } from "./types.js";
 
 const MAX_ANALYSIS_SOURCE_BYTES = 16 * 1024 * 1024;
-const WORKFLOW_STATUSES = ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled"] as const;
 const TERMINAL_WORKFLOW_STATUSES = new Set<RunStatus>(["succeeded", "failed", "timed-out", "canceled"]);
 
-const nonNegativeInteger = z.number().int().nonnegative();
-const unitMetric = z.number().finite().min(0).max(1);
-const optionalSourceTimestamp = z.string().optional();
-
-const evalRunRecordSourceSchema = z.looseObject({
-  row_id: z.string().min(1),
-  ultrafuzz_run_root: z.string().min(1).optional(),
-  status: z.enum(["launched", "failed"]),
-  final_status: z.string().min(1).optional(),
-  started_at: optionalSourceTimestamp,
-  finished_at: optionalSourceTimestamp
-});
-
-const evalRowMetricsSourceSchema = z.looseObject({
-  report_schema_valid: z.boolean(),
-  ground_truth_bug_count: nonNegativeInteger,
-  finding_count: nonNegativeInteger,
-  true_positives: nonNegativeInteger,
-  false_positives: nonNegativeInteger,
-  missed: nonNegativeInteger,
-  human_review_queue_count: nonNegativeInteger,
-  duplicate_count: nonNegativeInteger,
-  precision: unitMetric,
-  recall: unitMetric,
-  f1_score: unitMetric,
-  full_match_rate: unitMetric,
-  severity_accuracy: unitMetric.nullable(),
-  true_positive_accuracy: unitMetric,
-  duplicate_rate: unitMetric,
-  runtime_seconds: z.number().finite().nonnegative().nullable(),
-  cost_estimate: z.number().finite().nonnegative().nullable()
-});
-
-const evalSummarySourceSchema = z.looseObject({
-  rows: z.array(evalRowMetricsSourceSchema)
-});
-
-type EvalRunRecordSource = z.infer<typeof evalRunRecordSourceSchema>;
-type EvalRowMetricsSource = z.infer<typeof evalRowMetricsSourceSchema>;
+type EvalRunRecordSource = EvalRunRecord;
+type EvalRowMetricsSource = EvalRowScore;
 type WorkflowObservation = {
   status: AnalysisAttemptHistory["attempts"][number]["workflow_status"];
   started_at?: string;
   finished_at?: string;
 };
-type SourceState<T> = {
-  value?: T;
-  reason?: Extract<AnalysisBundleOmissionReason, "source-missing" | "source-invalid">;
-};
-
 export interface CollectEvalAnalysisBundleInput {
   projectRoot: string;
   evalRunId: string;
@@ -91,8 +51,9 @@ export function collectEvalAnalysisBundle(input: CollectEvalAnalysisBundleInput)
     throw new EvalError("EVAL_RUN_NOT_FOUND", `eval run not found: ${input.evalRunId}`);
   }
 
-  const recordsSource = readJsonLinesSource(path.join(root, "runs.jsonl"), evalRunRecordSourceSchema);
-  const summarySource = readJsonSource(path.join(root, "summary.json"), evalSummarySourceSchema);
+  const records = readEvalRunRecords(path.join(root, "runs.jsonl"));
+  const summary = readEvalScoreSummary(path.join(root, "summary.json"));
+  assertAnalysisLineage(input.evalRunId, root, records, summary);
   const payloads: Partial<Record<AnalysisBundleDataKind, unknown>> = {};
   const omissions: Partial<Record<AnalysisBundleDataKind, AnalysisBundleOmissionReason>> = {};
   let terminalPayload: AnalysisTerminalStatus | undefined;
@@ -103,42 +64,54 @@ export function collectEvalAnalysisBundle(input: CollectEvalAnalysisBundleInput)
     payloads["recovery-summary"] = input.recoverySummary;
   }
 
-  if (recordsSource.value === undefined) {
-    const reason = recordsSource.reason ?? "data-unavailable";
-    omissions["terminal-status"] = reason;
-    omissions["attempt-history"] = reason;
-  } else if (recordsSource.value.length === 0) {
-    omissions["terminal-status"] = "data-unavailable";
-    omissions["attempt-history"] = "data-unavailable";
-  } else {
-    const records = recordsSource.value;
-    const workflowObservations = workflowObservationsForRecords(records);
-    terminalPayload = terminalStatus(records, workflowObservations);
-    payloads["terminal-status"] = terminalPayload;
-    payloads["attempt-history"] = attemptHistory(records, workflowObservations);
+  const workflowObservations = workflowObservationsForRecords(records);
+  terminalPayload = terminalStatus(records, workflowObservations);
+  if (!terminalPayload.terminal) {
+    throw new EvalError(
+      "EVAL_ANALYSIS_SOURCE_NOT_TERMINAL",
+      "eval analysis bundles require authoritative terminal workflow evidence"
+    );
   }
+  payloads["terminal-status"] = terminalPayload;
+  payloads["attempt-history"] = attemptHistory(records, workflowObservations);
 
-  if (summarySource.value === undefined) {
-    const reason = summarySource.reason ?? "data-unavailable";
-    omissions["evaluation-metrics"] =
-      reason === "source-missing" && terminalPayload?.terminal === false ? "not-terminal" : reason;
-  } else if (summarySource.value.rows.length === 0) {
-    omissions["evaluation-metrics"] = "data-unavailable";
-  } else {
-    payloads["evaluation-metrics"] = evaluationMetrics(summarySource.value.rows);
+  if (summary.rows.length === 0) {
+    throw new EvalError("EVAL_ANALYSIS_SOURCE_INVALID", "eval analysis summary must contain at least one scored row");
   }
+  payloads["evaluation-metrics"] = evaluationMetrics(summary.rows);
 
-  const accounting = accountingSummary(
-    recordsSource.value === undefined ? [] : latestRecordsByRow(recordsSource.value),
-    summarySource.value?.rows ?? []
-  );
-  if (accounting === undefined) {
-    omissions["accounting-summary"] = accountingOmissionReason(recordsSource, summarySource, terminalPayload);
-  } else {
-    payloads["accounting-summary"] = accounting;
-  }
+  payloads["accounting-summary"] = accountingSummary(latestRecordsByRow(records), summary.rows);
 
   return writeAnalysisBundle({ outputDir: input.outputDir, payloads, omissions });
+}
+
+function assertAnalysisLineage(
+  evalRunId: string,
+  evalRunRootPath: string,
+  records: EvalRunRecord[],
+  summary: EvalScoreSummary
+): void {
+  if (summary.eval_run_id !== evalRunId || path.resolve(summary.eval_run_root) !== path.resolve(evalRunRootPath)) {
+    throw new EvalError("EVAL_ANALYSIS_LINEAGE_INVALID", "eval score summary names another eval run");
+  }
+  for (const record of records) {
+    if (record.eval_run_id !== evalRunId) {
+      throw new EvalError(
+        "EVAL_ANALYSIS_LINEAGE_INVALID",
+        `eval run record ${record.row_id} names another eval run`
+      );
+    }
+  }
+  const recordIds = new Set(latestRecordsByRow(records).map((record) => record.row_id));
+  const scoreIds = new Set(summary.rows.map((row) => row.row_id));
+  const missingScores = [...recordIds].filter((rowId) => !scoreIds.has(rowId)).sort();
+  const missingRecords = [...scoreIds].filter((rowId) => !recordIds.has(rowId)).sort();
+  if (missingScores.length > 0 || missingRecords.length > 0) {
+    throw new EvalError("EVAL_ANALYSIS_LINEAGE_INVALID", "eval records and score rows do not form an exact join", {
+      records_without_scores: missingScores,
+      scores_without_records: missingRecords
+    });
+  }
 }
 
 function terminalStatus(
@@ -161,15 +134,10 @@ function terminalStatus(
     statusCounts[status] += 1;
   }
   const startedAt = minTimestamp(
-    latest.map((record) => workflowObservations.get(record)?.started_at ?? record.started_at)
+    latest.map((record) => workflowObservations.get(record)?.started_at ?? record.launcher.started_at ?? undefined)
   );
   const observedFinishedAt = maxTimestamp(
-    latest.map((record) => {
-      const observation = workflowObservations.get(record);
-      if (observation !== undefined) return observation.finished_at;
-      const status = knownWorkflowStatus(record.final_status) ?? (record.status === "failed" ? "failed" : undefined);
-      return status !== undefined && TERMINAL_WORKFLOW_STATUSES.has(status) ? record.finished_at : undefined;
-    })
+    latest.map((record) => workflowObservations.get(record)?.finished_at)
   );
   const finishedAt =
     startedAt !== undefined && observedFinishedAt !== undefined && observedFinishedAt < startedAt
@@ -193,8 +161,8 @@ function attemptHistory(
   return {
     schema_version: ANALYSIS_BUNDLE_SCHEMA_VERSION,
     attempts: records.map((record, index) => {
-      const startedAt = normalizedTimestamp(record.started_at);
-      const observedFinishedAt = normalizedTimestamp(record.finished_at);
+      const startedAt = normalizedTimestamp(record.launcher.started_at ?? undefined);
+      const observedFinishedAt = normalizedTimestamp(record.launcher.finished_at ?? undefined);
       const finishedAt =
         startedAt !== undefined && observedFinishedAt !== undefined && observedFinishedAt < startedAt
           ? undefined
@@ -240,28 +208,32 @@ function evaluationMetrics(rows: EvalRowMetricsSource[]): AnalysisEvaluationMetr
 function accountingSummary(
   records: EvalRunRecordSource[],
   rows: EvalRowMetricsSource[]
-): AnalysisAccountingSummary | undefined {
-  const summaries = uniqueRunRoots(records).flatMap((runRoot) => {
-    const summary = readAccountingSummary(runRoot);
-    return summary === undefined ? [] : [summary];
-  });
-  const runtimes = rows.flatMap((row) => (row.runtime_seconds === null ? [] : [row.runtime_seconds]));
-  const scoreCosts = rows.flatMap((row) => (row.cost_estimate === null ? [] : [row.cost_estimate]));
-  if (summaries.length === 0 && runtimes.length === 0 && scoreCosts.length === 0) {
-    return undefined;
+): AnalysisAccountingSummary {
+  const summaries = uniqueRunRoots(records).map(readAccountingSummary);
+  if (summaries.length !== records.length) {
+    throw new EvalError(
+      "EVAL_ANALYSIS_ACCOUNTING_LINEAGE_INVALID",
+      "eval analysis requires one distinct accounting source per scored run"
+    );
   }
-
-  const runCount = Math.max(records.length, rows.length);
-  const metadataCosts = summaries.flatMap((summary) =>
+  const runtimes = rows.map((row) => {
+    if (row.runtime_seconds === null) {
+      throw new EvalError(
+        "EVAL_ANALYSIS_ACCOUNTING_INCOMPLETE",
+        `eval row ${row.row_id} has no authoritative runtime`
+      );
+    }
+    return row.runtime_seconds;
+  });
+  const costs = summaries.flatMap((summary) =>
     summary.estimated_spend_usd === undefined ? [] : [summary.estimated_spend_usd]
   );
-  const costs = summaries.length === 0 ? scoreCosts : metadataCosts;
   return {
     schema_version: ANALYSIS_BUNDLE_SCHEMA_VERSION,
-    run_count: runCount,
-    accounted_run_count: summaries.length === 0 ? scoreCosts.length : summaries.length,
+    run_count: records.length,
+    accounted_run_count: summaries.length,
     runtime_observed_run_count: runtimes.length,
-    runtime_seconds: runtimes.length === 0 ? null : roundMetric(runtimes.reduce((total, value) => total + value, 0)),
+    runtime_seconds: roundMetric(runtimes.reduce((total, value) => total + value, 0)),
     input_tokens: sumAccounting(summaries, "input_tokens"),
     output_tokens: sumAccounting(summaries, "output_tokens"),
     cache_read_tokens: sumAccounting(summaries, "cache_read_tokens"),
@@ -269,14 +241,7 @@ function accountingSummary(
     reasoning_tokens: sumAccounting(summaries, "reasoning_tokens"),
     total_tokens: sumAccounting(summaries, "total_tokens"),
     estimated_spend_usd: costs.length === 0 ? null : roundCurrency(costs.reduce((total, value) => total + value, 0)),
-    partial_pricing:
-      (summaries.length === 0 ? scoreCosts.length : summaries.length) < runCount ||
-      summaries.some(
-        (summary) =>
-          summary.partial_pricing ||
-          summary.unpriced_event_count > 0 ||
-          (summary.total_tokens > 0 && summary.estimated_spend_usd === undefined)
-      ),
+    partial_pricing: summaries.some((summary) => summary.partial_pricing),
     event_count: sumAccounting(summaries, "event_count"),
     priced_event_count: sumAccounting(summaries, "priced_event_count"),
     unpriced_event_count: sumAccounting(summaries, "unpriced_event_count")
@@ -295,41 +260,58 @@ interface StoredAccountingSummary {
   event_count: number;
   priced_event_count: number;
   unpriced_event_count: number;
+  usage_complete: boolean;
+  pricing_complete: boolean;
 }
 
-function readAccountingSummary(runRoot: string): StoredAccountingSummary | undefined {
+function readAccountingSummary(runRoot: string): StoredAccountingSummary {
   const metadataPath = path.join(runRoot, "run.json");
   try {
     assertRegularFileInside(runRoot, metadataPath, "analysis accounting source");
     const metadata = readJsonBounded(metadataPath);
     const accounting = recordField(metadata, "accounting");
-    const summary = recordField(accounting, "cumulative") ?? recordField(accounting, "current");
-    const totalTokens = nonNegativeIntegerField(summary, "total_tokens");
-    if (summary === undefined || totalTokens === undefined) {
-      return undefined;
-    }
-    const estimatedSpendUsd = nonNegativeNumberField(summary, "estimated_spend_usd");
-    const eventCount = nonNegativeIntegerField(summary, "event_count") ?? 0;
-    const pricedEventCount = nonNegativeIntegerField(summary, "priced_event_count") ?? 0;
-    const unpricedEventCount = nonNegativeIntegerField(summary, "unpriced_event_count") ?? 0;
+    const summary = recordField(accounting, "cumulative");
+    if (summary === undefined) throw new Error("accounting.cumulative is required");
+    const inputTokens = requiredNonNegativeIntegerField(summary, "input_tokens");
+    const outputTokens = requiredNonNegativeIntegerField(summary, "output_tokens");
+    const cacheReadTokens = requiredNonNegativeIntegerField(summary, "cache_read_tokens");
+    const cacheWriteTokens = requiredNonNegativeIntegerField(summary, "cache_write_tokens");
+    const reasoningTokens = requiredNonNegativeIntegerField(summary, "reasoning_tokens");
+    const totalTokens = requiredNonNegativeIntegerField(summary, "total_tokens");
+    const eventCount = requiredNonNegativeIntegerField(summary, "event_count");
+    const pricedEventCount = requiredNonNegativeIntegerField(summary, "priced_event_count");
+    const unpricedEventCount = requiredNonNegativeIntegerField(summary, "unpriced_event_count");
+    const usageComplete = requiredBooleanField(summary, "usage_complete");
+    const pricingComplete = requiredBooleanField(summary, "pricing_complete");
+    const partialPricing = requiredBooleanField(summary, "partial_pricing");
     if (eventCount !== pricedEventCount + unpricedEventCount) {
-      return undefined;
+      throw new Error("event_count must equal priced_event_count plus unpriced_event_count");
+    }
+    if (pricingComplete === partialPricing) throw new Error("partial_pricing must be the inverse of pricing_complete");
+    const estimatedSpendUsd = nonNegativeNumberField(summary, "estimated_spend_usd");
+    if (pricingComplete && estimatedSpendUsd === undefined) {
+      throw new Error("complete pricing requires estimated_spend_usd");
     }
     return {
-      input_tokens: nonNegativeIntegerField(summary, "input_tokens") ?? 0,
-      output_tokens: nonNegativeIntegerField(summary, "output_tokens") ?? 0,
-      cache_read_tokens: nonNegativeIntegerField(summary, "cache_read_tokens") ?? 0,
-      cache_write_tokens: nonNegativeIntegerField(summary, "cache_write_tokens") ?? 0,
-      reasoning_tokens: nonNegativeIntegerField(summary, "reasoning_tokens") ?? 0,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      cache_read_tokens: cacheReadTokens,
+      cache_write_tokens: cacheWriteTokens,
+      reasoning_tokens: reasoningTokens,
       total_tokens: totalTokens,
       ...(estimatedSpendUsd === undefined ? {} : { estimated_spend_usd: estimatedSpendUsd }),
-      partial_pricing: summary.partial_pricing === true || unpricedEventCount > 0,
+      partial_pricing: partialPricing,
       event_count: eventCount,
       priced_event_count: pricedEventCount,
-      unpriced_event_count: unpricedEventCount
+      unpriced_event_count: unpricedEventCount,
+      usage_complete: usageComplete,
+      pricing_complete: pricingComplete
     };
-  } catch {
-    return undefined;
+  } catch (error) {
+    throw new EvalError("EVAL_ANALYSIS_ACCOUNTING_INVALID", `invalid current accounting source: ${metadataPath}`, {
+      path: metadataPath,
+      reason: error instanceof Error ? error.message : String(error)
+    });
   }
 }
 
@@ -337,35 +319,41 @@ function workflowObservationsForRecords(records: EvalRunRecordSource[]): Map<Eva
   const observations = new Map<EvalRunRecordSource, WorkflowObservation>();
   const byRoot = new Map<string, WorkflowObservation | undefined>();
   for (const record of records) {
-    let observation: WorkflowObservation | undefined;
-    if (record.ultrafuzz_run_root !== undefined && path.isAbsolute(record.ultrafuzz_run_root)) {
-      if (!byRoot.has(record.ultrafuzz_run_root)) {
-        byRoot.set(record.ultrafuzz_run_root, readWorkflowObservation(record.ultrafuzz_run_root));
-      }
-      observation = byRoot.get(record.ultrafuzz_run_root);
+    if (
+      record.status !== "launched" ||
+      record.ultrafuzz_run_root === undefined ||
+      !path.isAbsolute(record.ultrafuzz_run_root)
+    ) {
+      throw new EvalError(
+        "EVAL_ANALYSIS_WORKFLOW_EVIDENCE_MISSING",
+        `eval row ${record.row_id} has no launched current workflow evidence`
+      );
     }
-    const status =
-      observation?.status ??
-      knownWorkflowStatus(record.final_status) ??
-      (record.status === "failed" ? "failed" : "unknown");
-    observations.set(record, { ...observation, status });
+    if (!byRoot.has(record.ultrafuzz_run_root)) {
+      byRoot.set(record.ultrafuzz_run_root, readWorkflowObservation(record.ultrafuzz_run_root));
+    }
+    const observation = byRoot.get(record.ultrafuzz_run_root);
+    if (observation === undefined) throw new Error("unreachable workflow observation");
+    observations.set(record, observation);
   }
   return observations;
 }
 
-function readWorkflowObservation(runRoot: string): WorkflowObservation | undefined {
+function readWorkflowObservation(runRoot: string): WorkflowObservation {
   const statePath = path.join(runRoot, "state.json");
   try {
     assertRegularFileInside(runRoot, statePath, "analysis workflow state source");
-    const parsed = validateRunStateSchema(readJsonBounded(statePath));
-    if (!parsed.ok || parsed.value === undefined) return undefined;
+    const state = readRunState(statePath);
     return {
-      status: parsed.value.status,
-      ...(parsed.value.started_at === undefined ? {} : { started_at: parsed.value.started_at }),
-      ...(parsed.value.finished_at === undefined ? {} : { finished_at: parsed.value.finished_at })
+      status: state.status,
+      ...(state.started_at === undefined ? {} : { started_at: state.started_at }),
+      ...(state.finished_at === undefined ? {} : { finished_at: state.finished_at })
     };
-  } catch {
-    return undefined;
+  } catch (error) {
+    throw new EvalError("EVAL_ANALYSIS_WORKFLOW_EVIDENCE_INVALID", `invalid current workflow state: ${statePath}`, {
+      path: statePath,
+      reason: error instanceof Error ? error.message : String(error)
+    });
   }
 }
 
@@ -401,10 +389,6 @@ function aggregateStatus(
   return "mixed";
 }
 
-function knownWorkflowStatus(value: string | undefined): RunStatus | undefined {
-  return WORKFLOW_STATUSES.includes(value as RunStatus) ? (value as RunStatus) : undefined;
-}
-
 function minTimestamp(values: Array<string | undefined>): string | undefined {
   return values
     .flatMap((value) => {
@@ -424,60 +408,14 @@ function maxTimestamp(values: Array<string | undefined>): string | undefined {
     .at(-1);
 }
 
-function accountingOmissionReason(
-  recordsSource: SourceState<EvalRunRecordSource[]>,
-  summarySource: SourceState<{ rows: EvalRowMetricsSource[] }>,
-  terminalPayload: AnalysisTerminalStatus | undefined
-): AnalysisBundleOmissionReason {
-  if (summarySource.reason === "source-missing" && terminalPayload?.terminal === false) {
-    return "not-terminal";
-  }
-  if (recordsSource.value === undefined) {
-    return recordsSource.reason ?? "data-unavailable";
-  }
-  return "data-unavailable";
-}
-
 function normalizedTimestamp(value: string | undefined): string | undefined {
   if (value === undefined || !Number.isFinite(Date.parse(value))) return undefined;
   const normalized = new Date(value).toISOString();
   return normalized === value ? value : normalized;
 }
 
-function readJsonSource<T>(filePath: string, schema: z.ZodType<T>): SourceState<T> {
-  if (!fs.existsSync(filePath)) return { reason: "source-missing" };
-  try {
-    const parsed = schema.safeParse(readJsonBounded(filePath));
-    return parsed.success ? { value: parsed.data } : { reason: "source-invalid" };
-  } catch {
-    return { reason: "source-invalid" };
-  }
-}
-
-function readJsonLinesSource<T>(filePath: string, schema: z.ZodType<T>): SourceState<T[]> {
-  if (!fs.existsSync(filePath)) return { reason: "source-missing" };
-  try {
-    const contents = readTextBounded(filePath);
-    const values = contents
-      .split(/\r?\n/u)
-      .filter((line) => line.trim().length > 0)
-      .map((line) => schema.parse(JSON.parse(line) as unknown));
-    return { value: values };
-  } catch {
-    return { reason: "source-invalid" };
-  }
-}
-
 function readJsonBounded(filePath: string): unknown {
-  return JSON.parse(readTextBounded(filePath)) as unknown;
-}
-
-function readTextBounded(filePath: string): string {
-  assertRegularFileInside(path.dirname(filePath), filePath, "analysis bundle source");
-  if (fs.statSync(filePath).size > MAX_ANALYSIS_SOURCE_BYTES) {
-    throw new Error("analysis bundle source exceeded the size limit");
-  }
-  return fs.readFileSync(filePath, "utf8");
+  return parseStrictJsonBytes(readRegularFileSnapshot(filePath, MAX_ANALYSIS_SOURCE_BYTES));
 }
 
 function recordField(value: unknown, key: string): Record<string, unknown> | undefined {
@@ -491,6 +429,18 @@ function recordField(value: unknown, key: string): Record<string, unknown> | und
 function nonNegativeIntegerField(value: Record<string, unknown> | undefined, key: string): number | undefined {
   const candidate = value?.[key];
   return typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 0 ? candidate : undefined;
+}
+
+function requiredNonNegativeIntegerField(value: Record<string, unknown>, key: string): number {
+  const candidate = nonNegativeIntegerField(value, key);
+  if (candidate === undefined) throw new Error(`${key} must be a nonnegative integer`);
+  return candidate;
+}
+
+function requiredBooleanField(value: Record<string, unknown>, key: string): boolean {
+  const candidate = value[key];
+  if (typeof candidate !== "boolean") throw new Error(`${key} must be a Boolean`);
+  return candidate;
 }
 
 function nonNegativeNumberField(value: Record<string, unknown> | undefined, key: string): number | undefined {

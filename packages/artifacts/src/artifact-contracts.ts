@@ -1,13 +1,10 @@
 import crypto from "node:crypto";
+import { TextDecoder } from "node:util";
 
-import {
-  ARTIFACT_CONTRACT_IDS,
-  isArtifactContractId,
-  type ArtifactContractId
-} from "./artifact-contract-ids.js";
+import { ARTIFACT_CONTRACT_IDS, type ArtifactContractId } from "./artifact-contract-ids.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { artifactSchemaBundleDigest, artifactSchemaRegistry, VALIDATOR_BUILD_IDENTITY } from "./schema-registry.js";
-import { parseStrictJson, StrictJsonError } from "./strict-json.js";
+import { parseStrictJson, parseStrictJsonBytes, StrictJsonError } from "./strict-json.js";
 import {
   WORKFLOW_CONTRACT_DESCRIPTIONS,
   WORKFLOW_SCHEMA_FILES,
@@ -79,8 +76,9 @@ const existingJsonContracts = {
     validEmptyExample: '{"schema_version":"ultrafuzz.property-campaign.v2","failures":[]}'
   },
   "ultrafuzz/property-lens@2": {
-    description: "A strict typed property-lens catalog."
-  , schemaFile: "property-lens.schema.json" },
+    description: "A strict typed property-lens catalog.",
+    schemaFile: "property-lens.schema.json"
+  },
   "ultrafuzz/reference-expectations@2": {
     description: "A strict supplied reference expectation catalog.",
     schemaFile: "reference-expectations.schema.json"
@@ -127,9 +125,7 @@ const contractInputs: Array<Omit<ArtifactContractDefinition, "digest">> = ARTIFA
 const definitions = defineContracts(contractInputs);
 
 const contractSchemaFiles = Object.freeze({
-  ...Object.fromEntries(
-    Object.entries(existingJsonContracts).map(([contract, value]) => [contract, value.schemaFile])
-  ),
+  ...Object.fromEntries(Object.entries(existingJsonContracts).map(([contract, value]) => [contract, value.schemaFile])),
   ...WORKFLOW_SCHEMA_FILES
 }) as Readonly<Record<Exclude<ArtifactContractId, "ultrafuzz/nonempty-markdown@1" | "ultrafuzz/text@1">, string>>;
 
@@ -163,26 +159,66 @@ export function validateArtifactContract(
   contents: string,
   artifactPath = "$"
 ): ArtifactContractValidationResult {
-  if (contract === "ultrafuzz/nonempty-markdown@1") {
-    return contents.trim().length > 0
-      ? { ok: true, issues: [], value: contents }
-      : failure("ARTIFACT_MARKDOWN_EMPTY", "Markdown artifact must contain non-whitespace content", artifactPath);
+  if (contract === "ultrafuzz/nonempty-markdown@1" || contract === "ultrafuzz/text@1") {
+    return validateTextContract(contract, contents, artifactPath);
   }
-  if (contract === "ultrafuzz/text@1") return { ok: true, issues: [], value: contents };
 
   let parsed: unknown;
   try {
     parsed = parseStrictJson(contents);
   } catch (error) {
-    return failure(
-      error instanceof StrictJsonError && error.kind === "duplicate-key"
-        ? "ARTIFACT_JSON_DUPLICATE_KEY"
-        : "ARTIFACT_JSON_INVALID",
-      `Artifact is not strict JSON: ${error instanceof Error ? error.message : String(error)}`,
-      artifactPath
-    );
+    return strictJsonFailure(error, artifactPath);
+  }
+  return validateJsonContractValue(contract, parsed, artifactPath);
+}
+
+/** Validate the exact immutable artifact bytes, including their UTF-8 encoding. */
+export function validateArtifactContractBytes(
+  contract: ArtifactContractId,
+  contents: Uint8Array,
+  artifactPath = "$"
+): ArtifactContractValidationResult {
+  if (contract === "ultrafuzz/nonempty-markdown@1" || contract === "ultrafuzz/text@1") {
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(contents);
+    } catch (error) {
+      return failure(
+        "ARTIFACT_UTF8_INVALID",
+        `Artifact is not valid UTF-8: ${error instanceof Error ? error.message : String(error)}`,
+        artifactPath
+      );
+    }
+    return validateTextContract(contract, text, artifactPath);
   }
 
+  let parsed: unknown;
+  try {
+    parsed = parseStrictJsonBytes(contents);
+  } catch (error) {
+    return strictJsonFailure(error, artifactPath);
+  }
+  return validateJsonContractValue(contract, parsed, artifactPath);
+}
+
+function validateTextContract(
+  contract: "ultrafuzz/nonempty-markdown@1" | "ultrafuzz/text@1",
+  contents: string,
+  artifactPath: string
+): ArtifactContractValidationResult {
+  if (contract === "ultrafuzz/nonempty-markdown@1") {
+    return contents.trim().length > 0
+      ? { ok: true, issues: [], value: contents }
+      : failure("ARTIFACT_MARKDOWN_EMPTY", "Markdown artifact must contain non-whitespace content", artifactPath);
+  }
+  return { ok: true, issues: [], value: contents };
+}
+
+function validateJsonContractValue(
+  contract: Exclude<ArtifactContractId, "ultrafuzz/nonempty-markdown@1" | "ultrafuzz/text@1">,
+  parsed: unknown,
+  artifactPath: string
+): ArtifactContractValidationResult {
   const schemaFile = ARTIFACT_CONTRACT_SCHEMA_FILES[contract];
   if (schemaFile === undefined) {
     return failure("ARTIFACT_SCHEMA_UNAVAILABLE", `No JSON Schema is registered for ${contract}`, artifactPath);
@@ -203,6 +239,16 @@ export function validateArtifactContract(
     };
   }
   return { ok: true, issues: [], value: parsed };
+}
+
+function strictJsonFailure(error: unknown, artifactPath: string): ArtifactContractValidationResult {
+  return failure(
+    error instanceof StrictJsonError && error.kind === "duplicate-key"
+      ? "ARTIFACT_JSON_DUPLICATE_KEY"
+      : "ARTIFACT_JSON_INVALID",
+    `Artifact is not strict JSON: ${error instanceof Error ? error.message : String(error)}`,
+    artifactPath
+  );
 }
 
 function defineContracts(

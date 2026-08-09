@@ -2,8 +2,17 @@ import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { TextDecoder } from "node:util";
 
-import { appendLineDurable, safeResolveInside, validateSafeId } from "@ultrafuzz/artifacts";
+import {
+  appendLineDurable,
+  assertPlannedGraph,
+  parseStrictJson,
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
+  safeResolveInside,
+  validateSafeId
+} from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { EVAL_RESULT_SCHEMA_VERSION, type EvalResult } from "./types.js";
@@ -117,12 +126,11 @@ export function resolveTerminalReportPath(input: { runRoot?: string }): Terminal
   }
 
   const runRoot = path.resolve(input.runRoot);
-  let graph: unknown;
-  try {
-    graph = JSON.parse(fs.readFileSync(path.join(runRoot, "graph.json"), "utf8"));
-  } catch {
+  const graphPath = path.join(runRoot, "graph.json");
+  if (!fs.existsSync(graphPath)) {
     return { reason: "run graph is unavailable" };
   }
+  const graph = assertPlannedGraph(jsonFile(graphPath));
   const candidates = terminalReportCandidates(runRoot, graph);
   if (candidates.length === 1) {
     return {
@@ -267,7 +275,7 @@ export function evalRunRoot(projectRoot: string, evalRunId: string): string {
 }
 
 export function jsonFile<T = unknown>(filePath: string): T {
-  return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
+  return parseStrictJsonBytes(readRegularFileSnapshot(filePath, 64 * 1024 * 1024)) as T;
 }
 
 export function appendJsonLine(filePath: string, value: unknown): void {
@@ -278,11 +286,16 @@ export function readJsonLines<T = unknown>(filePath: string): T[] {
   if (!fs.existsSync(filePath)) {
     return [];
   }
-  return fs
-    .readFileSync(filePath, "utf8")
-    .split(/\r?\n/u)
-    .filter((line) => line.trim().length > 0)
-    .map((line) => JSON.parse(line) as T);
+  const bytes = readRegularFileSnapshot(filePath, 64 * 1024 * 1024);
+  const contents = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  if (contents.length === 0) return [];
+  const lines = contents.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines.map((rawLine, index) => {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (line.trim().length === 0) throw new SyntaxError(`blank JSONL record at ${filePath}:${index + 1}`);
+    return parseStrictJson(line) as T;
+  });
 }
 
 export function roundMetric(value: number): number {

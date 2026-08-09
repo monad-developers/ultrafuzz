@@ -1,0 +1,1316 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:common:1",
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "nonNegativeNumber": {
+      "type": "number",
+      "minimum": 0
+    },
+    "unitMetric": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^(?:sha256:)?[0-9a-f]{64}$"
+    },
+    "jsonValue": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/jsonValue" }
+        },
+        {
+          "type": "object",
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        }
+      ]
+    },
+    "stringMap": {
+      "type": "object",
+      "propertyNames": { "minLength": 1 },
+      "additionalProperties": { "type": "string" }
+    },
+    "nonNegativeIntegerMap": {
+      "type": "object",
+      "propertyNames": { "minLength": 1 },
+      "additionalProperties": { "$ref": "#/$defs/nonNegativeInteger" }
+    },
+    "runtimeDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "severity", "source"],
+      "properties": {
+        "code": { "$ref": "#/$defs/nonEmptyString" },
+        "message": { "$ref": "#/$defs/nonEmptyString" },
+        "severity": { "enum": ["error", "warning", "info"] },
+        "source": { "$ref": "#/$defs/nonEmptyString" },
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "details": {
+          "type": "object",
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        }
+      }
+    },
+    "modelProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent"],
+      "properties": {
+        "agent": { "$ref": "#/$defs/nonEmptyString" },
+        "model": { "$ref": "#/$defs/nonEmptyString" },
+        "reasoning": { "$ref": "#/$defs/nonEmptyString" },
+        "timeout_seconds": { "$ref": "#/$defs/positiveInteger" },
+        "config": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": { "$ref": "#/$defs/nonEmptyString" }
+            },
+            {
+              "type": "object",
+              "propertyNames": { "minLength": 1 },
+              "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+            }
+          ]
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "repo", "ref", "ground_truth"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "repo": { "$ref": "#/$defs/nonEmptyString" },
+        "ref": { "$ref": "#/$defs/nonEmptyString" },
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "signal_profile": { "$ref": "#/$defs/nonEmptyString" },
+        "ground_truth": { "$ref": "#/$defs/nonEmptyString" },
+        "sensitivity": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "resolvedTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "repo", "ref", "ground_truth", "ground_truth_path"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "repo": { "$ref": "#/$defs/nonEmptyString" },
+        "ref": { "$ref": "#/$defs/nonEmptyString" },
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "signal_profile": { "$ref": "#/$defs/nonEmptyString" },
+        "ground_truth": { "$ref": "#/$defs/nonEmptyString" },
+        "sensitivity": { "$ref": "#/$defs/nonEmptyString" },
+        "ground_truth_path": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "variant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "topology": { "$ref": "#/$defs/nonEmptyString" },
+        "prompts": { "$ref": "#/$defs/nonEmptyString" },
+        "prompt_overlays": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "model_profiles": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "workflow_input": { "$ref": "#/$defs/jsonValue" },
+        "runner_model_profile": { "$ref": "#/$defs/nonEmptyString" },
+        "judge_model_profile": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "resolvedVariant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "prompt_overlay_paths"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "topology": { "$ref": "#/$defs/nonEmptyString" },
+        "prompts": { "$ref": "#/$defs/nonEmptyString" },
+        "prompt_overlays": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "model_profiles": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "workflow_input": { "$ref": "#/$defs/jsonValue" },
+        "runner_model_profile": { "$ref": "#/$defs/nonEmptyString" },
+        "judge_model_profile": { "$ref": "#/$defs/nonEmptyString" },
+        "topology_path": { "$ref": "#/$defs/nonEmptyString" },
+        "prompts_path": { "$ref": "#/$defs/nonEmptyString" },
+        "prompt_overlay_paths": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        }
+      }
+    },
+    "judgePanel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "quorum"],
+      "properties": {
+        "total": { "$ref": "#/$defs/positiveInteger" },
+        "quorum": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "recoveryPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_repeated_model_executions", "aggregate_non_comparable", "publication"],
+      "properties": {
+        "max_repeated_model_executions": { "$ref": "#/$defs/nonNegativeInteger" },
+        "aggregate_non_comparable": { "enum": ["include", "exclude", "separate"] },
+        "publication": { "enum": ["clean", "comparable"] }
+      }
+    },
+    "artifactPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "include", "max_file_bytes", "mode_explicit"],
+      "properties": {
+        "mode": { "enum": ["manifest-only", "upload"] },
+        "include": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "uniqueItems": true
+        },
+        "max_file_bytes": { "$ref": "#/$defs/positiveInteger" },
+        "mode_explicit": { "type": "boolean" }
+      }
+    },
+    "reportingPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_telemetry", "heartbeat_interval_seconds", "artifacts"],
+      "properties": {
+        "node_telemetry": { "type": "boolean" },
+        "heartbeat_interval_seconds": { "$ref": "#/$defs/positiveInteger" },
+        "experiment_prefix": { "$ref": "#/$defs/nonEmptyString" },
+        "artifacts": { "$ref": "#/$defs/artifactPolicy" }
+      }
+    },
+    "evalSuite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "suite",
+        "model_profiles",
+        "targets",
+        "variants",
+        "run",
+        "metrics",
+        "recovery_equivalence",
+        "reporting"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.eval.v1" },
+        "suite": { "$ref": "#/$defs/nonEmptyString" },
+        "ground_truth_root": { "$ref": "#/$defs/nonEmptyString" },
+        "model_profiles": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "$ref": "#/$defs/modelProfile" }
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/target" }
+        },
+        "variants": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/variant" }
+        },
+        "run": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["runner_model_profile", "judge_model_profile", "trials_per_variant"],
+          "properties": {
+            "runner_model_profile": { "$ref": "#/$defs/nonEmptyString" },
+            "judge_model_profile": { "$ref": "#/$defs/nonEmptyString" },
+            "trials_per_variant": { "$ref": "#/$defs/positiveInteger" },
+            "max_parallel_targets": { "$ref": "#/$defs/positiveInteger" },
+            "max_parallel_runs": { "$ref": "#/$defs/positiveInteger" }
+          }
+        },
+        "judge_panel": { "$ref": "#/$defs/judgePanel" },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["primary", "recall_threshold", "secondary"],
+          "properties": {
+            "primary": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/nonEmptyString" },
+              "uniqueItems": true
+            },
+            "recall_threshold": { "$ref": "#/$defs/unitMetric" },
+            "secondary": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/nonEmptyString" },
+              "uniqueItems": true
+            }
+          }
+        },
+        "recovery_equivalence": { "$ref": "#/$defs/recoveryPolicy" },
+        "reporting": { "$ref": "#/$defs/reportingPolicy" }
+      }
+    },
+    "candidateProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "commit", "dirty"],
+      "properties": {
+        "label": { "$ref": "#/$defs/nonEmptyString" },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "dirty": { "type": "boolean" },
+        "execution_artifact_id": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "benchmarkTargetProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "repo", "commit", "dirty"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "repo": { "$ref": "#/$defs/nonEmptyString" },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "dirty": { "type": "boolean" }
+      }
+    },
+    "groundTruthSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "revision"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/nonEmptyString" },
+        "revision": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "executionPolicyProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "fingerprint",
+        "max_parallel_targets",
+        "max_parallel_runs",
+        "node_telemetry",
+        "heartbeat_interval_seconds",
+        "controller_mode",
+        "watch_timeout_seconds",
+        "poll_interval_ms",
+        "recovery_equivalence_fingerprint"
+      ],
+      "properties": {
+        "revision": { "$ref": "#/$defs/nonEmptyString" },
+        "fingerprint": { "$ref": "#/$defs/sha256" },
+        "max_parallel_targets": {
+          "oneOf": [
+            { "$ref": "#/$defs/positiveInteger" },
+            { "type": "null" }
+          ]
+        },
+        "max_parallel_runs": { "$ref": "#/$defs/positiveInteger" },
+        "node_telemetry": { "type": "boolean" },
+        "heartbeat_interval_seconds": { "$ref": "#/$defs/positiveInteger" },
+        "controller_mode": { "enum": ["watch", "detached"] },
+        "watch_timeout_seconds": { "$ref": "#/$defs/positiveInteger" },
+        "poll_interval_ms": { "$ref": "#/$defs/positiveInteger" },
+        "benchmark_execution_fingerprint": { "$ref": "#/$defs/sha256" },
+        "recovery_equivalence_fingerprint": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "benchmarkProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "availability",
+        "series",
+        "protocol_revision",
+        "cohort_fingerprint",
+        "targets",
+        "ground_truth_sha256",
+        "ground_truth_subjects",
+        "execution_policy"
+      ],
+      "properties": {
+        "availability": { "const": "available" },
+        "series": { "$ref": "#/$defs/nonEmptyString" },
+        "protocol_revision": { "$ref": "#/$defs/nonEmptyString" },
+        "cohort_fingerprint": { "$ref": "#/$defs/sha256" },
+        "targets": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/benchmarkTargetProvenance" }
+        },
+        "ground_truth_sha256": {
+          "type": "object",
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "$ref": "#/$defs/sha256" }
+        },
+        "ground_truth_subjects": {
+          "type": "object",
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "$ref": "#/$defs/groundTruthSubject" }
+        },
+        "execution_policy": { "$ref": "#/$defs/executionPolicyProvenance" }
+      }
+    },
+    "runProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate", "benchmark"],
+      "properties": {
+        "candidate": { "$ref": "#/$defs/candidateProvenance" },
+        "benchmark": { "$ref": "#/$defs/benchmarkProvenance" }
+      }
+    },
+    "scoringProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "implementation_revision",
+        "implementation_dirty",
+        "judge_mode",
+        "judge_prompt_version",
+        "judge_models",
+        "judge_panel",
+        "ground_truth_sha256",
+        "ground_truth_subjects",
+        "fingerprint"
+      ],
+      "properties": {
+        "implementation_revision": { "$ref": "#/$defs/nonEmptyString" },
+        "implementation_dirty": { "type": "boolean" },
+        "judge_mode": { "enum": ["deterministic", "llm"] },
+        "judge_prompt_version": { "$ref": "#/$defs/nonEmptyString" },
+        "judge_models": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "uniqueItems": true
+        },
+        "judge_panel": { "$ref": "#/$defs/judgePanel" },
+        "ground_truth_sha256": {
+          "type": "object",
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "$ref": "#/$defs/sha256" }
+        },
+        "ground_truth_subjects": {
+          "type": "object",
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "$ref": "#/$defs/groundTruthSubject" }
+        },
+        "fingerprint": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "summaryProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["availability", "candidate", "benchmark", "scoring"],
+      "properties": {
+        "availability": { "const": "available" },
+        "candidate": { "$ref": "#/$defs/candidateProvenance" },
+        "benchmark": { "$ref": "#/$defs/benchmarkProvenance" },
+        "scoring": { "$ref": "#/$defs/scoringProvenance" }
+      }
+    },
+    "evalRunManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "eval_run_id",
+        "suite_path",
+        "project_root",
+        "created_at",
+        "suite",
+        "provenance"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.eval.run.v2" },
+        "eval_run_id": { "$ref": "#/$defs/nonEmptyString" },
+        "suite_path": { "$ref": "#/$defs/nonEmptyString" },
+        "project_root": { "$ref": "#/$defs/nonEmptyString" },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "suite": { "$ref": "#/$defs/evalSuite" },
+        "provenance": { "$ref": "#/$defs/runProvenance" }
+      }
+    },
+    "evalMatrixRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "target_id",
+        "variant_id",
+        "trial_id",
+        "run_id",
+        "target",
+        "variant",
+        "runner_model_profile",
+        "judge_model_profile"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "target_id": { "$ref": "#/$defs/nonEmptyString" },
+        "variant_id": { "$ref": "#/$defs/nonEmptyString" },
+        "trial_id": { "$ref": "#/$defs/nonEmptyString" },
+        "run_id": { "$ref": "#/$defs/nonEmptyString" },
+        "target": { "$ref": "#/$defs/resolvedTarget" },
+        "variant": { "$ref": "#/$defs/resolvedVariant" },
+        "runner_model_profile": { "$ref": "#/$defs/nonEmptyString" },
+        "judge_model_profile": { "$ref": "#/$defs/nonEmptyString" },
+        "runner_model": { "$ref": "#/$defs/nonEmptyString" },
+        "judge_model": { "$ref": "#/$defs/nonEmptyString" },
+        "runner_reasoning": { "$ref": "#/$defs/nonEmptyString" },
+        "judge_reasoning": { "$ref": "#/$defs/nonEmptyString" },
+        "workflow_input": { "$ref": "#/$defs/jsonValue" }
+      }
+    },
+    "evalMatrix": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evalMatrixRow" }
+    },
+    "launcherLifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "started_at", "finished_at"],
+      "properties": {
+        "status": { "enum": ["succeeded", "failed"] },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "finished_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "recordLauncherLifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "started_at", "finished_at"],
+      "properties": {
+        "status": { "enum": ["succeeded", "failed"] },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "finished_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "workflowLifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "terminal", "started_at", "finished_at"],
+      "properties": {
+        "status": {
+          "enum": ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled"]
+        },
+        "terminal": { "type": "boolean" },
+        "started_at": {
+          "oneOf": [
+            { "$ref": "#/$defs/timestamp" },
+            { "type": "null" }
+          ]
+        },
+        "finished_at": {
+          "oneOf": [
+            { "$ref": "#/$defs/timestamp" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "expansionCompleteness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason"],
+      "properties": {
+        "status": { "const": "complete" },
+        "reason": { "type": "null" }
+      }
+    },
+    "nodeStatusCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pending",
+        "ready",
+        "runnable",
+        "running",
+        "succeeded",
+        "failed",
+        "skipped",
+        "timed-out",
+        "reused-from-prior-run",
+        "invalidated"
+      ],
+      "properties": {
+        "pending": { "$ref": "#/$defs/nonNegativeInteger" },
+        "ready": { "$ref": "#/$defs/nonNegativeInteger" },
+        "runnable": { "$ref": "#/$defs/nonNegativeInteger" },
+        "running": { "$ref": "#/$defs/nonNegativeInteger" },
+        "succeeded": { "$ref": "#/$defs/nonNegativeInteger" },
+        "failed": { "$ref": "#/$defs/nonNegativeInteger" },
+        "skipped": { "$ref": "#/$defs/nonNegativeInteger" },
+        "timed-out": { "$ref": "#/$defs/nonNegativeInteger" },
+        "reused-from-prior-run": { "$ref": "#/$defs/nonNegativeInteger" },
+        "invalidated": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "dynamicNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "logical_node_id", "status", "source_node_id", "retry_count", "timed_out"],
+      "properties": {
+        "node_id": { "$ref": "#/$defs/nonEmptyString" },
+        "logical_node_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/nonEmptyString" },
+            { "type": "null" }
+          ]
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "ready",
+            "runnable",
+            "running",
+            "succeeded",
+            "failed",
+            "skipped",
+            "timed-out",
+            "reused-from-prior-run",
+            "invalidated"
+          ]
+        },
+        "source_node_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/nonEmptyString" },
+            { "type": "null" }
+          ]
+        },
+        "retry_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "timed_out": { "type": "boolean" }
+      }
+    },
+    "nullableNonNegativeInteger": {
+      "oneOf": [
+        { "$ref": "#/$defs/nonNegativeInteger" },
+        { "type": "null" }
+      ]
+    },
+    "runExpansion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_count",
+        "status_counts",
+        "static_node_count",
+        "dynamic_node_count",
+        "dynamic_status_counts",
+        "dynamic_nodes",
+        "retried_node_count",
+        "failed_node_count",
+        "failed_node_ids",
+        "timed_out_node_count",
+        "timed_out_node_ids",
+        "concurrency",
+        "truncated",
+        "nodes",
+        "lineage",
+        "concurrency_evidence"
+      ],
+      "properties": {
+        "node_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "status_counts": { "$ref": "#/$defs/nodeStatusCounts" },
+        "static_node_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "dynamic_node_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "dynamic_status_counts": { "$ref": "#/$defs/nodeStatusCounts" },
+        "dynamic_nodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/dynamicNode" },
+          "maxItems": 256
+        },
+        "retried_node_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "failed_node_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "failed_node_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "timed_out_node_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "timed_out_node_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "concurrency": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requested", "effective", "ready_queue_depth", "active_work"],
+          "properties": {
+            "requested": { "$ref": "#/$defs/nonNegativeInteger" },
+            "effective": { "$ref": "#/$defs/nonNegativeInteger" },
+            "ready_queue_depth": { "$ref": "#/$defs/nonNegativeInteger" },
+            "active_work": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "truncated": { "type": "boolean" },
+        "nodes": { "$ref": "#/$defs/expansionCompleteness" },
+        "lineage": { "$ref": "#/$defs/expansionCompleteness" },
+        "concurrency_evidence": { "$ref": "#/$defs/expansionCompleteness" }
+      }
+    },
+    "recoveryEquivalence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "policy",
+        "unique_model_backed_node_executions",
+        "repeated_model_backed_node_executions",
+        "recovery_reexecuted_model_backed_node_executions",
+        "infrastructure_only_recovery_generations",
+        "model_work_recovery_generations",
+        "no_progress_recovery_generations",
+        "recovery_generations",
+        "observed_node_attempts",
+        "observed_workflow_executions",
+        "observed_controller_invocations",
+        "classification",
+        "reason"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.eval.recovery-equivalence.v1" },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_repeated_model_executions"],
+          "properties": {
+            "max_repeated_model_executions": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "unique_model_backed_node_executions": { "$ref": "#/$defs/nonNegativeInteger" },
+        "repeated_model_backed_node_executions": { "$ref": "#/$defs/nonNegativeInteger" },
+        "recovery_reexecuted_model_backed_node_executions": { "$ref": "#/$defs/nonNegativeInteger" },
+        "infrastructure_only_recovery_generations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "model_work_recovery_generations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "no_progress_recovery_generations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "recovery_generations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "observed_node_attempts": { "$ref": "#/$defs/nonNegativeInteger" },
+        "observed_workflow_executions": { "$ref": "#/$defs/nonNegativeInteger" },
+        "observed_controller_invocations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "classification": {
+          "enum": ["clean", "infrastructure-recovered", "model-reexecuted-within-policy", "non-comparable"]
+        },
+        "reason": {
+          "oneOf": [
+            { "$ref": "#/$defs/nonEmptyString" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "classification": { "const": "non-comparable" } },
+            "required": ["classification"]
+          },
+          "then": { "properties": { "reason": { "$ref": "#/$defs/nonEmptyString" } } },
+          "else": { "properties": { "reason": { "type": "null" } } }
+        }
+      ]
+    },
+    "evalRunRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "eval_run_id",
+        "row_id",
+        "target_id",
+        "variant_id",
+        "trial_id",
+        "status",
+        "workflow_ids",
+        "launcher",
+        "diagnostics"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.eval.run.v2" },
+        "eval_run_id": { "$ref": "#/$defs/nonEmptyString" },
+        "row_id": { "$ref": "#/$defs/nonEmptyString" },
+        "target_id": { "$ref": "#/$defs/nonEmptyString" },
+        "variant_id": { "$ref": "#/$defs/nonEmptyString" },
+        "trial_id": { "$ref": "#/$defs/nonEmptyString" },
+        "ultrafuzz_run_id": { "$ref": "#/$defs/nonEmptyString" },
+        "ultrafuzz_run_root": { "$ref": "#/$defs/nonEmptyString" },
+        "report_json_path": { "$ref": "#/$defs/nonEmptyString" },
+        "status": { "enum": ["launched", "failed"] },
+        "final_status": { "enum": ["launched", "succeeded", "failed", "timed-out", "canceled"] },
+        "graph_fingerprint": { "$ref": "#/$defs/sha256" },
+        "config_fingerprint": { "$ref": "#/$defs/sha256" },
+        "candidate_label": { "$ref": "#/$defs/nonEmptyString" },
+        "candidate_commit": { "$ref": "#/$defs/nonEmptyString" },
+        "execution_artifact_id": { "$ref": "#/$defs/nonEmptyString" },
+        "workflow_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "uniqueItems": true
+        },
+        "launcher": { "$ref": "#/$defs/recordLauncherLifecycle" },
+        "workflow": { "$ref": "#/$defs/workflowLifecycle" },
+        "expansion": { "$ref": "#/$defs/runExpansion" },
+        "recovery_equivalence": { "$ref": "#/$defs/recoveryEquivalence" },
+        "diagnostics": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/runtimeDiagnostic" }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "launched" } },
+            "required": ["status"]
+          },
+          "then": {
+            "required": ["ultrafuzz_run_id", "ultrafuzz_run_root"],
+            "properties": {
+              "ultrafuzz_run_id": true,
+              "ultrafuzz_run_root": true,
+              "launcher": {
+                "type": "object",
+                "properties": { "status": { "const": "succeeded" } },
+                "required": ["status"]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "launcher": {
+                "type": "object",
+                "properties": { "status": { "const": "failed" } },
+                "required": ["status"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "evalRunSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "eval_run_id", "launched", "failed", "incomplete", "records"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.eval.run-summary.v1" },
+        "eval_run_id": { "$ref": "#/$defs/nonEmptyString" },
+        "launched": { "$ref": "#/$defs/nonNegativeInteger" },
+        "failed": { "$ref": "#/$defs/nonNegativeInteger" },
+        "incomplete": { "$ref": "#/$defs/nonNegativeInteger" },
+        "records": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evalRunRecord" }
+        }
+      }
+    },
+    "matchSignalScores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root_cause", "affected_area", "impact", "evidence"],
+      "properties": {
+        "root_cause": { "$ref": "#/$defs/unitMetric" },
+        "affected_area": { "$ref": "#/$defs/unitMetric" },
+        "impact": { "$ref": "#/$defs/unitMetric" },
+        "evidence": { "$ref": "#/$defs/unitMetric" }
+      }
+    },
+    "classification": {
+      "enum": ["true-positive", "false-positive", "needs-human-review", "missed"]
+    },
+    "classificationReason": {
+      "enum": [
+        "deterministic-match",
+        "judge-confirmed-match",
+        "strong-novel-finding",
+        "weak-unmatched-finding",
+        "panel-disagreement"
+      ]
+    },
+    "judgeDecisionBase": {
+      "type": "object",
+      "required": [
+        "score",
+        "signals",
+        "classification",
+        "reason_code",
+        "rationale",
+        "confidence",
+        "judge_model",
+        "judge_kind",
+        "prompt_version",
+        "timestamp"
+      ],
+      "properties": {
+        "matched_ground_truth_bug_id": { "$ref": "#/$defs/nonEmptyString" },
+        "score": { "$ref": "#/$defs/unitMetric" },
+        "signals": { "$ref": "#/$defs/matchSignalScores" },
+        "classification": { "$ref": "#/$defs/classification" },
+        "reason_code": { "$ref": "#/$defs/classificationReason" },
+        "rationale": { "$ref": "#/$defs/nonEmptyString" },
+        "confidence": { "$ref": "#/$defs/unitMetric" },
+        "judge_model": { "$ref": "#/$defs/nonEmptyString" },
+        "judge_kind": { "enum": ["deterministic", "llm"] },
+        "reasoning_effort": { "$ref": "#/$defs/nonEmptyString" },
+        "prompt_version": { "$ref": "#/$defs/nonEmptyString" },
+        "timestamp": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "panelVoteSplit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "votes"],
+      "properties": {
+        "classification": { "$ref": "#/$defs/classification" },
+        "matched_ground_truth_bug_id": { "$ref": "#/$defs/nonEmptyString" },
+        "votes": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "panelMemberVote": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/judgeDecisionBase" },
+        {
+          "type": "object",
+          "required": ["member"],
+          "properties": { "member": { "$ref": "#/$defs/positiveInteger" } }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "panelAggregateDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "reason_code", "votes", "rationale"],
+      "properties": {
+        "classification": { "enum": ["true-positive", "false-positive", "needs-human-review"] },
+        "matched_ground_truth_bug_id": { "$ref": "#/$defs/nonEmptyString" },
+        "reason_code": { "$ref": "#/$defs/classificationReason" },
+        "votes": { "$ref": "#/$defs/positiveInteger" },
+        "rationale": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "judgePanelRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "quorum", "model", "prompt_version", "vote_split", "member_votes", "aggregate_decision"],
+      "properties": {
+        "total": { "$ref": "#/$defs/positiveInteger" },
+        "quorum": { "$ref": "#/$defs/positiveInteger" },
+        "model": { "$ref": "#/$defs/nonEmptyString" },
+        "reasoning_effort": { "$ref": "#/$defs/nonEmptyString" },
+        "prompt_version": { "$ref": "#/$defs/nonEmptyString" },
+        "vote_split": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/panelVoteSplit" }
+        },
+        "member_votes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/panelMemberVote" },
+          "minItems": 1
+        },
+        "aggregate_decision": { "$ref": "#/$defs/panelAggregateDecision" }
+      }
+    },
+    "judgeResult": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/judgeDecisionBase" },
+        {
+          "type": "object",
+          "properties": { "panel": { "$ref": "#/$defs/judgePanelRecord" } }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "evalFindingScore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "row_id",
+        "finding_id",
+        "report_path",
+        "deterministic_match",
+        "judge_result"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.eval.finding-score.v1" },
+        "row_id": { "$ref": "#/$defs/nonEmptyString" },
+        "finding_id": { "$ref": "#/$defs/nonEmptyString" },
+        "finding_title": { "$ref": "#/$defs/nonEmptyString" },
+        "report_path": { "$ref": "#/$defs/nonEmptyString" },
+        "deterministic_match": { "$ref": "#/$defs/judgeResult" },
+        "judge_result": { "$ref": "#/$defs/judgeResult" }
+      }
+    },
+    "evalReviewQueueItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "target_id",
+        "variant_id",
+        "trial_id",
+        "workflow_ids",
+        "finding",
+        "report_path",
+        "deterministic_match",
+        "judge_result",
+        "reviewer_status"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.eval.review-queue-item.v1" },
+        "target_id": { "$ref": "#/$defs/nonEmptyString" },
+        "variant_id": { "$ref": "#/$defs/nonEmptyString" },
+        "trial_id": { "$ref": "#/$defs/nonEmptyString" },
+        "ultrafuzz_run_id": { "$ref": "#/$defs/nonEmptyString" },
+        "workflow_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "uniqueItems": true
+        },
+        "finding": { "$ref": "#/$defs/jsonValue" },
+        "report_path": { "$ref": "#/$defs/nonEmptyString" },
+        "deterministic_match": { "$ref": "#/$defs/judgeResult" },
+        "judge_result": { "$ref": "#/$defs/judgeResult" },
+        "reviewer_status": { "enum": ["pending", "accepted", "rejected", "needs-more-evidence"] }
+      }
+    },
+    "evalPublicationDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "row_id", "contract", "reason"],
+      "properties": {
+        "code": { "enum": ["TERMINAL_REPORT_NOT_PUBLISHABLE", "RECOVERY_EQUIVALENCE_NOT_PUBLISHABLE"] },
+        "row_id": { "$ref": "#/$defs/nonEmptyString" },
+        "contract": { "const": "ultrafuzz/report@2" },
+        "reason": { "$ref": "#/$defs/nonEmptyString" },
+        "report_path": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "evalPublicationState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "status", "diagnostics"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.eval.publication.v1" },
+        "status": { "enum": ["publishable", "non-publishable"] },
+        "diagnostics": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evalPublicationDiagnostic" }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "publishable" } }, "required": ["status"] },
+          "then": { "properties": { "diagnostics": { "type": "array", "maxItems": 0 } } },
+          "else": { "properties": { "diagnostics": { "type": "array", "minItems": 1 } } }
+        }
+      ]
+    },
+    "efficiencyCompleteness": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "reason"],
+          "properties": {
+            "status": { "const": "complete" },
+            "reason": { "type": "null" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "reason"],
+          "properties": {
+            "status": { "const": "partial" },
+            "reason": {
+              "enum": [
+                "node-attempt-timestamps-final-attempt-only",
+                "usage-incomplete",
+                "pricing-incomplete"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nullableNonNegativeNumber": {
+      "oneOf": [
+        { "$ref": "#/$defs/nonNegativeNumber" },
+        { "type": "null" }
+      ]
+    },
+    "efficiency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wall_time_seconds",
+        "active_time_seconds",
+        "wait_time_seconds",
+        "total_tokens",
+        "cost_usd",
+        "runtime",
+        "usage",
+        "cost"
+      ],
+      "properties": {
+        "wall_time_seconds": { "$ref": "#/$defs/nonNegativeNumber" },
+        "active_time_seconds": { "$ref": "#/$defs/nonNegativeNumber" },
+        "wait_time_seconds": { "$ref": "#/$defs/nonNegativeNumber" },
+        "total_tokens": { "$ref": "#/$defs/nullableNonNegativeNumber" },
+        "cost_usd": { "$ref": "#/$defs/nullableNonNegativeNumber" },
+        "runtime": { "$ref": "#/$defs/efficiencyCompleteness" },
+        "usage": { "$ref": "#/$defs/efficiencyCompleteness" },
+        "cost": { "$ref": "#/$defs/efficiencyCompleteness" }
+      }
+    },
+    "evalRowScore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "row_id",
+        "target_id",
+        "variant_id",
+        "trial_id",
+        "report_schema_valid",
+        "ground_truth_bug_count",
+        "finding_count",
+        "true_positives",
+        "false_positives",
+        "missed",
+        "human_review_queue_count",
+        "duplicate_count",
+        "precision",
+        "recall",
+        "f1_score",
+        "full_match_rate",
+        "severity_accuracy",
+        "true_positive_accuracy",
+        "duplicate_rate",
+        "runtime_seconds",
+        "cost_estimate",
+        "lifecycle",
+        "efficiency",
+        "expansion",
+        "recovery_equivalence"
+      ],
+      "properties": {
+        "row_id": { "$ref": "#/$defs/nonEmptyString" },
+        "target_id": { "$ref": "#/$defs/nonEmptyString" },
+        "variant_id": { "$ref": "#/$defs/nonEmptyString" },
+        "trial_id": { "$ref": "#/$defs/nonEmptyString" },
+        "report_schema_valid": { "type": "boolean" },
+        "ground_truth_bug_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "finding_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "true_positives": { "$ref": "#/$defs/nonNegativeInteger" },
+        "false_positives": { "$ref": "#/$defs/nonNegativeInteger" },
+        "missed": { "$ref": "#/$defs/nonNegativeInteger" },
+        "human_review_queue_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "duplicate_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "precision": { "$ref": "#/$defs/unitMetric" },
+        "recall": { "$ref": "#/$defs/unitMetric" },
+        "f1_score": { "$ref": "#/$defs/unitMetric" },
+        "full_match_rate": { "$ref": "#/$defs/unitMetric" },
+        "severity_accuracy": {
+          "oneOf": [
+            { "$ref": "#/$defs/unitMetric" },
+            { "type": "null" }
+          ]
+        },
+        "true_positive_accuracy": { "$ref": "#/$defs/unitMetric" },
+        "duplicate_rate": { "$ref": "#/$defs/unitMetric" },
+        "runtime_seconds": { "$ref": "#/$defs/nullableNonNegativeNumber" },
+        "cost_estimate": { "$ref": "#/$defs/nullableNonNegativeNumber" },
+        "lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["launcher", "workflow"],
+          "properties": {
+            "launcher": { "$ref": "#/$defs/launcherLifecycle" },
+            "workflow": { "$ref": "#/$defs/workflowLifecycle" }
+          }
+        },
+        "efficiency": { "$ref": "#/$defs/efficiency" },
+        "expansion": { "$ref": "#/$defs/runExpansion" },
+        "recovery_equivalence": { "$ref": "#/$defs/recoveryEquivalence" }
+      }
+    },
+    "variantScoreSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "variant_id",
+        "row_count",
+        "precision",
+        "recall",
+        "f1_score",
+        "full_match_rate",
+        "human_review_queue_count",
+        "duplicate_rate",
+        "report_schema_valid_rate"
+      ],
+      "properties": {
+        "variant_id": { "$ref": "#/$defs/nonEmptyString" },
+        "row_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "precision": { "$ref": "#/$defs/unitMetric" },
+        "recall": { "$ref": "#/$defs/unitMetric" },
+        "f1_score": { "$ref": "#/$defs/unitMetric" },
+        "full_match_rate": { "$ref": "#/$defs/unitMetric" },
+        "human_review_queue_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "duplicate_rate": { "$ref": "#/$defs/unitMetric" },
+        "report_schema_valid_rate": { "$ref": "#/$defs/unitMetric" }
+      }
+    },
+    "recoveryEquivalenceSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "aggregate_non_comparable",
+        "included_row_count",
+        "excluded_row_count",
+        "classification_counts",
+        "non_comparable_variants"
+      ],
+      "properties": {
+        "aggregate_non_comparable": { "enum": ["include", "exclude", "separate"] },
+        "included_row_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "excluded_row_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "classification_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["clean", "infrastructure-recovered", "model-reexecuted-within-policy", "non-comparable"],
+          "properties": {
+            "clean": { "$ref": "#/$defs/nonNegativeInteger" },
+            "infrastructure-recovered": { "$ref": "#/$defs/nonNegativeInteger" },
+            "model-reexecuted-within-policy": { "$ref": "#/$defs/nonNegativeInteger" },
+            "non-comparable": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "non_comparable_variants": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/variantScoreSummary" }
+        }
+      }
+    },
+    "evalScoreSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "eval_run_id",
+        "eval_run_root",
+        "recall_threshold",
+        "rows",
+        "variants",
+        "scores_path",
+        "summary_path",
+        "review_queue_path",
+        "recovery_equivalence",
+        "provenance"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.eval.score-summary.v1" },
+        "eval_run_id": { "$ref": "#/$defs/nonEmptyString" },
+        "eval_run_root": { "$ref": "#/$defs/nonEmptyString" },
+        "recall_threshold": { "$ref": "#/$defs/unitMetric" },
+        "rows": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evalRowScore" }
+        },
+        "variants": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/variantScoreSummary" }
+        },
+        "scores_path": { "$ref": "#/$defs/nonEmptyString" },
+        "summary_path": { "$ref": "#/$defs/nonEmptyString" },
+        "review_queue_path": { "$ref": "#/$defs/nonEmptyString" },
+        "recovery_equivalence": { "$ref": "#/$defs/recoveryEquivalenceSummary" },
+        "provenance": { "$ref": "#/$defs/summaryProvenance" }
+      }
+    },
+    "telemetryCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "byteOffset",
+        "deliveredEventIds",
+        "uploadedArtifacts",
+        "lastHeartbeatAt",
+        "providerIds",
+        "findingsCountByNode"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "ultrafuzz.eval.telemetry-cursor.v1" },
+        "byteOffset": { "$ref": "#/$defs/nonNegativeInteger" },
+        "deliveredEventIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "maxItems": 4096,
+          "uniqueItems": true
+        },
+        "uploadedArtifacts": {
+          "type": "object",
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "lastHeartbeatAt": {
+          "type": "object",
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "$ref": "#/$defs/timestamp" }
+        },
+        "providerIds": {
+          "type": "object",
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "findingsCountByNode": { "$ref": "#/$defs/nonNegativeIntegerMap" }
+      }
+    }
+  }
+}

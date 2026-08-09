@@ -45,6 +45,7 @@ const {
   parseInvariantSuiteManifestBytes,
   parseStrictJsonBytes,
   publishFileDurableExclusive,
+  readRegularFileSnapshot,
   validateArtifactContract,
   validateArtifactVerificationMarker,
   validateImplementedPropertiesSchema,
@@ -104,6 +105,9 @@ const verificationOutput = z.object({
 
 const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v2";
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
+const MAX_VERIFIED_ARTIFACT_BYTES = 64 * 1024 * 1024;
+const MAX_VERIFIED_COMPANION_BYTES = 16 * 1024 * 1024;
+const MAX_PRE_AGENT_EVIDENCE_BYTES = 128 * 1024 * 1024;
 const unreachableCommitCountCommand =
   'set -euo pipefail; git fsck --connectivity-only --unreachable --no-reflogs --no-progress 2>&1 | awk \'$1 == "unreachable" && $2 == "commit" { count++ } END { print count + 0 }\'';
 
@@ -442,7 +446,7 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
     }
   }
   restoreWorkspacePatchPreparation(task, workspaceRoot);
-  prepareArtifactMirror(task, { replayWorkspacePatches: false });
+  prepareArtifactMirror(task, { replayWorkspacePatches: false, evidenceMode: "require" });
 }
 
 function resetTaskArtifactContents(
@@ -517,23 +521,31 @@ function taskArtifactRoots(task: (typeof taskSpecs)[number], canonicalArtifactDi
 
 function prepareArtifactMirror(
   task: (typeof taskSpecs)[number],
-  options: { replayWorkspacePatches?: boolean } = {}
+  options: { replayWorkspacePatches?: boolean; evidenceMode?: "create" | "require" } = {}
 ): z.infer<typeof preparationOutput> {
+  const evidenceMode = options.evidenceMode ?? "create";
   preservePinnedSourceProof(task);
   const workspaceRoot = realpathSync(task.workspacePath);
   const schemaDirectory = path.join(workspaceRoot, ".ultrafuzz", "schemas");
   materializePromptSchemas(schemaDirectory);
   preflightJsonValidator(schemaDirectory);
   assertTaskInputs(task, workspaceRoot);
-  materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true);
+  materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true, evidenceMode);
+  if (evidenceMode === "require") {
+    requireInvariantSuiteWorkspaceSnapshot(task);
+  }
   restoreInvariantSuiteWorkspaceSnapshot(task, {
     // On the post-agent pass, preserve source files authored in this attempt
     // until materializeWorkspacePatch captures them. Initial preparation and
     // retry reset calls use the default and remove stale sources.
     preserveCurrentSources: options.replayWorkspacePatches === false
   });
-  materializeInvariantSuiteFromDependencies(task, workspaceRoot);
-  captureInvariantSuiteWorkspaceSnapshot(task, workspaceRoot);
+  if (evidenceMode === "create") {
+    materializeInvariantSuiteFromDependencies(task, workspaceRoot);
+    captureInvariantSuiteWorkspaceSnapshot(task, workspaceRoot);
+  } else {
+    requireInvariantSuiteDependencyHandoff(task);
+  }
   const candidate = path.resolve(workspaceRoot, "artifacts", task.attemptId);
   if (!isStrictlyInsideDirectory(workspaceRoot, candidate)) {
     throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
@@ -543,7 +555,11 @@ function prepareArtifactMirror(
   if (!isStrictlyInsideDirectory(workspaceRoot, mirrorRoot)) {
     throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
   }
-  captureInvariantSuiteBaseline(task, workspaceRoot);
+  if (evidenceMode === "create") {
+    captureInvariantSuiteBaseline(task, workspaceRoot);
+  } else {
+    verifyInvariantSuiteBaseline(task);
+  }
 
   for (const output of task.outputs) {
     const artifactPath = path.resolve(mirrorRoot, output.path);
@@ -716,10 +732,15 @@ function firstDependencyRequiringReplay(
 function materializeWorkspacePatchDependencies(
   task: (typeof taskSpecs)[number],
   workspaceRoot: string,
-  replayWorkspacePatches: boolean
+  replayWorkspacePatches: boolean,
+  evidenceMode: "create" | "require"
 ): void {
+  const persistedPreparation = readWorkspacePatchPreparation(task);
   const expectedPreparation = workspacePatchPreparationTrees.get(task.attemptId);
-  if (expectedPreparation !== undefined && readWorkspacePatchPreparation(task) !== expectedPreparation) {
+  if (evidenceMode === "require" && persistedPreparation === undefined) {
+    throw new Error(`artifact-contract failure: workspace preparation is unavailable ${task.attemptId}`);
+  }
+  if (expectedPreparation !== undefined && persistedPreparation !== expectedPreparation) {
     throw new Error(`artifact-contract failure: workspace preparation was modified ${task.attemptId}`);
   }
   const dependencies = [...task.dependencyArtifactDirs]
@@ -791,26 +812,32 @@ function materializeWorkspacePatchDependencies(
     applyWorkspacePatch(workspaceRoot, capture);
   }
   if (!workspacePatchPreparationTrees.has(task.attemptId)) {
-    const persistedPreparation = readWorkspacePatchPreparation(task);
-    if (persistedPreparation === undefined && !replayWorkspacePatches) {
+    if (persistedPreparation === undefined && evidenceMode === "require") {
       throw new Error(`artifact-contract failure: workspace preparation is unavailable ${task.attemptId}`);
     }
     const preparationTree = persistedPreparation ?? captureWorkspaceTree(workspaceRoot);
     workspacePatchPreparationTrees.set(task.attemptId, preparationTree);
-    if (persistedPreparation === undefined) writeWorkspacePatchPreparation(task, preparationTree);
+    if (persistedPreparation === undefined && evidenceMode === "create") {
+      writeWorkspacePatchPreparation(task, preparationTree);
+    }
   }
+  const persistedBaseline = taskPublishesWorkspacePatch(task) ? readWorkspacePatchBaseline(task) : undefined;
   const expectedBaseline = workspacePatchBaselineTrees.get(task.attemptId);
-  if (expectedBaseline !== undefined && readWorkspacePatchBaseline(task) !== expectedBaseline) {
+  if (taskPublishesWorkspacePatch(task) && evidenceMode === "require" && persistedBaseline === undefined) {
+    throw new Error(`artifact-contract failure: workspace patch baseline is unavailable ${task.attemptId}`);
+  }
+  if (expectedBaseline !== undefined && persistedBaseline !== expectedBaseline) {
     throw new Error(`artifact-contract failure: workspace patch baseline was modified ${task.attemptId}`);
   }
   if (taskPublishesWorkspacePatch(task) && !workspacePatchBaselineTrees.has(task.attemptId)) {
-    const persistedBaseline = readWorkspacePatchBaseline(task);
-    if (persistedBaseline === undefined && !replayWorkspacePatches) {
+    if (persistedBaseline === undefined && evidenceMode === "require") {
       throw new Error(`artifact-contract failure: workspace patch baseline is unavailable ${task.attemptId}`);
     }
     const baselineTree = persistedBaseline ?? captureWorkspaceTree(workspaceRoot);
     workspacePatchBaselineTrees.set(task.attemptId, baselineTree);
-    if (persistedBaseline === undefined) writeWorkspacePatchBaseline(task, baselineTree);
+    if (persistedBaseline === undefined && evidenceMode === "create") {
+      writeWorkspacePatchBaseline(task, baselineTree);
+    }
   }
 }
 
@@ -845,14 +872,19 @@ function writeWorkspacePatchBaseline(task: (typeof taskSpecs)[number], baselineT
 function readWorkspacePatchBaseline(task: (typeof taskSpecs)[number]): string | undefined {
   const target = workspacePatchBaselinePath(task);
   if (!existsSync(target)) return undefined;
-  const resolved = resolveRegularArtifactFile(
+  const snapshot = readBoundedRegularArtifactSnapshot(
     realpathSync(task.metadata.artifacts.dir),
     target,
-    "artifact-contract failure: workspace patch baseline is not a regular file"
+    "artifact-contract failure: workspace patch baseline is not a regular file",
+    MAX_PRE_AGENT_EVIDENCE_BYTES,
+    true
   );
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(resolved, "utf8")) as unknown;
+    parsed = parseStrictJsonSnapshot(
+      snapshot,
+      `artifact-contract failure: workspace patch baseline is malformed ${task.attemptId}`
+    );
   } catch (error) {
     throw new Error(`artifact-contract failure: workspace patch baseline is malformed ${task.attemptId}`, {
       cause: error
@@ -902,14 +934,19 @@ function writeWorkspacePatchPreparation(task: (typeof taskSpecs)[number], prepar
 function readWorkspacePatchPreparation(task: (typeof taskSpecs)[number]): string | undefined {
   const target = workspacePatchPreparationPath(task);
   if (!existsSync(target)) return undefined;
-  const resolved = resolveRegularArtifactFile(
+  const snapshot = readBoundedRegularArtifactSnapshot(
     realpathSync(task.metadata.artifacts.dir),
     target,
-    "artifact-contract failure: workspace preparation is not a regular file"
+    "artifact-contract failure: workspace preparation is not a regular file",
+    MAX_PRE_AGENT_EVIDENCE_BYTES,
+    true
   );
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(resolved, "utf8")) as unknown;
+    parsed = parseStrictJsonSnapshot(
+      snapshot,
+      `artifact-contract failure: workspace preparation is malformed ${task.attemptId}`
+    );
   } catch (error) {
     throw new Error(`artifact-contract failure: workspace preparation is malformed ${task.attemptId}`, {
       cause: error
@@ -1215,14 +1252,95 @@ function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspa
   });
 }
 
-function invariantSuiteProtectedBaselinePath(task: (typeof taskSpecs)[number]): string {
+function verifyInvariantSuiteBaseline(task: (typeof taskSpecs)[number]): void {
+  if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) return;
+  const artifactRoot = realpathSync(task.metadata.artifacts.dir);
+  const baselinePath = path.join(artifactRoot, INVARIANT_SUITE_BASELINE_FILE);
+  const protectedBaselinePath = invariantSuiteProtectedBaselinePath(task, false);
+  const baseline = readAndValidateInvariantSuiteBaseline(artifactRoot, baselinePath, task.attemptId);
+  const protectedRoot = realpathSync(path.dirname(protectedBaselinePath));
+  const protectedBaseline = readAndValidateInvariantSuiteBaseline(protectedRoot, protectedBaselinePath, task.attemptId);
+  if (!baseline.bytes.equals(protectedBaseline.bytes)) {
+    throw new Error(`artifact-contract failure: invariant suite baseline copies disagree ${task.attemptId}`);
+  }
+  const expected = invariantSuiteBaselineSnapshots.get(artifactRoot);
+  const digest = createHash("sha256").update(baseline.bytes).digest("hex");
+  if (expected !== undefined && expected.sha256 !== digest) {
+    throw new Error("artifact-contract failure: invariant suite baseline was modified by the agent");
+  }
+  invariantSuiteBaselineSnapshots.set(artifactRoot, {
+    contents: decodeStrictUtf8Snapshot(baseline, "invariant suite baseline"),
+    sha256: digest
+  });
+  invariantSuiteProtectedBaselineSnapshots.set(protectedBaselinePath, {
+    contents: decodeStrictUtf8Snapshot(protectedBaseline, "protected invariant suite baseline"),
+    sha256: digest
+  });
+}
+
+function readAndValidateInvariantSuiteBaseline(
+  root: string,
+  baselinePath: string,
+  attemptId: string
+): ImmutableFileSnapshot {
+  const snapshot = readBoundedRegularArtifactSnapshot(
+    root,
+    baselinePath,
+    `artifact-contract failure: invariant suite baseline is unavailable ${attemptId}`,
+    MAX_PRE_AGENT_EVIDENCE_BYTES,
+    true
+  );
+  const parsed = parseStrictJsonSnapshot(
+    snapshot,
+    `artifact-contract failure: invariant suite baseline is malformed ${attemptId}`
+  );
+  if (
+    !isPlainRecord(parsed) ||
+    parsed.schema_version !== "ultrafuzz.invariant-suite-baseline.v1" ||
+    !Array.isArray(parsed.files) ||
+    Object.keys(parsed).length !== 2
+  ) {
+    throw new Error(`artifact-contract failure: invariant suite baseline is malformed ${attemptId}`);
+  }
+  const paths = new Set<string>();
+  let totalBytes = 0;
+  for (const entry of parsed.files) {
+    if (
+      !isPlainRecord(entry) ||
+      Object.keys(entry).length !== 3 ||
+      typeof entry.path !== "string" ||
+      typeof entry.sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(entry.sha256) ||
+      typeof entry.size !== "number" ||
+      !Number.isSafeInteger(entry.size) ||
+      entry.size < 1
+    ) {
+      throw new Error(`artifact-contract failure: invariant suite baseline entry is malformed ${attemptId}`);
+    }
+    const relativePath = assertSafeInvariantSuiteTestPath(entry.path);
+    if (paths.has(relativePath)) {
+      throw new Error(`artifact-contract failure: invariant suite baseline repeats path ${relativePath}`);
+    }
+    paths.add(relativePath);
+    assertInvariantSuiteSourceSize(relativePath, entry.size);
+    totalBytes += entry.size;
+  }
+  assertInvariantSuiteSourceBudget(paths.size, totalBytes);
+  return snapshot;
+}
+
+function invariantSuiteProtectedBaselinePath(task: (typeof taskSpecs)[number], createRoot = true): string {
   const projectRoot = realpathSync(process.cwd());
   const runRoot = path.resolve(process.cwd(), task.runRoot);
   if (runRoot !== projectRoot && !isStrictlyInsideDirectory(projectRoot, runRoot)) {
     throw new Error(`artifact-contract failure: unsafe invariant suite baseline root ${task.attemptId}`);
   }
   const protectedRoot = path.join(runRoot, "invariant-suite-baselines");
-  mkdirSync(protectedRoot, { recursive: true, mode: 0o700 });
+  if (createRoot) {
+    mkdirSync(protectedRoot, { recursive: true, mode: 0o700 });
+  } else if (!existsSync(protectedRoot)) {
+    throw new Error(`artifact-contract failure: protected invariant suite baseline is unavailable ${task.attemptId}`);
+  }
   const resolvedRoot = realpathSync(protectedRoot);
   if (resolvedRoot !== protectedRoot || !isStrictlyInsideDirectory(runRoot, resolvedRoot)) {
     throw new Error(`artifact-contract failure: unsafe invariant suite baseline root ${task.attemptId}`);
@@ -1250,8 +1368,8 @@ function invariantWorkspaceSourcePaths(workspaceRoot: string): string[] {
   );
 }
 
-function invariantSuiteWorkspaceSnapshotRoot(task: (typeof taskSpecs)[number]): string {
-  return invariantSuiteAttemptStateRoot(task, INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR);
+function invariantSuiteWorkspaceSnapshotRoot(task: (typeof taskSpecs)[number], createRoot = true): string {
+  return invariantSuiteAttemptStateRoot(task, INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR, createRoot);
 }
 
 /**
@@ -1260,7 +1378,11 @@ function invariantSuiteWorkspaceSnapshotRoot(task: (typeof taskSpecs)[number]): 
  * directory, because artifact roots are emptied on every retry and are
  * reachable from the model-controlled workspace.
  */
-function invariantSuiteAttemptStateRoot(task: (typeof taskSpecs)[number], directoryName: string): string {
+function invariantSuiteAttemptStateRoot(
+  task: (typeof taskSpecs)[number],
+  directoryName: string,
+  createRoot = true
+): string {
   const projectRoot = realpathSync(process.cwd());
   const runRootCandidate = path.resolve(process.cwd(), task.runRoot);
   if (runRootCandidate !== projectRoot && !isStrictlyInsideDirectory(projectRoot, runRootCandidate)) {
@@ -1271,6 +1393,11 @@ function invariantSuiteAttemptStateRoot(task: (typeof taskSpecs)[number], direct
     runRootStat = lstatSync(runRootCandidate);
   } catch (error) {
     if (!isMissingPathError(error)) throw error;
+    if (!createRoot) {
+      throw new Error(`artifact-contract failure: pre-agent evidence is unavailable ${task.attemptId}`, {
+        cause: error
+      });
+    }
     safeInvariantSuiteDirectory(projectRoot, path.dirname(runRootCandidate));
     mkdirSync(runRootCandidate, { recursive: false, mode: 0o700 });
     runRootStat = lstatSync(runRootCandidate);
@@ -1283,13 +1410,21 @@ function invariantSuiteAttemptStateRoot(task: (typeof taskSpecs)[number], direct
     throw new Error(`artifact-contract failure: unsafe invariant workspace snapshot root ${task.attemptId}`);
   }
   const rootCandidate = path.join(runRoot, directoryName);
-  mkdirSync(rootCandidate, { recursive: true, mode: 0o700 });
+  if (createRoot) {
+    mkdirSync(rootCandidate, { recursive: true, mode: 0o700 });
+  } else if (!existsSync(rootCandidate)) {
+    throw new Error(`artifact-contract failure: pre-agent evidence is unavailable ${task.attemptId}`);
+  }
   const root = realpathSync(rootCandidate);
   if (root !== rootCandidate || !isStrictlyInsideDirectory(runRoot, root)) {
     throw new Error(`artifact-contract failure: unsafe invariant workspace snapshot root ${task.attemptId}`);
   }
   const attemptCandidate = path.join(root, task.attemptId);
-  mkdirSync(attemptCandidate, { recursive: true, mode: 0o700 });
+  if (createRoot) {
+    mkdirSync(attemptCandidate, { recursive: true, mode: 0o700 });
+  } else if (!existsSync(attemptCandidate)) {
+    throw new Error(`artifact-contract failure: pre-agent evidence is unavailable ${task.attemptId}`);
+  }
   const attemptRoot = realpathSync(attemptCandidate);
   if (attemptRoot !== attemptCandidate || !isStrictlyInsideDirectory(root, attemptRoot)) {
     throw new Error(`artifact-contract failure: unsafe invariant workspace snapshot root ${task.attemptId}`);
@@ -1304,46 +1439,32 @@ function readStableWorkspaceSnapshotFile(
   expectedSize?: number,
   expectedSha256?: string
 ): Buffer {
-  const resolved = resolveRegularArtifactFile(
+  const snapshot = readBoundedRegularArtifactSnapshot(
     root,
     filePath,
-    `artifact-contract failure: invariant workspace snapshot file is not regular ${relativePath}`
+    `artifact-contract failure: invariant workspace snapshot file is not regular ${relativePath}`,
+    expectedSize ?? MAX_PRE_AGENT_EVIDENCE_BYTES
   );
-  const beforeLstat = lstatSync(resolved);
-  if (beforeLstat.isSymbolicLink() || !beforeLstat.isFile()) {
-    throw new Error(`artifact-contract failure: invariant workspace snapshot file changed ${relativePath}`);
-  }
-  const before = statSync(resolved);
-  if (before.nlink !== 1 || (expectedSize !== undefined && before.size !== expectedSize)) {
-    throw new Error(`artifact-contract failure: invariant workspace snapshot file changed ${relativePath}`);
-  }
-  const bytes = readFileSync(resolved);
-  const afterLstat = lstatSync(resolved);
-  const after = statSync(resolved);
   if (
-    afterLstat.isSymbolicLink() ||
-    !afterLstat.isFile() ||
-    after.nlink !== 1 ||
-    before.dev !== after.dev ||
-    before.ino !== after.ino ||
-    before.size !== after.size ||
-    before.mtimeMs !== after.mtimeMs ||
-    bytes.length !== before.size ||
-    (expectedSha256 !== undefined && createHash("sha256").update(bytes).digest("hex") !== expectedSha256)
+    (expectedSize !== undefined && snapshot.bytes.length !== expectedSize) ||
+    (expectedSha256 !== undefined && createHash("sha256").update(snapshot.bytes).digest("hex") !== expectedSha256)
   ) {
     throw new Error(`artifact-contract failure: invariant workspace snapshot file changed ${relativePath}`);
   }
-  return bytes;
+  return snapshot.bytes;
 }
 
-function loadInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number]): Map<string, Buffer> | undefined {
-  const snapshotRoot = invariantSuiteWorkspaceSnapshotRoot(task);
+function loadInvariantSuiteWorkspaceSnapshot(
+  task: (typeof taskSpecs)[number],
+  options: { createRoot?: boolean } = {}
+): Map<string, Buffer> | undefined {
+  const snapshotRoot = invariantSuiteWorkspaceSnapshotRoot(task, options.createRoot ?? true);
   const manifestPath = path.join(snapshotRoot, INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE);
   if (!existsSync(manifestPath)) return undefined;
   const manifestBytes = readStableWorkspaceSnapshotFile(snapshotRoot, manifestPath, "snapshot manifest");
   let parsed: unknown;
   try {
-    parsed = JSON.parse(manifestBytes.toString("utf8")) as unknown;
+    parsed = parseStrictJsonBytes(manifestBytes);
   } catch (error) {
     throw new Error("artifact-contract failure: invariant workspace snapshot manifest is malformed", { cause: error });
   }
@@ -1394,6 +1515,24 @@ function loadInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number]): 
   }
   invariantSuiteWorkspaceSnapshots.set(task.attemptId, snapshot);
   return snapshot;
+}
+
+function requireInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number]): Map<string, Buffer> {
+  if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) return new Map();
+  const expected = invariantSuiteWorkspaceSnapshots.get(task.attemptId);
+  const persisted = loadInvariantSuiteWorkspaceSnapshot(task, { createRoot: false });
+  if (persisted === undefined) {
+    throw new Error(`artifact-contract failure: invariant workspace snapshot is unavailable ${task.attemptId}`);
+  }
+  if (
+    expected !== undefined &&
+    (expected.size !== persisted.size ||
+      [...expected].some(([relativePath, bytes]) => !persisted.get(relativePath)?.equals(bytes)))
+  ) {
+    throw new Error(`artifact-contract failure: invariant workspace snapshot was modified ${task.attemptId}`);
+  }
+  invariantSuiteWorkspaceSnapshots.set(task.attemptId, persisted);
+  return persisted;
 }
 
 function captureInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
@@ -1595,12 +1734,17 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
     if (markerLocation === undefined) {
       throw new Error("verification marker is missing");
     }
-    const resolvedMarker = resolveRegularArtifactFile(
+    const markerSnapshot = readBoundedRegularArtifactSnapshot(
       markerLocation.root,
       markerLocation.path,
-      `artifact-contract failure: artifact dependency has not passed verification ${dependencyAttemptId}`
+      `artifact-contract failure: artifact dependency has not passed verification ${dependencyAttemptId}`,
+      MAX_VERIFIED_COMPANION_BYTES,
+      true
     );
-    const marker = parseStrictJsonBytes(readFileSync(resolvedMarker)) as {
+    const marker = parseStrictJsonSnapshot(
+      markerSnapshot,
+      `artifact-contract failure: dependency verification marker is malformed ${dependencyAttemptId}`
+    ) as {
       schema_version?: unknown;
       attempt_id?: unknown;
       node_id?: unknown;
@@ -1679,14 +1823,23 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
       }
       assertSafeVerifiedPublicationPath(entry.path);
       const artifactPath = path.resolve(dependency, entry.path);
-      const resolvedArtifact = resolveRegularArtifactFile(
+      const artifactSnapshot = readBoundedRegularArtifactSnapshot(
         dependency,
         artifactPath,
-        `artifact-contract failure: verified dependency artifact is missing ${entry.path}`
+        `artifact-contract failure: verified dependency artifact is missing ${entry.path}`,
+        MAX_VERIFIED_ARTIFACT_BYTES
       );
-      const bytes = readFileSync(resolvedArtifact);
-      const contents = bytes.toString("utf8");
+      const contents = decodeStrictUtf8Snapshot(
+        artifactSnapshot,
+        `artifact-contract failure: verified dependency artifact ${entry.path}`
+      );
       const definition = artifactContractDefinition(entry.contract as Parameters<typeof artifactContractDefinition>[0]);
+      if (definition.format === "json") {
+        parseStrictJsonSnapshot(
+          artifactSnapshot,
+          `artifact-contract failure: verified dependency artifact ${entry.path}`
+        );
+      }
       if (definition.digest !== entry.contract_digest) {
         throw new Error(`verified dependency contract changed ${entry.path}`);
       }
@@ -1702,7 +1855,7 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
       ) {
         throw new Error(`verified dependency schema binding changed ${entry.path}`);
       }
-      const artifactSha = createHash("sha256").update(bytes).digest("hex");
+      const artifactSha = createHash("sha256").update(artifactSnapshot.bytes).digest("hex");
       if (artifactSha !== entry.sha256) {
         throw new Error(`verified dependency artifact changed ${entry.path}`);
       }
@@ -1715,7 +1868,7 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
         throw new Error(`verified dependency artifact is no longer valid ${entry.path}`);
       }
       declaredArtifactShas.set(entry.path, entry.sha256);
-      rememberExpectedVerifiedPublication(expectedPublicationShas, entry.path, bytes);
+      rememberExpectedVerifiedPublication(expectedPublicationShas, entry.path, artifactSnapshot.bytes);
       if (entry.contract === "ultrafuzz/generated-tests@2") {
         for (const companion of verifyGeneratedTestFiles(dependency, validation.value)) {
           rememberExpectedVerifiedPublication(expectedPublicationShas, companion.path, companion.contents);
@@ -1751,14 +1904,11 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
       }
       publicationPaths.add(entry.path);
       markerPublicationShas.set(entry.path, entry.sha256);
-      const artifactPath = path.resolve(dependency, entry.path);
-      const resolvedArtifact = resolveRegularArtifactFile(
-        dependency,
-        artifactPath,
-        `artifact-contract failure: verified dependency publication is missing ${entry.path}`
-      );
-      const bytes = readFileSync(resolvedArtifact);
-      if (createHash("sha256").update(bytes).digest("hex") !== entry.sha256) {
+      const expectedPublicationSha = expectedPublicationShas.get(entry.path);
+      if (expectedPublicationSha === undefined) {
+        throw new Error(`verified dependency publication is unexpected ${entry.path}`);
+      }
+      if (expectedPublicationSha !== entry.sha256) {
         throw new Error(`verified dependency publication changed ${entry.path}`);
       }
       const declaredSha = declaredArtifactShas.get(entry.path);
@@ -1900,39 +2050,37 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
   writeFileDurable(proofPath, proofContents);
 }
 
-function materializeGeneratedTestCompanions(task: (typeof taskSpecs)[number]): void {
-  const artifactDir = realpathSync(task.metadata.artifacts.dir);
-  const artifactRoots = taskArtifactRoots(task, artifactDir);
+function materializeGeneratedTestCompanions(
+  task: (typeof taskSpecs)[number],
+  capturedOutputs: readonly CapturedTaskOutput[] = []
+): void {
   const workspaceRoot = realpathSync(task.workspacePath);
 
   for (const output of task.outputs) {
     if (output.contract !== "ultrafuzz/generated-tests@2") {
       continue;
     }
-    for (const candidateRoot of artifactRoots) {
-      let resolvedManifestPath: string;
-      try {
-        resolvedManifestPath = resolveRegularArtifactFile(
-          candidateRoot,
-          path.resolve(candidateRoot, output.path),
-          `artifact-contract failure: output is not a regular file ${output.path}`
-        );
-      } catch {
-        continue;
-      }
-      const validation = validateArtifactContract(
-        output.contract,
-        readFileSync(resolvedManifestPath, "utf8"),
-        output.path
+    const captured = capturedOutputs.find((entry) => entry.output.path === output.path);
+    if (captured === undefined) continue;
+    let contents: string;
+    try {
+      parseStrictJsonSnapshot(captured.file, `artifact-contract failure: output ${output.path}`);
+      contents = decodeStrictUtf8Snapshot(captured.file, `artifact-contract failure: output ${output.path}`);
+    } catch {
+      // The final verifier reports the typed output failure without creating a
+      // companion from an ambiguous manifest.
+      continue;
+    }
+    const validation = validateArtifactContract(output.contract, contents, output.path);
+    if (!validation.ok) continue;
+    const entries = (validation.value as { generated_tests?: Array<{ path?: string }> }).generated_tests ?? [];
+    for (const entry of entries) {
+      materializeGeneratedTestCompanion(
+        workspaceRoot,
+        captured.artifactRoot,
+        generatedTestNodeIds(task),
+        entry.path ?? ""
       );
-      if (!validation.ok) {
-        continue;
-      }
-      const entries = (validation.value as { generated_tests?: Array<{ path?: string }> }).generated_tests ?? [];
-      for (const entry of entries) {
-        materializeGeneratedTestCompanion(workspaceRoot, candidateRoot, generatedTestNodeIds(task), entry.path ?? "");
-      }
-      break;
     }
   }
 }
@@ -1988,56 +2136,29 @@ function materializeGeneratedTestCompanion(
   ];
   const existingCandidates = sourceCandidates.filter((candidate) => existsSync(candidate));
   const sourceCandidate = existingCandidates[0] ?? sourceCandidates[0];
-  if (existingCandidates.length > 1) {
-    const first = readFileSync(
-      resolveNonEmptyRegularArtifactFile(
-        workspaceRoot,
-        existingCandidates[0],
-        `artifact-contract failure: generated test file is missing ${relativePath}`,
-        `artifact-contract failure: generated test file is empty ${relativePath}`
-      )
-    );
-    for (const candidate of existingCandidates.slice(1)) {
-      const bytes = readFileSync(
-        resolveNonEmptyRegularArtifactFile(
-          workspaceRoot,
-          candidate,
-          `artifact-contract failure: generated test file is missing ${relativePath}`,
-          `artifact-contract failure: generated test file is empty ${relativePath}`
-        )
-      );
-      if (!bytes.equals(first)) {
-        throw new Error(`artifact-contract failure: generated test sources conflict ${relativePath}`);
-      }
-    }
-  }
   if (!isStrictlyInsideDirectory(workspaceRoot, sourceCandidate)) {
     throw new Error(`artifact-contract failure: unsafe generated test source ${relativePath}`);
   }
   const missingSource = `artifact-contract failure: generated test file is missing ${relativePath}`;
-  const emptySource = `artifact-contract failure: generated test file is empty ${relativePath}`;
-  const sourcePath = resolveNonEmptyRegularArtifactFile(workspaceRoot, sourceCandidate, missingSource, emptySource);
-  const sourceBefore = statSync(sourcePath);
-  if (sourceBefore.nlink !== 1) {
-    throw new Error(`artifact-contract failure: generated test source is hard-linked ${relativePath}`);
-  }
-  const contents = readFileSync(sourcePath);
-  const sourcePathAfter = resolveNonEmptyRegularArtifactFile(
-    workspaceRoot,
-    sourceCandidate,
-    missingSource,
-    emptySource
+  const sourceSnapshots = (existingCandidates.length === 0 ? [sourceCandidate] : existingCandidates).map(
+    (candidate) => {
+      const snapshot = readBoundedRegularArtifactSnapshot(
+        workspaceRoot,
+        candidate,
+        missingSource,
+        MAX_VERIFIED_COMPANION_BYTES,
+        true
+      );
+      decodeStrictUtf8Snapshot(snapshot, `artifact-contract failure: generated test source ${relativePath}`);
+      return snapshot;
+    }
   );
-  const sourceAfter = statSync(sourcePathAfter);
-  if (
-    sourcePathAfter !== sourcePath ||
-    sourceBefore.dev !== sourceAfter.dev ||
-    sourceBefore.ino !== sourceAfter.ino ||
-    sourceBefore.size !== sourceAfter.size ||
-    sourceBefore.mtimeMs !== sourceAfter.mtimeMs ||
-    sourceAfter.nlink !== 1
-  ) {
-    throw new Error(`artifact-contract failure: generated test source changed ${relativePath}`);
+  const source = sourceSnapshots[0];
+  if (source === undefined) throw new Error(missingSource);
+  for (const candidate of sourceSnapshots.slice(1)) {
+    if (!candidate.bytes.equals(source.bytes)) {
+      throw new Error(`artifact-contract failure: generated test sources conflict ${relativePath}`);
+    }
   }
 
   const artifactParent = path.dirname(artifactPath);
@@ -2047,19 +2168,7 @@ function materializeGeneratedTestCompanion(
     throw new Error(`artifact-contract failure: unsafe generated test parent ${relativePath}`);
   }
   const anchoredArtifactPath = path.join(resolvedParent, path.basename(artifactPath));
-  writeFileSync(anchoredArtifactPath, contents, { flag: "wx", mode: 0o600 });
-  const resolvedArtifactPath = resolveNonEmptyRegularArtifactFile(
-    artifactRoot,
-    anchoredArtifactPath,
-    `artifact-contract failure: generated test file is missing ${relativePath}`,
-    `artifact-contract failure: generated test file is empty ${relativePath}`
-  );
-  if (
-    createHash("sha256").update(readFileSync(resolvedArtifactPath)).digest("hex") !==
-    createHash("sha256").update(contents).digest("hex")
-  ) {
-    throw new Error(`artifact-contract failure: generated test copy mismatch ${relativePath}`);
-  }
+  writeFileSync(anchoredArtifactPath, source.bytes, { flag: "wx", mode: 0o600 });
 }
 
 /**
@@ -2070,7 +2179,10 @@ function materializeGeneratedTestCompanion(
  * TargetFunctions, and Properties sources behind; downstream stages then ran
  * the pinned repository without the selected harness.
  */
-function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): void {
+function materializeInvariantSuiteCompanions(
+  task: (typeof taskSpecs)[number],
+  capturedOutputs: readonly CapturedTaskOutput[] = []
+): void {
   if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) {
     return;
   }
@@ -2082,36 +2194,29 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
   const artifactRoots = taskArtifactRoots(task, artifactDir);
   const paths = new Set<string>();
   if (implementationOutput !== undefined) {
-    for (const root of artifactRoots) {
-      let implementationPath: string;
-      try {
-        implementationPath = resolveRegularArtifactFile(
-          root,
-          path.resolve(root, implementationOutput.path),
-          "artifact-contract failure: implemented property records are not a regular file"
-        );
-      } catch {
-        continue;
-      }
+    const captured = capturedOutputs.find((entry) => entry.output.path === implementationOutput.path);
+    if (captured !== undefined) {
       let raw: unknown;
       try {
-        raw = JSON.parse(readFileSync(implementationPath, "utf8")) as unknown;
+        raw = parseStrictJsonSnapshot(
+          captured.file,
+          "artifact-contract failure: implemented property records are malformed"
+        );
       } catch {
         // Leave malformed task output for verifyArtifacts, which reports the
-        // typed artifact-contract failure instead of leaking a raw SyntaxError.
-        continue;
+        // typed artifact-contract failure without materializing companions from it.
+        raw = undefined;
       }
-      const parsed = validateImplementedPropertiesSchema(raw, implementationPath);
-      if (!parsed.ok || parsed.value === undefined) {
-        continue;
-      }
-      for (const record of parsed.value.properties) {
-        if (record.status !== "implemented") continue;
-        for (const relativePath of record.implementation_paths) {
-          paths.add(assertSafeInvariantSuitePath(relativePath));
-        }
-        for (const relativePath of record.test_paths) {
-          paths.add(assertSafeInvariantSuiteTestPath(relativePath));
+      const parsed = validateImplementedPropertiesSchema(raw, captured.file.path);
+      if (parsed.ok && parsed.value !== undefined) {
+        for (const record of parsed.value.properties) {
+          if (record.status !== "implemented") continue;
+          for (const relativePath of record.implementation_paths) {
+            paths.add(assertSafeInvariantSuitePath(relativePath));
+          }
+          for (const relativePath of record.test_paths) {
+            paths.add(assertSafeInvariantSuiteTestPath(relativePath));
+          }
         }
       }
     }
@@ -2146,22 +2251,19 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
   }
   for (const relativePath of paths) {
     const sourcePath = path.resolve(task.workspacePath, relativePath);
-    const source = resolveNonEmptyRegularArtifactFile(
+    const source = readBoundedRegularArtifactSnapshot(
       realpathSync(task.workspacePath),
       sourcePath,
       `artifact-contract failure: invariant suite source is missing ${relativePath}`,
-      `artifact-contract failure: invariant suite source is empty ${relativePath}`
+      MAX_VERIFIED_COMPANION_BYTES,
+      true
     );
-    const sourceStat = statSync(source);
-    assertInvariantSuiteSourceSize(relativePath, sourceStat.size);
-    const sourceBytes = readFileSync(source);
-    if (sourceBytes.length !== sourceStat.size) {
-      throw new Error(`artifact-contract failure: invariant suite source changed ${relativePath}`);
-    }
+    decodeStrictUtf8Snapshot(source, `artifact-contract failure: invariant suite source ${relativePath}`);
+    assertInvariantSuiteSourceSize(relativePath, source.bytes.length);
     // A path this stage republishes REPLACES the inherited copy rather than
     // adding to it, so the superseded bytes leave the running total.
-    totalBytes += sourceBytes.length - (publicationSnapshot.get(relativePath)?.length ?? 0);
-    publicationSnapshot.set(relativePath, sourceBytes);
+    totalBytes += source.bytes.length - (publicationSnapshot.get(relativePath)?.length ?? 0);
+    publicationSnapshot.set(relativePath, source.bytes);
     assertInvariantSuiteSourceBudget(publicationSnapshot.size, totalBytes);
   }
   invariantSuitePublicationSnapshots.set(task.attemptId, publicationSnapshot);
@@ -2190,9 +2292,13 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
   const manifestContents = `${JSON.stringify(manifest)}\n`;
   for (const artifactRoot of artifactRoots) {
     resetInvariantSuiteArtifactRoot(artifactRoot);
-    copyDependencyInvariantSuiteToArtifact(task, artifactRoot);
-    for (const relativePath of paths) {
-      copyInvariantSuiteSource(realpathSync(task.workspacePath), artifactRoot, relativePath, true);
+    for (const [relativePath, bytes] of publicationSnapshot) {
+      const destination = path.resolve(artifactRoot, "invariant-suite", relativePath);
+      if (!isStrictlyInsideDirectory(artifactRoot, destination)) {
+        throw new Error(`artifact-contract failure: unsafe invariant suite artifact path ${relativePath}`);
+      }
+      const parent = safeInvariantSuiteDirectory(artifactRoot, path.dirname(destination));
+      writeFileDurable(path.join(parent, path.basename(destination)), bytes);
     }
     writeFileDurable(path.join(artifactRoot, INVARIANT_SUITE_MANIFEST_FILE), manifestContents);
   }
@@ -2316,8 +2422,8 @@ function inheritedInvariantSuiteTombstones(task: (typeof taskSpecs)[number]): Se
   return tombstones;
 }
 
-function invariantSuiteHandoffRoot(task: (typeof taskSpecs)[number]): string {
-  return invariantSuiteAttemptStateRoot(task, INVARIANT_SUITE_HANDOFF_DIR);
+function invariantSuiteHandoffRoot(task: (typeof taskSpecs)[number], createRoot = true): string {
+  return invariantSuiteAttemptStateRoot(task, INVARIANT_SUITE_HANDOFF_DIR, createRoot);
 }
 
 /**
@@ -2355,17 +2461,14 @@ function invariantSuiteDependencyFingerprints(
       const dependencyRoot = realpathSync(dependency);
       const manifestPath = path.join(dependencyRoot, INVARIANT_SUITE_MANIFEST_FILE);
       if (existsSync(manifestPath)) {
-        digest = createHash("sha256")
-          .update(
-            readFileSync(
-              resolveRegularArtifactFile(
-                dependencyRoot,
-                manifestPath,
-                "artifact-contract failure: invariant suite manifest is not a regular file"
-              )
-            )
-          )
-          .digest("hex");
+        const manifest = readBoundedRegularArtifactSnapshot(
+          dependencyRoot,
+          manifestPath,
+          "artifact-contract failure: invariant suite manifest is not a regular file",
+          MAX_VERIFIED_COMPANION_BYTES,
+          true
+        );
+        digest = createHash("sha256").update(manifest.bytes).digest("hex");
       }
     } catch (error) {
       if (error instanceof Error && error.message.startsWith("artifact-contract failure:")) throw error;
@@ -2432,29 +2535,29 @@ function writeInvariantSuiteDependencyHandoff(
  * are byte-identical yet whose recorded suite bytes are not fails closed, which
  * is the actual tampering case.
  */
-function loadInvariantSuiteDependencyHandoff(task: (typeof taskSpecs)[number]):
+function loadInvariantSuiteDependencyHandoff(
+  task: (typeof taskSpecs)[number],
+  options: { createRoot?: boolean; producerMismatch?: "discard" | "fail" } = {}
+):
   | {
       selected: Map<string, { dependency: string; bytes: Buffer; direct: boolean }>;
       tombstones: Set<string>;
     }
   | undefined {
-  const handoffRoot = invariantSuiteHandoffRoot(task);
+  const handoffRoot = invariantSuiteHandoffRoot(task, options.createRoot ?? true);
   const handoffPath = path.join(handoffRoot, INVARIANT_SUITE_HANDOFF_FILE);
   if (!existsSync(handoffPath)) return undefined;
-  const resolvedHandoff = resolveNonEmptyRegularArtifactFile(
+  const handoff = readBoundedRegularArtifactSnapshot(
     handoffRoot,
     handoffPath,
     `artifact-contract failure: invariant suite handoff record is missing ${handoffPath}`,
-    `artifact-contract failure: invariant suite handoff record is empty ${handoffPath}`
+    MAX_PRE_AGENT_EVIDENCE_BYTES,
+    true
   );
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(resolvedHandoff, "utf8")) as unknown;
-  } catch (error) {
-    throw new Error(`artifact-contract failure: invariant suite handoff record is malformed ${handoffPath}`, {
-      cause: error
-    });
-  }
+  const parsed = parseStrictJsonSnapshot(
+    handoff,
+    `artifact-contract failure: invariant suite handoff record is malformed ${handoffPath}`
+  );
   if (
     !isPlainRecord(parsed) ||
     parsed.schema_version !== INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION ||
@@ -2465,12 +2568,18 @@ function loadInvariantSuiteDependencyHandoff(task: (typeof taskSpecs)[number]):
   ) {
     throw new Error(`artifact-contract failure: invariant suite handoff record is invalid ${handoffPath}`);
   }
-  // A record that predates the ancestor fingerprint, or whose ancestors have
-  // since republished, describes a handoff that no longer exists. Discard it
-  // and let the caller re-derive rather than failing a retries=0 node closed on
-  // a legitimate recovery flow.
+  // Initial preparation may discard a handoff made obsolete by a deliberately
+  // re-run ancestor. Post-agent verification must instead fail closed: it is
+  // too late to derive different pre-agent evidence without reopening the
+  // attempt against inputs the agent never saw.
   const recordedProducers: Array<{ attempt_id: string; manifest_sha256: string | null }> = [];
-  if (!Array.isArray(parsed.producers)) return undefined;
+  if (!Array.isArray(parsed.producers)) {
+    if (options.producerMismatch === "fail") {
+      throw new Error(`artifact-contract failure: invariant suite handoff producers are unavailable ${handoffPath}`);
+    }
+    return undefined;
+  }
+  const producerIds = new Set<string>();
   for (const entry of parsed.producers) {
     if (
       !isPlainRecord(entry) ||
@@ -2480,12 +2589,19 @@ function loadInvariantSuiteDependencyHandoff(task: (typeof taskSpecs)[number]):
     ) {
       throw new Error(`artifact-contract failure: invariant suite handoff producer entry is invalid ${handoffPath}`);
     }
+    if (producerIds.has(entry.attempt_id)) {
+      throw new Error(`artifact-contract failure: duplicate invariant suite handoff producer ${entry.attempt_id}`);
+    }
+    producerIds.add(entry.attempt_id);
     recordedProducers.push({ attempt_id: entry.attempt_id, manifest_sha256: entry.manifest_sha256 });
   }
   if (
     invariantSuiteFingerprintKey(recordedProducers) !==
     invariantSuiteFingerprintKey(invariantSuiteDependencyFingerprints(task))
   ) {
+    if (options.producerMismatch === "fail") {
+      throw new Error(`artifact-contract failure: invariant suite handoff producers changed ${handoffPath}`);
+    }
     return undefined;
   }
   const dependencyRoots = new Map<string, string>(
@@ -2533,11 +2649,68 @@ function loadInvariantSuiteDependencyHandoff(task: (typeof taskSpecs)[number]):
     if (typeof entry !== "string") {
       throw new Error(`artifact-contract failure: invariant suite handoff record is invalid ${handoffPath}`);
     }
-    tombstones.add(assertSafeInvariantSuitePath(entry));
+    const relativePath = assertSafeInvariantSuitePath(entry);
+    if (tombstones.has(relativePath)) {
+      throw new Error(`artifact-contract failure: duplicate invariant suite handoff tombstone ${relativePath}`);
+    }
+    tombstones.add(relativePath);
   }
   assertInvariantSuiteTombstoneBudget(tombstones.size, handoffPath);
   invariantSuiteDependencySnapshots.set(task.attemptId, selected);
   return { selected, tombstones };
+}
+
+/**
+ * Reload the exact dependency handoff captured before the agent ran. This is a
+ * verification-only boundary: missing, stale, or corrupt evidence is terminal
+ * and is never replaced with a newly derived view of ancestor artifacts.
+ */
+function requireInvariantSuiteDependencyHandoff(task: (typeof taskSpecs)[number]): void {
+  if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) return;
+  const expected = invariantSuiteDependencySnapshots.get(task.attemptId);
+  let recorded:
+    | {
+        selected: Map<string, { dependency: string; bytes: Buffer; direct: boolean }>;
+        tombstones: Set<string>;
+      }
+    | undefined;
+  try {
+    recorded = loadInvariantSuiteDependencyHandoff(task, {
+      createRoot: false,
+      producerMismatch: "fail"
+    });
+  } catch (error) {
+    throw new Error(
+      `artifact-contract failure: invariant suite dependency handoff is unavailable ${invariantSuiteHandoffRecordPath(
+        task
+      )}`,
+      { cause: error }
+    );
+  }
+  if (recorded === undefined) {
+    throw new Error(
+      `artifact-contract failure: invariant suite dependency handoff is unavailable ${invariantSuiteHandoffRecordPath(
+        task
+      )}`
+    );
+  }
+  if (expected !== undefined) {
+    if (
+      expected.size !== recorded.selected.size ||
+      [...expected].some(([relativePath, entry]) => {
+        const persisted = recorded?.selected.get(relativePath);
+        return (
+          persisted === undefined ||
+          path.basename(persisted.dependency) !== path.basename(entry.dependency) ||
+          persisted.direct !== entry.direct ||
+          !persisted.bytes.equals(entry.bytes)
+        );
+      })
+    ) {
+      throw new Error(`artifact-contract failure: invariant suite dependency handoff was modified ${task.attemptId}`);
+    }
+  }
+  invariantSuiteDependencySnapshots.set(task.attemptId, recorded.selected);
 }
 
 /**
@@ -3347,84 +3520,6 @@ function gitTestTreePaths(workspaceRoot: string): string[] {
   return [...paths].sort();
 }
 
-function copyInvariantSuiteSource(
-  workspaceRoot: string,
-  artifactRoot: string,
-  relativePath: string,
-  replaceExisting = false
-): void {
-  const sourcePath = path.resolve(workspaceRoot, relativePath);
-  const source = resolveNonEmptyRegularArtifactFile(
-    workspaceRoot,
-    sourcePath,
-    `artifact-contract failure: invariant suite source is missing ${relativePath}`,
-    `artifact-contract failure: invariant suite source is empty ${relativePath}`
-  );
-  const sourceStat = statSync(source);
-  if (sourceStat.nlink !== 1) {
-    throw new Error(`artifact-contract failure: invariant suite source is hard-linked ${relativePath}`);
-  }
-  assertInvariantSuiteSourceSize(relativePath, sourceStat.size);
-  const sourceBytes = readFileSync(source);
-  if (sourceBytes.length !== sourceStat.size) {
-    throw new Error(`artifact-contract failure: invariant suite source changed ${relativePath}`);
-  }
-  const artifactPath = path.resolve(artifactRoot, "invariant-suite", relativePath);
-  if (!isStrictlyInsideDirectory(artifactRoot, artifactPath)) {
-    throw new Error(`artifact-contract failure: unsafe invariant suite artifact path ${relativePath}`);
-  }
-  const artifactParent = safeInvariantSuiteDirectory(artifactRoot, path.dirname(artifactPath));
-  mkdirSync(artifactParent, { recursive: true });
-  const resolvedParent = realpathSync(artifactParent);
-  if (resolvedParent !== artifactParent || !isStrictlyInsideDirectory(artifactRoot, resolvedParent)) {
-    throw new Error(`artifact-contract failure: unsafe invariant suite artifact parent ${relativePath}`);
-  }
-  const anchoredArtifactPath = path.join(resolvedParent, path.basename(artifactPath));
-  let artifactEntryExists = false;
-  try {
-    const artifactStat = lstatSync(anchoredArtifactPath);
-    artifactEntryExists = true;
-    if (artifactStat.isSymbolicLink()) {
-      throw new Error(`artifact-contract failure: invariant suite artifact is a symlink ${relativePath}`);
-    }
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-  }
-  if (artifactEntryExists) {
-    const existing = resolveNonEmptyRegularArtifactFile(
-      artifactRoot,
-      anchoredArtifactPath,
-      `artifact-contract failure: invariant suite artifact is missing ${relativePath}`,
-      `artifact-contract failure: invariant suite artifact is empty ${relativePath}`
-    );
-    if (!replaceExisting && !readFileSync(existing).equals(sourceBytes)) {
-      throw new Error(`artifact-contract failure: invariant suite source changed ${relativePath}`);
-    }
-    if (!replaceExisting) return;
-  }
-  if (replaceExisting) {
-    writeFileDurable(anchoredArtifactPath, sourceBytes);
-  } else {
-    writeFileSync(anchoredArtifactPath, sourceBytes, { flag: "wx", mode: 0o600 });
-  }
-}
-
-function copyDependencyInvariantSuiteToArtifact(task: (typeof taskSpecs)[number], artifactRoot: string): void {
-  const tombstones = invariantSuiteTombstones.get(realpathSync(task.workspacePath)) ?? new Set<string>();
-  const selected = resolveInvariantSuiteDependencySnapshot(task);
-  for (const [relativePath, entry] of selected) {
-    if (tombstones.has(relativePath)) continue;
-    const destination = path.resolve(artifactRoot, "invariant-suite", relativePath);
-    const parent = safeInvariantSuiteDirectory(artifactRoot, path.dirname(destination));
-    mkdirSync(parent, { recursive: true });
-    const resolvedParent = realpathSync(parent);
-    if (resolvedParent !== parent || !isStrictlyInsideDirectory(artifactRoot, resolvedParent)) {
-      throw new Error(`artifact-contract failure: unsafe invariant suite artifact parent ${relativePath}`);
-    }
-    writeFileDurable(path.join(resolvedParent, path.basename(destination)), entry.bytes);
-  }
-}
-
 function listInvariantSuiteSources(
   suiteRoot: string,
   relative = "",
@@ -3462,22 +3557,15 @@ function listInvariantSuiteSources(
 
 function readInvariantSuiteSourceBytes(suiteRoot: string, relativePath: string, prefix: string): Buffer {
   const sourcePath = path.resolve(suiteRoot, relativePath);
-  const source = resolveNonEmptyRegularArtifactFile(
+  const snapshot = readBoundedRegularArtifactSnapshot(
     suiteRoot,
     sourcePath,
     `${prefix} source is missing ${relativePath}`,
-    `${prefix} source is empty ${relativePath}`
+    MAX_INVARIANT_SUITE_SOURCE_BYTES,
+    true
   );
-  const sourceStat = statSync(source);
-  if (sourceStat.nlink !== 1) {
-    throw new Error(`${prefix} source is hard-linked ${relativePath}`);
-  }
-  assertInvariantSuiteSourceSize(relativePath, sourceStat.size);
-  const sourceBytes = readFileSync(source);
-  if (sourceBytes.length !== sourceStat.size) {
-    throw new Error(`${prefix} source changed ${relativePath}`);
-  }
-  return sourceBytes;
+  assertInvariantSuiteSourceSize(relativePath, snapshot.bytes.length);
+  return snapshot.bytes;
 }
 
 function copyInvariantSuiteIntoWorkspace(workspaceRoot: string, suiteRoot: string, relativePath: string): void {
@@ -3571,50 +3659,65 @@ function safeInvariantSuiteDirectory(root: string, candidate: string): string {
   return resolved;
 }
 
-/**
- * Rebuild the publication expectation from the durable manifest this attempt
- * already published. verifyArtifacts is its own retries:0 node, so a restart
- * between an invariant agent task finishing and its verifier running left the
- * in-process snapshot empty and killed the run at a stateful-invariant stage.
- * The manifest is the durable record of the same publication, so recovery reads
- * it and reports a typed artifact failure naming the file only when the
- * manifest itself is unavailable.
- */
-function recoverInvariantSuitePublicationSnapshot(
+type InvariantSuiteArtifactSnapshot = Readonly<{
+  manifest: ImmutableFileSnapshot;
+  sources: ReadonlyMap<string, ImmutableFileSnapshot>;
+}>;
+
+/** Capture one complete suite root exactly once before comparing or publishing it. */
+function captureInvariantSuiteArtifactSnapshot(
   task: (typeof taskSpecs)[number],
-  artifactRoots: readonly string[]
-): Map<string, Buffer> {
-  for (const artifactRoot of artifactRoots) {
-    const manifest = readInvariantSuiteManifestRecord(artifactRoot);
-    if (
-      manifest === undefined ||
-      manifest.producerNodeId !== task.metadata.node.logicalNodeId ||
-      manifest.producerAttemptId !== task.attemptId
-    ) {
-      continue;
-    }
-    const suiteRoot = path.join(artifactRoot, "invariant-suite");
-    const recovered = new Map<string, Buffer>();
-    for (const [relativePath, entry] of manifest.files) {
-      const bytes = readInvariantSuiteSourceBytes(
-        suiteRoot,
-        relativePath,
-        "artifact-contract failure: invariant suite artifact"
-      );
-      if (bytes.length !== entry.sizeBytes || createHash("sha256").update(bytes).digest("hex") !== entry.sha256) {
-        throw new Error(`artifact-contract failure: invariant suite artifact changed ${relativePath}`);
-      }
-      recovered.set(relativePath, bytes);
-    }
-    invariantSuitePublicationSnapshots.set(task.attemptId, recovered);
-    return recovered;
-  }
-  throw new Error(
-    `artifact-contract failure: invariant suite manifest is unavailable for ${task.attemptId} ${path.join(
-      artifactRoots[0] ?? "",
-      INVARIANT_SUITE_MANIFEST_FILE
-    )}`
+  artifactRoot: string
+): InvariantSuiteArtifactSnapshot {
+  const manifestPath = path.join(artifactRoot, INVARIANT_SUITE_MANIFEST_FILE);
+  const manifestSnapshot = readBoundedRegularArtifactSnapshot(
+    artifactRoot,
+    manifestPath,
+    `artifact-contract failure: invariant suite manifest is missing ${manifestPath}`,
+    MAX_VERIFIED_COMPANION_BYTES,
+    true
   );
+  const manifest = parseInvariantSuiteManifestRecord(manifestSnapshot.bytes, manifestPath);
+  if (manifest.producerNodeId !== task.metadata.node.logicalNodeId || manifest.producerAttemptId !== task.attemptId) {
+    throw new Error(`artifact-contract failure: invariant suite manifest is invalid ${task.attemptId}`);
+  }
+
+  const suiteRoot = path.join(artifactRoot, "invariant-suite");
+  const actualPaths = existsSync(suiteRoot) ? listInvariantSuiteSources(suiteRoot) : [];
+  if (manifest.files.size > 0 && actualPaths.length === 0) {
+    throw new Error(`artifact-contract failure: invariant suite artifact root is missing ${task.attemptId}`);
+  }
+  const unexpectedPath = actualPaths.find((relativePath) => !manifest.files.has(relativePath));
+  if (unexpectedPath !== undefined) {
+    throw new Error(`artifact-contract failure: unexpected invariant suite artifact ${unexpectedPath}`);
+  }
+  if (actualPaths.length !== manifest.files.size) {
+    throw new Error("artifact-contract failure: invariant suite artifact set changed");
+  }
+
+  const sources = new Map<string, ImmutableFileSnapshot>();
+  for (const relativePath of actualPaths) {
+    const expected = manifest.files.get(relativePath);
+    if (expected === undefined) {
+      throw new Error(`artifact-contract failure: unexpected invariant suite artifact ${relativePath}`);
+    }
+    const snapshot = readBoundedRegularArtifactSnapshot(
+      suiteRoot,
+      path.resolve(suiteRoot, relativePath),
+      `artifact-contract failure: invariant suite artifact is missing ${relativePath}`,
+      MAX_VERIFIED_COMPANION_BYTES,
+      true
+    );
+    decodeStrictUtf8Snapshot(snapshot, `artifact-contract failure: invariant suite artifact ${relativePath}`);
+    if (
+      snapshot.bytes.length !== expected.sizeBytes ||
+      createHash("sha256").update(snapshot.bytes).digest("hex") !== expected.sha256
+    ) {
+      throw new Error(`artifact-contract failure: invariant suite artifact changed ${relativePath}`);
+    }
+    sources.set(relativePath, snapshot);
+  }
+  return Object.freeze({ manifest: manifestSnapshot, sources });
 }
 
 function rememberInvariantSuitePublications(
@@ -3622,51 +3725,37 @@ function rememberInvariantSuitePublications(
   publications: Map<string, Buffer>,
   artifactRoots: readonly string[]
 ): void {
-  const expected =
-    invariantSuitePublicationSnapshots.get(task.attemptId) ??
-    recoverInvariantSuitePublicationSnapshot(task, artifactRoots);
-  const expectedPaths = new Set(expected.keys());
-  let observedRoot = false;
+  let expected = invariantSuitePublicationSnapshots.get(task.attemptId);
   for (const artifactRoot of artifactRoots) {
-    const manifestPath = path.join(artifactRoot, INVARIANT_SUITE_MANIFEST_FILE);
-    const manifest = resolveNonEmptyRegularArtifactFile(
-      artifactRoot,
-      manifestPath,
-      "artifact-contract failure: invariant suite manifest is missing",
-      "artifact-contract failure: invariant suite manifest is empty"
-    );
-    rememberVerifiedPublication(publications, INVARIANT_SUITE_MANIFEST_FILE, readFileSync(manifest));
-    const suiteRoot = path.join(artifactRoot, "invariant-suite");
-    if (!existsSync(suiteRoot)) continue;
-    observedRoot = true;
-    const actualPaths = listInvariantSuiteSources(suiteRoot);
-    for (const relativePath of actualPaths) {
-      const expectedBytes = expected.get(relativePath);
-      if (expectedBytes === undefined) {
-        throw new Error(`artifact-contract failure: unexpected invariant suite artifact ${relativePath}`);
-      }
-      const sourcePath = path.resolve(suiteRoot, relativePath);
-      const source = resolveNonEmptyRegularArtifactFile(
-        suiteRoot,
-        sourcePath,
-        `artifact-contract failure: invariant suite artifact is missing ${relativePath}`,
-        `artifact-contract failure: invariant suite artifact is empty ${relativePath}`
+    const captured = captureInvariantSuiteArtifactSnapshot(task, artifactRoot);
+    rememberVerifiedPublication(publications, INVARIANT_SUITE_MANIFEST_FILE, captured.manifest.bytes);
+    if (expected === undefined) {
+      expected = new Map(
+        [...captured.sources].map(([relativePath, snapshot]) => [relativePath, Buffer.from(snapshot.bytes)])
       );
-      const bytes = readFileSync(source);
-      if (!bytes.equals(expectedBytes)) {
-        throw new Error(`artifact-contract failure: invariant suite artifact changed ${relativePath}`);
-      }
-      rememberVerifiedPublication(publications, path.posix.join("invariant-suite", relativePath), expectedBytes);
+      invariantSuitePublicationSnapshots.set(task.attemptId, expected);
     }
     if (
-      actualPaths.length !== expectedPaths.size ||
-      actualPaths.some((relativePath) => !expectedPaths.has(relativePath))
+      captured.sources.size !== expected.size ||
+      [...captured.sources].some(([relativePath]) => !expected?.has(relativePath))
     ) {
       throw new Error("artifact-contract failure: invariant suite artifact set changed");
     }
+    for (const [relativePath, snapshot] of captured.sources) {
+      const expectedBytes = expected.get(relativePath);
+      if (expectedBytes === undefined || !snapshot.bytes.equals(expectedBytes)) {
+        throw new Error(`artifact-contract failure: invariant suite artifact changed ${relativePath}`);
+      }
+      rememberVerifiedPublication(publications, path.posix.join("invariant-suite", relativePath), snapshot.bytes);
+    }
   }
-  if (expected.size > 0 && !observedRoot) {
-    throw new Error(`artifact-contract failure: invariant suite artifact root is missing ${task.attemptId}`);
+  if (expected === undefined) {
+    throw new Error(
+      `artifact-contract failure: invariant suite manifest is unavailable for ${task.attemptId} ${path.join(
+        artifactRoots[0] ?? "",
+        INVARIANT_SUITE_MANIFEST_FILE
+      )}`
+    );
   }
 }
 
@@ -3676,46 +3765,10 @@ function rememberExpectedInvariantSuitePublications(
   publications: Map<string, string>
 ): void {
   const dependencyRoot = realpathSync(dependency);
-  const manifestPath = path.join(dependencyRoot, INVARIANT_SUITE_MANIFEST_FILE);
-  const resolvedManifest = resolveNonEmptyRegularArtifactFile(
-    dependencyRoot,
-    manifestPath,
-    "artifact-contract failure: invariant suite manifest is missing",
-    "artifact-contract failure: invariant suite manifest is empty"
-  );
-  const manifestBytes = readFileSync(resolvedManifest);
-  const manifest = parseInvariantSuiteManifestRecord(manifestBytes, manifestPath);
-  if (
-    manifest.producerNodeId !== dependencyTask.metadata.node.logicalNodeId ||
-    manifest.producerAttemptId !== dependencyTask.attemptId
-  ) {
-    throw new Error(`artifact-contract failure: invariant suite manifest is invalid ${dependencyTask.attemptId}`);
-  }
-  rememberExpectedVerifiedPublication(publications, INVARIANT_SUITE_MANIFEST_FILE, manifestBytes);
-
-  const expectedFiles = manifest.files;
-
-  const suiteRoot = path.join(dependencyRoot, "invariant-suite");
-  const actualPaths = existsSync(suiteRoot) ? listInvariantSuiteSources(suiteRoot) : [];
-  if (expectedFiles.size > 0 && actualPaths.length === 0) {
-    throw new Error(`artifact-contract failure: invariant suite artifact root is missing ${dependencyTask.attemptId}`);
-  }
-  if (
-    actualPaths.length !== expectedFiles.size ||
-    actualPaths.some((relativePath) => !expectedFiles.has(relativePath))
-  ) {
-    throw new Error("artifact-contract failure: invariant suite artifact set changed");
-  }
-  for (const relativePath of actualPaths) {
-    const bytes = readInvariantSuiteSourceBytes(suiteRoot, relativePath, "artifact handoff invariant suite");
-    const expected = expectedFiles.get(relativePath);
-    if (expected === undefined) {
-      throw new Error(`artifact-contract failure: unexpected invariant suite artifact ${relativePath}`);
-    }
-    if (bytes.length !== expected.sizeBytes || createHash("sha256").update(bytes).digest("hex") !== expected.sha256) {
-      throw new Error(`artifact-contract failure: invariant suite artifact changed ${relativePath}`);
-    }
-    rememberExpectedVerifiedPublication(publications, path.posix.join("invariant-suite", relativePath), bytes);
+  const captured = captureInvariantSuiteArtifactSnapshot(dependencyTask, dependencyRoot);
+  rememberExpectedVerifiedPublication(publications, INVARIANT_SUITE_MANIFEST_FILE, captured.manifest.bytes);
+  for (const [relativePath, snapshot] of captured.sources) {
+    rememberExpectedVerifiedPublication(publications, path.posix.join("invariant-suite", relativePath), snapshot.bytes);
   }
 }
 
@@ -3745,62 +3798,152 @@ function resolveNonEmptyRegularArtifactFile(
   return resolvedPath;
 }
 
+type ImmutableFileSnapshot = Readonly<{ path: string; bytes: Buffer }>;
+type CapturedTaskOutput = Readonly<{
+  output: (typeof taskSpecs)[number]["outputs"][number];
+  artifactRoot: string;
+  file: ImmutableFileSnapshot;
+}>;
+type VerifiedOutputSnapshot = Readonly<{
+  artifactRoot: string;
+  file: ImmutableFileSnapshot;
+  contents: string;
+  value: unknown;
+}>;
+
+function readBoundedRegularArtifactSnapshot(
+  artifactDir: string,
+  artifactPath: string,
+  failureMessage: string,
+  maxBytes: number,
+  requireNonEmpty = false
+): ImmutableFileSnapshot {
+  const resolvedPath = resolveRegularArtifactFile(artifactDir, artifactPath, failureMessage);
+  const before = statSync(resolvedPath);
+  if (before.nlink !== 1) {
+    throw new Error(`${failureMessage}: file is hard-linked`);
+  }
+  let bytes: Buffer;
+  try {
+    bytes = readRegularFileSnapshot(resolvedPath, maxBytes);
+  } catch (error) {
+    throw new Error(`${failureMessage}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
+  if (requireNonEmpty && bytes.length === 0) {
+    throw new Error(`${failureMessage}: file is empty`);
+  }
+  const after = statSync(resolvedPath);
+  if (
+    after.nlink !== 1 ||
+    before.dev !== after.dev ||
+    before.ino !== after.ino ||
+    before.size !== after.size ||
+    before.mtimeMs !== after.mtimeMs ||
+    before.ctimeMs !== after.ctimeMs ||
+    bytes.length !== after.size
+  ) {
+    throw new Error(`${failureMessage}: file changed while it was captured`);
+  }
+  return Object.freeze({ path: resolvedPath, bytes });
+}
+
+function decodeStrictUtf8Snapshot(snapshot: ImmutableFileSnapshot, failureMessage: string): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(snapshot.bytes);
+  } catch (error) {
+    throw new Error(`${failureMessage}: file is not valid UTF-8`, { cause: error });
+  }
+}
+
+function parseStrictJsonSnapshot(snapshot: ImmutableFileSnapshot, failureMessage: string): unknown {
+  try {
+    return parseStrictJsonBytes(snapshot.bytes);
+  } catch (error) {
+    throw new Error(
+      `${failureMessage}: file is not strict JSON: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
+  }
+}
+
+function captureTaskOutputs(task: (typeof taskSpecs)[number]): CapturedTaskOutput[] {
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const artifactRoots = taskArtifactRoots(task, artifactDir);
+  const outputPaths = new Set<string>();
+  return task.outputs.map((output) => {
+    if (outputPaths.has(output.path)) {
+      throw new Error(`artifact-contract failure: duplicate output path ${output.path}`);
+    }
+    outputPaths.add(output.path);
+    const canonicalPath = path.resolve(artifactDir, output.path);
+    if (!isStrictlyInsideDirectory(artifactDir, canonicalPath)) {
+      throw new Error(`artifact-contract failure: unsafe output path ${output.path}`);
+    }
+    const failureMessage = `artifact-contract failure: output is not a regular file ${output.path}`;
+    for (const candidateRoot of artifactRoots) {
+      try {
+        return Object.freeze({
+          output,
+          artifactRoot: candidateRoot,
+          file: readBoundedRegularArtifactSnapshot(
+            candidateRoot,
+            path.resolve(candidateRoot, output.path),
+            failureMessage,
+            MAX_VERIFIED_ARTIFACT_BYTES
+          )
+        });
+      } catch {
+        // Try the exact task-owned worktree mirror before failing closed.
+      }
+    }
+    throw new Error(failureMessage);
+  });
+}
+
 function finalizeAndVerifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verificationOutput> {
   // The model session has already returned. Only explicitly runtime-owned
   // artifacts and exact-byte companions may be materialized here. This task is
   // always configured with zero retries so a missing or malformed agent-owned
   // output is terminal and can never reopen or replay model work.
-  prepareArtifactMirror(task, { replayWorkspacePatches: false });
-  materializeGeneratedTestCompanions(task);
-  materializeInvariantSuiteCompanions(task);
+  prepareArtifactMirror(task, { replayWorkspacePatches: false, evidenceMode: "require" });
+  clearArtifactVerificationMarker(task);
   materializeWorkspacePatch(task);
-  return verifyArtifacts(task);
+  const capturedOutputs = captureTaskOutputs(task);
+  materializeGeneratedTestCompanions(task, capturedOutputs);
+  materializeInvariantSuiteCompanions(task, capturedOutputs);
+  return verifyArtifacts(task, capturedOutputs);
 }
 
-function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verificationOutput> {
+function verifyArtifacts(
+  task: (typeof taskSpecs)[number],
+  capturedTaskOutputs?: readonly CapturedTaskOutput[]
+): z.infer<typeof verificationOutput> {
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   // A model-controlled workspace can pre-create arbitrary sidecars. Remove
   // any stale marker before validating so only this verifier can publish the
   // success boundary consumed by downstream preparation tasks.
   clearArtifactVerificationMarker(task);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
-  verifyInvariantLedgerSourceEvidence(task, artifactRoots);
+  const capturedOutputs = capturedTaskOutputs ?? captureTaskOutputs(task);
+
   const publications = new Map<string, Buffer>();
-  const artifacts = task.outputs.map((output) => {
-    const canonicalPath = path.resolve(artifactDir, output.path);
-    if (!isStrictlyInsideDirectory(artifactDir, canonicalPath)) {
-      throw new Error(`artifact-contract failure: unsafe output path ${output.path}`);
-    }
-    const failureMessage = `artifact-contract failure: output is not a regular file ${output.path}`;
-    let artifactRoot: string | undefined;
-    let resolvedPath: string | undefined;
-    for (const candidateRoot of artifactRoots) {
-      try {
-        resolvedPath = resolveRegularArtifactFile(
-          candidateRoot,
-          path.resolve(candidateRoot, output.path),
-          failureMessage
-        );
-        artifactRoot = candidateRoot;
-        break;
-      } catch {
-        // Try the exact task-owned worktree mirror before failing closed.
-      }
-    }
-    if (artifactRoot === undefined || resolvedPath === undefined) {
-      throw new Error(failureMessage);
-    }
-    const bytes = readFileSync(resolvedPath);
-    const contents = bytes.toString("utf8");
+  const verifiedOutputs = new Map<string, VerifiedOutputSnapshot>();
+  const artifacts = capturedOutputs.map(({ output, artifactRoot, file }) => {
+    const contents = decodeStrictUtf8Snapshot(file, `artifact-contract failure: output ${output.path}`);
+    const value =
+      artifactContractDefinition(output.contract).format === "json"
+        ? parseStrictJsonSnapshot(file, `artifact-contract failure: output ${output.path}`)
+        : contents;
     const validation = validateArtifactContract(output.contract, contents, output.path);
     if (!validation.ok) {
       throw new Error(
         `artifact-contract failure for ${output.path} (${output.contract}): ${formatSchemaValidationIssues(validation.issues)}`
       );
     }
-    rememberVerifiedPublication(publications, output.path, bytes);
+    verifiedOutputs.set(output.path, Object.freeze({ artifactRoot, file, contents, value }));
+    rememberVerifiedPublication(publications, output.path, file.bytes);
     if (output.contract === "ultrafuzz/generated-tests@2") {
-      for (const companion of verifyGeneratedTestFiles(artifactRoot, validation.value)) {
+      for (const companion of verifyGeneratedTestFiles(artifactRoot, value)) {
         rememberVerifiedPublication(publications, companion.path, companion.contents);
       }
     }
@@ -3817,10 +3960,11 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
             schema_bundle_sha256: output.schemaBundleSha256,
             validator_build: output.validatorBuild
           }),
-      sha256: createHash("sha256").update(bytes).digest("hex"),
+      sha256: createHash("sha256").update(file.bytes).digest("hex"),
       primary: output.primary
     };
   });
+  verifyInvariantLedgerSourceEvidence(task, verifiedOutputs);
   if (invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) {
     rememberInvariantSuitePublications(task, publications, artifactRoots);
   }
@@ -3842,19 +3986,23 @@ function readInvariantSourceSnapshot(
   if (!isStrictlyInsideDirectory(workspaceRoot, sourceCandidate)) {
     throw new Error(`artifact-contract failure: invariant ${label} path escapes the task workspace: ${relativePath}`);
   }
-  let sourcePath: string;
+  let snapshot: ImmutableFileSnapshot;
   try {
-    sourcePath = resolveRegularArtifactFile(workspaceRoot, sourceCandidate, `${label} is not a regular file`);
+    snapshot = readBoundedRegularArtifactSnapshot(
+      workspaceRoot,
+      sourceCandidate,
+      `${label} is not a regular file`,
+      MAX_VERIFIED_COMPANION_BYTES
+    );
   } catch (error) {
     throw new Error(
       `artifact-contract failure: invariant ${label} ${relativePath} is unavailable: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error }
     );
   }
-  const bytes = readFileSync(sourcePath);
   let content: string;
   try {
-    content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(snapshot.bytes);
   } catch {
     throw new Error(`artifact-contract failure: invariant ${label} ${relativePath} is binary`);
   }
@@ -3863,14 +4011,22 @@ function readInvariantSourceSnapshot(
   }
   if (
     usesPinnedSource &&
-    !checkInvariantSourcePinned({ workspacePath: workspaceRoot, relativePath, bytes, ref: pinnedSourceRef }).ok
+    !checkInvariantSourcePinned({
+      workspacePath: workspaceRoot,
+      relativePath,
+      bytes: snapshot.bytes,
+      ref: pinnedSourceRef
+    }).ok
   ) {
     throw new Error(`artifact-contract failure: invariant ${label} ${relativePath} is not pinned and unchanged`);
   }
-  return { bytes, content };
+  return { bytes: snapshot.bytes, content };
 }
 
-function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], artifactRoots: readonly string[]): void {
+function verifyInvariantLedgerSourceEvidence(
+  task: (typeof taskSpecs)[number],
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
+): void {
   if (task.metadata.node.logicalNodeId !== "project-discovery") {
     return;
   }
@@ -3878,36 +4034,12 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
   if (ledgerOutput === undefined) {
     return;
   }
-  let ledgerPath: string | undefined;
-  for (const root of artifactRoots) {
-    try {
-      ledgerPath = resolveRegularArtifactFile(
-        root,
-        path.resolve(root, ledgerOutput.path),
-        "artifact-contract failure: invariant ledger is not a regular file"
-      );
-      break;
-    } catch {
-      // The normal output verifier below reports the missing artifact.
-    }
-  }
-  if (ledgerPath === undefined) {
-    return;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(ledgerPath, "utf8")) as unknown;
-  } catch (error) {
-    throw new Error(
-      `artifact-contract failure: invariant ledger JSON is unreadable: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error }
-    );
-  }
-  const validation = validateInvariantLedgerSchema(parsed, ledgerPath);
+  const ledger = verifiedOutputs.get(ledgerOutput.path);
+  if (ledger === undefined) return;
+  const validation = validateInvariantLedgerSchema(ledger.value, ledger.file.path);
   if (!validation.ok || validation.value === undefined) {
     return;
   }
-  const ledgerBytes = readFileSync(ledgerPath);
   const files = new Map<string, { path: string; sha256: string; content: string }>();
   const sourceSnapshots = new Map<string, { bytes: Buffer; content: string }>();
   const workspacePath = path.resolve(task.workspacePath);
@@ -4016,7 +4148,7 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
     attempt_id: task.attemptId,
     commit,
     tree,
-    ledger_sha256: createHash("sha256").update(ledgerBytes).digest("hex"),
+    ledger_sha256: createHash("sha256").update(ledger.file.bytes).digest("hex"),
     files: [...files.values()]
   };
   const proofValidation = validateInvariantSourceProofSchema(proof, "invariant-source-proof");
@@ -4214,19 +4346,26 @@ function writeArtifactVerificationMarker(
 
 function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ path: string; contents: Buffer }> {
   const entries = (value as { generated_tests?: Array<{ path?: string }> }).generated_tests ?? [];
+  const paths = new Set<string>();
   return entries.map((entry) => {
     const relativePath = entry.path ?? "";
+    if (paths.has(relativePath)) {
+      throw new Error(`artifact-contract failure: duplicate generated test path ${relativePath}`);
+    }
+    paths.add(relativePath);
     const artifactPath = path.resolve(artifactDir, relativePath);
     if (!isStrictlyInsideDirectory(artifactDir, artifactPath)) {
       throw new Error(`artifact-contract failure: unsafe generated test path ${relativePath}`);
     }
-    const resolvedPath = resolveNonEmptyRegularArtifactFile(
+    const snapshot = readBoundedRegularArtifactSnapshot(
       artifactDir,
       artifactPath,
       `artifact-contract failure: generated test file is missing ${relativePath}`,
-      `artifact-contract failure: generated test file is empty ${relativePath}`
+      MAX_VERIFIED_COMPANION_BYTES,
+      true
     );
-    return { path: relativePath, contents: readFileSync(resolvedPath) };
+    decodeStrictUtf8Snapshot(snapshot, `artifact-contract failure: generated test file ${relativePath}`);
+    return { path: relativePath, contents: snapshot.bytes };
   });
 }
 

@@ -11,6 +11,8 @@ import {
   artifactContractDefinition,
   artifactContractSchemaBinding,
   layoutForRunRoot,
+  readRunMetadataDocument,
+  writeRunMetadataDocument,
   writeArtifactManifest
 } from "@ultrafuzz/artifacts";
 import AdmZip from "adm-zip";
@@ -155,45 +157,82 @@ function writeRunAccounting(
   }
 ): void {
   const runMetadataPath = path.join(runRoot, "run.json");
-  const runMetadata = JSON.parse(fs.readFileSync(runMetadataPath, "utf8")) as Record<string, unknown>;
+  const runMetadata = readRunMetadataDocument(runMetadataPath, path.basename(runRoot));
+  assert.ok(runMetadata.workflow, "accounting fixtures require a linked workflow");
+  const workflowRunId = runMetadata.workflow.run_id;
+  const controlGeneration = runMetadata.workflow.control_generation;
+  const unpricedEventCount = accounting.unpricedEventCount ?? (accounting.partialPricing ? 1 : 0);
+  const eventCount = 1 + unpricedEventCount;
+  const estimatedSpendUsd = Number(accounting.estimatedSpend.replace(/[$,+]/gu, ""));
   const summary = {
+    uncached_input_tokens: accounting.totalTokens,
     input_tokens: accounting.totalTokens,
     output_tokens: 0,
     cache_read_tokens: 0,
     cache_write_tokens: 0,
     reasoning_tokens: 0,
+    inclusive_token_total: accounting.totalTokens,
+    billable_token_total: accounting.totalTokens,
     total_tokens: accounting.totalTokens,
     tokens_used: accounting.tokensUsed,
     estimated_spend: accounting.estimatedSpend,
-    estimated_spend_usd: Number(accounting.estimatedSpend.replace(/[$,+]/gu, "")),
+    estimated_spend_usd: estimatedSpendUsd,
+    component_costs_usd: {
+      uncached_input: estimatedSpendUsd,
+      cache_read: 0,
+      cache_write: 0,
+      output: 0,
+      reasoning: 0
+    },
+    usage_complete: true,
+    usage_incomplete_reasons: [],
+    pricing_complete: !accounting.partialPricing,
+    pricing_incomplete_reasons: accounting.partialPricing
+      ? [{ code: "model-pricing-unavailable" as const, model: "gpt-test" }]
+      : [],
     partial_pricing: accounting.partialPricing,
-    event_count: 1 + (accounting.unpricedEventCount ?? (accounting.partialPricing ? 1 : 0)),
+    cache_read_pricing_estimated: false,
+    event_count: eventCount,
     priced_event_count: 1,
-    unpriced_event_count: accounting.unpricedEventCount ?? (accounting.partialPricing ? 1 : 0),
+    unpriced_event_count: unpricedEventCount,
     models: ["gpt-test"],
     agents: ["codex"]
   };
-  fs.writeFileSync(
-    runMetadataPath,
-    `${JSON.stringify(
-      {
-        ...runMetadata,
-        accounting: {
-          schema_version: "1.0",
-          source: "workflow-events",
-          workflow_run_id: "ultrafuzz-cli-run",
-          current: summary,
-          cumulative: {
-            ...summary,
-            source_run_ids: []
-          }
+  const current = {
+    ...summary,
+    control_generation: controlGeneration,
+    workflow_run_id: workflowRunId,
+    source_event_sequences: Array.from({ length: eventCount }, (_, index) => index),
+    attempts: []
+  };
+  writeRunMetadataDocument(runMetadataPath, {
+    ...runMetadata,
+    accounting: {
+      schema_version: "ultrafuzz.accounting.v3",
+      source: "usage-ledger",
+      workflow_run_id: workflowRunId,
+      current,
+      segments: [current],
+      cumulative: { ...summary, source_run_ids: [] },
+      checkpoint: {
+        schema_version: "ultrafuzz.accounting-checkpoint.v1",
+        ledger_event_count: eventCount,
+        last_source_event_sequence: eventCount - 1,
+        control_generation: controlGeneration,
+        workflow_run_id: workflowRunId
+      },
+      pricing_catalog: {
+        source: "configured-catalog",
+        status: "available",
+        resolved_models: ["gpt-test"],
+        unresolved_models: [],
+        model_prices: {
+          "gpt-test": { inputUsdPerMillion: 1, outputUsdPerMillion: 1 }
         }
       },
-      null,
-      2
-    )}\n`,
-    "utf8"
-  );
+      updated_at: new Date().toISOString()
+    }
+  });
 }
 
 function writeFinalReportAccounting(
@@ -560,59 +599,13 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
   fs.mkdirSync(artifactDir, { recursive: true });
   fs.writeFileSync(path.join(artifactDir, "stdout.txt"), "generated stdout\n", "utf8");
-  const runMetadataPath = path.join(runData.run_root, "run.json");
-  const runMetadata = JSON.parse(fs.readFileSync(runMetadataPath, "utf8")) as Record<string, unknown>;
-  fs.writeFileSync(
-    runMetadataPath,
-    `${JSON.stringify(
-      {
-        ...runMetadata,
-        accounting: {
-          schema_version: "1.0",
-          source: "workflow-events",
-          workflow_run_id: "ultrafuzz-cli-run",
-          current: {
-            input_tokens: 100,
-            output_tokens: 23,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            reasoning_tokens: 0,
-            total_tokens: 123,
-            tokens_used: "123",
-            estimated_spend: "$0.46+",
-            estimated_spend_usd: 0.46,
-            partial_pricing: true,
-            event_count: 2,
-            priced_event_count: 1,
-            unpriced_event_count: 1,
-            models: ["gpt-test"],
-            agents: ["codex"]
-          },
-          cumulative: {
-            input_tokens: 100,
-            output_tokens: 23,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            reasoning_tokens: 0,
-            total_tokens: 123,
-            tokens_used: "123",
-            estimated_spend: "$0.46+",
-            estimated_spend_usd: 0.46,
-            partial_pricing: true,
-            event_count: 2,
-            priced_event_count: 1,
-            unpriced_event_count: 1,
-            models: ["gpt-test"],
-            agents: ["codex"],
-            source_run_ids: []
-          }
-        }
-      },
-      null,
-      2
-    )}\n`,
-    "utf8"
-  );
+  writeRunAccounting(runData.run_root, {
+    totalTokens: 123,
+    tokensUsed: "123",
+    estimatedSpend: "$0.46+",
+    partialPricing: true,
+    unpricedEventCount: 1
+  });
   const reportDir = writeFinalReportAccounting(runData.run_root, {
     tokensUsed: "123",
     estimatedSpend: "$0.46+",

@@ -38,6 +38,8 @@ describe("eval JSONL journals", () => {
     };
     fs.writeFileSync(journalPath, `${JSON.stringify(linkedRow)}\n{"eval_run_id":"eval-01"`, "utf8");
 
-    expect(() => readJsonLines(journalPath)).toThrow(SyntaxError);
+    expect(() => readJsonLines(journalPath)).toThrowError(
+      expect.objectContaining({ name: "StrictJsonError", kind: "syntax" })
+    );
   });
 });

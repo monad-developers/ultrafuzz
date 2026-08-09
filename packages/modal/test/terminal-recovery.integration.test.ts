@@ -23,7 +23,7 @@ import {
   type ModalRecoveryDecision,
   type ModalRecoveryPolicy
 } from "../src/recovery.js";
-import { NonResumableTerminalRunError, repairModalEvalRunRecord, type ModalResumeWorkspace } from "../src/resume.js";
+import { NonResumableTerminalRunError, finalizeModalEvalRunRecord, type ModalResumeWorkspace } from "../src/resume.js";
 import { classifyTerminalDisposition } from "../src/terminal-disposition.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "../src/worker-result.js";
 import { currentArtifactBinding, currentRunState } from "./current-artifact-fixtures.js";
@@ -63,7 +63,7 @@ describe("terminal artifact-gate recovery", () => {
 
     let terminalError: unknown;
     try {
-      await repairModalEvalRunRecord(workspace, { run_id: workspace.productRunId, status: "failed" }, disposition);
+      await finalizeModalEvalRunRecord(workspace, { run_id: workspace.productRunId, status: "failed" }, disposition);
     } catch (error) {
       terminalError = error;
     }

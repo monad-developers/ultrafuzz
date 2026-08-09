@@ -66,7 +66,7 @@ export async function resolveLiveModelPricing(input: {
   signal?: AbortSignal;
   timeoutMs?: number;
 }): Promise<PricingCatalogResult> {
-  const models = uniqueNormalizedModels(input.models);
+  const models = uniqueModels(input.models);
   if (models.length === 0) {
     return {
       prices: new Map(),
@@ -154,7 +154,7 @@ function pricesForModels(catalog: unknown, models: string[]): Map<string, ModelP
       if (!isRecord(provider.models)) {
         continue;
       }
-      const match = Object.entries(provider.models).find(([id]) => normalizeModel(id) === model);
+      const match = Object.entries(provider.models).find(([id]) => id === model);
       const pricing = pricingFromCatalogModel(match?.[1]);
       if (pricing !== undefined) {
         result.set(model, pricing);
@@ -229,7 +229,7 @@ export function modelPricingFromSnapshot(value: unknown): Map<string, ModelPrici
   for (const [model, rawPricing] of Object.entries(value)) {
     const pricing = storedModelPricing(rawPricing);
     if (pricing !== undefined) {
-      result.set(normalizeModel(model), pricing);
+      result.set(model, pricing);
     }
   }
   return result;
@@ -338,12 +338,8 @@ function pinnedProviderForModel(model: string): string | undefined {
   return model.startsWith("kimi") || model.startsWith("moonshot") ? MOONSHOT_PROVIDER_ID : undefined;
 }
 
-function uniqueNormalizedModels(models: Iterable<string>): string[] {
-  return [...new Set([...models].map(normalizeModel).filter((model) => model.length > 0))].sort();
-}
-
-function normalizeModel(model: string): string {
-  return model.trim().toLowerCase();
+function uniqueModels(models: Iterable<string>): string[] {
+  return [...new Set([...models].filter((model) => model.length > 0))].sort();
 }
 
 function pricingTimeoutMs(value: string | undefined): number {

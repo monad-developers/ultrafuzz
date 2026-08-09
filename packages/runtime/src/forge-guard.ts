@@ -15,6 +15,13 @@ export interface ForgeGuardEnvironment {
   active: boolean;
 }
 
+export interface ForgeGuardMetadata {
+  enabled: boolean;
+  active: boolean;
+  virtual_memory_limit_kb: number;
+  rayon_threads: number;
+}
+
 export function prepareForgeGuardEnvironment(input: {
   layout: RunLayout;
   config: ResolvedConfig;
@@ -51,7 +58,7 @@ export function prepareForgeGuardEnvironment(input: {
   };
 }
 
-export function forgeGuardMetadata(config: ResolvedConfig, active: boolean): Record<string, unknown> {
+export function forgeGuardMetadata(config: ResolvedConfig, active: boolean): ForgeGuardMetadata {
   return {
     enabled: config.run.forgeGuardEnabled,
     active,

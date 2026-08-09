@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:node-checkpoint:1",
+  "title": "Ultrafuzz Modal durable node checkpoint",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "checkpoint_id", "sequence", "stage", "created_at", "storage_lineage", "workspace_path", "run_root", "execution_snapshot_root", "handoff_archive", "project_archive_sha256"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.modal.node-checkpoint.v1" },
+    "checkpoint_id": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" },
+    "sequence": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/positiveInteger" },
+    "stage": { "enum": ["prepared", "running", "failed", "completed"] },
+    "created_at": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/timestamp" },
+    "storage_lineage": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonEmptyString" },
+    "workspace_path": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" },
+    "run_root": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" },
+    "execution_snapshot_root": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" },
+    "handoff_archive": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" },
+    "project_archive_sha256": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/sha256" },
+    "restored_from": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" },
+    "error": { "type": "string", "minLength": 1, "maxLength": 4096 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "stage": { "const": "failed" } }, "required": ["stage"] },
+      "then": { "properties": { "error": {} }, "required": ["error"] },
+      "else": { "properties": { "error": false } }
+    }
+  ]
+}

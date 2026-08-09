@@ -4,16 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { emptyEvalHistory } from "@ultrafuzz/evals";
+
 import { runCli } from "../src/index.js";
 
 test("eval history renders and checks deterministic public charts", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cli-history-"));
   fs.mkdirSync(path.join(project, "benchmarks"), { recursive: true });
-  fs.writeFileSync(
-    path.join(project, "benchmarks", "history.json"),
-    '{"schema_version":"ultrafuzz.eval.history.v1","supersessions":[],"observations":[]}\n',
-    "utf8"
-  );
+  fs.writeFileSync(path.join(project, "benchmarks", "history.json"), `${JSON.stringify(emptyEvalHistory())}\n`, "utf8");
 
   const rendered = await invoke(project, ["eval", "history", "--project", project, "--json"]);
   assert.equal(rendered.code, 0, rendered.stderr || rendered.stdout);

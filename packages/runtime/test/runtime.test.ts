@@ -9682,7 +9682,7 @@ test("syncRun fails a successful workflow node that is missing required artifact
   assert.equal(state.nodes?.["project-discovery"]?.provenance?.terminal_disposition, undefined);
   assert.equal(
     fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json")),
-    true
+    false
   );
 
   writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
@@ -11497,7 +11497,6 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
     }>;
   };
   const missingPrompt = sealedPlan.rendered_prompts[0]!;
-  const expectedPrompt = fs.readFileSync(missingPrompt.rendered_prompt_path, "utf8");
   fs.rmSync(missingPrompt.rendered_prompt_path);
   fs.rmSync(path.join(run.value!.run_root, missingPrompt.rendered_prompt_snapshot_path));
   const mutableConfigPath = path.join(project, "ultrafuzz.toml");
@@ -11520,7 +11519,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-lifecycle-run");
   assert.equal(resumed.value?.submitted, true);
-  assert.equal(fs.readFileSync(missingPrompt.rendered_prompt_path, "utf8"), expectedPrompt);
+  assert.equal(fs.existsSync(missingPrompt.rendered_prompt_path), false);
   assert.doesNotMatch(fs.readFileSync(credentialLog, "utf8"), new RegExp(hostileCredential, "u"));
   const resumedState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;
   assert.equal(resumedState.concurrency.requested_concurrency, 8);

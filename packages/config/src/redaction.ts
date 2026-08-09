@@ -17,6 +17,7 @@ import {
 } from "./types.js";
 
 export const REDACTION_PLACEHOLDER = SENSITIVE_REDACTION_PLACEHOLDER;
+export const CONFIG_REDACTIONS_SCHEMA_VERSION = "ultrafuzz.config-redactions.v2" as const;
 
 export interface RedactionEntry {
   path: string[];
@@ -28,7 +29,7 @@ export interface RedactionEntry {
 }
 
 export interface RedactionManifest {
-  schemaVersion: "1.0";
+  schemaVersion: typeof CONFIG_REDACTIONS_SCHEMA_VERSION;
   placeholder: typeof REDACTION_PLACEHOLDER;
   entries: RedactionEntry[];
 }
@@ -49,7 +50,7 @@ export function redactResolvedConfig(config: ResolvedConfig): RedactedResolvedCo
   return {
     config: redacted,
     manifest: {
-      schemaVersion: "1.0",
+      schemaVersion: CONFIG_REDACTIONS_SCHEMA_VERSION,
       placeholder: REDACTION_PLACEHOLDER,
       entries
     }

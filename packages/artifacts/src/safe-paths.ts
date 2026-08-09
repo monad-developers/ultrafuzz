@@ -340,6 +340,45 @@ export function appendLineDurable(filePath: string, line: string, trustedRoot?: 
 }
 
 /**
+ * Durably creates a new regular file without accepting an intervening writer.
+ *
+ * This is the missing-file counterpart to appendBytesDurableAt: callers that
+ * made a decision from an absent snapshot must fail if any path appears before
+ * publication instead of appending to unvalidated bytes.
+ */
+export function createFileDurableExclusive(filePath: string, data: string | Uint8Array, trustedRoot?: string): void {
+  const directory = path.dirname(filePath);
+  if (trustedRoot !== undefined) {
+    assertNoSymlinkComponents(trustedRoot, directory, "create directory");
+  }
+  fs.mkdirSync(directory, { recursive: true });
+  if (trustedRoot !== undefined) {
+    assertNoSymlinkComponents(trustedRoot, filePath, "create path");
+  }
+
+  const fd = fs.openSync(
+    filePath,
+    fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW,
+    0o600
+  );
+  runWithClosedDescriptor(fd, `failed to durably create ${filePath} and close its descriptor`, () => {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1) {
+      throw new ArtifactPathError("not-file", `create path must be a singly linked regular file: ${filePath}`);
+    }
+    const bytes = typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const written = fs.writeSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (written <= 0) throw new Error(`create write made no progress: ${filePath}`);
+      offset += written;
+    }
+    fs.fsyncSync(fd);
+  });
+  fsyncDirectory(directory);
+}
+
+/**
  * Durably appends at an exact expected end-of-file offset.
  *
  * A torn-tail repair decides what to write from an earlier read. Rechecking the

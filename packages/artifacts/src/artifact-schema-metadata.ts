@@ -91,6 +91,10 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "campaignSummarySchema",
     ["campaign-summary-backend-uniqueness", "campaign-summary-count-coupling"]
   ),
+  "config-redactions.schema.json": runtime("configRedactionsJsonSchema", undefined, [
+    "config-redactions-path-key-equality",
+    "config-redactions-path-uniqueness"
+  ]),
   "coverage-goal.schema.json": artifact("ultrafuzz/coverage-goal@1", "coverageGoalJsonSchema", "coverageGoalSchema"),
   "dependency-scope-matrix.schema.json": artifact(
     "ultrafuzz/dependency-scope-matrix@1",
@@ -158,6 +162,8 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "externalizedStateAccountingSchema",
     ["externalized-state-id-uniqueness", "externalized-state-scenario-joins"]
   ),
+  "event-query-facade.schema.json": runtime("eventQueryFacadeJsonSchema", "eventQueryFacadeSchema"),
+  "event-record.schema.json": runtime("eventRecordJsonSchema", "eventRecordSchema"),
   "finding-lifecycle-ledger.schema.json": artifact(
     "ultrafuzz/finding-lifecycle-ledger@1",
     "findingLifecycleLedgerJsonSchema",
@@ -213,7 +219,9 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "invariant-suite-file-tombstone-disjointness"
   ]),
   "node-attempt-ledger.schema.json": runtime("nodeAttemptLedgerJsonSchema", "nodeAttemptLedgerEntrySchema", [
-    "attempt-parent-link",
+    "attempt-failure-message-byte-length",
+    "attempt-reuse-source-link",
+    "attempt-source-event-join",
     "attempt-outcome-digest-coupling",
     "attempt-order"
   ]),
@@ -269,10 +277,19 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "report-finding-id-uniqueness",
     "report-property-provenance-join"
   ]),
+  "run-plan.schema.json": runtime("runPlanJsonSchema", undefined, [
+    "run-plan-attempt-id-uniqueness"
+  ]),
+  "run-metadata.schema.json": runtime("runMetadataJsonSchema", undefined, [
+    "run-metadata-workflow-id-equality",
+    "run-metadata-current-segment-equality",
+    "run-metadata-accounting-workflow-identity"
+  ]),
   "run-state.schema.json": runtime("runStateJsonSchema", "runStateSchema", [
     "run-state-fingerprint",
     "run-state-node-key-equality"
   ]),
+  "source-run.schema.json": runtime("sourceRunJsonSchema", undefined, ["source-run-not-self"]),
   "selected-strategies.schema.json": artifact(
     "ultrafuzz/selected-strategies@1",
     "selectedStrategiesJsonSchema",

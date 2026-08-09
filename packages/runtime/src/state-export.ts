@@ -7,8 +7,12 @@ import {
   layoutForRunRoot,
   queryEvents,
   replayNodeAttempts,
+  readPlannedGraphDocument,
+  readRunMetadataDocument,
   readRunState,
   summarizeNodeAttempts,
+  type RunMetadataDocument,
+  type RunMetadataWorkflow,
   type RunState,
   validateSafeId
 } from "@ultrafuzz/artifacts";
@@ -24,7 +28,7 @@ import type {
   WorkflowCommandSummary
 } from "./types.js";
 import { summarizeRunProgress } from "./run-progress.js";
-import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
+import { runtimeFailure, runtimeResult } from "./utils.js";
 import { runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
 import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
 import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
@@ -98,11 +102,11 @@ export async function getRunStatus(input: {
       }));
   const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
   const base = readRunListEntry(layout.root, layout.runId);
-  const state = fs.existsSync(layout.statePath) ? readRunState(layout) : undefined;
+  const state = readRunState(layout);
   const events = fs.existsSync(layout.eventsPath)
     ? fs.readFileSync(layout.eventsPath, "utf8").split(/\r?\n/u).filter(Boolean).length
     : 0;
-  const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath);
+  const metadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
   const workflowSnapshots = evidence.ok
     ? {
         run_id: evidence.smithersRunId,
@@ -122,10 +126,10 @@ export async function getRunStatus(input: {
     true,
     {
       ...base,
-      ...(state ? { state: publicRunState(state) } : {}),
+      state: publicRunState(state),
       events,
       attempts: summarizeNodeAttempts(replayNodeAttempts(layout).entries),
-      graph: readJsonIfExists(layout.graphPath),
+      graph: readPlannedGraphDocument(layout.graphPath),
       metadata: publicRunMetadata(metadata),
       ...(workflowSnapshots ? { workflow: workflowSummary(workflowSnapshots) } : {})
     },
@@ -273,16 +277,16 @@ function checkedRunLayout(runsRoot: string, runId: string) {
 
 function readRunListEntry(runRoot: string, runId: string): RunListEntry {
   const layout = layoutForRunRoot(runRoot, runId);
-  const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath) ?? {};
-  const state = fs.existsSync(layout.statePath) ? readRunState(layout) : undefined;
+  const metadata = readRunMetadataDocument(layout.runMetadataPath, runId);
+  const state = readRunState(layout);
   return {
     run_id: runId,
     run_root: runRoot,
-    status: state?.status ?? "pending",
-    ...(typeof metadata.created_at === "string" ? { created_at: metadata.created_at } : {}),
-    ...(state?.started_at ? { started_at: state.started_at } : {}),
-    ...(state?.finished_at ? { finished_at: state.finished_at } : {}),
-    ...(state?.source_run_id ? { source_run_id: state.source_run_id } : {}),
+    status: state.status,
+    created_at: metadata.created_at,
+    ...(state.started_at ? { started_at: state.started_at } : {}),
+    ...(state.finished_at ? { finished_at: state.finished_at } : {}),
+    ...(state.source_run_id ? { source_run_id: state.source_run_id } : {}),
     workflow_ids: workflowIdsFromMetadata(metadata)
   };
 }
@@ -583,44 +587,15 @@ function commandSummary(snapshot: SmithersCommandSnapshot): WorkflowCommandSumma
   };
 }
 
-function workflowIdsFromMetadata(metadata: Record<string, unknown>): string[] {
-  if (Array.isArray(metadata.workflow_ids)) {
-    return metadata.workflow_ids.filter((value): value is string => typeof value === "string");
-  }
-  if (Array.isArray(metadata.smithers_inspection_ids)) {
-    return metadata.smithers_inspection_ids.filter((value): value is string => typeof value === "string");
-  }
-  return [];
+function workflowIdsFromMetadata(metadata: RunMetadataDocument): string[] {
+  return [...metadata.workflow_ids];
 }
 
-function publicRunMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
-  if (metadata === undefined) {
-    return undefined;
-  }
-  const publicMetadata = { ...metadata };
-  delete publicMetadata.smithers;
-  delete publicMetadata.smithers_inspection_ids;
-  const workflowIds = workflowIdsFromMetadata(metadata);
-  if (workflowIds.length > 0) {
-    publicMetadata.workflow_ids = workflowIds;
-  }
-  const workflow = metadata.workflow;
-  if (workflow && typeof workflow === "object" && !Array.isArray(workflow)) {
-    publicMetadata.workflow = publicWorkflowMetadata(workflow as Record<string, unknown>);
-  } else {
-    const smithers = metadata.smithers;
-    if (smithers && typeof smithers === "object" && !Array.isArray(smithers)) {
-      const record = smithers as Record<string, unknown>;
-      publicMetadata.workflow = {
-        ...(typeof record.workflowRunId === "string" ? { run_id: record.workflowRunId } : {}),
-        ...(typeof record.workflowName === "string" ? { name: record.workflowName } : {}),
-        ...(Array.isArray(record.taskNodeIds)
-          ? { task_node_ids: record.taskNodeIds.filter((value): value is string => typeof value === "string") }
-          : {})
-      };
-    }
-  }
-  return publicMetadata;
+function publicRunMetadata(metadata: RunMetadataDocument): Record<string, unknown> {
+  return {
+    ...metadata,
+    ...(metadata.workflow === undefined ? {} : { workflow: publicWorkflowMetadata(metadata.workflow) })
+  };
 }
 
 function publicRunState(state: RunState): RunState {
@@ -658,13 +633,11 @@ function publicRunState(state: RunState): RunState {
   };
 }
 
-function publicWorkflowMetadata(workflow: Record<string, unknown>): Record<string, unknown> {
+function publicWorkflowMetadata(workflow: RunMetadataWorkflow): Record<string, unknown> {
   return {
-    ...(typeof workflow.run_id === "string" ? { run_id: workflow.run_id } : {}),
-    ...(typeof workflow.name === "string" ? { name: workflow.name } : {}),
-    ...(Array.isArray(workflow.task_node_ids)
-      ? { task_node_ids: workflow.task_node_ids.filter((value): value is string => typeof value === "string") }
-      : {})
+    run_id: workflow.run_id,
+    name: workflow.name,
+    task_node_ids: [...workflow.task_node_ids]
   };
 }
 

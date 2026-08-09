@@ -147,7 +147,7 @@ export function registeredSchemaForPath(filePath: string): ArtifactSchemaRegistr
 }
 
 export function readRegularFileSnapshot(filePath: string, maxBytes: number): Buffer {
-  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
   let descriptor: number;
   try {
     descriptor = fs.openSync(filePath, flags);

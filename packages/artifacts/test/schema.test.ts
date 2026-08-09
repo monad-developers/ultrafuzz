@@ -1057,40 +1057,37 @@ test("analysis bundle manifest schema rejects unversioned and non-allowlisted en
   assert.equal(validateAnalysisBundleManifestSchema({ ...manifest, files: [] }).ok, false);
 });
 
-test("usage ledger schema requires typed incompleteness markers", () => {
+test("usage ledger schema accepts only exact projected Smithers usage", () => {
   const entry = {
     schema_version: USAGE_LEDGER_SCHEMA_VERSION,
-    event_id: "usage-event-1",
     run_id: "run-1",
     workflow_run_id: "workflow-1",
-    source_event_id: "source-event-1",
-    attempt_id: "usage-attempt-1",
-    checkpoint_generation_id: "checkpoint-1",
-    observed_at: "2026-07-18T00:00:00.000Z",
-    usage: {},
-    usage_complete: false,
-    usage_incomplete_reasons: [{ code: "usage-missing" }]
+    control_generation: "c".repeat(64),
+    source_event_sequence: 1,
+    observed_timestamp_ms: Date.parse("2026-07-18T00:00:00.000Z"),
+    node_id: "node:1",
+    iteration: 0,
+    attempt: 1,
+    usage: { model: "model", agent: "agent", input_tokens: 1, output_tokens: 2 }
   };
 
   assert.equal(validateUsageLedgerEntry(entry).ok, true);
-  assert.equal(
-    validateUsageLedgerEntry({ ...entry, usage_incomplete_reasons: [] }).ok,
-    false,
-    "incomplete generated usage must carry a typed reason"
-  );
+  assert.equal(validateUsageLedgerEntry({ ...entry, source_event_id: "legacy" }).ok, false);
+  assert.equal(validateUsageLedgerEntry({ ...entry, usage: { ...entry.usage, total_tokens: 3 } }).ok, false);
 });
 
-test("node attempt ledger schema accepts only bounded optional failure messages", () => {
+test("node attempt ledger shape stays structural while byte and ordering rules remain semantic gates", () => {
   const entry = {
     schema_version: NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
-    attempt_id: "attempt-1",
     run_id: "run-1",
-    node_id: "node-1",
+    workflow_run_id: "workflow-1",
+    control_generation: "c".repeat(64),
+    node_id: "node:1",
     strategy_attempt_id: "strategy-1",
-    executor_retry_id: "retry-1",
-    checkpoint_generation_id: "checkpoint-1",
-    workflow_execution_id: "execution-1",
-    controller_invocation_id: "controller-1",
+    iteration: 0,
+    attempt: 1,
+    started_event_sequence: 1,
+    source_event_sequence: 2,
     lifecycle: {
       started_at: "2026-07-18T10:00:00.000Z",
       finished_at: "2026-07-18T10:01:00.000Z"
@@ -1106,7 +1103,8 @@ test("node attempt ledger schema accepts only bounded optional failure messages"
   };
   assert.equal(validateNodeAttemptLedgerEntry(entry).ok, true);
   assert.equal(validateNodeAttemptLedgerEntry({ ...entry, failure_message: "" }).ok, false);
-  assert.equal(validateNodeAttemptLedgerEntry({ ...entry, failure_message: "🙂".repeat(251) }).ok, false);
+  assert.equal(validateNodeAttemptLedgerEntry({ ...entry, failure_message: "🙂".repeat(251) }).ok, true);
+  assert.equal(validateNodeAttemptLedgerEntry({ ...entry, failure_message: "x".repeat(1_001) }).ok, false);
   assert.equal(validateNodeAttemptLedgerEntry({ ...entry, diagnostic: { message: "raw failure" } }).ok, false);
   assert.equal(
     validateNodeAttemptLedgerEntry({
@@ -1126,7 +1124,7 @@ test("node attempt ledger schema accepts only bounded optional failure messages"
         finished_at: "2026-07-18T07:59:59.000Z"
       }
     }).ok,
-    false
+    true
   );
 });
 

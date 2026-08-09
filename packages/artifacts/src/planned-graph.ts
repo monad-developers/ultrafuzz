@@ -5,6 +5,8 @@ import {
 } from "./artifact-contract-ids.js";
 import { artifactContractDefinition, artifactContractSchemaBinding } from "./artifact-contracts.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
+import { readRegularFileSnapshot } from "./schema-registry.js";
+import { parseStrictJsonBytes } from "./strict-json.js";
 
 export const PLANNED_GRAPH_SCHEMA_VERSION = "ultrafuzz.planned-graph.v3" as const;
 export const PLANNED_GRAPH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:planned-graph:3" as const;
@@ -277,6 +279,17 @@ export function assertPlannedGraph(value: unknown): PlannedGraphDocument {
   const graph = value as PlannedGraphDocument;
   assertPlannedGraphSemantics(graph);
   return graph;
+}
+
+export function readPlannedGraphDocument(filePath: string): PlannedGraphDocument {
+  return assertPlannedGraph(
+    parseStrictJsonBytes(readRegularFileSnapshot(filePath, 64 * 1024 * 1024), {
+      maxBytes: 64 * 1024 * 1024,
+      maxDepth: 128,
+      maxItems: 1_000_000,
+      maxProperties: 1_000_000
+    })
+  );
 }
 
 export function assertPlannedGraphSemantics(graph: PlannedGraphDocument): void {

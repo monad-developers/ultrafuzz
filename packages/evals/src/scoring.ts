@@ -6,6 +6,16 @@ import { z } from "zod/v4";
 
 import { summarizeEvalTerminal } from "./efficiency.js";
 import {
+  appendEvalRunRecord,
+  parseEvalScoreSummary,
+  readEvalMatrix,
+  readEvalRunManifest,
+  readEvalRunRecords,
+  readEvalScoreSummary,
+  serializeEvalFindingScores,
+  serializeEvalReviewQueue
+} from "./eval-durable.js";
+import {
   ADJUDICATOR_RESPONSE_FORMAT,
   buildAdjudicatorPrompt,
   buildAdjudicatorRetryPrompt,
@@ -22,13 +32,15 @@ import {
   type GroundTruthSubject
 } from "./ground-truth.js";
 import {
-  classifyRecoveryEquivalence,
   reconcileEvalRunRecords,
   recoveryEquivalenceCanBeRecorded,
   withRecordedRecoveryEquivalence
 } from "./recovery-equivalence.js";
 import { resolveJudgePanelConfig, resolveRecoveryEquivalencePolicy } from "./suite.js";
 import {
+  EVAL_FINDING_SCORE_SCHEMA_VERSION,
+  EVAL_REVIEW_QUEUE_ITEM_SCHEMA_VERSION,
+  EVAL_SCORE_SUMMARY_SCHEMA_VERSION,
   type EvalCompareValue,
   type EvalClassificationReasonCode,
   type EvalFindingScore,
@@ -37,7 +49,6 @@ import {
   type EvalLongitudinalCompareValue,
   type EvalRowScore,
   type EvalRunRecord,
-  type EvalRunProvenance,
   type EvalScoreSummary,
   type EvalSuiteSpec,
   type EvalVariantScoreSummary,
@@ -49,12 +60,9 @@ import {
 } from "./types.js";
 import {
   EvalError,
-  appendJsonLine,
   evalRunRoot,
   isRecord,
-  jsonFile,
   mean,
-  readJsonLines,
   resolveTerminalReportPath,
   roundMetric
 } from "./utils.js";
@@ -89,7 +97,7 @@ export interface ScoreEvalRowReportInput {
   suite: EvalSuiteSpec;
   row: EvalMatrixRow;
   reportPath: string;
-  record?: EvalRunRecord;
+  record: EvalRunRecord;
   llmJudge?: boolean | FindingJudge;
   env?: Record<string, string | undefined>;
 }
@@ -104,26 +112,33 @@ export interface ScoreFindingsAgainstGroundTruthInput {
   matchMode?: "report" | "candidate";
   reportPath?: string;
   reportSchemaValid?: boolean;
-  record?: EvalRunRecord;
+  record: EvalRunRecord;
   llmJudge?: boolean | FindingJudge;
   env?: Record<string, string | undefined>;
 }
 
 export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreSummary> {
   const root = evalRunRoot(input.projectRoot, input.evalRunId);
-  const evalManifest = jsonFile<{ suite?: EvalSuiteSpec; provenance?: EvalRunProvenance }>(
-    path.join(root, "eval.json")
-  );
-  if (evalManifest.suite === undefined) {
-    throw new EvalError("EVAL_RUN_MANIFEST_INVALID", "eval run manifest is missing suite");
-  }
+  const evalManifest = readEvalRunManifest(path.join(root, "eval.json"));
   const suite = evalManifest.suite;
-  const matrix = jsonFile<EvalMatrixRow[]>(path.join(root, "matrix.json"));
-  const records = readJsonLines<EvalRunRecord>(path.join(root, "runs.jsonl"));
+  const matrix = readEvalMatrix(path.join(root, "matrix.json"));
+  const records = readEvalRunRecords(path.join(root, "runs.jsonl"));
   const recordsByRow = reconcileEvalRunRecords(records);
+  const matrixRowIds = new Set(matrix.map((row) => row.id));
+  const unexpectedRows = [...recordsByRow.keys()].filter((rowId) => !matrixRowIds.has(rowId)).sort();
+  if (unexpectedRows.length > 0) {
+    throw new EvalError("EVAL_RUN_RECORD_LINEAGE_INVALID", "run journal contains rows outside the current matrix", {
+      row_ids: unexpectedRows
+    });
+  }
   for (const row of matrix) {
     const record = recordsByRow.get(row.id);
-    if (record === undefined) continue;
+    if (record === undefined) {
+      throw new EvalError("EVAL_RUN_RECORD_MISSING", `eval row ${row.id} has no durable run record`);
+    }
+    if (record.status !== "launched") {
+      throw new EvalError("EVAL_RUN_NOT_LAUNCHED", `eval row ${row.id} did not launch successfully`);
+    }
     const canRecordRecoveryEquivalence = recoveryEquivalenceCanBeRecorded(record);
     if (!canRecordRecoveryEquivalence) {
       throw new EvalError(
@@ -134,7 +149,7 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
     const recorded = withRecordedRecoveryEquivalence(record, suite);
     recordsByRow.set(row.id, recorded);
     if (record.recovery_equivalence === undefined && canRecordRecoveryEquivalence) {
-      appendJsonLine(path.join(root, "runs.jsonl"), recorded);
+      appendEvalRunRecord(path.join(root, "runs.jsonl"), recorded);
     }
   }
   const scoresPath = path.join(root, "scores.jsonl");
@@ -142,9 +157,9 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
   const judgeMode = input.llmJudge === undefined || input.llmJudge === false ? "deterministic" : "llm";
   const llmJudge = resolveJudge(input.llmJudge, input.env);
   const scoredRows = await mapLimitStable(matrix, suite.run.max_parallel_runs ?? 1, async (row) => {
-    const record = recordsByRow.get(row.id);
+    const record = recordsByRow.get(row.id)!;
     const reportResolution = resolveTerminalReportPath({
-      ...(record?.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root })
+      runRoot: record.ultrafuzz_run_root
     });
     if (reportResolution.path === undefined) {
       throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", reportResolution.reason, { row_id: row.id });
@@ -176,6 +191,7 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
       : rowScores.filter((row) => row.recovery_equivalence.classification !== "non-comparable");
   const variants = summarizeVariants(aggregateRows);
   const summary: EvalScoreSummary = {
+    schema_version: EVAL_SCORE_SUMMARY_SCHEMA_VERSION,
     eval_run_id: input.evalRunId,
     eval_run_root: root,
     recall_threshold: suite.metrics.recall_threshold,
@@ -202,16 +218,17 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
       suite,
       matrix,
       judgeMode,
-      ...(evalManifest.provenance !== undefined ? { runProvenance: evalManifest.provenance } : {})
+      runProvenance: evalManifest.provenance
     })
   };
+  const validatedSummary = parseEvalScoreSummary(summary, summaryPath);
   replaceScoringOutputs(root, [
-    { filePath: scoresPath, contents: serializeJsonLines(findingScores) },
-    { filePath: reviewQueuePath, contents: serializeJsonLines(reviewQueue) },
-    { filePath: summaryPath, contents: `${JSON.stringify(summary, null, 2)}\n` },
-    { filePath: summaryMarkdownPath, contents: renderSummaryMarkdown(summary) }
+    { filePath: scoresPath, contents: serializeEvalFindingScores(findingScores) },
+    { filePath: reviewQueuePath, contents: serializeEvalReviewQueue(reviewQueue) },
+    { filePath: summaryPath, contents: `${JSON.stringify(validatedSummary, null, 2)}\n` },
+    { filePath: summaryMarkdownPath, contents: renderSummaryMarkdown(validatedSummary) }
   ]);
-  return summary;
+  return validatedSummary;
 }
 
 async function mapLimitStable<T, U>(values: T[], limit: number, worker: (value: T) => Promise<U>): Promise<U[]> {
@@ -302,10 +319,6 @@ function replaceScoringOutputs(root: string, outputs: readonly ScoringOutputFile
   }
 }
 
-function serializeJsonLines(values: readonly unknown[]): string {
-  return values.length === 0 ? "" : `${values.map((value) => JSON.stringify(value)).join("\n")}\n`;
-}
-
 function fileSystemEntryExists(filePath: string): boolean {
   try {
     fs.lstatSync(filePath);
@@ -353,7 +366,7 @@ export async function scoreFindingsAgainstGroundTruth(input: ScoreFindingsAgains
 
 export function compareEvalRun(input: { projectRoot: string; evalRunId: string; baseline: string }): EvalCompareValue {
   const root = evalRunRoot(input.projectRoot, input.evalRunId);
-  const summary = jsonFile<EvalScoreSummary>(path.join(root, "summary.json"));
+  const summary = readEvalScoreSummary(path.join(root, "summary.json"));
   const baseline = summary.variants.find((variant) => variant.variant_id === input.baseline);
   if (baseline === undefined) {
     throw new EvalError("EVAL_BASELINE_UNKNOWN", `baseline variant ${input.baseline} not found`, {
@@ -418,7 +431,7 @@ export function compareEvalRuns(input: {
 }
 
 function readEvalSummary(projectRoot: string, evalRunId: string): EvalScoreSummary {
-  return jsonFile<EvalScoreSummary>(path.join(evalRunRoot(projectRoot, evalRunId), "summary.json"));
+  return readEvalScoreSummary(path.join(evalRunRoot(projectRoot, evalRunId), "summary.json"));
 }
 
 function comparisonDifferences(baseline: EvalScoreSummary, candidate: EvalScoreSummary): string[] {
@@ -427,13 +440,9 @@ function comparisonDifferences(baseline: EvalScoreSummary, candidate: EvalScoreS
 
 function provenanceDifferences(baseline: EvalScoreSummary, candidate: EvalScoreSummary): string[] {
   const differences: string[] = [];
-  const baselineCandidate = baseline.provenance?.candidate;
-  const candidateCandidate = candidate.provenance?.candidate;
+  const baselineCandidate = baseline.provenance.candidate;
+  const candidateCandidate = candidate.provenance.candidate;
   if (
-    baselineCandidate === undefined ||
-    candidateCandidate === undefined ||
-    baselineCandidate.commit === "unavailable" ||
-    candidateCandidate.commit === "unavailable" ||
     baselineCandidate.dirty !== false ||
     candidateCandidate.dirty !== false ||
     baselineCandidate.execution_artifact_id === undefined ||
@@ -441,32 +450,21 @@ function provenanceDifferences(baseline: EvalScoreSummary, candidate: EvalScoreS
   ) {
     differences.push("candidate execution provenance is not immutable");
   }
-  const baselineBenchmark = baseline.provenance?.benchmark;
-  const candidateBenchmark = candidate.provenance?.benchmark;
-  if (baselineBenchmark === undefined || candidateBenchmark === undefined) {
-    differences.push("benchmark provenance is unavailable");
-  } else {
-    if (baselineBenchmark.availability !== "available" || candidateBenchmark.availability !== "available") {
-      differences.push("benchmark provenance is incomplete");
-    }
-    if (baselineBenchmark.cohort_fingerprint !== candidateBenchmark.cohort_fingerprint) {
-      differences.push("benchmark cohort fingerprints differ");
-    }
-    if (baselineBenchmark.execution_policy.fingerprint !== candidateBenchmark.execution_policy.fingerprint) {
-      differences.push("execution policy fingerprints differ");
-    }
+  const baselineBenchmark = baseline.provenance.benchmark;
+  const candidateBenchmark = candidate.provenance.benchmark;
+  if (baselineBenchmark.cohort_fingerprint !== candidateBenchmark.cohort_fingerprint) {
+    differences.push("benchmark cohort fingerprints differ");
   }
-  const baselineScoring = baseline.provenance?.scoring;
-  const candidateScoring = candidate.provenance?.scoring;
-  if (baselineScoring === undefined || candidateScoring === undefined) {
-    differences.push("scoring provenance is unavailable");
-  } else {
-    if (baselineScoring.implementation_dirty !== false || candidateScoring.implementation_dirty !== false) {
-      differences.push("scoring implementation provenance is not immutable");
-    }
-    if (baselineScoring.fingerprint !== candidateScoring.fingerprint) {
-      differences.push("scoring identity fingerprints differ");
-    }
+  if (baselineBenchmark.execution_policy.fingerprint !== candidateBenchmark.execution_policy.fingerprint) {
+    differences.push("execution policy fingerprints differ");
+  }
+  const baselineScoring = baseline.provenance.scoring;
+  const candidateScoring = candidate.provenance.scoring;
+  if (baselineScoring.implementation_dirty !== false || candidateScoring.implementation_dirty !== false) {
+    differences.push("scoring implementation provenance is not immutable");
+  }
+  if (baselineScoring.fingerprint !== candidateScoring.fingerprint) {
+    differences.push("scoring identity fingerprints differ");
   }
   return differences;
 }
@@ -483,15 +481,15 @@ function variantScopeDifferences(baseline: EvalScoreSummary, candidate: EvalScor
 }
 
 export function renderSummaryMarkdown(summary: EvalScoreSummary): string {
-  const candidate = summary.provenance?.candidate;
-  const benchmark = summary.provenance?.benchmark;
-  const scoring = summary.provenance?.scoring;
+  const candidate = summary.provenance.candidate;
+  const benchmark = summary.provenance.benchmark;
+  const scoring = summary.provenance.scoring;
   const lines = [
     `# Ultrafuzz Eval ${summary.eval_run_id}`,
     "",
-    `Candidate: ${candidate === undefined ? "unavailable (historical result)" : `${candidate.label} (${candidate.commit})`}`,
-    `Benchmark cohort: ${benchmark?.cohort_fingerprint ?? "unavailable (historical result)"}`,
-    `Scoring identity: ${scoring?.fingerprint ?? "unavailable"}`,
+    `Candidate: ${candidate.label} (${candidate.commit})`,
+    `Benchmark cohort: ${benchmark.cohort_fingerprint}`,
+    `Scoring identity: ${scoring.fingerprint}`,
     `Recovery aggregation: ${summary.recovery_equivalence.aggregate_non_comparable} (${summary.recovery_equivalence.included_row_count} included, ${summary.recovery_equivalence.excluded_row_count} excluded)`,
     "",
     `Recall threshold: ${summary.recall_threshold}`,
@@ -622,7 +620,7 @@ function resolveJudge(
 async function scoreRow(input: {
   suite: EvalSuiteSpec;
   row: EvalMatrixRow;
-  record?: EvalRunRecord;
+  record: EvalRunRecord;
   reportPath: string;
   llmJudge?: FindingJudge;
 }): Promise<{
@@ -661,7 +659,7 @@ async function scoreRow(input: {
 async function scoreFindings(input: {
   suite: EvalSuiteSpec;
   row: EvalMatrixRow;
-  record?: EvalRunRecord;
+  record: EvalRunRecord;
   reportPath: string;
   findings: unknown[];
   bugs: GroundTruthBug[];
@@ -730,11 +728,12 @@ async function scoreFindings(input: {
       }
     } else if (match.judge_result.classification === "needs-human-review") {
       reviewQueue.push({
+        schema_version: EVAL_REVIEW_QUEUE_ITEM_SCHEMA_VERSION,
         target_id: input.row.target_id,
         variant_id: input.row.variant_id,
         trial_id: input.row.trial_id,
-        ...(input.record?.ultrafuzz_run_id !== undefined ? { ultrafuzz_run_id: input.record.ultrafuzz_run_id } : {}),
-        workflow_ids: input.record?.workflow_ids ?? [],
+        ...(input.record.ultrafuzz_run_id !== undefined ? { ultrafuzz_run_id: input.record.ultrafuzz_run_id } : {}),
+        workflow_ids: input.record.workflow_ids,
         finding,
         report_path: input.reportPath,
         deterministic_match: match.deterministic_match,
@@ -746,6 +745,7 @@ async function scoreFindings(input: {
     }
     const findingTitle = stringField(finding, "title");
     matches.push({
+      schema_version: EVAL_FINDING_SCORE_SCHEMA_VERSION,
       row_id: input.row.id,
       finding_id: stringField(finding, "id") ?? `finding-${index + 1}`,
       ...(findingTitle !== undefined ? { finding_title: findingTitle } : {}),
@@ -762,10 +762,7 @@ async function scoreFindings(input: {
   const f1 = precision + recall === 0 ? 0 : roundMetric((2 * precision * recall) / (precision + recall));
   const judgedFindings = truePositives + falsePositives + duplicates;
   const terminal = summarizeEvalTerminal(input.record);
-  const recoveryEquivalence =
-    input.record === undefined
-      ? classifyRecoveryEquivalence({ policy: input.suite.recovery_equivalence })
-      : withRecordedRecoveryEquivalence(input.record, input.suite).recovery_equivalence!;
+  const recoveryEquivalence = withRecordedRecoveryEquivalence(input.record, input.suite).recovery_equivalence!;
   const rowScore: EvalRowScore = {
     row_id: input.row.id,
     target_id: input.row.target_id,

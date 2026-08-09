@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:smoke-result:1",
+  "title": "Ultrafuzz Modal smoke result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "provider", "checks", "diagnostics"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.modal.smoke-result.v1" },
+    "status": { "enum": ["passed", "failed"] },
+    "provider": { "enum": ["openai", "anthropic", "deepseek", "kimi"] },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["production_image", "production_entrypoint", "non_root", "durable_storage", "provider_auth", "same_volume_resume", "completed_work_not_repeated", "single_launch_owner"],
+      "properties": {
+        "production_image": { "type": "boolean" },
+        "production_entrypoint": { "type": "boolean" },
+        "non_root": { "type": "boolean" },
+        "durable_storage": { "type": "boolean" },
+        "provider_auth": { "type": "boolean" },
+        "same_volume_resume": { "type": "boolean" },
+        "completed_work_not_repeated": { "type": "boolean" },
+        "single_launch_owner": { "type": "boolean" }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["completed_units", "repeated_units", "launch_owners"],
+      "properties": {
+        "completed_units": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonNegativeInteger" },
+        "repeated_units": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonNegativeInteger" },
+        "launch_owners": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonNegativeInteger" },
+        "failure_code": { "const": "cloud-operation-failed" },
+        "failure_stage": { "enum": ["prepare", "fresh-launch", "checkpoint", "fresh-terminate", "resume-launch", "completion", "cleanup"] }
+      },
+      "dependentRequired": {
+        "failure_code": ["failure_stage"],
+        "failure_stage": ["failure_code"]
+      }
+    }
+  }
+}

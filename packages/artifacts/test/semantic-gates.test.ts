@@ -147,6 +147,10 @@ const fixtures = {
     positive: { lifecycle: { started_at: "2026-01-01T00:00:00Z", finished_at: "2026-01-01T00:00:01Z" } },
     negative: { lifecycle: { started_at: "2026-01-01T00:00:01Z", finished_at: "2026-01-01T00:00:00Z" } }
   },
+  "attempt-failure-message-byte-length": {
+    positive: { failure_message: "🙂".repeat(250) },
+    negative: { failure_message: "🙂".repeat(251) }
+  },
   "attempt-outcome-digest-coupling": {
     positive: { outcome: "succeeded", reuse: { status: "executed" }, manifests: { output_sha256: "1" } },
     negative: { outcome: "succeeded", reuse: { status: "reused" }, manifests: { output_sha256: null } }
@@ -163,6 +167,26 @@ const fixtures = {
     positive: { backend_results: [{ fuzzer_backend: "a" }] },
     negative: { backend_results: [{ fuzzer_backend: "a" }, { fuzzer_backend: "a" }] }
   },
+  "config-redactions-path-key-equality": {
+    positive: {
+      entries: [{ path: ["models", "profiles", "default", "model"], key: "models.profiles.default.model" }]
+    },
+    negative: { entries: [{ path: ["models", "profiles", "default", "model"], key: "wrong.path" }] }
+  },
+  "config-redactions-path-uniqueness": {
+    positive: {
+      entries: [
+        { path: ["models", "profiles", "a", "model"] },
+        { path: ["models", "profiles", "b", "model"] }
+      ]
+    },
+    negative: {
+      entries: [
+        { path: ["models", "profiles", "a", "model"] },
+        { path: ["models", "profiles", "a", "model"] }
+      ]
+    }
+  },
   "dependency-id-uniqueness": {
     positive: { dependencies: [{ dependency_id: "a" }] },
     negative: { dependencies: [{ dependency_id: "a" }, { dependency_id: "a" }] }
@@ -173,7 +197,12 @@ const fixtures = {
   },
   "differential-gap-lane-uniqueness": {
     positive: { ready_lanes: [{ lane_id: "a", attempt_index: 0 }] },
-    negative: { ready_lanes: [{ lane_id: "a", attempt_index: 0 }, { lane_id: "a", attempt_index: 0 }] }
+    negative: {
+      ready_lanes: [
+        { lane_id: "a", attempt_index: 0 },
+        { lane_id: "a", attempt_index: 0 }
+      ]
+    }
   },
   "differential-plan-lane-id-uniqueness": {
     positive: { assigned_differential_lanes: [{ lane_id: "a" }], deferred_lane_candidates: [{ lane_id: "b" }] },
@@ -233,7 +262,12 @@ const fixtures = {
   },
   "finding-projected-reference-uniqueness": {
     positive: { family_variants: [{ id: "a", dedupe_key: "a" }] },
-    negative: { family_variants: [{ id: "a", dedupe_key: "a" }, { id: "a", dedupe_key: "b" }] }
+    negative: {
+      family_variants: [
+        { id: "a", dedupe_key: "a" },
+        { id: "a", dedupe_key: "b" }
+      ]
+    }
   },
   "findings-id-uniqueness": {
     positive: [{ id: "a" }],
@@ -393,6 +427,28 @@ const fixtures = {
     positive: { issues: [{ id: "a" }], non_production_outcomes: [{ id: "b" }] },
     negative: { issues: [{ id: "a" }], non_production_outcomes: [{ id: "a" }] }
   },
+  "run-metadata-accounting-workflow-identity": {
+    positive: {
+      workflow: { run_id: "workflow-a" },
+      accounting: { workflow_run_id: "workflow-a", current: { workflow_run_id: "workflow-a" } }
+    },
+    negative: {
+      workflow: { run_id: "workflow-a" },
+      accounting: { workflow_run_id: "workflow-b", current: { workflow_run_id: "workflow-b" } }
+    }
+  },
+  "run-metadata-current-segment-equality": {
+    positive: { accounting: { current: { total_tokens: 2 }, segments: [{ total_tokens: 1 }, { total_tokens: 2 }] } },
+    negative: { accounting: { current: { total_tokens: 1 }, segments: [{ total_tokens: 1 }, { total_tokens: 2 }] } }
+  },
+  "run-metadata-workflow-id-equality": {
+    positive: { workflow_ids: ["workflow-a"], workflow: { run_id: "workflow-a" } },
+    negative: { workflow_ids: ["workflow-b"], workflow: { run_id: "workflow-a" } }
+  },
+  "run-plan-attempt-id-uniqueness": {
+    positive: { rendered_prompts: [{ attempt_id: "a" }, { attempt_id: "b" }] },
+    negative: { rendered_prompts: [{ attempt_id: "a" }, { attempt_id: "a" }] }
+  },
   "run-state-node-key-equality": {
     positive: { nodes: { a: { node_id: "a" } } },
     negative: { nodes: { a: { node_id: "b" } } }
@@ -467,6 +523,10 @@ const fixtures = {
       ]
     }
   },
+  "source-run-not-self": {
+    positive: { run_id: "run-new", source_run_id: "run-source" },
+    negative: { run_id: "run-same", source_run_id: "run-same" }
+  },
   "strategy-detection-dedupe-key-uniqueness": {
     positive: [{ dedupe_key: "a" }],
     negative: [{ dedupe_key: "a" }, { dedupe_key: "a" }]
@@ -512,7 +572,10 @@ test("every document-local gate has a passing and failing non-mutating fixture",
 test("offline schema execution never claims contextual gates passed", () => {
   for (const [filename, metadata] of Object.entries(ARTIFACT_SCHEMA_METADATA)) {
     const results = executeOfflineSchemaSemanticGates(filename as keyof typeof ARTIFACT_SCHEMA_METADATA, {});
-    assert.deepEqual(results.map((result) => result.gate), metadata.semanticGates);
+    assert.deepEqual(
+      results.map((result) => result.gate),
+      metadata.semanticGates
+    );
     for (const result of results) {
       const registration = SEMANTIC_GATE_REGISTRY[result.gate as SemanticGateName];
       if (registration.scope === "document") continue;
@@ -556,16 +619,71 @@ test("every contextual registration executes real positive and negative checks",
         negative: { node_id: "b", artifacts: [{ ...validPlannedOutput }] },
         context: { plannedGraph: { node: { id: "a", outputs: [{ ...validPlannedOutput }] } } }
       },
-      "attempt-parent-link": {
-        positive: { attempt_id: "b", parent_attempt_id: "a", reuse: { status: "executed" } },
-        negative: { attempt_id: "b", parent_attempt_id: "missing", reuse: { status: "executed" } },
-        context: { attemptLedger: { entries: [{ attempt_id: "a" }, { attempt_id: "b" }] } }
+      "attempt-reuse-source-link": {
+        positive: {
+          workflow_run_id: "workflow-current",
+          source_event_sequence: 4,
+          reuse: { status: "reused", source: { workflow_run_id: "workflow-source", source_event_sequence: 2 } }
+        },
+        negative: {
+          workflow_run_id: "workflow-current",
+          source_event_sequence: 4,
+          reuse: { status: "reused", source: { workflow_run_id: "workflow-missing", source_event_sequence: 2 } }
+        },
+        context: {
+          attemptLedger: {
+            entries: [],
+            sourceEntries: [{ workflow_run_id: "workflow-source", source_event_sequence: 2 }]
+          }
+        }
       },
-      "campaign-summary-count-coupling": {
+      "attempt-source-event-join": {
+        positive: {
+          workflow_run_id: "workflow-a",
+          node_id: "node:a",
+          iteration: 0,
+          attempt: 1,
+          started_event_sequence: 1,
+          source_event_sequence: 2,
+          lifecycle: { started_at: "2026-01-01T00:00:00.000Z", finished_at: "2026-01-01T00:00:01.000Z" },
+          outcome: "succeeded"
+        },
+        negative: {
+          workflow_run_id: "workflow-a",
+          node_id: "node:a",
+          iteration: 0,
+          attempt: 1,
+          started_event_sequence: 1,
+          source_event_sequence: 3,
+          lifecycle: { started_at: "2026-01-01T00:00:00.000Z", finished_at: "2026-01-01T00:00:01.000Z" },
+          outcome: "succeeded"
+        },
+        context: {
+          eventLog: {
+            events: [
+              {
+                workflow_run_id: "workflow-a",
+                source_event_sequence: 1,
+                timestamp_ms: Date.parse("2026-01-01T00:00:00.000Z"),
+                type: "NodeStarted",
+                payload: { nodeId: "node:a", iteration: 0, attempt: 1 }
+              },
+              {
+                workflow_run_id: "workflow-a",
+                source_event_sequence: 2,
+                timestamp_ms: Date.parse("2026-01-01T00:00:01.000Z"),
+                type: "NodeFinished",
+                payload: { nodeId: "node:a", iteration: 0, attempt: 1 }
+              }
+            ]
+          }
+        }
+      },
+  "campaign-summary-count-coupling": {
         positive: { failure_counts: { pre_deduplication: 1, post_deduplication: 1 } },
         negative: { failure_counts: { pre_deduplication: 2, post_deduplication: 1 } },
         context: { artifactSet: { campaigns: [{ failures: [{}] }], findings: [{}] } }
-      },
+  },
       "generated-test-path-exists": {
         positive: { generated_tests: [{ path: "generated-tests/test.sol" }] },
         negative: { generated_tests: [{ path: "generated-tests/missing.sol" }] },
@@ -588,7 +706,7 @@ test("every contextual registration executes real positive and negative checks",
           artifactSet: { propertyLenses: [{ sourceNodeId: "lens", document: { properties: [{ id: "a" }] } }] }
         }
       },
-      "report-property-provenance-join": {
+  "report-property-provenance-join": {
         positive: {
           issues: [{ id: "finding" }],
           property_provenance: [
@@ -600,7 +718,7 @@ test("every contextual registration executes real positive and negative checks",
               test_paths: ["test"]
             }
           ]
-        },
+  },
         negative: {
           issues: [{ id: "finding" }],
           property_provenance: [
@@ -694,7 +812,7 @@ test("every contextual registration executes real positive and negative checks",
           }
         }
       },
-      "smithers-task-planned-graph-dependency-join": {
+  "smithers-task-planned-graph-dependency-join": {
         positive: {
           tasks: [
             {
@@ -704,7 +822,7 @@ test("every contextual registration executes real positive and negative checks",
               metadata: { dependencies: { concreteNodeIds: ["node-b"] } }
             }
           ]
-        },
+  },
         negative: {
           tasks: [
             {
@@ -727,14 +845,46 @@ test("every contextual registration executes real positive and negative checks",
         }
       },
       "usage-ledger-event-order": {
-        positive: { event_id: "b", observed_at: "2026-01-01T00:00:01Z" },
-        negative: { event_id: "b", observed_at: "2025-01-01T00:00:00Z" },
-        context: { usageLedger: { entries: [{ event_id: "a", observed_at: "2026-01-01T00:00:00Z" }] } }
+        positive: { workflow_run_id: "workflow-a", source_event_sequence: 2, control_generation: "a".repeat(64) },
+        negative: { workflow_run_id: "workflow-a", source_event_sequence: 0, control_generation: "a".repeat(64) },
+        context: {
+          usageLedger: {
+            entries: [{ workflow_run_id: "workflow-a", source_event_sequence: 1, control_generation: "a".repeat(64) }]
+          }
+        }
       },
       "usage-ledger-source-event-join": {
-        positive: { source_event_id: "a" },
-        negative: { source_event_id: "missing" },
-        context: { eventLog: { sourceEventIds: ["a"] } }
+        positive: {
+          workflow_run_id: "workflow-a",
+          source_event_sequence: 2,
+          observed_timestamp_ms: 2,
+          node_id: "node:a",
+          iteration: 0,
+          attempt: 1,
+          usage: { model: "model", agent: "agent", input_tokens: 1, output_tokens: 2 }
+        },
+        negative: { workflow_run_id: "workflow-a", source_event_sequence: 3 },
+        context: {
+          eventLog: {
+            events: [
+              {
+                workflow_run_id: "workflow-a",
+                source_event_sequence: 2,
+                timestamp_ms: 2,
+                type: "TokenUsageReported",
+                payload: {
+                  nodeId: "node:a",
+                  iteration: 0,
+                  attempt: 1,
+                  model: "model",
+                  agent: "agent",
+                  inputTokens: 1,
+                  outputTokens: 2
+                }
+              }
+            ]
+          }
+        }
       },
       "workspace-patch-git-binding": {
         positive: { base_commit: "bc", base_tree: "bt", result_tree: "rt", patch_sha256: "p" },
@@ -772,4 +922,58 @@ test("every contextual registration executes real positive and negative checks",
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("attempt source-event joins accept only declared host-side validation failures from NodeFinished", () => {
+  const context: SemanticGateContext = {
+    eventLog: {
+      events: [
+        {
+          workflow_run_id: "workflow-a",
+          source_event_sequence: 1,
+          timestamp_ms: Date.parse("2026-01-01T00:00:00.000Z"),
+          type: "NodeStarted",
+          payload: { nodeId: "node:a", iteration: 0, attempt: 1 }
+        },
+        {
+          workflow_run_id: "workflow-a",
+          source_event_sequence: 2,
+          timestamp_ms: Date.parse("2026-01-01T00:00:01.000Z"),
+          type: "NodeFinished",
+          payload: { nodeId: "node:a", iteration: 0, attempt: 1 }
+        }
+      ]
+    }
+  };
+  const failedAttempt = {
+    workflow_run_id: "workflow-a",
+    node_id: "node:a",
+    iteration: 0,
+    attempt: 1,
+    started_event_sequence: 1,
+    source_event_sequence: 2,
+    lifecycle: {
+      started_at: "2026-01-01T00:00:00.000Z",
+      finished_at: "2026-01-01T00:00:01.000Z"
+    },
+    outcome: "failed"
+  };
+
+  for (const failureCategory of ["artifact-validation", "invalid-output"]) {
+    assert.equal(
+      executeSemanticGate("attempt-source-event-join", {
+        document: { ...failedAttempt, failure_category: failureCategory },
+        context
+      }).status,
+      "passed",
+      failureCategory
+    );
+  }
+  assert.equal(
+    executeSemanticGate("attempt-source-event-join", {
+      document: { ...failedAttempt, failure_category: "executor-error" },
+      context
+    }).status,
+    "failed"
+  );
 });

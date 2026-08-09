@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { artifactSchemaDirectory } from "@ultrafuzz/artifacts";
+import { EVAL_PUBLICATION_STATE_SCHEMA_ID, evalSchemaBundleDigest, evalSchemaDirectory } from "@ultrafuzz/evals";
 import {
   EXPANDED_GRAPH_JSON_SCHEMA_ID,
   TOPOLOGY_SCHEMA_BUNDLE_DIGEST,
@@ -131,6 +132,46 @@ test("json validate recognizes the pinned topology schema and rejects a same-nam
     const tamperedSchema = path.join(temporary, "expanded-graph.schema.json");
     fs.writeFileSync(tamperedSchema, `${fs.readFileSync(schema, "utf8")} `, "utf8");
     const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", graph]);
+    assert.equal(tamperedCapture.code, 2);
+    assert.match(tamperedCapture.stderr, /JSON_SCHEMA_DIGEST_MISMATCH/u);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("json validate recognizes the pinned eval schema and reports the owning eval bundle", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-eval-"));
+  try {
+    const schema = path.join(evalSchemaDirectory(), "eval-publication-state.schema.json");
+    const publicationState = path.join(temporary, "publication-state.json");
+    fs.writeFileSync(
+      publicationState,
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.eval.publication.v1",
+        status: "publishable",
+        diagnostics: []
+      })}\n`,
+      "utf8"
+    );
+
+    const validCapture = await capture(["json", "validate", "--schema", schema, "--file", publicationState, "--json"]);
+    assert.equal(validCapture.code, 0);
+    const envelope = JSON.parse(validCapture.stdout) as {
+      ok: boolean;
+      data: {
+        status: string;
+        schema: { id: string; bundle_sha256: string; registered: boolean };
+      };
+    };
+    assert.equal(envelope.ok, true);
+    assert.equal(envelope.data.status, "valid");
+    assert.equal(envelope.data.schema.registered, true);
+    assert.equal(envelope.data.schema.id, EVAL_PUBLICATION_STATE_SCHEMA_ID);
+    assert.equal(envelope.data.schema.bundle_sha256, evalSchemaBundleDigest());
+
+    const tamperedSchema = path.join(temporary, "eval-publication-state.schema.json");
+    fs.writeFileSync(tamperedSchema, `${fs.readFileSync(schema, "utf8")} `, "utf8");
+    const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", publicationState]);
     assert.equal(tamperedCapture.code, 2);
     assert.match(tamperedCapture.stderr, /JSON_SCHEMA_DIGEST_MISMATCH/u);
   } finally {

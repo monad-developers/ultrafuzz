@@ -2,6 +2,7 @@ import { Readable } from "node:stream";
 import { createGunzip } from "node:zlib";
 
 import AdmZip from "adm-zip";
+import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
 import tar from "tar-stream";
 
 const HANDOFF_SUFFIX = "handoff/current-state.json";
@@ -53,9 +54,8 @@ export class BundleArchive {
   }
 
   readJson<T = unknown>(relativePath: string): T {
-    const text = this.readBuffer(relativePath).toString("utf8");
     try {
-      return JSON.parse(text) as T;
+      return parseStrictJsonBytes(this.readBuffer(relativePath)) as T;
     } catch (error) {
       throw new Error(`Invalid JSON in ${this.entryName(relativePath)}: ${(error as Error).message}`, { cause: error });
     }
@@ -137,7 +137,7 @@ async function extractSelectedJson(
       stream.on("end", () => {
         try {
           if (key in output) throw new Error(`Duplicate nested JSON match for ${key}`);
-          output[key] = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          output[key] = parseStrictJsonBytes(Buffer.concat(chunks));
           next();
         } catch (error) {
           fail(new Error(`Invalid nested JSON (${header.name}) in ${label}: ${(error as Error).message}`));

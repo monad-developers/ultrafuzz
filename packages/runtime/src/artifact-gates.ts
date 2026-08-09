@@ -24,7 +24,7 @@ import {
   safeResolveInside,
   sha256Bytes,
   updateNodeState,
-  validateArtifactContract,
+  validateArtifactContractBytes,
   validateFindingsSchema,
   validateGeneratedTestManifestSchema,
   validateInvariantLedgerSchema,
@@ -1522,7 +1522,7 @@ function verifyRequiredArtifactShape(
   const binding = artifactContractSchemaBinding(output.contract);
   const contract =
     binding === undefined
-      ? validateArtifactContract(output.contract, artifactBytes.toString("utf8"), absolutePath)
+      ? validateArtifactContractBytes(output.contract, artifactBytes, absolutePath)
       : { ok: true, issues: [], value: parseStrictJsonBytes(artifactBytes) };
   const diagnostics: RuntimeDiagnostic[] = [
     ...schemaDiagnostics,

@@ -1,9 +1,14 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { createNodeAttemptLedgerEntry, type AppendNodeAttemptInput } from "@ultrafuzz/artifacts";
+import {
+  createEventRecord,
+  createNodeAttemptLedgerEntry,
+  type AppendNodeAttemptInput
+} from "@ultrafuzz/artifacts";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -15,6 +20,14 @@ import {
   withRecordedRecoveryEquivalence
 } from "../src/recovery-equivalence.js";
 import type { EvalRecoveryEquivalencePolicy, EvalRunRecord } from "../src/types.js";
+import {
+  currentEvalRunRecord,
+  currentPlannedGraph,
+  currentRunState,
+  testRow,
+  testSuite,
+  writeCurrentRunEvidence
+} from "./helpers.js";
 
 const T0 = "2026-07-20T00:00:00.000Z";
 const POLICY: EvalRecoveryEquivalencePolicy = {
@@ -23,73 +36,116 @@ const POLICY: EvalRecoveryEquivalencePolicy = {
   publication: "comparable"
 };
 
+type AttemptFixture = Partial<AppendNodeAttemptInput> &
+  Pick<AppendNodeAttemptInput, "nodeId" | "strategyAttemptId"> & { controllerInvocationId?: string };
+
+function controlGeneration(controller: string): string {
+  return crypto.createHash("sha256").update(controller).digest("hex");
+}
+
+function workflowRunId(controller: string): string {
+  return `workflow-${controller}`;
+}
+
 function evidenceRoot(input: {
   controllers: string[];
-  attempts?: Array<Partial<AppendNodeAttemptInput> & Pick<AppendNodeAttemptInput, "nodeId" | "strategyAttemptId">>;
+  attempts?: AttemptFixture[];
 }): string {
   const root = mkdtempSync(path.join(tmpdir(), "ufz-recovery-equivalence-"));
   const attemptedNodeIds = new Set((input.attempts ?? []).map((attempt) => attempt.nodeId));
-  fs.writeFileSync(
-    path.join(root, "graph.json"),
-    JSON.stringify({
-      nodes: [
-        { id: "model-a", model_fanout: [{ model_profile_id: "generated-model" }] },
-        { id: "model-b", model_fanout: [{ model_profile_id: "generated-model" }] },
-        { id: "metadata", model_fanout: [] }
-      ]
-    }),
-    "utf8"
-  );
-  fs.writeFileSync(
-    path.join(root, "state.json"),
-    JSON.stringify({
-      status: "succeeded",
+  const graph = currentPlannedGraph(["model-a", "model-b", "metadata"], undefined);
+  graph.nodes[2]!.kind = "reference";
+  graph.nodes[2]!.model_fanout = [];
+  graph.nodes[2]!.prompt_path = "";
+  graph.nodes[2]!.reference = "test-reference";
+  graph.nodes[2]!.reference_revision = {
+    provider: "github",
+    repo: "example/reference",
+    commit: "0".repeat(40),
+    paths: ["README.md"]
+  };
+  writeCurrentRunEvidence({
+    runRoot: root,
+    runId: "generated-run",
+    graph,
+    state: currentRunState({
+      runId: "generated-run",
       nodes: {
-        "model-a": attemptedNodeIds.has("model-a") ? { status: "succeeded", started_at: T0 } : { status: "skipped" },
-        "model-b": attemptedNodeIds.has("model-b") ? { status: "succeeded", started_at: T0 } : { status: "skipped" }
+        "model-a": attemptedNodeIds.has("model-a")
+          ? { status: "succeeded" }
+          : { status: "skipped", started_at: undefined },
+        "model-b": attemptedNodeIds.has("model-b")
+          ? { status: "succeeded" }
+          : { status: "skipped", started_at: undefined },
+        metadata: attemptedNodeIds.has("metadata")
+          ? { status: "succeeded" }
+          : { status: "skipped", started_at: undefined }
       }
-    }),
-    "utf8"
+    })
+  });
+  const controllerEvents = input.controllers.map((controller, index) =>
+    createEventRecord(
+      { runId: "generated-run" },
+      {
+        timestamp: new Date(Date.parse(T0) + index * 1_000).toISOString(),
+        eventType: index === 0 ? "workflow-submitted" : "workflow-lifecycle-submitted",
+        payload: {
+          workflow_run_id: workflowRunId(controller),
+          control_generation: controlGeneration(controller),
+          controller_invocation_id: controller,
+          controller_invoked_at: new Date(Date.parse(T0) + index * 1_000).toISOString()
+        }
+      }
+    )
   );
   fs.writeFileSync(
     path.join(root, "events.jsonl"),
-    `${input.controllers
-      .map((controller, index) =>
-        JSON.stringify({
-          timestamp: new Date(Date.parse(T0) + index * 1_000).toISOString(),
-          event_type: index === 0 ? "workflow-submitted" : "workflow-lifecycle-submitted",
-          payload: {
-            controller_invocation_id: controller,
-            controller_invoked_at: new Date(Date.parse(T0) + index * 1_000).toISOString()
-          }
-        })
-      )
-      .join("\n")}\n`,
+    controllerEvents.length === 0
+      ? ""
+      : `${controllerEvents.map((event) => JSON.stringify(event)).join("\n")}\n`,
     "utf8"
   );
-  const attempts = (input.attempts ?? []).map((attempt, index) =>
-    createNodeAttemptLedgerEntry(
+  const attemptCounts = new Map<string, number>();
+  const attempts = (input.attempts ?? []).map((attempt, index) => {
+    const { controllerInvocationId = "controller-1", ...overrides } = attempt;
+    const workflowId = overrides.workflowRunId ?? workflowRunId(controllerInvocationId);
+    const attemptIndex = attemptCounts.get(workflowId) ?? 0;
+    attemptCounts.set(workflowId, attemptIndex + 1);
+    return createNodeAttemptLedgerEntry(
       { runId: "generated-run" },
       {
-        executorRetryId: `retry-${index + 1}`,
-        checkpointGenerationId: `checkpoint-${index + 1}`,
-        workflowExecutionId: `execution-${attempt.controllerInvocationId ?? "controller-1"}`,
-        controllerInvocationId: attempt.controllerInvocationId ?? "controller-1",
+        workflowRunId: workflowId,
+        controlGeneration: overrides.controlGeneration ?? controlGeneration(controllerInvocationId),
+        iteration: overrides.iteration ?? 0,
+        attempt: overrides.attempt ?? attemptIndex,
+        startedEventSequence: overrides.startedEventSequence ?? attemptIndex * 2,
+        sourceEventSequence: overrides.sourceEventSequence ?? attemptIndex * 2 + 1,
         startedAt: new Date(Date.parse(T0) + index * 1_000 + 100).toISOString(),
         finishedAt: new Date(Date.parse(T0) + index * 1_000 + 200).toISOString(),
         outcome: "succeeded",
         inputManifestDigest: "a".repeat(64),
         outputManifestDigest: "b".repeat(64),
-        ...attempt
+        ...overrides
       }
-    )
-  );
+    );
+  });
   fs.writeFileSync(
     path.join(root, "attempts.jsonl"),
     attempts.length === 0 ? "" : `${attempts.map((attempt) => JSON.stringify(attempt)).join("\n")}\n`,
     "utf8"
   );
   return root;
+}
+
+function recoveryRecord(root: string): EvalRunRecord {
+  const row = testRow(testSuite("/tmp/ground-truth"), { id: "generated-row", run_id: "generated-run" });
+  return currentEvalRunRecord({
+    row,
+    runRoot: root,
+    runId: "generated-run",
+    evalRunId: "generated-eval",
+    overrides: { recovery_equivalence: undefined }
+  });
 }
 
 describe("recovery equivalence", () => {
@@ -157,7 +213,7 @@ describe("recovery equivalence", () => {
     expect(forbidden.reason).toContain("exceeds policy maximum");
   });
 
-  it("treats agentic nodes without explicit fanout as model-backed", () => {
+  it("treats agentic nodes with an empty fanout as model-backed", () => {
     const root = evidenceRoot({
       controllers: ["controller-1", "controller-2"],
       attempts: [
@@ -165,11 +221,9 @@ describe("recovery equivalence", () => {
         { nodeId: "model-a", strategyAttemptId: "model-a", controllerInvocationId: "controller-2" }
       ]
     });
-    fs.writeFileSync(
-      path.join(root, "graph.json"),
-      JSON.stringify({ nodes: [{ id: "model-a", kind: "agentic", model_fanout: [] }] }),
-      "utf8"
-    );
+    const graph = currentPlannedGraph(["model-a"], undefined);
+    graph.nodes[0]!.model_fanout = [];
+    fs.writeFileSync(path.join(root, "graph.json"), JSON.stringify(graph), "utf8");
 
     expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
       classification: "non-comparable",
@@ -180,22 +234,18 @@ describe("recovery equivalence", () => {
     });
   });
 
-  it("does not infer model work from kindless nodes with explicit empty fanout", () => {
+  it("does not infer model work from a typed reference node", () => {
     const root = evidenceRoot({ controllers: ["controller-1"] });
-    fs.writeFileSync(
-      path.join(root, "graph.json"),
-      JSON.stringify({ nodes: [{ id: "metadata", model_fanout: [] }] }),
-      "utf8"
-    );
+    const graph = JSON.parse(fs.readFileSync(path.join(root, "graph.json"), "utf8")) as {
+      nodes: Array<{ id: string }>;
+    };
+    graph.nodes = graph.nodes.filter((node) => node.id === "metadata");
+    fs.writeFileSync(path.join(root, "graph.json"), JSON.stringify(graph), "utf8");
     fs.writeFileSync(
       path.join(root, "state.json"),
-      JSON.stringify({
-        status: "succeeded",
-        nodes: { metadata: { status: "succeeded", started_at: T0 } }
-      }),
+      JSON.stringify(currentRunState({ runId: "generated-run", nodes: { metadata: { status: "succeeded" } } })),
       "utf8"
     );
-    fs.rmSync(path.join(root, "attempts.jsonl"));
 
     expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
       classification: "clean",
@@ -222,42 +272,51 @@ describe("recovery equivalence", () => {
     });
   });
 
-  it("fails closed when model exposure cannot be reconstructed", () => {
+  it("rejects current evidence when model exposure cannot be reconstructed", () => {
     const root = evidenceRoot({ controllers: ["controller-1"] });
     fs.writeFileSync(
       path.join(root, "state.json"),
-      JSON.stringify({
-        status: "succeeded",
-        nodes: { "model-a": { status: "succeeded", started_at: T0 }, "model-b": { status: "skipped" } }
-      }),
+      JSON.stringify(
+        currentRunState({
+          runId: "generated-run",
+          nodes: {
+            "model-a": { status: "succeeded" },
+            "model-b": { status: "skipped", started_at: undefined },
+            metadata: { status: "skipped", started_at: undefined }
+          }
+        })
+      ),
       "utf8"
     );
-    fs.rmSync(path.join(root, "attempts.jsonl"));
 
-    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
-      classification: "non-comparable",
-      reason: "node attempt ledger is unavailable"
-    });
+    expect(() => classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toThrow(
+      "model execution exposure cannot be reconstructed"
+    );
   });
 
-  it("fails closed when a partial ledger omits started model work", () => {
+  it("rejects a partial ledger that omits started model work", () => {
     const root = evidenceRoot({
       controllers: ["controller-1"],
-      attempts: [{ nodeId: "metadata", strategyAttemptId: "metadata", controllerInvocationId: "controller-1" }]
+      attempts: [{ nodeId: "model-b", strategyAttemptId: "model-b", controllerInvocationId: "controller-1" }]
     });
     fs.writeFileSync(
       path.join(root, "state.json"),
-      JSON.stringify({
-        status: "succeeded",
-        nodes: { "model-a": { status: "succeeded", started_at: T0 }, metadata: { status: "succeeded", started_at: T0 } }
-      }),
+      JSON.stringify(
+        currentRunState({
+          runId: "generated-run",
+          nodes: {
+            "model-a": { status: "succeeded" },
+            "model-b": { status: "succeeded" },
+            metadata: { status: "skipped", started_at: undefined }
+          }
+        })
+      ),
       "utf8"
     );
 
-    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
-      classification: "non-comparable",
-      reason: "model execution exposure cannot be reconstructed"
-    });
+    expect(() => classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toThrow(
+      "model execution exposure is incomplete"
+    );
   });
 
   it("fails closed when controller recovery lineage is unavailable", () => {
@@ -267,11 +326,9 @@ describe("recovery equivalence", () => {
     });
     fs.rmSync(path.join(root, "events.jsonl"));
 
-    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
-      classification: "non-comparable",
-      observed_node_attempts: 1,
-      reason: "controller recovery lineage cannot be reconstructed"
-    });
+    expect(() => classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toThrowError(
+      expect.objectContaining({ code: "EVAL_RECOVERY_EVIDENCE_INVALID" })
+    );
   });
 
   it("fails closed when controller events contain no submission lineage", () => {
@@ -280,13 +337,12 @@ describe("recovery equivalence", () => {
       attempts: [{ nodeId: "model-a", strategyAttemptId: "model-a", controllerInvocationId: "controller-1" }]
     });
 
-    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
-      classification: "non-comparable",
-      reason: "controller recovery lineage cannot be reconciled"
-    });
+    expect(() => classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toThrow(
+      "workflow event ledger has no controller submission evidence"
+    );
   });
 
-  it("reconciles provider controller aliases without double-counting local submissions", () => {
+  it("rejects provider aliases instead of synthesizing controller lineage", () => {
     const root = evidenceRoot({
       controllers: ["local-controller-1", "local-controller-2"],
       attempts: [
@@ -295,14 +351,12 @@ describe("recovery equivalence", () => {
       ]
     });
 
-    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
-      classification: "infrastructure-recovered",
-      recovery_generations: 1,
-      observed_controller_invocations: 2
-    });
+    expect(() => classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toThrow(
+      "node attempt lineage does not match a prior controller submission"
+    );
   });
 
-  it("retains provider-only recovery generations after the local submission", () => {
+  it("rejects provider-only generations without matching submission evidence", () => {
     const root = evidenceRoot({
       controllers: ["local-controller-1"],
       attempts: [
@@ -311,15 +365,12 @@ describe("recovery equivalence", () => {
       ]
     });
 
-    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
-      classification: "non-comparable",
-      recovery_generations: 1,
-      recovery_reexecuted_model_backed_node_executions: 1,
-      observed_controller_invocations: 2
-    });
+    expect(() => classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toThrow(
+      "node attempt lineage does not match a prior controller submission"
+    );
   });
 
-  it("fails closed when a controller identity reappears after another generation", () => {
+  it("rejects attempts that refer to an unsubmitted control generation", () => {
     const root = evidenceRoot({
       controllers: ["local-controller-1"],
       attempts: [
@@ -329,62 +380,51 @@ describe("recovery equivalence", () => {
       ]
     });
 
-    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
-      classification: "non-comparable",
-      reason: "controller recovery lineage cannot be reconciled"
-    });
+    expect(() => classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toThrow(
+      "node attempt lineage does not match a prior controller submission"
+    );
   });
 
-  it("fails closed on contradictory graph kind and model fanout", () => {
+  it("rejects contradictory graph kind and model fanout", () => {
     const root = evidenceRoot({
       controllers: ["controller-1"],
       attempts: [{ nodeId: "model-a", strategyAttemptId: "model-a", controllerInvocationId: "controller-1" }]
     });
-    fs.writeFileSync(
-      path.join(root, "graph.json"),
-      JSON.stringify({
-        nodes: [{ id: "model-a", kind: "meta", model_fanout: [{ model_profile_id: "generated-model" }] }]
-      }),
-      "utf8"
-    );
-
-    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
-      classification: "non-comparable",
-      reason: "planned graph model metadata is inconsistent"
-    });
-  });
-
-  it("fails closed on duplicate graph or controller identities", () => {
-    const root = evidenceRoot({
-      controllers: ["controller-1"],
-      attempts: [{ nodeId: "model-a", strategyAttemptId: "model-a", controllerInvocationId: "controller-1" }]
-    });
-    fs.writeFileSync(
-      path.join(root, "graph.json"),
-      JSON.stringify({
-        nodes: [
-          { id: "model-a", kind: "agentic" },
-          { id: "model-a", kind: "meta" }
-        ]
-      }),
-      "utf8"
-    );
-    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
-      classification: "non-comparable",
-      reason: "planned graph contains duplicate node identities"
-    });
-
-    fs.writeFileSync(path.join(root, "graph.json"), JSON.stringify({ nodes: [{ id: "model-a", kind: "agentic" }] }));
-    const event = {
-      timestamp: T0,
-      event_type: "workflow-submitted",
-      payload: { controller_invocation_id: "controller-1", controller_invoked_at: T0 }
+    const graph = JSON.parse(fs.readFileSync(path.join(root, "graph.json"), "utf8")) as {
+      nodes: Array<{ kind: string; model_fanout: unknown[] }>;
     };
-    fs.writeFileSync(path.join(root, "events.jsonl"), `${JSON.stringify(event)}\n${JSON.stringify(event)}\n`, "utf8");
-    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
-      classification: "non-comparable",
-      reason: "controller recovery lineage cannot be reconstructed"
+    graph.nodes[2]!.model_fanout = [...graph.nodes[0]!.model_fanout];
+    fs.writeFileSync(path.join(root, "graph.json"), JSON.stringify(graph), "utf8");
+
+    expect(() => classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toThrow(
+      "planned graph is schema-invalid"
+    );
+  });
+
+  it("rejects duplicate graph or controller identities", () => {
+    const root = evidenceRoot({
+      controllers: ["controller-1"],
+      attempts: [{ nodeId: "model-a", strategyAttemptId: "model-a", controllerInvocationId: "controller-1" }]
     });
+    const graph = JSON.parse(fs.readFileSync(path.join(root, "graph.json"), "utf8")) as {
+      nodes: Array<Record<string, unknown>>;
+    };
+    graph.nodes = [graph.nodes[0]!, { ...graph.nodes[0]! }];
+    fs.writeFileSync(path.join(root, "graph.json"), JSON.stringify(graph), "utf8");
+    expect(() => classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toThrow(
+      'planned graph repeats node ID "model-a"'
+    );
+
+    fs.writeFileSync(
+      path.join(root, "graph.json"),
+      JSON.stringify(currentPlannedGraph(["model-a"], undefined)),
+      "utf8"
+    );
+    const event = fs.readFileSync(path.join(root, "events.jsonl"), "utf8").trim();
+    fs.writeFileSync(path.join(root, "events.jsonl"), `${event}\n${event}\n`, "utf8");
+    expect(() => classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toThrowError(
+      expect.objectContaining({ code: "EVAL_RECOVERY_EVIDENCE_INVALID" })
+    );
   });
 
   it("fails closed when controller submission events are malformed", () => {
@@ -401,11 +441,9 @@ describe("recovery equivalence", () => {
       "utf8"
     );
 
-    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
-      classification: "non-comparable",
-      observed_node_attempts: 1,
-      reason: "controller recovery lineage cannot be reconstructed"
-    });
+    expect(() => classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toThrowError(
+      expect.objectContaining({ code: "EVAL_RECOVERY_EVIDENCE_INVALID" })
+    );
   });
 
   it("preserves the first recorded classification when later evidence changes", () => {
@@ -413,18 +451,7 @@ describe("recovery equivalence", () => {
       controllers: ["controller-1"],
       attempts: [{ nodeId: "model-a", strategyAttemptId: "model-a", controllerInvocationId: "controller-1" }]
     });
-    const record: EvalRunRecord = {
-      schema_version: "ultrafuzz.eval.run.v1",
-      eval_run_id: "generated-eval",
-      row_id: "generated-row",
-      target_id: "generated-target",
-      variant_id: "generated-variant",
-      trial_id: "trial-1",
-      ultrafuzz_run_root: root,
-      status: "launched",
-      workflow_ids: [],
-      diagnostics: []
-    };
+    const record = recoveryRecord(root);
     const recorded = withRecordedRecoveryEquivalence(record, { recovery_equivalence: POLICY });
     fs.writeFileSync(path.join(root, "attempts.jsonl"), "not-json\n", "utf8");
 
@@ -466,18 +493,7 @@ describe("recovery equivalence", () => {
       attempts: [{ nodeId: "model-a", strategyAttemptId: "model-a", controllerInvocationId: "controller-1" }]
     });
     const clean = classifyRecoveryEquivalence({ runRoot: root, policy: POLICY });
-    const base: EvalRunRecord = {
-      schema_version: "ultrafuzz.eval.run.v1",
-      eval_run_id: "generated-eval",
-      row_id: "generated-row",
-      target_id: "generated-target",
-      variant_id: "generated-variant",
-      trial_id: "trial-1",
-      ultrafuzz_run_root: root,
-      status: "launched",
-      workflow_ids: [],
-      diagnostics: []
-    };
+    const base = recoveryRecord(root);
 
     expect(() =>
       reconcileEvalRunRecords([
@@ -499,24 +515,20 @@ describe("recovery equivalence", () => {
       controllers: ["controller-1"],
       attempts: [{ nodeId: "model-a", strategyAttemptId: "model-a", controllerInvocationId: "controller-1" }]
     });
-    const record: EvalRunRecord = {
-      schema_version: "ultrafuzz.eval.run.v1",
-      eval_run_id: "generated-eval",
-      row_id: "generated-row",
-      target_id: "generated-target",
-      variant_id: "generated-variant",
-      trial_id: "trial-1",
-      ultrafuzz_run_root: root,
-      status: "launched",
-      workflow_ids: [],
-      diagnostics: []
-    };
+    const record = recoveryRecord(root);
     const statePath = path.join(root, "state.json");
-    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
-    fs.writeFileSync(statePath, JSON.stringify({ ...state, status: "running" }), "utf8");
+    fs.writeFileSync(
+      statePath,
+      JSON.stringify(currentRunState({ runId: "generated-run", status: "running", nodes: { "model-a": {} } })),
+      "utf8"
+    );
     expect(recoveryEquivalenceCanBeRecorded(record)).toBe(false);
 
-    fs.writeFileSync(statePath, JSON.stringify({ ...state, status: "succeeded" }), "utf8");
+    fs.writeFileSync(
+      statePath,
+      JSON.stringify(currentRunState({ runId: "generated-run", status: "succeeded", nodes: { "model-a": {} } })),
+      "utf8"
+    );
     expect(recoveryEquivalenceCanBeRecorded(record)).toBe(true);
   });
 });

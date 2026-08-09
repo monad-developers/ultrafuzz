@@ -8,13 +8,15 @@ import {
   assertPathInside,
   assertRegularFileInside,
   layoutForRunRoot,
+  readRegularFileSnapshot,
+  readRunState,
   validateSafeId
 } from "@ultrafuzz/artifacts";
 import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
 
 import { commandFailure, emitCommandResult, globalFlags, projectRoot } from "../../command-shared.js";
-import { loadValidatedReportArtifacts } from "../../report-artifacts.js";
+import { loadValidatedReportSnapshot, type ValidatedReportSnapshot } from "../../report-artifacts.js";
 
 const TOP_LEVEL_RUN_FILES = [
   "attempts.jsonl",
@@ -26,8 +28,7 @@ const TOP_LEVEL_RUN_FILES = [
   "plan.json",
   "run.json",
   "state.json",
-  "usage.jsonl",
-  "workspaces.json"
+  "usage.jsonl"
 ] as const;
 
 const INCLUDED_DIRECTORIES = ["artifacts", "review", "events.index"] as const;
@@ -36,6 +37,8 @@ const INCLUDED_DIRECTORIES = ["artifacts", "review", "events.index"] as const;
 // why a node failed, which nothing else in the run root records. They ship under
 // a neutral archive prefix so the bundle does not name the orchestration engine.
 const RENAMED_DIRECTORIES = [{ source: "smithers/logs", archive: "engine-logs" }] as const;
+const MAX_BUNDLE_FILE_BYTES = 64 * 1024 * 1024;
+const MAX_BUNDLE_TOTAL_BYTES = 512 * 1024 * 1024;
 
 interface BundleData {
   zip_path: string;
@@ -49,6 +52,7 @@ interface BundleData {
 interface BundleFile {
   absolutePath: string;
   archivePath: string;
+  contents: Buffer;
 }
 
 export default class ReportBundle extends Command {
@@ -95,17 +99,18 @@ export default class ReportBundle extends Command {
       assertNoSymlinkComponents(outputGuardRoot, outputDirectory, "output directory");
 
       const diagnostics: RuntimeDiagnostic[] = [];
-      if (hasFinalReportJson(layout.root, layout.artifactsDir)) {
-        loadValidatedReportArtifacts(layout.root);
-      }
+      const validatedReport = hasFinalReportJson(layout.root, layout.artifactsDir)
+        ? loadValidatedReportSnapshot(layout.root)
+        : undefined;
       const files = collectBundleFiles(layout.root, diagnostics);
+      if (validatedReport !== undefined) assertValidatedReportBundleSnapshot(files, validatedReport);
       if (files.length === 0) {
         throw new Error("run has no report bundle artifacts to package");
       }
 
       const zip = new AdmZip();
       for (const file of files) {
-        zip.addFile(file.archivePath, fs.readFileSync(file.absolutePath));
+        zip.addFile(file.archivePath, file.contents);
       }
       const manifest = {
         schema_version: "ultrafuzz.report_bundle.v1",
@@ -159,6 +164,19 @@ export default class ReportBundle extends Command {
   }
 }
 
+function assertValidatedReportBundleSnapshot(files: readonly BundleFile[], report: ValidatedReportSnapshot): void {
+  const expected = [
+    { path: report.artifacts.json_path, contents: report.json_bytes },
+    { path: report.artifacts.markdown_path, contents: report.markdown_bytes }
+  ];
+  for (const entry of expected) {
+    const captured = files.find((file) => file.absolutePath === entry.path);
+    if (captured === undefined || !captured.contents.equals(entry.contents)) {
+      throw new Error(`validated report changed before its immutable bundle snapshot was captured: ${entry.path}`);
+    }
+  }
+}
+
 function resolveOutputPath(project: string, runId: string, requested: string | undefined): string {
   if (requested !== undefined) {
     return path.resolve(path.isAbsolute(requested) ? requested : path.join(project, requested));
@@ -184,10 +202,9 @@ function hasFinalReportJson(runRoot: string, artifactsDirectory: string): boolea
   const statePath = path.join(runRoot, "state.json");
   if (fs.existsSync(statePath)) {
     assertRegularFileInside(runRoot, statePath, "run state path");
-    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as unknown;
-    const nodes = recordField(state, "nodes");
-    for (const [nodeId, nodeState] of Object.entries(nodes ?? {})) {
-      if (recordValue(nodeState, "logical_node_id") === "final-report") {
+    const state = readRunState(layoutForRunRoot(runRoot));
+    for (const [nodeId, nodeState] of Object.entries(state.nodes)) {
+      if (nodeState.logical_node_id === "final-report") {
         nodeIds.add(validateSafeId(nodeId, "final report node ID"));
       }
     }
@@ -201,22 +218,6 @@ function hasFinalReportJson(runRoot: string, artifactsDirectory: string): boolea
     return true;
   }
   return false;
-}
-
-function recordField(value: unknown, key: string): Record<string, unknown> | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  const field = (value as Record<string, unknown>)[key];
-  return field !== null && typeof field === "object" && !Array.isArray(field)
-    ? (field as Record<string, unknown>)
-    : undefined;
-}
-
-function recordValue(value: unknown, key: string): unknown {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)[key]
-    : undefined;
 }
 
 function collectBundleFiles(runRoot: string, diagnostics: RuntimeDiagnostic[]): BundleFile[] {
@@ -246,6 +247,10 @@ function collectBundleFiles(runRoot: string, diagnostics: RuntimeDiagnostic[]): 
     }
   }
 
+  const totalBytes = files.reduce((total, file) => total + file.contents.byteLength, 0);
+  if (totalBytes > MAX_BUNDLE_TOTAL_BYTES) {
+    throw new Error(`report bundle inputs exceed the ${MAX_BUNDLE_TOTAL_BYTES}-byte limit`);
+  }
   return files.sort((left, right) => left.archivePath.localeCompare(right.archivePath));
 }
 
@@ -295,7 +300,11 @@ function addBundleFile(
 ): void {
   try {
     assertRegularFileInside(runRoot, absolutePath, "bundle file");
-    files.push({ absolutePath, archivePath: normalizeArchivePath(archivePath) });
+    files.push({
+      absolutePath,
+      archivePath: normalizeArchivePath(archivePath),
+      contents: readRegularFileSnapshot(absolutePath, MAX_BUNDLE_FILE_BYTES)
+    });
   } catch (error) {
     diagnostics.push({
       code: "REPORT_BUNDLE_FILE_SKIPPED",

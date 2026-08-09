@@ -1,7 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { appendLineDurable, assertNoSymlinkComponents, safeResolveInside } from "@ultrafuzz/artifacts";
+import {
+  appendLineDurable,
+  assertNoSymlinkComponents,
+  readRunPlanDocument,
+  safeResolveInside
+} from "@ultrafuzz/artifacts";
 import type { ModalExecutionProviderConfig } from "@ultrafuzz/config";
 import { isPathInside, validateCleanPolicy } from "@ultrafuzz/security";
 
@@ -163,28 +168,11 @@ function readPersistedModalExecution(runRoot: string): ModalExecutionProviderCon
   const planPath = path.join(runRoot, "plan.json");
   if (!fs.existsSync(planPath)) return undefined;
   assertNoSymlinkComponents(runRoot, planPath, "cloud cleanup plan");
-  const plan = JSON.parse(fs.readFileSync(planPath, "utf8")) as unknown;
-  if (!isRecord(plan) || !isRecord(plan.execution) || plan.execution.mode !== "cloud") return undefined;
-  if (plan.execution.provider !== "modal") {
-    throw new Error("persisted cloud execution provider is unsupported");
-  }
-  const providers = plan.execution.providers;
-  const modal = isRecord(providers) ? providers.modal : undefined;
-  if (
-    !isRecord(modal) ||
-    typeof modal.app !== "string" ||
-    modal.app.trim() === "" ||
-    typeof modal.image !== "string" ||
-    modal.image.trim() === "" ||
-    (modal.region !== undefined && (typeof modal.region !== "string" || modal.region.trim() === "")) ||
-    !Array.isArray(modal.credentialEnv) ||
-    modal.credentialEnv.length !== 2 ||
-    new Set(modal.credentialEnv).size !== modal.credentialEnv.length ||
-    !modal.credentialEnv.every((name) => typeof name === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/u.test(name))
-  ) {
-    throw new Error("persisted cloud cleanup configuration is invalid");
-  }
-  return modal as unknown as ModalExecutionProviderConfig;
+  const plan = readRunPlanDocument(planPath, path.basename(runRoot));
+  if (plan.execution.mode !== "cloud") return undefined;
+  const modal = plan.execution.providers.modal;
+  if (modal === undefined) throw new Error("persisted cloud cleanup plan is missing its Modal provider");
+  return modal;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

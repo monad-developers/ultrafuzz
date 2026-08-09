@@ -1,69 +1,65 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
-  USAGE_FIELDS,
-  USAGE_INCOMPLETE_REASON_CODES,
   appendUsageEvents,
   appendNodeAttempts,
   appendEvent,
+  assertRunMetadataDocument,
   assertPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
   assertNoSymlinkComponents,
   assertPathInside,
   createNodeAttemptLedgerEntry,
+  createUsageLedgerEntry,
   getNodeArtifactDir,
   layoutForRunRoot,
   manifestDigest,
+  nodeAttemptLedgerIdentity,
   normalizeNodeAttemptFailureMessage,
   queryNodeAttempts,
   readJsonFile,
+  readRunMetadataDocument,
   replayEvents,
+  replayNodeAttempts,
   readRunState,
   parseStrictJsonBytes,
   parseSmithersTaskManifestBytes,
   replayUsageEvents,
   safeResolveInside,
-  stableUsageDimension,
   sha256File,
   updateNodeState,
   updateRunStatus,
+  usageLedgerIdentity,
   validateFindingsSchema,
   validateSafeId,
   writeArtifactManifest,
-  writeJsonDurable,
+  writeRunMetadataDocument,
   writeRunState,
   type AppendNodeAttemptInput,
   type ArtifactProvenance,
   type AppendUsageEventInput,
   type NodeAttemptFailureCategory,
-  type NodeAttemptId,
   type NodeAttemptLedgerEntry,
   type NodeAttemptOutcome,
   type NodeState,
   type NormalizedUsage,
   type NodeStatus,
   type RunLayout,
+  type RunMetadataAccounting,
+  type RunMetadataDocument,
   type RunStatus,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestTask,
   PLANNED_GRAPH_SCHEMA_VERSION,
   type StateJsonValue,
-  type UsageField,
-  type UsageIncompleteReason as LedgerUsageIncompleteReason,
   type UsageLedgerEntry,
   type UsageLedgerReplay
 } from "@ultrafuzz/artifacts";
 
 import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
 import {
-  ArtifactReconciliationInterruptedError,
-  isRetryableArtifactReconciliationError,
-  onlyTransientArtifactDiagnostics,
-  reconcileRequiredArtifactsFromWorkspace
-} from "./artifact-reconciliation.js";
-import {
-  modelPricingFromSnapshot,
   modelPricingSnapshot,
   pricingForContext,
   resolveLiveModelPricing,
@@ -78,7 +74,7 @@ import {
   type SyncRunInput,
   type SyncRunValue
 } from "./types.js";
-import { diagnosticFromError, readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
+import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
 import {
   requestSmithersCancel,
   runSmithersInspectionCommand,
@@ -87,6 +83,7 @@ import {
 } from "./smithers.js";
 import { runsRootForProject } from "./validate.js";
 import { projectWorkflowControlState } from "./workflow-control.js";
+import { runtimeSemanticGateDiagnostics } from "./semantic-gates.js";
 
 type StoredWorkflowTask = SmithersTaskManifestTask;
 
@@ -107,49 +104,27 @@ interface WorkflowInspect {
 
 interface WorkflowEvent {
   type: string;
-  sequence?: number;
-  globalSequence?: number;
-  sourceEventId?: string;
-  timestampMs?: number;
-  payload?: Record<string, unknown>;
+  workflowRunId: string;
+  sourceEventSequence: number;
+  timestampMs: number;
+  payload: Record<string, unknown>;
 }
 
-interface UsageCompletenessMarker {
-  code: LedgerUsageIncompleteReason["code"] | ComponentUsageIncompleteReason["code"] | "ledger-entry-malformed";
-  field?: UsageField;
-  component?: UsageComponent;
-  model?: string;
-  event_id?: string;
-  checkpoint_generation_id?: string;
-}
+type UsageCompletenessMarker = ComponentUsageIncompleteReason;
 
-interface PricingCompletenessMarker {
-  code: PricingIncompleteReason["code"] | "price-unavailable" | "ledger-entry-malformed";
-  component?: UsageComponent;
-  model?: string;
-  event_id?: string;
-  checkpoint_generation_id?: string;
-}
+type PricingCompletenessMarker = PricingIncompleteReason;
 
 interface TerminalWorkflowAttempt {
   retry: number;
   iteration: number;
-  startedSequence?: number;
-  finishedSequence?: number;
+  nodeId: string;
+  startedSequence: number;
+  finishedSequence: number;
   startedAt: string;
   finishedAt: string;
   outcome: NodeAttemptOutcome;
   failureCategory?: NodeAttemptFailureCategory;
   failureMessage?: string;
-  executorRetryId?: string;
-  checkpointGenerationId?: string;
-  workflowExecutionId?: string;
-  controllerInvocationId?: string;
-}
-
-interface ControllerInvocation {
-  id: string;
-  invokedAt: string;
 }
 
 interface AccountingSummary {
@@ -166,7 +141,6 @@ interface AccountingSummary {
   estimated_spend: string;
   estimated_spend_usd?: number;
   component_costs_usd: UsageComponentCosts;
-  provided_cost_usd?: number;
   usage_complete: boolean;
   usage_incomplete_reasons: UsageCompletenessMarker[];
   pricing_complete: boolean;
@@ -182,14 +156,43 @@ interface AccountingSummary {
 }
 
 interface AccountingSegment extends AccountingSummary {
-  checkpoint_generation_id: string;
+  control_generation: string;
   workflow_run_id: string;
-  event_ids: string[];
-  attempt_ids: string[];
+  source_event_sequences: number[];
+  attempts: Array<{ node_id: string; iteration: number; attempt: number }>;
 }
 
 interface CumulativeAccountingSummary extends AccountingSummary {
   source_run_ids: string[];
+}
+
+interface StoredPricingCatalog extends PricingCatalogMetadata {
+  model_prices: Record<string, ModelPricing>;
+}
+
+interface StoredAccountingDocument {
+  raw: Record<string, unknown>;
+  workflowRunId: string;
+  current: AccountingSegment;
+  segments: AccountingSegment[];
+  cumulative: CumulativeAccountingSummary;
+  checkpoint: StoredAccountingCheckpoint;
+  pricingCatalog: StoredPricingCatalog;
+  pricing: Map<string, ModelPricing>;
+}
+
+interface StoredAccountingCheckpoint {
+  schema_version: typeof ACCOUNTING_CHECKPOINT_SCHEMA_VERSION;
+  ledger_event_count: number;
+  last_source_event_sequence: number;
+  control_generation: string;
+  workflow_run_id: string;
+}
+
+interface PreparedUsageLedgerAppend {
+  inputs: AppendUsageEventInput[];
+  entries: UsageLedgerEntry[];
+  pendingEntries: UsageLedgerEntry[];
 }
 
 interface AccountingTotals {
@@ -202,7 +205,6 @@ interface AccountingTotals {
   billableTokens: number;
   estimatedSpendUsd?: number;
   componentCostsUsd: UsageComponentCosts;
-  providedCostUsd?: number;
   usageIncompleteReasons: ComponentUsageIncompleteReason[];
   pricingIncompleteReasons: PricingIncompleteReason[];
   partialPricing: boolean;
@@ -220,13 +222,13 @@ type UsageComponent = "uncached_input" | "cache_read" | "cache_write" | "output"
 type UsageComponentCosts = Record<UsageComponent, number>;
 
 interface ComponentUsageIncompleteReason {
-  code: "component-usage-unavailable" | "component-usage-estimated" | "component-breakdown-incomplete";
+  code: "component-usage-unavailable" | "component-usage-estimated";
   component?: UsageComponent;
   model?: string;
 }
 
 interface PricingIncompleteReason {
-  code: "model-pricing-unavailable" | "component-rate-unavailable" | "event-pricing-reported-partial";
+  code: "model-pricing-unavailable" | "component-rate-unavailable";
   component?: UsageComponent;
   model?: string;
 }
@@ -275,21 +277,6 @@ export interface WorkflowSynchronizationControl {
   deadlineMs?: number;
 }
 
-interface ArtifactReconciliationGrace {
-  [key: string]: StateJsonValue;
-  schema_version: "ultrafuzz.artifact-reconciliation-grace.v1";
-  started_at: string;
-  deadline_at: string;
-  attempts: number;
-  last_attempt_at: string;
-  missing_count: number;
-}
-
-type ArtifactReconciliationGraceRead =
-  | { status: "absent" }
-  | { status: "valid"; value: ArtifactReconciliationGrace }
-  | { status: "invalid"; issues: string[] };
-
 const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
   "succeeded",
   "failed",
@@ -320,13 +307,9 @@ const TERMINAL_FAILED_WORKFLOW_STATES = new Set(["failed", "error", "timeout", "
 // A node that reached one of these did not fail, so a failure attribution from
 // an earlier attempt must not survive on it.
 const NODE_RECOVERED_STATUSES = new Set<NodeStatus>(["succeeded", "reused-from-prior-run"]);
-const ACCOUNTING_SCHEMA_VERSION = "2.0";
-const ACCOUNTING_CHECKPOINT_SCHEMA_VERSION = "1.0";
+const ACCOUNTING_SCHEMA_VERSION = "ultrafuzz.accounting.v3";
+const ACCOUNTING_CHECKPOINT_SCHEMA_VERSION = "ultrafuzz.accounting-checkpoint.v1";
 const ACCOUNTING_USD_PRECISION = 12;
-export const ARTIFACT_RECONCILIATION_GRACE_MS = 5 * 60 * 1000;
-export const ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS = 15 * 1000;
-export const ARTIFACT_RECONCILIATION_MAX_ATTEMPTS = 20;
-export const ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS = 5 * 1000;
 
 export async function syncRun(input: SyncRunInput, control: WorkflowSynchronizationControl = {}) {
   const result = await synchronizeLinkedWorkflowRun(input, control);
@@ -426,8 +409,8 @@ export async function synchronizeLinkedWorkflowRun(
   ];
 
   const inspect = parseInspectSnapshot(inspectSnapshot.json);
-  const events = parseWorkflowEvents(eventsSnapshot.stdout);
-  const tokenEvents = parseWorkflowEvents(tokenEventsSnapshot.stdout);
+  const events = parseWorkflowEvents(eventsSnapshot.stdout, evidence.smithersRunId);
+  const tokenEvents = parseWorkflowEvents(tokenEventsSnapshot.stdout, evidence.smithersRunId);
   let syncResult;
   try {
     syncResult = await synchronizeTasks({
@@ -435,6 +418,7 @@ export async function synchronizeLinkedWorkflowRun(
       graph: loaded.graph,
       tasks: loaded.tasks,
       workflowRunId: evidence.smithersRunId,
+      controlGeneration: evidence.controlGeneration,
       inspect,
       events,
       control
@@ -476,6 +460,7 @@ export async function synchronizeLinkedWorkflowRun(
   const accountingResult = await synchronizeWorkflowAccounting({
     layout,
     workflowRunId: evidence.smithersRunId,
+    controlGeneration: evidence.controlGeneration,
     events: tokenEvents,
     attemptEvents: events,
     control,
@@ -651,14 +636,6 @@ function synchronizationInterruptionDiagnostic(error: unknown): RuntimeDiagnosti
   if (error instanceof WorkflowSynchronizationInterruptedError) {
     return error.diagnostic;
   }
-  if (error instanceof ArtifactReconciliationInterruptedError) {
-    return {
-      code: error.code,
-      message: error.message,
-      severity: "error",
-      source: "workflow"
-    };
-  }
   return undefined;
 }
 
@@ -680,6 +657,7 @@ function inspectionExecutionControl(
 async function synchronizeWorkflowAccounting(input: {
   layout: RunLayout;
   workflowRunId: string;
+  controlGeneration: string;
   events: WorkflowEvent[];
   attemptEvents: WorkflowEvent[];
   env?: Record<string, string | undefined>;
@@ -689,23 +667,47 @@ async function synchronizeWorkflowAccounting(input: {
   available: boolean;
   budgetDiagnostic?: RuntimeDiagnostic;
 }> {
-  const usageReplay = appendWorkflowUsageEvents(input.layout, input.workflowRunId, input.events);
-  if (usageReplay.entries.length === 0 && usageReplay.malformedEntries === 0) {
+  const metadata = readRunMetadataDocument(input.layout.runMetadataPath, input.layout.runId);
+  if (metadata.workflow?.run_id !== input.workflowRunId) {
+    throw new Error("run.json workflow does not match the linked Smithers run");
+  }
+  if (metadata.workflow.control_generation !== input.controlGeneration) {
+    throw new Error("run.json workflow control generation does not match the linked Smithers run");
+  }
+  const storedAccounting =
+    metadata.accounting === undefined
+      ? undefined
+      : storedAccountingDocument(metadata.accounting, input.workflowRunId);
+  const existingUsageReplay = replayUsageEvents(input.layout);
+  if (storedAccounting !== undefined) {
+    assertAccountingMatchesUsageLedger(storedAccounting, existingUsageReplay.entries, "run.json#$.accounting");
+  }
+  const preparedUsage = prepareWorkflowUsageEvents(
+    input.layout,
+    input.workflowRunId,
+    input.controlGeneration,
+    input.events,
+    existingUsageReplay
+  );
+
+  const stateSourceRunId = readRunState(input.layout).source_run_id;
+  if (metadata.source_run_id !== stateSourceRunId) {
+    throw new Error("run.json and state.json disagree on source_run_id");
+  }
+  if (preparedUsage.entries.length === 0) {
+    if (storedAccounting !== undefined) {
+      throw new Error("run.json accounting cannot exist when the usage ledger is empty");
+    }
     return { changed: false, available: false };
   }
 
-  const metadata = readJsonIfExists<Record<string, unknown>>(input.layout.runMetadataPath) ?? {};
-  const storedAccounting = recordField(metadata, "accounting");
-  const storedPricingCatalog = recordField(storedAccounting, "pricing_catalog");
-  const storedPricing =
-    stringField(storedAccounting, "schema_version") === ACCOUNTING_SCHEMA_VERSION
-      ? modelPricingFromSnapshot(storedPricingCatalog?.model_prices)
-      : new Map<string, ModelPricing>();
+  const storedPricingCatalog = storedAccounting?.pricingCatalog;
+  const storedPricing = storedAccounting?.pricing ?? new Map<string, ModelPricing>();
   const previouslyUnresolvedModels =
     storedPricingCatalog?.status === "disabled"
-      ? new Set(stringArrayField(storedPricingCatalog, "unresolved_models"))
+      ? new Set(storedPricingCatalog.unresolved_models)
       : new Set<string>();
-  const ledgerEvents = workflowEventsFromUsageLedger(usageReplay.entries);
+  const ledgerEvents = workflowEventsFromUsageLedger(preparedUsage.entries);
   const requiredModels = modelsRequiringPricing(ledgerEvents);
   const missingModels = requiredModels.filter(
     (model) => !storedPricing.has(model) && !previouslyUnresolvedModels.has(model)
@@ -740,65 +742,20 @@ async function synchronizeWorkflowAccounting(input: {
     live: livePricing?.metadata
   });
   const cacheReadRatio = configuredCacheReadRatio(input.env?.ULTRAFUZZ_CACHE_READ_RATIO);
-  const observedFailedZeroUsageSourceEvents = failedZeroUsageSourceEventIds(
-    input.workflowRunId,
-    input.events,
-    input.attemptEvents
-  );
-  const exemptionCandidateSourceEventIds = new Set(
-    usageReplay.entries
-      .filter((entry) => usageLedgerEntryIsZeroUsageExemptionCandidate(entry))
-      .map((entry) => entry.source_event_id)
-  );
-  const failedZeroUsageSourceEvents = new Set(
-    [
-      ...stringArrayField(recordField(storedAccounting, "checkpoint"), "failed_zero_usage_source_event_ids"),
-      ...observedFailedZeroUsageSourceEvents
-    ].filter((sourceEventId) => exemptionCandidateSourceEventIds.has(sourceEventId))
-  );
-  const seenPersistedFailedZeroUsageSourceEventIds = new Set<string>();
-  const persistedFailedZeroUsageSourceEventIds = usageReplay.entries.flatMap((entry) => {
-    const sourceEventId = entry.source_event_id;
-    if (
-      !failedZeroUsageSourceEvents.has(sourceEventId) ||
-      seenPersistedFailedZeroUsageSourceEventIds.has(sourceEventId)
-    ) {
-      return [];
-    }
-    seenPersistedFailedZeroUsageSourceEventIds.add(sourceEventId);
-    return [sourceEventId];
-  });
-  const segments = accountingSegmentsFromUsageLedger(
-    usageReplay.entries,
-    resolvedPricing,
-    cacheReadRatio,
-    usageReplay.malformedEntries,
-    failedZeroUsageSourceEvents
-  );
-  const current =
-    segments.at(-1) ??
-    accountingSummaryWithCompleteness(
-      undefined,
-      [],
-      usageReplay.malformedEntries,
-      {
-        checkpointGenerationId: stableUsageDimension("checkpoint", [input.workflowRunId, "malformed"]),
-        workflowRunId: input.workflowRunId
-      },
-      failedZeroUsageSourceEvents
-    );
-  const accountingSegments = segments.length === 0 && usageReplay.malformedEntries > 0 ? [current] : segments;
+  const accountingSegments = accountingSegmentsFromUsageLedger(preparedUsage.entries, resolvedPricing, cacheReadRatio);
+  const current = accountingSegments.at(-1);
+  if (current === undefined) throw new Error("non-empty usage ledger produced no accounting segment");
 
-  const sourceRunId = stringField(metadata, "source_run_id") ?? readRunState(input.layout).source_run_id;
+  const sourceRunId = metadata.source_run_id;
   const sourceAccounting =
     sourceRunId === undefined ? undefined : cumulativeAccountingForSourceRun(input.layout, sourceRunId);
-  const sourceSummaries = sourceAccounting?.summary === undefined ? [] : [sourceAccounting.summary];
+  const sourceSummaries = sourceAccounting === undefined ? [] : [sourceAccounting.summary];
   const cumulative = cumulativeAccountingSummary(
     [...sourceSummaries, ...accountingSegments],
     sourceAccounting?.sourceRunIds ?? []
   );
-  const lastUsageEvent = usageReplay.entries.at(-1);
-  const nextComparable = {
+  const lastUsageEvent = preparedUsage.entries.at(-1)!;
+  const nextComparable: Omit<RunMetadataAccounting, "updated_at"> = {
     schema_version: ACCOUNTING_SCHEMA_VERSION,
     source: "usage-ledger",
     workflow_run_id: input.workflowRunId,
@@ -807,23 +764,30 @@ async function synchronizeWorkflowAccounting(input: {
     cumulative,
     checkpoint: {
       schema_version: ACCOUNTING_CHECKPOINT_SCHEMA_VERSION,
-      ledger_event_count: usageReplay.entries.length,
-      malformed_entry_count: usageReplay.malformedEntries,
-      duplicate_entry_count: usageReplay.duplicateEntries,
-      ...(persistedFailedZeroUsageSourceEventIds.length === 0
-        ? {}
-        : { failed_zero_usage_source_event_ids: persistedFailedZeroUsageSourceEventIds }),
-      ...(lastUsageEvent === undefined
-        ? {}
-        : {
-            last_event_id: lastUsageEvent.event_id,
-            checkpoint_generation_id: lastUsageEvent.checkpoint_generation_id,
-            workflow_run_id: lastUsageEvent.workflow_run_id
-          })
+      ledger_event_count: preparedUsage.entries.length,
+      last_source_event_sequence: lastUsageEvent.source_event_sequence,
+      control_generation: lastUsageEvent.control_generation,
+      workflow_run_id: lastUsageEvent.workflow_run_id
     },
     pricing_catalog: pricingCatalog
   };
-  if (sameJsonValue(comparableAccounting(recordField(metadata, "accounting")), comparableAccounting(nextComparable))) {
+  const accountingChanged = !sameJsonValue(
+    comparableAccounting(storedAccounting?.raw),
+    comparableAccounting(nextComparable)
+  );
+  const nextAccounting: RunMetadataAccounting = {
+    ...nextComparable,
+    updated_at:
+      accountingChanged || metadata.accounting === undefined ? new Date().toISOString() : metadata.accounting.updated_at
+  };
+  const nextMetadata = assertRunMetadataDocument(
+    { ...metadata, accounting: nextAccounting },
+    input.layout.runId
+  );
+  const validatedAccounting = storedAccountingDocument(nextMetadata.accounting, input.workflowRunId);
+  assertAccountingMatchesUsageLedger(validatedAccounting, preparedUsage.entries, "proposed run.json#$.accounting");
+
+  if (!accountingChanged && preparedUsage.pendingEntries.length === 0) {
     return { changed: false, available: true };
   }
 
@@ -835,14 +799,16 @@ async function synchronizeWorkflowAccounting(input: {
     return { changed: false, available: false, budgetDiagnostic: preAccountingMutationBudgetDiagnostic };
   }
 
-  writeJsonDurable(input.layout.runMetadataPath, {
-    ...metadata,
-    accounting: {
-      ...nextComparable,
-      updated_at: new Date().toISOString()
+  if (preparedUsage.inputs.length > 0) {
+    const appended = appendUsageEvents(input.layout, preparedUsage.inputs);
+    if (!isDeepStrictEqual(appended.replay.entries, preparedUsage.entries)) {
+      throw new Error("usage ledger changed after its immutable validation snapshot");
     }
-  });
-  return { changed: true, available: true };
+  }
+  if (accountingChanged) {
+    writeRunMetadataDocument(input.layout.runMetadataPath, nextMetadata);
+  }
+  return { changed: accountingChanged || preparedUsage.pendingEntries.length > 0, available: true };
 }
 
 function accountingFromWorkflowEvents(
@@ -855,65 +821,42 @@ function accountingFromWorkflowEvents(
     if (event.type !== "TokenUsageReported") {
       continue;
     }
-    const payload = event.payload ?? {};
-    const inputTokens = firstNumericField(payload, ["inputTokens", "input_tokens", "promptTokens", "prompt_tokens"]);
-    const outputTokens = firstNumericField(payload, [
-      "outputTokens",
-      "output_tokens",
-      "completionTokens",
-      "completion_tokens"
-    ]);
-    const cacheReadTokens = firstNumericField(payload, ["cacheReadTokens", "cache_read_tokens"]);
-    const cacheWriteTokens = firstNumericField(payload, ["cacheWriteTokens", "cache_write_tokens"]);
-    const reasoningTokens = firstNumericField(payload, ["reasoningTokens", "reasoning_tokens"]);
-    const explicitTotal = firstNumericField(payload, ["totalTokens", "total_tokens"]);
-    const costUsd = firstNumericField(payload, [
-      "costUsd",
-      "costUSD",
-      "cost",
-      "estimatedCostUsd",
-      "estimated_cost_usd"
-    ]);
-    const model = stringField(payload, "model");
+    const payload = event.payload;
+    const inputTokens = requiredWorkflowEventCount(payload.inputTokens, "TokenUsageReported inputTokens");
+    const outputTokens = requiredWorkflowEventCount(payload.outputTokens, "TokenUsageReported outputTokens");
+    const cacheReadTokens =
+      payload.cacheReadTokens === undefined
+        ? undefined
+        : requiredWorkflowEventCount(payload.cacheReadTokens, "TokenUsageReported cacheReadTokens");
+    const cacheWriteTokens =
+      payload.cacheWriteTokens === undefined
+        ? undefined
+        : requiredWorkflowEventCount(payload.cacheWriteTokens, "TokenUsageReported cacheWriteTokens");
+    const reasoningTokens =
+      payload.reasoningTokens === undefined
+        ? undefined
+        : requiredWorkflowEventCount(payload.reasoningTokens, "TokenUsageReported reasoningTokens");
+    const model = requiredWorkflowEventString(payload.model, "TokenUsageReported model");
     const normalizedUsage = normalizeUsageComponents({
       model,
-      inputTokens: inputTokens ?? 0,
-      outputTokens: outputTokens ?? 0,
+      inputTokens,
+      outputTokens,
       cacheReadTokens,
       cacheWriteTokens: cacheWriteTokens ?? 0,
       reasoningTokens: reasoningTokens ?? 0,
       cacheReadRatio
     });
     const componentTokenCount = sumUsageComponents(normalizedUsage.components);
-    const tokenCount = Math.max(explicitTotal ?? 0, componentTokenCount);
+    const tokenCount = componentTokenCount;
     const usageIncompleteReasons = [...normalizedUsage.incompleteReasons];
-    if (explicitTotal !== undefined && explicitTotal > componentTokenCount) {
-      usageIncompleteReasons.push({
-        code: "component-breakdown-incomplete",
-        ...(model === undefined ? {} : { model })
-      });
-    }
     const componentPricing = priceUsageComponents({
       model,
       components: normalizedUsage.components,
       modelPricing
     });
     const pricingIncompleteReasons = [...componentPricing.incompleteReasons];
-    if (
-      booleanField(payload, "partialPricing") === true ||
-      booleanField(payload, "partial_pricing") === true ||
-      booleanField(payload, "pricingPartial") === true ||
-      booleanField(payload, "pricing_partial") === true
-    ) {
-      pricingIncompleteReasons.push({
-        code: "event-pricing-reported-partial",
-        ...(model === undefined ? {} : { model })
-      });
-    }
-    const usageUnavailable = usageIncompleteReasons.some(
-      (reason) => reason.code === "component-usage-unavailable" || reason.code === "component-breakdown-incomplete"
-    );
-    const estimatedCostUsd = costUsd ?? (usageUnavailable ? undefined : componentPricing.costUsd);
+    const usageUnavailable = usageIncompleteReasons.some((reason) => reason.code === "component-usage-unavailable");
+    const estimatedCostUsd = usageUnavailable ? undefined : componentPricing.costUsd;
     if (tokenCount <= 0 && estimatedCostUsd === undefined) {
       continue;
     }
@@ -933,11 +876,7 @@ function accountingFromWorkflowEvents(
     }
     if (estimatedCostUsd !== undefined) {
       totals.estimatedSpendUsd = addUsd(totals.estimatedSpendUsd, estimatedCostUsd);
-      if (costUsd === undefined) {
-        addComponentCosts(totals.componentCostsUsd, componentPricing.componentCostsUsd);
-      } else {
-        totals.providedCostUsd = addUsd(totals.providedCostUsd, costUsd);
-      }
+      addComponentCosts(totals.componentCostsUsd, componentPricing.componentCostsUsd);
     }
     totals.usageIncompleteReasons.push(...usageIncompleteReasons);
     totals.pricingIncompleteReasons.push(...pricingIncompleteReasons);
@@ -946,280 +885,165 @@ function accountingFromWorkflowEvents(
       totals.cacheReadRatioUsed = normalizedUsage.cacheReadRatioUsed;
     }
     totals.partialPricing = totals.partialPricing || pricingIncompleteReasons.length > 0;
-    if (model !== undefined) {
-      totals.models.add(model);
-    }
-    const agent = stringField(payload, "agent");
-    if (agent !== undefined) {
-      totals.agents.add(agent);
-    }
+    totals.models.add(model);
+    totals.agents.add(requiredWorkflowEventString(payload.agent, "TokenUsageReported agent"));
   }
   return accountingSummaryFromTotals(totals);
 }
 
-function appendWorkflowUsageEvents(
+function prepareWorkflowUsageEvents(
   layout: RunLayout,
   workflowRunId: string,
-  events: WorkflowEvent[]
-): UsageLedgerReplay {
-  const replay = replayUsageEvents(layout);
+  controlGeneration: string,
+  events: WorkflowEvent[],
+  existingReplay: UsageLedgerReplay
+): PreparedUsageLedgerAppend {
   const usageEvents = events.filter((event) => event.type === "TokenUsageReported");
-  if (usageEvents.length === 0) {
-    return replay;
+  const existingByIdentity = new Map(
+    existingReplay.entries.map((entry) => [usageLedgerIdentity(entry), entry] as const)
+  );
+  const candidateInputs = new Map<string, AppendUsageEventInput>();
+  const candidates = new Map<string, UsageLedgerEntry>();
+  for (const event of usageEvents) {
+    const candidateInput = normalizedUsageLedgerInput(workflowRunId, controlGeneration, event);
+    const candidate = createUsageLedgerEntry(layout, candidateInput);
+    const identity = usageLedgerIdentity(candidate);
+    const duplicateCandidate = candidates.get(identity);
+    if (duplicateCandidate !== undefined) {
+      if (!isDeepStrictEqual(duplicateCandidate, candidate)) {
+        throw new Error(`usage event ${identity} appears with conflicting immutable data in the source snapshot`);
+      }
+      continue;
+    }
+    const existing = existingByIdentity.get(identity);
+    if (existing !== undefined && !isDeepStrictEqual(existing, candidate)) {
+      throw new Error(`usage event ${identity} was already recorded with different immutable data`);
+    }
+    candidates.set(identity, candidate);
+    candidateInputs.set(identity, candidateInput);
   }
-  const existingGenerationBySourceEvent = new Map(
-    replay.entries
-      .filter((entry) => entry.workflow_run_id === workflowRunId)
-      .map((entry) => [entry.source_event_id, entry.checkpoint_generation_id])
-  );
-  const candidates = usageEvents.map((event) => normalizedUsageLedgerInput(workflowRunId, event));
-  const firstUnseenImplicitCandidate = candidates.find(
-    (candidate) =>
-      candidate.checkpointGenerationId === undefined && !existingGenerationBySourceEvent.has(candidate.sourceEventId)
-  );
-  const fallbackGeneration =
-    firstUnseenImplicitCandidate === undefined
-      ? stableUsageDimension("checkpoint", [workflowRunId, candidates[0]?.sourceEventId ?? "empty-segment"])
-      : stableUsageDimension("checkpoint", [workflowRunId, firstUnseenImplicitCandidate.sourceEventId]);
-  return appendUsageEvents(
-    layout,
-    candidates.map((candidate) => {
-      const existingGeneration = existingGenerationBySourceEvent.get(candidate.sourceEventId);
-      return {
-        ...candidate,
-        checkpointGenerationId: candidate.checkpointGenerationId ?? existingGeneration ?? fallbackGeneration
-      };
-    }),
-    { replay }
-  ).replay;
+
+  const entries = existingReplay.entries.map((entry) => candidates.get(usageLedgerIdentity(entry)) ?? entry);
+  const pendingEntries: UsageLedgerEntry[] = [];
+  const inputs: AppendUsageEventInput[] = [];
+  for (const [identity, candidate] of candidates) {
+    if (existingByIdentity.has(identity)) continue;
+    entries.push(candidate);
+    pendingEntries.push(candidate);
+    inputs.push(candidateInputs.get(identity)!);
+  }
+  const context = {
+    usageLedger: { entries },
+    eventLog: {
+      events: events.map((event) => ({
+        workflow_run_id: event.workflowRunId,
+        source_event_sequence: event.sourceEventSequence,
+        timestamp_ms: event.timestampMs,
+        type: event.type,
+        payload: event.payload
+      }))
+    }
+  };
+  for (const candidate of candidates.values()) {
+    const diagnostics = runtimeSemanticGateDiagnostics({
+      schemaFilename: "usage-ledger.schema.json",
+      document: candidate,
+      artifactPath: layout.usageLedgerPath,
+      context
+    });
+    if (diagnostics.length > 0) {
+      throw new Error(diagnostics.map((diagnostic) => diagnostic.message).join("; "));
+    }
+  }
+  return { inputs, entries, pendingEntries };
 }
 
 function normalizedUsageLedgerInput(
   workflowRunId: string,
+  controlGeneration: string,
   event: WorkflowEvent
-): Omit<AppendUsageEventInput, "checkpointGenerationId"> & { checkpointGenerationId?: string } {
-  const payload = event.payload ?? {};
-  const fields = [
-    normalizedNumericUsageField(payload, "input_tokens", [
-      "inputTokens",
-      "input_tokens",
-      "promptTokens",
-      "prompt_tokens"
-    ]),
-    normalizedNumericUsageField(payload, "output_tokens", [
-      "outputTokens",
-      "output_tokens",
-      "completionTokens",
-      "completion_tokens"
-    ]),
-    normalizedNumericUsageField(payload, "cache_read_tokens", ["cacheReadTokens", "cache_read_tokens"]),
-    normalizedNumericUsageField(payload, "cache_write_tokens", ["cacheWriteTokens", "cache_write_tokens"]),
-    normalizedNumericUsageField(payload, "reasoning_tokens", ["reasoningTokens", "reasoning_tokens"]),
-    normalizedNumericUsageField(payload, "total_tokens", ["totalTokens", "total_tokens"])
-  ];
-  const usage = Object.fromEntries(
-    fields.flatMap((field) => (field.value === undefined ? [] : [[field.field, field.value]]))
-  ) as NormalizedUsage;
-  const costUsd = firstNonNegativeNumericField(payload, [
-    "costUsd",
-    "costUSD",
-    "cost",
-    "estimatedCostUsd",
-    "estimated_cost_usd"
-  ]);
-  if (costUsd !== undefined) {
-    usage.cost_usd = costUsd;
+): AppendUsageEventInput {
+  if (event.workflowRunId !== workflowRunId || event.type !== "TokenUsageReported") {
+    throw new Error("usage ledger input is not an exact TokenUsageReported event for the linked workflow");
   }
-  const model = stringField(payload, "model");
-  if (model !== undefined) {
-    usage.model = model;
-  }
-  const agent = stringField(payload, "agent");
-  if (agent !== undefined) {
-    usage.agent = agent;
-  }
-
-  const usageIncompleteReasons: LedgerUsageIncompleteReason[] = fields
-    .filter((field) => field.malformed)
-    .map((field) => ({ code: "usage-malformed", field: field.field }));
-  if (!fields.some((field) => field.present)) {
-    usageIncompleteReasons.push({ code: "usage-missing" });
-  }
-  const nodeId = stringField(payload, "nodeId") ?? stringField(payload, "node_id");
-  const iteration = firstNonNegativeIntegerField(payload, ["iteration"]);
-  const attempt = firstNonNegativeIntegerField(payload, ["attempt"]);
-  if (nodeId === undefined || iteration === undefined || attempt === undefined) {
-    usageIncompleteReasons.push({ code: "attempt-identity-missing" });
-  }
-
-  const sourceEventId = stableUsageDimension(
-    "workflow-event",
-    event.sourceEventId === undefined
-      ? [workflowRunId, "position", event.sequence ?? null, event.timestampMs ?? null]
-      : [workflowRunId, "explicit", event.sourceEventId]
-  );
-  const explicitGeneration = checkpointGenerationId(payload, workflowRunId);
+  const payload = event.payload;
   return {
     workflowRunId,
-    sourceEventId,
-    ...(explicitGeneration === undefined ? {} : { checkpointGenerationId: explicitGeneration }),
-    observedAt: new Date(event.timestampMs ?? 0).toISOString(),
-    ...(nodeId === undefined ? {} : { nodeId }),
-    ...(iteration === undefined ? {} : { iteration }),
-    ...(attempt === undefined ? {} : { attempt }),
-    usage,
-    usageComplete: usageIncompleteReasons.length === 0,
-    usageIncompleteReasons: uniqueUsageIncompleteReasons(usageIncompleteReasons)
+    controlGeneration,
+    sourceEventSequence: event.sourceEventSequence,
+    observedTimestampMs: event.timestampMs,
+    nodeId: requiredWorkflowEventString(payload.nodeId, "TokenUsageReported nodeId"),
+    iteration: requiredWorkflowEventCount(payload.iteration, "TokenUsageReported iteration"),
+    attempt: requiredWorkflowEventCount(payload.attempt, "TokenUsageReported attempt"),
+    usage: {
+      model: requiredWorkflowEventString(payload.model, "TokenUsageReported model"),
+      agent: requiredWorkflowEventString(payload.agent, "TokenUsageReported agent"),
+      input_tokens: requiredWorkflowEventCount(payload.inputTokens, "TokenUsageReported inputTokens"),
+      output_tokens: requiredWorkflowEventCount(payload.outputTokens, "TokenUsageReported outputTokens"),
+      ...(payload.cacheReadTokens === undefined
+        ? {}
+        : { cache_read_tokens: requiredWorkflowEventCount(payload.cacheReadTokens, "TokenUsageReported cacheReadTokens") }),
+      ...(payload.cacheWriteTokens === undefined
+        ? {}
+        : { cache_write_tokens: requiredWorkflowEventCount(payload.cacheWriteTokens, "TokenUsageReported cacheWriteTokens") }),
+      ...(payload.reasoningTokens === undefined
+        ? {}
+        : { reasoning_tokens: requiredWorkflowEventCount(payload.reasoningTokens, "TokenUsageReported reasoningTokens") })
+    }
   };
 }
 
-function failedZeroUsageSourceEventIds(
-  workflowRunId: string,
-  usageEvents: readonly WorkflowEvent[],
-  attemptEvents: readonly WorkflowEvent[]
-): ReadonlySet<string> {
-  const observedUsageSourceEventIds = new Set(
-    usageEvents
-      .filter((event) => event.type === "TokenUsageReported")
-      .map((event) => normalizedUsageLedgerInput(workflowRunId, event).sourceEventId)
-  );
-  const activeAttempts = new Map<string, { usageSourceEventIds: Set<string> }>();
-  const failedUsageSourceEventIds = new Set<string>();
-  // Smithers excludes token events from its default lifecycle query. Merge the
-  // dedicated token query back into that stream by the raw, globally stable
-  // event sequence before correlating usage with an attempt occurrence.
-  const mergedEvents = [
-    ...attemptEvents.filter((event) => event.type !== "TokenUsageReported"),
-    ...usageEvents.filter((event) => event.type === "TokenUsageReported")
-  ];
-  const globalSequenceCounts = new Map<number, number>();
-  for (const event of mergedEvents) {
-    if (event.globalSequence === undefined) continue;
-    globalSequenceCounts.set(event.globalSequence, (globalSequenceCounts.get(event.globalSequence) ?? 0) + 1);
-  }
-  const correlatedEvents = mergedEvents
-    .filter(
-      (event): event is WorkflowEvent & { globalSequence: number } =>
-        event.globalSequence !== undefined && globalSequenceCounts.get(event.globalSequence) === 1
-    )
-    .sort((left, right) => left.globalSequence - right.globalSequence);
-  for (const event of correlatedEvents) {
-    const identity = workflowEventAttemptIdentity(event.payload ?? {});
-    if (identity === undefined) continue;
-
-    if (event.type === "NodeStarted") {
-      // Retry counters can restart across workflow continuations. A new start
-      // therefore begins a distinct lifecycle occurrence even when its tuple
-      // matches an earlier attempt exactly.
-      activeAttempts.set(identity, { usageSourceEventIds: new Set() });
-      continue;
-    }
-
-    const active = activeAttempts.get(identity);
-    if (active === undefined) continue;
-    if (event.type === "TokenUsageReported") {
-      const sourceEventId = normalizedUsageLedgerInput(workflowRunId, event).sourceEventId;
-      if (observedUsageSourceEventIds.has(sourceEventId)) active.usageSourceEventIds.add(sourceEventId);
-      continue;
-    }
-
-    const terminal = terminalOutcomeForEvent(event);
-    if (terminal === undefined) continue;
-    if (["failed", "timed-out", "canceled"].includes(terminal.outcome)) {
-      for (const sourceEventId of active.usageSourceEventIds) failedUsageSourceEventIds.add(sourceEventId);
-    }
-    activeAttempts.delete(identity);
-  }
-  return failedUsageSourceEventIds;
-}
-
-function workflowEventAttemptIdentity(payload: Record<string, unknown>): string | undefined {
-  const nodeId = stringField(payload, "nodeId") ?? stringField(payload, "node_id");
-  const attempt = firstNonNegativeIntegerField(payload, ["attempt"]);
-  const iteration = firstNonNegativeIntegerField(payload, ["iteration"]);
-  return nodeId === undefined || iteration === undefined || attempt === undefined
-    ? undefined
-    : JSON.stringify([nodeId, iteration, attempt]);
-}
-
-function checkpointGenerationId(payload: Record<string, unknown>, workflowRunId: string): string | undefined {
-  const explicit =
-    stringField(payload, "checkpointGenerationId") ??
-    stringField(payload, "checkpoint_generation_id") ??
-    firstNumericField(payload, ["checkpointGeneration", "checkpoint_generation", "generation"]);
-  if (explicit === undefined) {
-    return undefined;
-  }
-  const value = String(explicit);
-  return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$/u.test(value)
-    ? value
-    : stableUsageDimension("checkpoint", [workflowRunId, value]);
-}
-
-function normalizedNumericUsageField(
-  payload: Record<string, unknown>,
-  field: UsageField,
-  aliases: readonly string[]
-): { field: UsageField; present: boolean; malformed: boolean; value?: number } {
-  for (const alias of aliases) {
-    if (!Object.hasOwn(payload, alias)) {
-      continue;
-    }
-    const raw = payload[alias];
-    const value = typeof raw === "string" && raw.trim().length > 0 ? Number(raw) : raw;
-    return typeof value === "number" && Number.isFinite(value) && value >= 0
-      ? { field, present: true, malformed: false, value }
-      : { field, present: true, malformed: true };
-  }
-  return { field, present: false, malformed: false };
-}
-
 function workflowEventsFromUsageLedger(entries: readonly UsageLedgerEntry[]): WorkflowEvent[] {
-  return entries.map((entry) => ({
-    type: "TokenUsageReported",
-    timestampMs: Date.parse(entry.observed_at),
-    payload: {
+  return entries.map((entry) => {
+    const payload = {
+      type: "TokenUsageReported",
+      runId: entry.workflow_run_id,
+      timestampMs: entry.observed_timestamp_ms,
+      nodeId: entry.node_id,
+      iteration: entry.iteration,
+      attempt: entry.attempt,
+      model: entry.usage.model,
+      agent: entry.usage.agent,
       inputTokens: entry.usage.input_tokens,
       outputTokens: entry.usage.output_tokens,
       cacheReadTokens: entry.usage.cache_read_tokens,
       cacheWriteTokens: entry.usage.cache_write_tokens,
-      reasoningTokens: entry.usage.reasoning_tokens,
-      totalTokens: entry.usage.total_tokens,
-      costUsd: entry.usage.cost_usd,
-      model: entry.usage.model,
-      agent: entry.usage.agent
-    }
-  }));
+      reasoningTokens: entry.usage.reasoning_tokens
+    };
+    return {
+      type: "TokenUsageReported",
+      workflowRunId: entry.workflow_run_id,
+      sourceEventSequence: entry.source_event_sequence,
+      timestampMs: entry.observed_timestamp_ms,
+      payload
+    };
+  });
 }
 
 function accountingSegmentsFromUsageLedger(
   entries: readonly UsageLedgerEntry[],
   modelPricing: ReadonlyMap<string, ModelPricing>,
-  cacheReadRatio: number | undefined,
-  malformedEntries: number,
-  failedZeroUsageSourceEvents: ReadonlySet<string>
+  cacheReadRatio: number | undefined
 ): AccountingSegment[] {
   const grouped = new Map<string, { entries: UsageLedgerEntry[]; lastLedgerIndex: number }>();
   for (const [ledgerIndex, entry] of entries.entries()) {
-    const key = JSON.stringify([entry.workflow_run_id, entry.checkpoint_generation_id]);
+    const key = JSON.stringify([entry.workflow_run_id, entry.control_generation]);
     const generation = grouped.get(key) ?? { entries: [], lastLedgerIndex: ledgerIndex };
     generation.entries.push(entry);
     generation.lastLedgerIndex = ledgerIndex;
     grouped.set(key, generation);
   }
   const groups = [...grouped.values()].sort((left, right) => left.lastLedgerIndex - right.lastLedgerIndex);
-  return groups.map((generation, index) => {
+  return groups.map((generation) => {
     const generationEntries = generation.entries;
     const firstEntry = generationEntries[0]!;
     return accountingSummaryWithCompleteness(
       accountingFromWorkflowEvents(workflowEventsFromUsageLedger(generationEntries), modelPricing, cacheReadRatio),
       generationEntries,
-      index === groups.length - 1 ? malformedEntries : 0,
       {
-        checkpointGenerationId: firstEntry.checkpoint_generation_id,
+        controlGeneration: firstEntry.control_generation,
         workflowRunId: firstEntry.workflow_run_id
-      },
-      failedZeroUsageSourceEvents
+      }
     );
   });
 }
@@ -1227,87 +1051,29 @@ function accountingSegmentsFromUsageLedger(
 function accountingSummaryWithCompleteness(
   summary: AccountingSummary | undefined,
   entries: readonly UsageLedgerEntry[],
-  malformedEntries: number,
-  identity: { checkpointGenerationId: string; workflowRunId: string },
-  failedZeroUsageSourceEvents: ReadonlySet<string>
+  identity: { controlGeneration: string; workflowRunId: string }
 ): AccountingSegment {
   const base = summary ?? emptyAccountingSummary();
-  const usageIncompleteReasons: UsageCompletenessMarker[] = [
-    ...base.usage_incomplete_reasons,
-    ...entries.flatMap((entry): UsageCompletenessMarker[] =>
-      entry.usage_incomplete_reasons.map((reason) => ({
-        ...reason,
-        event_id: entry.event_id,
-        checkpoint_generation_id: entry.checkpoint_generation_id
-      }))
-    )
-  ];
-  if (malformedEntries > 0) {
-    usageIncompleteReasons.push({ code: "ledger-entry-malformed" });
-  }
-
-  // A typed usage-missing record tied to a terminally failed attempt has no
-  // observed spend to price. Preserve its usage-incomplete evidence, but do not
-  // let it make the priced retry partial. Other incomplete zero-value records
-  // remain conservative: malformed telemetry or a successful attempt with no
-  // usage could conceal spend and therefore stays unpriced.
-  const unpricedIncompleteEntries = entries.filter(
-    (entry) =>
-      !usageLedgerEntryHasAccountingValue(entry) &&
-      !entry.usage_complete &&
-      !(failedZeroUsageSourceEvents.has(entry.source_event_id) && usageLedgerEntryIsZeroUsageExemptionCandidate(entry))
-  );
-  const unpricedEventCount = base.unpriced_event_count + unpricedIncompleteEntries.length + malformedEntries;
-  const pricingIncompleteReasons: PricingCompletenessMarker[] = [...base.pricing_incomplete_reasons];
-  pricingIncompleteReasons.push(
-    ...unpricedIncompleteEntries.map((entry) => ({
-      code: "price-unavailable" as const,
-      event_id: entry.event_id,
-      checkpoint_generation_id: entry.checkpoint_generation_id
-    }))
-  );
-  if (malformedEntries > 0) {
-    pricingIncompleteReasons.push({ code: "ledger-entry-malformed" });
-  }
-  const uniquePricingReasons = uniquePricingCompletenessMarkers(pricingIncompleteReasons);
+  const usageIncompleteReasons = uniqueUsageCompletenessMarkers(base.usage_incomplete_reasons);
+  const uniquePricingReasons = uniquePricingCompletenessMarkers(base.pricing_incomplete_reasons);
   const partialPricing = uniquePricingReasons.length > 0;
   return {
     ...base,
     estimated_spend:
       base.estimated_spend_usd === undefined ? "unavailable" : formatUsd(base.estimated_spend_usd, partialPricing),
     usage_complete: usageIncompleteReasons.length === 0,
-    usage_incomplete_reasons: uniqueUsageCompletenessMarkers(usageIncompleteReasons),
+    usage_incomplete_reasons: usageIncompleteReasons,
     pricing_complete: !partialPricing,
     pricing_incomplete_reasons: uniquePricingReasons,
     partial_pricing: partialPricing,
-    // accountingFromWorkflowEvents excludes zero-usage/no-cost records, so
-    // preserve the priced + unpriced partition required by the public bundle.
-    // The ledger checkpoint separately retains the full record count.
-    event_count: base.event_count + unpricedIncompleteEntries.length + malformedEntries,
-    unpriced_event_count: unpricedEventCount,
-    checkpoint_generation_id: identity.checkpointGenerationId,
+    event_count: Math.max(base.event_count, entries.length),
+    control_generation: identity.controlGeneration,
     workflow_run_id: identity.workflowRunId,
-    event_ids: entries.map((entry) => entry.event_id),
-    attempt_ids: uniqueStrings(entries.map((entry) => entry.attempt_id))
+    source_event_sequences: entries.map((entry) => entry.source_event_sequence),
+    attempts: uniqueByJson(
+      entries.map((entry) => ({ node_id: entry.node_id, iteration: entry.iteration, attempt: entry.attempt }))
+    )
   };
-}
-
-function usageLedgerEntryHasAccountingValue(entry: UsageLedgerEntry): boolean {
-  const usage = entry.usage;
-  const detailedInputTokens = (usage.cache_read_tokens ?? 0) + (usage.cache_write_tokens ?? 0);
-  const effectiveInputTokens = Math.max(usage.input_tokens ?? 0, detailedInputTokens);
-  const effectiveOutputTokens = Math.max(usage.output_tokens ?? 0, usage.reasoning_tokens ?? 0);
-  const tokenCount = Math.max(usage.total_tokens ?? 0, effectiveInputTokens + effectiveOutputTokens);
-  return tokenCount > 0 || usage.cost_usd !== undefined;
-}
-
-function usageLedgerEntryIsZeroUsageExemptionCandidate(entry: UsageLedgerEntry): boolean {
-  return (
-    !usageLedgerEntryHasAccountingValue(entry) &&
-    !entry.usage_complete &&
-    entry.usage_incomplete_reasons.length === 1 &&
-    entry.usage_incomplete_reasons[0]?.code === "usage-missing"
-  );
 }
 
 function emptyAccountingSummary(): AccountingSummary {
@@ -1338,34 +1104,433 @@ function emptyAccountingSummary(): AccountingSummary {
   };
 }
 
+function storedAccountingDocument(value: unknown, expectedWorkflowRunId?: string): StoredAccountingDocument {
+  const label = "run.json#$.accounting";
+  const stored = exactStoredRecord(
+    value,
+    label,
+    [
+      "schema_version",
+      "source",
+      "workflow_run_id",
+      "current",
+      "segments",
+      "cumulative",
+      "checkpoint",
+      "pricing_catalog",
+      "updated_at"
+    ],
+    []
+  );
+  if (stored.schema_version !== ACCOUNTING_SCHEMA_VERSION) {
+    throw new Error(`${label}.schema_version is unsupported; expected ${ACCOUNTING_SCHEMA_VERSION}`);
+  }
+  if (stored.source !== "usage-ledger") throw new Error(`${label}.source must equal "usage-ledger"`);
+  const workflowRunId = requiredStoredString(stored.workflow_run_id, `${label}.workflow_run_id`);
+  if (expectedWorkflowRunId !== undefined && workflowRunId !== expectedWorkflowRunId) {
+    throw new Error(`${label}.workflow_run_id does not match the linked Smithers run`);
+  }
+  requiredStoredTimestamp(stored.updated_at, `${label}.updated_at`);
+  if (!Array.isArray(stored.segments) || stored.segments.length === 0) {
+    throw new Error(`${label}.segments must be a non-empty array`);
+  }
+  const segments = stored.segments.map((segment, index) =>
+    storedAccountingSegment(segment, `${label}.segments[${index}]`)
+  );
+  const current = storedAccountingSegment(stored.current, `${label}.current`);
+  if (!sameJsonValue(current, segments.at(-1))) throw new Error(`${label}.current must equal the final segment`);
+  if (current.workflow_run_id !== workflowRunId) {
+    throw new Error(`${label}.workflow_run_id must equal the current segment workflow_run_id`);
+  }
+  const cumulative = storedCumulativeAccountingSummary(stored.cumulative, `${label}.cumulative`);
+  const checkpoint = storedAccountingCheckpoint(stored.checkpoint, `${label}.checkpoint`, segments);
+  const pricingCatalog = storedPricingCatalog(stored.pricing_catalog, `${label}.pricing_catalog`);
+  return {
+    raw: stored,
+    workflowRunId,
+    current,
+    segments,
+    cumulative,
+    checkpoint,
+    pricingCatalog,
+    pricing: new Map(Object.entries(pricingCatalog.model_prices))
+  };
+}
+
+function storedAccountingSegment(value: unknown, label: string): AccountingSegment {
+  const stored = exactStoredRecord(
+    value,
+    label,
+    [...ACCOUNTING_SUMMARY_REQUIRED_FIELDS, "control_generation", "workflow_run_id", "source_event_sequences", "attempts"],
+    ACCOUNTING_SUMMARY_OPTIONAL_FIELDS
+  );
+  const summary = storedAccountingSummary(
+    Object.fromEntries(
+      [...ACCOUNTING_SUMMARY_REQUIRED_FIELDS, ...ACCOUNTING_SUMMARY_OPTIONAL_FIELDS].flatMap((field) =>
+        Object.prototype.hasOwnProperty.call(stored, field) ? [[field, stored[field]]] : []
+      )
+    ),
+    label
+  );
+  const controlGeneration = requiredStoredString(stored.control_generation, `${label}.control_generation`);
+  if (!/^[a-f0-9]{64}$/u.test(controlGeneration)) {
+    throw new Error(`${label}.control_generation must be a lowercase SHA-256 digest`);
+  }
+  const workflowRunId = requiredStoredString(stored.workflow_run_id, `${label}.workflow_run_id`);
+  if (!Array.isArray(stored.source_event_sequences) || stored.source_event_sequences.length === 0) {
+    throw new Error(`${label}.source_event_sequences must be a non-empty array`);
+  }
+  const sourceEventSequences = stored.source_event_sequences.map((sequence, index) =>
+    requiredStoredCount(sequence, `${label}.source_event_sequences[${index}]`)
+  );
+  for (let index = 1; index < sourceEventSequences.length; index += 1) {
+    if (sourceEventSequences[index]! <= sourceEventSequences[index - 1]!) {
+      throw new Error(`${label}.source_event_sequences must be strictly increasing`);
+    }
+  }
+  if (!Array.isArray(stored.attempts) || stored.attempts.length === 0) {
+    throw new Error(`${label}.attempts must be a non-empty array`);
+  }
+  const attempts = stored.attempts.map((attempt, index) => {
+    const attemptLabel = `${label}.attempts[${index}]`;
+    const candidate = exactStoredRecord(attempt, attemptLabel, ["node_id", "iteration", "attempt"], []);
+    return {
+      node_id: requiredStoredString(candidate.node_id, `${attemptLabel}.node_id`),
+      iteration: requiredStoredCount(candidate.iteration, `${attemptLabel}.iteration`),
+      attempt: requiredStoredCount(candidate.attempt, `${attemptLabel}.attempt`)
+    };
+  });
+  if (new Set(attempts.map((attempt) => JSON.stringify(attempt))).size !== attempts.length) {
+    throw new Error(`${label}.attempts must not contain duplicate coordinates`);
+  }
+  if (summary.event_count !== sourceEventSequences.length) {
+    throw new Error(`${label}.event_count must equal source_event_sequences.length`);
+  }
+  return {
+    ...summary,
+    control_generation: controlGeneration,
+    workflow_run_id: workflowRunId,
+    source_event_sequences: sourceEventSequences,
+    attempts
+  };
+}
+
+function storedCumulativeAccountingSummary(value: unknown, label: string): CumulativeAccountingSummary {
+  const stored = exactStoredRecord(
+    value,
+    label,
+    [...ACCOUNTING_SUMMARY_REQUIRED_FIELDS, "source_run_ids"],
+    ACCOUNTING_SUMMARY_OPTIONAL_FIELDS
+  );
+  const summary = storedAccountingSummary(
+    Object.fromEntries(
+      [...ACCOUNTING_SUMMARY_REQUIRED_FIELDS, ...ACCOUNTING_SUMMARY_OPTIONAL_FIELDS].flatMap((field) =>
+        Object.prototype.hasOwnProperty.call(stored, field) ? [[field, stored[field]]] : []
+      )
+    ),
+    label
+  );
+  return {
+    ...summary,
+    source_run_ids: requiredStoredStringArray(stored.source_run_ids, `${label}.source_run_ids`)
+  };
+}
+
+function storedAccountingCheckpoint(
+  value: unknown,
+  label: string,
+  segments: readonly AccountingSegment[]
+): StoredAccountingCheckpoint {
+  const stored = exactStoredRecord(
+    value,
+    label,
+    [
+      "schema_version",
+      "ledger_event_count",
+      "last_source_event_sequence",
+      "control_generation",
+      "workflow_run_id"
+    ],
+    []
+  );
+  if (stored.schema_version !== ACCOUNTING_CHECKPOINT_SCHEMA_VERSION) {
+    throw new Error(`${label}.schema_version is unsupported; expected ${ACCOUNTING_CHECKPOINT_SCHEMA_VERSION}`);
+  }
+  const ledgerEventCount = requiredStoredCount(stored.ledger_event_count, `${label}.ledger_event_count`);
+  const lastSourceEventSequence = requiredStoredCount(
+    stored.last_source_event_sequence,
+    `${label}.last_source_event_sequence`
+  );
+  const controlGeneration = requiredStoredString(stored.control_generation, `${label}.control_generation`);
+  const workflowRunId = requiredStoredString(stored.workflow_run_id, `${label}.workflow_run_id`);
+  const totalEvents = segments.reduce((total, segment) => total + segment.source_event_sequences.length, 0);
+  const current = segments.at(-1)!;
+  if (ledgerEventCount !== totalEvents) throw new Error(`${label}.ledger_event_count disagrees with segments`);
+  if (
+    lastSourceEventSequence !== current.source_event_sequences.at(-1) ||
+    controlGeneration !== current.control_generation ||
+    workflowRunId !== current.workflow_run_id
+  ) {
+    throw new Error(`${label} does not identify the final usage-ledger event`);
+  }
+  return {
+    schema_version: ACCOUNTING_CHECKPOINT_SCHEMA_VERSION,
+    ledger_event_count: ledgerEventCount,
+    last_source_event_sequence: lastSourceEventSequence,
+    control_generation: controlGeneration,
+    workflow_run_id: workflowRunId
+  };
+}
+
+function assertAccountingMatchesUsageLedger(
+  accounting: StoredAccountingDocument,
+  entries: readonly UsageLedgerEntry[],
+  label: string
+): void {
+  const grouped = new Map<
+    string,
+    {
+      workflowRunId: string;
+      controlGeneration: string;
+      sourceEventSequences: number[];
+      attempts: Array<{ node_id: string; iteration: number; attempt: number }>;
+      attemptIdentities: Set<string>;
+      lastLedgerIndex: number;
+    }
+  >();
+  for (const [ledgerIndex, entry] of entries.entries()) {
+    const identity = JSON.stringify([entry.workflow_run_id, entry.control_generation]);
+    const group = grouped.get(identity) ?? {
+      workflowRunId: entry.workflow_run_id,
+      controlGeneration: entry.control_generation,
+      sourceEventSequences: [],
+      attempts: [],
+      attemptIdentities: new Set<string>(),
+      lastLedgerIndex: ledgerIndex
+    };
+    group.sourceEventSequences.push(entry.source_event_sequence);
+    const attempt = { node_id: entry.node_id, iteration: entry.iteration, attempt: entry.attempt };
+    const attemptIdentity = JSON.stringify(attempt);
+    if (!group.attemptIdentities.has(attemptIdentity)) {
+      group.attemptIdentities.add(attemptIdentity);
+      group.attempts.push(attempt);
+    }
+    group.lastLedgerIndex = ledgerIndex;
+    grouped.set(identity, group);
+  }
+  const expectedSegments = [...grouped.values()].sort(
+    (left, right) => left.lastLedgerIndex - right.lastLedgerIndex
+  );
+  if (accounting.segments.length !== expectedSegments.length) {
+    throw new Error(`${label}.segments do not exactly correspond to the usage ledger`);
+  }
+  for (const [index, expected] of expectedSegments.entries()) {
+    const segment = accounting.segments[index]!;
+    if (
+      segment.workflow_run_id !== expected.workflowRunId ||
+      segment.control_generation !== expected.controlGeneration ||
+      !isDeepStrictEqual(segment.source_event_sequences, expected.sourceEventSequences) ||
+      !isDeepStrictEqual(segment.attempts, expected.attempts)
+    ) {
+      throw new Error(`${label}.segments[${index}] does not exactly correspond to the usage ledger`);
+    }
+  }
+  const finalEntry = entries.at(-1);
+  if (
+    accounting.checkpoint.ledger_event_count !== entries.length ||
+    finalEntry === undefined ||
+    accounting.checkpoint.last_source_event_sequence !== finalEntry.source_event_sequence ||
+    accounting.checkpoint.control_generation !== finalEntry.control_generation ||
+    accounting.checkpoint.workflow_run_id !== finalEntry.workflow_run_id
+  ) {
+    throw new Error(`${label}.checkpoint does not exactly identify the final usage-ledger event`);
+  }
+}
+
+function storedPricingCatalog(value: unknown, label: string): StoredPricingCatalog {
+  const stored = exactStoredRecord(
+    value,
+    label,
+    ["source", "status", "resolved_models", "unresolved_models", "model_prices"],
+    ["fetched_at"]
+  );
+  const sources = new Set<PricingCatalogMetadata["source"]>(["models.dev", "configured-catalog", "disabled"]);
+  const statuses = new Set<PricingCatalogMetadata["status"]>(["available", "disabled", "unavailable"]);
+  const source = requiredStoredString(stored.source, `${label}.source`) as PricingCatalogMetadata["source"];
+  const status = requiredStoredString(stored.status, `${label}.status`) as PricingCatalogMetadata["status"];
+  if (!sources.has(source)) throw new Error(`${label}.source is not a current pricing source`);
+  if (!statuses.has(status)) throw new Error(`${label}.status is not a current pricing status`);
+  const fetchedAt = Object.prototype.hasOwnProperty.call(stored, "fetched_at")
+    ? requiredStoredTimestamp(stored.fetched_at, `${label}.fetched_at`)
+    : undefined;
+  const resolvedModels = requiredStoredStringArray(stored.resolved_models, `${label}.resolved_models`, {
+    sorted: true
+  });
+  const unresolvedModels = requiredStoredStringArray(stored.unresolved_models, `${label}.unresolved_models`, {
+    sorted: true
+  });
+  if (resolvedModels.some((model) => unresolvedModels.includes(model))) {
+    throw new Error(`${label} resolved_models and unresolved_models must be disjoint`);
+  }
+  if (!isRecord(stored.model_prices)) throw new Error(`${label}.model_prices must be an object`);
+  const modelPriceEntries = Object.entries(stored.model_prices);
+  const modelPriceKeys = modelPriceEntries.map(([model]) => model);
+  if (modelPriceKeys.some((model, index) => model !== [...modelPriceKeys].sort()[index])) {
+    throw new Error(`${label}.model_prices keys must be sorted lexicographically`);
+  }
+  const modelPrices = Object.fromEntries(
+    modelPriceEntries.map(([model, pricing]) => {
+      requiredStoredString(model, `${label}.model_prices key`);
+      return [model, storedModelPricing(pricing, `${label}.model_prices[${JSON.stringify(model)}]`)];
+    })
+  );
+  if (!sameJsonValue(Object.keys(modelPrices), resolvedModels)) {
+    throw new Error(`${label}.resolved_models must exactly equal model_prices keys`);
+  }
+  if (status === "disabled" && source !== "disabled") throw new Error(`${label} disabled status requires disabled source`);
+  return {
+    source,
+    status,
+    ...(fetchedAt === undefined ? {} : { fetched_at: fetchedAt }),
+    resolved_models: resolvedModels,
+    unresolved_models: unresolvedModels,
+    model_prices: modelPrices
+  };
+}
+
+function storedModelPricing(value: unknown, label: string): ModelPricing {
+  const stored = exactStoredRecord(
+    value,
+    label,
+    ["inputUsdPerMillion", "outputUsdPerMillion"],
+    ["cachedInputUsdPerMillion", "cacheWriteUsdPerMillion", "contextTiers"]
+  );
+  const contextTiers = Object.prototype.hasOwnProperty.call(stored, "contextTiers")
+    ? storedModelPricingTiers(stored.contextTiers, `${label}.contextTiers`)
+    : undefined;
+  return {
+    inputUsdPerMillion: requiredStoredNonNegativeNumber(stored.inputUsdPerMillion, `${label}.inputUsdPerMillion`),
+    ...(Object.prototype.hasOwnProperty.call(stored, "cachedInputUsdPerMillion")
+      ? {
+          cachedInputUsdPerMillion: requiredStoredNonNegativeNumber(
+            stored.cachedInputUsdPerMillion,
+            `${label}.cachedInputUsdPerMillion`
+          )
+        }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(stored, "cacheWriteUsdPerMillion")
+      ? {
+          cacheWriteUsdPerMillion: requiredStoredNonNegativeNumber(
+            stored.cacheWriteUsdPerMillion,
+            `${label}.cacheWriteUsdPerMillion`
+          )
+        }
+      : {}),
+    outputUsdPerMillion: requiredStoredNonNegativeNumber(stored.outputUsdPerMillion, `${label}.outputUsdPerMillion`),
+    ...(contextTiers === undefined ? {} : { contextTiers })
+  };
+}
+
+function storedModelPricingTiers(value: unknown, label: string): NonNullable<ModelPricing["contextTiers"]> {
+  if (!Array.isArray(value) || value.length === 0) throw new Error(`${label} must be a non-empty array`);
+  const tiers = value.map((tier, index) => {
+    const tierLabel = `${label}[${index}]`;
+    const stored = exactStoredRecord(
+      tier,
+      tierLabel,
+      ["contextTokens", "inputUsdPerMillion", "outputUsdPerMillion"],
+      ["cachedInputUsdPerMillion", "cacheWriteUsdPerMillion"]
+    );
+    const contextTokens = requiredStoredCount(stored.contextTokens, `${tierLabel}.contextTokens`);
+    if (contextTokens === 0) throw new Error(`${tierLabel}.contextTokens must be positive`);
+    return {
+      contextTokens,
+      inputUsdPerMillion: requiredStoredNonNegativeNumber(
+        stored.inputUsdPerMillion,
+        `${tierLabel}.inputUsdPerMillion`
+      ),
+      ...(Object.prototype.hasOwnProperty.call(stored, "cachedInputUsdPerMillion")
+        ? {
+            cachedInputUsdPerMillion: requiredStoredNonNegativeNumber(
+              stored.cachedInputUsdPerMillion,
+              `${tierLabel}.cachedInputUsdPerMillion`
+            )
+          }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(stored, "cacheWriteUsdPerMillion")
+        ? {
+            cacheWriteUsdPerMillion: requiredStoredNonNegativeNumber(
+              stored.cacheWriteUsdPerMillion,
+              `${tierLabel}.cacheWriteUsdPerMillion`
+            )
+          }
+        : {}),
+      outputUsdPerMillion: requiredStoredNonNegativeNumber(
+        stored.outputUsdPerMillion,
+        `${tierLabel}.outputUsdPerMillion`
+      )
+    };
+  });
+  for (let index = 1; index < tiers.length; index += 1) {
+    if (tiers[index]!.contextTokens <= tiers[index - 1]!.contextTokens) {
+      throw new Error(`${label} contextTokens must be strictly increasing`);
+    }
+  }
+  return tiers;
+}
+
 function cumulativeAccountingForSourceRun(
   layout: RunLayout,
   sourceRunId: string
-): { summary?: AccountingSummary; sourceRunIds: string[] } | undefined {
+): { summary: AccountingSummary; sourceRunIds: string[] } {
   const safeSourceRunId = validateSafeId(sourceRunId, "source run ID");
   if (safeSourceRunId === layout.runId) {
-    return undefined;
+    throw new Error("source run ID cannot refer to the current run");
   }
   const runsRoot = path.dirname(layout.root);
   const sourceRoot = path.join(runsRoot, safeSourceRunId);
   assertPathInside(runsRoot, sourceRoot, "source run root");
-  const sourceMetadata = readJsonIfExists<Record<string, unknown>>(
-    layoutForRunRoot(sourceRoot, safeSourceRunId).runMetadataPath
+  if (!fs.existsSync(sourceRoot)) {
+    throw new Error(`referenced source run ${JSON.stringify(safeSourceRunId)} has no run.json metadata`);
+  }
+  assertNoSymlinkComponents(runsRoot, sourceRoot, "source run root");
+  const sourceLayout = layoutForRunRoot(sourceRoot, safeSourceRunId);
+  const sourceMetadata = readRunMetadataDocument(sourceLayout.runMetadataPath, safeSourceRunId);
+  const sourceState = readRunState(sourceLayout);
+  if (sourceMetadata.source_run_id !== sourceState.source_run_id) {
+    throw new Error(`referenced source run ${JSON.stringify(safeSourceRunId)} has inconsistent source_run_id metadata`);
+  }
+  if (sourceMetadata.source_run_id === safeSourceRunId) {
+    throw new Error(`referenced source run ${JSON.stringify(safeSourceRunId)} links to itself`);
+  }
+  if (sourceMetadata.accounting === undefined) {
+    throw new Error(`referenced source run ${JSON.stringify(safeSourceRunId)} has no accounting.v3 evidence`);
+  }
+  if (sourceMetadata.workflow === undefined) {
+    throw new Error(`referenced source run ${JSON.stringify(safeSourceRunId)} has accounting without workflow metadata`);
+  }
+  const accounting = storedAccountingDocument(sourceMetadata.accounting, sourceMetadata.workflow.run_id);
+  assertAccountingMatchesUsageLedger(
+    accounting,
+    replayUsageEvents(sourceLayout).entries,
+    `referenced source run ${JSON.stringify(safeSourceRunId)} accounting`
   );
-  if (sourceMetadata === undefined) {
-    return { sourceRunIds: [safeSourceRunId] };
+  if (accounting.cumulative.source_run_ids.includes(safeSourceRunId)) {
+    throw new Error(`referenced source accounting already contains its own run ID ${JSON.stringify(safeSourceRunId)}`);
   }
-  const accounting = recordField(sourceMetadata, "accounting");
-  const cumulativeRecord = recordField(accounting, "cumulative");
-  const cumulative = storedAccountingSummary(cumulativeRecord);
-  if (cumulative !== undefined) {
-    return {
-      summary: cumulative,
-      sourceRunIds: uniqueStrings([safeSourceRunId, ...stringArrayField(cumulativeRecord, "source_run_ids")])
-    };
+  const directSourceRunId = sourceMetadata.source_run_id;
+  if (
+    (directSourceRunId === undefined && accounting.cumulative.source_run_ids.length !== 0) ||
+    (directSourceRunId !== undefined && accounting.cumulative.source_run_ids[0] !== directSourceRunId)
+  ) {
+    throw new Error(
+      `referenced source run ${JSON.stringify(safeSourceRunId)} cumulative lineage disagrees with its direct source relationship`
+    );
   }
-  const current = storedAccountingSummary(recordField(accounting, "current"));
-  return { ...(current === undefined ? {} : { summary: current }), sourceRunIds: [safeSourceRunId] };
+  return {
+    summary: accounting.cumulative,
+    sourceRunIds: [safeSourceRunId, ...accounting.cumulative.source_run_ids]
+  };
 }
 
 function cumulativeAccountingSummary(
@@ -1391,9 +1556,6 @@ function cumulativeAccountingSummary(
       summary.partial_pricing ||
       (summary.total_tokens > 0 && summary.estimated_spend === "unavailable");
     addComponentCosts(totals.componentCostsUsd, summary.component_costs_usd);
-    if (summary.provided_cost_usd !== undefined) {
-      totals.providedCostUsd = addUsd(totals.providedCostUsd, summary.provided_cost_usd);
-    }
     usageIncompleteReasons.push(...summary.usage_incomplete_reasons);
     pricingIncompleteReasons.push(...summary.pricing_incomplete_reasons);
     totals.cacheReadPricingEstimated = totals.cacheReadPricingEstimated || summary.cache_read_pricing_estimated;
@@ -1424,72 +1586,140 @@ function cumulativeAccountingSummary(
   };
 }
 
-function storedAccountingSummary(value: Record<string, unknown> | undefined): AccountingSummary | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  const totalTokens = firstNumericField(value, ["total_tokens", "totalTokens"]);
-  if (totalTokens === undefined) {
-    return undefined;
-  }
-  const estimatedSpendUsd = firstNumericField(value, ["estimated_spend_usd", "estimatedSpendUsd"]);
-  const componentCostsValue = recordField(value, "component_costs_usd") ?? recordField(value, "componentCostsUsd");
-  const componentCosts = storedComponentCosts(componentCostsValue);
-  const providedCostUsd = firstNumericField(value, ["provided_cost_usd", "providedCostUsd"]);
-  const partialPricing = booleanField(value, "partial_pricing") ?? booleanField(value, "partialPricing") ?? false;
-  const usageComplete = booleanField(value, "usage_complete") ?? booleanField(value, "usageComplete") ?? true;
+const ACCOUNTING_SUMMARY_REQUIRED_FIELDS = [
+  "uncached_input_tokens",
+  "input_tokens",
+  "output_tokens",
+  "cache_read_tokens",
+  "cache_write_tokens",
+  "reasoning_tokens",
+  "inclusive_token_total",
+  "billable_token_total",
+  "total_tokens",
+  "tokens_used",
+  "estimated_spend",
+  "component_costs_usd",
+  "usage_complete",
+  "usage_incomplete_reasons",
+  "pricing_complete",
+  "pricing_incomplete_reasons",
+  "partial_pricing",
+  "cache_read_pricing_estimated",
+  "event_count",
+  "priced_event_count",
+  "unpriced_event_count",
+  "models",
+  "agents"
+] as const;
+
+const ACCOUNTING_SUMMARY_OPTIONAL_FIELDS = ["estimated_spend_usd", "cache_read_ratio_used"] as const;
+
+function storedAccountingSummary(value: unknown, label: string): AccountingSummary {
+  const stored = exactStoredRecord(
+    value,
+    label,
+    ACCOUNTING_SUMMARY_REQUIRED_FIELDS,
+    ACCOUNTING_SUMMARY_OPTIONAL_FIELDS
+  );
+  const uncachedInputTokens = requiredStoredCount(stored.uncached_input_tokens, `${label}.uncached_input_tokens`);
+  const inputTokens = requiredStoredCount(stored.input_tokens, `${label}.input_tokens`);
+  const outputTokens = requiredStoredCount(stored.output_tokens, `${label}.output_tokens`);
+  const cacheReadTokens = requiredStoredCount(stored.cache_read_tokens, `${label}.cache_read_tokens`);
+  const cacheWriteTokens = requiredStoredCount(stored.cache_write_tokens, `${label}.cache_write_tokens`);
+  const reasoningTokens = requiredStoredCount(stored.reasoning_tokens, `${label}.reasoning_tokens`);
+  const inclusiveTokenTotal = requiredStoredCount(stored.inclusive_token_total, `${label}.inclusive_token_total`);
+  const billableTokenTotal = requiredStoredCount(stored.billable_token_total, `${label}.billable_token_total`);
+  const totalTokens = requiredStoredCount(stored.total_tokens, `${label}.total_tokens`);
+  const tokensUsed = requiredStoredString(stored.tokens_used, `${label}.tokens_used`);
+  const estimatedSpend = requiredStoredString(stored.estimated_spend, `${label}.estimated_spend`);
+  const estimatedSpendUsd = optionalStoredNonNegativeNumber(stored, "estimated_spend_usd", label);
+  const componentCosts = storedComponentCosts(stored.component_costs_usd, `${label}.component_costs_usd`);
+  const usageComplete = requiredStoredBoolean(stored.usage_complete, `${label}.usage_complete`);
   const usageIncompleteReasons = storedUsageCompletenessMarkers(
-    value.usage_incomplete_reasons ?? value.usageIncompleteReasons
+    stored.usage_incomplete_reasons,
+    `${label}.usage_incomplete_reasons`
   );
-  const pricingComplete =
-    booleanField(value, "pricing_complete") ?? booleanField(value, "pricingComplete") ?? !partialPricing;
+  const pricingComplete = requiredStoredBoolean(stored.pricing_complete, `${label}.pricing_complete`);
   const pricingIncompleteReasons = storedPricingCompletenessMarkers(
-    value.pricing_incomplete_reasons ?? value.pricingIncompleteReasons
+    stored.pricing_incomplete_reasons,
+    `${label}.pricing_incomplete_reasons`
   );
+  const partialPricing = requiredStoredBoolean(stored.partial_pricing, `${label}.partial_pricing`);
+  const cacheReadPricingEstimated = requiredStoredBoolean(
+    stored.cache_read_pricing_estimated,
+    `${label}.cache_read_pricing_estimated`
+  );
+  const cacheReadRatioUsed = optionalStoredNonNegativeNumber(stored, "cache_read_ratio_used", label);
+  const eventCount = requiredStoredCount(stored.event_count, `${label}.event_count`);
+  const pricedEventCount = requiredStoredCount(stored.priced_event_count, `${label}.priced_event_count`);
+  const unpricedEventCount = requiredStoredCount(stored.unpriced_event_count, `${label}.unpriced_event_count`);
+  const models = requiredStoredStringArray(stored.models, `${label}.models`, { sorted: true });
+  const agents = requiredStoredStringArray(stored.agents, `${label}.agents`, { sorted: true });
+
+  if (inputTokens !== uncachedInputTokens) throw new Error(`${label}.input_tokens must equal uncached_input_tokens`);
+  const calculatedInclusive =
+    uncachedInputTokens + cacheReadTokens + cacheWriteTokens + outputTokens + reasoningTokens;
+  if (inclusiveTokenTotal !== calculatedInclusive || totalTokens !== inclusiveTokenTotal) {
+    throw new Error(`${label} token totals do not equal the exact component sum`);
+  }
+  if (billableTokenTotal > inclusiveTokenTotal) {
+    throw new Error(`${label}.billable_token_total cannot exceed inclusive_token_total`);
+  }
+  if (tokensUsed !== formatInteger(totalTokens)) throw new Error(`${label}.tokens_used does not match total_tokens`);
+  if (pricedEventCount + unpricedEventCount > eventCount) {
+    throw new Error(`${label} priced and unpriced event counts exceed event_count`);
+  }
+  if (usageComplete !== (usageIncompleteReasons.length === 0)) {
+    throw new Error(`${label}.usage_complete disagrees with usage_incomplete_reasons`);
+  }
+  if (pricingComplete !== (pricingIncompleteReasons.length === 0)) {
+    throw new Error(`${label}.pricing_complete disagrees with pricing_incomplete_reasons`);
+  }
+  if ((cacheReadRatioUsed !== undefined) !== cacheReadPricingEstimated) {
+    throw new Error(`${label}.cache_read_ratio_used must be present exactly when cache-read pricing is estimated`);
+  }
+  if (cacheReadRatioUsed !== undefined && cacheReadRatioUsed > 1) {
+    throw new Error(`${label}.cache_read_ratio_used must not exceed 1`);
+  }
+  if (estimatedSpendUsd === undefined) {
+    if (estimatedSpend !== "unavailable" || sumComponentCosts(componentCosts) !== 0) {
+      throw new Error(`${label} unavailable spend must omit estimated_spend_usd and carry zero component costs`);
+    }
+  } else {
+    if (estimatedSpend !== formatUsd(estimatedSpendUsd, partialPricing)) {
+      throw new Error(`${label}.estimated_spend does not match estimated_spend_usd`);
+    }
+    if (roundUsd(sumComponentCosts(componentCosts)) !== roundUsd(estimatedSpendUsd)) {
+      throw new Error(`${label}.component_costs_usd does not sum to estimated_spend_usd`);
+    }
+  }
+
   return {
-    uncached_input_tokens:
-      firstNumericField(value, ["uncached_input_tokens", "uncachedInputTokens", "input_tokens", "inputTokens"]) ?? 0,
-    input_tokens:
-      firstNumericField(value, ["uncached_input_tokens", "uncachedInputTokens", "input_tokens", "inputTokens"]) ?? 0,
-    output_tokens: firstNumericField(value, ["output_tokens", "outputTokens"]) ?? 0,
-    cache_read_tokens: firstNumericField(value, ["cache_read_tokens", "cacheReadTokens"]) ?? 0,
-    cache_write_tokens: firstNumericField(value, ["cache_write_tokens", "cacheWriteTokens"]) ?? 0,
-    reasoning_tokens: firstNumericField(value, ["reasoning_tokens", "reasoningTokens"]) ?? 0,
-    inclusive_token_total:
-      firstNumericField(value, ["inclusive_token_total", "inclusiveTokenTotal", "total_tokens", "totalTokens"]) ??
-      totalTokens,
-    billable_token_total:
-      firstNumericField(value, ["billable_token_total", "billableTokenTotal", "total_tokens", "totalTokens"]) ??
-      totalTokens,
+    uncached_input_tokens: uncachedInputTokens,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    cache_read_tokens: cacheReadTokens,
+    cache_write_tokens: cacheWriteTokens,
+    reasoning_tokens: reasoningTokens,
+    inclusive_token_total: inclusiveTokenTotal,
+    billable_token_total: billableTokenTotal,
     total_tokens: totalTokens,
-    tokens_used: stringField(value, "tokens_used") ?? stringField(value, "tokensUsed") ?? formatInteger(totalTokens),
-    estimated_spend: stringField(value, "estimated_spend") ?? stringField(value, "estimatedSpend") ?? "unavailable",
+    tokens_used: tokensUsed,
+    estimated_spend: estimatedSpend,
     ...(estimatedSpendUsd === undefined ? {} : { estimated_spend_usd: estimatedSpendUsd }),
     component_costs_usd: componentCosts,
-    ...(providedCostUsd === undefined && estimatedSpendUsd !== undefined && sumComponentCosts(componentCosts) === 0
-      ? { provided_cost_usd: estimatedSpendUsd }
-      : providedCostUsd === undefined
-        ? {}
-        : { provided_cost_usd: providedCostUsd }),
     usage_complete: usageComplete,
-    usage_incomplete_reasons:
-      usageComplete || usageIncompleteReasons.length > 0 ? usageIncompleteReasons : [{ code: "usage-missing" }],
+    usage_incomplete_reasons: usageIncompleteReasons,
     pricing_complete: pricingComplete,
-    pricing_incomplete_reasons:
-      pricingComplete || pricingIncompleteReasons.length > 0
-        ? pricingIncompleteReasons
-        : [{ code: "price-unavailable" }],
+    pricing_incomplete_reasons: pricingIncompleteReasons,
     partial_pricing: partialPricing,
-    cache_read_pricing_estimated:
-      booleanField(value, "cache_read_pricing_estimated") ?? booleanField(value, "cacheReadPricingEstimated") ?? false,
-    ...(firstNumericField(value, ["cache_read_ratio_used", "cacheReadRatioUsed"]) === undefined
-      ? {}
-      : { cache_read_ratio_used: firstNumericField(value, ["cache_read_ratio_used", "cacheReadRatioUsed"]) }),
-    event_count: firstNumericField(value, ["event_count", "eventCount"]) ?? 0,
-    priced_event_count: firstNumericField(value, ["priced_event_count", "pricedEventCount"]) ?? 0,
-    unpriced_event_count: firstNumericField(value, ["unpriced_event_count", "unpricedEventCount"]) ?? 0,
-    models: stringArrayField(value, "models"),
-    agents: stringArrayField(value, "agents")
+    cache_read_pricing_estimated: cacheReadPricingEstimated,
+    ...(cacheReadRatioUsed === undefined ? {} : { cache_read_ratio_used: cacheReadRatioUsed }),
+    event_count: eventCount,
+    priced_event_count: pricedEventCount,
+    unpriced_event_count: unpricedEventCount,
+    models,
+    agents
   };
 }
 
@@ -1515,7 +1745,6 @@ function accountingSummaryFromTotals(totals: AccountingTotals): AccountingSummar
     estimated_spend: estimatedSpendUsd === undefined ? "unavailable" : formatUsd(estimatedSpendUsd, partialPricing),
     ...(estimatedSpendUsd === undefined ? {} : { estimated_spend_usd: estimatedSpendUsd }),
     component_costs_usd: roundedComponentCosts(totals.componentCostsUsd),
-    ...(totals.providedCostUsd === undefined ? {} : { provided_cost_usd: totals.providedCostUsd }),
     usage_complete: usageIncompleteReasons.length === 0,
     usage_incomplete_reasons: usageIncompleteReasons,
     pricing_complete: pricingIncompleteReasons.length === 0,
@@ -1714,22 +1943,32 @@ function uniqueReasons<T extends ComponentUsageIncompleteReason | PricingIncompl
   );
 }
 
-function storedComponentCosts(value: Record<string, unknown> | undefined): UsageComponentCosts {
+function storedComponentCosts(value: unknown, label: string): UsageComponentCosts {
+  const stored = exactStoredRecord(
+    value,
+    label,
+    ["uncached_input", "cache_read", "cache_write", "output", "reasoning"],
+    []
+  );
   return {
-    uncached_input: firstNumericField(value, ["uncached_input", "uncachedInput"]) ?? 0,
-    cache_read: firstNumericField(value, ["cache_read", "cacheRead"]) ?? 0,
-    cache_write: firstNumericField(value, ["cache_write", "cacheWrite"]) ?? 0,
-    output: firstNumericField(value, ["output"]) ?? 0,
-    reasoning: firstNumericField(value, ["reasoning"]) ?? 0
+    uncached_input: requiredStoredNonNegativeNumber(stored.uncached_input, `${label}.uncached_input`),
+    cache_read: requiredStoredNonNegativeNumber(stored.cache_read, `${label}.cache_read`),
+    cache_write: requiredStoredNonNegativeNumber(stored.cache_write, `${label}.cache_write`),
+    output: requiredStoredNonNegativeNumber(stored.output, `${label}.output`),
+    reasoning: requiredStoredNonNegativeNumber(stored.reasoning, `${label}.reasoning`)
   };
 }
 
 function configuredCacheReadRatio(value: string | undefined): number | undefined {
-  if (value === undefined || value.trim().length === 0) {
-    return undefined;
+  if (value === undefined) return undefined;
+  if (!/^(?:0(?:\.\d+)?|1(?:\.0+)?)$/u.test(value)) {
+    throw new Error("ULTRAFUZZ_CACHE_READ_RATIO must be an exact decimal between 0 and 1");
   }
   const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : undefined;
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    throw new Error("ULTRAFUZZ_CACHE_READ_RATIO must be an exact decimal between 0 and 1");
+  }
+  return parsed;
 }
 
 function pricingForModel(
@@ -1739,7 +1978,7 @@ function pricingForModel(
   if (model === undefined) {
     return undefined;
   }
-  return modelPricing.get(model.trim().toLowerCase());
+  return modelPricing.get(model);
 }
 
 function modelsRequiringPricing(events: WorkflowEvent[]): string[] {
@@ -1748,9 +1987,8 @@ function modelsRequiringPricing(events: WorkflowEvent[]): string[] {
     if (event.type !== "TokenUsageReported") {
       continue;
     }
-    const payload = event.payload ?? {};
-    const model = stringField(payload, "model")?.trim().toLowerCase();
-    if (model !== undefined && model.length > 0) {
+    const model = stringField(event.payload, "model");
+    if (model !== undefined) {
       models.add(model);
     }
   }
@@ -1776,26 +2014,16 @@ function comparableAccounting(value: Record<string, unknown> | undefined): Recor
 function mergedPricingCatalogMetadata(input: {
   requiredModels: string[];
   resolvedPricing: ReadonlyMap<string, ModelPricing>;
-  stored: Record<string, unknown> | undefined;
+  stored: StoredPricingCatalog | undefined;
   live: PricingCatalogMetadata | undefined;
 }): PricingCatalogMetadata & { model_prices: Record<string, ModelPricing> } {
   const resolvedModels = input.requiredModels.filter((model) => input.resolvedPricing.has(model));
   const unresolvedModels = input.requiredModels.filter((model) => !input.resolvedPricing.has(model));
-  const storedSource = stringField(input.stored, "source");
-  const source =
-    input.live?.source ??
-    (storedSource === "models.dev" || storedSource === "configured-catalog" || storedSource === "disabled"
-      ? storedSource
-      : "models.dev");
-  const storedFetchedAt = stringField(input.stored, "fetched_at");
-  const fetchedAt = input.live?.fetched_at ?? storedFetchedAt;
-  const storedStatus =
-    input.stored?.status === "available" ||
-    input.stored?.status === "disabled" ||
-    input.stored?.status === "unavailable"
-      ? input.stored.status
-      : undefined;
-  const status = unresolvedModels.length === 0 ? "available" : (input.live?.status ?? storedStatus ?? "unavailable");
+  const source = input.live?.source ?? input.stored?.source;
+  if (source === undefined) throw new Error("pricing catalog source is unavailable for non-empty usage");
+  const fetchedAt = input.live?.fetched_at ?? input.stored?.fetched_at;
+  const status = unresolvedModels.length === 0 ? "available" : (input.live?.status ?? input.stored?.status);
+  if (status === undefined) throw new Error("pricing catalog status is unavailable for non-empty usage");
   return {
     source,
     status,
@@ -1825,6 +2053,7 @@ async function synchronizeTasks(input: {
   graph: PlannedGraph;
   tasks: StoredWorkflowTask[];
   workflowRunId: string;
+  controlGeneration: string;
   inspect: WorkflowInspect;
   events: WorkflowEvent[];
   control: WorkflowSynchronizationControl;
@@ -1840,10 +2069,6 @@ async function synchronizeTasks(input: {
   const workflowStates = new Map<string, string>();
   const steps = new Map(input.inspect.steps.map((step) => [step.id, step]));
   const eventsByNode = eventsByWorkflowNode(input.events);
-  const controllerInvocations = [
-    ...controllerInvocationsForWorkflow(input.layout, input.workflowRunId),
-    ...controllerInvocationsFromWorkflowEvents(input.events, input.workflowRunId)
-  ].sort((left, right) => left.invokedAt.localeCompare(right.invokedAt));
   const graphNodeById = new Map(input.graph.nodes.map((node) => [node.id, node]));
   const taskStatusesByConcreteNode = new Map<string, NodeStatus[]>();
   const taskAttemptsByConcreteNode = new Map<string, string[]>();
@@ -1884,10 +2109,8 @@ async function synchronizeTasks(input: {
     }
     const evidence = attemptEvidence.evidence;
 
-    const needsFinalization =
-      evidence.status === "succeeded"
-        ? previous?.status !== "succeeded" || !artifactManifestExists(input.layout, task.attemptId)
-        : ["failed", "skipped", "timed-out"].includes(evidence.status) && previous?.status !== evidence.status;
+    const previousIsTerminal = previous !== undefined && terminalStatus(previous.status);
+    const needsFinalization = !previousIsTerminal && terminalStatus(evidence.status);
     const finalization = needsFinalization
       ? await finalizeTerminalTask({
           layout: input.layout,
@@ -1897,20 +2120,17 @@ async function synchronizeTasks(input: {
           evidence,
           evidenceSource: attemptEvidence.source,
           tasksByAttempt,
-          force: previous?.status === "succeeded",
-          previous,
-          nowMs: synchronizationClock(input.control),
           control: input.control
         })
       : {
-          status: evidence.status,
+          status: previousIsTerminal ? previous.status : evidence.status,
           diagnostics: [],
           ...(evidence.error ? { lastError: evidence.error } : {}),
           provenance: {},
           events: []
         };
     diagnostics.push(...finalization.diagnostics);
-    const patchStatus = finalization.status;
+    const patchStatus = previousIsTerminal ? previous.status : finalization.status;
     nodeStatuses.set(task.attemptId, patchStatus);
     workflowStates.set(task.attemptId, evidence.workflowState ?? patchStatus);
     const concreteStatuses = taskStatusesByConcreteNode.get(task.concreteNodeId) ?? [];
@@ -1925,8 +2145,8 @@ async function synchronizeTasks(input: {
         layout: input.layout,
         task,
         workflowRunId: input.workflowRunId,
+        controlGeneration: input.controlGeneration,
         events: eventsByNode.get(task.smithersNodeId) ?? [],
-        controllerInvocations,
         currentAttempt: evidence.attempt,
         currentStatus: patchStatus,
         finalization
@@ -1935,6 +2155,14 @@ async function synchronizeTasks(input: {
       changed ||= ledger.appended;
     } catch (error) {
       diagnostics.push(diagnosticFromError(error, "artifacts", "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+    }
+    if (previousIsTerminal) {
+      // Durable terminal node state is immutable. A later synchronization may
+      // finish recording source-ledger evidence, but it cannot re-finalize the
+      // node, clear its failure, create a manifest, or recover it from files
+      // that appeared after Smithers completion.
+      syncedNodes += 1;
+      continue;
     }
     const patch = {
       status: patchStatus,
@@ -1991,8 +2219,12 @@ async function synchronizeTasks(input: {
       continue;
     }
     const aggregateStatus = aggregateAttemptStatuses(statuses);
-    nodeStatuses.set(concreteNodeId, aggregateStatus);
     const previous = readRunState(input.layout).nodes[concreteNodeId];
+    if (previous !== undefined && terminalStatus(previous.status)) {
+      nodeStatuses.set(concreteNodeId, previous.status);
+      continue;
+    }
+    nodeStatuses.set(concreteNodeId, aggregateStatus);
     const patch = {
       status: aggregateStatus,
       timed_out: aggregateStatus === "timed-out",
@@ -2016,147 +2248,6 @@ async function synchronizeTasks(input: {
   return { diagnostics, nodeStatuses, workflowStates, syncedNodes, changed };
 }
 
-function artifactReconciliationGrace(previous: NodeState | undefined, nowMs: number): ArtifactReconciliationGraceRead {
-  const storedValue = previous?.provenance?.artifact_reconciliation_grace;
-  if (storedValue === undefined) {
-    return { status: "absent" };
-  }
-  if (!isRecord(storedValue)) {
-    return { status: "invalid", issues: ["artifact_reconciliation_grace must be an object"] };
-  }
-  const stored = storedValue;
-  const issues: string[] = [];
-  const expectedFields = new Set([
-    "schema_version",
-    "started_at",
-    "deadline_at",
-    "attempts",
-    "last_attempt_at",
-    "missing_count"
-  ]);
-  const unexpectedFields = Object.keys(stored).filter((field) => !expectedFields.has(field));
-  if (unexpectedFields.length > 0) {
-    issues.push(`unexpected properties: ${unexpectedFields.sort().join(", ")}`);
-  }
-  const startedAt = stringField(stored, "started_at");
-  const deadlineAt = stringField(stored, "deadline_at");
-  const lastAttemptAt = stringField(stored, "last_attempt_at");
-  const attempts = numberField(stored, "attempts");
-  const missingCount = numberField(stored, "missing_count");
-  const startedAtMs = startedAt === undefined ? Number.NaN : Date.parse(startedAt);
-  const deadlineAtMs = deadlineAt === undefined ? Number.NaN : Date.parse(deadlineAt);
-  const lastAttemptAtMs = lastAttemptAt === undefined ? Number.NaN : Date.parse(lastAttemptAt);
-  if (stored.schema_version !== "ultrafuzz.artifact-reconciliation-grace.v1") {
-    issues.push('schema_version must equal "ultrafuzz.artifact-reconciliation-grace.v1"');
-  }
-  if (startedAt === undefined || !Number.isFinite(startedAtMs)) {
-    issues.push("started_at must be a valid timestamp");
-  }
-  if (deadlineAt === undefined || !Number.isFinite(deadlineAtMs)) {
-    issues.push("deadline_at must be a valid timestamp");
-  }
-  if (lastAttemptAt === undefined || !Number.isFinite(lastAttemptAtMs)) {
-    issues.push("last_attempt_at must be a valid timestamp");
-  }
-  if (!Number.isFinite(nowMs)) {
-    issues.push("the synchronization clock must be finite");
-  }
-  if (Number.isFinite(startedAtMs) && startedAtMs > nowMs + ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS) {
-    issues.push("started_at is later than the permitted clock-skew window");
-  }
-  if (Number.isFinite(lastAttemptAtMs) && lastAttemptAtMs > nowMs + ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS) {
-    issues.push("last_attempt_at is later than the permitted clock-skew window");
-  }
-  if (
-    Number.isFinite(deadlineAtMs) &&
-    deadlineAtMs > nowMs + ARTIFACT_RECONCILIATION_GRACE_MS + ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS
-  ) {
-    issues.push("deadline_at is later than the permitted reconciliation window");
-  }
-  if (Number.isFinite(startedAtMs) && Number.isFinite(deadlineAtMs) && deadlineAtMs < startedAtMs) {
-    issues.push("deadline_at must not precede started_at");
-  }
-  if (
-    Number.isFinite(startedAtMs) &&
-    Number.isFinite(deadlineAtMs) &&
-    deadlineAtMs > startedAtMs + ARTIFACT_RECONCILIATION_GRACE_MS
-  ) {
-    issues.push("deadline_at exceeds the maximum reconciliation grace");
-  }
-  if (Number.isFinite(startedAtMs) && Number.isFinite(lastAttemptAtMs) && lastAttemptAtMs < startedAtMs) {
-    issues.push("last_attempt_at must not precede started_at");
-  }
-  if (Number.isFinite(lastAttemptAtMs) && Number.isFinite(deadlineAtMs) && lastAttemptAtMs > deadlineAtMs) {
-    issues.push("last_attempt_at must not follow deadline_at");
-  }
-  if (
-    attempts === undefined ||
-    !Number.isInteger(attempts) ||
-    attempts < 1 ||
-    attempts > ARTIFACT_RECONCILIATION_MAX_ATTEMPTS
-  ) {
-    issues.push(`attempts must be an integer from 1 through ${ARTIFACT_RECONCILIATION_MAX_ATTEMPTS}`);
-  }
-  if (missingCount === undefined || !Number.isInteger(missingCount) || missingCount < 0) {
-    issues.push("missing_count must be a non-negative integer");
-  }
-  if (issues.length > 0) {
-    return { status: "invalid", issues };
-  }
-  return {
-    status: "valid",
-    value: {
-      schema_version: "ultrafuzz.artifact-reconciliation-grace.v1",
-      started_at: startedAt!,
-      deadline_at: deadlineAt!,
-      attempts: attempts!,
-      last_attempt_at: lastAttemptAt!,
-      missing_count: missingCount!
-    }
-  };
-}
-
-function artifactReconciliationAttemptDue(previous: ArtifactReconciliationGrace | undefined, nowMs: number): boolean {
-  if (previous === undefined) {
-    return true;
-  }
-  if (previous.attempts >= ARTIFACT_RECONCILIATION_MAX_ATTEMPTS) {
-    return false;
-  }
-  const lastAttemptMs = Date.parse(previous.last_attempt_at);
-  const deadlineMs = Date.parse(previous.deadline_at);
-  return nowMs >= Math.min(lastAttemptMs + ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS, deadlineMs);
-}
-
-function nextArtifactReconciliationGrace(input: {
-  previous: ArtifactReconciliationGrace | undefined;
-  nowMs: number;
-  attempted: boolean;
-  missingCount: number;
-}): ArtifactReconciliationGrace {
-  const now = new Date(input.nowMs).toISOString();
-  if (input.previous === undefined) {
-    return {
-      schema_version: "ultrafuzz.artifact-reconciliation-grace.v1",
-      started_at: now,
-      deadline_at: new Date(input.nowMs + ARTIFACT_RECONCILIATION_GRACE_MS).toISOString(),
-      attempts: input.attempted ? 1 : 0,
-      last_attempt_at: now,
-      missing_count: input.missingCount
-    };
-  }
-  return {
-    ...input.previous,
-    attempts: input.previous.attempts + (input.attempted ? 1 : 0),
-    ...(input.attempted ? { last_attempt_at: now } : {}),
-    missing_count: input.missingCount
-  };
-}
-
-function artifactReconciliationGraceExpired(grace: ArtifactReconciliationGrace, nowMs: number): boolean {
-  return nowMs >= Date.parse(grace.deadline_at) || grace.attempts >= ARTIFACT_RECONCILIATION_MAX_ATTEMPTS;
-}
-
 async function finalizeTerminalTask(input: {
   layout: RunLayout;
   node: PlannedGraphNode;
@@ -2165,9 +2256,6 @@ async function finalizeTerminalTask(input: {
   evidence: NodeWorkflowEvidence;
   evidenceSource: "agent" | "verifier" | "preparation";
   tasksByAttempt: Map<string, StoredWorkflowTask>;
-  force: boolean;
-  previous: NodeState | undefined;
-  nowMs: number;
   control: WorkflowSynchronizationControl;
 }): Promise<NodeFinalization> {
   if (input.evidence.status !== "succeeded") {
@@ -2222,147 +2310,9 @@ async function finalizeTerminalTask(input: {
   const diagnostics: RuntimeDiagnostic[] = [];
   const events: PendingNodeEvent[] = [];
   assertSynchronizationBudget(input.control);
-  const previousGraceRead = artifactReconciliationGrace(input.previous, input.nowMs);
-  if (previousGraceRead.status === "invalid") {
-    const diagnostic: RuntimeDiagnostic = {
-      code: "ARTIFACT_RECONCILIATION_GRACE_INVALID",
-      message: `persisted artifact reconciliation grace for ${input.task.attemptId} is invalid: ${previousGraceRead.issues.join("; ")}. Ultrafuzz will not synthesize or repair reconciliation history; preserve this run's artifacts and start a new run with a new run ID`,
-      severity: "error",
-      source: "artifact-reconciliation",
-      path: `state.nodes.${input.task.attemptId}.provenance.artifact_reconciliation_grace`,
-      details: {
-        expected_schema_version: "ultrafuzz.artifact-reconciliation-grace.v1",
-        issues: previousGraceRead.issues
-      }
-    };
-    return {
-      status: "failed",
-      diagnostics: [diagnostic],
-      lastError: diagnostic.message,
-      provenance: {
-        failure: {
-          category: "artifact-contract",
-          causal_task_id: input.task.verifierSmithersNodeId,
-          causal_failure_category: "artifact-contract",
-          dependent_task_ids: []
-        }
-      },
-      events
-    };
-  }
-  const previousGrace = previousGraceRead.status === "valid" ? previousGraceRead.value : undefined;
-  const artifactDir = getNodeArtifactDir(input.layout, input.task.attemptId, { create: true });
-  const shouldReconcile = artifactReconciliationAttemptDue(previousGrace, input.nowMs);
-  let reconciledArtifacts: string[] = [];
-  let reconciliationError: RuntimeDiagnostic | undefined;
-  if (shouldReconcile) {
-    try {
-      assertSynchronizationBudget(input.control);
-      reconciledArtifacts = (
-        await reconcileRequiredArtifactsFromWorkspace({
-          layout: input.layout,
-          node: input.node,
-          attemptId: input.task.attemptId,
-          control: input.control
-        })
-      ).materialized;
-      if (reconciledArtifacts.length > 0) {
-        events.push({
-          eventType: "node-artifacts-reconciled",
-          status: "succeeded",
-          payload: { materialized: reconciledArtifacts }
-        });
-      }
-    } catch (error) {
-      if (synchronizationInterruptionDiagnostic(error) !== undefined) {
-        throw error;
-      }
-      if (isRetryableArtifactReconciliationError(error)) {
-        diagnostics.push({
-          code: error.code,
-          message: error.message,
-          severity: "warning",
-          source: "artifact-reconciliation"
-        });
-      } else {
-        reconciliationError = diagnosticFromError(
-          error,
-          "artifact-reconciliation",
-          "WORKSPACE_ARTIFACT_RECONCILE_FAILED"
-        );
-        diagnostics.push(reconciliationError);
-      }
-    }
-  }
-  assertSynchronizationBudget(input.control);
+  const artifactDir = getNodeArtifactDir(input.layout, input.task.attemptId);
   const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId);
-  const grace = nextArtifactReconciliationGrace({
-    previous: previousGrace,
-    nowMs: input.nowMs,
-    attempted: shouldReconcile,
-    missingCount: gate.diagnostics.length
-  });
-  const gracePending =
-    !gate.ok &&
-    reconciliationError === undefined &&
-    onlyTransientArtifactDiagnostics(gate.diagnostics) &&
-    !artifactReconciliationGraceExpired(grace, input.nowMs);
-
-  if (gracePending) {
-    // Carry the gate's non-fatal diagnostics through. Two of them fire only on
-    // the pass that actually mutates -- a re-sealed verification marker and a
-    // sanitized lens output -- and node patches persist no diagnostics, so
-    // returning early without them is the only sync that would ever have
-    // reported a security-relevant edit, and it would report nothing.
-    diagnostics.push(...gate.diagnostics.filter((diagnostic) => diagnostic.severity !== "error"));
-    diagnostics.push({
-      code: "REQUIRED_ARTIFACT_GRACE_PENDING",
-      message:
-        "required artifacts are not yet visible; strict validation remains pending within the bounded reconciliation grace",
-      severity: "warning",
-      source: "artifact-gates",
-      details: {
-        attempts: grace.attempts,
-        missing_count: grace.missing_count,
-        deadline_at: grace.deadline_at
-      }
-    });
-    if (previousGrace === undefined) {
-      events.push({
-        eventType: "node-artifact-reconciliation-grace-started",
-        status: "running",
-        payload: {
-          attempts: grace.attempts,
-          missing_count: grace.missing_count,
-          deadline_at: grace.deadline_at
-        }
-      });
-    } else if (shouldReconcile) {
-      events.push({
-        eventType: "node-artifact-reconciliation-grace-retried",
-        status: "running",
-        payload: { attempts: grace.attempts, missing_count: grace.missing_count }
-      });
-    }
-    return {
-      status: "running",
-      diagnostics,
-      provenance: {
-        output_contracts: { ok: false, missing: gate.missing },
-        artifact_reconciliation_grace: grace
-      },
-      events
-    };
-  }
-
   diagnostics.push(...gate.diagnostics);
-  if (gate.ok && previousGrace !== undefined) {
-    events.push({
-      eventType: "node-artifact-reconciliation-grace-completed",
-      status: "succeeded",
-      payload: { attempts: grace.attempts }
-    });
-  }
   events.push({
     eventType: gate.ok ? "node-artifacts-verified" : "node-artifacts-missing",
     status: gate.ok ? "succeeded" : "failed",
@@ -2438,11 +2388,11 @@ async function finalizeTerminalTask(input: {
 
   const errorDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
   if (errorDiagnostics.length > 0) {
-    const taskOutputValidationFailure = findingsValidationFailed && reconciliationError === undefined;
+    const taskOutputValidationFailure = !gate.ok || findingsValidationFailed;
     return {
       status: "failed",
       diagnostics,
-      lastError: diagnostics.map((diagnostic) => diagnostic.message).join("; "),
+      lastError: errorDiagnostics.map((diagnostic) => diagnostic.message).join("; "),
       provenance: {
         output_contracts: { ok: gate.ok, missing: gate.missing },
         failure: {
@@ -2451,8 +2401,6 @@ async function finalizeTerminalTask(input: {
           causal_failure_category: "artifact-contract",
           dependent_task_ids: []
         },
-        ...(reconciledArtifacts.length > 0 ? { reconciled_artifacts: reconciledArtifacts } : {}),
-        ...(previousGrace === undefined ? {} : { artifact_reconciliation_grace: grace }),
         ...(findingsCount !== undefined ? { findings_count: findingsCount } : {}),
         ...(taskOutputValidationFailure
           ? {
@@ -2471,10 +2419,7 @@ async function finalizeTerminalTask(input: {
     diagnostics,
     provenance: {
       output_contracts: { ok: true, missing: [] },
-      ...(reconciledArtifacts.length > 0 ? { reconciled_artifacts: reconciledArtifacts } : {}),
-      ...(previousGrace === undefined ? {} : { artifact_reconciliation_grace: grace }),
-      ...(findingsCount !== undefined ? { findings_count: findingsCount } : {}),
-      ...(input.force ? { repaired_missing_manifest: true } : {})
+      ...(findingsCount !== undefined ? { findings_count: findingsCount } : {})
     },
     events
   };
@@ -2530,8 +2475,8 @@ function appendTerminalTaskAttempts(input: {
   layout: RunLayout;
   task: StoredWorkflowTask;
   workflowRunId: string;
+  controlGeneration: string;
   events: WorkflowEvent[];
-  controllerInvocations: ControllerInvocation[];
   currentAttempt?: number;
   currentStatus: NodeStatus;
   finalization: NodeFinalization;
@@ -2549,60 +2494,28 @@ function appendTerminalTaskAttempts(input: {
   );
   const manifestPath = path.join(getNodeArtifactDir(input.layout, input.task.attemptId), "artifact-manifest.json");
   const outputManifestDigest = fs.existsSync(manifestPath) ? sha256File(manifestPath) : undefined;
-  const existing = queryNodeAttempts(input.layout, { strategyAttemptId: input.task.attemptId });
-  let sourceEntries: NodeAttemptLedgerEntry[] | undefined;
+  const allExisting = replayNodeAttempts(input.layout).entries;
+  const existing = allExisting.filter((entry) => entry.strategy_attempt_id === input.task.attemptId);
+  const existingByIdentity = new Map(
+    allExisting.map((entry) => [nodeAttemptLedgerIdentity(entry), entry] as const)
+  );
+  const sourceEntries = sourceNodeAttempts(input.layout, state.source_run_id, input.task.attemptId);
   const currentTerminalAttempt =
     input.currentAttempt === undefined
       ? undefined
       : terminalAttempts.filter((attempt) => attempt.retry === input.currentAttempt).at(-1);
-  const prepared: Array<{
-    isCurrent: boolean;
-    attemptId: NodeAttemptId;
-    appendInput?: AppendNodeAttemptInput;
-    recordedEntry?: NodeAttemptLedgerEntry;
-  }> = [];
-  const preparedById = new Map<string, (typeof prepared)[number]>();
+  const pending: AppendNodeAttemptInput[] = [];
+  const candidates: NodeAttemptLedgerEntry[] = [];
+  const candidatesByIdentity = new Map<string, NodeAttemptLedgerEntry>();
+  let currentAttemptExecuted = false;
   for (const attempt of terminalAttempts) {
-    const controllerInvocationId = dimensionId(
-      "controller",
-      attempt.controllerInvocationId ??
-        controllerInvocationForAttempt(input.controllerInvocations, attempt.startedAt) ??
-        input.workflowRunId
-    );
-    const workflowExecutionId = dimensionId(
-      "execution",
-      attempt.workflowExecutionId ?? stableLedgerDimension("execution", [input.workflowRunId, controllerInvocationId])
-    );
-    const checkpointGenerationId = dimensionId(
-      "checkpoint",
-      attempt.checkpointGenerationId ??
-        stableLedgerDimension("checkpoint", [workflowExecutionId, String(attempt.iteration)])
-    );
-    const executorRetryId = dimensionId(
-      "retry",
-      attempt.executorRetryId ??
-        stableLedgerDimension("retry", [
-          input.workflowRunId,
-          input.task.attemptId,
-          String(attempt.finishedSequence ?? attempt.finishedAt),
-          String(attempt.retry)
-        ])
-    );
-    const recordedEntry = existing.find((entry) => entry.executor_retry_id === executorRetryId);
-    if (recordedEntry !== undefined) {
-      prepared.push({
-        isCurrent: attempt === currentTerminalAttempt,
-        attemptId: recordedEntry.attempt_id,
-        recordedEntry
-      });
-      continue;
-    }
+    const isCurrent = attempt === currentTerminalAttempt;
     let outcome = attempt.outcome;
     let failureCategory = attempt.failureCategory;
     let failureMessage = attempt.failureMessage;
     let outputDigest = outcome === "succeeded" ? outputManifestDigest : undefined;
     if (
-      attempt === currentTerminalAttempt &&
+      isCurrent &&
       outcome === "succeeded" &&
       input.currentStatus !== "succeeded" &&
       terminalStatus(input.currentStatus)
@@ -2614,18 +2527,14 @@ function appendTerminalTaskAttempts(input: {
       outcome = "failed";
       failureCategory = "artifact-validation";
     }
-    if (attempt === currentTerminalAttempt && ["failed", "timed-out", "canceled"].includes(outcome)) {
+    if (isCurrent && ["failed", "timed-out", "canceled"].includes(outcome)) {
       failureMessage = input.finalization.lastError ?? failureMessage;
     }
     const reuseSource =
       outcome === "reused"
         ? reusedSourceAttempt({
             existing,
-            sourceEntries: (sourceEntries ??= sourceNodeAttempts(
-              input.layout,
-              state.source_run_id,
-              input.task.attemptId
-            )),
+            sourceEntries,
             outputManifestDigest: outputDigest
           })
         : undefined;
@@ -2633,16 +2542,24 @@ function appendTerminalTaskAttempts(input: {
       outputDigest = reuseSource.outputManifestDigest;
     }
     const reuse =
-      reuseSource === undefined ? undefined : { status: "reused" as const, sourceAttemptId: reuseSource.attemptId };
+      reuseSource === undefined
+        ? undefined
+        : {
+            status: "reused" as const,
+            sourceWorkflowRunId: reuseSource.workflowRunId,
+            sourceEventSequence: reuseSource.sourceEventSequence
+          };
     const normalizedFailureMessage =
       failureMessage === undefined ? undefined : normalizeNodeAttemptFailureMessage(failureMessage);
     const appendInput: AppendNodeAttemptInput = {
-      nodeId: input.task.concreteNodeId,
+      workflowRunId: input.workflowRunId,
+      controlGeneration: input.controlGeneration,
+      nodeId: attempt.nodeId,
       strategyAttemptId: input.task.attemptId,
-      executorRetryId,
-      checkpointGenerationId,
-      workflowExecutionId,
-      controllerInvocationId,
+      iteration: attempt.iteration,
+      attempt: attempt.retry,
+      startedEventSequence: attempt.startedSequence,
+      sourceEventSequence: attempt.finishedSequence,
       startedAt: attempt.startedAt,
       finishedAt: attempt.finishedAt,
       outcome,
@@ -2652,115 +2569,107 @@ function appendTerminalTaskAttempts(input: {
       ...(failureCategory === undefined ? {} : { failureCategory }),
       ...(normalizedFailureMessage === undefined ? {} : { failureMessage: normalizedFailureMessage })
     };
-    const preparedAttempt = {
-      isCurrent: attempt === currentTerminalAttempt,
-      appendInput,
-      attemptId: createNodeAttemptLedgerEntry(input.layout, appendInput).attempt_id
-    };
-    const duplicate = preparedById.get(preparedAttempt.attemptId);
-    if (duplicate !== undefined) {
-      if (JSON.stringify(duplicate.appendInput) !== JSON.stringify(preparedAttempt.appendInput)) {
-        throw new Error(`node attempt ${preparedAttempt.attemptId} was observed with conflicting terminal data`);
+    const candidate = createNodeAttemptLedgerEntry(input.layout, appendInput);
+    const identity = nodeAttemptLedgerIdentity(candidate);
+    const duplicateCandidate = candidatesByIdentity.get(identity);
+    if (duplicateCandidate !== undefined) {
+      if (!isDeepStrictEqual(duplicateCandidate, candidate)) {
+        throw new Error(`node attempt ${identity} appears with conflicting immutable data in the source snapshot`);
       }
+      currentAttemptExecuted ||= isCurrent && duplicateCandidate.reuse.status === "executed";
       continue;
     }
-    preparedById.set(preparedAttempt.attemptId, preparedAttempt);
-    prepared.push(preparedAttempt);
-  }
-
-  const existingById = new Set(existing.map((entry) => entry.attempt_id));
-  let parentAttemptId: NodeAttemptId | undefined;
-  if (prepared.length > 0 && !existingById.has(prepared[0]!.attemptId)) {
-    parentAttemptId = existing.at(-1)?.attempt_id;
-  }
-  const pending: AppendNodeAttemptInput[] = [];
-  let currentAttemptExecuted = false;
-  for (const attempt of prepared) {
-    const entry = attempt.recordedEntry;
-    if (entry !== undefined) {
-      parentAttemptId = entry.attempt_id;
-      currentAttemptExecuted ||= attempt.isCurrent && entry.reuse.status === "executed";
+    const recordedEntry = existingByIdentity.get(identity);
+    if (recordedEntry !== undefined) {
+      if (!isDeepStrictEqual(recordedEntry, candidate)) {
+        throw new Error(`node attempt ${identity} was already recorded with different immutable data`);
+      }
+      candidatesByIdentity.set(identity, candidate);
+      candidates.push(candidate);
+      currentAttemptExecuted ||= isCurrent && recordedEntry.reuse.status === "executed";
       continue;
     }
-    pending.push({
-      ...attempt.appendInput!,
-      ...(parentAttemptId === undefined ? {} : { parentAttemptId })
+    candidatesByIdentity.set(identity, candidate);
+    candidates.push(candidate);
+    pending.push(appendInput);
+    currentAttemptExecuted ||= isCurrent && reuse?.status !== "reused";
+  }
+  const proposedEntries = [...allExisting, ...candidates.filter((candidate) => !existingByIdentity.has(nodeAttemptLedgerIdentity(candidate)))];
+  const gateContext = {
+    attemptLedger: { entries: proposedEntries, sourceEntries },
+    eventLog: {
+      events: input.events.map((event) => ({
+        workflow_run_id: event.workflowRunId,
+        source_event_sequence: event.sourceEventSequence,
+        timestamp_ms: event.timestampMs,
+        type: event.type,
+        payload: event.payload
+      }))
+    }
+  };
+  for (const candidate of candidates) {
+    const diagnostics = runtimeSemanticGateDiagnostics({
+      schemaFilename: "node-attempt-ledger.schema.json",
+      document: candidate,
+      artifactPath: input.layout.attemptLedgerPath,
+      context: gateContext
     });
-    parentAttemptId = attempt.attemptId;
-    currentAttemptExecuted ||= attempt.isCurrent && attempt.appendInput!.reuse?.status !== "reused";
+    if (diagnostics.length > 0) {
+      throw new Error(diagnostics.map((diagnostic) => diagnostic.message).join("; "));
+    }
   }
   const results = pending.length === 0 ? [] : appendNodeAttempts(input.layout, pending);
-  const allEntries = new Map(existing.map((entry) => [entry.attempt_id, entry]));
-  for (const result of results) {
-    allEntries.set(result.entry.attempt_id, result.entry);
-  }
+  const allEntries = proposedEntries.filter((entry) => entry.strategy_attempt_id === input.task.attemptId);
   return {
     appended: results.some((result) => result.appended),
-    executedAttempts: [...allEntries.values()].filter((entry) => entry.reuse.status === "executed").length,
+    executedAttempts: allEntries.filter((entry) => entry.reuse.status === "executed").length,
     currentAttemptExecuted
   };
 }
 
 function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAttempt[] {
-  const attempts: Array<Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">> = [];
+  const active = new Map<
+    string,
+    Pick<
+      TerminalWorkflowAttempt,
+      "retry" | "iteration" | "nodeId" | "startedSequence" | "startedAt"
+    >
+  >();
+  const attempts: TerminalWorkflowAttempt[] = [];
   for (const event of events) {
-    const payload = event.payload ?? {};
-    const retry = numberField(payload, "attempt");
-    if (retry === undefined || retry < 0) {
+    if (event.type !== "NodeStarted" && event.type !== "NodeFinished" && event.type !== "NodeFailed") continue;
+    const payload = event.payload;
+    const nodeId = requiredWorkflowEventString(payload.nodeId, `${event.type} nodeId`);
+    const retry = requiredWorkflowEventCount(payload.attempt, `${event.type} attempt`);
+    const iteration = requiredWorkflowEventCount(payload.iteration, `${event.type} iteration`);
+    const identity = JSON.stringify([nodeId, iteration, retry]);
+    const timestamp = new Date(event.timestampMs).toISOString();
+    if (event.type === "NodeStarted") {
+      if (active.has(identity)) throw new Error(`Smithers attempt ${identity} has multiple active NodeStarted events`);
+      active.set(identity, {
+        retry,
+        iteration,
+        nodeId,
+        startedSequence: event.sourceEventSequence,
+        startedAt: timestamp
+      });
       continue;
     }
-    const iteration = numberField(payload, "iteration") ?? 0;
-    const timestamp = event.timestampMs === undefined ? undefined : new Date(event.timestampMs).toISOString();
     const terminal = terminalOutcomeForEvent(event);
-    let current = latestWorkflowAttempt(attempts, retry, iteration);
-    if (event.type === "NodeStarted" && timestamp !== undefined) {
-      if (current === undefined || current.startedAt !== undefined || current.finishedAt !== undefined) {
-        current = { retry, iteration };
-        attempts.push(current);
-      }
-      applyAttemptDimensionFields(current, payload);
-      current.startedSequence = event.sequence;
-      current.startedAt = timestamp;
-      continue;
-    }
-    if (current === undefined) {
-      current = { retry, iteration };
-      attempts.push(current);
-    }
-    applyAttemptDimensionFields(current, payload);
-    if (terminal !== undefined && current.finishedAt === undefined && timestamp !== undefined) {
-      current.finishedAt = timestamp;
-      current.finishedSequence = event.sequence;
-      current.startedAt ??= timestamp;
-      current.startedSequence ??= event.sequence;
-      current.outcome = terminal.outcome;
-      current.failureCategory = terminal.failureCategory;
-      current.failureMessage = terminal.failureMessage;
-    }
+    if (terminal === undefined) continue;
+    const started = active.get(identity);
+    if (started === undefined) throw new Error(`Smithers terminal event has no preceding NodeStarted for ${identity}`);
+    active.delete(identity);
+    attempts.push({
+      ...started,
+      finishedSequence: event.sourceEventSequence,
+      finishedAt: timestamp,
+      outcome: terminal.outcome,
+      ...(terminal.failureCategory === undefined ? {} : { failureCategory: terminal.failureCategory }),
+      ...(terminal.failureMessage === undefined ? {} : { failureMessage: terminal.failureMessage })
+    });
   }
-  return attempts
-    .filter(
-      (attempt): attempt is TerminalWorkflowAttempt =>
-        attempt.startedAt !== undefined && attempt.finishedAt !== undefined && attempt.outcome !== undefined
-    )
-    .sort(
-      (left, right) =>
-        left.finishedAt.localeCompare(right.finishedAt) || left.iteration - right.iteration || left.retry - right.retry
-    );
-}
-
-function latestWorkflowAttempt(
-  attempts: ReadonlyArray<Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">>,
-  retry: number,
-  iteration: number
-): (Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">) | undefined {
-  for (let index = attempts.length - 1; index >= 0; index -= 1) {
-    const attempt = attempts[index]!;
-    if (attempt.retry === retry && attempt.iteration === iteration) {
-      return attempt;
-    }
-  }
-  return undefined;
+  return attempts.sort((left, right) => left.finishedSequence - right.finishedSequence);
 }
 
 function terminalOutcomeForEvent(event: WorkflowEvent):
@@ -2773,100 +2682,15 @@ function terminalOutcomeForEvent(event: WorkflowEvent):
   switch (event.type) {
     case "NodeFinished":
       return { outcome: "succeeded" };
-    case "TaskHeartbeatTimeout":
-      return {
-        outcome: "timed-out",
-        failureCategory: "timeout",
-        failureMessage: stringField(event.payload, "message") ?? "workflow task timed out"
-      };
     case "NodeFailed": {
-      const failureMessage = errorText(event.payload?.error);
-      return errorLooksLikeTimeout(event.payload?.error)
+      const failureMessage = errorText(event.payload.error);
+      return errorLooksLikeTimeout(event.payload.error)
         ? { outcome: "timed-out", failureCategory: "timeout", ...(failureMessage ? { failureMessage } : {}) }
         : { outcome: "failed", failureCategory: "executor-error", ...(failureMessage ? { failureMessage } : {}) };
     }
-    case "NodeCancelled":
-      return { outcome: "canceled", failureCategory: "canceled", failureMessage: "workflow task was cancelled" };
-    case "NodeSkipped":
-      return { outcome: "skipped" };
     default:
       return undefined;
   }
-}
-
-function applyAttemptDimensionFields(
-  attempt: Partial<TerminalWorkflowAttempt>,
-  payload: Record<string, unknown>
-): void {
-  attempt.executorRetryId ??= firstStringField(payload, ["executorRetryId", "executor_retry_id"]);
-  attempt.checkpointGenerationId ??=
-    firstStringField(payload, ["checkpointGenerationId", "checkpoint_generation_id"]) ??
-    firstNumberFieldAsString(payload, ["checkpointGeneration", "checkpoint_generation", "generation"]);
-  attempt.workflowExecutionId ??= firstStringField(payload, [
-    "workflowExecutionId",
-    "workflow_execution_id",
-    "executionId",
-    "execution_id"
-  ]);
-  attempt.controllerInvocationId ??= firstStringField(payload, ["controllerInvocationId", "controller_invocation_id"]);
-}
-
-function controllerInvocationsForWorkflow(layout: RunLayout, workflowRunId: string): ControllerInvocation[] {
-  return replayEvents(layout).records.flatMap((event): ControllerInvocation[] => {
-    if (!["workflow-submitted", "workflow-lifecycle-submitted"].includes(event.event_type)) {
-      return [];
-    }
-    const payload = isRecord(event.payload) ? event.payload : undefined;
-    if (stringField(payload, "workflow_run_id") !== workflowRunId) {
-      return [];
-    }
-    return [
-      {
-        id: stringField(payload, "controller_invocation_id") ?? event.event_id,
-        invokedAt: stringField(payload, "controller_invoked_at") ?? event.timestamp
-      }
-    ];
-  });
-}
-
-function controllerInvocationsFromWorkflowEvents(
-  events: readonly WorkflowEvent[],
-  workflowRunId: string
-): ControllerInvocation[] {
-  const controllerEvents = new Set(["RunStarted", "RunAutoResumed", "RunHijacked", "ReplayStarted", "RunForked"]);
-  return events.flatMap((event): ControllerInvocation[] => {
-    if (!controllerEvents.has(event.type) || event.timestampMs === undefined) {
-      return [];
-    }
-    const payload = event.payload ?? {};
-    const payloadRunId = stringField(payload, "runId") ?? stringField(payload, "run_id");
-    if (payloadRunId !== undefined && payloadRunId !== workflowRunId) {
-      return [];
-    }
-    const explicitId = firstStringField(payload, ["controllerInvocationId", "controller_invocation_id"]);
-    return [
-      {
-        id:
-          explicitId ??
-          stableLedgerDimension("controller", [
-            workflowRunId,
-            event.type,
-            String(event.sequence ?? ""),
-            String(event.timestampMs),
-            stringField(payload, "nodeId") ?? "",
-            String(numberField(payload, "attempt") ?? "")
-          ]),
-        invokedAt: new Date(event.timestampMs).toISOString()
-      }
-    ];
-  });
-}
-
-function controllerInvocationForAttempt(
-  invocations: readonly ControllerInvocation[],
-  startedAt: string
-): string | undefined {
-  return invocations.filter((invocation) => invocation.invokedAt <= startedAt).at(-1)?.id ?? invocations[0]?.id;
 }
 
 function nodeAttemptOutcome(status: NodeStatus): NodeAttemptOutcome {
@@ -2876,7 +2700,7 @@ function nodeAttemptOutcome(status: NodeStatus): NodeAttemptOutcome {
     case "timed-out":
       return "timed-out";
     case "skipped":
-      return "skipped";
+      return "failed";
     case "reused-from-prior-run":
       return "reused";
     default:
@@ -2914,7 +2738,7 @@ function reusedSourceAttempt(input: {
   existing: readonly NodeAttemptLedgerEntry[];
   sourceEntries: readonly NodeAttemptLedgerEntry[];
   outputManifestDigest?: string;
-}): { attemptId: NodeAttemptId; outputManifestDigest: string } {
+}): { workflowRunId: string; sourceEventSequence: number; outputManifestDigest: string } {
   const candidates = [...input.sourceEntries, ...input.existing]
     .filter(
       (entry) => (entry.outcome === "succeeded" || entry.outcome === "reused") && entry.manifests.output_sha256 !== null
@@ -2930,7 +2754,8 @@ function reusedSourceAttempt(input: {
     throw new Error("reused node attempt source is missing its output manifest digest");
   }
   return {
-    attemptId: source.reuse.status === "reused" ? source.reuse.source_attempt_id : source.attempt_id,
+    workflowRunId: source.workflow_run_id,
+    sourceEventSequence: source.source_event_sequence,
     outputManifestDigest
   };
 }
@@ -2957,32 +2782,11 @@ function sourceNodeAttempts(
   return queryNodeAttempts(layoutForRunRoot(sourceRoot, safeSourceRunId), { strategyAttemptId });
 }
 
-function dimensionId(prefix: string, value: string): string {
-  return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$/u.test(value) ? value : stableLedgerDimension(prefix, [value]);
-}
-
-function stableLedgerDimension(prefix: string, parts: readonly string[]): string {
-  return `${prefix}-${manifestDigest(JSON.stringify(parts)).slice(0, 32)}`;
-}
-
 function firstStringField(value: Record<string, unknown> | undefined, keys: readonly string[]): string | undefined {
   for (const key of keys) {
     const candidate = stringField(value, key);
     if (candidate !== undefined) {
       return candidate;
-    }
-  }
-  return undefined;
-}
-
-function firstNumberFieldAsString(
-  value: Record<string, unknown> | undefined,
-  keys: readonly string[]
-): string | undefined {
-  for (const key of keys) {
-    const candidate = numberField(value, key);
-    if (candidate !== undefined) {
-      return String(candidate);
     }
   }
   return undefined;
@@ -3488,48 +3292,102 @@ function failedWorkflowTaskIds(data: Record<string, unknown> | undefined, steps:
   return [...ids].sort();
 }
 
-function parseWorkflowEvents(stdout: string): WorkflowEvent[] {
-  const events: WorkflowEvent[] = [];
-  for (const line of stdout.split(/\r?\n/u)) {
-    if (line.trim().length === 0) {
-      continue;
-    }
+function parseWorkflowEvents(stdout: string, expectedWorkflowRunId: string): WorkflowEvent[] {
+  if (stdout.length === 0) return [];
+  if (stdout.includes("\uFFFD")) throw new Error("Smithers event snapshot is not valid UTF-8");
+  if (!stdout.endsWith("\n")) throw new Error("Smithers event snapshot has an unterminated final record");
+  const lines = stdout.split("\n");
+  lines.pop();
+  const events = lines.map((line, index): WorkflowEvent => {
+    if (line.trim().length === 0) throw new Error(`Smithers event snapshot contains a blank record at line ${index + 1}`);
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(line) as unknown;
-      if (!isRecord(parsed)) {
-        continue;
-      }
-      const payload = recordField(parsed, "payload") ?? parsed;
-      const type =
-        stringField(parsed, "type") ??
-        stringField(parsed, "event") ??
-        stringField(parsed, "kind") ??
-        stringField(payload, "type") ??
-        stringField(payload, "event") ??
-        stringField(payload, "kind");
-      if (type === undefined) {
-        continue;
-      }
-      const globalSequence = numberField(parsed, "seq") ?? numberField(payload, "seq");
-      events.push({
-        type,
-        sequence: globalSequence ?? events.length,
-        ...(globalSequence === undefined ? {} : { globalSequence }),
-        sourceEventId:
-          stringField(parsed, "eventId") ??
-          stringField(parsed, "event_id") ??
-          stringField(payload, "eventId") ??
-          stringField(payload, "event_id"),
-        timestampMs: numberField(parsed, "timestampMs") ?? numberField(payload, "timestampMs"),
-        ...(payload ? { payload } : {})
+      parsed = parseStrictJsonBytes(Buffer.from(line, "utf8"), {
+        maxBytes: 4 * 1024 * 1024,
+        maxDepth: 128,
+        maxItems: 100_000,
+        maxProperties: 100_000
       });
-    } catch {
-      continue;
+    } catch (error) {
+      throw new Error(
+        `Smithers event record ${index + 1} is invalid strict JSON: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    if (!isRecord(parsed) || !hasOnlyKeys(parsed, ["runId", "seq", "timestampMs", "type", "payload"])) {
+      throw new Error(`Smithers event record ${index + 1} must use the exact five-key 0.32.0 envelope`);
+    }
+    const workflowRunId = requiredWorkflowEventString(parsed.runId, `Smithers event record ${index + 1} runId`);
+    const sourceEventSequence = requiredWorkflowEventCount(parsed.seq, `Smithers event record ${index + 1} seq`);
+    const timestampMs = requiredWorkflowEventCount(parsed.timestampMs, `Smithers event record ${index + 1} timestampMs`);
+    const type = requiredWorkflowEventString(parsed.type, `Smithers event record ${index + 1} type`);
+    if (!isRecord(parsed.payload)) throw new Error(`Smithers event record ${index + 1} payload must be an object`);
+    const payload = parsed.payload;
+    if (workflowRunId !== expectedWorkflowRunId) {
+      throw new Error(
+        `Smithers event record ${index + 1} belongs to ${JSON.stringify(workflowRunId)}, expected ${JSON.stringify(expectedWorkflowRunId)}`
+      );
+    }
+    if (payload.runId !== workflowRunId || payload.type !== type || payload.timestampMs !== timestampMs) {
+      throw new Error(`Smithers event record ${index + 1} envelope and payload provenance disagree`);
+    }
+    validateSmithersEventPayload(type, payload, index + 1);
+    return { type, workflowRunId, sourceEventSequence, timestampMs, payload };
+  });
+  for (let index = 1; index < events.length; index += 1) {
+    if (events[index]!.sourceEventSequence <= events[index - 1]!.sourceEventSequence) {
+      throw new Error(`Smithers event snapshot sequences are not strictly increasing at record ${index + 1}`);
     }
   }
-  return events.sort(
-    (left, right) => (left.sequence ?? 0) - (right.sequence ?? 0) || (left.timestampMs ?? 0) - (right.timestampMs ?? 0)
-  );
+  return events;
+}
+
+function validateSmithersEventPayload(type: string, payload: Record<string, unknown>, lineNumber: number): void {
+  const label = `Smithers ${type} payload at line ${lineNumber}`;
+  const attemptEventTypes = new Set(["NodeStarted", "NodeFinished", "NodeFailed", "NodeRetrying", "TokenUsageReported"]);
+  if (attemptEventTypes.has(type)) {
+    requiredWorkflowEventString(payload.nodeId, `${label} nodeId`);
+    requiredWorkflowEventCount(payload.iteration, `${label} iteration`);
+    requiredWorkflowEventCount(payload.attempt, `${label} attempt`);
+  } else if (type === "NodeSkipped") {
+    requiredWorkflowEventString(payload.nodeId, `${label} nodeId`);
+    requiredWorkflowEventCount(payload.iteration, `${label} iteration`);
+  }
+  if (type !== "TokenUsageReported") return;
+  const allowed = [
+    "type",
+    "runId",
+    "nodeId",
+    "iteration",
+    "attempt",
+    "model",
+    "agent",
+    "inputTokens",
+    "outputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+    "reasoningTokens",
+    "timestampMs"
+  ];
+  if (!hasOnlyKeys(payload, allowed)) throw new Error(`${label} contains unsupported fields`);
+  requiredWorkflowEventString(payload.model, `${label} model`);
+  requiredWorkflowEventString(payload.agent, `${label} agent`);
+  requiredWorkflowEventCount(payload.inputTokens, `${label} inputTokens`);
+  requiredWorkflowEventCount(payload.outputTokens, `${label} outputTokens`);
+  for (const field of ["cacheReadTokens", "cacheWriteTokens", "reasoningTokens"] as const) {
+    if (payload[field] !== undefined) requiredWorkflowEventCount(payload[field], `${label} ${field}`);
+  }
+}
+
+function requiredWorkflowEventString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 4_096 || value.includes("\0")) {
+    throw new Error(`${label} is invalid`);
+  }
+  return value;
+}
+
+function requiredWorkflowEventCount(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error(`${label} is invalid`);
+  return value;
 }
 
 function loadSynchronizationInputs(
@@ -3670,156 +3528,142 @@ function numberField(value: Record<string, unknown> | undefined, key: string): n
   return typeof field === "number" && Number.isFinite(field) ? field : undefined;
 }
 
-function firstNumericField(value: Record<string, unknown> | undefined, keys: string[]): number | undefined {
-  for (const key of keys) {
-    const field = value?.[key];
-    if (typeof field === "number" && Number.isFinite(field)) {
-      return field;
-    }
-    if (typeof field === "string") {
-      const parsed = Number(field);
-      if (Number.isFinite(parsed)) {
-        return parsed;
-      }
-    }
+function exactStoredRecord(
+  value: unknown,
+  label: string,
+  requiredFields: readonly string[],
+  optionalFields: readonly string[]
+): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error(`${label} must be an object`);
+  const allowed = new Set([...requiredFields, ...optionalFields]);
+  const extras = Object.keys(value).filter((field) => !allowed.has(field));
+  const missing = requiredFields.filter((field) => !Object.prototype.hasOwnProperty.call(value, field));
+  if (extras.length > 0 || missing.length > 0) {
+    throw new Error(
+      `${label} does not use the exact current shape${missing.length === 0 ? "" : `; missing: ${missing.join(", ")}`}${extras.length === 0 ? "" : `; unsupported: ${extras.join(", ")}`}`
+    );
   }
-  return undefined;
+  return value;
 }
 
-function firstNonNegativeNumericField(
-  value: Record<string, unknown> | undefined,
-  keys: readonly string[]
-): number | undefined {
-  const field = firstNumericField(value, [...keys]);
-  return field !== undefined && field >= 0 ? field : undefined;
-}
-
-function firstNonNegativeIntegerField(
-  value: Record<string, unknown> | undefined,
-  keys: readonly string[]
-): number | undefined {
-  const field = firstNonNegativeNumericField(value, keys);
-  return field !== undefined && Number.isInteger(field) ? field : undefined;
-}
-
-function booleanField(value: Record<string, unknown> | undefined, key: string): boolean | undefined {
-  const field = value?.[key];
-  return typeof field === "boolean" ? field : undefined;
-}
-
-function stringArrayField(value: Record<string, unknown> | undefined, key: string): string[] {
-  const field = value?.[key];
-  return Array.isArray(field) ? field.filter((entry): entry is string => typeof entry === "string") : [];
-}
-
-function storedUsageCompletenessMarkers(value: unknown): UsageCompletenessMarker[] {
-  if (!Array.isArray(value)) {
-    return [];
+function requiredStoredString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0 || value.includes("\0")) {
+    throw new Error(`${label} must be a non-empty string`);
   }
-  return uniqueUsageCompletenessMarkers(
-    value.flatMap((entry): UsageCompletenessMarker[] => {
-      if (!isRecord(entry)) {
-        return [];
-      }
-      const code = stringField(entry, "code");
-      const componentUsageCodes = new Set<ComponentUsageIncompleteReason["code"]>([
-        "component-usage-unavailable",
-        "component-usage-estimated",
-        "component-breakdown-incomplete"
-      ]);
-      if (
-        code === undefined ||
-        (code !== "ledger-entry-malformed" &&
-          !USAGE_INCOMPLETE_REASON_CODES.includes(code as LedgerUsageIncompleteReason["code"]) &&
-          !componentUsageCodes.has(code as ComponentUsageIncompleteReason["code"]))
-      ) {
-        return [];
-      }
-      const field = stringField(entry, "field");
-      const component = stringField(entry, "component");
-      const components = new Set<UsageComponent>([
-        "uncached_input",
-        "cache_read",
-        "cache_write",
-        "output",
-        "reasoning"
-      ]);
-      return [
-        {
-          code: code as UsageCompletenessMarker["code"],
-          ...(field !== undefined && USAGE_FIELDS.includes(field as UsageField) ? { field: field as UsageField } : {}),
-          ...(component !== undefined && components.has(component as UsageComponent)
-            ? { component: component as UsageComponent }
-            : {}),
-          ...(stringField(entry, "model") === undefined ? {} : { model: stringField(entry, "model") }),
-          ...(stringField(entry, "event_id") === undefined ? {} : { event_id: stringField(entry, "event_id") }),
-          ...(stringField(entry, "checkpoint_generation_id") === undefined
-            ? {}
-            : { checkpoint_generation_id: stringField(entry, "checkpoint_generation_id") })
-        }
-      ];
-    })
+  return value;
+}
+
+function requiredStoredTimestamp(value: unknown, label: string): string {
+  const timestamp = requiredStoredString(value, label);
+  const parsed = Date.parse(timestamp);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== timestamp) {
+    throw new Error(`${label} must be a canonical UTC timestamp`);
+  }
+  return timestamp;
+}
+
+function requiredStoredBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`${label} must be a boolean`);
+  return value;
+}
+
+function requiredStoredNonNegativeNumber(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative finite number`);
+  }
+  return value;
+}
+
+function requiredStoredCount(value: unknown, label: string): number {
+  const count = requiredStoredNonNegativeNumber(value, label);
+  if (!Number.isSafeInteger(count)) throw new Error(`${label} must be a non-negative safe integer`);
+  return count;
+}
+
+function optionalStoredNonNegativeNumber(
+  value: Record<string, unknown>,
+  field: string,
+  label: string
+): number | undefined {
+  return Object.prototype.hasOwnProperty.call(value, field)
+    ? requiredStoredNonNegativeNumber(value[field], `${label}.${field}`)
+    : undefined;
+}
+
+function requiredStoredStringArray(
+  value: unknown,
+  label: string,
+  options: { sorted?: boolean } = {}
+): string[] {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  const entries = value.map((entry, index) => requiredStoredString(entry, `${label}[${index}]`));
+  if (new Set(entries).size !== entries.length) throw new Error(`${label} must not contain duplicates`);
+  const sorted = [...entries].sort();
+  if (options.sorted === true && entries.some((entry, index) => entry !== sorted[index])) {
+    throw new Error(`${label} must be sorted lexicographically`);
+  }
+  return entries;
+}
+
+function storedUsageCompletenessMarkers(value: unknown, label: string): UsageCompletenessMarker[] {
+  return storedCompletenessMarkers(
+    value,
+    label,
+    new Set<ComponentUsageIncompleteReason["code"]>([
+      "component-usage-unavailable",
+      "component-usage-estimated"
+    ])
   );
 }
 
-function storedPricingCompletenessMarkers(value: unknown): PricingCompletenessMarker[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return uniquePricingCompletenessMarkers(
-    value.flatMap((entry): PricingCompletenessMarker[] => {
-      if (!isRecord(entry)) {
-        return [];
-      }
-      const code = stringField(entry, "code");
-      const pricingCodes = new Set<PricingIncompleteReason["code"]>([
-        "model-pricing-unavailable",
-        "component-rate-unavailable",
-        "event-pricing-reported-partial"
-      ]);
-      if (
-        code === undefined ||
-        (code !== "price-unavailable" &&
-          code !== "ledger-entry-malformed" &&
-          !pricingCodes.has(code as PricingIncompleteReason["code"]))
-      ) {
-        return [];
-      }
-      const component = stringField(entry, "component");
-      const components = new Set<UsageComponent>([
-        "uncached_input",
-        "cache_read",
-        "cache_write",
-        "output",
-        "reasoning"
-      ]);
-      return [
-        {
-          code: code as PricingCompletenessMarker["code"],
-          ...(component !== undefined && components.has(component as UsageComponent)
-            ? { component: component as UsageComponent }
-            : {}),
-          ...(stringField(entry, "model") === undefined ? {} : { model: stringField(entry, "model") }),
-          ...(stringField(entry, "event_id") === undefined ? {} : { event_id: stringField(entry, "event_id") }),
-          ...(stringField(entry, "checkpoint_generation_id") === undefined
-            ? {}
-            : { checkpoint_generation_id: stringField(entry, "checkpoint_generation_id") })
-        }
-      ];
-    })
+function storedPricingCompletenessMarkers(value: unknown, label: string): PricingCompletenessMarker[] {
+  return storedCompletenessMarkers(
+    value,
+    label,
+    new Set<PricingIncompleteReason["code"]>(["model-pricing-unavailable", "component-rate-unavailable"])
   );
 }
 
-function uniqueUsageIncompleteReasons(reasons: readonly LedgerUsageIncompleteReason[]): LedgerUsageIncompleteReason[] {
-  return uniqueByJson(reasons);
+function storedCompletenessMarkers<Code extends string>(
+  value: unknown,
+  label: string,
+  codes: ReadonlySet<Code>
+): Array<{ code: Code; component: UsageComponent; model: string }> {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  const components = new Set<UsageComponent>([
+    "uncached_input",
+    "cache_read",
+    "cache_write",
+    "output",
+    "reasoning"
+  ]);
+  const markers = value.map((entry, index) => {
+    const markerLabel = `${label}[${index}]`;
+    const stored = exactStoredRecord(entry, markerLabel, ["code", "component", "model"], []);
+    const code = requiredStoredString(stored.code, `${markerLabel}.code`);
+    const component = requiredStoredString(stored.component, `${markerLabel}.component`);
+    const model = requiredStoredString(stored.model, `${markerLabel}.model`);
+    if (!codes.has(code as Code)) throw new Error(`${markerLabel}.code is not a current completeness reason`);
+    if (!components.has(component as UsageComponent)) {
+      throw new Error(`${markerLabel}.component is not a current usage component`);
+    }
+    return { code: code as Code, component: component as UsageComponent, model };
+  });
+  const canonical = [...markers].sort((left, right) =>
+    `${left.code}:${left.component}:${left.model}`.localeCompare(`${right.code}:${right.component}:${right.model}`)
+  );
+  if (!sameJsonValue(markers, canonical) || new Set(markers.map((marker) => JSON.stringify(marker))).size !== markers.length) {
+    throw new Error(`${label} must be unique and sorted canonically`);
+  }
+  return markers;
 }
 
 function uniqueUsageCompletenessMarkers(reasons: readonly UsageCompletenessMarker[]): UsageCompletenessMarker[] {
-  return uniqueByJson(reasons);
+  return uniqueReasons([...reasons]);
 }
 
 function uniquePricingCompletenessMarkers(reasons: readonly PricingCompletenessMarker[]): PricingCompletenessMarker[] {
-  return uniqueByJson(reasons);
+  return uniqueReasons([...reasons]);
 }
 
 function uniqueByJson<T>(values: readonly T[]): T[] {
@@ -3869,6 +3713,11 @@ function errorLooksLikeTimeout(value: unknown): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const allowed = new Set(keys);
+  return Object.keys(value).every((key) => allowed.has(key));
 }
 
 function uniqueStrings(values: string[]): string[] {

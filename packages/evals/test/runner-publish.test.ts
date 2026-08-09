@@ -3,78 +3,132 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { createNodeAttemptLedgerEntry } from "@ultrafuzz/artifacts";
 import { describe, expect, it } from "vitest";
 
 import { summarizeEvalTerminal } from "../src/efficiency.js";
 import { publishEvalRun } from "../src/publish.js";
 import { launchEvalRow, runEvalSuite, watchEvalRow } from "../src/runner.js";
-import { EVAL_RUN_SCHEMA_VERSION } from "../src/types.js";
 import { readJsonLines } from "../src/utils.js";
-import { RecordingReporter, cleanRecoveryEquivalence, testRow, testSuite, writeRunFixture } from "./helpers.js";
+import {
+  RecordingReporter,
+  cleanRecoveryEquivalence,
+  currentEvalRunRecord,
+  currentPlannedGraph,
+  currentRunManifest,
+  currentRunState,
+  currentScoreSummary,
+  initializeTestGitRepository,
+  testRow,
+  testSuite,
+  writeRunFixture
+} from "./helpers.js";
 
 const T0 = "2026-07-09T00:00:00.000Z";
 const T1 = "2026-07-09T00:05:00.000Z";
 
-function terminalRunFixture(runRoot: string): void {
+function terminalRunFixture(runRoot: string, status: "succeeded" | "timed-out" | "canceled" = "succeeded"): void {
+  const controlGeneration = "a".repeat(64);
+  const graph = currentPlannedGraph(["setup-1", "final-report"]);
+  graph.nodes[1]!.depends_on = ["setup-1"];
   writeRunFixture({
     runRoot,
     events: [
-      { event_id: "evt-1", event_type: "node-synced", timestamp: T0, node_id: "setup-1", status: "running" },
       {
-        event_id: "evt-2",
+        event_id: `evt-${"0".repeat(24)}`,
+        event_type: "workflow-submitted",
+        timestamp: T0,
+        payload: {
+          workflow_run_id: "workflow-1",
+          control_generation: controlGeneration,
+          controller_invocation_id: "controller-1",
+          controller_invoked_at: T0
+        }
+      },
+      {
+        event_id: `evt-${"1".repeat(24)}`,
+        event_type: "node-synced",
+        timestamp: T0,
+        node_id: "setup-1",
+        status: "running"
+      },
+      {
+        event_id: `evt-${"2".repeat(24)}`,
         event_type: "artifact-manifest-written",
         timestamp: T1,
         node_id: "setup-1",
         status: "succeeded"
       },
-      { event_id: "evt-3", event_type: "node-synced", timestamp: T1, node_id: "setup-1", status: "succeeded" }
-    ],
-    state: {
-      schema_version: "1.0",
-      run_id: "run-1",
-      status: "succeeded",
-      created_at: T0,
-      started_at: T0,
-      finished_at: T1,
-      nodes: {
-        "setup-1": {
-          node_id: "setup-1",
-          status: "succeeded",
-          retry_count: 0,
-          timed_out: false,
-          started_at: T0,
-          finished_at: T1
-        }
+      {
+        event_id: `evt-${"3".repeat(24)}`,
+        event_type: "node-synced",
+        timestamp: T1,
+        node_id: "setup-1",
+        status: "succeeded"
       }
-    },
-    graph: {
-      schema_version: "1.0",
-      groups: { setup: {} },
-      nodes: [
-        { id: "setup-1", logical_id: "setup-1", kind: "agentic", depends_on: [] },
-        {
-          id: "final-report",
-          logical_id: "final-report",
-          kind: "agentic",
-          depends_on: ["setup-1"],
-          artifact_dir: "artifacts/final-report",
-          outputs: [{ path: "report.json", contract: "ultrafuzz/report@1", primary: false }]
-        }
-      ]
-    },
+    ],
+    state: currentRunState({
+      runId: "run-1",
+      status,
+      nodes: {
+        "setup-1": { status: "succeeded", started_at: T0, finished_at: T1 },
+        "final-report": { status: "skipped", started_at: undefined, finished_at: undefined }
+      },
+      overrides: { created_at: T0, started_at: T0, finished_at: T1, last_transition_at: T1 }
+    }),
+    graph,
     artifacts: {
       "setup-1": { "report.md": "# report" },
       "final-report": {
         "report.md": "# report",
         "report.json": JSON.stringify({
-          schema_version: "1.0",
-          run_metadata: {},
+          schema_version: "ultrafuzz.report.v2",
+          run_metadata: {
+            run_id: "run-1",
+            source_run_id: "run-1",
+            repository: "https://example.com/target-a",
+            elapsed_time: "5m",
+            models_used: ["gpt-test"],
+            tokens_used: "15",
+            estimated_spend: "$0.01",
+            partial_pricing: false,
+            strategy_loops: 1
+          },
           issues: [],
-          non_production_outcomes: []
+          non_production_outcomes: [],
+          property_provenance: []
         })
       }
     }
   });
+  const attempt = createNodeAttemptLedgerEntry(
+    { runId: "run-1" },
+    {
+      workflowRunId: "workflow-1",
+      controlGeneration,
+      nodeId: "setup-1",
+      strategyAttemptId: "setup-1",
+      iteration: 0,
+      attempt: 0,
+      startedEventSequence: 1,
+      sourceEventSequence: 2,
+      startedAt: T0,
+      finishedAt: T1,
+      outcome: "succeeded",
+      inputManifestDigest: "b".repeat(64),
+      outputManifestDigest: "c".repeat(64)
+    }
+  );
+  fs.writeFileSync(path.join(runRoot, "attempts.jsonl"), `${JSON.stringify(attempt)}\n`, "utf8");
+}
+
+function launchedRecord(row: ReturnType<typeof testRow>, runRoot: string) {
+  const record = currentEvalRunRecord({ row, runRoot, evalRunId: "eval-1" });
+  delete record.final_status;
+  delete record.workflow;
+  delete record.expansion;
+  delete record.recovery_equivalence;
+  return record;
 }
 
 describe("runner", () => {
@@ -181,14 +235,12 @@ describe("runner", () => {
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-detached");
     writeRunFixture({
       runRoot,
-      state: {
-        schema_version: "1.0",
-        run_id: "run-detached",
+      state: currentRunState({
+        runId: "run-detached",
         status: "running",
-        created_at: T0,
-        started_at: T0,
-        nodes: {}
-      }
+        nodes: {},
+        overrides: { created_at: T0, started_at: T0, last_transition_at: T0 }
+      })
     });
 
     const record = await launchEvalRow({
@@ -205,20 +257,10 @@ describe("runner", () => {
         diagnostics: []
       })
     });
-    const terminal = summarizeEvalTerminal(record);
-
     expect(record.launcher).toMatchObject({ status: "succeeded" });
-    expect(terminal.lifecycle.workflow).toEqual({
-      status: "running",
-      terminal: false,
-      started_at: T0,
-      finished_at: null
-    });
-    expect(terminal.efficiency.runtime).toEqual({
-      status: "unavailable",
-      reason: "workflow-not-terminal"
-    });
-    expect(terminal.efficiency.wall_time_seconds).toBeNull();
+    expect(() => summarizeEvalTerminal(record)).toThrow(
+      expect.objectContaining({ code: "EVAL_WORKFLOW_NOT_TERMINAL" })
+    );
   });
 
   it("watches terminal rows by default even when provider reporting is disabled", async () => {
@@ -233,8 +275,10 @@ describe("runner", () => {
       "utf8"
     );
     const suite = testSuite(groundTruthRoot);
+    suite.targets[0]!.ref = "0".repeat(40);
     const suitePath = path.join(project, "suite.yml");
     fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");
+    initializeTestGitRepository(project);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
     terminalRunFixture(runRoot);
 
@@ -274,19 +318,20 @@ describe("runner", () => {
       "utf8"
     );
     const suite = testSuite(groundTruthRoot);
+    suite.targets[0]!.ref = "0".repeat(40);
     const suitePath = path.join(project, "suite.yml");
     fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");
+    initializeTestGitRepository(project);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
     writeRunFixture({
       runRoot,
-      state: {
-        schema_version: "1.0",
-        run_id: "run-1",
+      state: currentRunState({
+        runId: "run-1",
         status: "running",
-        created_at: T0,
-        started_at: T0,
-        nodes: {}
-      }
+        nodes: {},
+        overrides: { created_at: T0, started_at: T0, last_transition_at: T0 }
+      }),
+      graph: currentPlannedGraph([], undefined)
     });
 
     const result = await runEvalSuite({
@@ -295,7 +340,8 @@ describe("runner", () => {
       evalRunId: "eval-watch-timeout",
       groundTruthRoot,
       provider: "none",
-      watchTimeoutSeconds: 0,
+      watchTimeoutSeconds: 1,
+      pollIntervalMs: 1,
       launcher: async () => ({
         ok: true,
         runId: "run-1",
@@ -325,21 +371,12 @@ describe("runner", () => {
         "utf8"
       );
       const suite = testSuite(groundTruthRoot);
+      suite.targets[0]!.ref = "0".repeat(40);
       const suitePath = path.join(project, "suite.yml");
       fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");
+      initializeTestGitRepository(project);
       const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
-      writeRunFixture({
-        runRoot,
-        state: {
-          schema_version: "1.0",
-          run_id: "run-1",
-          status,
-          created_at: T0,
-          started_at: T0,
-          finished_at: T1,
-          nodes: {}
-        }
-      });
+      terminalRunFixture(runRoot, status);
 
       const result = await runEvalSuite({
         projectRoot: project,
@@ -415,21 +452,7 @@ describe("runner", () => {
     const watched = await watchEvalRow({
       plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
       row,
-      record: {
-        schema_version: EVAL_RUN_SCHEMA_VERSION,
-        eval_run_id: "eval-1",
-        row_id: row.id,
-        target_id: row.target_id,
-        variant_id: row.variant_id,
-        trial_id: row.trial_id,
-        ultrafuzz_run_id: "run-1",
-        ultrafuzz_run_root: runRoot,
-        status: "launched",
-        workflow_ids: ["wf-1"],
-        started_at: T0,
-        finished_at: T0,
-        diagnostics: []
-      },
+      record: launchedRecord(row, runRoot),
       reporters: [reporter],
       evalRunRoot: path.join(base, "eval-run"),
       sync: async () => {
@@ -471,14 +494,12 @@ describe("runner", () => {
     writeRunFixture({
       runRoot,
       events: [],
-      state: {
-        schema_version: "1.0",
-        run_id: "run-1",
+      state: currentRunState({
+        runId: "run-1",
         status: "running",
-        created_at: T0,
-        started_at: T0,
-        nodes: {}
-      }
+        nodes: {},
+        overrides: { created_at: T0, started_at: T0, last_transition_at: T0 }
+      })
     });
     const reporter = new RecordingReporter();
     let syncCalls = 0;
@@ -486,21 +507,7 @@ describe("runner", () => {
     const watched = await watchEvalRow({
       plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
       row,
-      record: {
-        schema_version: EVAL_RUN_SCHEMA_VERSION,
-        eval_run_id: "eval-1",
-        row_id: row.id,
-        target_id: row.target_id,
-        variant_id: row.variant_id,
-        trial_id: row.trial_id,
-        ultrafuzz_run_id: "run-1",
-        ultrafuzz_run_root: runRoot,
-        status: "launched",
-        workflow_ids: ["wf-1"],
-        started_at: T0,
-        finished_at: T0,
-        diagnostics: []
-      },
+      record: launchedRecord(row, runRoot),
       reporters: [reporter],
       evalRunRoot: path.join(base, "eval-run"),
       sync: async () => {
@@ -538,32 +545,19 @@ describe("runner", () => {
     writeRunFixture({
       runRoot,
       events: [],
-      state: {
-        schema_version: "1.0",
-        run_id: "run-1",
+      state: currentRunState({
+        runId: "run-1",
         status: "running",
-        created_at: T0,
-        started_at: T0,
-        nodes: {}
-      }
+        nodes: {},
+        overrides: { created_at: T0, started_at: T0, last_transition_at: T0 }
+      }),
+      graph: currentPlannedGraph([], undefined)
     });
 
     const watched = await watchEvalRow({
       plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
       row,
-      record: {
-        schema_version: EVAL_RUN_SCHEMA_VERSION,
-        eval_run_id: "eval-1",
-        row_id: row.id,
-        target_id: row.target_id,
-        variant_id: row.variant_id,
-        trial_id: row.trial_id,
-        ultrafuzz_run_id: "run-1",
-        ultrafuzz_run_root: runRoot,
-        status: "launched",
-        workflow_ids: ["wf-1"],
-        diagnostics: []
-      },
+      record: launchedRecord(row, runRoot),
       reporters: [],
       evalRunRoot: path.join(base, "eval-run"),
       sync: async () => undefined,
@@ -588,33 +582,19 @@ describe("runner", () => {
     writeRunFixture({
       runRoot,
       events: [],
-      state: {
-        schema_version: "1.0",
-        run_id: "run-1",
+      state: currentRunState({
+        runId: "run-1",
         status: "running",
-        created_at: T0,
-        started_at: T0,
-        nodes: {}
-      }
+        nodes: {},
+        overrides: { created_at: T0, started_at: T0, last_transition_at: T0 }
+      })
     });
     let syncCalls = 0;
 
     const watched = await watchEvalRow({
       plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
       row,
-      record: {
-        schema_version: EVAL_RUN_SCHEMA_VERSION,
-        eval_run_id: "eval-1",
-        row_id: row.id,
-        target_id: row.target_id,
-        variant_id: row.variant_id,
-        trial_id: row.trial_id,
-        ultrafuzz_run_id: "run-1",
-        ultrafuzz_run_root: runRoot,
-        status: "launched",
-        workflow_ids: ["wf-1"],
-        diagnostics: []
-      },
+      record: launchedRecord(row, runRoot),
       reporters: [],
       evalRunRoot: path.join(base, "eval-run"),
       sync: async () => {
@@ -655,71 +635,18 @@ describe("eval publish (post-hoc replay)", () => {
     fs.mkdirSync(evalRunRoot, { recursive: true });
     fs.writeFileSync(
       path.join(evalRunRoot, "eval.json"),
-      JSON.stringify({ schema_version: EVAL_RUN_SCHEMA_VERSION, eval_run_id: "eval-1", suite }),
+      JSON.stringify(currentRunManifest({ suite, projectRoot, evalRunId: "eval-1" })),
       "utf8"
     );
     fs.writeFileSync(path.join(evalRunRoot, "matrix.json"), JSON.stringify([row]), "utf8");
     fs.writeFileSync(
       path.join(evalRunRoot, "runs.jsonl"),
-      `${JSON.stringify({
-        schema_version: EVAL_RUN_SCHEMA_VERSION,
-        eval_run_id: "eval-1",
-        row_id: row.id,
-        target_id: row.target_id,
-        variant_id: row.variant_id,
-        trial_id: row.trial_id,
-        ultrafuzz_run_id: "run-1",
-        ultrafuzz_run_root: runRoot,
-        status: "launched",
-        workflow_ids: [],
-        started_at: T0,
-        finished_at: T1,
-        recovery_equivalence: cleanRecoveryEquivalence({
-          unique_model_backed_node_executions: 0,
-          observed_node_attempts: 0,
-          observed_workflow_executions: 0,
-          observed_controller_invocations: 0
-        }),
-        diagnostics: []
-      })}\n`,
+      `${JSON.stringify(currentEvalRunRecord({ row, runRoot, evalRunId: "eval-1" }))}\n`,
       "utf8"
     );
     fs.writeFileSync(
       path.join(evalRunRoot, "summary.json"),
-      JSON.stringify({
-        eval_run_id: "eval-1",
-        eval_run_root: evalRunRoot,
-        recall_threshold: 0.7,
-        rows: [
-          {
-            row_id: row.id,
-            target_id: row.target_id,
-            variant_id: row.variant_id,
-            trial_id: row.trial_id,
-            report_schema_valid: true,
-            ground_truth_bug_count: 2,
-            finding_count: 1,
-            true_positives: 1,
-            false_positives: 0,
-            missed: 1,
-            human_review_queue_count: 0,
-            duplicate_count: 0,
-            precision: 1,
-            recall: 0.5,
-            f1_score: 0.6667,
-            full_match_rate: 0.5,
-            severity_accuracy: null,
-            true_positive_accuracy: 1,
-            duplicate_rate: 0,
-            runtime_seconds: null,
-            cost_estimate: null
-          }
-        ],
-        variants: [],
-        scores_path: "",
-        summary_path: "",
-        review_queue_path: ""
-      }),
+      JSON.stringify(currentScoreSummary({ row, evalRunRoot, evalRunId: "eval-1" })),
       "utf8"
     );
     return { projectRoot, evalRunRoot };
@@ -850,7 +777,7 @@ describe("eval publish (post-hoc replay)", () => {
     expect(contacted).toBe(false);
     expect(JSON.parse(fs.readFileSync(path.join(evalRunRoot, "publication-state.json"), "utf8"))).toMatchObject({
       status: "non-publishable",
-      diagnostics: [{ code: "TERMINAL_REPORT_NOT_PUBLISHABLE", contract: "ultrafuzz/report@1" }]
+      diagnostics: [{ code: "TERMINAL_REPORT_NOT_PUBLISHABLE", contract: "ultrafuzz/report@2" }]
     });
   });
 

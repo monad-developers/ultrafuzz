@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:node-worker-error:1",
+  "title": "Ultrafuzz Modal node worker error IPC",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "message"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.modal.node-worker-error.v1" },
+    "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "phase": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "command": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "exit_code": { "type": "integer" },
+    "stdout": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "stderr": { "type": "string", "minLength": 1, "maxLength": 2000 }
+  },
+  "dependentRequired": {
+    "phase": ["command", "exit_code"],
+    "command": ["phase", "exit_code"],
+    "exit_code": ["phase", "command"],
+    "stdout": ["phase", "command", "exit_code"],
+    "stderr": ["phase", "command", "exit_code"]
+  }
+}

@@ -11,13 +11,14 @@ import {
   artifactContractSchemaBinding,
   createRunLayout,
   getNodeArtifactDir,
+  RUN_PLAN_SCHEMA_VERSION,
   safeResolveInside,
   sha256Bytes,
   validateReferenceExpectationsSchema,
   updateNodeState,
   writeArtifactManifest,
   writeFileDurable,
-  writeJsonDurable,
+  writeRunPlanDocument,
   PLANNED_GRAPH_SCHEMA_VERSION,
   type ArtifactContractId,
   type NodeStateInput,
@@ -50,7 +51,6 @@ import {
 } from "@ultrafuzz/topology";
 
 import {
-  RUNTIME_SCHEMA_VERSION,
   type PlanRunInput,
   type PlanRunValue,
   type PlannedGraph,
@@ -221,8 +221,11 @@ export async function planRun(input: PlanRunInput) {
   }
 
   const persistedRenderedPrompts = persistRenderedPromptSnapshots(layout, renderedPrompts);
-  writeJsonDurable(path.join(layout.root, "plan.json"), {
-    schema_version: RUNTIME_SCHEMA_VERSION,
+  if (validation.value.topology === undefined) {
+    throw new Error("validated run plan is missing its topology summary");
+  }
+  writeRunPlanDocument(path.join(layout.root, "plan.json"), {
+    schema_version: RUN_PLAN_SCHEMA_VERSION,
     run_id: runId,
     mode: input.mode ?? "run",
     ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
@@ -234,7 +237,7 @@ export async function planRun(input: PlanRunInput) {
     rendered_prompts: persistedRenderedPrompts,
     policy_posture: Object.fromEntries(
       Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
-    )
+    ) as Record<"config" | "topology" | "prompts" | "paths" | "agents" | "trust", "pass" | "warn" | "fail">
   });
 
   return runtimeResult(true, {

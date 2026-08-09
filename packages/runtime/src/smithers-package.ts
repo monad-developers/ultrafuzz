@@ -45,11 +45,6 @@ const REQUIRED_SMITHERS_DEPENDENCIES = {
   overrides: REQUIRED_SMITHERS_OVERRIDES
 } as const;
 
-const UNOVERRIDDEN_SMITHERS_DEPENDENCIES = {
-  dependencies: REQUIRED_SMITHERS_DEPENDENCIES.dependencies,
-  devDependencies: REQUIRED_SMITHERS_DEPENDENCIES.devDependencies
-} as const;
-
 // When each pinned version above reached npm. This is the input to the
 // resolution cutoff below, and the reason a pin bump cannot silently leave the
 // cutoff behind: `assertSmithersResolutionCutoff`, which the suite runs, demands
@@ -84,7 +79,7 @@ const SMITHERS_PIN_PUBLISH_TIMES: Readonly<Record<string, string>> = {
 // version published after it, so resolution depends on the manifest and this
 // constant, not on the wall clock -- which is exactly what an in-flight resume
 // needs, and it needs no lockfile in the run workspace, so `--package-lock=false`
-// and the migration path in `migrateLegacySmithersPackageManifest` are untouched.
+// and the generated manifest is current-only.
 //
 // The rule for moving it: the next UTC midnight after the newest pin above. It
 // must never precede a pinned version's own publish instant -- npm would fail to
@@ -153,46 +148,6 @@ export function smithersDependencyInstallArgs({ prefix, registry }: SmithersInst
   ];
 }
 
-/** Manifest sections keyed by name, so one comparison covers deps and overrides. */
-type SmithersManifestSections = Readonly<Record<string, Readonly<Record<string, string>>>>;
-
-interface SmithersDependencyShape extends SmithersManifestSections {
-  readonly dependencies: Readonly<Record<string, string>>;
-  readonly devDependencies: Readonly<Record<string, string>>;
-}
-
-// Every pinned shape Ultrafuzz has shipped, newest first. A generated manifest
-// left behind by an older Ultrafuzz must migrate forward instead of failing the
-// launch, because in-flight cloud runs resume against their existing project
-// root. Add the outgoing pin here whenever the runner version changes.
-const SUPERSEDED_SMITHERS_DEPENDENCIES: readonly SmithersDependencyShape[] = [
-  {
-    dependencies: { "smithers-orchestrator": "0.31.0", zod: "4.4.3" },
-    devDependencies: { typescript: "6.0.3" }
-  },
-  {
-    dependencies: { "smithers-orchestrator": "0.29.0", zod: "4.4.3" },
-    devDependencies: { typescript: "6.0.3" }
-  },
-  {
-    dependencies: { "smithers-orchestrator": "0.28.0", zod: "4.4.3" },
-    devDependencies: { typescript: "6.0.3" }
-  },
-  {
-    dependencies: { "smithers-orchestrator": "0.27.0", zod: "4.4.3" },
-    devDependencies: { typescript: "6.0.3" }
-  },
-  {
-    dependencies: { "smithers-orchestrator": "^0.27.0", zod: "^4.4.3" },
-    devDependencies: { typescript: "^6.0.3" }
-  }
-];
-
-export interface SmithersPackageMigration {
-  manifest: unknown;
-  migrated: boolean;
-}
-
 export function renderSmithersPackageJson(): string {
   return `${JSON.stringify(
     {
@@ -207,12 +162,18 @@ export function renderSmithersPackageJson(): string {
 }
 
 export function assertSmithersPackageManifest(value: unknown): void {
-  if (!isRecord(value)) {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["name", "private", "type", "dependencies", "devDependencies", "overrides"]) ||
+    value.name !== "ultrafuzz-smithers" ||
+    value.private !== true ||
+    value.type !== "module"
+  ) {
     throw modifiedManifestError();
   }
   for (const [section, expected] of Object.entries(REQUIRED_SMITHERS_DEPENDENCIES)) {
     const actual = value[section];
-    if (!isRecord(actual)) {
+    if (!isRecord(actual) || !hasExactKeys(actual, Object.keys(expected))) {
       throw modifiedManifestError();
     }
     for (const [name, version] of Object.entries(expected)) {
@@ -223,61 +184,6 @@ export function assertSmithersPackageManifest(value: unknown): void {
   }
 }
 
-export function migrateLegacySmithersPackageManifest(value: unknown): SmithersPackageMigration {
-  // A manifest already carrying the current runner but an incomplete override
-  // block still has to migrate: that is how a project root written before an
-  // override was added, or before one was retargeted, picks the new pin up.
-  const staleRequiredOverrides =
-    isRecord(value) &&
-    hasRequiredVersions(value, UNOVERRIDDEN_SMITHERS_DEPENDENCIES) &&
-    !hasRequiredVersions(value, { overrides: REQUIRED_SMITHERS_OVERRIDES });
-  if (
-    !isRecord(value) ||
-    value.name !== "ultrafuzz-smithers" ||
-    value.private !== true ||
-    value.type !== "module" ||
-    (!SUPERSEDED_SMITHERS_DEPENDENCIES.some((dependencies) => hasRequiredVersions(value, dependencies)) &&
-      !staleRequiredOverrides)
-  ) {
-    return { manifest: value, migrated: false };
-  }
-  const dependencies = value.dependencies as Record<string, unknown>;
-  const devDependencies = value.devDependencies as Record<string, unknown>;
-  return {
-    manifest: {
-      ...value,
-      dependencies: {
-        ...dependencies,
-        ...REQUIRED_SMITHERS_DEPENDENCIES.dependencies
-      },
-      devDependencies: {
-        ...devDependencies,
-        ...REQUIRED_SMITHERS_DEPENDENCIES.devDependencies
-      },
-      overrides: {
-        ...(isRecord(value.overrides) ? value.overrides : {}),
-        ...REQUIRED_SMITHERS_DEPENDENCIES.overrides
-      }
-    },
-    migrated: true
-  };
-}
-
-function hasRequiredVersions(value: Record<string, unknown>, required: SmithersManifestSections): boolean {
-  for (const [section, expected] of Object.entries(required)) {
-    const actual = value[section];
-    if (!isRecord(actual)) {
-      return false;
-    }
-    for (const [name, version] of Object.entries(expected)) {
-      if (actual[name] !== version) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 function modifiedManifestError(): Error {
   return new Error(
     "generated workflow dependency manifest must retain Ultrafuzz's exact runner versions; recreate it before launch"
@@ -286,4 +192,10 @@ function modifiedManifestError(): Error {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const canonical = [...expected].sort();
+  return actual.length === canonical.length && actual.every((key, index) => key === canonical[index]);
 }

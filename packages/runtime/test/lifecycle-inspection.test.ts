@@ -4,11 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import {
-  artifactSchemaBundleDigest,
-  artifactSchemaRegistry,
-  VALIDATOR_BUILD_IDENTITY
-} from "@ultrafuzz/artifacts";
+import { artifactSchemaBundleDigest, artifactSchemaRegistry, VALIDATOR_BUILD_IDENTITY } from "@ultrafuzz/artifacts";
 
 import {
   cancelRun,
@@ -54,11 +50,7 @@ function fakeUltrafuzzCliEntrypoint(project: string): string {
       }
     }
   };
-  fs.writeFileSync(
-    entrypoint,
-    `process.stdout.write(${JSON.stringify(JSON.stringify(preflightResponse))});\n`,
-    "utf8"
-  );
+  fs.writeFileSync(entrypoint, `process.stdout.write(${JSON.stringify(JSON.stringify(preflightResponse))});\n`, "utf8");
   fs.chmodSync(entrypoint, 0o500);
   return entrypoint;
 }
@@ -120,10 +112,18 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
     node: path.join(project, "fake-node.json"),
     events: path.join(project, "fake-events.ndjson")
   };
-  fs.writeFileSync(files.why, `${JSON.stringify({ data: fixtures.why ?? {} })}\n`, "utf8");
-  fs.writeFileSync(files.timeline, `${JSON.stringify(fixtures.timeline ?? { timeline: { frames: [] } })}\n`, "utf8");
-  fs.writeFileSync(files.snapshots, `${JSON.stringify(fixtures.snapshots ?? { snapshots: [] })}\n`, "utf8");
-  fs.writeFileSync(files.node, `${JSON.stringify({ data: fixtures.node ?? {} })}\n`, "utf8");
+  fs.writeFileSync(files.why, `${JSON.stringify({ ok: true, data: fixtures.why ?? {} })}\n`, "utf8");
+  fs.writeFileSync(
+    files.timeline,
+    `${JSON.stringify({ ok: true, data: fixtures.timeline ?? { timeline: { frames: [] } } })}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    files.snapshots,
+    `${JSON.stringify({ ok: true, data: fixtures.snapshots ?? { snapshots: [] } })}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(files.node, `${JSON.stringify({ ok: true, data: fixtures.node ?? {} })}\n`, "utf8");
   fs.writeFileSync(files.events, fixtures.events ?? "", "utf8");
   const nodeWatchPath = path.join(project, "fake-node-watch.ndjson");
   if (fixtures.nodeWatchLines !== undefined) {
@@ -157,7 +157,7 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
       `    cat ${shellQuote(files.events)}`,
       "    ;;",
       "  cancel)",
-      `    printf '%s\\n' '{"data":{"status":"${fixtures.cancelStatus ?? "cancel-requested"}"}}'`,
+      `    printf '%s\\n' '{"ok":true,"data":{"status":"${fixtures.cancelStatus ?? "cancel-requested"}"}}'`,
       `    exit ${fixtures.cancelExitCode ?? 2}`,
       "    ;;",
       "  *)",
@@ -688,7 +688,7 @@ test("getWorkflowNode includes attempts on request and tool payloads only with -
 });
 
 test("watchWorkflowNode keeps streaming past the engine's terminal clear-screen bytes", async () => {
-  const detail = JSON.stringify(nodeDetailFixture());
+  const detail = JSON.stringify({ ok: true, data: nodeDetailFixture() });
   // The engine's watch loop clears the terminal before every non-initial
   // render, writing an ANSI sequence with no trailing newline into the same
   // stdout stream as the JSONL payload.
@@ -726,7 +726,7 @@ test("cancelRun converges when the engine reports the run is already terminal", 
     [
       "#!/bin/sh",
       'if [ "$1" = "cancel" ]; then',
-      '  printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_ACTIVE"}}\'',
+      '  printf \'%s\\n\' \'{"code":"RUN_NOT_ACTIVE","message":"Run is not active"}\'',
       "  exit 4",
       "fi",
       "printf '%s\\n' '{\"ok\":true}'",

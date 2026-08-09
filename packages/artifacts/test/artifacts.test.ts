@@ -52,7 +52,20 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
     runId: "run-1",
     sourceRunId: "run-0",
     resolvedConfigToml: '[run]\noutput_dir = ".ultrafuzz/runs"\n',
-    configRedactions: { schema_version: "1.0", redactions: [{ key: "OPENAI_API_KEY" }] },
+    configRedactions: {
+      schemaVersion: "ultrafuzz.config-redactions.v2",
+      placeholder: "<redacted>",
+      entries: [
+        {
+          path: ["models", "profiles", "default", "model"],
+          key: "models.profiles.default.model",
+          reason: "sensitive-value",
+          restoreFrom: "current-config",
+          requiredForWorkflowLaunch: true,
+          requiredForWorkflowSubmission: true
+        }
+      ]
+    },
     graphFingerprint: "graph-fp",
     configFingerprint: "config-fp",
     stateNodes: [
@@ -82,7 +95,6 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
     layout.eventsPath,
     layout.usageLedgerPath,
     layout.attemptLedgerPath,
-    layout.workspacesPath,
     path.join(layout.eventsIndexDir, "query-inputs.json")
   ]) {
     assert.equal(fs.existsSync(expected), true, expected);
@@ -93,19 +105,17 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
   assert.equal(path.basename(getNodeArtifactDir(layout, "node-a", { create: true })), "node-a");
 });
 
-test("generated usage events append idempotently with stable checkpoint dimensions", () => {
+test("validated usage events append idempotently with exact Smithers identities", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-usage" });
   const generated = {
     workflowRunId: "workflow-run-usage",
-    sourceEventId: "source-event-1",
-    checkpointGenerationId: "checkpoint-1",
-    observedAt: "2026-07-18T00:00:00.000Z",
+    controlGeneration: "a".repeat(64),
+    sourceEventSequence: 7,
+    observedTimestampMs: Date.parse("2026-07-18T00:00:00.000Z"),
     nodeId: "node-a",
     iteration: 0,
     attempt: 1,
-    usage: { input_tokens: 12, output_tokens: 3, cost_usd: 0.01, model: "generated-model" },
-    usageComplete: true,
-    usageIncompleteReasons: []
+    usage: { input_tokens: 12, output_tokens: 3, model: "generated-model", agent: "generated-agent" }
   };
 
   const first = appendUsageEvents(layout, [generated]);
@@ -114,13 +124,13 @@ test("generated usage events append idempotently with stable checkpoint dimensio
 
   assert.equal(first.appended, 1);
   assert.equal(replayed.appended, 0);
-  assert.equal(replayed.entries[0]?.event_id, first.entries[0]?.event_id);
-  assert.match(ledger.entries[0]?.attempt_id ?? "", /^usage-attempt-/u);
-  assert.equal(ledger.entries[0]?.checkpoint_generation_id, "checkpoint-1");
+  assert.deepEqual(replayed.entries[0], first.entries[0]);
+  assert.equal(ledger.entries[0]?.source_event_sequence, 7);
+  assert.equal(ledger.entries[0]?.control_generation, "a".repeat(64));
   assert.equal(ledger.entries.length, 1);
 
   appendLineDurable(layout.usageLedgerPath, "{malformed", layout.root);
-  assert.equal(replayUsageEvents(layout).malformedEntries, 1);
+  assert.throws(() => replayUsageEvents(layout), /invalid strict JSON/u);
 });
 
 test("usage ledger replay rejects entries copied from another run", () => {
@@ -129,15 +139,13 @@ test("usage ledger replay rejects entries copied from another run", () => {
   const secondLayout = createRunLayout({ projectRoot: project, runId: "run-usage-second" });
   const input = {
     workflowRunId: "workflow-run-usage",
-    sourceEventId: "source-event-1",
-    checkpointGenerationId: "checkpoint-1",
-    observedAt: "2026-07-18T00:00:00.000Z",
+    controlGeneration: "b".repeat(64),
+    sourceEventSequence: 1,
+    observedTimestampMs: Date.parse("2026-07-18T00:00:00.000Z"),
     nodeId: "node-a",
     iteration: 0,
     attempt: 1,
-    usage: { input_tokens: 1 },
-    usageComplete: true,
-    usageIncompleteReasons: []
+    usage: { input_tokens: 1, output_tokens: 0, model: "model", agent: "agent" }
   };
   appendUsageEvents(firstLayout, [input]);
   appendUsageEvents(secondLayout, [input]);
@@ -147,10 +155,7 @@ test("usage ledger replay rejects entries copied from another run", () => {
     secondLayout.root
   );
 
-  const replay = replayUsageEvents(secondLayout);
-  assert.equal(replay.entries.length, 1);
-  assert.equal(replay.entries[0]?.run_id, secondLayout.runId);
-  assert.equal(replay.malformedEntries, 1);
+  assert.throws(() => replayUsageEvents(secondLayout), /run_id belongs to/u);
 });
 
 test("node attempt ledger is append-only, idempotent, independently queryable, and exactly summarized", () => {
@@ -158,12 +163,14 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
   const inputDigest = manifestDigest("generated input manifest");
   const outputDigest = manifestDigest("generated output manifest");
   const firstInput = {
-    nodeId: "strategy-a",
+    workflowRunId: "workflow-run-attempts",
+    controlGeneration: "c".repeat(64),
+    nodeId: "node:strategy-a",
     strategyAttemptId: "strategy-a",
-    executorRetryId: "executor-retry-1",
-    checkpointGenerationId: "checkpoint-1",
-    workflowExecutionId: "execution-1",
-    controllerInvocationId: "controller-1",
+    iteration: 0,
+    attempt: 1,
+    startedEventSequence: 1,
+    sourceEventSequence: 2,
     startedAt: "2026-07-18T10:00:00.000Z",
     finishedAt: "2026-07-18T10:01:00.000Z",
     outcome: "failed" as const,
@@ -176,7 +183,7 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
   const replayedFirst = appendNodeAttempt(layout, firstInput);
   assert.equal(first.appended, true);
   assert.equal(replayedFirst.appended, false);
-  assert.equal(replayedFirst.entry.attempt_id, first.entry.attempt_id);
+  assert.deepEqual(replayedFirst.entry, first.entry);
   assert.equal(first.entry.failure_message, replayedFirst.entry.failure_message);
   assert.ok(Buffer.byteLength(first.entry.failure_message ?? "", "utf8") <= MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES);
   assert.match(first.entry.failure_message ?? "", /<redacted>/u);
@@ -184,11 +191,9 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
 
   const second = appendNodeAttempt(layout, {
     ...firstInput,
-    executorRetryId: "executor-retry-2",
-    checkpointGenerationId: "checkpoint-2",
-    workflowExecutionId: "execution-2",
-    controllerInvocationId: "controller-2",
-    parentAttemptId: first.entry.attempt_id,
+    attempt: 2,
+    startedEventSequence: 3,
+    sourceEventSequence: 4,
     startedAt: "2026-07-18T10:02:00.000Z",
     finishedAt: "2026-07-18T10:03:00.000Z",
     outcome: "succeeded",
@@ -198,24 +203,27 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
   });
   appendNodeAttempt(layout, {
     ...firstInput,
-    nodeId: "strategy-b",
+    nodeId: "node:strategy-b",
     strategyAttemptId: "strategy-b",
-    executorRetryId: "executor-retry-3",
-    checkpointGenerationId: "checkpoint-2",
-    workflowExecutionId: "execution-2",
-    controllerInvocationId: "controller-2",
+    attempt: 1,
+    startedEventSequence: 5,
+    sourceEventSequence: 6,
     startedAt: "2026-07-18T10:04:00.000Z",
     finishedAt: "2026-07-18T10:04:00.000Z",
     outcome: "reused",
-    reuse: { status: "reused", sourceAttemptId: second.entry.attempt_id },
+    reuse: {
+      status: "reused",
+      sourceWorkflowRunId: second.entry.workflow_run_id,
+      sourceEventSequence: second.entry.source_event_sequence
+    },
     outputManifestDigest: outputDigest,
     failureCategory: undefined,
     failureMessage: undefined
   });
 
-  assert.equal(queryNodeAttempts(layout, { checkpointGenerationId: "checkpoint-1" }).length, 1);
-  assert.equal(queryNodeAttempts(layout, { workflowExecutionId: "execution-2" }).length, 2);
-  assert.equal(queryNodeAttempts(layout, { controllerInvocationId: "controller-2" }).length, 2);
+  assert.equal(queryNodeAttempts(layout, { workflowRunId: "workflow-run-attempts" }).length, 3);
+  assert.equal(queryNodeAttempts(layout, { controlGeneration: "c".repeat(64) }).length, 3);
+  assert.equal(queryNodeAttempts(layout, { sourceEventSequence: 4 }).length, 1);
   assert.equal(queryNodeAttempts(layout, { reuseStatus: "reused" })[0]?.reuse.status, "reused");
 
   const summary = summarizeNodeAttempts(queryNodeAttempts(layout));
@@ -223,12 +231,10 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
     total: 3,
     executed: 2,
     reused: 1,
-    outcomes: { succeeded: 1, failed: 1, "timed-out": 0, canceled: 0, skipped: 0, reused: 1 },
+    outcomes: { succeeded: 1, failed: 1, "timed-out": 0, canceled: 0, reused: 1 },
     strategy_attempts: 2,
-    executor_retries: 3,
-    checkpoint_generations: 2,
-    workflow_executions: 2,
-    controller_invocations: 2
+    workflow_runs: 1,
+    control_generations: 1
   });
   assert.equal(fs.readFileSync(layout.attemptLedgerPath, "utf8").trim().split("\n").length, 3);
   assert.equal(normalizeNodeAttemptFailureMessage("  first\nsecond  "), "first second");
@@ -537,18 +543,18 @@ test("event indexes encode long IDs in a collision-free hash namespace", () => {
   const maximumRunId = "r".repeat(128);
   const layout = createRunLayout({ projectRoot: tempProject(), runId: maximumRunId });
   const facadeBeforeAppend = readEventQueryFacade(layout);
-  const secondMaximumRunId = `${"r".repeat(127)}s`;
-  const directBoundaryRunId = "d".repeat(122);
+  const secondMaximumEventType = `${"t".repeat(127)}u`;
+  const directBoundaryEventType = "d".repeat(122);
   const longBoundaryEventType = "e".repeat(123);
   const maximumEventType = "t".repeat(128);
   const maximumNodeId = "n".repeat(128);
   const maximumStatus = "s".repeat(128);
-  const legacyCollisionRunId = `${maximumRunId.slice(0, 97)}-${crypto
+  const legacyCollisionEventType = `${maximumEventType.slice(0, 97)}-${crypto
     .createHash("sha256")
-    .update(maximumRunId, "utf8")
+    .update(maximumEventType, "utf8")
     .digest("hex")
     .slice(0, 24)}`;
-  assert.equal(legacyCollisionRunId.length, 122);
+  assert.equal(legacyCollisionEventType.length, 122);
 
   appendEvent(layout, {
     eventType: maximumEventType,
@@ -557,20 +563,21 @@ test("event indexes encode long IDs in a collision-free hash namespace", () => {
     payload: { id: "maximum" }
   });
   appendEvent(layout, {
-    runId: secondMaximumRunId,
     eventType: longBoundaryEventType,
     nodeId: "direct-node",
     status: "direct-status",
     payload: { id: "second-maximum" }
   });
   appendEvent(layout, {
-    runId: legacyCollisionRunId,
-    eventType: "direct-event",
+    eventType: secondMaximumEventType,
+    payload: { id: "second-long-id" }
+  });
+  appendEvent(layout, {
+    eventType: legacyCollisionEventType,
     payload: { id: "legacy-collision" }
   });
   appendEvent(layout, {
-    runId: directBoundaryRunId,
-    eventType: "boundary-event",
+    eventType: directBoundaryEventType,
     payload: { id: "direct-boundary" }
   });
 
@@ -582,19 +589,23 @@ test("event indexes encode long IDs in a collision-free hash namespace", () => {
       `${crypto.createHash("sha256").update(value, "utf8").digest("hex")}.jsonl`
     );
   const maximumRunIndex = hashedIndexPath("run", maximumRunId);
-  const secondMaximumRunIndex = hashedIndexPath("run", secondMaximumRunId);
   assert.equal(fs.existsSync(maximumRunIndex), true);
-  assert.equal(fs.existsSync(secondMaximumRunIndex), true);
-  assert.notEqual(maximumRunIndex, secondMaximumRunIndex);
-  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "run", `${legacyCollisionRunId}.jsonl`)), true);
-  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "run", `${directBoundaryRunId}.jsonl`)), true);
+  assert.equal(fs.existsSync(hashedIndexPath("type", secondMaximumEventType)), true);
+  assert.notEqual(hashedIndexPath("type", maximumEventType), hashedIndexPath("type", secondMaximumEventType));
+  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "type", `${legacyCollisionEventType}.jsonl`)), true);
+  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "type", `${directBoundaryEventType}.jsonl`)), true);
   assert.equal(fs.existsSync(hashedIndexPath("type", longBoundaryEventType)), true);
   assert.equal(fs.existsSync(hashedIndexPath("type", maximumEventType)), true);
   assert.equal(fs.existsSync(hashedIndexPath("node", maximumNodeId)), true);
   assert.equal(fs.existsSync(hashedIndexPath("status", maximumStatus)), true);
 
-  const maximumRecord = JSON.parse(fs.readFileSync(maximumRunIndex, "utf8")) as { run_id: string };
-  assert.equal(maximumRecord.run_id, maximumRunId);
+  const maximumRecords = fs
+    .readFileSync(maximumRunIndex, "utf8")
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { run_id: string });
+  assert.equal(maximumRecords.length, 5);
+  assert.equal(maximumRecords.every((record) => record.run_id === maximumRunId), true);
   const facadeAfterAppend = readEventQueryFacade(layout) as {
     filters?: unknown;
     long_filters?: unknown;
@@ -615,7 +626,7 @@ test("event indexes encode long IDs in a collision-free hash namespace", () => {
     status: "events.index/status/sha256/<sha256-hex(status)>.jsonl"
   });
   assert.deepEqual(facadeAfterAppend.index_key_encoding, {
-    version: "1",
+    version: "ultrafuzz.event-index-key.v1",
     direct_max_id_length: 122,
     direct_id_path: "<dimension>/<id>.jsonl",
     long_id_path: "<dimension>/sha256/<sha256-hex(id)>.jsonl",

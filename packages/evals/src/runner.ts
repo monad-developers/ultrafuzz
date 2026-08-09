@@ -1,12 +1,19 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { readRunState, writeJsonDurable, type RunState } from "@ultrafuzz/artifacts";
+import { readRunState, type RunState } from "@ultrafuzz/artifacts";
 import type { EvalConfig, RuntimeConfigOverrides } from "@ultrafuzz/config";
 import { startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { BENCHMARK_SMOKE_WORKFLOW_PROFILE } from "./benchmark-manifest.js";
 import { evalWorkflowLifecycle, isTerminalWorkflowStatus } from "./efficiency.js";
+import {
+  appendEvalRunRecord,
+  readStrictJsonDocument,
+  writeEvalMatrix,
+  writeEvalRunManifest,
+  writeEvalRunSummary
+} from "./eval-durable.js";
 import { evalRunExpansion } from "./expansion.js";
 import { NodeTelemetryPump } from "./node-telemetry.js";
 import {
@@ -20,6 +27,7 @@ import { createEvalReporters } from "./reporters/index.js";
 import { planEvalSuite, type PlanEvalSuiteInput } from "./suite.js";
 import {
   EVAL_RUN_SCHEMA_VERSION,
+  EVAL_RUN_SUMMARY_SCHEMA_VERSION,
   type EvalMatrixRow,
   type EvalCandidateProvenance,
   type EvalModelProfile,
@@ -30,7 +38,6 @@ import {
 } from "./types.js";
 import {
   EvalError,
-  appendJsonLine,
   boundedEvalId,
   diagnosticFromError,
   evalRunRoot,
@@ -124,7 +131,7 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
       ? resolvedProvenance
       : { ...resolvedProvenance, candidate: input.candidateProvenance };
   const plan: EvalPlanValue = { ...planned, provenance };
-  writeJsonDurable(path.join(root, "eval.json"), {
+  writeEvalRunManifest(path.join(root, "eval.json"), {
     schema_version: EVAL_RUN_SCHEMA_VERSION,
     eval_run_id: evalRunId,
     suite_path: plan.suite_path,
@@ -133,7 +140,7 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
     suite: plan.suite,
     provenance
   });
-  writeJsonDurable(path.join(root, "matrix.json"), plan.matrix);
+  writeEvalMatrix(path.join(root, "matrix.json"), plan.matrix);
   for (const reporter of reporters) {
     await reporter.onPlan(plan);
   }
@@ -181,7 +188,8 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
             record.workflow.status === "canceled")
       ).length
     : 0;
-  writeJsonDurable(path.join(root, "run-summary.json"), {
+  writeEvalRunSummary(path.join(root, "run-summary.json"), {
+    schema_version: EVAL_RUN_SUMMARY_SCHEMA_VERSION,
     eval_run_id: evalRunId,
     launched,
     failed,
@@ -223,7 +231,6 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
           candidate_commit: input.candidateProvenance.commit
         }
       : {}),
-    started_at: startedAt
   } as const;
 
   const launcher = input.launcher ?? runtimeRowLauncher;
@@ -278,7 +285,7 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
 
   if (input.appendRecord === true) {
     const root = input.evalRunRoot ?? evalRunRoot(input.projectRoot, input.evalRunId);
-    appendJsonLine(path.join(root, "runs.jsonl"), record);
+    appendEvalRunRecord(path.join(root, "runs.jsonl"), record);
   }
   return record;
 }
@@ -529,8 +536,12 @@ export async function watchEvalRow(
   const updatedRecord: EvalRunRecord = {
     ...input.record,
     final_status: result.status,
-    workflow: evalWorkflowLifecycle(state),
-    expansion: evalRunExpansion({ ...(runRoot === undefined ? {} : { runRoot }), state }),
+    ...(state === undefined
+      ? {}
+      : {
+          workflow: evalWorkflowLifecycle(state),
+          expansion: evalRunExpansion({ runRoot, state })
+        }),
     ...(recoveryEquivalence === undefined ? {} : { recovery_equivalence: recoveryEquivalence }),
     ...(syncFailureDiagnostic === undefined && timeoutDiagnostic === undefined
       ? {}
@@ -542,7 +553,7 @@ export async function watchEvalRow(
           ]
         })
   };
-  appendJsonLine(path.join(input.evalRunRoot, "runs.jsonl"), updatedRecord);
+  appendEvalRunRecord(path.join(input.evalRunRoot, "runs.jsonl"), updatedRecord);
   return {
     record: updatedRecord,
     diagnostics
@@ -563,43 +574,31 @@ const defaultRowSync: RowSync = async (input) => {
 };
 
 function readGraph(runRoot: string): unknown {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(runRoot, "graph.json"), "utf8"));
-  } catch {
-    return undefined;
-  }
+  const graphPath = path.join(runRoot, "graph.json");
+  return fs.existsSync(graphPath) ? readStrictJsonDocument(graphPath) : undefined;
 }
 
 function readStateSafe(runRoot: string): RunState | undefined {
-  try {
-    return readRunState(path.join(runRoot, "state.json"));
-  } catch {
-    return undefined;
-  }
+  const statePath = path.join(runRoot, "state.json");
+  return fs.existsSync(statePath) ? readRunState(statePath) : undefined;
 }
 
 /** The row's terminal report path, or nothing -- never a throw that would cost the row its journal entry. */
 function readTerminalReportPath(runRoot: string): string | undefined {
-  try {
-    return resolveTerminalReportPath({ runRoot }).path;
-  } catch {
-    return undefined;
-  }
+  return resolveTerminalReportPath({ runRoot }).path;
 }
 
 function readRunFingerprints(runRoot: string): {
   graph_fingerprint?: string;
   config_fingerprint?: string;
 } {
-  try {
-    const value = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as Record<string, unknown>;
-    return {
-      ...(typeof value.graph_fingerprint === "string" ? { graph_fingerprint: value.graph_fingerprint } : {}),
-      ...(typeof value.config_fingerprint === "string" ? { config_fingerprint: value.config_fingerprint } : {})
-    };
-  } catch {
-    return {};
-  }
+  const statePath = path.join(runRoot, "state.json");
+  if (!fs.existsSync(statePath)) return {};
+  const value = readRunState(statePath);
+  return {
+    ...(value.graph_fingerprint === undefined ? {} : { graph_fingerprint: value.graph_fingerprint }),
+    ...(value.config_fingerprint === undefined ? {} : { config_fingerprint: value.config_fingerprint })
+  };
 }
 
 export function isTerminalRunStatus(status: string): boolean {

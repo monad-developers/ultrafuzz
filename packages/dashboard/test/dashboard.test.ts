@@ -190,6 +190,27 @@ test("dashboard rejects oversized JSON request bodies", async () => {
   }
 });
 
+test("dashboard rejects duplicate JSON request keys before handling a mutation", async () => {
+  const projectRoot = makeProject();
+  const configPath = path.join(projectRoot, "ultrafuzz.toml");
+  const originalConfig = fs.readFileSync(configPath, "utf8");
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const response = await fetch(apiUrl(handle.url, "/api/config"), {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        "x-ultrafuzz-session": handle.sessionToken
+      },
+      body: '{"content":"project_name = \\"first\\"\\n","content":"project_name = \\"second\\"\\n"}'
+    });
+    assert.equal(response.status, 400);
+    assert.equal(fs.readFileSync(configPath, "utf8"), originalConfig);
+  } finally {
+    await handle.close();
+  }
+});
+
 test("dashboard stops reading an oversized unfinished chunked body", async () => {
   const projectRoot = makeProject();
   const handle = await serveDashboard({ projectRoot, port: 0 });

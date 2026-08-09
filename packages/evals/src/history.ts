@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertRegularFileInside } from "@ultrafuzz/artifacts";
+import { assertRegularFileInside, parseStrictJsonBytes } from "@ultrafuzz/artifacts";
 import { z } from "zod/v4";
 
 import {
@@ -25,7 +25,14 @@ import {
   parsePublicEvalDiagnostics
 } from "./public-diagnostics.js";
 import { parseRecoveryEquivalence } from "./recovery-equivalence.js";
-import { EvalError, evalRunRoot, jsonFile, readJsonLines, safeEvalId } from "./utils.js";
+import {
+  readEvalFindingScores,
+  readEvalMatrix,
+  readEvalRunManifest,
+  readEvalScoreSummary,
+  readStrictJsonDocument
+} from "./eval-durable.js";
+import { EvalError, evalRunRoot, safeEvalId } from "./utils.js";
 
 export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v2" as const;
 export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v6" as const;
@@ -276,7 +283,7 @@ export function readEvalHistory(filePath: string): EvalHistory {
   if (!fs.existsSync(filePath)) return emptyEvalHistory();
   let value: unknown;
   try {
-    value = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    value = readStrictJsonDocument(filePath);
   } catch (error) {
     throw new EvalError("EVAL_HISTORY_INVALID", `failed to read eval history ${filePath}`, {
       reason: error instanceof Error ? error.message : String(error)
@@ -1006,26 +1013,17 @@ export function publishEvalRunToHistory(input: PublishEvalHistoryInput): {
   chartPaths: string[];
 } {
   const root = evalRunRoot(input.projectRoot, input.evalRunId);
-  const manifest = jsonFile<{
-    eval_run_id?: string;
-    created_at?: string;
-    suite?: EvalSuiteSpec;
-    provenance?: EvalRunProvenance;
-  }>(path.join(root, "eval.json"));
-  if (manifest.suite === undefined || manifest.created_at === undefined) {
-    throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "eval manifest is missing suite or timestamp");
-  }
-  const matrix = jsonFile<EvalMatrixRow[]>(path.join(root, "matrix.json"));
-  const summary = jsonFile<EvalScoreSummary>(path.join(root, "summary.json"));
-  const scores = readJsonLines<EvalFindingScore>(path.join(root, "scores.jsonl"));
+  const manifest = readEvalRunManifest(path.join(root, "eval.json"));
+  const matrix = readEvalMatrix(path.join(root, "matrix.json"));
+  const summary = readEvalScoreSummary(path.join(root, "summary.json"));
+  const scores = readEvalFindingScores(path.join(root, "scores.jsonl"));
   const publicEvalDiagnostics = readOptionalPublicEvalDiagnostics(root);
   if (manifest.eval_run_id !== input.evalRunId || summary.eval_run_id !== input.evalRunId) {
     throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "eval artifact IDs do not match the requested run");
   }
   if (
-    manifest.provenance === undefined ||
-    stableStringify(manifest.provenance.candidate) !== stableStringify(summary.provenance?.candidate) ||
-    stableStringify(manifest.provenance.benchmark) !== stableStringify(summary.provenance?.benchmark)
+    stableStringify(manifest.provenance.candidate) !== stableStringify(summary.provenance.candidate) ||
+    stableStringify(manifest.provenance.benchmark) !== stableStringify(summary.provenance.benchmark)
   ) {
     throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPATIBLE", "run and scoring lineage do not match");
   }
@@ -1081,7 +1079,12 @@ function readOptionalPublicEvalDiagnostics(root: string): unknown | undefined {
       throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "public eval diagnostics exceed the size limit");
     }
     try {
-      return JSON.parse(fs.readFileSync(descriptor, "utf8")) as unknown;
+      return parseStrictJsonBytes(fs.readFileSync(descriptor), {
+        maxBytes: MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
+        maxDepth: 128,
+        maxItems: 250_000,
+        maxProperties: 250_000
+      });
     } catch (error) {
       throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "failed to read public eval diagnostics", {
         reason: error instanceof Error ? error.message : String(error)

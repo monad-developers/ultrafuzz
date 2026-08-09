@@ -4,7 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { createInitialRunState, writeRunState, type RunState } from "@ultrafuzz/artifacts";
+import { appendEvalRunRecord, writeEvalMatrix, type EvalMatrixRow, type EvalRunRecord } from "@ultrafuzz/evals";
+
 import { runCli } from "../src/index.js";
+
+const DIGEST = "a".repeat(64);
 
 test("eval status renders disclosure-safe table and JSON snapshots without mutating run state", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cli-eval-status-"));
@@ -13,55 +18,30 @@ test("eval status renders disclosure-safe table and JSON snapshots without mutat
   const runRoot = path.join(project, "private-target-checkout", ".ultrafuzz", "runs", "synthetic-run");
   fs.mkdirSync(evalRoot, { recursive: true });
   fs.mkdirSync(runRoot, { recursive: true });
-  fs.writeFileSync(
-    path.join(evalRoot, "matrix.json"),
-    `${JSON.stringify([
-      {
-        id: "secret-target-private-variant",
-        target: {
-          sensitivity: "private",
-          repo: "https://private.example/secret-repository",
-          path: "/private/secret-target-checkout",
-          ref: "secret-ref",
-          ground_truth_path: "/private/secret-ground-truth.yml"
-        }
-      }
-    ])}\n`,
-    "utf8"
-  );
-  fs.writeFileSync(
+  const matrixRow = privateMatrixRow({
+    rowId: "secret-target-private-variant",
+    runId: "synthetic-run",
+    targetId: "secret-target",
+    variantId: "private-variant",
+    repository: "https://private.example/secret-repository",
+    checkoutPath: "/private/secret-target-checkout",
+    targetRef: "secret-ref",
+    groundTruth: "secret-ground-truth.yml"
+  });
+  writeEvalMatrix(path.join(evalRoot, "matrix.json"), [matrixRow]);
+  appendEvalRunRecord(
     path.join(evalRoot, "runs.jsonl"),
-    `${JSON.stringify({
-      eval_run_id: evalRunId,
-      row_id: "secret-target-private-variant",
-      status: "launched",
-      ultrafuzz_run_id: "synthetic-run",
-      ultrafuzz_run_root: runRoot,
-      diagnostics: [{ message: "secret-finding-evidence" }]
-    })}\n`,
-    "utf8"
+    launchedRecord({
+      evalRunId,
+      row: matrixRow,
+      runId: "synthetic-run",
+      runRoot,
+      diagnosticMessage: "secret-finding-evidence"
+    })
   );
   const timestamp = new Date().toISOString();
   const statePath = path.join(runRoot, "state.json");
-  fs.writeFileSync(
-    statePath,
-    `${JSON.stringify({
-      schema_version: "1.1",
-      run_id: "synthetic-run",
-      status: "succeeded",
-      created_at: timestamp,
-      started_at: timestamp,
-      finished_at: timestamp,
-      last_transition_at: timestamp,
-      controller_lease: { renewed_at: timestamp },
-      concurrency: { observed_at: timestamp },
-      nodes: {
-        first: { node_id: "first", status: "succeeded", finished_at: timestamp },
-        second: { node_id: "second", status: "reused-from-prior-run", finished_at: timestamp }
-      }
-    })}\n`,
-    "utf8"
-  );
+  writeRunState(statePath, terminalRunState("synthetic-run", timestamp));
   const stateBefore = fs.readFileSync(statePath, "utf8");
   const modifiedBefore = fs.statSync(statePath).mtimeMs;
 
@@ -154,32 +134,25 @@ test("eval status watch exits when remaining rows cannot progress", async () => 
   const runRoot = path.join(project, "private-invalid-target", ".ultrafuzz", "runs", "synthetic-invalid-run");
   fs.mkdirSync(evalRoot, { recursive: true });
   fs.mkdirSync(runRoot, { recursive: true });
-  fs.writeFileSync(
-    path.join(evalRoot, "matrix.json"),
-    `${JSON.stringify([
-      {
-        id: "secret-invalid-row",
-        target: {
-          sensitivity: "private",
-          repo: "https://private.example/secret-invalid-repository",
-          path: "/private/secret-invalid-target",
-          ref: "secret-invalid-ref",
-          ground_truth_path: "/private/secret-invalid-ground-truth.yml"
-        }
-      }
-    ])}\n`,
-    "utf8"
-  );
-  fs.writeFileSync(
+  const matrixRow = privateMatrixRow({
+    rowId: "secret-invalid-row",
+    runId: "synthetic-invalid-run",
+    targetId: "secret-invalid-target",
+    variantId: "secret-invalid-variant",
+    repository: "https://private.example/secret-invalid-repository",
+    checkoutPath: "/private/secret-invalid-target",
+    targetRef: "secret-invalid-ref",
+    groundTruth: "secret-invalid-ground-truth.yml"
+  });
+  writeEvalMatrix(path.join(evalRoot, "matrix.json"), [matrixRow]);
+  appendEvalRunRecord(
     path.join(evalRoot, "runs.jsonl"),
-    `${JSON.stringify({
-      eval_run_id: evalRunId,
-      row_id: "secret-invalid-row",
-      status: "launched",
-      ultrafuzz_run_id: "synthetic-invalid-run",
-      ultrafuzz_run_root: runRoot
-    })}\n`,
-    "utf8"
+    launchedRecord({
+      evalRunId,
+      row: matrixRow,
+      runId: "synthetic-invalid-run",
+      runRoot
+    })
   );
   fs.writeFileSync(path.join(runRoot, "state.json"), "{invalid", "utf8");
 
@@ -252,4 +225,92 @@ async function invoke(project: string, argv: string[]): Promise<{ code: number; 
     }
   });
   return { code, stdout, stderr };
+}
+
+function privateMatrixRow(input: {
+  rowId: string;
+  runId: string;
+  targetId: string;
+  variantId: string;
+  repository: string;
+  checkoutPath: string;
+  targetRef: string;
+  groundTruth: string;
+}): EvalMatrixRow {
+  return {
+    id: input.rowId,
+    target_id: input.targetId,
+    variant_id: input.variantId,
+    trial_id: "trial-1",
+    run_id: input.runId,
+    target: {
+      id: input.targetId,
+      sensitivity: "private",
+      repo: input.repository,
+      path: input.checkoutPath,
+      ref: input.targetRef,
+      ground_truth: input.groundTruth,
+      ground_truth_path: path.join("/private", input.groundTruth)
+    },
+    variant: { id: input.variantId, prompt_overlay_paths: [] },
+    runner_model_profile: "eval-runner",
+    judge_model_profile: "eval-judge"
+  };
+}
+
+function launchedRecord(input: {
+  evalRunId: string;
+  row: EvalMatrixRow;
+  runId: string;
+  runRoot: string;
+  diagnosticMessage?: string;
+}): EvalRunRecord {
+  const timestamp = "2026-08-09T12:00:00.000Z";
+  return {
+    schema_version: "ultrafuzz.eval.run.v2",
+    eval_run_id: input.evalRunId,
+    row_id: input.row.id,
+    target_id: input.row.target_id,
+    variant_id: input.row.variant_id,
+    trial_id: input.row.trial_id,
+    ultrafuzz_run_id: input.runId,
+    ultrafuzz_run_root: input.runRoot,
+    status: "launched",
+    workflow_ids: [],
+    launcher: { status: "succeeded", started_at: timestamp, finished_at: timestamp },
+    diagnostics:
+      input.diagnosticMessage === undefined
+        ? []
+        : [
+            {
+              code: "EVAL_TEST_DIAGNOSTIC",
+              message: input.diagnosticMessage,
+              severity: "info",
+              source: "eval-status-test"
+            }
+          ]
+  };
+}
+
+function terminalRunState(runId: string, timestamp: string): RunState {
+  const state = createInitialRunState({
+    runId,
+    createdAt: timestamp,
+    graphFingerprint: DIGEST,
+    configFingerprint: DIGEST,
+    nodes: [
+      { id: "first", status: "succeeded" },
+      { id: "second", status: "reused-from-prior-run" }
+    ]
+  });
+  state.status = "succeeded";
+  state.started_at = timestamp;
+  state.finished_at = timestamp;
+  state.last_transition_at = timestamp;
+  state.nodes.first!.started_at = timestamp;
+  state.nodes.first!.finished_at = timestamp;
+  state.nodes.second!.started_at = timestamp;
+  state.nodes.second!.finished_at = timestamp;
+  state.concurrency.observed_at = timestamp;
+  return state;
 }

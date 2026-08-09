@@ -13,6 +13,9 @@ import {
   assertRegularFileInside,
   getNodeArtifactDir,
   getNodeWorkspaceDir,
+  parseStrictJsonBytes,
+  readJsonFile,
+  readRunPlanDocument,
   SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
   SMITHERS_TASK_METADATA_SCHEMA_VERSION as REGISTERED_SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   writeFileDurable,
@@ -42,7 +45,6 @@ import {
 } from "./workflow-execution-snapshot-capability.js";
 import {
   assertSmithersPackageManifest,
-  migrateLegacySmithersPackageManifest,
   SMITHERS_ORCHESTRATOR_BIN_PATH,
   SMITHERS_ORCHESTRATOR_VERSION,
   smithersDependencyInstallArgs
@@ -997,17 +999,11 @@ const SMITHERS_EXECUTION_CONTEXT_ENVIRONMENT_VARIABLES = new Set([
 ]);
 const SMITHERS_ACTIVE_RUN_STATES = new Set([
   "running",
-  "in-progress",
-  "started",
-  "retrying",
-  "queued",
   "waiting-approval",
   "waiting-event",
-  "waiting-timer"
+  "waiting-timer",
+  "waiting-quota"
 ]);
-
-// `smithers up` exits 4 with code RUN_EXISTS when a non-resume submission names an existing run.
-const SMITHERS_RUN_EXISTS_EXIT_CODE = 4;
 
 export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = SMITHERS_TASK_MANIFEST_SCHEMA_VERSION;
 export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = REGISTERED_SMITHERS_TASK_METADATA_SCHEMA_VERSION;
@@ -1130,6 +1126,11 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const projectRoot = path.resolve(input.projectRoot ?? inferProjectRootFromRunLayout(input.runLayout));
   const workflowName = input.workflowName ?? `ultrafuzz-${input.runLayout.runId}`;
   const smithersRunId = `ultrafuzz-${input.runLayout.runId}`;
+  if (!isCompatibleSmithersRunId(smithersRunId)) {
+    throw new Error(
+      `run ID ${JSON.stringify(input.runLayout.runId)} does not produce a current Smithers run ID matching ^[a-z0-9_-]{1,64}$`
+    );
+  }
   const agenticAttemptsByNodeId = new Map<string, string[]>();
   const attemptsByNodeId = new Map<string, string[]>();
   for (const node of input.graph.nodes.filter((candidate) => candidate.kind !== "meta")) {
@@ -1145,7 +1146,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     );
   }
   const renderedByAttempt = new Map(
-    input.renderedPrompts.map((prompt) => [prompt.attempt_id ?? prompt.node_id, prompt.rendered_prompt_path])
+    input.renderedPrompts.map((prompt) => [prompt.attempt_id, prompt.rendered_prompt_path])
   );
   const tasks = input.graph.nodes.flatMap((node) =>
     nodeAttemptsFor(node)
@@ -1294,10 +1295,7 @@ export async function smithersExecutionControlFiles(
 
   const planPath = path.join(layout.root, "plan.json");
   add(planPath, "controls/plan.json");
-  const plan = JSON.parse(fs.readFileSync(planPath, "utf8")) as { run_id?: unknown; rendered_prompts?: unknown };
-  if (plan.run_id !== layout.runId || !Array.isArray(plan.rendered_prompts)) {
-    throw new Error("persisted run plan cannot define the workflow execution closure");
-  }
+  const plan = readRunPlanDocument(planPath, layout.runId);
   const plannedPrompts = new Map<string, Record<string, unknown>>();
   for (const value of plan.rendered_prompts) {
     if (isObjectRecord(value) && typeof value.attempt_id === "string") plannedPrompts.set(value.attempt_id, value);
@@ -1737,9 +1735,12 @@ export async function requestSmithersPause(input: {
     env: input.env,
     acceptedExitCodes: [2]
   });
-  const reportedStatus = firstStringField(jsonField(result.stdout).json, ["status"]);
-  const status = result.exitCode === 0 && reportedStatus === "paused" ? "paused" : "pause-requested";
-  return { ...result, status };
+  const payload = commandPayload(jsonField(result.stdout).json);
+  const reportedStatus = payload?.status;
+  if (reportedStatus !== "paused" && reportedStatus !== "pause-requested") {
+    throw new Error("workflow runner pause did not return the current JSON status contract");
+  }
+  return { ...result, status: reportedStatus };
 }
 
 export async function requestSmithersCancel(input: {
@@ -1763,19 +1764,17 @@ export async function requestSmithersCancel(input: {
   if (result.exitCode === 4) {
     return { ...result, status: "cancelled", reportedStatus: "already-terminal" };
   }
-  const reportedStatus = firstStringField(commandPayload(jsonField(result.stdout).json), ["status"]);
-  // The engine reports `cancelled`; Ultrafuzz keeps `cancel-requested` until a
-  // confirmed terminal cancellation so a durable request never looks finished.
-  const status = isConfirmedCancelStatus(reportedStatus) ? "cancelled" : "cancel-requested";
-  return { ...result, status, ...(reportedStatus === undefined ? {} : { reportedStatus }) };
+  const payload = commandPayload(jsonField(result.stdout).json);
+  const reportedStatus = payload?.status;
+  if (reportedStatus !== "cancelled" && reportedStatus !== "cancel-requested") {
+    throw new Error("workflow runner cancel did not return the current JSON status contract");
+  }
+  return { ...result, status: reportedStatus, reportedStatus };
 }
 
 function smithersStdoutHasErrorCode(stdout: string, code: string): boolean {
-  return jsonHasErrorCode(jsonField(stdout).json, code) || stdout.includes(code);
-}
-
-function isConfirmedCancelStatus(value: string | undefined): boolean {
-  return value === "cancelled" || value === "canceled";
+  const parsed = jsonField(stdout).json;
+  return isObjectRecord(parsed) && parsed.code === code;
 }
 
 /**
@@ -2052,10 +2051,10 @@ function patchPosture(sourcePath: string, patched: string, patchable: string): S
 }
 
 export function commandPayload(value: unknown): Record<string, unknown> | undefined {
-  if (!isObjectRecord(value)) {
+  if (!isObjectRecord(value) || value.ok !== true || !isObjectRecord(value.data)) {
     return undefined;
   }
-  return isObjectRecord(value.data) ? value.data : value;
+  return value.data;
 }
 
 export async function runSmithersLifecycleCommand(input: {
@@ -2120,7 +2119,7 @@ export async function runSmithersLifecycleCommand(input: {
       projectRoot: input.projectRoot,
       env: input.env
     });
-    if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND") || smithersSnapshotHasMissingRunHistory(inspection)) {
+    if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND")) {
       const recoveryLogDirArgs = workflowLogDirArgs();
       const inputJson = workflowRelaunchInputJson();
       const recoveryCommand = [
@@ -2204,78 +2203,14 @@ export async function runSmithersLifecycleCommand(input: {
     if (
       failedTasks.length === 0 &&
       input.retryFailed === true &&
-      (smithersSnapshotRunStateIsFailed(inspection) || smithersSnapshotRunStateIsStale(inspection))
+      input.resetNode === undefined &&
+      (smithersSnapshotRunStateIsFailed(inspection) || smithersSnapshotRunStateIsStale(inspection)) &&
+      smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED") &&
+      !isCompatibleSmithersRunId(input.smithersRunId)
     ) {
-      // A rewind to the latest timeline frame is a no-op upstream: `jumpToFrame` returns early
-      // without touching the run row or any node, and `up --resume` already un-terminalizes a
-      // failed run on its own. So the only recovery worth issuing here is the replacement lineage
-      // for a run id the backend can no longer resume in place.
-      if (
-        input.resetNode === undefined &&
-        smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED") &&
-        !isCompatibleSmithersRunId(input.smithersRunId)
-      ) {
-        const relaunchPaths = input.relaunchPaths;
-        const replacementLogDirArgs = workflowLogDirArgs();
-        const replacementRunId = compatibleRecoveryRunId(input.smithersRunId);
-        const replacementInputJson = workflowRelaunchInputJson();
-        const replacementArgs = (adoptExisting: boolean) => [
-          "up",
-          input.workflowPath,
-          "--detach",
-          ...(adoptExisting ? ["--resume", replacementRunId] : []),
-          "--run-id",
-          replacementRunId,
-          ...(adoptExisting && input.force === true ? ["--force"] : []),
-          ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
-          "--root",
-          input.projectRoot,
-          ...replacementLogDirArgs,
-          "--input",
-          replacementInputJson,
-          "--format",
-          "json",
-          ...supervisorCommandArgs(input.controllerLeaseSeconds)
-        ];
-        let recovery = await execSmithersCli({
-          args: replacementArgs(false),
-          projectRoot: input.projectRoot,
-          env: input.env,
-          environmentVariableNames: input.environmentVariableNames,
-          keepWorkspaces: input.keepWorkspaces,
-          acceptedExitCodes: [SMITHERS_RUN_EXISTS_EXIT_CODE]
-        });
-        let appliedRecovery = "incompatible-workflow-run-id";
-        if (recovery.exitCode !== 0) {
-          if (!smithersOutputRejectsExistingRun(recovery)) {
-            throw new Error(
-              `replacement workflow lineage submission failed: ${recovery.stderr.trim() || recovery.stdout.trim() || `exit ${recovery.exitCode}`}`
-            );
-          }
-          // An earlier recovery generation created this replacement run and then died before the
-          // new lineage was persisted, so the durable run still points at the old id and every
-          // later generation recomputes the same replacement id. Adopt the orphan by resuming it
-          // instead of wedging on RUN_EXISTS forever.
-          recovery = await execSmithersCli({
-            args: replacementArgs(true),
-            projectRoot: input.projectRoot,
-            env: input.env,
-            environmentVariableNames: input.environmentVariableNames,
-            keepWorkspaces: input.keepWorkspaces
-          });
-          appliedRecovery = "incompatible-workflow-run-id-adopted";
-        }
-        writeJsonDurable(path.join(path.dirname(relaunchPaths.inputPath), "recovery-submission.json"), {
-          schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
-          smithers_run_id: replacementRunId,
-          recovery: appliedRecovery,
-          command: recovery.command,
-          stdout: redactedEvidenceText(recovery.stdout),
-          stderr: redactedEvidenceText(recovery.stderr),
-          submitted_at: new Date().toISOString()
-        });
-        return { ...recovery, workflowRunId: replacementRunId };
-      }
+      throw new Error(
+        `persisted workflow run ID ${JSON.stringify(input.smithersRunId)} is unsupported by the pinned workflow runner; historical runs are not converted or transferred`
+      );
     }
   }
 
@@ -2490,98 +2425,87 @@ export async function runSmithersInspectionCommand(input: {
 }
 
 function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: string): boolean {
-  return (
-    jsonHasErrorCode(snapshot.json, code) ||
-    [snapshot.stdout, snapshot.stderr, snapshot.error ?? ""].some((value) => value.includes(code))
-  );
-}
-
-function smithersSnapshotHasMissingRunHistory(snapshot: SmithersCommandSnapshot): boolean {
-  const evidence = [
-    snapshot.stdout,
-    snapshot.stderr,
-    snapshot.error ?? "",
-    snapshot.json === undefined ? "" : JSON.stringify(snapshot.json)
-  ].join("\n");
-  return evidence.includes("No Smithers run history found") || evidence.includes("No workflow run history found");
+  if (!isObjectRecord(snapshot.json)) return false;
+  if (snapshot.json.code === code) return true;
+  if (snapshot.json.ok !== true || !isObjectRecord(snapshot.json.data)) return false;
+  const run = snapshot.json.data.run;
+  return isObjectRecord(run) && isObjectRecord(run.error) && run.error.code === code;
 }
 
 function smithersSnapshotRunState(snapshot: SmithersCommandSnapshot): string | undefined {
-  const parsed = isObjectRecord(snapshot.json) ? snapshot.json : {};
-  const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
-  const runState = isObjectRecord(data.runState) ? data.runState.state : undefined;
-  if (typeof runState === "string") {
-    return runState;
+  const data = currentSmithersInspectData(snapshot);
+  const runState = data.runState;
+  if (!isObjectRecord(runState) || typeof runState.state !== "string" || runState.state.length === 0) {
+    throw new Error("current Smithers inspection is missing its canonical runState.state");
   }
-  const runStatus = isObjectRecord(data.run) ? data.run.status : undefined;
-  if (typeof runStatus === "string") {
-    return runStatus;
-  }
-  // Some run-state and task-output snapshot variants report the state at the top level of `data`
-  // with no `runState`/`run` wrapper; without this fallback a terminal failed run reads as unknown
-  // and resume proceeds in place.
-  return [data.state, data.status].find((value): value is string => typeof value === "string");
+  return runState.state;
 }
 
 function smithersSnapshotRunStateIsActive(snapshot: SmithersCommandSnapshot): boolean {
   const state = smithersSnapshotRunState(snapshot);
-  return state !== undefined && SMITHERS_ACTIVE_RUN_STATES.has(state.toLowerCase());
+  return state !== undefined && SMITHERS_ACTIVE_RUN_STATES.has(state);
 }
 
 function smithersSnapshotRunStateIsFailed(snapshot: SmithersCommandSnapshot): boolean {
-  const state = smithersSnapshotRunState(snapshot);
-  return state !== undefined && ["failed", "error", "timed-out", "timeout"].includes(state.toLowerCase());
+  return smithersSnapshotRunState(snapshot) === "failed";
 }
 
 function smithersSnapshotRunStateIsStale(snapshot: SmithersCommandSnapshot): boolean {
-  return smithersSnapshotRunState(snapshot)?.toLowerCase() === "stale";
+  return smithersSnapshotRunState(snapshot) === "stale";
 }
 
 function smithersSnapshotFailedTasks(snapshot: SmithersCommandSnapshot): Array<{ nodeId: string; iteration: number }> {
-  const parsed = isObjectRecord(snapshot.json) ? snapshot.json : {};
-  const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
+  const data = currentSmithersInspectData(snapshot);
   const failedTasks = new Map<string, { nodeId: string; iteration: number }>();
-  const failedChildKeys = [data.failedChildKeys, parsed.failedChildKeys].find(Array.isArray) ?? [];
-  for (const key of failedChildKeys) {
-    if (typeof key !== "string") continue;
-    const separator = key.lastIndexOf("::");
-    const nodeId = separator < 0 ? key : key.slice(0, separator);
-    const iteration = separator < 0 ? 0 : Number(key.slice(separator + 2));
-    if (nodeId.trim() === "" || !Number.isSafeInteger(iteration) || iteration < 0) continue;
-    failedTasks.set(`${nodeId}::${iteration}`, { nodeId, iteration });
+  if (data.failedChildKeys !== undefined) {
+    if (!Array.isArray(data.failedChildKeys)) {
+      throw new Error("current Smithers inspection failedChildKeys must be an array");
+    }
+    for (const key of data.failedChildKeys) {
+      if (typeof key !== "string") {
+        throw new Error("current Smithers inspection failedChildKeys must contain only strings");
+      }
+      const separator = key.lastIndexOf("::");
+      const nodeId = separator < 1 ? "" : key.slice(0, separator);
+      const iterationText = separator < 0 ? "" : key.slice(separator + 2);
+      const iteration = Number(iterationText);
+      if (!/^(?:0|[1-9]\d*)$/u.test(iterationText) || nodeId.length === 0 || !Number.isSafeInteger(iteration)) {
+        throw new Error(`current Smithers inspection has invalid failed child key ${JSON.stringify(key)}`);
+      }
+      failedTasks.set(key, { nodeId, iteration });
+    }
   }
   if (failedTasks.size > 0) return [...failedTasks.values()];
-  const collections = [data.steps, data.nodes, parsed.steps, parsed.nodes];
-  const failedStates = new Set(["failed", "error", "timed-out", "timeout", "canceled", "cancelled"]);
-  for (const collection of collections) {
-    const entries = Array.isArray(collection)
-      ? collection
-      : isObjectRecord(collection)
-        ? Object.entries(collection).map(([id, value]) =>
-            isObjectRecord(value) && typeof value.id !== "string" ? { ...value, id } : value
-          )
-        : [];
-    for (const entry of entries) {
-      if (!isObjectRecord(entry)) continue;
-      const state = [entry.state, entry.status].find((value): value is string => typeof value === "string");
-      const nodeId = [entry.nodeId, entry.node_id, entry.id].find(
-        (value): value is string => typeof value === "string" && value.trim() !== ""
-      );
-      const iteration =
-        typeof entry.iteration === "number" && Number.isSafeInteger(entry.iteration) && entry.iteration >= 0
-          ? entry.iteration
-          : 0;
-      if (state !== undefined && nodeId !== undefined && failedStates.has(state.toLowerCase())) {
-        const key = `${nodeId}::${iteration}`;
-        if (!failedTasks.has(key)) failedTasks.set(key, { nodeId, iteration });
-      }
+  if (!Array.isArray(data.nodes)) {
+    throw new Error("current Smithers inspection is missing its canonical nodes array");
+  }
+  for (const entry of data.nodes) {
+    if (
+      !isObjectRecord(entry) ||
+      typeof entry.nodeId !== "string" ||
+      entry.nodeId.length === 0 ||
+      typeof entry.state !== "string" ||
+      entry.state.length === 0
+    ) {
+      throw new Error("current Smithers inspection contains an invalid canonical node row");
+    }
+    if (entry.state === "failed") {
+      const key = `${entry.nodeId}::0`;
+      failedTasks.set(key, { nodeId: entry.nodeId, iteration: 0 });
     }
   }
   return [...failedTasks.values()];
 }
 
-function smithersOutputRejectsExistingRun(snapshot: { stdout: string; stderr: string }): boolean {
-  return [snapshot.stdout, snapshot.stderr].some((value) => value.includes("RUN_EXISTS"));
+function currentSmithersInspectData(snapshot: SmithersCommandSnapshot): Record<string, unknown> {
+  if (!isObjectRecord(snapshot.json) || snapshot.json.ok !== true || !isObjectRecord(snapshot.json.data)) {
+    throw new Error("workflow inspection did not return the current Smithers JSON envelope");
+  }
+  const run = snapshot.json.data.run;
+  if (!isObjectRecord(run) || typeof run.status !== "string" || run.status.length === 0) {
+    throw new Error("current Smithers inspection is missing its canonical run.status");
+  }
+  return snapshot.json.data;
 }
 
 /**
@@ -2614,33 +2538,25 @@ function isCompatibleSmithersRunId(value: string): boolean {
   return /^[a-z0-9_-]{1,64}$/u.test(value);
 }
 
-function compatibleRecoveryRunId(value: string): string {
-  return `ufz-recovery-${crypto.createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
-}
-
 function resetNodeMarkerMatches(markerPath: string | undefined, smithersRunId: string, nodeId: string): boolean {
   if (markerPath === undefined || !fs.existsSync(markerPath)) {
     return false;
   }
-  try {
-    const parsed: unknown = JSON.parse(fs.readFileSync(markerPath, "utf8"));
-    return isObjectRecord(parsed) && parsed.smithers_run_id === smithersRunId && parsed.node_id === nodeId;
-  } catch {
-    return false;
+  const parsed = readJsonFile(markerPath);
+  if (
+    !isObjectRecord(parsed) ||
+    !hasExactObjectKeys(parsed, ["schema_version", "smithers_run_id", "node_id", "applied_at"]) ||
+    parsed.schema_version !== SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION ||
+    typeof parsed.smithers_run_id !== "string" ||
+    parsed.smithers_run_id.length === 0 ||
+    typeof parsed.node_id !== "string" ||
+    parsed.node_id.length === 0 ||
+    typeof parsed.applied_at !== "string" ||
+    !isCanonicalDateTime(parsed.applied_at)
+  ) {
+    throw new Error("persisted Smithers reset marker does not match the current strict contract");
   }
-}
-
-function jsonHasErrorCode(value: unknown, code: string): boolean {
-  if (Array.isArray(value)) {
-    return value.some((entry) => jsonHasErrorCode(entry, code));
-  }
-  if (!isObjectRecord(value)) {
-    return false;
-  }
-  if (value.code === code) {
-    return true;
-  }
-  return Object.values(value).some((entry) => jsonHasErrorCode(entry, code));
+  return parsed.smithers_run_id === smithersRunId && parsed.node_id === nodeId;
 }
 
 async function execSmithersCli(input: {
@@ -2760,29 +2676,12 @@ function supervisorCommandArgs(controllerLeaseSeconds: number): string[] {
   ];
 }
 
-function parseForkedRunId(stdout: string): string | undefined {
-  const parsed = jsonField(stdout).json;
-  return firstStringField(parsed, ["forkedRunId", "replayedRunId", "runId", "workflow_run_id"]);
-}
-
-function firstStringField(value: unknown, keys: readonly string[]): string | undefined {
-  if (value === null || typeof value !== "object") {
-    return undefined;
+function parseForkedRunId(stdout: string): string {
+  const payload = commandPayload(jsonField(stdout).json);
+  if (typeof payload?.forkedRunId !== "string" || payload.forkedRunId.length === 0) {
+    throw new Error("workflow runner fork/replay did not return the current forkedRunId contract");
   }
-  const record = value as Record<string, unknown>;
-  for (const key of keys) {
-    const candidate = record[key];
-    if (typeof candidate === "string" && candidate.length > 0) {
-      return candidate;
-    }
-  }
-  for (const key of ["data", "result", "value"]) {
-    const nested = firstStringField(record[key], keys);
-    if (nested !== undefined) {
-      return nested;
-    }
-  }
-  return undefined;
+  return payload.forkedRunId;
 }
 
 export function smithersDiagnostic(error: unknown, code: string): RuntimeDiagnostic {
@@ -2888,12 +2787,8 @@ async function ensureSmithersDependencies(
   }
   assertNoSymlinkComponents(projectRoot, packageRoot, "Smithers package");
   assertNoSymlinkComponents(projectRoot, packageJson, "Smithers package manifest");
-  const parsedManifest = JSON.parse(fs.readFileSync(packageJson, "utf8")) as unknown;
-  const migration = migrateLegacySmithersPackageManifest(parsedManifest);
-  if (migration.migrated) {
-    writeFileDurable(packageJson, `${JSON.stringify(migration.manifest, null, 2)}\n`);
-  }
-  assertSmithersPackageManifest(migration.manifest);
+  const parsedManifest = readJsonFile(packageJson);
+  assertSmithersPackageManifest(parsedManifest);
   const nodeModules = path.join(packageRoot, "node_modules");
   if (fs.existsSync(nodeModules)) {
     assertNoSymlinkComponents(projectRoot, nodeModules, "Smithers dependencies");
@@ -3222,6 +3117,18 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function hasExactObjectKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const canonical = [...expected].sort();
+  return actual.length === canonical.length && actual.every((key, index) => key === canonical[index]);
+}
+
+function isCanonicalDateTime(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return false;
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+}
+
 function assertAndCloseSmithersExecutableAnchor(anchor: SmithersExecutableAnchor | undefined): void {
   if (anchor === undefined) return;
   try {
@@ -3520,7 +3427,13 @@ function inferProjectRootFromRunLayout(runLayout: RunLayout): string {
 }
 
 function workflowFileStem(runId: string): string {
-  return `ultrafuzz-${runId.replace(/[^A-Za-z0-9._-]/gu, "-")}`;
+  const stem = `ultrafuzz-${runId}`;
+  if (!isCompatibleSmithersRunId(stem)) {
+    throw new Error(
+      `run ID ${JSON.stringify(runId)} does not produce a current Smithers workflow name matching ^[a-z0-9_-]{1,64}$`
+    );
+  }
+  return stem;
 }
 
 function writePreparedWorkflowFile(root: string, filePath: string, contents: string, label: string): void {
@@ -3565,7 +3478,14 @@ function jsonField(stdout: string): { json?: unknown } {
     return {};
   }
   try {
-    return { json: JSON.parse(trimmed) as unknown };
+    return {
+      json: parseStrictJsonBytes(Buffer.from(trimmed, "utf8"), {
+        maxBytes: SMITHERS_CLI_MAX_BUFFER_BYTES,
+        maxDepth: 128,
+        maxItems: 1_000_000,
+        maxProperties: 1_000_000
+      })
+    };
   } catch {
     return {};
   }

@@ -1,20 +1,13 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { artifactContractDefinition, artifactContractSchemaBinding } from "./artifact-contracts.js";
-import {
-  ARTIFACT_SCHEMA_METADATA,
-  type ArtifactSchemaFilename
-} from "./artifact-schema-metadata.js";
+import { ARTIFACT_SCHEMA_METADATA, type ArtifactSchemaFilename } from "./artifact-schema-metadata.js";
+import { MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "./attempt-ledger.js";
 
-export const SEMANTIC_GATE_SCOPES = [
-  "document",
-  "filesystem",
-  "cross-artifact",
-  "git",
-  "runtime-state"
-] as const;
+export const SEMANTIC_GATE_SCOPES = ["document", "filesystem", "cross-artifact", "git", "runtime-state"] as const;
 
 export type SemanticGateScope = (typeof SEMANTIC_GATE_SCOPES)[number];
 
@@ -53,6 +46,8 @@ export interface SemanticPlannedGraphContext {
 
 export interface SemanticAttemptLedgerContext {
   entries: readonly unknown[];
+  /** Trusted entries from a source run that may be referenced by reuse evidence. */
+  sourceEntries?: readonly unknown[];
 }
 
 export interface SemanticRuntimeStateContext {
@@ -65,7 +60,13 @@ export interface SemanticUsageLedgerContext {
 }
 
 export interface SemanticEventLogContext {
-  sourceEventIds: readonly string[];
+  events: readonly {
+    workflow_run_id: string;
+    source_event_sequence: number;
+    timestamp_ms: number;
+    type: string;
+    payload: unknown;
+  }[];
 }
 
 /**
@@ -255,7 +256,12 @@ function uniqueCompositeGate(
   };
 }
 
-function nestedUniqueFieldGate(parentPath: readonly string[], childKey: string, field: string, label: string): GateHandler {
+function nestedUniqueFieldGate(
+  parentPath: readonly string[],
+  childKey: string,
+  field: string,
+  label: string
+): GateHandler {
   return (document) =>
     arrayAt(document, parentPath).flatMap((parent, parentIndex) =>
       projectedUniquenessIssues([
@@ -284,7 +290,7 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
 }
 
 function adminConfigJoinIssues(document: unknown): SemanticGateIssue[] {
-  const ids = new Set(arrayAt(document, ["surfaces"]).flatMap((row) => (stringField(row, "surface_id") ?? "")));
+  const ids = new Set(arrayAt(document, ["surfaces"]).flatMap((row) => stringField(row, "surface_id") ?? ""));
   ids.delete("");
   const issues: SemanticGateIssue[] = [];
   for (const key of ["selector_mismatches", "ambiguous_or_incomplete_specs", "coverage_notes"] as const) {
@@ -330,7 +336,9 @@ function aggregationCountIssues(document: unknown): SemanticGateIssue[] {
 
 function analysisBundlePathIssues(document: unknown): SemanticGateIssue[] {
   const files = arrayAt(document, ["files"]);
-  const paths = files.map((entry) => stringField(entry, "path")).filter((entry): entry is string => entry !== undefined);
+  const paths = files
+    .map((entry) => stringField(entry, "path"))
+    .filter((entry): entry is string => entry !== undefined);
   const issues: SemanticGateIssue[] = [];
   const sorted = [...paths].sort();
   if (paths.some((entry, index) => entry !== sorted[index])) {
@@ -380,8 +388,29 @@ function attemptOrderIssues(document: unknown): SemanticGateIssue[] {
   const lifecycle = at(document, ["lifecycle"]);
   const started = stringField(lifecycle, "started_at");
   const finished = stringField(lifecycle, "finished_at");
-  if (started === undefined || finished === undefined || Date.parse(finished) >= Date.parse(started)) return [];
-  return [issue("$.lifecycle.finished_at", "Attempt finish time cannot precede its start time")];
+  const startedSequence = numberField(document, "started_event_sequence");
+  const finishedSequence = numberField(document, "source_event_sequence");
+  const issues: SemanticGateIssue[] = [];
+  if (started !== undefined && finished !== undefined && Date.parse(finished) < Date.parse(started)) {
+    issues.push(issue("$.lifecycle.finished_at", "Attempt finish time cannot precede its start time"));
+  }
+  if (startedSequence !== undefined && finishedSequence !== undefined && startedSequence >= finishedSequence) {
+    issues.push(issue("$.started_event_sequence", "Attempt start event must precede its terminal source event"));
+  }
+  return issues;
+}
+
+function attemptFailureMessageByteLengthIssues(document: unknown): SemanticGateIssue[] {
+  const message = stringField(document, "failure_message");
+  if (message === undefined || Buffer.byteLength(message, "utf8") <= MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES) {
+    return [];
+  }
+  return [
+    issue(
+      "$.failure_message",
+      `Attempt failure message must not exceed ${MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES} UTF-8 bytes`
+    )
+  ];
 }
 
 function attemptOutcomeDigestIssues(document: unknown): SemanticGateIssue[] {
@@ -395,8 +424,8 @@ function attemptOutcomeDigestIssues(document: unknown): SemanticGateIssue[] {
   if ((outcome === "reused") !== (reuseStatus === "reused")) {
     issues.push(issue("$.reuse.status", "Attempt outcome and reuse status must agree"));
   }
-  if (outcome === "succeeded" && outputDigest === null) {
-    issues.push(issue("$.manifests.output_sha256", "Succeeded attempts require an output manifest digest"));
+  if ((outcome === "succeeded" || outcome === "reused") && outputDigest === null) {
+    issues.push(issue("$.manifests.output_sha256", "Succeeded and reused attempts require an output manifest digest"));
   }
   if (failed && document.failure_category === undefined) {
     issues.push(issue("$.failure_category", "Failed attempts require a failure category"));
@@ -408,7 +437,7 @@ function attemptOutcomeDigestIssues(document: unknown): SemanticGateIssue[] {
 }
 
 function dependencyJoinIssues(document: unknown): SemanticGateIssue[] {
-  const ids = new Set(arrayAt(document, ["dependencies"]).flatMap((row) => (stringField(row, "dependency_id") ?? "")));
+  const ids = new Set(arrayAt(document, ["dependencies"]).flatMap((row) => stringField(row, "dependency_id") ?? ""));
   ids.delete("");
   const issues: SemanticGateIssue[] = [];
   for (const key of [
@@ -443,7 +472,7 @@ function differentialResultIdentityIssues(document: unknown): SemanticGateIssue[
 }
 
 function dynamicModelJoinIssues(document: unknown): SemanticGateIssue[] {
-  const agents = new Set(arrayAt(document, ["agents"]).flatMap((row) => (stringField(row, "agent_id") ?? "")));
+  const agents = new Set(arrayAt(document, ["agents"]).flatMap((row) => stringField(row, "agent_id") ?? ""));
   agents.delete("");
   return arrayAt(document, ["models"]).flatMap((row, index) => {
     const agentId = stringField(row, "agent_id");
@@ -476,7 +505,7 @@ function dynamicSelectionCountIssues(document: unknown): SemanticGateIssue[] {
 
 function externalizedStateJoinIssues(document: unknown): SemanticGateIssue[] {
   const componentIds = new Set(
-    arrayAt(document, ["state_components"]).flatMap((row) => (stringField(row, "component_id") ?? ""))
+    arrayAt(document, ["state_components"]).flatMap((row) => stringField(row, "component_id") ?? "")
   );
   componentIds.delete("");
   const issues: SemanticGateIssue[] = [];
@@ -485,7 +514,10 @@ function externalizedStateJoinIssues(document: unknown): SemanticGateIssue[] {
       for (const [idIndex, id] of stringArray(at(row, ["state_component_ids"])).entries()) {
         if (!componentIds.has(id)) {
           issues.push(
-            issue(`$.${key}[${rowIndex}].state_component_ids[${idIndex}]`, `Unknown state component ID ${JSON.stringify(id)}`)
+            issue(
+              `$.${key}[${rowIndex}].state_component_ids[${idIndex}]`,
+              `Unknown state component ID ${JSON.stringify(id)}`
+            )
           );
         }
       }
@@ -532,13 +564,14 @@ function findingProjectedReferenceIssues(document: unknown): SemanticGateIssue[]
     {
       items: arrayAt(document, ["lifecycle", "strategy_hits"]),
       path: "$.lifecycle.strategy_hits",
-      project: (row) => JSON.stringify([
-        row.strategy,
-        row.attempt_index ?? null,
-        row.model_id ?? null,
-        row.model_index ?? null,
-        row.loop_index ?? null
-      ]),
+      project: (row) =>
+        JSON.stringify([
+          row.strategy,
+          row.attempt_index ?? null,
+          row.model_id ?? null,
+          row.model_index ?? null,
+          row.loop_index ?? null
+        ]),
       label: "strategy hit identity"
     }
   ];
@@ -554,9 +587,7 @@ function findingProjectedReferenceIssues(document: unknown): SemanticGateIssue[]
           : undefined;
     if (key === undefined) continue;
     if (seen.has(key)) {
-      issues.push(
-        issue(`$.contributing_backend_failures[${index}]`, `Duplicate contributing backend failure ${key}`)
-      );
+      issues.push(issue(`$.contributing_backend_failures[${index}]`, `Duplicate contributing backend failure ${key}`));
     }
     seen.add(key);
   }
@@ -572,13 +603,17 @@ function invariantLedgerUniquenessIssues(document: unknown): SemanticGateIssue[]
   for (const [entryIndex, entry] of arrayAt(document, ["entries"]).entries()) {
     const ids = stringArray(at(entry, ["inventory_ids"]));
     if (new Set(ids).size !== ids.length) {
-      issues.push(issue(`$.entries[${entryIndex}].inventory_ids`, "Inventory IDs within a ledger entry must be unique"));
+      issues.push(
+        issue(`$.entries[${entryIndex}].inventory_ids`, "Inventory IDs within a ledger entry must be unique")
+      );
     }
   }
   for (const [rowIndex, row] of arrayAt(document, ["inventory_rows"]).entries()) {
     const ids = stringArray(at(row, ["ledger_ids"]));
     if (new Set(ids).size !== ids.length) {
-      issues.push(issue(`$.inventory_rows[${rowIndex}].ledger_ids`, "Ledger IDs within an inventory row must be unique"));
+      issues.push(
+        issue(`$.inventory_rows[${rowIndex}].ledger_ids`, "Ledger IDs within an inventory row must be unique")
+      );
     }
   }
   return issues;
@@ -587,14 +622,18 @@ function invariantLedgerUniquenessIssues(document: unknown): SemanticGateIssue[]
 function invariantLedgerJoinIssues(document: unknown): SemanticGateIssue[] {
   const entries = arrayAt(document, ["entries"]);
   const rows = arrayAt(document, ["inventory_rows"]);
-  const entryById = new Map(entries.flatMap((entry) => {
-    const id = stringField(entry, "id");
-    return id === undefined ? [] : [[id, entry] as const];
-  }));
-  const rowById = new Map(rows.flatMap((row) => {
-    const id = stringField(row, "id");
-    return id === undefined ? [] : [[id, row] as const];
-  }));
+  const entryById = new Map(
+    entries.flatMap((entry) => {
+      const id = stringField(entry, "id");
+      return id === undefined ? [] : [[id, entry] as const];
+    })
+  );
+  const rowById = new Map(
+    rows.flatMap((row) => {
+      const id = stringField(row, "id");
+      return id === undefined ? [] : [[id, row] as const];
+    })
+  );
   const issues: SemanticGateIssue[] = [];
   for (const [entryIndex, entry] of entries.entries()) {
     const entryId = stringField(entry, "id");
@@ -602,7 +641,10 @@ function invariantLedgerJoinIssues(document: unknown): SemanticGateIssue[] {
       const row = rowById.get(inventoryId);
       if (row === undefined) {
         issues.push(
-          issue(`$.entries[${entryIndex}].inventory_ids[${inventoryIndex}]`, `Unknown inventory row ${JSON.stringify(inventoryId)}`)
+          issue(
+            `$.entries[${entryIndex}].inventory_ids[${inventoryIndex}]`,
+            `Unknown inventory row ${JSON.stringify(inventoryId)}`
+          )
         );
       } else if (entryId !== undefined && !stringArray(at(row, ["ledger_ids"])).includes(entryId)) {
         issues.push(
@@ -617,7 +659,10 @@ function invariantLedgerJoinIssues(document: unknown): SemanticGateIssue[] {
       const entry = entryById.get(ledgerId);
       if (entry === undefined) {
         issues.push(
-          issue(`$.inventory_rows[${rowIndex}].ledger_ids[${ledgerIndex}]`, `Unknown ledger entry ${JSON.stringify(ledgerId)}`)
+          issue(
+            `$.inventory_rows[${rowIndex}].ledger_ids[${ledgerIndex}]`,
+            `Unknown ledger entry ${JSON.stringify(ledgerId)}`
+          )
         );
       } else if (rowId !== undefined && !stringArray(at(entry, ["inventory_ids"])).includes(rowId)) {
         issues.push(
@@ -638,7 +683,7 @@ function plannedNodeIdIssues(document: unknown): SemanticGateIssue[] {
 }
 
 function plannedDependencyJoinIssues(document: unknown): SemanticGateIssue[] {
-  const ids = new Set(plannedNodes(document).flatMap((node) => (stringField(node, "id") ?? "")));
+  const ids = new Set(plannedNodes(document).flatMap((node) => stringField(node, "id") ?? ""));
   ids.delete("");
   const issues: SemanticGateIssue[] = [];
   for (const [nodeIndex, node] of plannedNodes(document).entries()) {
@@ -646,10 +691,15 @@ function plannedDependencyJoinIssues(document: unknown): SemanticGateIssue[] {
     for (const [dependencyIndex, dependency] of stringArray(at(node, ["depends_on"])).entries()) {
       if (!ids.has(dependency)) {
         issues.push(
-          issue(`$.nodes[${nodeIndex}].depends_on[${dependencyIndex}]`, `Unknown planned dependency ${JSON.stringify(dependency)}`)
+          issue(
+            `$.nodes[${nodeIndex}].depends_on[${dependencyIndex}]`,
+            `Unknown planned dependency ${JSON.stringify(dependency)}`
+          )
         );
       } else if (dependency === nodeId) {
-        issues.push(issue(`$.nodes[${nodeIndex}].depends_on[${dependencyIndex}]`, "A planned node cannot depend on itself"));
+        issues.push(
+          issue(`$.nodes[${nodeIndex}].depends_on[${dependencyIndex}]`, "A planned node cannot depend on itself")
+        );
       }
     }
   }
@@ -679,7 +729,9 @@ function plannedAcyclicityIssues(document: unknown): SemanticGateIssue[] {
     visited.add(nodeId);
   };
   for (const nodeId of nodes.keys()) visit(nodeId);
-  return cycle === undefined ? [] : [issue("$.nodes", `Planned graph contains a dependency cycle at ${JSON.stringify(cycle)}`)];
+  return cycle === undefined
+    ? []
+    : [issue("$.nodes", `Planned graph contains a dependency cycle at ${JSON.stringify(cycle)}`)];
 }
 
 function plannedOutputPathIssues(document: unknown): SemanticGateIssue[] {
@@ -700,7 +752,12 @@ function plannedPrimaryIssues(document: unknown): SemanticGateIssue[] {
     const count = arrayAt(node, ["outputs"]).filter((output) => booleanField(output, "primary") === true).length;
     return count === 1
       ? []
-      : [issue(`$.nodes[${nodeIndex}].outputs`, `Planned node must identify exactly one primary output; found ${count}`)];
+      : [
+          issue(
+            `$.nodes[${nodeIndex}].outputs`,
+            `Planned node must identify exactly one primary output; found ${count}`
+          )
+        ];
   });
 }
 
@@ -710,12 +767,7 @@ function plannedModelFanoutIssues(document: unknown): SemanticGateIssue[] {
       {
         items: arrayAt(node, ["model_fanout"]),
         path: `$.nodes[${nodeIndex}].model_fanout`,
-        project: (row) => JSON.stringify([
-          row.model_profile_id,
-          row.model_index,
-          row.loop_index,
-          row.attempt_index
-        ]),
+        project: (row) => JSON.stringify([row.model_profile_id, row.model_index, row.loop_index, row.attempt_index]),
         label: "model-fanout identity"
       }
     ])
@@ -729,7 +781,10 @@ function plannedWorkflowTaskIssues(document: unknown): SemanticGateIssue[] {
     for (const [taskIndex, taskId] of stringArray(at(node, ["workflow", "task_node_ids"])).entries()) {
       if (seen.has(taskId)) {
         issues.push(
-          issue(`$.nodes[${nodeIndex}].workflow.task_node_ids[${taskIndex}]`, `Duplicate workflow task ID ${JSON.stringify(taskId)}`)
+          issue(
+            `$.nodes[${nodeIndex}].workflow.task_node_ids[${taskIndex}]`,
+            `Duplicate workflow task ID ${JSON.stringify(taskId)}`
+          )
         );
       }
       seen.add(taskId);
@@ -785,11 +840,20 @@ function plannedContractIdentityIssues(document: unknown): SemanticGateIssue[] {
       }
       if (stringField(output, "contract_digest") !== definition.digest) {
         issues.push(
-          issue(`$.nodes[${nodeIndex}].outputs[${outputIndex}].contract_digest`, "Planned output contract digest changed")
+          issue(
+            `$.nodes[${nodeIndex}].outputs[${outputIndex}].contract_digest`,
+            "Planned output contract digest changed"
+          )
         );
       }
       const binding = artifactContractSchemaBinding(contract as Parameters<typeof artifactContractSchemaBinding>[0]);
-      const bindingFields = ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"] as const;
+      const bindingFields = [
+        "schema_file",
+        "schema_id",
+        "schema_sha256",
+        "schema_bundle_sha256",
+        "validator_build"
+      ] as const;
       if (
         (binding === undefined && bindingFields.some((field) => isRecord(output) && output[field] !== undefined)) ||
         (binding !== undefined && bindingFields.some((field) => isRecord(output) && output[field] !== binding[field]))
@@ -874,7 +938,9 @@ function smithersDocumentIdentityIssues(document: unknown): SemanticGateIssue[] 
       issues.push(issue(`${taskPath}.smithersNodeId`, "Smithers workflow node ID must be derived from attemptId"));
     }
     if (attemptId !== undefined && stringField(task, "verifierSmithersNodeId") !== `verify:${attemptId}`) {
-      issues.push(issue(`${taskPath}.verifierSmithersNodeId`, "Smithers verifier node ID must be derived from attemptId"));
+      issues.push(
+        issue(`${taskPath}.verifierSmithersNodeId`, "Smithers verifier node ID must be derived from attemptId")
+      );
     }
     const metadata = at(task, ["metadata"]);
     if (isRecord(metadata)) {
@@ -902,10 +968,14 @@ function smithersDocumentIdentityIssues(document: unknown): SemanticGateIssue[] 
         issues.push(issue(`${taskPath}.metadata.model`, "Smithers task model metadata does not match its envelope"));
       }
       if (!sameUnknownArray(task.dependencies, at(metadata, ["dependencies", "attemptIds"]))) {
-        issues.push(issue(`${taskPath}.metadata.dependencies.attemptIds`, "Dependency attempt metadata does not match"));
+        issues.push(
+          issue(`${taskPath}.metadata.dependencies.attemptIds`, "Dependency attempt metadata does not match")
+        );
       }
       if (!sameUnknownArray(task.dependencySmithersNodeIds, at(metadata, ["dependencies", "smithersNodeIds"]))) {
-        issues.push(issue(`${taskPath}.metadata.dependencies.smithersNodeIds`, "Dependency workflow metadata does not match"));
+        issues.push(
+          issue(`${taskPath}.metadata.dependencies.smithersNodeIds`, "Dependency workflow metadata does not match")
+        );
       }
       const timeout = at(metadata, ["timeout"]);
       const retryPolicy = at(metadata, ["retryPolicy"]);
@@ -938,14 +1008,18 @@ function smithersDocumentIdentityIssues(document: unknown): SemanticGateIssue[] 
 
 function smithersDependencyJoinIssues(document: unknown): SemanticGateIssue[] {
   const tasks = smithersTasks(document);
-  const byAttempt = new Map(tasks.flatMap((task) => {
-    const id = stringField(task, "attemptId");
-    return id === undefined ? [] : [[id, task] as const];
-  }));
-  const byVerifier = new Map(tasks.flatMap((task) => {
-    const id = stringField(task, "verifierSmithersNodeId");
-    return id === undefined ? [] : [[id, task] as const];
-  }));
+  const byAttempt = new Map(
+    tasks.flatMap((task) => {
+      const id = stringField(task, "attemptId");
+      return id === undefined ? [] : [[id, task] as const];
+    })
+  );
+  const byVerifier = new Map(
+    tasks.flatMap((task) => {
+      const id = stringField(task, "verifierSmithersNodeId");
+      return id === undefined ? [] : [[id, task] as const];
+    })
+  );
   const issues: SemanticGateIssue[] = [];
   for (const [taskIndex, task] of tasks.entries()) {
     const attemptId = stringField(task, "attemptId");
@@ -956,11 +1030,17 @@ function smithersDependencyJoinIssues(document: unknown): SemanticGateIssue[] {
       const dependencyAttempt = stringField(dependency, "attemptId");
       if (dependency === undefined) {
         issues.push(
-          issue(`$.tasks[${taskIndex}].dependencySmithersNodeIds[${dependencyIndex}]`, `Unknown verifier dependency ${JSON.stringify(verifierId)}`)
+          issue(
+            `$.tasks[${taskIndex}].dependencySmithersNodeIds[${dependencyIndex}]`,
+            `Unknown verifier dependency ${JSON.stringify(verifierId)}`
+          )
         );
       } else if (dependencyAttempt !== undefined && !dependencies.includes(dependencyAttempt)) {
         issues.push(
-          issue(`$.tasks[${taskIndex}].dependencySmithersNodeIds[${dependencyIndex}]`, "Verifier dependency is absent from dependency attempts")
+          issue(
+            `$.tasks[${taskIndex}].dependencySmithersNodeIds[${dependencyIndex}]`,
+            "Verifier dependency is absent from dependency attempts"
+          )
         );
       } else if (dependencyAttempt !== undefined) {
         joined.add(dependencyAttempt);
@@ -968,10 +1048,15 @@ function smithersDependencyJoinIssues(document: unknown): SemanticGateIssue[] {
     }
     for (const [dependencyIndex, dependencyId] of dependencies.entries()) {
       if (dependencyId === attemptId) {
-        issues.push(issue(`$.tasks[${taskIndex}].dependencies[${dependencyIndex}]`, "A Smithers task cannot depend on itself"));
+        issues.push(
+          issue(`$.tasks[${taskIndex}].dependencies[${dependencyIndex}]`, "A Smithers task cannot depend on itself")
+        );
       } else if (byAttempt.has(dependencyId) && !joined.has(dependencyId)) {
         issues.push(
-          issue(`$.tasks[${taskIndex}].dependencies[${dependencyIndex}]`, "Task dependency is missing its verifier workflow dependency")
+          issue(
+            `$.tasks[${taskIndex}].dependencies[${dependencyIndex}]`,
+            "Task dependency is missing its verifier workflow dependency"
+          )
         );
       }
     }
@@ -980,10 +1065,12 @@ function smithersDependencyJoinIssues(document: unknown): SemanticGateIssue[] {
 }
 
 function smithersDependencyAcyclicityIssues(document: unknown): SemanticGateIssue[] {
-  const byVerifier = new Map(smithersTasks(document).flatMap((task) => {
-    const id = stringField(task, "verifierSmithersNodeId");
-    return id === undefined ? [] : [[id, task] as const];
-  }));
+  const byVerifier = new Map(
+    smithersTasks(document).flatMap((task) => {
+      const id = stringField(task, "verifierSmithersNodeId");
+      return id === undefined ? [] : [[id, task] as const];
+    })
+  );
   const visiting = new Set<string>();
   const visited = new Set<string>();
   let cycle: string | undefined;
@@ -1003,7 +1090,9 @@ function smithersDependencyAcyclicityIssues(document: unknown): SemanticGateIssu
     visited.add(id);
   };
   for (const task of smithersTasks(document)) visit(task);
-  return cycle === undefined ? [] : [issue("$.tasks", `Smithers task dependencies contain a cycle at ${JSON.stringify(cycle)}`)];
+  return cycle === undefined
+    ? []
+    : [issue("$.tasks", `Smithers task dependencies contain a cycle at ${JSON.stringify(cycle)}`)];
 }
 
 function smithersPlannedAttemptIds(node: unknown): string[] {
@@ -1031,11 +1120,12 @@ function smithersPlannedCoverageIssues(document: unknown, context: SemanticGateC
     const id = stringField(node, "id");
     const matching = tasks.filter((task) => stringField(task, "concreteNodeId") === id);
     if (stringField(node, "kind") === "reference") {
-      if (matching.length > 0) issues.push(issue(`$.nodes[${nodeIndex}]`, "Reference planned nodes cannot have Smithers tasks"));
+      if (matching.length > 0)
+        issues.push(issue(`$.nodes[${nodeIndex}]`, "Reference planned nodes cannot have Smithers tasks"));
       continue;
     }
     const expected = smithersPlannedAttemptIds(node);
-    const actual = matching.flatMap((task) => (stringField(task, "attemptId") ?? "")).filter((idValue) => idValue !== "");
+    const actual = matching.flatMap((task) => stringField(task, "attemptId") ?? "").filter((idValue) => idValue !== "");
     if (!sameStringSet(actual, expected)) {
       issues.push(issue(`$.nodes[${nodeIndex}]`, `Smithers tasks do not cover planned node ${JSON.stringify(id)}`));
     }
@@ -1044,15 +1134,19 @@ function smithersPlannedCoverageIssues(document: unknown, context: SemanticGateC
 }
 
 function smithersPlannedIdentityIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
-  const nodes = new Map(smithersGraphNodes(context).flatMap((node) => {
-    const id = stringField(node, "id");
-    return id === undefined ? [] : [[id, node] as const];
-  }));
+  const nodes = new Map(
+    smithersGraphNodes(context).flatMap((node) => {
+      const id = stringField(node, "id");
+      return id === undefined ? [] : [[id, node] as const];
+    })
+  );
   const issues: SemanticGateIssue[] = [];
   for (const [taskIndex, task] of smithersTasks(document).entries()) {
     const node = nodes.get(stringField(task, "concreteNodeId") ?? "");
     if (node === undefined || stringField(node, "kind") !== "agentic") {
-      issues.push(issue(`$.tasks[${taskIndex}].concreteNodeId`, "Smithers task does not join to an agentic planned node"));
+      issues.push(
+        issue(`$.tasks[${taskIndex}].concreteNodeId`, "Smithers task does not join to an agentic planned node")
+      );
       continue;
     }
     const metadata = at(task, ["metadata"]);
@@ -1085,22 +1179,32 @@ function smithersPlannedIdentityIssues(document: unknown, context: SemanticGateC
     if (
       actualOutputs.length !== plannedOutputs.length ||
       plannedOutputs.some((output, outputIndex) =>
-        outputFields.some(([actualField, plannedField]) =>
-          !isRecord(actualOutputs[outputIndex]) || !isRecord(output) || actualOutputs[outputIndex]![actualField] !== output[plannedField]
+        outputFields.some(
+          ([actualField, plannedField]) =>
+            !isRecord(actualOutputs[outputIndex]) ||
+            !isRecord(output) ||
+            actualOutputs[outputIndex]![actualField] !== output[plannedField]
         )
       )
     ) {
-      issues.push(issue(`$.tasks[${taskIndex}].metadata.artifacts.outputs`, "Smithers output contracts differ from the planned node"));
+      issues.push(
+        issue(
+          `$.tasks[${taskIndex}].metadata.artifacts.outputs`,
+          "Smithers output contracts differ from the planned node"
+        )
+      );
     }
   }
   return issues;
 }
 
 function smithersPlannedDependencyJoinIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
-  const nodes = new Map(smithersGraphNodes(context).flatMap((node) => {
-    const id = stringField(node, "id");
-    return id === undefined ? [] : [[id, node] as const];
-  }));
+  const nodes = new Map(
+    smithersGraphNodes(context).flatMap((node) => {
+      const id = stringField(node, "id");
+      return id === undefined ? [] : [[id, node] as const];
+    })
+  );
   const issues: SemanticGateIssue[] = [];
   for (const [taskIndex, task] of smithersTasks(document).entries()) {
     const node = nodes.get(stringField(task, "concreteNodeId") ?? "");
@@ -1112,21 +1216,30 @@ function smithersPlannedDependencyJoinIssues(document: unknown, context: Semanti
     const expectedAttempts = dependencyNodes.flatMap(smithersPlannedAttemptIds);
     const actualAttempts = stringArray(at(task, ["dependencies"])).filter((id) => id !== "meta-start");
     if (!sameStringSet(actualAttempts, expectedAttempts)) {
-      issues.push(issue(`$.tasks[${taskIndex}].dependencies`, "Smithers dependency attempts do not match planned dependencies"));
+      issues.push(
+        issue(`$.tasks[${taskIndex}].dependencies`, "Smithers dependency attempts do not match planned dependencies")
+      );
     }
     const expectedNodes = stringArray(at(node, ["depends_on"]));
     const actualNodes = stringArray(at(task, ["metadata", "dependencies", "concreteNodeIds"])).filter(
       (id) => id !== "__start__"
     );
     if (!sameStringSet(actualNodes, expectedNodes)) {
-      issues.push(issue(`$.tasks[${taskIndex}].metadata.dependencies.concreteNodeIds`, "Smithers concrete dependencies do not match the plan"));
+      issues.push(
+        issue(
+          `$.tasks[${taskIndex}].metadata.dependencies.concreteNodeIds`,
+          "Smithers concrete dependencies do not match the plan"
+        )
+      );
     }
     const expectedVerifiers = dependencyNodes
       .filter((dependency) => stringField(dependency, "kind") === "agentic")
       .flatMap(smithersPlannedAttemptIds)
       .map((id) => `verify:${id}`);
     if (!sameStringSet(stringArray(at(task, ["dependencySmithersNodeIds"])), expectedVerifiers)) {
-      issues.push(issue(`$.tasks[${taskIndex}].dependencySmithersNodeIds`, "Smithers workflow dependencies do not match the plan"));
+      issues.push(
+        issue(`$.tasks[${taskIndex}].dependencySmithersNodeIds`, "Smithers workflow dependencies do not match the plan")
+      );
     }
   }
   return issues;
@@ -1182,7 +1295,9 @@ function filesystemManifestIssues(
     }
     const rowPath = `${displayPath(rowsPath)}[${index}]`;
     if (filePath === undefined || stats === undefined || !stats.isFile() || stats.isSymbolicLink()) {
-      issues.push(issue(`${rowPath}.path`, `Referenced file is missing or nonregular: ${JSON.stringify(relativePath)}`));
+      issues.push(
+        issue(`${rowPath}.path`, `Referenced file is missing or nonregular: ${JSON.stringify(relativePath)}`)
+      );
       continue;
     }
     if (expectedDigest !== undefined && sha256File(filePath) !== expectedDigest) {
@@ -1190,7 +1305,9 @@ function filesystemManifestIssues(
     }
     const expectedSize = numberField(row, "size_bytes");
     if (expectedSize !== undefined && expectedSize !== stats.size) {
-      issues.push(issue(`${rowPath}.size_bytes`, `Referenced file size does not match ${JSON.stringify(relativePath)}`));
+      issues.push(
+        issue(`${rowPath}.size_bytes`, `Referenced file size does not match ${JSON.stringify(relativePath)}`)
+      );
     }
   }
   return issues;
@@ -1210,14 +1327,17 @@ function generatedTestExistenceIssues(document: unknown, context: SemanticGateCo
     } catch {
       // Reported below.
     }
-    return [issue(`$.generated_tests[${index}].path`, `Generated test does not exist: ${JSON.stringify(relativePath)}`)];
+    return [
+      issue(`$.generated_tests[${index}].path`, `Generated test does not exist: ${JSON.stringify(relativePath)}`)
+    ];
   });
 }
 
 function agentSourceProofGitIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const git = context.git!;
   const issues: SemanticGateIssue[] = [];
-  if (stringField(document, "commit") !== git.commit) issues.push(issue("$.commit", "Source proof commit does not match Git"));
+  if (stringField(document, "commit") !== git.commit)
+    issues.push(issue("$.commit", "Source proof commit does not match Git"));
   if (stringField(document, "tree") !== git.tree) issues.push(issue("$.tree", "Source proof tree does not match Git"));
   for (const [index, ref] of arrayAt(document, ["refs"]).entries()) {
     const name = stringField(ref, "name");
@@ -1232,8 +1352,10 @@ function agentSourceProofGitIssues(document: unknown, context: SemanticGateConte
 function invariantSourceProofGitIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const git = context.git!;
   const issues: SemanticGateIssue[] = [];
-  if (stringField(document, "commit") !== git.commit) issues.push(issue("$.commit", "Invariant proof commit does not match Git"));
-  if (stringField(document, "tree") !== git.tree) issues.push(issue("$.tree", "Invariant proof tree does not match Git"));
+  if (stringField(document, "commit") !== git.commit)
+    issues.push(issue("$.commit", "Invariant proof commit does not match Git"));
+  if (stringField(document, "tree") !== git.tree)
+    issues.push(issue("$.tree", "Invariant proof tree does not match Git"));
   for (const [index, file] of arrayAt(document, ["files"]).entries()) {
     const content = stringField(file, "content");
     const digest = stringField(file, "sha256");
@@ -1293,10 +1415,7 @@ function campaignSummaryCountIssues(document: unknown, context: SemanticGateCont
   const campaigns = context.artifactSet!.campaigns!;
   const findings = context.artifactSet!.findings!;
   const expected = {
-    pre_deduplication: campaigns.reduce<number>(
-      (total, campaign) => total + arrayAt(campaign, ["failures"]).length,
-      0
-    ),
+    pre_deduplication: campaigns.reduce<number>((total, campaign) => total + arrayAt(campaign, ["failures"]).length, 0),
     post_deduplication: findings.length
   };
   const counts = at(document, ["failure_counts"]);
@@ -1309,16 +1428,26 @@ function campaignSummaryCountIssues(document: unknown, context: SemanticGateCont
 
 function implementedSelectionJoinIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const selectedIds = stringArray(at(document, ["selection", "property_ids"]));
-  const recordIds = arrayAt(document, ["properties"]).flatMap((row) => (stringField(row, "property_id") ?? ""));
+  const recordIds = arrayAt(document, ["properties"]).flatMap((row) => stringField(row, "property_id") ?? "");
   const catalog = context.artifactSet!.propertyCatalog;
-  const catalogIds = new Set(arrayAt(catalog, ["properties"]).flatMap((row) => (stringField(row, "id") ?? "")));
+  const catalogIds = new Set(arrayAt(catalog, ["properties"]).flatMap((row) => stringField(row, "id") ?? ""));
   const issues: SemanticGateIssue[] = [];
-  if (!sameStringSet(selectedIds, recordIds.filter((id) => id !== ""))) {
+  if (
+    !sameStringSet(
+      selectedIds,
+      recordIds.filter((id) => id !== "")
+    )
+  ) {
     issues.push(issue("$.selection.property_ids", "Implementation selection must equal the implementation record IDs"));
   }
   for (const [index, id] of selectedIds.entries()) {
     if (!catalogIds.has(id)) {
-      issues.push(issue(`$.selection.property_ids[${index}]`, `Selection references unknown canonical property ${JSON.stringify(id)}`));
+      issues.push(
+        issue(
+          `$.selection.property_ids[${index}]`,
+          `Selection references unknown canonical property ${JSON.stringify(id)}`
+        )
+      );
     }
   }
   return issues;
@@ -1362,25 +1491,33 @@ function reportPropertyJoinIssues(document: unknown, context: SemanticGateContex
   );
   const findingIds = new Set(
     [...arrayAt(document, ["issues"]), ...arrayAt(document, ["non_production_outcomes"])]
-      .flatMap((row) => (stringField(row, "id") ?? ""))
+      .flatMap((row) => stringField(row, "id") ?? "")
       .filter((id) => id !== "")
   );
   const issues: SemanticGateIssue[] = [];
   for (const [entryIndex, entry] of arrayAt(document, ["property_provenance"]).entries()) {
     const findingId = stringField(entry, "finding_id");
     if (findingId !== undefined && !findingIds.has(findingId)) {
-      issues.push(issue(`$.property_provenance[${entryIndex}].finding_id`, `Unknown report finding ${JSON.stringify(findingId)}`));
+      issues.push(
+        issue(`$.property_provenance[${entryIndex}].finding_id`, `Unknown report finding ${JSON.stringify(findingId)}`)
+      );
     }
     const propertyIds = stringArray(at(entry, ["property_ids"]));
     for (const [propertyIndex, propertyId] of propertyIds.entries()) {
       if (!catalogById.has(propertyId)) {
         issues.push(
-          issue(`$.property_provenance[${entryIndex}].property_ids[${propertyIndex}]`, `Unknown canonical property ${JSON.stringify(propertyId)}`)
+          issue(
+            `$.property_provenance[${entryIndex}].property_ids[${propertyIndex}]`,
+            `Unknown canonical property ${JSON.stringify(propertyId)}`
+          )
         );
       }
       if (!implementationById.has(propertyId)) {
         issues.push(
-          issue(`$.property_provenance[${entryIndex}].property_ids[${propertyIndex}]`, `Missing implementation record for ${JSON.stringify(propertyId)}`)
+          issue(
+            `$.property_provenance[${entryIndex}].property_ids[${propertyIndex}]`,
+            `Missing implementation record for ${JSON.stringify(propertyId)}`
+          )
         );
       }
     }
@@ -1393,7 +1530,9 @@ function reportPropertyJoinIssues(document: unknown, context: SemanticGateContex
       isRecord(source) ? [JSON.stringify([source.source_node_id, source.source_property_id])] : []
     );
     if (!sameStringSet(expectedSources, actualSources)) {
-      issues.push(issue(`$.property_provenance[${entryIndex}].sources`, "Report property sources do not match the catalog"));
+      issues.push(
+        issue(`$.property_provenance[${entryIndex}].sources`, "Report property sources do not match the catalog")
+      );
     }
     const expectedImplementationPaths = propertyIds.flatMap((id) =>
       stringArray(at(implementationById.get(id), ["implementation_paths"]))
@@ -1401,31 +1540,111 @@ function reportPropertyJoinIssues(document: unknown, context: SemanticGateContex
     const expectedTestPaths = propertyIds.flatMap((id) => stringArray(at(implementationById.get(id), ["test_paths"])));
     if (!sameStringSet(expectedImplementationPaths, stringArray(at(entry, ["implementation_paths"])))) {
       issues.push(
-        issue(`$.property_provenance[${entryIndex}].implementation_paths`, "Report implementation paths do not match implementation records")
+        issue(
+          `$.property_provenance[${entryIndex}].implementation_paths`,
+          "Report implementation paths do not match implementation records"
+        )
       );
     }
     if (!sameStringSet(expectedTestPaths, stringArray(at(entry, ["test_paths"])))) {
-      issues.push(issue(`$.property_provenance[${entryIndex}].test_paths`, "Report test paths do not match implementation records"));
+      issues.push(
+        issue(
+          `$.property_provenance[${entryIndex}].test_paths`,
+          "Report test paths do not match implementation records"
+        )
+      );
     }
   }
   return issues;
 }
 
-function attemptParentLinkIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
-  const entries = context.attemptLedger!.entries;
-  const currentId = stringField(document, "attempt_id");
-  const currentIndex = entries.findIndex((entry) => stringField(entry, "attempt_id") === currentId);
-  const priorIds = new Set(
-    entries.slice(0, currentIndex < 0 ? entries.length : currentIndex).flatMap((entry) => (stringField(entry, "attempt_id") ?? ""))
-  );
-  const issues: SemanticGateIssue[] = [];
-  const parent = stringField(document, "parent_attempt_id");
-  if (parent !== undefined && (parent === currentId || !priorIds.has(parent))) {
-    issues.push(issue("$.parent_attempt_id", "Parent attempt must identify an earlier, different ledger entry"));
+function attemptReuseSourceLinkIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+  const reuse = at(document, ["reuse"]);
+  if (stringField(reuse, "status") !== "reused") return [];
+  const source = at(reuse, ["source"]);
+  const sourceWorkflowRunId = stringField(source, "workflow_run_id");
+  const sourceSequence = numberField(source, "source_event_sequence");
+  if (sourceWorkflowRunId === undefined || sourceSequence === undefined) return [];
+
+  const currentWorkflowRunId = stringField(document, "workflow_run_id");
+  const currentSequence = numberField(document, "source_event_sequence");
+  if (sourceWorkflowRunId === currentWorkflowRunId && sourceSequence === currentSequence) {
+    return [issue("$.reuse.source", "An attempt cannot reuse its own Smithers source identity")];
   }
-  const reuseSource = stringField(at(document, ["reuse"]), "source_attempt_id");
-  if (reuseSource !== undefined && (reuseSource === currentId || !priorIds.has(reuseSource))) {
-    issues.push(issue("$.reuse.source_attempt_id", "Reuse source must identify an earlier, different ledger entry"));
+
+  const entries = context.attemptLedger!.entries;
+  const currentIndex = entries.indexOf(document);
+  const candidates = [
+    ...entries.slice(0, currentIndex < 0 ? entries.length : currentIndex),
+    ...(context.attemptLedger?.sourceEntries ?? [])
+  ];
+  const found = candidates.some(
+    (entry) =>
+      stringField(entry, "workflow_run_id") === sourceWorkflowRunId &&
+      numberField(entry, "source_event_sequence") === sourceSequence
+  );
+  return found ? [] : [issue("$.reuse.source", "Reuse source must identify trusted, different attempt evidence")];
+}
+
+function sourceEventKey(workflowRunId: string, sequence: number): string {
+  return JSON.stringify([workflowRunId, sequence]);
+}
+
+function sourceEventsByIdentity(context: SemanticGateContext): Map<string, SemanticEventLogContext["events"][number]> {
+  return new Map(
+    context.eventLog!.events.map((event) => [sourceEventKey(event.workflow_run_id, event.source_event_sequence), event])
+  );
+}
+
+function attemptSourceEventJoinIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+  const workflowRunId = stringField(document, "workflow_run_id");
+  const startedSequence = numberField(document, "started_event_sequence");
+  const terminalSequence = numberField(document, "source_event_sequence");
+  if (workflowRunId === undefined || startedSequence === undefined || terminalSequence === undefined) return [];
+  const events = sourceEventsByIdentity(context);
+  const started = events.get(sourceEventKey(workflowRunId, startedSequence));
+  const terminal = events.get(sourceEventKey(workflowRunId, terminalSequence));
+  const issues: SemanticGateIssue[] = [];
+  if (started?.type !== "NodeStarted") {
+    issues.push(issue("$.started_event_sequence", "Attempt start does not join an exact NodeStarted source event"));
+  }
+  const outcome = stringField(document, "outcome");
+  const failureCategory = stringField(document, "failure_category");
+  const expectedTerminal = outcome === "succeeded" || outcome === "reused" ? "NodeFinished" : "NodeFailed";
+  const hostValidationDisposition =
+    outcome === "failed" &&
+    (failureCategory === "artifact-validation" || failureCategory === "invalid-output") &&
+    terminal?.type === "NodeFinished";
+  if (terminal?.type !== expectedTerminal && !hostValidationDisposition) {
+    issues.push(
+      issue("$.source_event_sequence", `Attempt terminal does not join an exact ${expectedTerminal} source event`)
+    );
+  }
+  const nodeId = stringField(document, "node_id");
+  const iteration = numberField(document, "iteration");
+  const attempt = numberField(document, "attempt");
+  for (const [name, event, recordPath] of [
+    ["start", started, "$.started_event_sequence"],
+    ["terminal", terminal, "$.source_event_sequence"]
+  ] as const) {
+    if (!isRecord(event?.payload)) continue;
+    if (
+      stringField(event.payload, "nodeId") !== nodeId ||
+      numberField(event.payload, "iteration") !== iteration ||
+      numberField(event.payload, "attempt") !== attempt
+    ) {
+      issues.push(issue(recordPath, `Attempt ${name} event identity does not match node_id, iteration, and attempt`));
+    }
+  }
+  const lifecycle = at(document, ["lifecycle"]);
+  if (started !== undefined && stringField(lifecycle, "started_at") !== new Date(started.timestamp_ms).toISOString()) {
+    issues.push(issue("$.lifecycle.started_at", "Attempt start timestamp does not match its source event"));
+  }
+  if (
+    terminal !== undefined &&
+    stringField(lifecycle, "finished_at") !== new Date(terminal.timestamp_ms).toISOString()
+  ) {
+    issues.push(issue("$.lifecycle.finished_at", "Attempt finish timestamp does not match its source event"));
   }
   return issues;
 }
@@ -1445,23 +1664,68 @@ function runStateFingerprintIssues(document: unknown, context: SemanticGateConte
 function usageEventOrderIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const entries = [...context.usageLedger!.entries];
   if (!entries.includes(document)) entries.push(document);
-  const issues = uniqueFieldGate([[]], "event_id", "usage event ID")(entries, {});
-  for (let index = 1; index < entries.length; index += 1) {
-    const previous = stringField(entries[index - 1], "observed_at");
-    const current = stringField(entries[index], "observed_at");
-    if (previous !== undefined && current !== undefined && Date.parse(current) < Date.parse(previous)) {
-      issues.push(issue(`$[${index}].observed_at`, "Usage ledger events must be ordered by observation time"));
+  const issues: SemanticGateIssue[] = [];
+  const identities = new Set<string>();
+  const lastByWorkflow = new Map<string, { sequence: number; controlGeneration: string }>();
+  for (const [index, entry] of entries.entries()) {
+    const workflowRunId = stringField(entry, "workflow_run_id");
+    const sequence = numberField(entry, "source_event_sequence");
+    const controlGeneration = stringField(entry, "control_generation");
+    if (workflowRunId === undefined || sequence === undefined || controlGeneration === undefined) continue;
+    const identity = sourceEventKey(workflowRunId, sequence);
+    if (identities.has(identity)) {
+      issues.push(issue(`$[${index}].source_event_sequence`, "Usage ledger repeats a Smithers source identity"));
     }
+    identities.add(identity);
+    const prior = lastByWorkflow.get(workflowRunId);
+    if (prior !== undefined && sequence <= prior.sequence) {
+      issues.push(
+        issue(`$[${index}].source_event_sequence`, "Usage source sequences must be strictly increasing per workflow")
+      );
+    }
+    if (prior !== undefined && controlGeneration !== prior.controlGeneration) {
+      issues.push(
+        issue(`$[${index}].control_generation`, "A workflow run cannot change its sealed control generation")
+      );
+    }
+    lastByWorkflow.set(workflowRunId, { sequence, controlGeneration });
   }
   return issues;
 }
 
 function usageSourceEventJoinIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
-  const known = new Set(context.eventLog!.sourceEventIds);
-  const sourceEventId = stringField(document, "source_event_id");
-  return sourceEventId !== undefined && !known.has(sourceEventId)
-    ? [issue("$.source_event_id", `Usage entry references unknown source event ${JSON.stringify(sourceEventId)}`)]
-    : [];
+  const workflowRunId = stringField(document, "workflow_run_id");
+  const sourceSequence = numberField(document, "source_event_sequence");
+  if (workflowRunId === undefined || sourceSequence === undefined) return [];
+  const source = sourceEventsByIdentity(context).get(sourceEventKey(workflowRunId, sourceSequence));
+  if (source?.type !== "TokenUsageReported" || !isRecord(source.payload)) {
+    return [issue("$.source_event_sequence", "Usage entry does not join an exact TokenUsageReported source event")];
+  }
+  const usage = at(document, ["usage"]);
+  const expectedUsage = {
+    model: source.payload.model,
+    agent: source.payload.agent,
+    input_tokens: source.payload.inputTokens,
+    output_tokens: source.payload.outputTokens,
+    ...(source.payload.cacheReadTokens === undefined ? {} : { cache_read_tokens: source.payload.cacheReadTokens }),
+    ...(source.payload.cacheWriteTokens === undefined ? {} : { cache_write_tokens: source.payload.cacheWriteTokens }),
+    ...(source.payload.reasoningTokens === undefined ? {} : { reasoning_tokens: source.payload.reasoningTokens })
+  };
+  const issues: SemanticGateIssue[] = [];
+  if (
+    stringField(document, "node_id") !== stringField(source.payload, "nodeId") ||
+    numberField(document, "iteration") !== numberField(source.payload, "iteration") ||
+    numberField(document, "attempt") !== numberField(source.payload, "attempt")
+  ) {
+    issues.push(issue("$", "Usage attempt coordinates do not match the source event"));
+  }
+  if (numberField(document, "observed_timestamp_ms") !== source.timestamp_ms) {
+    issues.push(issue("$.observed_timestamp_ms", "Usage observation timestamp does not match the source event"));
+  }
+  if (!isDeepStrictEqual(usage, expectedUsage)) {
+    issues.push(issue("$.usage", "Canonical usage does not exactly project the source event payload"));
+  }
+  return issues;
 }
 
 const gateSpecifications = {
@@ -1475,16 +1739,12 @@ const gateSpecifications = {
   "agent-source-proof-ref-uniqueness": documentGate(uniqueFieldGate([["refs"]], "name", "source proof ref name")),
   "aggregation-count-coupling": documentGate(aggregationCountIssues),
   "aggregation-destination-path-uniqueness": documentGate(aggregationDestinationIssues),
-  "analysis-bundle-file-digest": contextualGate(
-    "filesystem",
-    ["filesystem.rootDirectory"],
-    (document, context) => filesystemManifestIssues(document, context, ["files"])
+  "analysis-bundle-file-digest": contextualGate("filesystem", ["filesystem.rootDirectory"], (document, context) =>
+    filesystemManifestIssues(document, context, ["files"])
   ),
   "analysis-bundle-path-order": documentGate(analysisBundlePathIssues),
-  "artifact-manifest-file-digest": contextualGate(
-    "filesystem",
-    ["filesystem.rootDirectory"],
-    (document, context) => filesystemManifestIssues(document, context, ["files"])
+  "artifact-manifest-file-digest": contextualGate("filesystem", ["filesystem.rootDirectory"], (document, context) =>
+    filesystemManifestIssues(document, context, ["files"])
   ),
   "artifact-manifest-file-path-uniqueness": documentGate(uniqueFieldGate([["files"]], "path", "artifact file path")),
   "artifact-manifest-output-path-uniqueness": documentGate(
@@ -1496,7 +1756,9 @@ const gateSpecifications = {
   "artifact-verification-artifact-path-uniqueness": documentGate(
     uniqueFieldGate([["artifacts"]], "path", "verified artifact path")
   ),
-  "artifact-verification-exactly-one-primary": documentGate((document) => exactlyOnePrimaryIssues(document, "artifacts")),
+  "artifact-verification-exactly-one-primary": documentGate((document) =>
+    exactlyOnePrimaryIssues(document, "artifacts")
+  ),
   "artifact-verification-plan-contract-identity": contextualGate(
     "cross-artifact",
     ["plannedGraph.node"],
@@ -1507,12 +1769,10 @@ const gateSpecifications = {
     uniqueFieldGate([["publications"]], "path", "publication path")
   ),
   "attempt-order": documentGate(attemptOrderIssues),
+  "attempt-failure-message-byte-length": documentGate(attemptFailureMessageByteLengthIssues),
   "attempt-outcome-digest-coupling": documentGate(attemptOutcomeDigestIssues),
-  "attempt-parent-link": contextualGate(
-    "runtime-state",
-    ["attemptLedger.entries"],
-    attemptParentLinkIssues
-  ),
+  "attempt-reuse-source-link": contextualGate("runtime-state", ["attemptLedger.entries"], attemptReuseSourceLinkIssues),
+  "attempt-source-event-join": contextualGate("runtime-state", ["eventLog.events"], attemptSourceEventJoinIssues),
   "audited-differential-lane-id-uniqueness": documentGate(
     uniqueFieldGate([["ready_lanes"], ["rejected_or_narrowed_lanes"]], "lane_id", "audited lane ID")
   ),
@@ -1527,6 +1787,27 @@ const gateSpecifications = {
     ["artifactSet.campaigns", "artifactSet.findings"],
     campaignSummaryCountIssues
   ),
+  "config-redactions-path-key-equality": documentGate((document) =>
+    arrayAt(document, ["entries"]).flatMap((entry, index) => {
+      const pathValue = at(entry, ["path"]);
+      const projected = Array.isArray(pathValue) ? pathValue.join(".") : undefined;
+      const key = stringField(entry, "key");
+      return projected !== undefined && key !== projected
+        ? [issue(`$.entries[${index}].key`, "Configuration redaction key does not equal its projected path")]
+        : [];
+    })
+  ),
+  "config-redactions-path-uniqueness": documentGate((document) => {
+    const seen = new Set<string>();
+    return arrayAt(document, ["entries"]).flatMap((entry, index) => {
+      const pathValue = at(entry, ["path"]);
+      if (!Array.isArray(pathValue)) return [];
+      const projected = JSON.stringify(pathValue);
+      const duplicate = seen.has(projected);
+      seen.add(projected);
+      return duplicate ? [issue(`$.entries[${index}].path`, "Duplicate configuration redaction path")] : [];
+    });
+  }),
   "dependency-id-uniqueness": documentGate(uniqueFieldGate([["dependencies"]], "dependency_id", "dependency ID")),
   "dependency-row-joins": documentGate(dependencyJoinIssues),
   "differential-gap-lane-uniqueness": documentGate(
@@ -1543,9 +1824,14 @@ const gateSpecifications = {
     )
   ),
   "differential-plan-lane-id-uniqueness": documentGate(
-    uniqueFieldGate([["assigned_differential_lanes"], ["deferred_lane_candidates"]], "lane_id", "differential lane ID", {
-      global: true
-    })
+    uniqueFieldGate(
+      [["assigned_differential_lanes"], ["deferred_lane_candidates"]],
+      "lane_id",
+      "differential lane ID",
+      {
+        global: true
+      }
+    )
   ),
   "differential-plan-surface-id-uniqueness": documentGate(
     uniqueFieldGate([["candidate_surfaces"], ["out_of_scope_surfaces"]], "surface_id", "differential surface ID", {
@@ -1593,9 +1879,7 @@ const gateSpecifications = {
     ["filesystem.rootDirectory"],
     generatedTestExistenceIssues
   ),
-  "generated-test-path-uniqueness": documentGate(
-    uniqueFieldGate([["generated_tests"]], "path", "generated test path")
-  ),
+  "generated-test-path-uniqueness": documentGate(uniqueFieldGate([["generated_tests"]], "path", "generated test path")),
   "harness-repair-failure-id-uniqueness": documentGate(uniqueFieldGate([[]], "failure_id", "harness failure ID")),
   "implemented-property-id-uniqueness": documentGate(
     uniqueFieldGate([["properties"]], "property_id", "implemented property ID")
@@ -1619,10 +1903,15 @@ const gateSpecifications = {
     uniqueFieldGate([["files"]], "path", "invariant suite file path")
   ),
   "invariant-suite-file-tombstone-disjointness": documentGate((document) => {
-    const files = new Set(arrayAt(document, ["files"]).flatMap((row) => (stringField(row, "path") ?? "")));
+    const files = new Set(arrayAt(document, ["files"]).flatMap((row) => stringField(row, "path") ?? ""));
     return stringArray(at(document, ["tombstones"])).flatMap((tombstone, index) =>
       files.has(tombstone)
-        ? [issue(`$.tombstones[${index}]`, `Invariant suite path is both present and tombstoned ${JSON.stringify(tombstone)}`)]
+        ? [
+            issue(
+              `$.tombstones[${index}]`,
+              `Invariant suite path is both present and tombstoned ${JSON.stringify(tombstone)}`
+            )
+          ]
         : []
     );
   }),
@@ -1632,7 +1921,9 @@ const gateSpecifications = {
     return tombstones.flatMap((tombstone, index) => {
       const duplicate = seen.has(tombstone);
       seen.add(tombstone);
-      return duplicate ? [issue(`$.tombstones[${index}]`, `Duplicate invariant suite tombstone ${JSON.stringify(tombstone)}`)] : [];
+      return duplicate
+        ? [issue(`$.tombstones[${index}]`, `Duplicate invariant suite tombstone ${JSON.stringify(tombstone)}`)]
+        : [];
     });
   }),
   "planned-graph-acyclicity": documentGate(plannedAcyclicityIssues),
@@ -1652,11 +1943,7 @@ const gateSpecifications = {
   ),
   "property-id-uniqueness": documentGate(uniqueFieldGate([["properties"]], "id", "property ID")),
   "property-lens-id-uniqueness": documentGate(uniqueFieldGate([["properties"]], "id", "property lens ID")),
-  "property-source-join": contextualGate(
-    "cross-artifact",
-    ["artifactSet.propertyLenses"],
-    propertySourceJoinIssues
-  ),
+  "property-source-join": contextualGate("cross-artifact", ["artifactSet.propertyLenses"], propertySourceJoinIssues),
   "property-source-projected-uniqueness": documentGate(propertySourceProjectedIssues),
   "reference-expectation-id-uniqueness": documentGate(
     uniqueFieldGate([["expectations"]], "id", "reference expectation ID")
@@ -1669,6 +1956,38 @@ const gateSpecifications = {
     "cross-artifact",
     ["artifactSet.propertyCatalog", "artifactSet.implementedProperties"],
     reportPropertyJoinIssues
+  ),
+  "run-metadata-accounting-workflow-identity": documentGate((document) => {
+    const workflowRunId = stringField(at(document, ["workflow"]), "run_id");
+    const accounting = at(document, ["accounting"]);
+    if (accounting === undefined) return [];
+    const accountingRunId = stringField(accounting, "workflow_run_id");
+    const currentRunId = stringField(at(accounting, ["current"]), "workflow_run_id");
+    return workflowRunId !== accountingRunId || workflowRunId !== currentRunId
+      ? [issue("$.accounting.workflow_run_id", "Accounting identity does not equal the active workflow run")]
+      : [];
+  }),
+  "run-metadata-current-segment-equality": documentGate((document) => {
+    const accounting = at(document, ["accounting"]);
+    if (accounting === undefined) return [];
+    const segments = arrayAt(accounting, ["segments"]);
+    return isDeepStrictEqual(at(accounting, ["current"]), segments.at(-1))
+      ? []
+      : [issue("$.accounting.current", "Current accounting does not equal the final segment")];
+  }),
+  "run-metadata-workflow-id-equality": documentGate((document) => {
+    const workflow = at(document, ["workflow"]);
+    const ids = stringArray(at(document, ["workflow_ids"]));
+    if (workflow === undefined) {
+      return ids.length === 0 ? [] : [issue("$.workflow_ids", "Unlinked metadata carries workflow IDs")];
+    }
+    const runId = stringField(workflow, "run_id");
+    return ids.length === 1 && ids[0] === runId
+      ? []
+      : [issue("$.workflow_ids", "Workflow IDs do not equal the active workflow run")];
+  }),
+  "run-plan-attempt-id-uniqueness": documentGate(
+    uniqueFieldGate([["rendered_prompts"]], "attempt_id", "rendered prompt attempt ID")
   ),
   "run-state-fingerprint": contextualGate(
     "runtime-state",
@@ -1683,9 +2002,7 @@ const gateSpecifications = {
     uniqueFieldGate([["semantic_reds"]], "stable_failure_hash", "semantic red hash")
   ),
   "severity-finding-id-uniqueness": documentGate(uniqueFieldGate([[]], "id", "severity finding ID")),
-  "smithers-task-attempt-id-uniqueness": documentGate(
-    uniqueFieldGate([["tasks"]], "attemptId", "Smithers attempt ID")
-  ),
+  "smithers-task-attempt-id-uniqueness": documentGate(uniqueFieldGate([["tasks"]], "attemptId", "Smithers attempt ID")),
   "smithers-task-workflow-id-uniqueness": documentGate(smithersWorkflowIdentityIssues),
   "smithers-task-document-identity": documentGate(smithersDocumentIdentityIssues),
   "smithers-task-dependency-join": documentGate(smithersDependencyJoinIssues),
@@ -1705,20 +2022,17 @@ const gateSpecifications = {
     ["plannedGraph.document"],
     smithersPlannedDependencyJoinIssues
   ),
+  "source-run-not-self": documentGate((document) =>
+    stringField(document, "run_id") === stringField(document, "source_run_id")
+      ? [issue("$.source_run_id", "Source run must differ from the destination run")]
+      : []
+  ),
   "strategy-detection-dedupe-key-uniqueness": documentGate(
     uniqueFieldGate([[]], "dedupe_key", "strategy detection dedupe key")
   ),
   "triaged-finding-id-uniqueness": documentGate(uniqueFieldGate([[]], "id", "triaged finding ID")),
-  "usage-ledger-event-order": contextualGate(
-    "runtime-state",
-    ["usageLedger.entries"],
-    usageEventOrderIssues
-  ),
-  "usage-ledger-source-event-join": contextualGate(
-    "runtime-state",
-    ["eventLog.sourceEventIds"],
-    usageSourceEventJoinIssues
-  ),
+  "usage-ledger-event-order": contextualGate("runtime-state", ["usageLedger.entries"], usageEventOrderIssues),
+  "usage-ledger-source-event-join": contextualGate("runtime-state", ["eventLog.events"], usageSourceEventJoinIssues),
   "workspace-patch-git-binding": contextualGate(
     "git",
     ["git.baseCommit", "git.baseTree", "git.resultTree", "git.patchSha256"],
@@ -1760,9 +2074,7 @@ function assertRegistryMatchesMetadata(): void {
 
 assertRegistryMatchesMetadata();
 
-export function semanticGateRegistration<Name extends SemanticGateName>(
-  name: Name
-): SemanticGateRegistration<Name> {
+export function semanticGateRegistration<Name extends SemanticGateName>(name: Name): SemanticGateRegistration<Name> {
   const registration = SEMANTIC_GATE_REGISTRY[name];
   if (registration === undefined) throw new Error(`Unknown semantic gate ${JSON.stringify(name)}`);
   return registration as unknown as SemanticGateRegistration<Name>;
@@ -1784,7 +2096,9 @@ export function executeSemanticGate<Name extends SemanticGateName>(
 ): SemanticGateExecutionResult<Name> {
   const registration = SEMANTIC_GATE_REGISTRY[name];
   if (registration === undefined) throw new Error(`Unknown semantic gate ${JSON.stringify(name)}`);
-  const missingContext = registration.requiredContext.filter((capability) => !hasCapability(request.context, capability));
+  const missingContext = registration.requiredContext.filter(
+    (capability) => !hasCapability(request.context, capability)
+  );
   if (missingContext.length > 0) {
     return {
       status: "requires-context",

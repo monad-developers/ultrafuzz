@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,7 +8,11 @@ import { describe, expect, it } from "vitest";
 
 import { compareEvalRuns } from "../src/scoring.js";
 import type { EvalScoreSummary, EvalSummaryProvenance } from "../src/types.js";
-import { recoveryEquivalenceSummary } from "./helpers.js";
+import { currentRowScore, testRow, testSuite } from "./helpers.js";
+
+function fingerprint(value: string): string {
+  return `sha256:${crypto.createHash("sha256").update(value).digest("hex")}`;
+}
 
 function provenance(cohort: string, policy: string, scoring: string): EvalSummaryProvenance {
   return {
@@ -22,19 +27,21 @@ function provenance(cohort: string, policy: string, scoring: string): EvalSummar
       availability: "available",
       series: "generated-series",
       protocol_revision: "1",
-      cohort_fingerprint: cohort,
+      cohort_fingerprint: fingerprint(cohort),
       targets: [{ id: "generated", repo: "https://example.com/generated", commit: "b".repeat(40), dirty: false }],
       ground_truth_sha256: { generated: `sha256:${"c".repeat(64)}` },
+      ground_truth_subjects: {},
       execution_policy: {
         revision: "ultrafuzz.eval-controller.v1",
-        fingerprint: policy,
+        fingerprint: fingerprint(policy),
         max_parallel_targets: 1,
         max_parallel_runs: 1,
         node_telemetry: true,
         heartbeat_interval_seconds: 60,
         controller_mode: "watch",
         watch_timeout_seconds: 120,
-        poll_interval_ms: 10
+        poll_interval_ms: 10,
+        recovery_equivalence_fingerprint: fingerprint("recovery-policy")
       }
     },
     scoring: {
@@ -43,8 +50,10 @@ function provenance(cohort: string, policy: string, scoring: string): EvalSummar
       judge_mode: "deterministic",
       judge_prompt_version: "ultrafuzz-eval-judge-v2",
       judge_models: ["judge-generated"],
+      judge_panel: { total: 3, quorum: 2 },
       ground_truth_sha256: { generated: `sha256:${"c".repeat(64)}` },
-      fingerprint: scoring
+      ground_truth_subjects: {},
+      fingerprint: fingerprint(scoring)
     }
   };
 }
@@ -69,16 +78,43 @@ function writeSummary(
     duplicate_rate: 0,
     report_schema_valid_rate: 1
   });
+  const rows = variantIds.map((variantId) =>
+    currentRowScore(
+      testRow(testSuite("/tmp/ground-truth"), {
+        id: `row-${variantId}`,
+        variant_id: variantId,
+        trial_id: `trial-${variantId}`
+      }),
+      {
+        precision: f1,
+        recall: f1,
+        f1_score: f1,
+        full_match_rate: f1
+      }
+    )
+  );
   const summary: EvalScoreSummary = {
+    schema_version: "ultrafuzz.eval.score-summary.v1",
     eval_run_id: evalRunId,
     eval_run_root: root,
     recall_threshold: 0.7,
-    rows: [],
+    rows,
     variants: variantIds.map(variant),
     scores_path: path.join(root, "scores.jsonl"),
     summary_path: path.join(root, "summary.json"),
     review_queue_path: path.join(root, "review.jsonl"),
-    recovery_equivalence: recoveryEquivalenceSummary(),
+    recovery_equivalence: {
+      aggregate_non_comparable: "include",
+      included_row_count: rows.length,
+      excluded_row_count: 0,
+      classification_counts: {
+        clean: rows.length,
+        "infrastructure-recovered": 0,
+        "model-reexecuted-within-policy": 0,
+        "non-comparable": 0
+      },
+      non_comparable_variants: []
+    },
     provenance: value
   };
   fs.writeFileSync(path.join(root, "summary.json"), `${JSON.stringify(summary)}\n`, "utf8");
@@ -150,7 +186,7 @@ describe("longitudinal eval comparison", () => {
     });
   });
 
-  it("requires a waiver for historical summaries without lineage", () => {
+  it("rejects historical summaries without current lineage", () => {
     const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-compare-historical-"));
     writeSummary(projectRoot, "baseline", 0.5, provenance("cohort-1", "policy-1", "scoring-1"));
     const historicalRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", "historical");
@@ -164,6 +200,14 @@ describe("longitudinal eval comparison", () => {
 
     expect(() =>
       compareEvalRuns({ projectRoot, baselineEvalRunId: "historical", candidateEvalRunId: "baseline" })
-    ).toThrowError(expect.objectContaining({ code: "EVAL_PROVENANCE_INCOMPATIBLE" }));
+    ).toThrowError(expect.objectContaining({ code: "EVAL_DURABLE_SCHEMA_INVALID" }));
+    expect(() =>
+      compareEvalRuns({
+        projectRoot,
+        baselineEvalRunId: "historical",
+        candidateEvalRunId: "baseline",
+        allowIncompatible: true
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_DURABLE_SCHEMA_INVALID" }));
   });
 });

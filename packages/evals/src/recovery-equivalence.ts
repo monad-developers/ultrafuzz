@@ -1,7 +1,18 @@
-import fs from "node:fs";
 import path from "node:path";
 
-import { assertRegularFileInside, replayNodeAttempts, type NodeAttemptLedgerEntry } from "@ultrafuzz/artifacts";
+import {
+  assertPlannedGraph,
+  assertRegularFileInside,
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
+  readRunState,
+  replayEvents,
+  replayNodeAttempts,
+  type EventRecord,
+  type NodeAttemptLedgerEntry,
+  type PlannedGraphDocument,
+  type RunState
+} from "@ultrafuzz/artifacts";
 import { z } from "zod/v4";
 
 import { resolveRecoveryEquivalencePolicy } from "./suite.js";
@@ -145,34 +156,19 @@ const recoveryEquivalenceSchema = z
     }
   });
 
-const graphSchema = z.looseObject({
-  nodes: z.array(
-    z.looseObject({
-      id: z.string().min(1),
-      kind: z.string().optional(),
-      model_fanout: z.array(z.unknown()).optional()
-    })
-  )
-});
-
-const stateSchema = z.looseObject({
-  status: z.string().optional(),
-  nodes: z.record(z.string(), z.looseObject({ status: z.string().optional(), started_at: z.string().optional() }))
-});
-
-const eventSchema = z.looseObject({
-  event_id: z.string().min(1).optional(),
-  timestamp: z.string().min(1),
-  event_type: z.string().min(1),
-  payload: z.unknown()
-});
-
 interface RecoveryGeneration {
   id: string;
   controllerInvocationId: string;
   firstObservedAt: string;
   attempts: NodeAttemptLedgerEntry[];
   executedModelAttempts: NodeAttemptLedgerEntry[];
+}
+
+interface ControllerObservation {
+  id: string;
+  at: string;
+  workflowRunId: string;
+  controlGeneration: string;
 }
 
 export function parseRecoveryEquivalence(value: unknown): EvalRecoveryEquivalence {
@@ -184,98 +180,43 @@ export function parseRecoveryEquivalence(value: unknown): EvalRecoveryEquivalenc
  * submissions. Only aggregate counts leave the run directory.
  */
 export function classifyRecoveryEquivalence(input: {
-  runRoot?: string;
+  runRoot: string;
   policy?: EvalRecoveryEquivalencePolicy;
 }): EvalRecoveryEquivalence {
   const policy = resolveRecoveryEquivalencePolicy(input.policy);
-  if (input.runRoot === undefined) {
-    return nonComparable(policy, "run evidence is unavailable");
-  }
   const runRoot = path.resolve(input.runRoot);
-  const graph = readJsonSource(path.join(runRoot, "graph.json"), graphSchema);
-  const state = readJsonSource(path.join(runRoot, "state.json"), stateSchema);
-  if (graph === undefined || state === undefined) {
-    return nonComparable(policy, "execution lineage is unavailable");
-  }
+  const graph = assertPlannedGraph(readCurrentJson(path.join(runRoot, "graph.json"), runRoot));
+  const state = readRunState(path.join(runRoot, "state.json"));
   if (new Set(graph.nodes.map((node) => node.id)).size !== graph.nodes.length) {
-    return nonComparable(policy, "planned graph contains duplicate node identities");
+    throw evidenceError("planned graph contains duplicate node identities");
   }
-  if (
-    graph.nodes.some(
-      (node) => (node.kind === "meta" || node.kind === "reference") && (node.model_fanout?.length ?? 0) > 0
-    )
-  ) {
-    return nonComparable(policy, "planned graph model metadata is inconsistent");
+  if (graph.nodes.some((node) => node.kind === "reference" && node.model_fanout.length > 0)) {
+    throw evidenceError("planned graph model metadata is inconsistent");
   }
   const modelNodeIds = new Set(graph.nodes.filter(isModelBackedNode).map((node) => node.id));
   const ledgerPath = path.join(runRoot, "attempts.jsonl");
-  let replay: ReturnType<typeof replayNodeAttempts>;
-  try {
-    assertRegularFileInside(runRoot, ledgerPath, "node attempt ledger");
-    if (fs.statSync(ledgerPath).size > MAX_RECOVERY_SOURCE_BYTES) {
-      return nonComparable(policy, "node attempt ledger exceeds the size limit");
-    }
-    replay = replayNodeAttempts(ledgerPath);
-  } catch {
-    if (modelWorkMayHaveStarted(state, modelNodeIds)) {
-      return nonComparable(policy, "node attempt ledger is unavailable");
-    }
-    replay = { entries: [], malformedEntries: 0, duplicateEntries: 0 };
-  }
-  if (replay.malformedEntries > 0 || replay.duplicateEntries > 0) {
-    return nonComparable(policy, "node attempt ledger cannot be reconstructed");
-  }
+  const entries = readNodeAttemptLedger(ledgerPath, runRoot, state.run_id);
   const graphNodeIds = new Set(graph.nodes.map((node) => node.id));
-  if (replay.entries.some((entry) => !graphNodeIds.has(entry.node_id))) {
-    return nonComparable(policy, "node attempt lineage does not match the planned graph", replay.entries);
+  if (entries.some((entry) => !graphNodeIds.has(entry.node_id))) {
+    throw evidenceError("node attempt lineage does not match the planned graph");
   }
   const observedModelNodeIds = new Set(
-    replay.entries.filter((entry) => modelNodeIds.has(entry.node_id)).map((entry) => entry.node_id)
+    entries.filter((entry) => modelNodeIds.has(entry.node_id)).map((entry) => entry.node_id)
   );
   if (modelWorkMayHaveStarted(state, modelNodeIds) && observedModelNodeIds.size === 0) {
-    return nonComparable(policy, "model execution exposure cannot be reconstructed");
+    throw evidenceError("model execution exposure cannot be reconstructed");
   }
   if ([...startedModelNodeIds(state, modelNodeIds)].some((nodeId) => !observedModelNodeIds.has(nodeId))) {
-    return nonComparable(policy, "model execution exposure is incomplete", replay.entries);
+    throw evidenceError("model execution exposure is incomplete");
   }
 
-  const controllerObservations = controllerInvocations(path.join(runRoot, "events.jsonl"));
-  if (controllerObservations === undefined) {
-    return nonComparable(policy, "controller recovery lineage cannot be reconstructed", replay.entries);
-  }
-  const reconciledControllers = reconcileAttemptControllers(replay.entries, controllerObservations);
-  if (reconciledControllers === undefined) {
-    return nonComparable(policy, "controller recovery lineage cannot be reconciled", replay.entries);
-  }
+  const controllerObservations = controllerInvocations(path.join(runRoot, "events.jsonl"), runRoot, state.run_id);
   const generationsById = new Map<string, RecoveryGeneration>();
-  for (const entry of replay.entries) {
-    const controllerInvocationId = reconciledControllers.get(entry.attempt_id);
-    if (controllerInvocationId === undefined) {
-      return nonComparable(policy, "controller recovery lineage cannot be reconciled", replay.entries);
-    }
-    const generationId = JSON.stringify([controllerInvocationId, entry.workflow_execution_id]);
-    const generation = generationsById.get(generationId) ?? {
-      id: generationId,
-      controllerInvocationId,
-      firstObservedAt:
-        controllerObservations.find((observation) => observation.id === controllerInvocationId)?.at ??
-        entry.lifecycle.started_at,
-      attempts: [],
-      executedModelAttempts: []
-    };
-    if (entry.lifecycle.started_at < generation.firstObservedAt) {
-      generation.firstObservedAt = entry.lifecycle.started_at;
-    }
-    generation.attempts.push(entry);
-    if (entry.reuse.status === "executed" && modelNodeIds.has(entry.node_id)) {
-      generation.executedModelAttempts.push(entry);
-    }
-    generationsById.set(generation.id, generation);
-  }
-  const controllersWithAttempts = new Set<string>(reconciledControllers.values());
   for (const observation of controllerObservations) {
-    if (controllersWithAttempts.has(observation.id)) continue;
-    const generationId = JSON.stringify([observation.id, null]);
+    const generationId = recoveryGenerationId(observation.controlGeneration, observation.workflowRunId);
+    if (generationsById.has(generationId)) {
+      throw evidenceError(`multiple controller submissions name recovery generation ${generationId}`);
+    }
     generationsById.set(generationId, {
       id: generationId,
       controllerInvocationId: observation.id,
@@ -283,6 +224,17 @@ export function classifyRecoveryEquivalence(input: {
       attempts: [],
       executedModelAttempts: []
     });
+  }
+  for (const entry of entries) {
+    const generationId = recoveryGenerationId(entry.control_generation, entry.workflow_run_id);
+    const generation = generationsById.get(generationId);
+    if (generation === undefined || entry.lifecycle.started_at < generation.firstObservedAt) {
+      throw evidenceError("node attempt lineage does not match a prior controller submission");
+    }
+    generation.attempts.push(entry);
+    if (entry.reuse.status === "executed" && modelNodeIds.has(entry.node_id)) {
+      generation.executedModelAttempts.push(entry);
+    }
   }
   const generations = [...generationsById.values()].sort(
     (left, right) => left.firstObservedAt.localeCompare(right.firstObservedAt) || left.id.localeCompare(right.id)
@@ -337,12 +289,9 @@ export function classifyRecoveryEquivalence(input: {
     model_work_recovery_generations: modelWork,
     no_progress_recovery_generations: noProgress,
     recovery_generations: recoveryGenerations.length,
-    observed_node_attempts: replay.entries.length,
-    observed_workflow_executions: new Set(replay.entries.map((entry) => entry.workflow_execution_id)).size,
-    observed_controller_invocations: new Set([
-      ...controllerObservations.map((observation) => observation.id),
-      ...reconciledControllers.values()
-    ]).size,
+    observed_node_attempts: entries.length,
+    observed_workflow_executions: new Set(entries.map((entry) => entry.workflow_run_id)).size,
+    observed_controller_invocations: controllerObservations.length,
     classification,
     reason
   });
@@ -355,6 +304,9 @@ export function withRecordedRecoveryEquivalence(
 ): EvalRunRecord {
   if (record.recovery_equivalence !== undefined) {
     return { ...record, recovery_equivalence: parseRecoveryEquivalence(record.recovery_equivalence) };
+  }
+  if (record.ultrafuzz_run_root === undefined) {
+    throw evidenceError(`eval row ${record.row_id} has no run root for recovery classification`);
   }
   return {
     ...record,
@@ -395,13 +347,10 @@ export function reconcileEvalRunRecords(records: readonly EvalRunRecord[]): Map<
 
 /** Recovery evidence is immutable only after the underlying workflow is terminal. */
 export function recoveryEquivalenceCanBeRecorded(record: EvalRunRecord): boolean {
-  if (record.ultrafuzz_run_root !== undefined) {
-    const state = readJsonSource(path.join(record.ultrafuzz_run_root, "state.json"), stateSchema);
-    if (state !== undefined) {
-      return isTerminalStatus(state.status);
-    }
+  if (record.ultrafuzz_run_root === undefined) {
+    throw evidenceError(`eval row ${record.row_id} has no run root for recovery classification`);
   }
-  return record.workflow?.terminal === true && isTerminalStatus(record.workflow.status);
+  return isTerminalStatus(readRunState(path.join(record.ultrafuzz_run_root, "state.json")).status);
 }
 
 export function recoveryEquivalenceIsPublishable(
@@ -419,30 +368,7 @@ export function recoveryEquivalenceIsPublishable(
   );
 }
 
-function nonComparable(
-  policy: EvalRecoveryEquivalencePolicy,
-  reason: string,
-  entries: readonly NodeAttemptLedgerEntry[] = []
-): EvalRecoveryEquivalence {
-  return parseRecoveryEquivalence({
-    schema_version: RECOVERY_EQUIVALENCE_SCHEMA_VERSION,
-    policy: { max_repeated_model_executions: policy.max_repeated_model_executions },
-    unique_model_backed_node_executions: 0,
-    repeated_model_backed_node_executions: 0,
-    recovery_reexecuted_model_backed_node_executions: 0,
-    infrastructure_only_recovery_generations: 0,
-    model_work_recovery_generations: 0,
-    no_progress_recovery_generations: 0,
-    recovery_generations: 0,
-    observed_node_attempts: entries.length,
-    observed_workflow_executions: new Set(entries.map((entry) => entry.workflow_execution_id)).size,
-    observed_controller_invocations: new Set(entries.map((entry) => entry.controller_invocation_id)).size,
-    classification: "non-comparable",
-    reason
-  });
-}
-
-function modelWorkMayHaveStarted(state: z.infer<typeof stateSchema>, modelNodeIds: ReadonlySet<string>): boolean {
+function modelWorkMayHaveStarted(state: RunState, modelNodeIds: ReadonlySet<string>): boolean {
   if (state.status === "succeeded" && modelNodeIds.size > 0) return true;
   return [...modelNodeIds].some((nodeId) => {
     const node = state.nodes[nodeId];
@@ -453,7 +379,7 @@ function modelWorkMayHaveStarted(state: z.infer<typeof stateSchema>, modelNodeId
 }
 
 function startedModelNodeIds(
-  state: z.infer<typeof stateSchema>,
+  state: RunState,
   modelNodeIds: ReadonlySet<string>
 ): ReadonlySet<string> {
   return new Set(
@@ -466,112 +392,92 @@ function startedModelNodeIds(
   );
 }
 
-function isTerminalStatus(status: string | undefined): boolean {
-  return status !== undefined && ["succeeded", "failed", "timed-out", "canceled"].includes(status);
+function isTerminalStatus(status: string): boolean {
+  return ["succeeded", "failed", "timed-out", "canceled"].includes(status);
 }
 
-function isModelBackedNode(node: z.infer<typeof graphSchema>["nodes"][number]): boolean {
-  if (node.kind === "meta" || node.kind === "reference") return false;
-  if (node.kind === "agentic") return true;
-  if ((node.model_fanout?.length ?? 0) > 0) return true;
-  return node.kind === undefined && node.model_fanout === undefined;
+function isModelBackedNode(node: PlannedGraphDocument["nodes"][number]): boolean {
+  return node.kind === "agentic";
 }
 
-function controllerInvocations(eventsPath: string): Array<{ id: string; at: string }> | undefined {
-  if (!fs.existsSync(eventsPath)) return undefined;
+function controllerInvocations(eventsPath: string, root: string, expectedRunId: string): ControllerObservation[] {
+  let records: EventRecord[];
   try {
-    assertRegularFileInside(path.dirname(eventsPath), eventsPath, "workflow event ledger");
-    if (fs.statSync(eventsPath).size > MAX_RECOVERY_SOURCE_BYTES) return undefined;
-    const observations = new Map<string, string>();
-    for (const line of fs.readFileSync(eventsPath, "utf8").split(/\r?\n/u)) {
-      if (line.trim().length === 0) continue;
-      const raw = JSON.parse(line) as unknown;
-      const rawRecord = recordValue(raw);
-      const eventType = stringField(rawRecord, "event_type");
-      if (eventType === undefined || !["workflow-submitted", "workflow-lifecycle-submitted"].includes(eventType)) {
-        continue;
-      }
-      const parsed = eventSchema.safeParse(raw);
-      if (!parsed.success) return undefined;
-      const payload = recordValue(parsed.data.payload);
-      const id = stringField(payload, "controller_invocation_id") ?? parsed.data.event_id;
-      const at = stringField(payload, "controller_invoked_at") ?? parsed.data.timestamp;
-      if (id === undefined || !Number.isFinite(Date.parse(at))) return undefined;
-      if (observations.has(id)) return undefined;
-      observations.set(id, at);
-    }
-    return [...observations].map(([id, at]) => ({ id, at }));
-  } catch {
-    return undefined;
+    assertRegularFileInside(root, eventsPath, "recovery equivalence event ledger");
+    records = replayEvents(eventsPath, Number.MAX_SAFE_INTEGER).records;
+  } catch (error) {
+    throw evidenceError(`failed to read current recovery ledger ${eventsPath}`, error);
   }
+  const observations = new Map<string, ControllerObservation>();
+  for (const [index, record] of records.entries()) {
+    if (record.run_id !== expectedRunId) throw evidenceError(`workflow event ${index + 1} names another run`);
+    const eventType = requireString(record.event_type, `workflow event ${index + 1} event_type`);
+    if (!["workflow-submitted", "workflow-lifecycle-submitted"].includes(eventType)) continue;
+    const payload = requireRecord(record.payload, `workflow event ${index + 1} payload`);
+    const id = requireString(payload.controller_invocation_id, `workflow event ${index + 1} controller_invocation_id`);
+    const at = requireTimestamp(payload.controller_invoked_at, `workflow event ${index + 1} controller_invoked_at`);
+    const workflowRunId = requireString(payload.workflow_run_id, `workflow event ${index + 1} workflow_run_id`);
+    const controlGeneration = requireString(
+      payload.control_generation,
+      `workflow event ${index + 1} control_generation`
+    );
+    if (!/^[a-f0-9]{64}$/u.test(controlGeneration)) {
+      throw evidenceError(`workflow event ${index + 1} control_generation must be a lowercase SHA-256 digest`);
+    }
+    if (observations.has(id)) throw evidenceError(`duplicate controller invocation ${JSON.stringify(id)}`);
+    observations.set(id, { id, at, workflowRunId, controlGeneration });
+  }
+  if (observations.size === 0) throw evidenceError("workflow event ledger has no controller submission evidence");
+  return [...observations.values()];
 }
 
-function reconcileAttemptControllers(
-  entries: readonly NodeAttemptLedgerEntry[],
-  observations: readonly { id: string; at: string }[]
-): Map<string, string> | undefined {
-  if (entries.length > 0 && observations.length === 0) return undefined;
-  const orderedObservations = [...observations].sort(
-    (left, right) => left.at.localeCompare(right.at) || left.id.localeCompare(right.id)
-  );
-  const observationIds = new Set(orderedObservations.map((observation) => observation.id));
-  const aliasesByObservation = new Map<string, string>();
-  const reconciled = new Map<string, string>();
-  const seenAttemptControllerIds = new Set<string>();
-  let previousAttemptControllerId: string | undefined;
-  for (const entry of [...entries].sort((left, right) =>
-    left.lifecycle.started_at.localeCompare(right.lifecycle.started_at)
-  )) {
-    if (
-      entry.controller_invocation_id !== previousAttemptControllerId &&
-      seenAttemptControllerIds.has(entry.controller_invocation_id)
-    ) {
-      return undefined;
-    }
-    seenAttemptControllerIds.add(entry.controller_invocation_id);
-    previousAttemptControllerId = entry.controller_invocation_id;
-    if (
-      orderedObservations.some(
-        (observation) =>
-          observation.id === entry.controller_invocation_id && observation.at <= entry.lifecycle.started_at
-      )
-    ) {
-      reconciled.set(entry.attempt_id, entry.controller_invocation_id);
-      continue;
-    }
-    const observation = orderedObservations.filter((candidate) => candidate.at <= entry.lifecycle.started_at).at(-1);
-    if (observation === undefined) return undefined;
-    const alias = aliasesByObservation.get(observation.id);
-    if (alias === undefined || alias === entry.controller_invocation_id) {
-      aliasesByObservation.set(observation.id, entry.controller_invocation_id);
-      reconciled.set(entry.attempt_id, observation.id);
-    } else {
-      let syntheticId = JSON.stringify(["attempt-controller", entry.controller_invocation_id]);
-      while (observationIds.has(syntheticId)) syntheticId = `:${syntheticId}`;
-      reconciled.set(entry.attempt_id, syntheticId);
-    }
-  }
-  return reconciled;
+function recoveryGenerationId(controlGeneration: string, workflowRunId: string): string {
+  return JSON.stringify([controlGeneration, workflowRunId]);
 }
 
-function readJsonSource<T>(filePath: string, schema: z.ZodType<T>): T | undefined {
+function readCurrentJson(filePath: string, root: string): unknown {
   try {
-    assertRegularFileInside(path.dirname(filePath), filePath, "recovery equivalence source");
-    if (fs.statSync(filePath).size > MAX_RECOVERY_SOURCE_BYTES) return undefined;
-    const parsed = schema.safeParse(JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown);
-    return parsed.success ? parsed.data : undefined;
-  } catch {
-    return undefined;
+    assertRegularFileInside(root, filePath, "recovery equivalence source");
+    return parseStrictJsonBytes(readRegularFileSnapshot(filePath, MAX_RECOVERY_SOURCE_BYTES), {
+      maxBytes: MAX_RECOVERY_SOURCE_BYTES,
+      maxDepth: 128,
+      maxItems: 500_000,
+      maxProperties: 500_000
+    });
+  } catch (error) {
+    throw evidenceError(`failed to read current recovery evidence ${filePath}`, error);
   }
 }
 
-function recordValue(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
+function readNodeAttemptLedger(filePath: string, root: string, expectedRunId: string): NodeAttemptLedgerEntry[] {
+  try {
+    assertRegularFileInside(root, filePath, "recovery equivalence ledger");
+    return replayNodeAttempts({ attemptLedgerPath: filePath, runId: expectedRunId }).entries;
+  } catch (error) {
+    throw evidenceError(`failed to read current recovery ledger ${filePath}`, error);
+  }
 }
 
-function stringField(value: Record<string, unknown> | undefined, key: string): string | undefined {
-  const candidate = value?.[key];
-  return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined;
+function requireRecord(value: unknown, field: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw evidenceError(`${field} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.length === 0) throw evidenceError(`${field} must be a non-empty string`);
+  return value;
+}
+
+function requireTimestamp(value: unknown, field: string): string {
+  const timestamp = requireString(value, field);
+  if (!Number.isFinite(Date.parse(timestamp))) throw evidenceError(`${field} must be a valid timestamp`);
+  return timestamp;
+}
+
+function evidenceError(message: string, cause?: unknown): EvalError {
+  return new EvalError("EVAL_RECOVERY_EVIDENCE_INVALID", message, {
+    ...(cause === undefined ? {} : { reason: cause instanceof Error ? cause.message : String(cause) })
+  });
 }

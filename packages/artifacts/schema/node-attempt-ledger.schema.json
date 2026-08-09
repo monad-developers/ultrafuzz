@@ -5,14 +5,15 @@
   "type": "object",
   "required": [
     "schema_version",
-    "attempt_id",
     "run_id",
+    "workflow_run_id",
+    "control_generation",
     "node_id",
     "strategy_attempt_id",
-    "executor_retry_id",
-    "checkpoint_generation_id",
-    "workflow_execution_id",
-    "controller_invocation_id",
+    "iteration",
+    "attempt",
+    "started_event_sequence",
+    "source_event_sequence",
     "lifecycle",
     "outcome",
     "reuse",
@@ -20,101 +21,63 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema_version": {
-      "const": "1.0"
-    },
-    "attempt_id": {
+    "schema_version": { "const": "ultrafuzz.node-attempt-ledger.v1" },
+    "run_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "workflow_run_id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
     },
-    "run_id": {
-      "type": "string",
-      "minLength": 1
-    },
-    "node_id": {
-      "type": "string",
-      "minLength": 1
-    },
+    "control_generation": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "node_id": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" },
     "strategy_attempt_id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
     },
-    "executor_retry_id": {
-      "type": "string",
-      "minLength": 1
-    },
-    "checkpoint_generation_id": {
-      "type": "string",
-      "minLength": 1
-    },
-    "workflow_execution_id": {
-      "type": "string",
-      "minLength": 1
-    },
-    "controller_invocation_id": {
-      "type": "string",
-      "minLength": 1
-    },
-    "parent_attempt_id": {
-      "type": "string",
-      "minLength": 1
-    },
+    "iteration": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "attempt": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "started_event_sequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "source_event_sequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
     "lifecycle": {
       "type": "object",
-      "required": [
-        "started_at",
-        "finished_at"
-      ],
+      "required": ["started_at", "finished_at"],
       "additionalProperties": false,
       "properties": {
-        "started_at": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "finished_at": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "started_at": { "type": "string", "format": "date-time" },
+        "finished_at": { "type": "string", "format": "date-time" }
       }
     },
-    "outcome": {
-      "enum": [
-        "succeeded",
-        "failed",
-        "timed-out",
-        "canceled",
-        "skipped",
-        "reused"
-      ]
-    },
+    "outcome": { "enum": ["succeeded", "failed", "timed-out", "canceled", "reused"] },
     "reuse": {
       "oneOf": [
         {
           "type": "object",
-          "required": [
-            "status"
-          ],
+          "required": ["status"],
           "additionalProperties": false,
-          "properties": {
-            "status": {
-              "const": "executed"
-            }
-          }
+          "properties": { "status": { "const": "executed" } }
         },
         {
           "type": "object",
-          "required": [
-            "status",
-            "source_attempt_id"
-          ],
+          "required": ["status", "source"],
           "additionalProperties": false,
           "properties": {
-            "status": {
-              "const": "reused"
-            },
-            "source_attempt_id": {
-              "type": "string",
-              "minLength": 1
+            "status": { "const": "reused" },
+            "source": {
+              "type": "object",
+              "required": ["workflow_run_id", "source_event_sequence"],
+              "additionalProperties": false,
+              "properties": {
+                "workflow_run_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+                },
+                "source_event_sequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+              }
             }
           }
         }
@@ -122,27 +85,11 @@
     },
     "manifests": {
       "type": "object",
-      "required": [
-        "input_sha256",
-        "output_sha256"
-      ],
+      "required": ["input_sha256", "output_sha256"],
       "additionalProperties": false,
       "properties": {
-        "input_sha256": {
-          "type": "string",
-          "pattern": "^[a-f0-9]{64}$"
-        },
-        "output_sha256": {
-          "anyOf": [
-            {
-              "type": "string",
-              "pattern": "^[a-f0-9]{64}$"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
+        "input_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "output_sha256": { "anyOf": [{ "type": "string", "pattern": "^[a-f0-9]{64}$" }, { "type": "null" }] }
       }
     },
     "failure_category": {
@@ -156,10 +103,83 @@
         "unknown"
       ]
     },
-    "failure_message": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 1000
+    "failure_message": { "type": "string", "minLength": 1, "maxLength": 1000 }
+  },
+  "allOf": [
+    {
+      "if": { "type": "object", "properties": { "outcome": { "const": "reused" } }, "required": ["outcome"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "reuse": {
+            "type": "object",
+            "properties": { "status": { "const": "reused" } },
+            "required": ["status"]
+          }
+        }
+      },
+      "else": {
+        "type": "object",
+        "properties": {
+          "reuse": {
+            "type": "object",
+            "properties": { "status": { "const": "executed" } },
+            "required": ["status"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": { "outcome": { "enum": ["succeeded", "reused"] } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "manifests": {
+            "type": "object",
+            "properties": {
+              "output_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            },
+            "required": ["output_sha256"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": { "outcome": { "enum": ["failed", "timed-out", "canceled"] } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "failure_category": {
+            "enum": [
+              "executor-error",
+              "timeout",
+              "canceled",
+              "dependency",
+              "invalid-output",
+              "artifact-validation",
+              "unknown"
+            ]
+          }
+        },
+        "required": ["failure_category"]
+      },
+      "else": {
+        "type": "object",
+        "not": {
+          "anyOf": [
+            { "type": "object", "properties": { "failure_category": {} }, "required": ["failure_category"] },
+            { "type": "object", "properties": { "failure_message": {} }, "required": ["failure_message"] }
+          ]
+        }
+      }
     }
-  }
+  ]
 }

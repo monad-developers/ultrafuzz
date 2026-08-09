@@ -18,6 +18,7 @@ import {
   isArtifactContractId,
   parseStrictJson,
   validateArtifactContract,
+  validateArtifactContractBytes,
   validateRegisteredJsonSchema
 } from "../src/index.js";
 
@@ -116,6 +117,15 @@ test("strict contract parsing rejects duplicate keys in every object-shaped cano
   }
 });
 
+test("byte-level contract validation rejects invalid UTF-8 before shape validation", () => {
+  const invalidUtf8 = Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0xc3, 0x28, 0x22, 0x7d]);
+  for (const contract of ["ultrafuzz/findings@2", "ultrafuzz/nonempty-markdown@1", "ultrafuzz/text@1"] as const) {
+    const result = validateArtifactContractBytes(contract, invalidUtf8, `${contract}:invalid-utf8`);
+    assert.equal(result.ok, false, contract);
+    assert.match(result.issues[0]?.code ?? "", /ARTIFACT_(?:JSON|UTF8)_INVALID/u, contract);
+  }
+});
+
 test("checked-in canonical schemas equal every metadata-named TypeScript export", () => {
   const exports = artifactExports as unknown as Record<string, unknown>;
   for (const entry of artifactSchemaRegistry()) {
@@ -208,6 +218,77 @@ test("Ajv and retained Zod parsers agree on canonical unique-array constraints",
   assert.deepEqual(mismatches, [], `Zod accepted JSON-Schema-invalid unique arrays: ${mismatches.join("; ")}`);
 });
 
+test("node-attempt JSON Schema and Zod agree on portable outcome conditionals", () => {
+  const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === "node-attempt-ledger.schema.json");
+  assert.ok(entry?.zodParser !== undefined);
+  const parser = (artifactExports as unknown as Record<string, unknown>)[entry.zodParser] as ZodLikeParser;
+  const succeeded = zodPositiveFixture(entry.filename, entry.contractIds) as Record<string, unknown>;
+  const failed = {
+    ...structuredClone(succeeded),
+    outcome: "failed",
+    manifests: { input_sha256: "a".repeat(64), output_sha256: null },
+    failure_category: "executor-error"
+  };
+  const reused = {
+    ...structuredClone(succeeded),
+    outcome: "reused",
+    reuse: {
+      status: "reused",
+      source: { workflow_run_id: "workflow-source", source_event_sequence: 1 }
+    }
+  };
+  const failedWithoutCategory = structuredClone(failed) as Record<string, unknown>;
+  delete failedWithoutCategory.failure_category;
+  const cases: Array<{ label: string; value: unknown; expected: boolean }> = [
+    { label: "succeeded", value: succeeded, expected: true },
+    {
+      label: "succeeded-null-output",
+      value: { ...structuredClone(succeeded), manifests: { input_sha256: "a".repeat(64), output_sha256: null } },
+      expected: false
+    },
+    {
+      label: "succeeded-failure-detail",
+      value: { ...structuredClone(succeeded), failure_category: "executor-error" },
+      expected: false
+    },
+    { label: "failed", value: failed, expected: true },
+    { label: "failed-missing-category", value: failedWithoutCategory, expected: false },
+    { label: "reused", value: reused, expected: true },
+    {
+      label: "reused-executed-status",
+      value: { ...structuredClone(reused), reuse: { status: "executed" } },
+      expected: false
+    },
+    {
+      label: "reused-null-output",
+      value: { ...structuredClone(reused), manifests: { input_sha256: "a".repeat(64), output_sha256: null } },
+      expected: false
+    },
+    {
+      label: "semantic-order-is-shape-valid",
+      value: {
+        ...structuredClone(succeeded),
+        started_event_sequence: 3,
+        source_event_sequence: 2,
+        lifecycle: {
+          started_at: "2026-08-09T00:02:00.000Z",
+          finished_at: "2026-08-09T00:01:00.000Z"
+        }
+      },
+      expected: true
+    },
+    {
+      label: "semantic-byte-limit-is-shape-valid",
+      value: { ...structuredClone(failed), failure_message: "🙂".repeat(251) },
+      expected: true
+    }
+  ];
+
+  for (const fixture of cases) {
+    assertParity(entry.id, parser, fixture.value, fixture.expected, `node-attempt:${fixture.label}`);
+  }
+});
+
 function assertParity(schemaId: string, parser: ZodLikeParser, value: unknown, expected: boolean, label: string): void {
   const before = structuredClone(value);
   const ajv = validateRegisteredJsonSchema(schemaId, value);
@@ -241,6 +322,45 @@ function zodPositiveFixture(filename: string, contractIds: readonly string[]): u
       };
     case "finding.schema.json":
       return (contractFixtures["ultrafuzz/findings@2"]!.valid as unknown[])[0];
+    case "event-query-facade.schema.json":
+      return {
+        schema_version: "ultrafuzz.event-query-facade.v1",
+        run_id: "run-1",
+        append_log: "events.jsonl",
+        index_root: "events.index",
+        indexes: ["run", "node", "type", "status", "timestamp"],
+        filters: {
+          run_id: "events.index/run/<run-id>.jsonl",
+          node_id: "events.index/node/<node-id>.jsonl",
+          event_type: "events.index/type/<event-type>.jsonl",
+          status: "events.index/status/<status>.jsonl",
+          timestamp: "events.index/timestamp/<yyyy-mm-dd>.jsonl"
+        },
+        long_filters: {
+          run_id: "events.index/run/sha256/<sha256-hex(run-id)>.jsonl",
+          node_id: "events.index/node/sha256/<sha256-hex(node-id)>.jsonl",
+          event_type: "events.index/type/sha256/<sha256-hex(event-type)>.jsonl",
+          status: "events.index/status/sha256/<sha256-hex(status)>.jsonl"
+        },
+        index_key_encoding: {
+          version: "ultrafuzz.event-index-key.v1",
+          direct_max_id_length: 122,
+          direct_id_path: "<dimension>/<id>.jsonl",
+          long_id_path: "<dimension>/sha256/<sha256-hex(id)>.jsonl",
+          digest: "sha256",
+          hash_input_encoding: "utf8",
+          digest_encoding: "hex"
+        }
+      };
+    case "event-record.schema.json":
+      return {
+        schema_version: "ultrafuzz.event-record.v1",
+        event_id: `evt-${"a".repeat(24)}`,
+        timestamp: "2026-08-09T00:00:00.000Z",
+        run_id: "run-1",
+        event_type: "workflow-synced",
+        payload: {}
+      };
     case "invariant-source-proof.schema.json":
       return {
         schema_version: "ultrafuzz.invariant-source-proof.v1",
@@ -252,15 +372,16 @@ function zodPositiveFixture(filename: string, contractIds: readonly string[]): u
       };
     case "node-attempt-ledger.schema.json":
       return {
-        schema_version: "1.0",
-        attempt_id: "attempt-1",
+        schema_version: "ultrafuzz.node-attempt-ledger.v1",
         run_id: "run-1",
-        node_id: "node-1",
+        workflow_run_id: "workflow-1",
+        control_generation: "c".repeat(64),
+        node_id: "node:1",
         strategy_attempt_id: "strategy-1",
-        executor_retry_id: "retry-1",
-        checkpoint_generation_id: "checkpoint-1",
-        workflow_execution_id: "execution-1",
-        controller_invocation_id: "controller-1",
+        iteration: 0,
+        attempt: 1,
+        started_event_sequence: 1,
+        source_event_sequence: 2,
         lifecycle: {
           started_at: "2026-08-09T00:00:00.000Z",
           finished_at: "2026-08-09T00:01:00.000Z"
@@ -278,17 +399,16 @@ function zodPositiveFixture(filename: string, contractIds: readonly string[]): u
       });
     case "usage-ledger.schema.json":
       return {
-        schema_version: "1.0",
-        event_id: "usage-event-1",
+        schema_version: "ultrafuzz.usage-ledger.v1",
         run_id: "run-1",
         workflow_run_id: "workflow-1",
-        source_event_id: "source-event-1",
-        attempt_id: "attempt-1",
-        checkpoint_generation_id: "checkpoint-1",
-        observed_at: "2026-08-09T00:00:00.000Z",
-        usage: { input_tokens: 1 },
-        usage_complete: true,
-        usage_incomplete_reasons: []
+        control_generation: "c".repeat(64),
+        source_event_sequence: 3,
+        observed_timestamp_ms: Date.parse("2026-08-09T00:00:00.000Z"),
+        node_id: "node:1",
+        iteration: 0,
+        attempt: 1,
+        usage: { model: "model", agent: "agent", input_tokens: 1, output_tokens: 2 }
       };
     default:
       throw new Error(`Missing retained-Zod positive fixture for ${filename}`);

@@ -4,8 +4,11 @@ import path from "node:path";
 import {
   assertNoSymlinkComponents,
   assertRegularFileInside,
+  layoutForRunRoot,
+  readRegularFileSnapshot,
+  readRunState,
   safeResolveInside,
-  validateArtifactContract,
+  validateArtifactContractBytes,
   validateSafeId,
   type ArtifactContractId,
   type ArtifactContractIssue
@@ -15,6 +18,14 @@ export interface ValidatedReportArtifacts {
   markdown_path: string;
   json_path: string;
   source: "validated-agent-report";
+}
+
+export interface ValidatedReportSnapshot {
+  artifacts: ValidatedReportArtifacts;
+  json: unknown;
+  json_bytes: Buffer;
+  markdown: string;
+  markdown_bytes: Buffer;
 }
 
 const REPORT_CONTRACT = "ultrafuzz/report@2" as ArtifactContractId;
@@ -30,6 +41,10 @@ const MAX_REPORT_MARKDOWN_BYTES = 16 * 1024 * 1024;
  * a renderer, normalizer, metadata merger, or manifest resealer.
  */
 export function loadValidatedReportArtifacts(runRoot: string): ValidatedReportArtifacts {
+  return loadValidatedReportSnapshot(runRoot).artifacts;
+}
+
+export function loadValidatedReportSnapshot(runRoot: string): ValidatedReportSnapshot {
   const root = path.resolve(runRoot);
   assertNoSymlinkComponents(root, root, "run root");
   const reportDirectory = findCurrentReportDirectory(root);
@@ -38,39 +53,37 @@ export function loadValidatedReportArtifacts(runRoot: string): ValidatedReportAr
   assertRegularFileInside(root, jsonPath, "report JSON path");
   assertRegularFileInside(root, markdownPath, "report Markdown path");
 
-  const reportValidation = validateArtifactContract(
-    REPORT_CONTRACT,
-    readBoundedText(root, jsonPath, "report JSON", MAX_REPORT_JSON_BYTES),
-    jsonPath
-  );
+  const reportBytes = readBoundedBytes(root, jsonPath, "report JSON", MAX_REPORT_JSON_BYTES);
+  const markdownBytes = readBoundedBytes(root, markdownPath, "report Markdown", MAX_REPORT_MARKDOWN_BYTES);
+  const reportValidation = validateArtifactContractBytes(REPORT_CONTRACT, reportBytes, jsonPath);
   if (!reportValidation.ok) {
     throw new Error(validationMessage("report JSON", reportValidation.issues));
   }
 
-  const markdownValidation = validateArtifactContract(
-    MARKDOWN_CONTRACT,
-    readBoundedText(root, markdownPath, "report Markdown", MAX_REPORT_MARKDOWN_BYTES),
-    markdownPath
-  );
+  const markdownValidation = validateArtifactContractBytes(MARKDOWN_CONTRACT, markdownBytes, markdownPath);
   if (!markdownValidation.ok) {
     throw new Error(validationMessage("report Markdown", markdownValidation.issues));
   }
 
-  return { markdown_path: markdownPath, json_path: jsonPath, source: "validated-agent-report" };
+  if (typeof markdownValidation.value !== "string") {
+    throw new Error("report Markdown validation did not return its immutable text snapshot");
+  }
+  return {
+    artifacts: { markdown_path: markdownPath, json_path: jsonPath, source: "validated-agent-report" },
+    json: reportValidation.value,
+    json_bytes: reportBytes,
+    markdown: markdownValidation.value,
+    markdown_bytes: markdownBytes
+  };
 }
 
 function findCurrentReportDirectory(runRoot: string): string {
   const artifactsRoot = safeResolveInside(runRoot, "artifacts", "report artifacts root");
   const candidates = new Set<string>(["final-report"]);
-  const statePath = safeResolveInside(runRoot, "state.json", "run state path");
-  if (fs.existsSync(statePath)) {
-    assertRegularFileInside(runRoot, statePath, "run state path");
-    const state = JSON.parse(readBoundedText(runRoot, statePath, "run state", 64 * 1024 * 1024)) as unknown;
-    const nodes = recordField(state, "nodes");
-    for (const [nodeId, nodeState] of Object.entries(nodes ?? {})) {
-      if (recordFieldValue(nodeState, "logical_node_id") === "final-report") {
-        candidates.add(validateSafeId(nodeId, "final report node ID"));
-      }
+  const state = readRunState(layoutForRunRoot(runRoot));
+  for (const [nodeId, nodeState] of Object.entries(state.nodes)) {
+    if (nodeState.logical_node_id === "final-report") {
+      candidates.add(validateSafeId(nodeId, "final report node ID"));
     }
   }
 
@@ -85,33 +98,13 @@ function findCurrentReportDirectory(runRoot: string): string {
   throw new Error("agent-written report JSON is not available for the current run");
 }
 
-function readBoundedText(runRoot: string, filePath: string, label: string, maximumBytes: number): string {
+function readBoundedBytes(runRoot: string, filePath: string, label: string, maximumBytes: number): Buffer {
   assertRegularFileInside(runRoot, filePath, `${label} path`);
-  const stat = fs.statSync(filePath);
-  if (stat.size > maximumBytes) {
-    throw new Error(`${label} exceeds the ${maximumBytes}-byte limit: ${filePath}`);
-  }
-  return fs.readFileSync(filePath, "utf8");
+  return readRegularFileSnapshot(filePath, maximumBytes);
 }
 
 function validationMessage(label: string, issues: readonly ArtifactContractIssue[]): string {
   return `${label} failed contract validation: ${issues
     .map((issue) => `${issue.code} ${issue.path}: ${issue.message}`)
     .join("; ")}`;
-}
-
-function recordField(value: unknown, key: string): Record<string, unknown> | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  const field = (value as Record<string, unknown>)[key];
-  return field !== null && typeof field === "object" && !Array.isArray(field)
-    ? (field as Record<string, unknown>)
-    : undefined;
-}
-
-function recordFieldValue(value: unknown, key: string): unknown {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)[key]
-    : undefined;
 }

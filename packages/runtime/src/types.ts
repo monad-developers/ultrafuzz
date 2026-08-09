@@ -10,6 +10,7 @@ import type {
   RunState
 } from "@ultrafuzz/artifacts";
 import type { ResolvedConfig, RuntimeConfigOverrides } from "@ultrafuzz/config";
+import type { PromptArtifactReference } from "@ultrafuzz/prompts";
 import type { MaterializeCopySelection } from "@ultrafuzz/security";
 import type { ExpandedGraph } from "@ultrafuzz/topology";
 
@@ -124,13 +125,13 @@ export type PlannedGraph = PlannedGraphDocument;
 export interface RenderedPromptPlan {
   node_id: string;
   logical_node_id: string;
-  attempt_id?: string;
+  attempt_id: string;
   prompt_id: string;
   prompt_path: string;
   rendered_prompt_path: string;
   rendered_prompt_digest: string;
   variables_used: string[];
-  artifact_references: unknown[];
+  artifact_references: PromptArtifactReference[];
 }
 
 export interface PlanRunValue {

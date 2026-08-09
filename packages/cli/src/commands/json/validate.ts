@@ -8,6 +8,7 @@ import {
   validateJsonFile,
   type SchemaRegistryEntry
 } from "@ultrafuzz/artifacts";
+import { evalSchemaBundleDigest, evalSchemaRegistry } from "@ultrafuzz/evals";
 import { topologySchemaBundleDigest, topologySchemaRegistry } from "@ultrafuzz/topology";
 
 import { cliIo, emitCommandResult, globalFlags, type CommandResult } from "../../command-shared.js";
@@ -69,6 +70,7 @@ function cliSchemaRegistry(): {
 } {
   const owners = [
     { entries: artifactSchemaRegistry(), bundle: artifactSchemaBundleDigest() },
+    { entries: evalSchemaRegistry(), bundle: evalSchemaBundleDigest() },
     { entries: topologySchemaRegistry(), bundle: topologySchemaBundleDigest() }
   ];
   const entries = owners.flatMap((owner) => [...owner.entries]);

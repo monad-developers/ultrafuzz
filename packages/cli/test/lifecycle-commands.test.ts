@@ -212,7 +212,7 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
   );
   fs.writeFileSync(
     eventsPath,
-    [
+    `${[
       JSON.stringify({
         runId: WORKFLOW_RUN_ID,
         seq: 1,
@@ -227,7 +227,7 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
         type: "run.progress",
         payload: { status: "running" }
       })
-    ].join("\n"),
+    ].join("\n")}\n`,
     "utf8"
   );
 

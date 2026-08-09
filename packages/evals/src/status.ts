@@ -6,9 +6,12 @@ import {
   RUN_STATE_STATUSES,
   TERMINAL_NODE_STATE_STATUSES,
   TERMINAL_RUN_STATE_STATUSES,
+  readRunState,
   type RunStatus
 } from "@ultrafuzz/artifacts";
 
+import { readEvalMatrix, readEvalRunRecords } from "./eval-durable.js";
+import type { EvalRunRecord } from "./types.js";
 import { EvalError, evalRunRoot, isRecord } from "./utils.js";
 
 export const EVAL_STATUS_SCHEMA_VERSION = "ultrafuzz.eval.status.v1" as const;
@@ -68,8 +71,7 @@ interface MatrixRow {
 }
 
 interface RunRecords {
-  latestByRowId: Map<string, unknown>;
-  malformed: boolean;
+  latestByRowId: Map<string, EvalRunRecord>;
 }
 
 const RUN_STATUSES = new Set<string>(RUN_STATE_STATUSES);
@@ -118,7 +120,7 @@ export function readEvalStatus(input: ReadEvalStatusInput): EvalStatusSnapshot {
       }
       const record = records.latestByRowId.get(matrixRow.id);
       if (record === undefined) {
-        return records.malformed ? unavailableRow(row, "invalid", false) : unavailableRow(row, "not-launched", false);
+        return unavailableRow(row, "not-launched", false);
       }
       return statusForRecord({
         row,
@@ -207,63 +209,36 @@ export function renderEvalStatusTable(snapshot: EvalStatusSnapshot): string {
 }
 
 function readMatrix(matrixPath: string): MatrixRow[] {
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(fs.readFileSync(matrixPath, "utf8"));
-  } catch {
-    throw new EvalError("EVAL_STATUS_MATRIX_UNAVAILABLE", "eval status matrix is unavailable");
+    return readEvalMatrix(matrixPath).map((row) => ({ id: row.id, valid: true }));
+  } catch (error) {
+    throw new EvalError("EVAL_STATUS_MATRIX_INVALID", "eval status matrix is invalid", {
+      reason: error instanceof Error ? error.message : String(error)
+    });
   }
-  if (!Array.isArray(parsed)) {
-    throw new EvalError("EVAL_STATUS_MATRIX_INVALID", "eval status matrix is invalid");
-  }
-  return parsed.map((value) => {
-    const id = isRecord(value) && typeof value.id === "string" && value.id.length > 0 ? value.id : null;
-    return { id, valid: id !== null };
-  });
 }
 
 function readRunRecords(recordsPath: string, expectedEvalRunId: string): RunRecords {
-  if (!fs.existsSync(recordsPath)) {
-    return { latestByRowId: new Map(), malformed: false };
-  }
-  let contents: string;
-  try {
-    contents = fs.readFileSync(recordsPath, "utf8");
-  } catch {
-    return { latestByRowId: new Map(), malformed: true };
-  }
-  const latestByRowId = new Map<string, unknown>();
-  let malformed = false;
-  for (const line of contents.split(/\r?\n/u)) {
-    if (line.trim().length === 0) continue;
-    try {
-      const record: unknown = JSON.parse(line);
-      if (
-        !isRecord(record) ||
-        record.eval_run_id !== expectedEvalRunId ||
-        typeof record.row_id !== "string" ||
-        record.row_id.length === 0
-      ) {
-        malformed = true;
-        continue;
-      }
-      latestByRowId.set(record.row_id, record);
-    } catch {
-      malformed = true;
+  const latestByRowId = new Map<string, EvalRunRecord>();
+  for (const record of readEvalRunRecords(recordsPath, { allowMissing: true })) {
+    if (record.eval_run_id !== expectedEvalRunId) {
+      throw new EvalError("EVAL_STATUS_RECORD_LINEAGE_INVALID", "eval status run record names another eval run", {
+        expected_eval_run_id: expectedEvalRunId,
+        observed_eval_run_id: record.eval_run_id,
+        row_id: record.row_id
+      });
     }
+    latestByRowId.set(record.row_id, record);
   }
-  return { latestByRowId, malformed };
+  return { latestByRowId };
 }
 
 function statusForRecord(input: {
   row: string;
-  record: unknown;
+  record: EvalRunRecord;
   snapshotAtMs: number;
   staleAfterSeconds: number;
 }): EvalStatusRow {
-  if (!isRecord(input.record) || !["launched", "failed"].includes(String(input.record.status))) {
-    return unavailableRow(input.row, "invalid", false);
-  }
   if (input.record.status === "failed") {
     return unavailableRow(input.row, "failed", true);
   }
@@ -277,15 +252,13 @@ function statusForRecord(input: {
     return unavailableRow(input.row, "invalid", false);
   }
 
-  let contents: string;
-  try {
-    contents = fs.readFileSync(path.join(input.record.ultrafuzz_run_root, "state.json"), "utf8");
-  } catch {
+  const statePath = path.join(input.record.ultrafuzz_run_root, "state.json");
+  if (!fs.existsSync(statePath)) {
     return unavailableRow(input.row, "inaccessible", false);
   }
   let rawState: unknown;
   try {
-    rawState = JSON.parse(contents);
+    rawState = readRunState(statePath);
   } catch {
     return unavailableRow(input.row, "invalid", false);
   }

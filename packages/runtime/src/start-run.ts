@@ -10,11 +10,15 @@ import {
   layoutForRunRoot,
   parseSmithersTaskManifestBytes,
   parseStrictJsonBytes,
+  readRunMetadataDocument,
   readRunState,
   updateRunStatus,
   validateSafeId,
   writeJsonDurable,
+  writeRunMetadataDocument,
   writeRunState,
+  type RunMetadataDocument,
+  type RunMetadataWorkflow,
   type RunLayout,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestTask,
@@ -35,7 +39,7 @@ import {
 import { planRun } from "./plan-run.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import { prepareTrustedCliEnvironment, runTrustedJsonValidatorPreflight } from "./trusted-cli.js";
-import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
+import { runtimeFailure, runtimeResult } from "./utils.js";
 import {
   compileSmithersWorkflow,
   requestSmithersPause,
@@ -466,10 +470,8 @@ async function persistSmithersEvidence(
     controlGeneration: verifiedControl.generation
   });
 
-  const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath) ?? {};
-  delete metadata.smithers;
-  delete metadata.smithers_inspection_ids;
-  writeJsonDurable(layout.runMetadataPath, {
+  const metadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
+  writeRunMetadataDocument(layout.runMetadataPath, {
     ...metadata,
     workflow_ids: [compiled.smithersRunId],
     workflow: {
@@ -559,17 +561,9 @@ export async function readLinkedWorkflowEvidence(
       return { ok: false, diagnostics: [missingEvidence] };
     }
     reconcilePendingWorkflowRunLink(resolvedProjectRoot, layout);
-    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
-      run_id?: unknown;
-      workflow_ids?: unknown;
-      workflow?: Record<string, unknown>;
-    };
-    if (metadata.run_id !== undefined && metadata.run_id !== runId) {
-      throw new Error("run metadata identity does not match the requested run");
-    }
-    const workflow = objectRecord(metadata.workflow);
-    const smithersRunId = workflow.run_id;
-    if (typeof smithersRunId !== "string" || smithersRunId.length === 0 || smithersRunId.includes("\0")) {
+    const metadata = readRunMetadataDocument(metadataPath, runId);
+    const workflow = metadata.workflow;
+    if (workflow === undefined) {
       return {
         ok: false,
         diagnostics: [
@@ -583,6 +577,8 @@ export async function readLinkedWorkflowEvidence(
         ]
       };
     }
+    const smithersRunId = workflow.run_id;
+    if (smithersRunId.includes("\0")) throw new Error("active workflow run ID contains a NUL byte");
     if (
       !Array.isArray(metadata.workflow_ids) ||
       metadata.workflow_ids.length !== 1 ||
@@ -617,8 +613,9 @@ export async function readLinkedWorkflowEvidence(
       control_generation: verifiedControl.generation,
       execution_snapshot_path: runRelativePath(layout, executionSnapshot.root)
     };
+    const workflowRecord = workflow as unknown as Record<string, unknown>;
     for (const [key, expected] of Object.entries(expectedWorkflowFields)) {
-      if (workflow[key] !== expected) {
+      if (workflowRecord[key] !== expected) {
         throw new Error(`stored workflow ${key.replaceAll("_", " ")} does not match its sealed control path`);
       }
     }
@@ -749,7 +746,7 @@ async function updateLinkedWorkflowRunId(
     if (committedLink.control_generation !== input.controlGeneration) {
       throw new Error("workflow run link control generation changed before replacement");
     }
-    const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath) ?? {};
+    const metadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
     const state = readRunState(layout);
     if (
       !metadataMatchesWorkflowRunLink(metadata, committedLink) ||
@@ -783,7 +780,7 @@ function reconcilePendingWorkflowRunLink(projectRoot: string, layout: RunLayout)
   if (pending === undefined) return;
   verifyWorkflowRunLinkAuthorization(layout, pending);
 
-  const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath) ?? {};
+  const metadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
   const state = readRunState(layout);
   if (pending.action === "start") {
     if (history.current !== undefined) throw new Error("initial workflow run link conflicts with committed history");
@@ -816,7 +813,7 @@ function reconcilePendingWorkflowRunLink(projectRoot: string, layout: RunLayout)
     ) {
       throw new Error("pending initial workflow run link projections cannot be reconciled safely");
     }
-    writeJsonDurable(layout.runMetadataPath, {
+    writeRunMetadataDocument(layout.runMetadataPath, {
       ...metadata,
       workflow_ids: [pending.workflow_run_id],
       workflow: binding.metadataWorkflow
@@ -854,7 +851,7 @@ function initialWorkflowBinding(
   executionSnapshotRoot: string,
   taskDocument: SmithersTaskManifestDocument,
   link: WorkflowRunLinkJournalEntry
-): { metadataWorkflow: Record<string, unknown>; stateWorkflow: Record<string, StateJsonValue> } {
+): { metadataWorkflow: RunMetadataWorkflow; stateWorkflow: Record<string, StateJsonValue> } {
   const workflowName = taskDocument.workflow_name;
   const taskNodeIds = taskDocument.tasks.map((task) => task.smithersNodeId);
   const executionSnapshot = runRelativePath(layout, executionSnapshotRoot);
@@ -887,13 +884,11 @@ function initialWorkflowBinding(
   };
 }
 
-function metadataIsPristineInitialWorkflowBinding(metadata: Record<string, unknown>): boolean {
+function metadataIsPristineInitialWorkflowBinding(metadata: RunMetadataDocument): boolean {
   return (
     Array.isArray(metadata.workflow_ids) &&
     metadata.workflow_ids.length === 0 &&
-    !Object.hasOwn(metadata, "workflow") &&
-    !Object.hasOwn(metadata, "smithers") &&
-    !Object.hasOwn(metadata, "smithers_inspection_ids")
+    !Object.hasOwn(metadata, "workflow")
   );
 }
 
@@ -902,8 +897,8 @@ function stateIsPristineInitialWorkflowBinding(state: ReturnType<typeof readRunS
 }
 
 function metadataMatchesInitialWorkflowBinding(
-  metadata: Record<string, unknown>,
-  expectedWorkflow: Record<string, unknown>
+  metadata: RunMetadataDocument,
+  expectedWorkflow: RunMetadataWorkflow
 ): boolean {
   return (
     Array.isArray(metadata.workflow_ids) &&
@@ -922,30 +917,33 @@ function stateMatchesInitialWorkflowBinding(
 
 function exactRecordMatches(
   observed: Record<string, unknown>,
-  expected: Record<string, unknown>,
+  expected: object,
   fieldsAllowedMissing: readonly string[] = []
 ): boolean {
   const allowedMissing = new Set(fieldsAllowedMissing);
+  const expectedRecord = expected as Record<string, unknown>;
   const observedKeys = Object.keys(observed);
-  const expectedKeys = Object.keys(expected);
-  if (observedKeys.some((key) => !Object.hasOwn(expected, key))) return false;
+  const expectedKeys = Object.keys(expectedRecord);
+  if (observedKeys.some((key) => !Object.hasOwn(expectedRecord, key))) return false;
   if (expectedKeys.some((key) => !Object.hasOwn(observed, key) && !allowedMissing.has(key))) return false;
   return expectedKeys.every(
     (key) =>
       (!Object.hasOwn(observed, key) && allowedMissing.has(key)) ||
-      JSON.stringify(observed[key]) === JSON.stringify(expected[key])
+      JSON.stringify(observed[key]) === JSON.stringify(expectedRecord[key])
   );
 }
 
 function writeLinkedWorkflowBinding(
   layout: RunLayout,
-  metadata: Record<string, unknown>,
+  metadata: RunMetadataDocument,
   state: ReturnType<typeof readRunState>,
   link: WorkflowRunLinkJournalEntry
 ): void {
-  const existingWorkflow = objectRecord(metadata.workflow);
-  writeJsonDurable(layout.runMetadataPath, {
-    ...metadata,
+  const existingWorkflow = metadata.workflow;
+  if (existingWorkflow === undefined) throw new Error("workflow replacement requires an existing workflow binding");
+  const { accounting: _staleAccounting, ...metadataWithoutAccounting } = metadata;
+  writeRunMetadataDocument(layout.runMetadataPath, {
+    ...metadataWithoutAccounting,
     workflow_ids: [link.workflow_run_id],
     workflow: {
       ...existingWorkflow,
@@ -970,7 +968,7 @@ function writeLinkedWorkflowBinding(
 }
 
 function metadataMatchesWorkflowRunLink(
-  metadata: Record<string, unknown>,
+  metadata: RunMetadataDocument,
   link: WorkflowRunLinkJournalEntry,
   allowMissingLinkId = false
 ): boolean {
@@ -1027,8 +1025,8 @@ function linkedWorkflowTasks(contents: Buffer): Array<{
 }
 
 function persistForgeGuardMetadata(layout: RunLayout, config: ResolvedConfig, active: boolean): void {
-  const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath) ?? {};
-  writeJsonDurable(layout.runMetadataPath, {
+  const metadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
+  writeRunMetadataDocument(layout.runMetadataPath, {
     ...metadata,
     forge_guard: forgeGuardMetadata(config, active)
   });

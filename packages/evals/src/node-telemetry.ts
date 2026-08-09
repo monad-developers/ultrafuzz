@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { TextDecoder } from "node:util";
 
 import {
   ARTIFACT_MANIFEST_FILE,
@@ -7,7 +8,9 @@ import {
   getNodeArtifactDir,
   layoutForRunRoot,
   normalizeSafeRelativePath,
+  parseStrictJson,
   readArtifactManifest,
+  readRunState,
   safeResolveInside,
   sha256Bytes,
   validateSafeId,
@@ -26,6 +29,7 @@ import {
   type EvalReporter
 } from "./reporter.js";
 import type { EvalMatrixRow, EvalReportingPolicy } from "./types.js";
+import { parseTelemetryCursor, readTelemetryCursor } from "./eval-durable.js";
 import { contentTypeForArtifact, isRecord, warningDiagnostic } from "./utils.js";
 
 export const TELEMETRY_CURSOR_SCHEMA_VERSION = "ultrafuzz.eval.telemetry-cursor.v1" as const;
@@ -78,27 +82,7 @@ export function loadTelemetryCursor(cursorPath: string): TelemetryCursorState {
   if (!fs.existsSync(cursorPath)) {
     return createTelemetryCursor();
   }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(cursorPath, "utf8")) as Partial<TelemetryCursorState>;
-    if (parsed.schemaVersion !== TELEMETRY_CURSOR_SCHEMA_VERSION) {
-      return createTelemetryCursor();
-    }
-    return {
-      schemaVersion: TELEMETRY_CURSOR_SCHEMA_VERSION,
-      byteOffset: typeof parsed.byteOffset === "number" && parsed.byteOffset >= 0 ? parsed.byteOffset : 0,
-      deliveredEventIds: Array.isArray(parsed.deliveredEventIds)
-        ? parsed.deliveredEventIds.filter((entry): entry is string => typeof entry === "string")
-        : [],
-      uploadedArtifacts: isRecord(parsed.uploadedArtifacts) ? (parsed.uploadedArtifacts as Record<string, string>) : {},
-      lastHeartbeatAt: isRecord(parsed.lastHeartbeatAt) ? (parsed.lastHeartbeatAt as Record<string, string>) : {},
-      providerIds: isRecord(parsed.providerIds) ? (parsed.providerIds as Record<string, string>) : {},
-      findingsCountByNode: isRecord(parsed.findingsCountByNode)
-        ? (parsed.findingsCountByNode as Record<string, number>)
-        : {}
-    };
-  } catch {
-    return createTelemetryCursor();
-  }
+  return readTelemetryCursor(cursorPath);
 }
 
 /**
@@ -188,11 +172,7 @@ export class NodeTelemetryPump {
     if (!fs.existsSync(statePath)) {
       return undefined;
     }
-    try {
-      return JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-    } catch {
-      return undefined;
-    }
+    return readRunState(statePath);
   }
 
   private readNewJournalRecords(warnings: RuntimeDiagnostic[]): { records: EventRecord[]; nextOffset: number } {
@@ -200,27 +180,31 @@ export class NodeTelemetryPump {
     // The existsSync/statSync/openSync sequence is not atomic: the run dir can
     // vanish between calls (CI cleanup, crash recovery). Treat any filesystem
     // error as "no new records this tick" instead of aborting the whole suite.
-    let text: string;
+    let buffer: Buffer;
     try {
       if (!fs.existsSync(eventsPath)) {
         return { records: [], nextOffset: this.cursor.byteOffset };
       }
       const size = fs.statSync(eventsPath).size;
       if (size < this.cursor.byteOffset) {
-        // Journal shrank (rewritten run dir) — restart from zero rather than mis-read.
-        this.cursor.byteOffset = 0;
+        warnings.push(
+          warningDiagnostic(
+            "EVAL_TELEMETRY_JOURNAL_REWRITTEN",
+            `run journal ${eventsPath} is shorter than its durable cursor; refusing to reset accounting state`
+          )
+        );
+        return { records: [], nextOffset: this.cursor.byteOffset };
       }
       if (size === this.cursor.byteOffset) {
         return { records: [], nextOffset: this.cursor.byteOffset };
       }
-      const buffer = Buffer.alloc(size - this.cursor.byteOffset);
+      buffer = Buffer.alloc(size - this.cursor.byteOffset);
       const fd = fs.openSync(eventsPath, "r");
       try {
         fs.readSync(fd, buffer, 0, buffer.length, this.cursor.byteOffset);
       } finally {
         fs.closeSync(fd);
       }
-      text = buffer.toString("utf8");
     } catch (error) {
       warnings.push(
         warningDiagnostic(
@@ -230,22 +214,42 @@ export class NodeTelemetryPump {
       );
       return { records: [], nextOffset: this.cursor.byteOffset };
     }
-    const lastNewline = text.lastIndexOf("\n");
+    const lastNewline = buffer.lastIndexOf(0x0a);
     if (lastNewline === -1) {
       // Partial line only — wait for the writer to finish it.
       return { records: [], nextOffset: this.cursor.byteOffset };
     }
-    const complete = text.slice(0, lastNewline + 1);
-    const nextOffset = this.cursor.byteOffset + Buffer.byteLength(complete, "utf8");
+    const completeBytes = buffer.subarray(0, lastNewline + 1);
+    let complete: string;
+    try {
+      complete = new TextDecoder("utf-8", { fatal: true }).decode(completeBytes);
+    } catch {
+      warnings.push(
+        warningDiagnostic(
+          "EVAL_TELEMETRY_JOURNAL_MALFORMED",
+          `run journal ${eventsPath} contains invalid UTF-8; the cursor was not advanced`
+        )
+      );
+      return { records: [], nextOffset: this.cursor.byteOffset };
+    }
+    const nextOffset = this.cursor.byteOffset + completeBytes.byteLength;
     const records: EventRecord[] = [];
-    for (const line of complete.split("\n")) {
-      if (line.trim().length === 0) {
-        continue;
-      }
+    const lines = complete.split("\n");
+    lines.pop();
+    for (const [index, rawLine] of lines.entries()) {
+      const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
       try {
-        records.push(JSON.parse(line) as EventRecord);
-      } catch {
-        warnings.push(warningDiagnostic("EVAL_TELEMETRY_JOURNAL_MALFORMED", "skipped malformed journal line"));
+        const record = parseStrictJson(line);
+        if (!isEventRecord(record)) throw new Error("journal record has an invalid event envelope");
+        records.push(record);
+      } catch (error) {
+        warnings.push(
+          warningDiagnostic(
+            "EVAL_TELEMETRY_JOURNAL_MALFORMED",
+            `run journal ${eventsPath} has an invalid record at line ${index + 1}; the cursor was not advanced: ${error instanceof Error ? error.message : String(error)}`
+          )
+        );
+        return { records: [], nextOffset: this.cursor.byteOffset };
       }
     }
     return { records, nextOffset };
@@ -485,7 +489,8 @@ export class NodeTelemetryPump {
     try {
       fs.mkdirSync(path.dirname(this.input.cursorPath), { recursive: true });
       const tempPath = `${this.input.cursorPath}.tmp`;
-      fs.writeFileSync(tempPath, `${JSON.stringify(this.cursor, null, 2)}\n`, "utf8");
+      const validated = parseTelemetryCursor(this.cursor, this.input.cursorPath);
+      fs.writeFileSync(tempPath, `${JSON.stringify(validated, null, 2)}\n`, "utf8");
       fs.renameSync(tempPath, this.input.cursorPath);
     } catch (error) {
       warnings.push(
@@ -496,6 +501,26 @@ export class NodeTelemetryPump {
       );
     }
   }
+}
+
+function isEventRecord(value: unknown): value is EventRecord {
+  return (
+    isRecord(value) &&
+    typeof value.schema_version === "string" &&
+    value.schema_version.length > 0 &&
+    typeof value.event_id === "string" &&
+    value.event_id.length > 0 &&
+    typeof value.timestamp === "string" &&
+    Number.isFinite(Date.parse(value.timestamp)) &&
+    typeof value.run_id === "string" &&
+    value.run_id.length > 0 &&
+    typeof value.event_type === "string" &&
+    value.event_type.length > 0 &&
+    Object.hasOwn(value, "payload") &&
+    (value.node_id === undefined || (typeof value.node_id === "string" && value.node_id.length > 0)) &&
+    (value.status === undefined || (typeof value.status === "string" && value.status.length > 0)) &&
+    (value.provenance === undefined || isRecord(value.provenance))
+  );
 }
 
 function isSafeManifestEntry(value: unknown): value is ArtifactManifestEntry {

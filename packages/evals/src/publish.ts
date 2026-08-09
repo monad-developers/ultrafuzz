@@ -1,11 +1,21 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { validateArtifactContract, writeJsonDurable } from "@ultrafuzz/artifacts";
+import { assertPlannedGraph, readRunState, validateArtifactContract, writeJsonDurable } from "@ultrafuzz/artifacts";
 import type { EvalConfig } from "@ultrafuzz/config";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { NodeTelemetryPump, createTelemetryCursor } from "./node-telemetry.js";
+import {
+  appendEvalRunRecord,
+  parseTelemetryCursor,
+  readEvalMatrix,
+  readEvalRunManifest,
+  readEvalRunRecords,
+  readEvalScoreSummary,
+  readStrictJsonDocument,
+  writeEvalPublicationState
+} from "./eval-durable.js";
 import {
   reconcileEvalRunRecords,
   recoveryEquivalenceCanBeRecorded,
@@ -15,14 +25,14 @@ import {
 import { graphFromPlannedGraph, type EvalRowResult } from "./reporter.js";
 import { EVAL_PROVIDER_NONE, createEvalReporters, resolveEvalProvider } from "./reporters/index.js";
 import {
+  EVAL_PUBLICATION_STATE_SCHEMA_VERSION,
+  type EvalPublicationDiagnostic,
   type EvalMatrixRow,
   type EvalPlanValue,
   type EvalRunRecord,
-  type EvalRunProvenance,
-  type EvalScoreSummary,
   type EvalSuiteSpec
 } from "./types.js";
-import { EvalError, appendJsonLine, evalRunRoot, jsonFile, readJsonLines, resolveTerminalReportPath } from "./utils.js";
+import { EvalError, evalRunRoot, resolveTerminalReportPath } from "./utils.js";
 
 export interface PublishEvalRunInput {
   projectRoot: string;
@@ -60,18 +70,10 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
   if (!fs.existsSync(root)) {
     throw new EvalError("EVAL_RUN_NOT_FOUND", `eval run not found: ${input.evalRunId}`, { root });
   }
-  const manifest = jsonFile<{
-    suite?: EvalSuiteSpec;
-    suite_path?: string;
-    project_root?: string;
-    provenance?: EvalRunProvenance;
-  }>(path.join(root, "eval.json"));
-  if (manifest.suite === undefined) {
-    throw new EvalError("EVAL_RUN_MANIFEST_INVALID", "eval run manifest is missing suite");
-  }
+  const manifest = readEvalRunManifest(path.join(root, "eval.json"));
   const suite = manifest.suite;
-  const matrix = jsonFile<EvalMatrixRow[]>(path.join(root, "matrix.json"));
-  const records = readJsonLines<EvalRunRecord>(path.join(root, "runs.jsonl"));
+  const matrix = readEvalMatrix(path.join(root, "matrix.json"));
+  const records = readEvalRunRecords(path.join(root, "runs.jsonl"));
   const recordsByRow = reconcileEvalRunRecords(records);
   for (const row of matrix) {
     const record = recordsByRow.get(row.id);
@@ -80,7 +82,7 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
     const recorded = withRecordedRecoveryEquivalence(record, suite);
     recordsByRow.set(row.id, recorded);
     if (record.recovery_equivalence === undefined && canRecordRecoveryEquivalence) {
-      appendJsonLine(path.join(root, "runs.jsonl"), recorded);
+      appendEvalRunRecord(path.join(root, "runs.jsonl"), recorded);
     }
   }
   assertPublishableTerminalReports(root, matrix, recordsByRow, suite);
@@ -108,11 +110,11 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
   });
 
   const plan: EvalPlanValue = {
-    suite_path: manifest.suite_path ?? "",
-    project_root: manifest.project_root ?? path.resolve(input.projectRoot),
+    suite_path: manifest.suite_path,
+    project_root: manifest.project_root,
     suite,
     matrix,
-    ...(manifest.provenance !== undefined ? { provenance: manifest.provenance } : {})
+    provenance: manifest.provenance
   };
   for (const reporter of reporters) {
     await reporter.onPlan(plan);
@@ -125,11 +127,10 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
   for (const row of matrix) {
     const record = recordsByRow.get(row.id);
     const runRoot = record?.ultrafuzz_run_root;
-    if (record === undefined || runRoot === undefined || !fs.existsSync(runRoot)) {
-      rowsSkipped += 1;
-      continue;
+    if (record === undefined || runRoot === undefined) {
+      throw new EvalError("EVAL_PUBLISH_RUN_RECORD_MISSING", `eval row ${row.id} has no launched run record`);
     }
-    const graph = readJsonSafe(path.join(runRoot, "graph.json"));
+    const graph = assertPlannedGraph(readStrictJsonDocument(path.join(runRoot, "graph.json")));
     for (const reporter of reporters) {
       await reporter.onRowStart(row, graphFromPlannedGraph(graph, row.id));
     }
@@ -160,7 +161,7 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
   let reportUrl: string | undefined;
   const summaryPath = path.join(root, "summary.json");
   if (fs.existsSync(summaryPath)) {
-    const summary = jsonFile<EvalScoreSummary>(summaryPath);
+    const summary = readEvalScoreSummary(summaryPath);
     for (const reporter of reporters) {
       await reporter.onScores(summary.rows, summary);
       const finalized = await reporter.finalize(summary);
@@ -188,18 +189,11 @@ function assertPublishableTerminalReports(
   recordsByRow: Map<string, EvalRunRecord>,
   suite: EvalSuiteSpec
 ): void {
-  const diagnostics: Array<{
-    code: string;
-    row_id: string;
-    contract: "ultrafuzz/report@2";
-    reason: string;
-    report_path?: string;
-  }> = [];
+  const diagnostics: EvalPublicationDiagnostic[] = [];
   for (const row of matrix) {
     const record = recordsByRow.get(row.id);
     const runRoot = record?.ultrafuzz_run_root;
-    const state = runRoot === undefined ? undefined : readJsonSafe(path.join(runRoot, "state.json"));
-    const status = isRecord(state) && typeof state.status === "string" ? state.status : record?.final_status;
+    const status = runRoot === undefined ? record?.final_status : readLinkedRunState(runRoot, row.id).status;
     const reportResolution = resolveTerminalReportPath({
       ...(runRoot === undefined ? {} : { runRoot })
     });
@@ -240,14 +234,16 @@ function assertPublishableTerminalReports(
         contract: "ultrafuzz/report@2",
         reason:
           recoveryEquivalence?.reason ??
-          `recovery classification ${recoveryEquivalence?.classification ?? "unavailable"} is not allowed by the suite publication policy`
+          (recoveryEquivalence === undefined
+            ? "recovery classification is missing"
+            : `recovery classification ${recoveryEquivalence.classification} is not allowed by the suite publication policy`)
       });
     }
   }
   const statePath = path.join(evalRunRoot, "publication-state.json");
   if (diagnostics.length > 0) {
-    writeJsonDurable(statePath, {
-      schema_version: "ultrafuzz.eval.publication.v1",
+    writeEvalPublicationState(statePath, {
+      schema_version: EVAL_PUBLICATION_STATE_SCHEMA_VERSION,
       status: "non-publishable",
       diagnostics
     });
@@ -255,38 +251,37 @@ function assertPublishableTerminalReports(
       diagnostics
     });
   }
-  writeJsonDurable(statePath, {
-    schema_version: "ultrafuzz.eval.publication.v1",
+  writeEvalPublicationState(statePath, {
+    schema_version: EVAL_PUBLICATION_STATE_SCHEMA_VERSION,
     status: "publishable",
     diagnostics: []
   });
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function resetCursor(cursorPath: string): void {
-  fs.mkdirSync(path.dirname(cursorPath), { recursive: true });
-  fs.writeFileSync(cursorPath, `${JSON.stringify(createTelemetryCursor(), null, 2)}\n`, "utf8");
+  writeJsonDurable(cursorPath, parseTelemetryCursor(createTelemetryCursor(), cursorPath));
 }
 
 function rowResult(record: EvalRunRecord, runRoot: string): EvalRowResult {
-  const state = readJsonSafe(path.join(runRoot, "state.json")) as
-    { status?: string; started_at?: string; finished_at?: string } | undefined;
+  const state = readLinkedRunState(runRoot, record.row_id);
   const status =
-    state?.status === "succeeded" ||
-    state?.status === "failed" ||
-    state?.status === "timed-out" ||
-    state?.status === "canceled"
+    state.status === "succeeded" ||
+    state.status === "failed" ||
+    state.status === "timed-out" ||
+    state.status === "canceled"
       ? state.status
-      : "launched";
+      : (() => {
+          throw new EvalError("EVAL_PUBLISH_RUN_NOT_TERMINAL", `linked run for row ${record.row_id} is not terminal`, {
+            row_id: record.row_id,
+            status: state.status
+          });
+        })();
   return {
     status,
     ...(record.ultrafuzz_run_id !== undefined ? { runId: record.ultrafuzz_run_id } : {}),
     runRoot,
-    ...(state?.started_at !== undefined ? { startedAt: state.started_at } : {}),
-    ...(state?.finished_at !== undefined ? { finishedAt: state.finished_at } : {}),
+    ...(state.started_at !== undefined ? { startedAt: state.started_at } : {}),
+    ...(state.finished_at !== undefined ? { finishedAt: state.finished_at } : {}),
     ...(record.graph_fingerprint !== undefined ? { graphFingerprint: record.graph_fingerprint } : {}),
     ...(record.config_fingerprint !== undefined ? { configFingerprint: record.config_fingerprint } : {}),
     ...(record.execution_artifact_id !== undefined ? { executionArtifactId: record.execution_artifact_id } : {}),
@@ -294,10 +289,14 @@ function rowResult(record: EvalRunRecord, runRoot: string): EvalRowResult {
   };
 }
 
-function readJsonSafe(filePath: string): unknown {
+function readLinkedRunState(runRoot: string, rowId: string) {
   try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch {
-    return undefined;
+    return readRunState(path.join(runRoot, "state.json"));
+  } catch (error) {
+    throw new EvalError("EVAL_PUBLISH_RUN_STATE_INVALID", `linked run state for row ${rowId} is missing or invalid`, {
+      row_id: rowId,
+      run_root: runRoot,
+      reason: error instanceof Error ? error.message : String(error)
+    });
   }
 }

@@ -3,7 +3,13 @@ import { readFileSync, realpathSync } from "node:fs";
 import { access, appendFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { assertGroundTruthSubject, readGroundTruthDocument, type GroundTruthSubject } from "@ultrafuzz/evals";
+import { readRunState } from "@ultrafuzz/artifacts";
+import {
+  assertGroundTruthSubject,
+  readEvalRunSummary,
+  readGroundTruthDocument,
+  type GroundTruthSubject
+} from "@ultrafuzz/evals";
 
 import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig, type PrivateModalBenchmarkConfig } from "./config.js";
 import { EVAL_WATCH_TIMEOUT_SECONDS, type ModalModelSpec } from "./defaults.js";
@@ -23,7 +29,7 @@ import {
   modalDurableRunNeedsResume,
   modalEvalRunCommand,
   NonResumableTerminalRunError,
-  repairModalEvalRunRecord,
+  finalizeModalEvalRunRecord,
   type ModalResumeRunState,
   type ModalResumeWorkspace
 } from "./resume.js";
@@ -146,10 +152,8 @@ async function main(): Promise<void> {
       let control: string;
       let evalRunId: string;
       let terminalDisposition: TerminalDisposition | undefined;
-      // Route on whether a durable run actually exists, not on whether an eval run directory exists. Those
-      // are not the same question, and answering the second one stranded R54: a generation-0 failure during
-      // workflow submission leaves the directory behind with nothing linked to it, and every later
-      // generation then died on the resume precondition in ~92s until the no-progress budget ran out (#378).
+      // The current eval journal is the sole evaluation-to-run link. Resume only a run named there; a
+      // durable workflow absent from that journal is inconsistent state and fails closed in the lookup.
       const found = await findModalResumeWorkspace(WORK_ROOT);
       if (found.kind === "resumable") {
         const workspace = found.workspace;
@@ -164,9 +168,8 @@ async function main(): Promise<void> {
         //
         // This is the only destructive step, and it is bounded by what the lookup proved: a run root is
         // named here only when its metadata is absent or carries no workflow link. That link is written
-        // before submission, so either way no workflow was ever submitted from that root. A root that IS
-        // linked but is missing its state is reported as damage rather than named here. A run that
-        // compiled — the R54 case — is linked, so it resumes above and never reaches this branch.
+        // before submission, so either way no workflow was ever submitted from that root. A linked root
+        // with missing state, or one absent from the eval journal, is rejected and never reaches deletion.
         for (const staleEvalRunId of found.staleEvalRunIds ?? []) {
           await rm(path.join(WORK_ROOT, "control", ".ultrafuzz", "evals", "runs", staleEvalRunId), {
             recursive: true,
@@ -214,14 +217,12 @@ async function main(): Promise<void> {
       }
 
       const evalDir = path.join(control, ".ultrafuzz/evals/runs", evalRunId);
-      const runSummary = JSON.parse(await readFile(path.join(evalDir, "run-summary.json"), "utf8")) as {
-        records?: Array<{ final_status?: string }>;
-      };
-      if (runSummary.records?.length !== 1) throw new OperationalDispositionError("unreachable");
-      if (runSummary.records[0]?.final_status !== "succeeded" && terminalDisposition === undefined) {
+      const runSummary = readEvalRunSummary(path.join(evalDir, "run-summary.json"));
+      if (runSummary.records.length !== 1) throw new OperationalDispositionError("unreachable");
+      if (runSummary.records[0]!.final_status !== "succeeded" && terminalDisposition === undefined) {
         terminalDisposition = await inspectTerminalDisposition(target);
       }
-      if (!canScoreBenchmarkRow(runSummary.records[0]?.final_status, terminalDisposition)) {
+      if (!canScoreBenchmarkRow(runSummary.records[0]!.final_status, terminalDisposition)) {
         throw new OperationalDispositionError("unreachable");
       }
 
@@ -260,8 +261,7 @@ async function resumeExistingEvaluation(
   evalRunId: string;
   terminalDisposition: TerminalDisposition | undefined;
 }> {
-  await verifyPersistedGroundTruthBinding(workspace.target).catch(async (error) => {
-    await rm(WORK_ROOT, { recursive: true, force: true });
+  await verifyPersistedGroundTruthBinding(workspace.target).catch((error) => {
     if (error instanceof CheckpointIncompatibleError) throw error;
     throw new CheckpointIncompatibleError("persistent ground truth subject binding is incompatible", { cause: error });
   });
@@ -289,7 +289,7 @@ async function resumeExistingEvaluation(
     state = await waitForTerminalRun(workspace, writer, stateBeforeResume);
     disposition = await terminalDispositionForState(workspace, state);
   }
-  await repairModalEvalRunRecord(workspace, state, disposition);
+  await finalizeModalEvalRunRecord(workspace, state, disposition);
   return {
     control: workspace.control,
     evalRunId: workspace.evalRunId,
@@ -394,7 +394,6 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
       revision: targetProof.commit
     });
   } catch (error) {
-    await rm(WORK_ROOT, { recursive: true, force: true });
     throw new CheckpointIncompatibleError("persistent ground truth subject binding is incompatible", { cause: error });
   }
   await runChecked(["node", CLI, "references", "sync", "--project", target, "--json"], {
@@ -545,25 +544,21 @@ async function reportProgress(target: string, writer: WorkerResultWriter): Promi
   await writer.writePartial(await readWorkerCheckpoint(target));
 }
 
-async function durableRunState(target: string, expectedRunId?: string): Promise<ModalResumeRunState | undefined> {
-  const available = await readdirIfExists(path.join(target, ".ultrafuzz/runs"));
-  const runs =
-    expectedRunId === undefined ? available.sort().reverse() : available.filter((run) => run === expectedRunId);
-  for (const run of runs) {
-    try {
-      const state = JSON.parse(await readFile(path.join(target, ".ultrafuzz/runs", run, "state.json"), "utf8")) as {
-        run_id?: string;
-        status?: string;
-        nodes?: Record<string, { status?: string }>;
-      };
-      if (state.nodes !== undefined && (state.run_id === undefined || state.run_id === run)) {
-        return { ...state, run_id: run };
-      }
-    } catch {
-      // Keep looking for a durable state file.
+async function durableRunState(target: string, expectedRunId: string): Promise<ModalResumeRunState | undefined> {
+  const statePath = path.join(target, ".ultrafuzz/runs", expectedRunId, "state.json");
+  try {
+    await access(statePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR") {
+      return undefined;
     }
+    throw error;
   }
-  return undefined;
+  const state = readRunState(statePath);
+  if (state.run_id !== expectedRunId) {
+    throw new Error(`durable run state identifies ${state.run_id}, expected ${expectedRunId}`);
+  }
+  return state;
 }
 
 async function runChecked(

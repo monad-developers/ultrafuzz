@@ -1,9 +1,16 @@
-import { randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
-import type { FileHandle } from "node:fs/promises";
+import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 
-import { layoutForRunRoot } from "@ultrafuzz/artifacts";
+import { layoutForRunRoot, readRunMetadataDocument } from "@ultrafuzz/artifacts";
+import {
+  appendEvalRunRecord,
+  EVAL_RUN_SUMMARY_SCHEMA_VERSION,
+  readEvalRunManifest,
+  readEvalRunRecords,
+  writeEvalRunSummary,
+  type EvalRunRecord,
+  type EvalWorkflowLifecycle
+} from "@ultrafuzz/evals";
 
 import { EVAL_WATCH_TIMEOUT_SECONDS } from "./defaults.js";
 import type { TerminalDisposition } from "./terminal-disposition.js";
@@ -114,24 +121,10 @@ export type ModalResumeLookup =
 /**
  * Decide whether a volume holds a resumable run, WITHOUT treating "nothing to resume" as a failure.
  *
- * The problem this solves (#378): `runs.jsonl` is the journal that links an evaluation row to the durable
- * run executing it, and that link is appended only AFTER the launcher returns. `startRun` creates the run
- * root, writes `state.json`, compiles the workflow and submits it before returning. So there is a wide
- * window — the whole of compilation and submission — in which a real durable run exists on disk, with real
- * completed nodes, and nothing in the journal points at it. Reading the journal alone, that is
- * indistinguishable from "never started", and the worker used to reject it outright and wedge the run
- * permanently, because the state is on a durable volume and so recurs every generation.
- *
- * The journal is therefore treated as a cache, not as the source of truth. When it holds no link, the
- * durable run directory is consulted directly:
- *
- *   - **a run linked to a workflow exists** -> resumable. Its journal link is missing, not the run.
- *     `repairModalEvalRunRecord` writes that link back when the run finalizes. Restarting here would
- *     abandon completed work, and would fail anyway: row run ids are deterministic, so `planRun` would
- *     refuse with `RUN_ALREADY_EXISTS`.
- *   - **no linked run exists** -> genuinely not started. Both ids involved are deterministic, so the caller
- *     is told what to clear before restarting: `staleEvalRunIds` for eval run directories
- *     (`EVAL_RUN_ALREADY_EXISTS`) and `staleRunRootIds` for unlinked run roots (`RUN_ALREADY_EXISTS`).
+ * `runs.jsonl` is the canonical evaluation-to-run link. A durable run that exists on disk but is absent
+ * from that journal is inconsistent state, not evidence from which to reconstruct a missing record. The
+ * strict-contract release intentionally fails that window closed: it never infers or writes a link after
+ * the fact.
  *
  * Counts of linked runs stay asymmetric: more than one durable run linked to a single evaluation is
  * corruption no correct producer can create, and silently picking a side would destroy a real run.
@@ -160,7 +153,14 @@ export async function findModalResumeWorkspace(workRoot: string): Promise<ModalR
     // and it creates that directory before writing `eval.json`. A kill in between leaves a directory that
     // is not a candidate but still blocks reuse, so a restart has to be told to clear it.
     directories.push(name);
-    if (await isRegularFileNotSymlink(path.join(root, "eval.json"))) candidates.push(name);
+    const manifestPath = path.join(root, "eval.json");
+    const manifestStat = await lstatIfMissing(manifestPath);
+    if (manifestStat !== undefined) {
+      if (!manifestStat.isFile() || manifestStat.isSymbolicLink()) {
+        throw new Error(`evaluation manifest at ${manifestPath} must be a regular file`);
+      }
+      candidates.push(name);
+    }
   }
   // Assert the shape of whatever IS present before deciding anything, including in the zero-candidate case.
   // A path that exists but is a symlink is damage at any candidate count, and the rest of this file is
@@ -191,9 +191,16 @@ export async function findModalResumeWorkspace(workRoot: string): Promise<ModalR
     throw new Error("persistent workspace is incomplete");
   }
   const evalRunId = candidates[0]!;
+  const manifest = readEvalRunManifest(path.join(evalRoot, evalRunId, "eval.json"));
+  if (manifest.eval_run_id !== evalRunId) {
+    throw new Error(`evaluation manifest identifies ${manifest.eval_run_id}, expected ${evalRunId}`);
+  }
+  if (path.resolve(manifest.project_root) !== path.resolve(control)) {
+    throw new Error("evaluation manifest project root does not identify the persistent control workspace");
+  }
   // A missing journal is the earliest form of the same window: `eval.json` is written before the first
   // append, so a kill in between leaves no file at all. That is a state to classify, not to crash on.
-  const records = await readRecordsIfMissing(path.join(evalRoot, evalRunId, "runs.jsonl"));
+  const records = readEvalRunRecords(path.join(evalRoot, evalRunId, "runs.jsonl"), { allowMissing: true });
   const productRunIds = new Set(
     records
       .map((record) => record.ultrafuzz_run_id)
@@ -206,11 +213,10 @@ export async function findModalResumeWorkspace(workRoot: string): Promise<ModalR
     return { kind: "resumable", workspace: { target, control, evalRunId, productRunId: [...productRunIds][0]! } };
   }
   const durable = await durableRunsOnDisk(target);
-  if (durable.resumable.length > 1) {
-    throw new Error(`resume requires exactly one durable run on disk, found ${durable.resumable.length}`);
-  }
-  if (durable.resumable.length === 1) {
-    return { kind: "resumable", workspace: { target, control, evalRunId, productRunId: durable.resumable[0]! } };
+  if (durable.resumable.length > 0) {
+    throw new Error(
+      `evaluation journal does not link durable run(s) ${durable.resumable.join(", ")}; refusing to infer a missing link`
+    );
   }
   // Damage only matters on the branch that would restart: a damaged root blocks `planRun`, but it must not
   // preempt resuming a run that is perfectly good. This applies to the `damaged` LIST only — a read fault
@@ -304,25 +310,24 @@ function isLayoutAddressable(runRoot: string): boolean {
  * deletion. Only ENOENT/ENOTDIR count as absence, matching `readdirIfMissing`.
  */
 async function hasLinkedWorkflow(runRoot: string): Promise<boolean> {
-  const text = await readFile(layoutForRunRoot(runRoot).runMetadataPath, "utf8").catch(
-    (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
-      throw error;
-    }
-  );
-  if (text === undefined) return false;
-  let metadata: { workflow?: { run_id?: unknown; workflowRunId?: unknown }; smithers?: { workflowRunId?: unknown } };
+  const metadataPath = layoutForRunRoot(runRoot).runMetadataPath;
+  const metadataStat = await lstat(metadataPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+    throw error;
+  });
+  if (metadataStat === undefined) return false;
+  if (!metadataStat.isFile() || metadataStat.isSymbolicLink()) {
+    throw new Error(`run metadata at ${metadataPath} must be a regular file`);
+  }
+  let metadata;
   try {
-    metadata = JSON.parse(text) as typeof metadata;
+    metadata = readRunMetadataDocument(metadataPath, path.basename(runRoot));
   } catch (error) {
-    // Failing closed is the decision here, not an oversight: reading unparseable metadata as "unlinked"
-    // would route the root to deletion. Name the file so the refusal is diagnosable from the volume.
-    throw new Error(`run metadata at ${layoutForRunRoot(runRoot).runMetadataPath} is not valid JSON`, {
+    throw new Error(`run metadata at ${metadataPath} is not a valid current run document`, {
       cause: error
     });
   }
-  const runId = metadata.workflow?.run_id ?? metadata.workflow?.workflowRunId ?? metadata.smithers?.workflowRunId;
-  return typeof runId === "string" && runId.length > 0;
+  return metadata.workflow !== undefined;
 }
 
 /**
@@ -378,7 +383,7 @@ export async function locateModalResumeWorkspace(workRoot: string): Promise<Moda
   return found.workspace;
 }
 
-export async function repairModalEvalRunRecord(
+export async function finalizeModalEvalRunRecord(
   workspace: ModalResumeWorkspace,
   state: ModalResumeRunState,
   disposition: TerminalDisposition | undefined
@@ -392,70 +397,40 @@ export async function repairModalEvalRunRecord(
   }
   const evalDir = path.join(workspace.control, ".ultrafuzz", "evals", "runs", workspace.evalRunId);
   const recordsPath = path.join(evalDir, "runs.jsonl");
-  const records = await readRecordsIfMissing(recordsPath);
-  let linked: Array<Record<string, unknown>> = records.filter((record) => record.ultrafuzz_run_id === state.run_id);
-  // #378: the journal may never have recorded the link, because it is appended only after the launcher
-  // returns. The run itself is the evidence it existed, so write the link the journal is missing rather
-  // than refuse a run that plainly ran. Only safe when NOTHING is linked: a journal that points at some
-  // other durable run is a genuine mismatch and must still be refused.
-  const linkageMissing = linked.length === 0 && !records.some((record) => isLinked(record));
-  if (linkageMissing) {
-    linked = [{ ...(records[records.length - 1] ?? {}), row_id: await soleRowId(evalDir, records) }];
-  }
+  const records = readEvalRunRecords(recordsPath);
+  const linked = records.filter((record) => record.ultrafuzz_run_id === state.run_id);
   if (linked.length === 0) throw new Error(`evaluation run does not reference durable run ${state.run_id}`);
   const rowIds = new Set(linked.map((record) => record.row_id));
   if (rowIds.size !== 1) throw new Error("evaluation run has ambiguous linked rows");
-  // A repaired row has to be the row a successful launch would have written, not the failed row with a link
-  // stamped on it. `scoreEvalRun` resolves the terminal report through `ultrafuzz_run_root`, and without it
-  // falls back to a path built from `row.run_id` — a different directory from the bounded run id actually on
-  // disk — so the run would drive to success and then fail scoring, wedging one step further downstream.
-  // `status` matters for the same reason: efficiency and status reporting read it, and would otherwise call
-  // a launch failed for a run that succeeded.
-  const record: Record<string, unknown> = {
-    ...linked[linked.length - 1]!,
-    ultrafuzz_run_id: state.run_id,
-    ...(linkageMissing
-      ? {
-          ultrafuzz_run_root: path.join(workspace.target, ".ultrafuzz", "runs", state.run_id),
-          status: "launched",
-          launcher: {
-            ...(typeof (linked[linked.length - 1] as Record<string, unknown> | undefined)?.launcher === "object"
-              ? ((linked[linked.length - 1] as Record<string, unknown>).launcher as Record<string, unknown>)
-              : {}),
-            status: "succeeded"
-          }
-        }
-      : {})
-  };
-  const finalStatus = state.status;
-  const currentWorkflow =
-    typeof record.workflow === "object" && record.workflow !== null && !Array.isArray(record.workflow)
-      ? (record.workflow as Record<string, unknown>)
-      : undefined;
-  const finishedAt =
-    timestamp(state.finished_at) ??
-    timestamp(currentWorkflow?.finished_at) ??
-    timestamp(record.finished_at) ??
-    new Date().toISOString();
-  const workflow = {
+  const record = linked[linked.length - 1]!;
+  const expectedRunRoot = path.join(workspace.target, ".ultrafuzz", "runs", state.run_id);
+  if (record.ultrafuzz_run_root !== expectedRunRoot || record.status !== "launched") {
+    throw new Error(`evaluation row for durable run ${state.run_id} is not a complete launched record`);
+  }
+  const finalStatus: "succeeded" | "failed" = state.status === "succeeded" ? "succeeded" : "failed";
+  const currentWorkflow = record.workflow;
+  const startedAt = timestamp(state.started_at);
+  const finishedAt = timestamp(state.finished_at);
+  if (startedAt === undefined || finishedAt === undefined) {
+    throw new Error(`terminal durable run ${state.run_id} is missing canonical lifecycle timestamps`);
+  }
+  const workflow: EvalWorkflowLifecycle = {
     status: finalStatus,
     terminal: true,
-    started_at:
-      timestamp(currentWorkflow?.started_at) ?? timestamp(state.started_at) ?? timestamp(state.created_at) ?? null,
+    started_at: startedAt,
     finished_at: finishedAt
   };
-  const updated =
+  const updated: EvalRunRecord =
     record.final_status === finalStatus &&
     currentWorkflow?.status === workflow.status &&
     currentWorkflow?.terminal === workflow.terminal &&
     currentWorkflow?.started_at === workflow.started_at &&
     currentWorkflow?.finished_at === workflow.finished_at
       ? record
-      : { ...record, final_status: finalStatus, workflow, finished_at: finishedAt };
-  // A repaired link must reach the journal even when nothing else about the row changed, otherwise the
-  // next generation would have to rediscover it from disk all over again.
-  if (updated !== record || linkageMissing) await appendLineDurable(recordsPath, `${JSON.stringify(updated)}\n`);
-  await writeJsonAtomic(path.join(evalDir, "run-summary.json"), {
+      : { ...record, final_status: finalStatus, workflow };
+  if (updated !== record) appendEvalRunRecord(recordsPath, updated);
+  writeEvalRunSummary(path.join(evalDir, "run-summary.json"), {
+    schema_version: EVAL_RUN_SUMMARY_SCHEMA_VERSION,
     eval_run_id: workspace.evalRunId,
     launched: 1,
     failed: 0,
@@ -464,109 +439,23 @@ export async function repairModalEvalRunRecord(
   });
 }
 
-function isLinked(record: Record<string, unknown>): boolean {
-  return typeof record.ultrafuzz_run_id === "string" && record.ultrafuzz_run_id.trim() !== "";
-}
-
-/**
- * The one evaluation row a repaired link belongs to.
- *
- * Prefers the journal, and falls back to `matrix.json` for the case where the journal was never written at
- * all. Refuses anything ambiguous: attaching a durable run to the wrong row would misreport which
- * configuration produced the result, which is worse than failing to repair.
- */
-async function soleRowId(evalDir: string, records: Array<Record<string, unknown>>): Promise<string> {
-  const journalRowIds = new Set(
-    records.map((record) => record.row_id).filter((value): value is string => typeof value === "string")
-  );
-  if (journalRowIds.size === 1) return [...journalRowIds][0]!;
-  if (journalRowIds.size > 1) throw new Error("evaluation run has ambiguous linked rows");
-  const matrix = (await readFile(path.join(evalDir, "matrix.json"), "utf8").then(
-    (text) => JSON.parse(text) as unknown,
-    () => undefined
-  )) as Array<{ id?: unknown }> | undefined;
-  const matrixRowIds = Array.isArray(matrix)
-    ? matrix.map((row) => row?.id).filter((value): value is string => typeof value === "string")
-    : [];
-  if (matrixRowIds.length !== 1) {
-    throw new Error(`evaluation run has no unambiguous row to link, found ${matrixRowIds.length}`);
-  }
-  return matrixRowIds[0]!;
-}
-
 function timestamp(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() !== "" && Number.isFinite(Date.parse(value)) ? value : undefined;
 }
 
-/**
- * Records, treating an absent journal as no records.
- *
- * A malformed line still throws, deliberately. Current writers fsync, but durable journals can outlive the
- * version that wrote them and an abrupt storage failure can still expose a torn final line. That line may be
- * the one carrying the durable run link; dropping it silently would read as "never linked" and could strand
- * a live run, so this stays loud.
- */
-async function readRecordsIfMissing(filePath: string): Promise<Array<Record<string, unknown>>> {
-  return readRecords(filePath).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT" || error.code === "ENOTDIR") return [];
-    throw error;
-  });
-}
-
-async function readRecords(filePath: string): Promise<Array<Record<string, unknown>>> {
-  return (await readFile(filePath, "utf8"))
-    .split(/\r?\n/u)
-    .filter((line) => line.trim() !== "")
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-}
-
-async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
-  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  let handle: FileHandle | undefined;
-  try {
-    handle = await open(temporary, "wx", 0o600);
-    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await rename(temporary, filePath);
-    await syncDirectory(path.dirname(filePath));
-  } finally {
-    await handle?.close().catch(() => undefined);
-    await unlink(temporary).catch(() => undefined);
-  }
-}
-
-async function appendLineDurable(filePath: string, line: string): Promise<void> {
-  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const handle = await open(filePath, "a", 0o600);
-  try {
-    await handle.writeFile(line, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  await syncDirectory(path.dirname(filePath));
-}
-
-async function syncDirectory(directoryPath: string): Promise<void> {
-  const directory = await open(directoryPath, "r");
-  try {
-    await directory.sync();
-  } finally {
-    await directory.close();
-  }
-}
-
 async function isDirectoryNotSymlink(filePath: string): Promise<boolean> {
-  return lstat(filePath)
-    .then((stat) => stat.isDirectory() && !stat.isSymbolicLink())
-    .catch(() => false);
+  const stat = await lstatIfMissing(filePath);
+  return stat !== undefined && stat.isDirectory() && !stat.isSymbolicLink();
 }
 
 async function isRegularFileNotSymlink(filePath: string): Promise<boolean> {
-  return lstat(filePath)
-    .then((stat) => stat.isFile() && !stat.isSymbolicLink())
-    .catch(() => false);
+  const stat = await lstatIfMissing(filePath);
+  return stat !== undefined && stat.isFile() && !stat.isSymbolicLink();
+}
+
+async function lstatIfMissing(filePath: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
+  return lstat(filePath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+    throw error;
+  });
 }
