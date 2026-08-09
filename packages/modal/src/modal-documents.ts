@@ -12,6 +12,7 @@ import {
   type JsonFileValidationDiagnostic
 } from "@ultrafuzz/artifacts";
 
+import { assertModalRetainedZodShape } from "./benchmark-config-zod.js";
 import { type DeepReadonly, type ModalContractForSchemaId, type ModalContractSchemaId } from "./modal-contracts.js";
 import {
   modalSchemaBundleDigest,
@@ -103,6 +104,13 @@ export function parseModalDocumentBytes<SchemaId extends ModalContractSchemaId>(
   }
   const value = parsed as ModalContractForSchemaId<SchemaId>;
   try {
+    assertModalRetainedZodShape(schemaId, value);
+  } catch (error) {
+    throw new ModalDocumentValidationError(schemaId, `Modal JSON document failed retained Zod shape validation`, [], {
+      cause: error
+    });
+  }
+  try {
     assertModalDocumentSemantics(schemaId, value);
   } catch (error) {
     throw new ModalDocumentValidationError(schemaId, `Modal JSON document failed trusted semantic gates`, [], {
@@ -140,6 +148,13 @@ export function assertModalDocumentValue<SchemaId extends ModalContractSchemaId>
       schemaId,
       `Modal JSON value failed ${schemaId}${detail === "" ? "" : `: ${detail}`}`
     );
+  }
+  try {
+    assertModalRetainedZodShape(schemaId, value);
+  } catch (error) {
+    throw new ModalDocumentValidationError(schemaId, `Modal JSON value failed retained Zod shape validation`, [], {
+      cause: error
+    });
   }
   try {
     assertModalDocumentSemantics(schemaId, value);

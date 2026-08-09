@@ -2,6 +2,7 @@ import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
 import { z, type ZodType } from "zod/v4";
 
 import { assertEvmbenchJsonSchema } from "./schema-registry.js";
+import { assertEvmbenchDocumentSemantics } from "./semantic-gates.js";
 
 export const EVMBENCH_PROFILE_VERSION = "ultrafuzz.evmbench.profile.v2" as const;
 export const EVMBENCH_DEFINITION_VERSION = "ultrafuzz.evmbench.lock.v2" as const;
@@ -30,16 +31,7 @@ export const evmbenchProfileSchema = z
     model: modelSchema,
     reasoning: reasoningSchema
   })
-  .strict()
-  .superRefine((profile, context) => {
-    if (profile.node_timeout_seconds > profile.workflow_timeout_seconds) {
-      context.addIssue({
-        code: "custom",
-        path: ["node_timeout_seconds"],
-        message: "node timeout must not exceed workflow timeout"
-      });
-    }
-  });
+  .strict();
 
 export type EvmbenchProfile = z.infer<typeof evmbenchProfileSchema>;
 
@@ -63,16 +55,12 @@ export const evmbenchCatalogAuditSchema = z
 export const evmbenchCatalogSchema = z
   .object({
     schema_version: z.literal(EVMBENCH_CATALOG_VERSION),
-    audits: z.array(evmbenchCatalogAuditSchema).min(1)
+    audits: z
+      .array(evmbenchCatalogAuditSchema)
+      .min(1)
+      .superRefine((audits, context) => addJsonUniqueItemsIssues(audits, context))
   })
-  .strict()
-  .superRefine((catalog, context) =>
-    addDuplicateIssues(
-      catalog.audits.map((audit) => audit.id),
-      ["audits"],
-      context
-    )
-  );
+  .strict();
 
 export const evmbenchLockSchema = z
   .object({
@@ -92,27 +80,19 @@ export const evmbenchLockSchema = z
     selected_split: z.literal("detect-tasks"),
     splits: z
       .object({
-        debug: z.array(evmbenchSafeIdSchema).min(1),
-        "detect-tasks": z.array(evmbenchSafeIdSchema).min(1)
+        debug: z
+          .array(evmbenchSafeIdSchema)
+          .min(1)
+          .superRefine((values, context) => addJsonUniqueItemsIssues(values, context)),
+        "detect-tasks": z
+          .array(evmbenchSafeIdSchema)
+          .min(1)
+          .superRefine((values, context) => addJsonUniqueItemsIssues(values, context))
       })
       .strict(),
     catalog: z.object({ path: z.literal("audit-catalog.json"), sha256: evmbenchDigestSchema }).strict()
   })
-  .strict()
-  .superRefine((lock, context) => {
-    addDuplicateIssues(lock.splits.debug, ["splits", "debug"], context);
-    addDuplicateIssues(lock.splits["detect-tasks"], ["splits", "detect-tasks"], context);
-    const detected = new Set(lock.splits["detect-tasks"]);
-    for (const [index, auditId] of lock.splits.debug.entries()) {
-      if (!detected.has(auditId)) {
-        context.addIssue({
-          code: "custom",
-          path: ["splits", "debug", index],
-          message: "debug audit is absent from detect-tasks"
-        });
-      }
-    }
-  });
+  .strict();
 
 export type EvmbenchCatalog = z.infer<typeof evmbenchCatalogSchema>;
 export type EvmbenchCatalogAudit = z.infer<typeof evmbenchCatalogAuditSchema>;
@@ -126,19 +106,7 @@ export const evmbenchPerAuditMetricsSchema = z
     detect_award: z.number().nonnegative(),
     detect_max_award: z.number().nonnegative()
   })
-  .strict()
-  .superRefine((metrics, context) => {
-    if (metrics.score > metrics.max_score) {
-      context.addIssue({ code: "custom", path: ["score"], message: "score exceeds max_score" });
-    }
-    if (metrics.detect_award > metrics.detect_max_award) {
-      context.addIssue({
-        code: "custom",
-        path: ["detect_award"],
-        message: "detect_award exceeds detect_max_award"
-      });
-    }
-  });
+  .strict();
 
 export const evmbenchOfficialMetricsSchema = z
   .object({
@@ -147,52 +115,11 @@ export const evmbenchOfficialMetricsSchema = z
     recall: z.number().min(0).max(1),
     detect_award: z.number().nonnegative(),
     detect_max_award: z.number().nonnegative(),
-    per_audit: z.record(evmbenchSafeIdSchema, evmbenchPerAuditMetricsSchema)
+    per_audit: z
+      .record(evmbenchSafeIdSchema, evmbenchPerAuditMetricsSchema)
+      .refine((perAudit) => Object.keys(perAudit).length > 0, "per_audit must not be empty")
   })
-  .strict()
-  .superRefine((metrics, context) => {
-    if (Object.keys(metrics.per_audit).length === 0) {
-      context.addIssue({ code: "custom", path: ["per_audit"], message: "per_audit must not be empty" });
-    }
-    if (metrics.score > metrics.max_score) {
-      context.addIssue({ code: "custom", path: ["score"], message: "score exceeds max_score" });
-    }
-    if (metrics.detect_award > metrics.detect_max_award) {
-      context.addIssue({
-        code: "custom",
-        path: ["detect_award"],
-        message: "detect_award exceeds detect_max_award"
-      });
-    }
-    if (!approximatelyEqual(metrics.recall, metrics.score / metrics.max_score)) {
-      context.addIssue({ code: "custom", path: ["recall"], message: "recall does not match score/max_score" });
-    }
-    const perAudit = Object.values(metrics.per_audit);
-    addAggregateIssue(
-      metrics.score,
-      perAudit.reduce((total, row) => total + row.score, 0),
-      "score",
-      context
-    );
-    addAggregateIssue(
-      metrics.max_score,
-      perAudit.reduce((total, row) => total + row.max_score, 0),
-      "max_score",
-      context
-    );
-    addAggregateIssue(
-      metrics.detect_award,
-      perAudit.reduce((total, row) => total + row.detect_award, 0),
-      "detect_award",
-      context
-    );
-    addAggregateIssue(
-      metrics.detect_max_award,
-      perAudit.reduce((total, row) => total + row.detect_max_award, 0),
-      "detect_max_award",
-      context
-    );
-  });
+  .strict();
 
 export const evmbenchRunProvenanceSchema = z
   .object({
@@ -201,7 +128,10 @@ export const evmbenchRunProvenanceSchema = z
     ultrafuzz_dirty: z.boolean(),
     evmbench_commit: evmbenchCommitSchema,
     frontier_evals_commit: evmbenchCommitSchema,
-    targets: z.array(z.object({ audit_id: evmbenchSafeIdSchema, source_commit: evmbenchCommitSchema }).strict()).min(1),
+    targets: z
+      .array(z.object({ audit_id: evmbenchSafeIdSchema, source_commit: evmbenchCommitSchema }).strict())
+      .min(1)
+      .superRefine((targets, context) => addJsonUniqueItemsIssues(targets, context)),
     audit_images: z
       .array(
         z
@@ -212,7 +142,8 @@ export const evmbenchRunProvenanceSchema = z
           })
           .strict()
       )
-      .min(1),
+      .min(1)
+      .superRefine((images, context) => addJsonUniqueItemsIssues(images, context)),
     profile: z.enum(["smoke", "full"]),
     profile_fingerprint: evmbenchDigestSchema,
     topology_fingerprint: evmbenchDigestSchema,
@@ -223,28 +154,6 @@ export const evmbenchRunProvenanceSchema = z
   })
   .strict()
   .superRefine((provenance, context) => {
-    addDuplicateIssues(
-      provenance.targets.map((target) => target.audit_id),
-      ["targets"],
-      context
-    );
-    addDuplicateIssues(
-      provenance.audit_images.map((image) => image.audit_id),
-      ["audit_images"],
-      context
-    );
-    if (
-      !sameValues(
-        provenance.targets.map((target) => target.audit_id),
-        provenance.audit_images.map((image) => image.audit_id)
-      )
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["audit_images"],
-        message: "audit image identities do not match targets"
-      });
-    }
     if (
       provenance.agent === "official-gold" &&
       provenance.audit_images.some((image) => image.overlay_image_digest !== null)
@@ -296,18 +205,7 @@ export const normalizedEvmbenchResultSchema = z
     provenance: evmbenchRunProvenanceSchema,
     operational: evmbenchOperationalMetricsSchema
   })
-  .strict()
-  .superRefine((result, context) => {
-    const officialIds = Object.keys(result.official_evmbench.per_audit);
-    const targetIds = result.provenance.targets.map((target) => target.audit_id);
-    if (!sameValues(officialIds, targetIds)) {
-      context.addIssue({
-        code: "custom",
-        path: ["official_evmbench", "per_audit"],
-        message: "official per-audit identities do not match provenance targets"
-      });
-    }
-  });
+  .strict();
 
 export type EvmbenchRunProvenance = z.infer<typeof evmbenchRunProvenanceSchema>;
 export type EvmbenchOperationalMetrics = z.infer<typeof evmbenchOperationalMetricsSchema>;
@@ -361,21 +259,23 @@ function parseDocument<T>(bytes: Uint8Array, schemaId: string, schema: ZodType<T
     maxProperties: 250_000
   });
   assertEvmbenchJsonSchema(schemaId, value, label);
-  return schema.parse(value);
+  const parsed = schema.parse(value);
+  assertEvmbenchDocumentSemantics(schemaId, parsed);
+  return parsed;
 }
 
 function serializeDocument<T>(value: T, schemaId: string, schema: ZodType<T>, label: string): Buffer {
-  schema.parse(value);
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
   parseDocument(bytes, schemaId, schema, label);
   return bytes;
 }
 
-function addDuplicateIssues(values: readonly string[], path: PropertyKey[], context: z.core.$RefinementCtx): void {
+function addJsonUniqueItemsIssues(values: readonly unknown[], context: z.core.$RefinementCtx): void {
   const seen = new Set<string>();
   for (const [index, value] of values.entries()) {
-    if (seen.has(value)) context.addIssue({ code: "custom", path: [...path, index], message: "duplicate identity" });
-    seen.add(value);
+    const identity = canonicalJsonIdentity(value);
+    if (seen.has(identity)) context.addIssue({ code: "custom", path: [index], message: "duplicate array item" });
+    seen.add(identity);
   }
 }
 
@@ -390,17 +290,13 @@ function addCompletenessIssue(
   }
 }
 
-function addAggregateIssue(value: number, aggregate: number, field: string, context: z.core.$RefinementCtx): void {
-  if (!approximatelyEqual(value, aggregate)) {
-    context.addIssue({ code: "custom", path: [field], message: `${field} does not equal its per-audit aggregate` });
+function canonicalJsonIdentity(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJsonIdentity).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJsonIdentity(entry)}`)
+      .join(",")}}`;
   }
-}
-
-function sameValues(left: readonly string[], right: readonly string[]): boolean {
-  const sortedRight = [...right].sort();
-  return left.length === right.length && [...left].sort().every((value, index) => value === sortedRight[index]);
-}
-
-function approximatelyEqual(left: number, right: number): boolean {
-  return Math.abs(left - right) <= Number.EPSILON * Math.max(1, Math.abs(left), Math.abs(right)) * 8;
+  return JSON.stringify(value);
 }

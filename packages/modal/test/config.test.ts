@@ -9,6 +9,7 @@ import {
   fingerprintModalConfigFile,
   fingerprintModalModel,
   loadModalBenchmarkConfig,
+  modalBenchmarkConfigZodSchema,
   modalBenchmarkConfigValidatorsAgree,
   parseModalBenchmarkConfig
 } from "../src/config.js";
@@ -19,6 +20,10 @@ import {
   MODAL_PUBLIC_SANDBOX_TIMEOUT_MS,
   MODAL_SANDBOX_TIMEOUT_MS
 } from "../src/defaults.js";
+import { MODAL_BENCHMARK_CONFIG_SCHEMA_ID } from "../src/modal-contracts.js";
+import { ModalDocumentValidationError } from "../src/modal-documents.js";
+import { validateModalJsonSchema } from "../src/modal-schema-registry.js";
+import { ModalSemanticValidationError } from "../src/modal-semantic-gates.js";
 
 function minimalConfig(): Record<string, unknown> {
   return {
@@ -52,6 +57,41 @@ function commonConfig(runId: string, models: unknown[]): Record<string, unknown>
     loops: 3,
     models
   };
+}
+
+function minimalPublicConfig() {
+  const model = DEFAULT_BENCHMARK_MODELS[0]!;
+  return {
+    ...commonConfig("public-run", [model]),
+    public_benchmark: {
+      benchmark: "evmbench" as const,
+      lane: "smoke" as const,
+      runner_model_profile: model.slug,
+      candidate_repository: "https://github.com/monad-developers/ultrafuzz",
+      candidate_commit: "a".repeat(40),
+      targets: [
+        {
+          id: "target-one",
+          repository: "https://github.com/example/target",
+          revision: "b".repeat(40),
+          framework: "foundry"
+        }
+      ],
+      max_runtime_seconds: 3_600
+    }
+  };
+}
+
+function expectBenchmarkConfigIdentityGate(value: unknown): void {
+  try {
+    parseModalBenchmarkConfig(value);
+    throw new Error("expected benchmark config semantic validation to fail");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ModalDocumentValidationError);
+    const cause = (error as ModalDocumentValidationError).cause;
+    expect(cause).toBeInstanceOf(ModalSemanticValidationError);
+    expect((cause as ModalSemanticValidationError).gate).toBe("modal-benchmark-config-identity");
+  }
 }
 
 describe("Modal benchmark config", () => {
@@ -118,6 +158,49 @@ describe("Modal benchmark config", () => {
         models: [DEFAULT_BENCHMARK_MODELS[0], DEFAULT_BENCHMARK_MODELS[0]]
       })
     ).toThrow();
+  });
+
+  it.each([
+    {
+      label: "duplicate projected model slugs",
+      value: {
+        ...minimalConfig(),
+        models: [DEFAULT_BENCHMARK_MODELS[0], DEFAULT_BENCHMARK_MODELS[0]]
+      }
+    },
+    {
+      label: "a public runner-profile mismatch",
+      value: {
+        ...minimalPublicConfig(),
+        public_benchmark: {
+          ...minimalPublicConfig().public_benchmark,
+          runner_model_profile: "different-profile"
+        }
+      }
+    },
+    {
+      label: "duplicate projected public target IDs",
+      value: {
+        ...minimalPublicConfig(),
+        public_benchmark: {
+          ...minimalPublicConfig().public_benchmark,
+          targets: [
+            minimalPublicConfig().public_benchmark.targets[0],
+            {
+              ...minimalPublicConfig().public_benchmark.targets[0],
+              revision: "c".repeat(40)
+            }
+          ]
+        }
+      }
+    }
+  ])("keeps $label out of both shape validators and rejects it in the named gate", ({ value }) => {
+    expect(validateModalJsonSchema(MODAL_BENCHMARK_CONFIG_SCHEMA_ID, value).ok).toBe(true);
+    const retained = modalBenchmarkConfigZodSchema.safeParse(value);
+    expect(retained.success).toBe(true);
+    if (retained.success) expect(retained.data).toEqual(value);
+    expect(modalBenchmarkConfigValidatorsAgree(value)).toBe(true);
+    expectBenchmarkConfigIdentityGate(value);
   });
 
   it("requires provider and agent pairs to match", () => {
@@ -388,9 +471,18 @@ describe("Modal benchmark config", () => {
 
     fs.writeFileSync(file, `${JSON.stringify({ ...config, schema_version: "ultrafuzz.modal.benchmark.v1" })}\n`);
     expect(() => loadModalBenchmarkConfig(file)).toThrow();
+
+    fs.writeFileSync(
+      file,
+      `${JSON.stringify({
+        ...config,
+        models: [DEFAULT_BENCHMARK_MODELS[0], DEFAULT_BENCHMARK_MODELS[0]]
+      })}\n`
+    );
+    expect(() => loadModalBenchmarkConfig(file)).toThrow(/trusted semantic gates/u);
   });
 
-  it("keeps the nontransforming Zod parser aligned with canonical schema and semantic gates", () => {
+  it("keeps the nontransforming Zod parser aligned with canonical JSON Schema", () => {
     const valid = minimalConfig();
     const variants: unknown[] = [
       valid,

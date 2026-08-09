@@ -13,6 +13,8 @@ import {
   type SchemaRegistryEntry
 } from "@ultrafuzz/artifacts";
 
+import { EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID } from "./semantic-gates.js";
+
 const MAX_EVMBENCH_SCHEMA_BYTES = 512 * 1024;
 
 const SCHEMA_METADATA = {
@@ -20,31 +22,25 @@ const SCHEMA_METADATA = {
     role: "runtime-state",
     typescriptExport: "EvmbenchCatalog",
     zodParser: "evmbenchCatalogSchema",
-    semanticGates: ["audit IDs are unique"]
+    semanticGates: EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID["urn:ultrafuzz:schema:evmbench:catalog:2"]
   },
   "evmbench-lock.schema.json": {
     role: "runtime-state",
     typescriptExport: "EvmbenchLock",
     zodParser: "evmbenchLockSchema",
-    semanticGates: ["debug is a subset of detect-tasks"]
+    semanticGates: EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID["urn:ultrafuzz:schema:evmbench:lock:2"]
   },
   "evmbench-profile.schema.json": {
     role: "runtime-state",
     typescriptExport: "EvmbenchProfile",
     zodParser: "evmbenchProfileSchema",
-    semanticGates: ["node timeout does not exceed workflow timeout"]
+    semanticGates: EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID["urn:ultrafuzz:schema:evmbench:profile:2"]
   },
   "evmbench-result.schema.json": {
     role: "artifact-contract",
     typescriptExport: "NormalizedEvmbenchResult",
     zodParser: "normalizedEvmbenchResultSchema",
-    semanticGates: [
-      "official scores do not exceed their maxima",
-      "recall equals score divided by max_score",
-      "official totals equal the per-audit aggregates",
-      "target, image, and per-audit identities agree",
-      "operational values agree with completeness labels"
-    ]
+    semanticGates: EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID["urn:ultrafuzz:schema:evmbench:result:2"]
   }
 } as const satisfies Record<
   string,

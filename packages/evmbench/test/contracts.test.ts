@@ -26,6 +26,7 @@ import {
   evmbenchSchemaRegistry,
   validateEvmbenchJsonSchema
 } from "../src/schema-registry.js";
+import { EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID, IMPLEMENTED_EVMBENCH_SEMANTIC_GATES } from "../src/semantic-gates.js";
 import { findUltrafuzzRepoRoot } from "../src/definition.js";
 
 describe("EVMBench JSON Schema and Zod parity", () => {
@@ -44,6 +45,10 @@ describe("EVMBench JSON Schema and Zod parity", () => {
       expect(Object.isFrozen(entry.schema)).toBe(true);
       expect(Object.isFrozen(entry.schema.properties)).toBe(true);
       expect(entry.sha256).toMatch(/^[0-9a-f]{64}$/u);
+      expect(entry.semanticGates).toEqual(
+        EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID[entry.id as keyof typeof EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID]
+      );
+      for (const gate of entry.semanticGates) expect(IMPLEMENTED_EVMBENCH_SEMANTIC_GATES).toContain(gate);
     }
   });
 
@@ -74,6 +79,15 @@ describe("EVMBench JSON Schema and Zod parity", () => {
       value: { ...validLock(), schema_version: "ultrafuzz.evmbench.lock.v1" }
     },
     {
+      label: "structurally duplicated lock split item",
+      schemaId: EVMBENCH_LOCK_JSON_SCHEMA_ID,
+      parser: evmbenchLockSchema,
+      value: {
+        ...validLock(),
+        splits: { debug: ["synthetic-audit", "synthetic-audit"], "detect-tasks": ["synthetic-audit"] }
+      }
+    },
+    {
       label: "untyped catalog field",
       schemaId: EVMBENCH_CATALOG_JSON_SCHEMA_ID,
       parser: evmbenchCatalogSchema,
@@ -97,6 +111,12 @@ describe("EVMBench JSON Schema and Zod parity", () => {
       }
     },
     {
+      label: "structurally duplicated catalog item",
+      schemaId: EVMBENCH_CATALOG_JSON_SCHEMA_ID,
+      parser: evmbenchCatalogSchema,
+      value: { ...validCatalog(), audits: [validCatalog().audits[0], validCatalog().audits[0]] }
+    },
+    {
       label: "generic per-audit object",
       schemaId: EVMBENCH_RESULT_JSON_SCHEMA_ID,
       parser: normalizedEvmbenchResultSchema,
@@ -110,6 +130,18 @@ describe("EVMBench JSON Schema and Zod parity", () => {
       schemaId: EVMBENCH_RESULT_JSON_SCHEMA_ID,
       parser: normalizedEvmbenchResultSchema,
       value: { ...validResult(), ultrafuzz_metrics: { precision: 1 } }
+    },
+    {
+      label: "structurally duplicated result target",
+      schemaId: EVMBENCH_RESULT_JSON_SCHEMA_ID,
+      parser: normalizedEvmbenchResultSchema,
+      value: {
+        ...validResult(),
+        provenance: {
+          ...validResult().provenance,
+          targets: [validResult().provenance.targets[0], validResult().provenance.targets[0]]
+        }
+      }
     },
     {
       label: "invalid overlay provenance",
@@ -141,18 +173,78 @@ describe("EVMBench JSON Schema and Zod parity", () => {
     expect(parser.safeParse(value).success).toBe(false);
   });
 
-  it("keeps documented cross-field gates in Zod while JSON Schema owns structural parity", () => {
-    const timeoutMismatch = { ...validProfile(), workflow_timeout_seconds: 60, node_timeout_seconds: 61 };
-    expect(validateEvmbenchJsonSchema(EVMBENCH_PROFILE_JSON_SCHEMA_ID, timeoutMismatch).ok).toBe(true);
-    expect(evmbenchProfileSchema.safeParse(timeoutMismatch).success).toBe(false);
-
-    const aggregateMismatch = {
-      ...validResult(),
-      official_evmbench: { ...validResult().official_evmbench, score: 2, recall: 0.5 }
-    };
-    expect(validateEvmbenchJsonSchema(EVMBENCH_RESULT_JSON_SCHEMA_ID, aggregateMismatch).ok).toBe(true);
-    expect(normalizedEvmbenchResultSchema.safeParse(aggregateMismatch).success).toBe(false);
-  });
+  it.each([
+    {
+      label: "profile timeout order",
+      schemaId: EVMBENCH_PROFILE_JSON_SCHEMA_ID,
+      parser: evmbenchProfileSchema,
+      parseBytes: parseEvmbenchProfileBytes,
+      gate: "node timeout does not exceed workflow timeout",
+      value: { ...validProfile(), workflow_timeout_seconds: 60, node_timeout_seconds: 61 }
+    },
+    {
+      label: "catalog projected audit identity",
+      schemaId: EVMBENCH_CATALOG_JSON_SCHEMA_ID,
+      parser: evmbenchCatalogSchema,
+      parseBytes: parseEvmbenchCatalogBytes,
+      gate: "audit IDs are unique",
+      value: {
+        ...validCatalog(),
+        audits: [
+          validCatalog().audits[0],
+          {
+            ...validCatalog().audits[0],
+            target_commit: "d".repeat(40)
+          }
+        ]
+      }
+    },
+    {
+      label: "lock split subset",
+      schemaId: EVMBENCH_LOCK_JSON_SCHEMA_ID,
+      parser: evmbenchLockSchema,
+      parseBytes: parseEvmbenchLockBytes,
+      gate: "debug is a subset of detect-tasks",
+      value: { ...validLock(), splits: { debug: ["debug-only"], "detect-tasks": ["synthetic-audit"] } }
+    },
+    {
+      label: "result aggregate",
+      schemaId: EVMBENCH_RESULT_JSON_SCHEMA_ID,
+      parser: normalizedEvmbenchResultSchema,
+      parseBytes: parseNormalizedEvmbenchResultBytes,
+      gate: "official totals equal the per-audit aggregates",
+      value: {
+        ...validResult(),
+        official_evmbench: { ...validResult().official_evmbench, score: 2, recall: 0.5 }
+      }
+    },
+    {
+      label: "result projected target identity",
+      schemaId: EVMBENCH_RESULT_JSON_SCHEMA_ID,
+      parser: normalizedEvmbenchResultSchema,
+      parseBytes: parseNormalizedEvmbenchResultBytes,
+      gate: "target, image, and per-audit identities agree",
+      value: {
+        ...validResult(),
+        provenance: {
+          ...validResult().provenance,
+          targets: [
+            validResult().provenance.targets[0],
+            { ...validResult().provenance.targets[0], source_commit: "f".repeat(40) }
+          ]
+        }
+      }
+    }
+  ])(
+    "keeps $label out of both shape validators and rejects it in its registered gate",
+    ({ schemaId, parser, parseBytes, gate, value }) => {
+      expect(validateEvmbenchJsonSchema(schemaId, value).ok).toBe(true);
+      const retained = parser.safeParse(value);
+      expect(retained.success).toBe(true);
+      if (retained.success) expect(retained.data).toEqual(value);
+      expect(() => parseBytes(Buffer.from(JSON.stringify(value)))).toThrow(gate);
+    }
+  );
 
   it("round-trips the normalized v2 result from exact validated bytes", () => {
     const value = normalizedEvmbenchResultSchema.parse(validResult());
