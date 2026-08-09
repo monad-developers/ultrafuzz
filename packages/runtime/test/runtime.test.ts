@@ -13,7 +13,10 @@ import {
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
   VALIDATOR_BUILD_IDENTITY,
-  type RunState
+  type RunState,
+  type SMITHERS_NODE_STATES,
+  type SMITHERS_RUN_STATES,
+  type SMITHERS_RUN_STATUSES
 } from "@ultrafuzz/artifacts";
 import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
 
@@ -565,7 +568,7 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "    fi",
       "    ;;",
       "  inspect)",
-      '    printf \'{"ok":true,"data":{"run":{"id":"%s","workflow":"%s","status":"running","started":"2026-07-03T00:00:00.000Z","elapsed":"0s"},"runState":{"runId":"%s","state":"running","computedAt":"2026-07-03T00:00:03.000Z"},"steps":[],"nodes":[]}}\\n\' "$2" "$2" "$2"',
+      '    printf \'{"ok":true,"data":{"run":{"id":"%s","workflow":"%s","status":"running","started":"2026-07-03T00:00:00.000Z","elapsed":"0s"},"runState":{"runId":"%s","state":"running","computedAt":"2026-07-03T00:00:03.000Z"},"steps":[],"nodes":[]},"meta":{"command":"inspect","duration":"1ms"}}\\n\' "$2" "$2" "$2"',
       "    ;;",
       "  events)",
       "    ;;",
@@ -685,21 +688,25 @@ function pricingCatalogDataUrl(catalog: unknown): string {
   return `data:application/json,${encodeURIComponent(JSON.stringify(catalog))}`;
 }
 
+type TestSmithersRunStatus = (typeof SMITHERS_RUN_STATUSES)[number];
+type TestSmithersRunState = Exclude<(typeof SMITHERS_RUN_STATES)[number], "unknown">;
+type TestSmithersNodeState = (typeof SMITHERS_NODE_STATES)[number];
+
 function workflowInspect(input: {
   workflowRunId: string;
-  status?: string;
-  state?: string;
+  status?: TestSmithersRunStatus;
+  state?: TestSmithersRunState;
   error?: unknown;
   failedChildKeys?: string[];
   includeVerifierSteps?: boolean;
-  steps: Array<{ id: string; state: string; attempt?: number }>;
+  steps: Array<{ id: string; state: TestSmithersNodeState; attempt?: number }>;
 }): unknown {
   const explicitStepIds = new Set(input.steps.map((step) => step.id));
   const taskRows =
     input.includeVerifierSteps === false
       ? input.steps
       : input.steps.flatMap((step) => {
-          if (!step.id.startsWith("node:") || statusFromTestWorkflowState(step.state) !== "succeeded") {
+          if (!step.id.startsWith("node:") || step.state !== "finished") {
             return [step];
           }
           const verifierId = `verify:${step.id.slice("node:".length)}`;
@@ -741,14 +748,12 @@ function workflowInspect(input: {
         : { failedChildren: input.failedChildKeys.length, failedChildKeys: input.failedChildKeys }),
       steps,
       nodes
+    },
+    meta: {
+      command: "inspect",
+      duration: "1ms"
     }
   };
-}
-
-function statusFromTestWorkflowState(state: string): "succeeded" | "other" {
-  return ["finished", "succeeded", "success", "complete", "completed"].includes(state.toLowerCase())
-    ? "succeeded"
-    : "other";
 }
 
 function workflowEvents(
@@ -7260,7 +7265,10 @@ test("syncRun reports a typed diagnostic when a terminal workflow failure has no
       state: "failed",
       error: { message: "Task failed: ultrafuzz-agent-tasks" },
       failedChildKeys: ["ultrafuzz-agent-tasks::0"],
-      steps: [{ id: "node:project-discovery", state: "pending" }]
+      steps: [
+        { id: "ultrafuzz-agent-tasks", state: "failed" },
+        { id: "node:project-discovery", state: "pending" }
+      ]
     }),
     events: workflowEvents(workflowRunId, [
       { type: "NodePending", nodeId: "node:project-discovery" },
@@ -7293,7 +7301,10 @@ test("syncRun records an unattributed terminal workflow failure durably and only
       state: "failed",
       error: { message: "Task failed: ultrafuzz-agent-tasks" },
       failedChildKeys: ["ultrafuzz-agent-tasks::0"],
-      steps: [{ id: "node:project-discovery", state: "pending" }]
+      steps: [
+        { id: "ultrafuzz-agent-tasks", state: "failed" },
+        { id: "node:project-discovery", state: "pending" }
+      ]
     }),
     events: workflowEvents(workflowRunId, [
       { type: "NodePending", nodeId: "node:project-discovery" },
@@ -7339,11 +7350,11 @@ test("syncRun leaves a cancelled preparation wrapper unattributed", async () => 
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
       workflowRunId,
-      status: "canceled",
-      state: "canceled",
+      status: "cancelled",
+      state: "cancelled",
       steps: [
         { id: "node:project-discovery", state: "finished", attempt: 1 },
-        { id: "prepare:actors-flows", state: "canceled", attempt: 1 },
+        { id: "prepare:actors-flows", state: "cancelled", attempt: 1 },
         { id: "node:actors-flows", state: "pending" }
       ]
     }),
@@ -7491,7 +7502,6 @@ test("syncRun does not report an unattributed failure that state.json already at
       status: "failed",
       state: "failed",
       error: { message: "Task failed: prepare:actors-flows" },
-      failedChildKeys: ["prepare:actors-flows::0"],
       steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
     }),
     events: workflowEvents(workflowRunId, [{ type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }])
@@ -9303,8 +9313,8 @@ test("syncRun cancels a nonterminal workflow at its durable workflow deadline", 
     `${JSON.stringify(
       workflowInspect({
         workflowRunId,
-        status: "canceled",
-        state: "canceled",
+        status: "cancelled",
+        state: "cancelled",
         steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
       })
     )}\n`,
@@ -9857,7 +9867,7 @@ test("resume keeps an already-running linked workflow attached without launching
     inspect: workflowInspect({
       workflowRunId: "ultrafuzz-active-lifecycle-run",
       status: "running",
-      steps: [{ id: "node:project-discovery", state: "running", attempt: 1 }]
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
     })
   });
   const run = await startRun({ projectRoot: project, runId: "active-lifecycle-run", env });
@@ -9870,7 +9880,7 @@ test("resume keeps an already-running linked workflow attached without launching
   assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-active-lifecycle-run");
   assert.equal(resumed.value?.submitted, false);
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.match(commands, /inspect ultrafuzz-active-lifecycle-run --format json/u);
+  assert.match(commands, /inspect ultrafuzz-active-lifecycle-run --format json --full-output/u);
   assert.doesNotMatch(commands, /^up /mu);
 
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
@@ -9891,7 +9901,159 @@ test("resume keeps an already-running linked workflow attached without launching
   );
 });
 
-test("resume retries one failed workflow task before continuing a terminal unfinished run", async () => {
+test("resume rejects non-current Smithers inspect evidence before making lifecycle decisions", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-strict-resume-inspect";
+  const validInspect = workflowInspect({
+    workflowRunId,
+    status: "running",
+    state: "running",
+    steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+  });
+  const env = fakeLifecycleSmithersEnv(project, { inspect: validInspect });
+  const run = await startRun({ projectRoot: project, runId: "strict-resume-inspect", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  interface MutableInspectFixture {
+    ok?: unknown;
+    data: {
+      run?: Record<string, unknown>;
+      runState?: Record<string, unknown>;
+      steps?: unknown;
+      nodes?: Array<Record<string, unknown>>;
+      [key: string]: unknown;
+    };
+    meta?: Record<string, unknown>;
+    [key: string]: unknown;
+  }
+  const invalidInspect = (mutate: (fixture: MutableInspectFixture) => void): MutableInspectFixture => {
+    const fixture = structuredClone(validInspect) as MutableInspectFixture;
+    mutate(fixture);
+    return fixture;
+  };
+  const contradictoryLegacySteps = invalidInspect((fixture) => {
+    fixture.data.steps = [
+      { id: "node:project-discovery", state: "failed", attempt: 99, label: "legacy row must stay inert" }
+    ];
+  });
+  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(contradictoryLegacySteps)}\n`, "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const ignoredLegacyCompanion = await resumeRun({ projectRoot: project, runId: "strict-resume-inspect", env });
+
+  assert.equal(ignoredLegacyCompanion.ok, true, JSON.stringify(ignoredLegacyCompanion.diagnostics));
+  assert.equal(ignoredLegacyCompanion.value?.submitted, false);
+  assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^(?:up|timetravel) /mu);
+
+  const cases: Array<{
+    label: string;
+    inspect: MutableInspectFixture;
+    message: RegExp;
+  }> = [
+    {
+      label: "missing full-output metadata",
+      inspect: invalidInspect((fixture) => delete fixture.meta),
+      message: /exact current full-output envelope/u
+    },
+    {
+      label: "wrong metadata command",
+      inspect: invalidInspect((fixture) => {
+        fixture.meta!.command = "status";
+      }),
+      message: /metadata command must be inspect/u
+    },
+    {
+      label: "missing canonical run state",
+      inspect: invalidInspect((fixture) => delete fixture.data.runState),
+      message: /missing current required fields: runState/u
+    },
+    {
+      label: "unknown run state",
+      inspect: invalidInspect((fixture) => {
+        fixture.data.runState!.state = "unknown";
+      }),
+      message: /runState\.state is unknown/u
+    },
+    {
+      label: "removed run-state alias",
+      inspect: invalidInspect((fixture) => {
+        fixture.data.runState!.state = "active";
+      }),
+      message: /runState\.state is not a current supported value/u
+    },
+    {
+      label: "steps-only compatibility shape",
+      inspect: invalidInspect((fixture) => delete fixture.data.nodes),
+      message: /missing current required fields: nodes/u
+    },
+    {
+      label: "missing ignored steps companion",
+      inspect: invalidInspect((fixture) => delete fixture.data.steps),
+      message: /missing current required fields: steps/u
+    },
+    {
+      label: "removed tasks shape",
+      inspect: invalidInspect((fixture) => {
+        fixture.data.tasks = fixture.data.nodes;
+      }),
+      message: /removed field aliases: tasks/u
+    },
+    {
+      label: "unknown data field",
+      inspect: invalidInspect((fixture) => {
+        fixture.data.result = [];
+      }),
+      message: /data contains fields outside the pinned 0\.32\.0 shape: result/u
+    },
+    {
+      label: "unknown run field",
+      inspect: invalidInspect((fixture) => {
+        fixture.data.run!.phase = "running";
+      }),
+      message: /data\.run contains fields outside the pinned 0\.32\.0 shape: phase/u
+    },
+    {
+      label: "unknown run-state field",
+      inspect: invalidInspect((fixture) => {
+        fixture.data.runState!.status = "running";
+      }),
+      message: /data\.runState contains fields outside the pinned 0\.32\.0 shape: status/u
+    },
+    {
+      label: "removed node-state alias",
+      inspect: invalidInspect((fixture) => {
+        fixture.data.nodes![0]!.state = "running";
+      }),
+      message: /nodes\[0\]\.state is not a current supported value/u
+    },
+    {
+      label: "failed child outside canonical nodes",
+      inspect: invalidInspect((fixture) => {
+        fixture.data.failedChildren = 1;
+        fixture.data.failedChildKeys = ["node:missing::0"];
+      }),
+      message: /failedChildKeys\[0\] does not name a canonical node/u
+    }
+  ];
+
+  for (const invalid of cases) {
+    fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(invalid.inspect)}\n`, "utf8");
+    fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+    const resumed = await resumeRun({ projectRoot: project, runId: "strict-resume-inspect", env });
+
+    assert.equal(resumed.ok, false, invalid.label);
+    assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED", invalid.label);
+    assert.match(resumed.diagnostics[0]?.message ?? "", invalid.message, invalid.label);
+    const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+    assert.match(commands, /inspect ultrafuzz-strict-resume-inspect --format json --full-output/u, invalid.label);
+    assert.doesNotMatch(commands, /^(?:up|timetravel) /mu, invalid.label);
+  }
+});
+
+test("resume rejects failed workflow nodes without exact reset identities", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -9919,18 +10081,12 @@ test("resume retries one failed workflow task before continuing a terminal unfin
     env
   });
 
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  assert.equal(resumed.value?.submitted, true);
+  assert.equal(resumed.ok, false);
+  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED");
+  assert.match(resumed.diagnostics[0]?.message ?? "", /failed nodes without exact failedChildKeys reset evidence/u);
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.match(commands, /inspect ultrafuzz-terminal-retry-run --format json/u);
-  assert.match(
-    commands,
-    /timetravel .*ultrafuzz-terminal-retry-run\.tsx --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --iteration 0 --no-deps --force --format json/u
-  );
-  assert.match(
-    commands,
-    /up .*ultrafuzz-terminal-retry-run\.tsx --resume ultrafuzz-terminal-retry-run --run-id ultrafuzz-terminal-retry-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
-  );
+  assert.match(commands, /inspect ultrafuzz-terminal-retry-run --format json --full-output/u);
+  assert.doesNotMatch(commands, /^(?:timetravel|up) /mu);
 });
 
 test("resume retries failed tasks reported inside a successful terminal workflow", async () => {
@@ -9980,7 +10136,7 @@ test("resume retries failed tasks reported inside a successful terminal workflow
   );
 });
 
-test("resume retries one failed workflow task before continuing a stale unfinished run", async () => {
+test("resume renews a stale unfinished run without synthesizing a task reset", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -9990,7 +10146,7 @@ test("resume retries one failed workflow task before continuing a stale unfinish
       status: "running",
       state: "stale",
       steps: [
-        { id: "node:project-discovery", state: "failed", attempt: 1 },
+        { id: "node:project-discovery", state: "pending", attempt: 1 },
         { id: "node:strategy", state: "pending", attempt: 0 }
       ]
     })
@@ -10020,11 +10176,8 @@ test("resume retries one failed workflow task before continuing a stale unfinish
   assert.equal(resumedState.status, "running");
   assert.equal(resumedState.finished_at, undefined);
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.match(commands, /inspect ultrafuzz-stale-retry-run --format json/u);
-  assert.match(
-    commands,
-    /timetravel .*ultrafuzz-stale-retry-run\.tsx --run-id ultrafuzz-stale-retry-run --node-id node:project-discovery --iteration 0 --no-deps --force --format json/u
-  );
+  assert.match(commands, /inspect ultrafuzz-stale-retry-run --format json --full-output/u);
+  assert.doesNotMatch(commands, /^timetravel /mu);
   assert.match(
     commands,
     /up .*ultrafuzz-stale-retry-run\.tsx --resume ultrafuzz-stale-retry-run --run-id ultrafuzz-stale-retry-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
@@ -10106,13 +10259,19 @@ test("resume suppresses duplicate submissions for every active workflow run stat
       workflowRunId: "ultrafuzz-retrying-lifecycle-run",
       status: "running",
       state: "running",
-      steps: [{ id: "node:project-discovery", state: "running", attempt: 2 }]
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 2 }]
     })
   });
   const run = await startRun({ projectRoot: project, runId: "retrying-lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
 
-  for (const state of ["running", "waiting-approval", "waiting-event", "waiting-timer"]) {
+  for (const [state, nodeState] of [
+    ["running", "in-progress"],
+    ["waiting-approval", "waiting-approval"],
+    ["waiting-event", "waiting-event"],
+    ["waiting-timer", "waiting-timer"],
+    ["recovering", "in-progress"]
+  ] as const) {
     fs.writeFileSync(
       env.SMITHERS_FAKE_INSPECT!,
       `${JSON.stringify(
@@ -10120,7 +10279,7 @@ test("resume suppresses duplicate submissions for every active workflow run stat
           workflowRunId: "ultrafuzz-retrying-lifecycle-run",
           status: "running",
           state,
-          steps: [{ id: "node:project-discovery", state, attempt: 2 }]
+          steps: [{ id: "node:project-discovery", state: nodeState, attempt: 2 }]
         })
       )}\n`,
       "utf8"
@@ -10132,12 +10291,12 @@ test("resume suppresses duplicate submissions for every active workflow run stat
     assert.equal(resumed.ok, true, `${state}: ${JSON.stringify(resumed.diagnostics)}`);
     assert.equal(resumed.value?.submitted, false, `state ${state} must suppress duplicate resume`);
     const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-    assert.match(commands, /inspect ultrafuzz-retrying-lifecycle-run --format json/u);
+    assert.match(commands, /inspect ultrafuzz-retrying-lifecycle-run --format json --full-output/u);
     assert.doesNotMatch(commands, /^up /mu, `state ${state} must not launch a duplicate up --resume`);
   }
 });
 
-test("resume re-submits a quota-waiting workflow after credentials change", async () => {
+test("resume keeps a quota-waiting workflow attached without launching a duplicate", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -10146,7 +10305,7 @@ test("resume re-submits a quota-waiting workflow after credentials change", asyn
       workflowRunId: "ultrafuzz-quota-resume-run",
       status: "waiting-quota",
       state: "waiting-quota",
-      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+      steps: [{ id: "node:project-discovery", state: "waiting-quota", attempt: 1 }]
     })
   });
   const run = await startRun({ projectRoot: project, runId: "quota-resume-run", env });
@@ -10156,10 +10315,10 @@ test("resume re-submits a quota-waiting workflow after credentials change", asyn
   const resumed = await resumeRun({ projectRoot: project, runId: "quota-resume-run", env });
 
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  assert.equal(resumed.value?.submitted, true);
+  assert.equal(resumed.value?.submitted, false);
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.match(commands, /inspect ultrafuzz-quota-resume-run --format json/u);
-  assert.match(commands, /^up .*--resume ultrafuzz-quota-resume-run/mu);
+  assert.match(commands, /inspect ultrafuzz-quota-resume-run --format json --full-output/u);
+  assert.doesNotMatch(commands, /^up /mu);
 });
 
 test("resume --reset-node does not repeat a committed reset after a failed continuation", async () => {

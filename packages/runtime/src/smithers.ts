@@ -16,6 +16,9 @@ import {
   parseStrictJsonBytes,
   readJsonFile,
   readRunPlanDocument,
+  SMITHERS_NODE_STATES,
+  SMITHERS_RUN_STATES,
+  SMITHERS_RUN_STATUSES,
   SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
   SMITHERS_TASK_METADATA_SCHEMA_VERSION as REGISTERED_SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   writeFileDurable,
@@ -997,7 +1000,32 @@ const SMITHERS_EXECUTION_CONTEXT_ENVIRONMENT_VARIABLES = new Set([
   "SMITHERS_RUN_ID",
   "SMITHERS_SNAPSHOT_SOCK"
 ]);
-const SMITHERS_ACTIVE_RUN_STATES = new Set(["running", "waiting-approval", "waiting-event", "waiting-timer"]);
+export type SmithersRunStatus = (typeof SMITHERS_RUN_STATUSES)[number];
+export type SmithersRunState = Exclude<(typeof SMITHERS_RUN_STATES)[number], "unknown">;
+export type SmithersNodeState = (typeof SMITHERS_NODE_STATES)[number];
+
+export interface CurrentSmithersInspectNode {
+  nodeId: string;
+  state: SmithersNodeState;
+  attempt: number;
+  label: string;
+}
+
+export interface CurrentSmithersInspect {
+  runStatus: SmithersRunStatus;
+  runState: SmithersRunState;
+  nodes: CurrentSmithersInspectNode[];
+  failedChildKeys: string[];
+}
+
+const SMITHERS_ACTIVE_RUN_STATES = new Set<SmithersRunState>([
+  "running",
+  "waiting-approval",
+  "waiting-event",
+  "waiting-timer",
+  "waiting-quota",
+  "recovering"
+]);
 
 export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = SMITHERS_TASK_MANIFEST_SCHEMA_VERSION;
 export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = REGISTERED_SMITHERS_TASK_METADATA_SCHEMA_VERSION;
@@ -2109,7 +2137,7 @@ export async function runSmithersLifecycleCommand(input: {
   let preResumeStderr = "";
   if (input.action === "resume" && input.relaunchPaths !== undefined) {
     const inspection = await runSmithersInspectionCommand({
-      args: ["inspect", input.smithersRunId, "--format", "json"],
+      args: ["inspect", input.smithersRunId, "--format", "json", "--full-output"],
       projectRoot: input.projectRoot,
       env: input.env
     });
@@ -2155,7 +2183,8 @@ export async function runSmithersLifecycleCommand(input: {
         `workflow inspection failed before resume: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
       );
     }
-    if (smithersSnapshotRunStateIsActive(inspection) && input.resetNode === undefined && input.force !== true) {
+    const currentInspection = parseCurrentSmithersInspect(inspection, input.smithersRunId);
+    if (smithersRunStateIsActive(currentInspection) && input.resetNode === undefined && input.force !== true) {
       return {
         stdout: inspection.stdout,
         stderr: inspection.stderr,
@@ -2164,8 +2193,8 @@ export async function runSmithersLifecycleCommand(input: {
       };
     }
     const failedTasks =
-      input.retryFailed === true && !smithersSnapshotRunStateIsActive(inspection)
-        ? smithersSnapshotFailedTasks(inspection)
+      input.retryFailed === true && !smithersRunStateIsActive(currentInspection)
+        ? smithersFailedTasks(currentInspection)
         : [];
     if (failedTasks.length > 0) {
       const resetStderr: string[] = [];
@@ -2198,7 +2227,7 @@ export async function runSmithersLifecycleCommand(input: {
       failedTasks.length === 0 &&
       input.retryFailed === true &&
       input.resetNode === undefined &&
-      (smithersSnapshotRunStateIsFailed(inspection) || smithersSnapshotRunStateIsStale(inspection)) &&
+      (currentInspection.runState === "failed" || currentInspection.runState === "stale") &&
       smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED") &&
       !isCompatibleSmithersRunId(input.smithersRunId)
     ) {
@@ -2428,80 +2457,312 @@ function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: s
   return isObjectRecord(run) && isObjectRecord(run.error) && run.error.code === code;
 }
 
-function smithersSnapshotRunState(snapshot: SmithersCommandSnapshot): string | undefined {
-  const data = currentSmithersInspectData(snapshot);
-  const runState = data.runState;
-  if (!isObjectRecord(runState) || typeof runState.state !== "string" || runState.state.length === 0) {
-    throw new Error("current Smithers inspection is missing its canonical runState.state");
-  }
-  return runState.state;
+function smithersRunStateIsActive(inspect: CurrentSmithersInspect): boolean {
+  return SMITHERS_ACTIVE_RUN_STATES.has(inspect.runState);
 }
 
-function smithersSnapshotRunStateIsActive(snapshot: SmithersCommandSnapshot): boolean {
-  const state = smithersSnapshotRunState(snapshot);
-  return state !== undefined && SMITHERS_ACTIVE_RUN_STATES.has(state);
-}
-
-function smithersSnapshotRunStateIsFailed(snapshot: SmithersCommandSnapshot): boolean {
-  return smithersSnapshotRunState(snapshot) === "failed";
-}
-
-function smithersSnapshotRunStateIsStale(snapshot: SmithersCommandSnapshot): boolean {
-  return smithersSnapshotRunState(snapshot) === "stale";
-}
-
-function smithersSnapshotFailedTasks(snapshot: SmithersCommandSnapshot): Array<{ nodeId: string; iteration: number }> {
-  const data = currentSmithersInspectData(snapshot);
+function smithersFailedTasks(inspect: CurrentSmithersInspect): Array<{ nodeId: string; iteration: number }> {
   const failedTasks = new Map<string, { nodeId: string; iteration: number }>();
-  if (data.failedChildKeys !== undefined) {
-    if (!Array.isArray(data.failedChildKeys)) {
-      throw new Error("current Smithers inspection failedChildKeys must be an array");
-    }
-    for (const key of data.failedChildKeys) {
-      if (typeof key !== "string") {
-        throw new Error("current Smithers inspection failedChildKeys must contain only strings");
-      }
-      const separator = key.lastIndexOf("::");
-      const nodeId = separator < 1 ? "" : key.slice(0, separator);
-      const iterationText = separator < 0 ? "" : key.slice(separator + 2);
-      const iteration = Number(iterationText);
-      if (!/^(?:0|[1-9]\d*)$/u.test(iterationText) || nodeId.length === 0 || !Number.isSafeInteger(iteration)) {
-        throw new Error(`current Smithers inspection has invalid failed child key ${JSON.stringify(key)}`);
-      }
-      failedTasks.set(key, { nodeId, iteration });
-    }
+  for (const key of inspect.failedChildKeys) {
+    const separator = key.lastIndexOf("::");
+    const nodeId = key.slice(0, separator);
+    const iteration = Number(key.slice(separator + 2));
+    failedTasks.set(key, { nodeId, iteration });
   }
   if (failedTasks.size > 0) return [...failedTasks.values()];
-  if (!Array.isArray(data.nodes)) {
-    throw new Error("current Smithers inspection is missing its canonical nodes array");
+  const failedNodeIds = inspect.nodes.filter((entry) => entry.state === "failed").map((entry) => entry.nodeId);
+  if (failedNodeIds.length > 0) {
+    throw new Error(
+      `Smithers inspect reports failed nodes without exact failedChildKeys reset evidence: ${failedNodeIds.join(", ")}`
+    );
   }
-  for (const entry of data.nodes) {
-    if (
-      !isObjectRecord(entry) ||
-      typeof entry.nodeId !== "string" ||
-      entry.nodeId.length === 0 ||
-      typeof entry.state !== "string" ||
-      entry.state.length === 0
-    ) {
-      throw new Error("current Smithers inspection contains an invalid canonical node row");
-    }
-    if (entry.state === "failed") {
-      const key = `${entry.nodeId}::0`;
-      failedTasks.set(key, { nodeId: entry.nodeId, iteration: 0 });
-    }
-  }
-  return [...failedTasks.values()];
+  return [];
 }
 
-function currentSmithersInspectData(snapshot: SmithersCommandSnapshot): Record<string, unknown> {
-  if (!isObjectRecord(snapshot.json) || snapshot.json.ok !== true || !isObjectRecord(snapshot.json.data)) {
-    throw new Error("workflow inspection did not return the current Smithers JSON envelope");
+export function parseCurrentSmithersInspect(
+  snapshot: SmithersCommandSnapshot,
+  expectedWorkflowRunId: string
+): CurrentSmithersInspect {
+  const envelope = snapshot.json;
+  if (!isObjectRecord(envelope) || !hasExactObjectKeys(envelope, ["ok", "data", "meta"])) {
+    throw new Error("Smithers inspect output must use the exact current full-output envelope");
   }
-  const run = snapshot.json.data.run;
-  if (!isObjectRecord(run) || typeof run.status !== "string" || run.status.length === 0) {
-    throw new Error("current Smithers inspection is missing its canonical run.status");
+  if (envelope.ok !== true) {
+    throw new Error("Smithers inspect full-output envelope must report ok: true");
   }
-  return snapshot.json.data;
+  validateCurrentSmithersInspectMeta(envelope.meta);
+  if (!isObjectRecord(envelope.data)) {
+    throw new Error("Smithers inspect data must be an object");
+  }
+  const data = envelope.data;
+  const removedAliases = ["tasks", "status", "state"].filter((key) => Object.hasOwn(data, key));
+  if (removedAliases.length > 0) {
+    throw new Error(`Smithers inspect data contains removed field aliases: ${removedAliases.join(", ")}`);
+  }
+  assertCurrentInspectObjectKeys(
+    data,
+    ["run", "runState", "steps", "nodes"],
+    [
+      "run",
+      "runState",
+      "failedChildren",
+      "failedChildKeys",
+      "steps",
+      "nodes",
+      "approvals",
+      "timers",
+      "loops",
+      "config"
+    ],
+    "Smithers inspect data"
+  );
+  if (!Array.isArray(data.steps)) {
+    throw new Error("Smithers inspect data.steps must be the ignored compatibility array emitted by the pinned runner");
+  }
+  for (const key of ["approvals", "timers", "loops"] as const) {
+    if (data[key] !== undefined && !Array.isArray(data[key])) {
+      throw new Error(`Smithers inspect data.${key} must be an array`);
+    }
+  }
+  if (data.config !== undefined && !isObjectRecord(data.config)) {
+    throw new Error("Smithers inspect data.config must be an object");
+  }
+
+  const run = data.run;
+  if (!isObjectRecord(run)) {
+    throw new Error("Smithers inspect data.run must be an object");
+  }
+  if (Object.hasOwn(run, "startedAt") || Object.hasOwn(run, "finishedAt")) {
+    throw new Error("Smithers inspect data.run contains removed timestamp aliases");
+  }
+  assertCurrentInspectObjectKeys(
+    run,
+    ["id", "workflow", "status", "started", "elapsed"],
+    [
+      "id",
+      "workflow",
+      "status",
+      "parentRunId",
+      "started",
+      "elapsed",
+      "finished",
+      "activeDescendantRunId",
+      "error",
+      "startedBy",
+      "continuedFrom",
+      "continuedFromDisplay"
+    ],
+    "Smithers inspect data.run"
+  );
+  if (requiredCurrentInspectString(run.id, "Smithers inspect data.run.id") !== expectedWorkflowRunId) {
+    throw new Error("Smithers inspect data.run.id does not match the requested workflow run");
+  }
+  const runStatus = requiredCurrentInspectEnum(run.status, SMITHERS_RUN_STATUSES, "Smithers inspect data.run.status");
+  requiredCurrentInspectString(run.workflow, "Smithers inspect data.run.workflow");
+  requiredCurrentInspectString(run.started, "Smithers inspect data.run.started");
+  requiredCurrentInspectString(run.elapsed, "Smithers inspect data.run.elapsed");
+  for (const key of ["parentRunId", "finished", "activeDescendantRunId", "continuedFromDisplay"] as const) {
+    if (run[key] !== undefined) requiredCurrentInspectString(run[key], `Smithers inspect data.run.${key}`);
+  }
+  if (run.finished !== undefined && !isCanonicalDateTime(run.finished as string)) {
+    throw new Error("Smithers inspect data.run.finished must be a canonical timestamp");
+  }
+  if (run.continuedFrom !== undefined) {
+    if (!Array.isArray(run.continuedFrom)) {
+      throw new Error("Smithers inspect data.run.continuedFrom must be an array");
+    }
+    for (const [index, value] of run.continuedFrom.entries()) {
+      requiredCurrentInspectString(value, `Smithers inspect data.run.continuedFrom[${index}]`);
+    }
+  }
+  if (run.startedBy !== undefined) validateCurrentSmithersStartedBy(run.startedBy);
+
+  const runState = data.runState;
+  if (!isObjectRecord(runState)) {
+    throw new Error("Smithers inspect data.runState must be an object");
+  }
+  assertCurrentInspectObjectKeys(
+    runState,
+    ["runId", "state", "computedAt"],
+    ["runId", "state", "computedAt", "blocked", "unhealthy"],
+    "Smithers inspect data.runState"
+  );
+  if (requiredCurrentInspectString(runState.runId, "Smithers inspect data.runState.runId") !== expectedWorkflowRunId) {
+    throw new Error("Smithers inspect data.runState.runId does not match the requested workflow run");
+  }
+  const computedAt = requiredCurrentInspectString(runState.computedAt, "Smithers inspect data.runState.computedAt");
+  if (!isCanonicalDateTime(computedAt)) {
+    throw new Error("Smithers inspect data.runState.computedAt must be a canonical timestamp");
+  }
+  for (const key of ["blocked", "unhealthy"] as const) {
+    if (runState[key] !== undefined && !isObjectRecord(runState[key])) {
+      throw new Error(`Smithers inspect data.runState.${key} must be an object`);
+    }
+  }
+  const parsedRunState = requiredCurrentInspectEnum(
+    runState.state,
+    SMITHERS_RUN_STATES,
+    "Smithers inspect data.runState.state"
+  );
+  if (parsedRunState === "unknown") {
+    throw new Error("Smithers inspect data.runState.state is unknown and cannot drive resume");
+  }
+
+  if (!Array.isArray(data.nodes)) {
+    throw new Error("Smithers inspect data.nodes must be the canonical node array");
+  }
+  const nodeIds = new Set<string>();
+  const nodes = data.nodes.map((value, index): CurrentSmithersInspectNode => {
+    const label = `Smithers inspect data.nodes[${index}]`;
+    if (!isObjectRecord(value) || !hasExactObjectKeys(value, ["nodeId", "state", "attempt", "label"])) {
+      throw new Error(`${label} must use the exact current node shape`);
+    }
+    const nodeId = requiredCurrentInspectString(value.nodeId, `${label}.nodeId`);
+    if (nodeIds.has(nodeId)) {
+      throw new Error(`${label}.nodeId duplicates an earlier canonical node`);
+    }
+    nodeIds.add(nodeId);
+    return {
+      nodeId,
+      state: requiredCurrentInspectEnum(value.state, SMITHERS_NODE_STATES, `${label}.state`),
+      attempt: requiredCurrentInspectCount(value.attempt, `${label}.attempt`),
+      label: requiredCurrentInspectString(value.label, `${label}.label`)
+    };
+  });
+
+  const failedChildKeys = parseCurrentSmithersFailedChildKeys(data, nodeIds);
+  return { runStatus, runState: parsedRunState, nodes, failedChildKeys };
+}
+
+function validateCurrentSmithersInspectMeta(value: unknown): void {
+  if (
+    !isObjectRecord(value) ||
+    !Object.hasOwn(value, "command") ||
+    !Object.hasOwn(value, "duration") ||
+    Object.keys(value).some((key) => !["command", "duration", "cta"].includes(key))
+  ) {
+    throw new Error("Smithers inspect metadata must use the exact current full-output shape");
+  }
+  if (value.command !== "inspect") {
+    throw new Error("Smithers inspect metadata command must be inspect");
+  }
+  requiredCurrentInspectString(value.duration, "Smithers inspect metadata duration");
+  if (value.cta === undefined) return;
+  if (!isObjectRecord(value.cta) || !hasExactObjectKeys(value.cta, ["description", "commands"])) {
+    throw new Error("Smithers inspect metadata CTA must use the exact current shape");
+  }
+  requiredCurrentInspectString(value.cta.description, "Smithers inspect metadata CTA description");
+  if (!Array.isArray(value.cta.commands) || value.cta.commands.length === 0) {
+    throw new Error("Smithers inspect metadata CTA commands must be a non-empty array");
+  }
+  for (const [index, command] of value.cta.commands.entries()) {
+    const label = `Smithers inspect metadata CTA commands[${index}]`;
+    if (
+      !isObjectRecord(command) ||
+      !Object.hasOwn(command, "command") ||
+      Object.keys(command).some((key) => !["command", "description"].includes(key))
+    ) {
+      throw new Error(`${label} must use the exact current shape`);
+    }
+    requiredCurrentInspectString(command.command, `${label}.command`);
+    if (command.description !== undefined) {
+      requiredCurrentInspectString(command.description, `${label}.description`);
+    }
+  }
+}
+
+function validateCurrentSmithersStartedBy(value: unknown): void {
+  if (!isObjectRecord(value)) {
+    throw new Error("Smithers inspect data.run.startedBy must be an object");
+  }
+  assertCurrentInspectObjectKeys(
+    value,
+    [],
+    ["harness", "sessionId", "prompt", "detected"],
+    "Smithers inspect data.run.startedBy"
+  );
+  for (const key of ["harness", "sessionId", "prompt"] as const) {
+    if (value[key] !== undefined) {
+      requiredCurrentInspectString(value[key], `Smithers inspect data.run.startedBy.${key}`);
+    }
+  }
+  if (value.detected !== undefined && value.detected !== true) {
+    throw new Error("Smithers inspect data.run.startedBy.detected must be true when present");
+  }
+  if (Object.keys(value).length === 0) {
+    throw new Error("Smithers inspect data.run.startedBy must not be empty");
+  }
+}
+
+function parseCurrentSmithersFailedChildKeys(data: Record<string, unknown>, nodeIds: ReadonlySet<string>): string[] {
+  const hasFailedChildren = Object.hasOwn(data, "failedChildren");
+  const hasFailedChildKeys = Object.hasOwn(data, "failedChildKeys");
+  if (hasFailedChildren !== hasFailedChildKeys) {
+    throw new Error("Smithers inspect failedChildren and failedChildKeys must be present together");
+  }
+  if (!hasFailedChildren) return [];
+  const count = requiredCurrentInspectCount(data.failedChildren, "Smithers inspect data.failedChildren");
+  if (count === 0 || !Array.isArray(data.failedChildKeys) || data.failedChildKeys.length !== count) {
+    throw new Error("Smithers inspect failed child count and keys do not use the current paired shape");
+  }
+  const keys = new Set<string>();
+  for (const [index, value] of data.failedChildKeys.entries()) {
+    const key = requiredCurrentInspectString(value, `Smithers inspect data.failedChildKeys[${index}]`);
+    const match = /^(.*)::(0|[1-9][0-9]*)$/u.exec(key);
+    if (match === null || match[1] === undefined || match[1].length === 0) {
+      throw new Error(`Smithers inspect data.failedChildKeys[${index}] is not a current task state key`);
+    }
+    if (!nodeIds.has(match[1])) {
+      throw new Error(`Smithers inspect data.failedChildKeys[${index}] does not name a canonical node`);
+    }
+    requiredCurrentInspectCount(Number(match[2]), `Smithers inspect data.failedChildKeys[${index}] iteration`);
+    if (keys.has(key)) {
+      throw new Error(`Smithers inspect data.failedChildKeys[${index}] duplicates an earlier key`);
+    }
+    keys.add(key);
+  }
+  return [...keys];
+}
+
+function assertCurrentInspectObjectKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  allowed: readonly string[],
+  label: string
+): void {
+  const missing = required.filter((key) => !Object.hasOwn(value, key));
+  if (missing.length > 0) {
+    throw new Error(`${label} is missing current required fields: ${missing.join(", ")}`);
+  }
+  const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) {
+    throw new Error(`${label} contains fields outside the pinned 0.32.0 shape: ${unknown.join(", ")}`);
+  }
+}
+
+function requiredCurrentInspectString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 4_096 || value.includes("\0")) {
+    throw new Error(`${label} must be a non-empty string`);
+  }
+  return value;
+}
+
+function requiredCurrentInspectCount(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function requiredCurrentInspectEnum<const Values extends readonly string[]>(
+  value: unknown,
+  values: Values,
+  label: string
+): Values[number] {
+  if (typeof value !== "string" || !(values as readonly string[]).includes(value)) {
+    throw new Error(`${label} is not a current supported value`);
+  }
+  return value as Values[number];
 }
 
 /**

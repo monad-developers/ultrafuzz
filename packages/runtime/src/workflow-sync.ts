@@ -37,6 +37,7 @@ import {
   writeArtifactManifest,
   writeRunMetadataDocument,
   writeRunState,
+  type AppendEventInput,
   type AppendNodeAttemptInput,
   type ArtifactProvenance,
   type AppendUsageEventInput,
@@ -74,9 +75,11 @@ import {
 } from "./types.js";
 import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
 import {
+  parseCurrentSmithersInspect,
   requestSmithersCancel,
   runSmithersInspectionCommand,
   smithersDiagnostic,
+  type CurrentSmithersInspect,
   type SmithersCommandSnapshot
 } from "./smithers.js";
 import { runsRootForProject } from "./validate.js";
@@ -87,18 +90,20 @@ type StoredWorkflowTask = SmithersTaskManifestTask;
 
 interface WorkflowStep {
   id: string;
-  state: string;
-  attempt?: number;
+  state: SmithersNodeState;
+  attempt: number;
 }
 
 interface WorkflowInspect {
-  runStatus?: string;
-  runState?: string;
-  startedAt?: string;
-  finishedAt?: string;
+  runStatus: SmithersRunStatus;
+  runState: SynchronizableSmithersRunState;
   steps: WorkflowStep[];
   failedWorkflowTaskIds: string[];
 }
+
+type SmithersRunStatus = CurrentSmithersInspect["runStatus"];
+type SynchronizableSmithersRunState = CurrentSmithersInspect["runState"];
+type SmithersNodeState = CurrentSmithersInspect["nodes"][number]["state"];
 
 interface WorkflowEvent {
   type: string;
@@ -241,7 +246,7 @@ interface NormalizedUsageComponents {
 
 interface NodeWorkflowEvidence {
   status: NodeStatus;
-  workflowState?: string;
+  workflowState?: SmithersNodeState;
   attempt?: number;
   startedAt?: string;
   finishedAt?: string;
@@ -263,11 +268,27 @@ interface NodeFinalization {
   events: PendingNodeEvent[];
 }
 
-interface PendingNodeEvent {
-  eventType: string;
-  status: NodeStatus;
-  payload: Record<string, unknown>;
-}
+type PendingNodeAppendEvent = Extract<
+  AppendEventInput,
+  {
+    eventType:
+      "node-artifacts-verified" | "node-artifacts-missing" | "findings-validated" | "artifact-manifest-written";
+  }
+>;
+type PendingNodeEvent = PendingNodeAppendEvent extends infer Event
+  ? Event extends PendingNodeAppendEvent
+    ? Omit<Event, "nodeId" | "runId" | "timestamp">
+    : never
+  : never;
+
+type WorkflowFailureUnattributedPayload = Extract<
+  AppendEventInput,
+  { eventType: "workflow-failure-unattributed" }
+>["payload"];
+type WorkflowFailureUnattributedDetails = Omit<WorkflowFailureUnattributedPayload, "workflow_run_id">;
+type UnattributedWorkflowFailureDiagnostic = RuntimeDiagnostic & {
+  details: WorkflowFailureUnattributedDetails;
+};
 
 export interface WorkflowSynchronizationControl {
   now?: () => number;
@@ -287,21 +308,9 @@ const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
 // carried by the agent task it gates, so only genuine wrapper failures are
 // attributed back to the durable node here.
 const PREPARATION_FAILURE_STATUSES = new Set<NodeStatus>(["failed", "timed-out"]);
-// `statusFromWorkflowState` collapses `cancelled`/`canceled`/`stuck` onto
-// `failed`, so the raw workflow state is the only thing that separates a genuine
-// preparation failure from a run the operator — or the deadline path's own
-// `requestSmithersCancel` — cancelled while the wrapper was in flight, and from
-// a controller-loss stall. Attributing either to the node would durably record
-// an artifact-contract violation the run never committed, and publish it.
-const PREPARATION_FAILURE_WORKFLOW_STATES = new Set([
-  "failed",
-  "error",
-  "timeout",
-  "timed-out",
-  "timedout",
-  "heartbeat-timeout"
-]);
-const TERMINAL_FAILED_WORKFLOW_STATES = new Set(["failed", "error", "timeout", "timed-out", "timedout"]);
+// Only exact Smithers failure evidence counts. Cancellation and missing state
+// must not be converted into a task failure; event-derived timeouts are carried
+// separately by `timedOut` because `timeout` is not a Smithers node state.
 // A node that reached one of these did not fail, so a failure attribution from
 // an earlier attempt must not survive on it.
 const NODE_RECOVERED_STATUSES = new Set<NodeStatus>(["succeeded", "reused-from-prior-run"]);
@@ -406,7 +415,15 @@ export async function synchronizeLinkedWorkflowRun(
     ...(tokenEventsSnapshot.ok ? [] : [workflowSnapshotDiagnostic(tokenEventsSnapshot, "WORKFLOW_TOKEN_EVENTS_FAILED")])
   ];
 
-  const inspect = parseInspectSnapshot(inspectSnapshot.json);
+  let inspect: WorkflowInspect;
+  try {
+    inspect = parseInspectSnapshot(inspectSnapshot, evidence.smithersRunId);
+  } catch (error) {
+    return {
+      ok: false,
+      diagnostics: [diagnosticFromError(error, "workflow", "WORKFLOW_INSPECT_INVALID")]
+    };
+  }
   const events = parseWorkflowEvents(eventsSnapshot.stdout, evidence.smithersRunId);
   const tokenEvents = parseWorkflowEvents(tokenEventsSnapshot.stdout, evidence.smithersRunId);
   let syncResult;
@@ -492,11 +509,16 @@ export async function synchronizeLinkedWorkflowRun(
     graph: loaded.graph,
     tasks: loaded.tasks,
     workflowStates: syncResult.workflowStates,
-    workflowState: inspect.runState ?? inspect.runStatus,
+    workflowState: inspect.runState,
     nowMs: observedAtMs
   });
   let deadlineApplied = false;
+  let exceededDeadlineAt: string | undefined;
   if (workflowControl.deadlineExceeded) {
+    exceededDeadlineAt = workflowControl.state.workflow_deadline_at;
+    if (exceededDeadlineAt === undefined) {
+      throw new Error("workflow control reported a deadline breach without a deadline timestamp");
+    }
     try {
       assertSynchronizationBudget(control);
       await requestSmithersCancel({
@@ -520,12 +542,15 @@ export async function synchronizeLinkedWorkflowRun(
     writeRunState(layout, workflowControl.state);
   }
   if (deadlineApplied) {
+    if (exceededDeadlineAt === undefined) {
+      throw new Error("workflow deadline evidence is missing after cancellation");
+    }
     appendEvent(layout, {
       eventType: "workflow-deadline-exceeded",
       status: "timed-out",
       payload: {
         workflow_run_id: evidence.smithersRunId,
-        deadline_at: workflowControl.state.workflow_deadline_at
+        deadline_at: exceededDeadlineAt
       }
     });
   }
@@ -574,7 +599,7 @@ export async function synchronizeLinkedWorkflowRun(
       }
       appendEvent(layout, {
         eventType: "workflow-failure-unattributed",
-        status: deadlineApplied ? "timed-out" : finalStatus,
+        status: deadlineApplied ? "timed-out" : "failed",
         payload
       });
     }
@@ -2057,13 +2082,13 @@ async function synchronizeTasks(input: {
 }): Promise<{
   diagnostics: RuntimeDiagnostic[];
   nodeStatuses: Map<string, NodeStatus>;
-  workflowStates: Map<string, string>;
+  workflowStates: Map<string, SmithersNodeState>;
   syncedNodes: number;
   changed: boolean;
 }> {
   const diagnostics: RuntimeDiagnostic[] = [];
   const nodeStatuses = new Map<string, NodeStatus>();
-  const workflowStates = new Map<string, string>();
+  const workflowStates = new Map<string, SmithersNodeState>();
   const steps = new Map(input.inspect.steps.map((step) => [step.id, step]));
   const eventsByNode = eventsByWorkflowNode(input.events);
   const graphNodeById = new Map(input.graph.nodes.map((node) => [node.id, node]));
@@ -2132,7 +2157,9 @@ async function synchronizeTasks(input: {
     diagnostics.push(...finalization.diagnostics);
     const patchStatus = previousIsImmutable ? (previous?.status ?? finalization.status) : finalization.status;
     nodeStatuses.set(task.attemptId, patchStatus);
-    workflowStates.set(task.attemptId, evidence.workflowState ?? patchStatus);
+    if (evidence.workflowState !== undefined) {
+      workflowStates.set(task.attemptId, evidence.workflowState);
+    }
     const concreteStatuses = taskStatusesByConcreteNode.get(task.concreteNodeId) ?? [];
     concreteStatuses.push(patchStatus);
     taskStatusesByConcreteNode.set(task.concreteNodeId, concreteStatuses);
@@ -2204,8 +2231,8 @@ async function synchronizeTasks(input: {
           workflow_run_id: input.workflowRunId,
           workflow_task_id: attemptEvidence.taskId,
           previous_status: previous?.status,
-          workflow_state: evidence.workflowState,
-          attempt: evidence.attempt
+          ...(evidence.workflowState === undefined ? {} : { workflow_state: evidence.workflowState }),
+          ...(evidence.attempt === undefined ? {} : { attempt: evidence.attempt })
         }
       });
     }
@@ -2315,14 +2342,25 @@ async function finalizeTerminalTask(input: {
   const artifactDir = getNodeArtifactDir(input.layout, input.task.attemptId);
   const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId);
   diagnostics.push(...gate.diagnostics);
-  events.push({
-    eventType: gate.ok ? "node-artifacts-verified" : "node-artifacts-missing",
-    status: gate.ok ? "succeeded" : "failed",
-    payload: {
-      output_contracts: input.node.outputs,
-      missing: gate.missing
-    }
-  });
+  if (gate.ok) {
+    events.push({
+      eventType: "node-artifacts-verified",
+      status: "succeeded",
+      payload: {
+        output_contracts: input.node.outputs,
+        missing: gate.missing
+      }
+    });
+  } else {
+    events.push({
+      eventType: "node-artifacts-missing",
+      status: "failed",
+      payload: {
+        output_contracts: input.node.outputs,
+        missing: gate.missing
+      }
+    });
+  }
 
   let findingsCount: number | undefined;
   let findingsValidationFailed = false;
@@ -2464,12 +2502,7 @@ function appendNodeEvents(
 ): void {
   for (const event of events) {
     assertSynchronizationBudget(control);
-    appendEvent(layout, {
-      eventType: event.eventType,
-      nodeId,
-      status: event.status,
-      payload: event.payload
-    });
+    appendEvent(layout, { ...event, nodeId });
   }
 }
 
@@ -2858,7 +2891,7 @@ function completionEvidenceForTask(
   if (
     preparationEvidence !== undefined &&
     PREPARATION_FAILURE_STATUSES.has(preparationEvidence.status) &&
-    preparationWorkflowStateIsFailure(preparationEvidence.workflowState) &&
+    preparationWorkflowStateIsFailure(preparationEvidence) &&
     (agentEvidence === undefined || !terminalStatus(agentEvidence.status))
   ) {
     return {
@@ -2921,7 +2954,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
         evidence = {
           ...evidence,
           status: "timed-out",
-          workflowState: "timeout",
+          workflowState: undefined,
           timedOut: true,
           ...attemptPatch,
           ...(timestamp ? { finishedAt: timestamp } : {}),
@@ -2935,7 +2968,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
         evidence = {
           ...evidence,
           status: timedOut ? "timed-out" : "failed",
-          workflowState: timedOut ? "timeout" : "failed",
+          workflowState: timedOut ? undefined : "failed",
           timedOut,
           ...attemptPatch,
           ...(timestamp ? { finishedAt: timestamp } : {}),
@@ -2963,7 +2996,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
         };
         break;
       case "NodeRetrying":
-        evidence = { status: "running", workflowState: "retrying", timedOut: false, ...attemptPatch };
+        evidence = { status: "running", timedOut: false, ...attemptPatch };
         break;
       case "NodeWaitingApproval":
         evidence = { ...evidence, status: "running", workflowState: "waiting-approval", ...attemptPatch };
@@ -2981,42 +3014,26 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
   return evidence;
 }
 
-function statusFromWorkflowState(state: string): NodeStatus {
-  const normalized = state.toLowerCase();
-  if (["finished", "succeeded", "success", "complete", "completed"].includes(normalized)) {
-    return "succeeded";
+function statusFromWorkflowState(state: SmithersNodeState): NodeStatus {
+  switch (state) {
+    case "finished":
+      return "succeeded";
+    case "failed":
+    case "cancelled":
+      return "failed";
+    case "skipped":
+      return "skipped";
+    case "in-progress":
+    case "waiting-approval":
+    case "waiting-event":
+    case "waiting-timer":
+    case "waiting-quota":
+    case "waiting-bound":
+    case "bound-stale":
+      return "running";
+    case "pending":
+      return "pending";
   }
-  if (["timeout", "timed-out", "timedout", "heartbeat-timeout"].includes(normalized)) {
-    return "timed-out";
-  }
-  if (["failed", "error", "cancelled", "canceled", "stuck"].includes(normalized)) {
-    return "failed";
-  }
-  if (["skipped", "skip"].includes(normalized)) {
-    return "skipped";
-  }
-  if (["reused", "reuse", "reused-from-prior-run", "reused_from_prior_run"].includes(normalized)) {
-    return "reused-from-prior-run";
-  }
-  if (
-    [
-      "in-progress",
-      "running",
-      "started",
-      "retrying",
-      "waiting-approval",
-      "waiting-event",
-      "waiting-timer",
-      "waiting-quota",
-      "queued"
-    ].includes(normalized)
-  ) {
-    return "running";
-  }
-  if (["ready", "runnable"].includes(normalized)) {
-    return "ready";
-  }
-  return "pending";
 }
 
 function finalRunStatus(
@@ -3026,8 +3043,8 @@ function finalRunStatus(
   options: { evidenceComplete: boolean } = { evidenceComplete: true }
 ): RunStatus {
   const statuses = [...nodeStatuses.values()];
-  const workflowStatus = (inspect.runState ?? inspect.runStatus ?? "").toLowerCase();
-  if (workflowStatus === "cancelled" || workflowStatus === "canceled") {
+  const workflowStatus = inspect.runState;
+  if (workflowStatus === "cancelled") {
     return currentStatus === "timed-out" ? "timed-out" : "canceled";
   }
   if (workflowStatus === "paused") {
@@ -3036,20 +3053,16 @@ function finalRunStatus(
   if (
     [
       "running",
-      "in-progress",
-      "started",
-      "retrying",
-      "queued",
       "waiting-approval",
       "waiting-event",
       "waiting-timer",
-      "waiting-quota"
+      "waiting-quota",
+      "recovering",
+      "stale",
+      "orphaned"
     ].includes(workflowStatus)
   ) {
     return "running";
-  }
-  if (workflowStatus.includes("timeout") || statuses.includes("timed-out")) {
-    return "timed-out";
   }
   if (workflowStatus === "failed" || statuses.some((status) => ["failed", "skipped", "invalidated"].includes(status))) {
     return "failed";
@@ -3060,17 +3073,14 @@ function finalRunStatus(
   ) {
     return "running";
   }
-  if (["succeeded", "finished", "continued", "success", "complete", "completed"].includes(workflowStatus)) {
+  if (workflowStatus === "succeeded") {
     return options.evidenceComplete &&
       (statuses.length === 0 ||
         statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run"))
       ? "succeeded"
       : "failed";
   }
-  if (["stale", "orphaned", "recovering"].includes(workflowStatus)) {
-    return "running";
-  }
-  return currentStatus === "pending" ? "running" : currentStatus;
+  return currentStatus;
 }
 
 // A workflow that ends terminally failed while every durable node is still
@@ -3081,9 +3091,9 @@ function finalRunStatus(
 function unattributedTerminalWorkflowFailure(
   inspect: WorkflowInspect,
   nodeStatuses: Map<string, NodeStatus>
-): RuntimeDiagnostic | undefined {
-  const workflowState = (inspect.runState ?? inspect.runStatus ?? "").toLowerCase();
-  if (!TERMINAL_FAILED_WORKFLOW_STATES.has(workflowState)) {
+): UnattributedWorkflowFailureDiagnostic | undefined {
+  const workflowState = inspect.runState;
+  if (workflowState !== "failed") {
     return undefined;
   }
   if ([...nodeStatuses.values()].some((status) => ["failed", "timed-out", "skipped", "invalidated"].includes(status))) {
@@ -3123,9 +3133,7 @@ function unattributedTerminalFailureKey(payload: unknown): string {
 }
 
 function workflowSucceeded(inspect: WorkflowInspect): boolean {
-  return ["succeeded", "finished", "continued", "success", "complete", "completed"].includes(
-    (inspect.runState ?? inspect.runStatus ?? "").toLowerCase()
-  );
+  return inspect.runState === "succeeded";
 }
 
 function aggregateAttemptStatuses(statuses: NodeStatus[]): NodeStatus {
@@ -3171,12 +3179,8 @@ function workflowEvidenceSupersedesPrevious(
   return stringField(workflow, "task_id") !== taskId || numberField(workflow, "attempt") !== evidence.attempt;
 }
 
-function preparationWorkflowStateIsFailure(workflowState: string | undefined): boolean {
-  // Every shape `evidenceFromStep` and `evidenceFromEvents` produce carries a
-  // raw state. If a future one does not, trust the collapsed status rather than
-  // losing the attribution this whole branch exists to provide.
-  if (workflowState === undefined) return true;
-  return PREPARATION_FAILURE_WORKFLOW_STATES.has(workflowState.toLowerCase());
+function preparationWorkflowStateIsFailure(evidence: NodeWorkflowEvidence): boolean {
+  return evidence.workflowState === "failed" || evidence.timedOut === true;
 }
 
 function finishedAtForStatus(
@@ -3187,7 +3191,7 @@ function finishedAtForStatus(
   if (!terminalStatus(status)) {
     return undefined;
   }
-  return evidenceFinishedAt ?? previous?.finished_at ?? new Date().toISOString();
+  return evidenceFinishedAt ?? previous?.finished_at;
 }
 
 function nodePatchChanges(previous: NodeState | undefined, patch: Partial<Omit<NodeState, "node_id">>): boolean {
@@ -3255,51 +3259,18 @@ function eventsByWorkflowNode(events: WorkflowEvent[]): Map<string, WorkflowEven
   return byNode;
 }
 
-function parseInspectSnapshot(value: unknown): WorkflowInspect {
-  const data = commandData(value);
-  const run = recordField(data, "run");
-  const runState = recordField(data, "runState");
-  const stepsRaw = firstArrayField(data, ["steps", "nodes", "tasks"]);
-  const steps = stepsRaw.flatMap((entry): WorkflowStep[] => {
-    if (!isRecord(entry)) {
-      return [];
-    }
-    const id =
-      stringField(entry, "id") ??
-      stringField(entry, "nodeId") ??
-      stringField(entry, "taskId") ??
-      stringField(entry, "name");
-    const state = stringField(entry, "state") ?? stringField(entry, "status") ?? stringField(entry, "phase");
-    if (id === undefined || state === undefined) {
-      return [];
-    }
-    return [{ id, state, attempt: numberField(entry, "attempt") ?? numberField(entry, "attemptIndex") }];
-  });
+function parseInspectSnapshot(snapshot: SmithersCommandSnapshot, expectedWorkflowRunId: string): WorkflowInspect {
+  const current = parseCurrentSmithersInspect(snapshot, expectedWorkflowRunId);
+  const failedWorkflowTaskIds = new Set(current.failedChildKeys.map((key) => key.slice(0, key.lastIndexOf("::"))));
+  for (const node of current.nodes) {
+    if (node.state === "failed") failedWorkflowTaskIds.add(node.nodeId);
+  }
   return {
-    runStatus: stringField(run, "status") ?? stringField(data, "status"),
-    runState: stringField(runState, "state") ?? stringField(data, "state"),
-    startedAt: stringField(run, "started") ?? stringField(run, "startedAt"),
-    finishedAt: stringField(run, "finished") ?? stringField(run, "finishedAt"),
-    steps,
-    failedWorkflowTaskIds: failedWorkflowTaskIds(data, steps)
+    runStatus: current.runStatus,
+    runState: current.runState,
+    steps: current.nodes.map((node) => ({ id: node.nodeId, state: node.state, attempt: node.attempt })),
+    failedWorkflowTaskIds: [...failedWorkflowTaskIds].sort()
   };
-}
-
-// The workflow task keys a terminal failure is attributed to. Wrapper tasks
-// (`prepare:`/`verify:`) appear here even though they own no durable node, so a
-// failure that cannot be attributed to a node is still nameable.
-function failedWorkflowTaskIds(data: Record<string, unknown> | undefined, steps: WorkflowStep[]): string[] {
-  const ids = new Set<string>();
-  for (const key of firstArrayField(data, ["failedChildKeys"])) {
-    if (typeof key !== "string") continue;
-    const separator = key.lastIndexOf("::");
-    const id = (separator < 0 ? key : key.slice(0, separator)).trim();
-    if (id !== "") ids.add(id);
-  }
-  for (const step of steps) {
-    if (TERMINAL_FAILED_WORKFLOW_STATES.has(step.state.toLowerCase())) ids.add(step.id);
-  }
-  return [...ids].sort();
 }
 
 function parseWorkflowEvents(stdout: string, expectedWorkflowRunId: string): WorkflowEvent[] {
@@ -3512,27 +3483,9 @@ function workflowSnapshotDiagnostic(snapshot: SmithersCommandSnapshot, code: str
   };
 }
 
-function commandData(value: unknown): Record<string, unknown> | undefined {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-  const data = recordField(value, "data");
-  return data ?? value;
-}
-
 function recordField(value: Record<string, unknown> | undefined, key: string): Record<string, unknown> | undefined {
   const field = value?.[key];
   return isRecord(field) ? field : undefined;
-}
-
-function firstArrayField(value: Record<string, unknown> | undefined, keys: string[]): unknown[] {
-  for (const key of keys) {
-    const field = value?.[key];
-    if (Array.isArray(field)) {
-      return field;
-    }
-  }
-  return [];
 }
 
 function stringField(value: Record<string, unknown> | undefined, key: string): string | undefined {

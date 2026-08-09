@@ -10,6 +10,7 @@ import {
   readRunState,
   replayEvents,
   writeJsonDurable,
+  type AppendEventInput,
   type EventRecord,
   type RunLayout
 } from "@ultrafuzz/artifacts";
@@ -282,7 +283,9 @@ function verifyWorkflowRunLinkEvent(layout: RunLayout, entry: WorkflowRunLinkJou
   }
 }
 
-function workflowRunLinkEventPayload(entry: WorkflowRunLinkJournalEntry): Record<string, string> {
+function workflowRunLinkEventPayload(
+  entry: WorkflowRunLinkJournalEntry
+): Extract<AppendEventInput, { eventType: "workflow-link-recorded" }>["payload"] {
   return {
     workflow_link_id: entry.link_id,
     action: entry.action,

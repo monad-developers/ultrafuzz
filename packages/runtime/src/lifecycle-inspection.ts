@@ -1,7 +1,6 @@
-import fs from "node:fs";
 import path from "node:path";
 
-import { appendEvent, readRunState, updateRunStatus } from "@ultrafuzz/artifacts";
+import { appendEvent, readRunState, updateRunStatus, type RunLayout, type RunStatus } from "@ultrafuzz/artifacts";
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 
 import {
@@ -43,6 +42,15 @@ const MAX_EVENT_LIMIT = 2_000;
 const MAX_WATCH_LINES = 100_000;
 const EVENT_DETAIL_LIMIT_CHARACTERS = 512;
 
+function readRunStatusIfPresent(layout: RunLayout): RunStatus | undefined {
+  try {
+    return readRunState(layout).status;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 export async function cancelRun(input: CancelRunInput) {
   const projectRoot = path.resolve(input.projectRoot);
   const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
@@ -59,16 +67,28 @@ export async function cancelRun(input: CancelRunInput) {
     // Read the persisted status rather than assuming `running`: `pause`d and
     // `pending` runs are cancellable too, and the append-only event evidence
     // must not record a state the run was never in.
-    const persistedStatus = fs.existsSync(evidence.layout.statePath) ? readRunState(evidence.layout).status : "pending";
-    appendEvent(evidence.layout, {
-      eventType: confirmed ? "workflow-cancel-confirmed" : "workflow-cancel-requested",
-      status: confirmed ? "canceled" : persistedStatus,
-      payload: {
-        action: "cancel",
-        workflow_run_id: evidence.smithersRunId,
-        confirmed
-      }
-    });
+    const persistedStatus = readRunStatusIfPresent(evidence.layout) ?? "pending";
+    if (confirmed) {
+      appendEvent(evidence.layout, {
+        eventType: "workflow-cancel-confirmed",
+        status: "canceled",
+        payload: {
+          action: "cancel",
+          workflow_run_id: evidence.smithersRunId,
+          confirmed: true
+        }
+      });
+    } else {
+      appendEvent(evidence.layout, {
+        eventType: "workflow-cancel-requested",
+        status: persistedStatus,
+        payload: {
+          action: "cancel",
+          workflow_run_id: evidence.smithersRunId,
+          confirmed: false
+        }
+      });
+    }
     // A durable request keeps the product run nonterminal; only a confirmed
     // cancellation writes Ultrafuzz's canonical terminal spelling.
     const state = confirmed ? updateRunStatus(evidence.layout, "canceled") : undefined;
@@ -118,9 +138,7 @@ export async function diagnoseRun(input: WorkflowRunQueryInput) {
     {
       run_id: input.runId,
       workflow_run_id: evidence.smithersRunId,
-      run_status:
-        (sync.ok ? sync.value.status : undefined) ??
-        (fs.existsSync(evidence.layout.statePath) ? readRunState(evidence.layout).status : "unknown"),
+      run_status: (sync.ok ? sync.value.status : undefined) ?? readRunStatusIfPresent(evidence.layout) ?? "unknown",
       workflow_status: stringOr(payload.status, "unknown"),
       summary: publicWorkflowText(stringOr(payload.summary, "no diagnosis available")),
       current_node_id: nullableString(payload.currentNodeId),

@@ -20,6 +20,7 @@ import {
   type RunMetadataDocument,
   type RunMetadataWorkflow,
   type RunLayout,
+  type AppendEventInput,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestTask,
   type StateJsonValue
@@ -210,7 +211,7 @@ export async function startRun(input: StartRunInput) {
     appendEvent(plan.layout, {
       eventType: "workflow-submit-failed",
       status: "failed",
-      payload: diagnostic
+      payload: workflowSubmissionFailureEventPayload(diagnostic)
     });
     return runtimeFailure<StartRunValue>([diagnostic]);
   } finally {
@@ -245,14 +246,25 @@ export async function pauseRun(input: PauseRunInput) {
     if (result.status === "paused") {
       updateRunStatus(evidence.layout, "paused");
     }
-    appendEvent(evidence.layout, {
-      eventType: result.status === "paused" ? "workflow-lifecycle-already-paused" : "workflow-pause-requested",
-      status: result.status === "paused" ? "paused" : "running",
-      payload: {
-        action: "pause",
-        workflow_run_id: evidence.smithersRunId
-      }
-    });
+    if (result.status === "paused") {
+      appendEvent(evidence.layout, {
+        eventType: "workflow-lifecycle-already-paused",
+        status: "paused",
+        payload: {
+          action: "pause",
+          workflow_run_id: evidence.smithersRunId
+        }
+      });
+    } else {
+      appendEvent(evidence.layout, {
+        eventType: "workflow-pause-requested",
+        status: "running",
+        payload: {
+          action: "pause",
+          workflow_run_id: evidence.smithersRunId
+        }
+      });
+    }
     return runtimeResult(true, {
       run_id: input.runId,
       workflow_run_id: evidence.smithersRunId,
@@ -263,6 +275,44 @@ export async function pauseRun(input: PauseRunInput) {
   } catch (error) {
     return runtimeFailure<PauseRunValue>([smithersDiagnostic(error, "WORKFLOW_PAUSE_FAILED")]);
   }
+}
+
+function workflowSubmissionFailureEventPayload(
+  diagnostic: RuntimeDiagnostic
+): Extract<AppendEventInput, { eventType: "workflow-submit-failed" }>["payload"] {
+  if (!isWorkflowSubmissionFailureEventPayload(diagnostic)) {
+    throw new Error("workflow submission diagnostic does not match the current event contract");
+  }
+  return diagnostic;
+}
+
+function isWorkflowSubmissionFailureEventPayload(
+  diagnostic: RuntimeDiagnostic
+): diagnostic is RuntimeDiagnostic & Extract<AppendEventInput, { eventType: "workflow-submit-failed" }>["payload"] {
+  if (
+    diagnostic.code !== "WORKFLOW_SUBMISSION_FAILED" ||
+    diagnostic.severity !== "error" ||
+    diagnostic.source !== "workflow" ||
+    Object.keys(diagnostic).some((key) => !["code", "message", "severity", "source", "details"].includes(key)) ||
+    diagnostic.details === undefined ||
+    diagnostic.details === null ||
+    Array.isArray(diagnostic.details)
+  ) {
+    return false;
+  }
+  const details = diagnostic.details;
+  if (Object.keys(details).some((key) => !["exit_code", "signal", "killed", "stdout", "stderr"].includes(key))) {
+    return false;
+  }
+  return (
+    (details.exit_code === undefined ||
+      typeof details.exit_code === "string" ||
+      (typeof details.exit_code === "number" && Number.isFinite(details.exit_code))) &&
+    (details.signal === undefined || typeof details.signal === "string") &&
+    (details.killed === undefined || typeof details.killed === "boolean") &&
+    (details.stdout === undefined || typeof details.stdout === "string") &&
+    (details.stderr === undefined || typeof details.stderr === "string")
+  );
 }
 
 async function submitLifecycleAction(input: WorkflowLifecycleInput, action: WorkflowLifecycleValue["action"]) {
