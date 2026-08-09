@@ -31,7 +31,8 @@ afterEach(() => {
 
 describe("trusted automatic eval-history publication handoff", () => {
   it("accepts only the exact event-bound smoke manifest", () => {
-    expect(validateAutomaticPublicationManifest(smokeManifest(), smokeContext())).toEqual(smokeManifest());
+    const manifest = smokeManifest();
+    expect(validateAutomaticPublicationManifest(manifest, smokeContext())).toBe(manifest);
   });
 
   it("accepts a safe overridden smoke runner before unpacking producer bundles", () => {
@@ -91,6 +92,7 @@ describe("trusted automatic eval-history publication handoff", () => {
 
   it("rejects untrusted identity, topology, provider, and path mutations", () => {
     const cases: Array<[string, (manifest: ReturnType<typeof smokeManifest>) => void]> = [
+      ["schema version", (manifest) => (manifest.schema_version = "ultrafuzz.modal.benchmark-control-manifest.v0")],
       ["unexpected root field", (manifest) => Object.assign(manifest, { command: "echo unsafe" })],
       ["candidate", (manifest) => (manifest.candidate_commit = "b".repeat(40))],
       ["repository", (manifest) => (manifest.repository = "https://github.com/example/other")],
@@ -385,10 +387,17 @@ describe("trusted automatic eval-history publication handoff", () => {
     ).toThrow(/graded case count/u);
   });
 
-  it("rejects symlinked and oversized producer manifests before parsing", () => {
+  it("rejects duplicate-key, symlinked, and oversized producer manifests before context checks", () => {
     const root = temporaryRoot("ultrafuzz-publication-manifest-");
     const target = path.join(root, "manifest.json");
     fs.writeFileSync(target, `${JSON.stringify(smokeManifest())}\n`);
+
+    const duplicate = path.join(root, "duplicate.json");
+    const serialized = JSON.stringify(smokeManifest());
+    const field = '"schema_version":"ultrafuzz.modal.benchmark-control-manifest.v1"';
+    fs.writeFileSync(duplicate, `${serialized.replace(field, `${field},"schema_version":"shadow"`)}\n`);
+    expect(() => readAutomaticPublicationManifest(duplicate, smokeContext())).toThrow(/duplicate property/u);
+
     const symlink = path.join(root, "manifest-link.json");
     fs.symlinkSync(target, symlink);
     expect(() => readAutomaticPublicationManifest(symlink, smokeContext())).toThrow();
@@ -467,6 +476,7 @@ function smokeManifest() {
   const modelSlug = "benchmark-smoke-gpt-5-6-luna-high";
   const pair = `ultrafuzz-bench-${modelSlug}`;
   return {
+    schema_version: "ultrafuzz.modal.benchmark-control-manifest.v1",
     candidate_commit: "a".repeat(40),
     repository: "https://github.com/monad-developers/ultrafuzz",
     generation: "12345-2",
@@ -518,6 +528,7 @@ function fullManifest() {
     };
   });
   return {
+    schema_version: "ultrafuzz.modal.benchmark-control-manifest.v1",
     candidate_commit: "a".repeat(40),
     repository: "https://github.com/monad-developers/ultrafuzz",
     generation: "12345-2",

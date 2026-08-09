@@ -1,4 +1,6 @@
 export const MODAL_COMMON_SCHEMA_ID = "urn:ultrafuzz:schema:modal:common:1" as const;
+export const MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID =
+  "urn:ultrafuzz:schema:modal:benchmark-control-manifest:1" as const;
 export const MODAL_LAUNCH_STATE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:launch-state:3" as const;
 export const MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:recovery-lifecycle:1" as const;
 export const MODAL_RECOVERY_STATE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:recovery-state:1" as const;
@@ -451,7 +453,50 @@ export interface StrictModalSmokeResultDocument {
   };
 }
 
+export type StrictModalBenchmarkMode = "smoke" | "full" | "threat-model";
+export type StrictModalBenchmarkName = "evmbench" | "ultrafuzz-bench";
+
+export interface StrictModalBenchmarkTarget {
+  id: string;
+  repository: string;
+  revision: string;
+  framework: string;
+}
+
+export interface StrictModalBenchmarkControlPair {
+  pair: string;
+  benchmark: StrictModalBenchmarkName;
+  mode: StrictModalBenchmarkMode;
+  lane: StrictModalBenchmarkMode;
+  model_slug: string;
+  provider: StrictModalModelProvider;
+  config_path: string;
+  state_path: string;
+}
+
+export interface StrictModalBenchmarkControlManifestDocument {
+  schema_version: "ultrafuzz.modal.benchmark-control-manifest.v1";
+  candidate_commit: string;
+  repository: string;
+  generation: string;
+  mode: StrictModalBenchmarkMode;
+  benchmark: StrictModalBenchmarkName;
+  execution: { mode: "modal"; dry_run: false };
+  image_name: string;
+  targets: StrictModalBenchmarkTarget[];
+  matrix_rows_per_pair: number;
+  control_timeout_seconds: number;
+  concurrency: {
+    max_parallel_eval_rows_per_sandbox: number;
+    max_parallel_workflow_nodes_per_row: number;
+    max_live_runner_workflows_by_provider: Partial<Record<StrictModalModelProvider, number>>;
+    max_live_judge_rows: number;
+  };
+  pairs: StrictModalBenchmarkControlPair[];
+}
+
 export interface ModalContractBySchemaId {
+  [MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID]: StrictModalBenchmarkControlManifestDocument;
   [MODAL_LAUNCH_STATE_SCHEMA_ID]: StrictModalLaunchStateDocument;
   [MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID]: StrictModalRecoveryLifecycleDocument;
   [MODAL_RECOVERY_STATE_SCHEMA_ID]: StrictModalRecoveryStateDocument;

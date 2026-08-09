@@ -5,6 +5,10 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
 
+import { readRegularFileSnapshot } from "../../packages/artifacts/dist/index.js";
+import { MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID } from "../../packages/modal/dist/modal-contracts.js";
+import { assertModalDocumentValue, parseModalDocumentBytes } from "../../packages/modal/dist/modal-documents.js";
+
 export const AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION = "ultrafuzz.eval-history-automatic-publication-plan.v1";
 
 const GENERATION_SCHEMA_VERSION = "ultrafuzz.eval-history-publication-generation.v1";
@@ -19,6 +23,7 @@ const FULL_COMMIT = /^[0-9a-f]{40}$/u;
 const POSITIVE_DECIMAL = /^[1-9][0-9]*$/u;
 const PUBLIC_EVAL_DIAGNOSTICS_PATH = "eval/public-eval-diagnostics.json";
 const ROOT_KEYS = [
+  "schema_version",
   "candidate_commit",
   "repository",
   "generation",
@@ -85,6 +90,7 @@ export function validateAutomaticPublicationManifest(value, context) {
  * release gate so trusted default-branch cleanup can authenticate its plan.
  */
 export function validateBenchmarkControlManifest(value, context) {
+  assertModalDocumentValue(MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID, value);
   const manifest = strictRecord(value, "benchmark manifest", ROOT_KEYS);
   const expected = benchmarkControlExpectations(
     context.mode === "smoke" && context.smokeProvider === undefined
@@ -107,7 +113,7 @@ export function validateBenchmarkControlManifest(value, context) {
   if (manifest.image_name !== `ufz-runner-${expected.candidateCommit}`) {
     throw new Error("benchmark manifest image name does not match the candidate commit");
   }
-  const targets = validateManifestTargets(manifest.targets, expected);
+  validateManifestTargets(manifest.targets, expected);
   if (manifest.matrix_rows_per_pair !== expected.matrixRowsPerPair) {
     throw new Error("benchmark manifest matrix row count does not match the trusted lane");
   }
@@ -123,7 +129,7 @@ export function validateBenchmarkControlManifest(value, context) {
   const seenModelSlugs = new Set();
   const seenConfigPaths = new Set();
   const seenStatePaths = new Set();
-  const pairs = manifest.pairs.map((value, index) => {
+  manifest.pairs.forEach((value, index) => {
     const pair = strictRecord(value, `benchmark pair ${index}`, PAIR_KEYS);
     const provider = expected.providers[index];
     if (pair.provider !== provider) {
@@ -149,43 +155,16 @@ export function validateBenchmarkControlManifest(value, context) {
     assertUnique(seenModelSlugs, modelSlug, "benchmark model slug");
     assertUnique(seenConfigPaths, configPath, "benchmark config path");
     assertUnique(seenStatePaths, statePath, "benchmark state path");
-    return {
-      pair: pairId,
-      benchmark: expected.benchmark,
-      mode: expected.mode,
-      lane: expected.mode,
-      model_slug: modelSlug,
-      provider,
-      config_path: configPath,
-      state_path: statePath
-    };
   });
-
-  return {
-    candidate_commit: expected.candidateCommit,
-    repository: expected.repository,
-    generation: expected.generation,
-    mode: expected.mode,
-    benchmark: expected.benchmark,
-    execution: { mode: "modal", dry_run: false },
-    image_name: manifest.image_name,
-    targets,
-    matrix_rows_per_pair: expected.matrixRowsPerPair,
-    control_timeout_seconds: expected.controlTimeoutSeconds,
-    concurrency: manifest.concurrency,
-    pairs
-  };
+  return manifest;
 }
 
 export function readAutomaticPublicationManifest(filePath, context) {
-  return validateAutomaticPublicationManifest(
-    readJsonRegular(filePath, MAX_MANIFEST_BYTES, "benchmark manifest"),
-    context
-  );
+  return validateAutomaticPublicationManifest(readBenchmarkControlManifestDocument(filePath), context);
 }
 
 export function readBenchmarkControlManifest(filePath, context) {
-  return validateBenchmarkControlManifest(readJsonRegular(filePath, MAX_MANIFEST_BYTES, "benchmark manifest"), context);
+  return validateBenchmarkControlManifest(readBenchmarkControlManifestDocument(filePath), context);
 }
 
 export function validateBenchmarkPolicyFiles(input) {
@@ -223,15 +202,13 @@ export async function prepareAutomaticPublication(input) {
     import("../../packages/modal/dist/launch-state.js")
   ]);
   const manifestPath = regularFileInside(controlRoot, "manifest.json", MAX_MANIFEST_BYTES, "benchmark manifest");
-  const producerPolicy = automaticProducerPolicyDimensions(
-    readJsonRegular(manifestPath, MAX_MANIFEST_BYTES, "benchmark manifest"),
-    controlRoot
-  );
+  const manifestDocument = readBenchmarkControlManifestDocument(manifestPath);
+  const producerPolicy = automaticProducerPolicyDimensions(manifestDocument, controlRoot);
   const context = publicationExpectations({
     ...input,
     ...benchmarkPolicyDimensions(policyRoot, identity, evalModule, producerPolicy)
   });
-  const manifest = readAutomaticPublicationManifest(manifestPath, context);
+  const manifest = validateAutomaticPublicationManifest(manifestDocument, context);
   const { loadModalBenchmarkConfig, fingerprintModalConfigFile, fingerprintModalModel } = configModule;
   const sourceFingerprint = launchStateModule.fingerprintTrackedSource(policyRoot);
   const usedModelSlugs = new Set();
@@ -693,6 +670,7 @@ function evaluateIntegerExpression(node, identifiers, label) {
 }
 
 export function automaticProducerPolicyDimensions(value, controlRoot) {
+  assertModalDocumentValue(MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID, value);
   const root = regularDirectory(controlRoot, "benchmark control root");
   const manifest = strictRecord(value, "benchmark manifest", ROOT_KEYS);
   const matrixRowsPerPair = positiveSafeInteger(manifest.matrix_rows_per_pair, "benchmark matrix row count");
@@ -1083,6 +1061,13 @@ function readJsonRegular(filePath, maxBytes, label) {
   } finally {
     fs.closeSync(descriptor);
   }
+}
+
+function readBenchmarkControlManifestDocument(filePath) {
+  return parseModalDocumentBytes(
+    MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID,
+    readRegularFileSnapshot(path.resolve(filePath), MAX_MANIFEST_BYTES)
+  ).value;
 }
 
 function regularDirectory(value, label) {

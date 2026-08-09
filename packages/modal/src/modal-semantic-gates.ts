@@ -2,6 +2,7 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
+  MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID,
   MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
   MODAL_LAUNCH_STATE_SCHEMA_ID,
   MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID,
@@ -18,6 +19,7 @@ import {
   MODAL_WORKER_RESULT_SCHEMA_ID,
   type ModalContractForSchemaId,
   type ModalContractSchemaId,
+  type StrictModalBenchmarkControlManifestDocument,
   type StrictModalExecutionDependencyManifestDocument,
   type StrictModalLaunchStateDocument,
   type StrictModalNodeCheckpointDocument,
@@ -36,6 +38,8 @@ import {
 } from "./modal-contracts.js";
 
 export const IMPLEMENTED_MODAL_SEMANTIC_GATES = Object.freeze([
+  "modal-benchmark-control-manifest-identity",
+  "modal-benchmark-control-manifest-uniqueness",
   "modal-execution-dependency-target-identity",
   "modal-execution-dependency-issuer-closure",
   "modal-execution-dependency-canonical-order",
@@ -77,6 +81,10 @@ export interface ModalNodeCheckpointResultContext {
 
 /** The exact gates each document dispatch can invoke; registry metadata imports this table directly. */
 export const MODAL_SEMANTIC_GATES_BY_SCHEMA_ID = Object.freeze({
+  [MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID]: [
+    "modal-benchmark-control-manifest-identity",
+    "modal-benchmark-control-manifest-uniqueness"
+  ],
   [MODAL_LAUNCH_STATE_SCHEMA_ID]: [
     "modal-launch-attempt-identity",
     "modal-launch-recovery-lineage",
@@ -182,6 +190,9 @@ export function assertModalDocumentSemantics<SchemaId extends ModalContractSchem
   value: ModalContractForSchemaId<SchemaId>
 ): void {
   switch (schemaId) {
+    case MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID:
+      assertBenchmarkControlManifestSemantics(value as StrictModalBenchmarkControlManifestDocument);
+      return;
     case MODAL_LAUNCH_STATE_SCHEMA_ID:
       assertLaunchStateSemantics(value as StrictModalLaunchStateDocument);
       return;
@@ -211,6 +222,53 @@ export function assertModalDocumentSemantics<SchemaId extends ModalContractSchem
       return;
     default:
       return;
+  }
+}
+
+function assertBenchmarkControlManifestSemantics(manifest: StrictModalBenchmarkControlManifestDocument): void {
+  if (manifest.image_name !== `ufz-runner-${manifest.candidate_commit}`) {
+    fail("modal-benchmark-control-manifest-identity", "image name does not match the candidate commit");
+  }
+  const targetIds = new Set<string>();
+  for (const target of manifest.targets) {
+    if (targetIds.has(target.id)) {
+      fail("modal-benchmark-control-manifest-uniqueness", `duplicate benchmark target ${target.id}`);
+    }
+    targetIds.add(target.id);
+  }
+  const pairIds = new Set<string>();
+  const modelSlugs = new Set<string>();
+  const configPaths = new Set<string>();
+  const statePaths = new Set<string>();
+  const providers = new Set<string>();
+  for (const pair of manifest.pairs) {
+    if (
+      pair.benchmark !== manifest.benchmark ||
+      pair.mode !== manifest.mode ||
+      pair.lane !== manifest.mode ||
+      pair.pair !== `${manifest.benchmark}-${pair.model_slug}` ||
+      pair.config_path !== `${pair.pair}.json` ||
+      pair.state_path !== `${pair.pair}.state.json`
+    ) {
+      fail("modal-benchmark-control-manifest-identity", `pair ${pair.pair} does not match its manifest scope`);
+    }
+    for (const [set, value, label] of [
+      [pairIds, pair.pair, "pair ID"],
+      [modelSlugs, pair.model_slug, "model slug"],
+      [configPaths, pair.config_path, "config path"],
+      [statePaths, pair.state_path, "state path"],
+      [providers, pair.provider, "provider"]
+    ] as const) {
+      if (set.has(value)) {
+        fail("modal-benchmark-control-manifest-uniqueness", `duplicate ${label} ${value}`);
+      }
+      set.add(value);
+    }
+  }
+  const concurrencyProviders = Object.keys(manifest.concurrency.max_live_runner_workflows_by_provider).sort();
+  const pairProviders = [...providers].sort();
+  if (!isDeepStrictEqual(concurrencyProviders, pairProviders)) {
+    fail("modal-benchmark-control-manifest-identity", "runner concurrency providers do not match producer pairs");
   }
 }
 

@@ -142,6 +142,7 @@ describe("cancelled Modal benchmark cleanup preparation", () => {
 });
 
 interface CleanupManifest {
+  schema_version: "ultrafuzz.modal.benchmark-control-manifest.v1";
   candidate_commit: string;
   repository: string;
   generation: string;
@@ -203,6 +204,7 @@ function cleanupFixture() {
   const manifestPath = path.join(root, "manifest.json");
   const outputPath = path.join(root, "pairs.tsv");
   const manifest: CleanupManifest = {
+    schema_version: "ultrafuzz.modal.benchmark-control-manifest.v1",
     candidate_commit: candidate,
     repository,
     generation: "12345-2",
@@ -324,6 +326,7 @@ function threatModelCleanupFixture() {
   const outputPath = path.join(root, "pairs-api.tsv");
   const targets = cleanupTargets();
   const manifest: CleanupManifest = {
+    schema_version: "ultrafuzz.modal.benchmark-control-manifest.v1",
     candidate_commit: threatCandidate,
     repository,
     generation: "54321-3",

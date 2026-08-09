@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 
 import { loadBenchmarkCohortManifest, loadBenchmarkLanesManifest } from "../../packages/evals/dist/index.js";
 import { parseModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
+import { MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID } from "../../packages/modal/dist/modal-contracts.js";
+import { serializeModalDocument } from "../../packages/modal/dist/modal-documents.js";
 import {
   PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS,
   PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS,
@@ -38,7 +40,7 @@ if (!/^[0-9a-f]{40}$/.test(candidateCommit ?? "")) throw new Error("candidate co
 if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository ?? "")) {
   throw new Error("candidate repository must be a canonical public GitHub URL");
 }
-if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(generation ?? "")) throw new Error("generation is invalid");
+if (!/^[1-9][0-9]*-[1-9][0-9]*$/.test(generation ?? "")) throw new Error("generation is invalid");
 if (mode !== "smoke" && mode !== "full") throw new Error("benchmark mode must be smoke or full");
 if (!outputDirectory) throw new Error("output directory is required");
 
@@ -136,6 +138,7 @@ for (const model of models) {
 
 const maxLiveRowsPerPair = Math.min(matrixRowsPerPair, maxParallelEvalRows);
 const manifest = {
+  schema_version: "ultrafuzz.modal.benchmark-control-manifest.v1",
   candidate_commit: candidateCommit,
   repository,
   generation,
@@ -162,7 +165,8 @@ const manifest = {
   },
   pairs
 };
-fs.writeFileSync(path.join(root, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+const serializedManifest = serializeModalDocument(MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID, manifest);
+fs.writeFileSync(path.join(root, "manifest.json"), serializedManifest.bytes, { mode: 0o600 });
 console.log(JSON.stringify(manifest));
 
 function benchmarkModels(benchmarkMode, checkedInProfiles) {

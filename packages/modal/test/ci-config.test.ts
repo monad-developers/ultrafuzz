@@ -41,6 +41,7 @@ describe("public Modal benchmark configuration", () => {
       { cwd: workspace }
     );
     const manifest = JSON.parse(fs.readFileSync(path.join(output, "manifest.json"), "utf8")) as {
+      schema_version: string;
       mode: string;
       benchmark: string;
       execution: { mode: string; dry_run: boolean };
@@ -56,6 +57,7 @@ describe("public Modal benchmark configuration", () => {
         max_live_judge_rows: number;
       };
     };
+    expect(manifest.schema_version).toBe("ultrafuzz.modal.benchmark-control-manifest.v1");
     expect(manifest.mode).toBe("smoke");
     expect(manifest).not.toHaveProperty("experiment");
     expect(manifest.benchmark).toBe("ultrafuzz-bench");
@@ -135,7 +137,7 @@ describe("public Modal benchmark configuration", () => {
         path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
         "d".repeat(40),
         "https://github.com/monad-developers/ultrafuzz",
-        "full-1",
+        "23456-1",
         output,
         "full"
       ],
@@ -240,7 +242,7 @@ describe("public Modal benchmark configuration", () => {
         path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
         "c".repeat(40),
         "https://github.com/monad-developers/ultrafuzz",
-        "overrides-1",
+        "34567-1",
         output,
         "full"
       ],
@@ -288,7 +290,7 @@ describe("public Modal benchmark configuration", () => {
         path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
         "e".repeat(40),
         "https://github.com/monad-developers/ultrafuzz",
-        "smoke-override-1",
+        "45678-1",
         output,
         "smoke"
       ],
@@ -336,7 +338,7 @@ describe("public Modal benchmark configuration", () => {
         path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
         "f".repeat(40),
         "https://github.com/monad-developers/ultrafuzz",
-        "deepseek-smoke-1",
+        "56789-1",
         output,
         "smoke"
       ],
@@ -418,7 +420,7 @@ describe("public Modal benchmark configuration", () => {
           path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
           "d".repeat(40),
           "https://github.com/monad-developers/ultrafuzz",
-          `invalid-${index}`,
+          `${60_000 + index}-1`,
           output,
           testCase.mode
         ],

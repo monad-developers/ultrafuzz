@@ -6,6 +6,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID,
   MODAL_COMMON_SCHEMA_ID,
   MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
   MODAL_LAUNCH_STATE_SCHEMA_ID,
@@ -103,6 +104,44 @@ function emptyRecoverySummary(): StrictModalRecoveryLifecycleSummary {
 
 function contractFixtures(): ContractFixtures {
   return {
+    [MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID]: {
+      schema_version: "ultrafuzz.modal.benchmark-control-manifest.v1",
+      candidate_commit: gitA,
+      repository: "https://github.com/monad-developers/ultrafuzz",
+      generation: "12345-1",
+      mode: "smoke",
+      benchmark: "ultrafuzz-bench",
+      execution: { mode: "modal", dry_run: false },
+      image_name: `ufz-runner-${gitA}`,
+      targets: [
+        {
+          id: "target-a",
+          repository: "https://github.com/example/target-a",
+          revision: gitB,
+          framework: "foundry"
+        }
+      ],
+      matrix_rows_per_pair: 1,
+      control_timeout_seconds: 19_800,
+      concurrency: {
+        max_parallel_eval_rows_per_sandbox: 1,
+        max_parallel_workflow_nodes_per_row: 8,
+        max_live_runner_workflows_by_provider: { openai: 1 },
+        max_live_judge_rows: 1
+      },
+      pairs: [
+        {
+          pair: "ultrafuzz-bench-benchmark-smoke-model-high",
+          benchmark: "ultrafuzz-bench",
+          mode: "smoke",
+          lane: "smoke",
+          model_slug: "benchmark-smoke-model-high",
+          provider: "openai",
+          config_path: "ultrafuzz-bench-benchmark-smoke-model-high.json",
+          state_path: "ultrafuzz-bench-benchmark-smoke-model-high.state.json"
+        }
+      ]
+    },
     [MODAL_LAUNCH_STATE_SCHEMA_ID]: {
       schema_version: "ultrafuzz.modal.launch-state.v3",
       logical_run_id: "logical-run",
@@ -266,7 +305,7 @@ function bytes(value: unknown): Buffer {
 describe("Modal strict JSON contract foundation", () => {
   it("registers and strictly compiles every schema with matching checked-in exports and gates", () => {
     const registry = modalSchemaRegistry();
-    expect(registry).toHaveLength(15);
+    expect(registry).toHaveLength(16);
     expect(registry.map((entry) => entry.filename)).toEqual(Object.keys(MODAL_SCHEMA_METADATA).sort());
     expect(modalSchemaBundleDigest()).toMatch(/^[0-9a-f]{64}$/u);
 

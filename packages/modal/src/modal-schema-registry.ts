@@ -14,6 +14,7 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import {
+  MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID,
   MODAL_COMMON_SCHEMA_ID,
   MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
   MODAL_LAUNCH_STATE_SCHEMA_ID,
@@ -68,6 +69,9 @@ function loadSchemaDocument(filename: string): Readonly<Record<string, unknown>>
 }
 
 export const modalCommonJsonSchema = loadSchemaDocument("modal-common.schema.json");
+export const modalBenchmarkControlManifestJsonSchema = loadSchemaDocument(
+  "modal-benchmark-control-manifest.schema.json"
+);
 export const modalExecutionDependencyManifestJsonSchema = loadSchemaDocument(
   "modal-execution-dependency-manifest.schema.json"
 );
@@ -86,6 +90,7 @@ export const modalWorkerLineageJsonSchema = loadSchemaDocument("modal-worker-lin
 export const modalWorkerResultJsonSchema = loadSchemaDocument("modal-worker-result.schema.json");
 
 export const MODAL_SCHEMA_EXPORTS = Object.freeze({
+  modalBenchmarkControlManifestJsonSchema,
   modalCommonJsonSchema,
   modalExecutionDependencyManifestJsonSchema,
   modalLaunchStateJsonSchema,
@@ -104,6 +109,12 @@ export const MODAL_SCHEMA_EXPORTS = Object.freeze({
 });
 
 export const MODAL_SCHEMA_METADATA: Readonly<Record<string, ModalSchemaMetadata>> = Object.freeze({
+  "modal-benchmark-control-manifest.schema.json": {
+    id: MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "modalBenchmarkControlManifestJsonSchema",
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID]
+  },
   "modal-common.schema.json": {
     id: MODAL_COMMON_SCHEMA_ID,
     role: "subschema",
@@ -197,6 +208,7 @@ export const MODAL_SCHEMA_METADATA: Readonly<Record<string, ModalSchemaMetadata>
 });
 
 const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, unknown>>>> = Object.freeze({
+  "modal-benchmark-control-manifest.schema.json": modalBenchmarkControlManifestJsonSchema,
   "modal-common.schema.json": modalCommonJsonSchema,
   "modal-execution-dependency-manifest.schema.json": modalExecutionDependencyManifestJsonSchema,
   "modal-launch-state.schema.json": modalLaunchStateJsonSchema,
