@@ -621,7 +621,7 @@ function fakeLifecycleSmithersEnv(
       '    cat "$SMITHERS_FAKE_INSPECT"',
       "    ;;",
       "  cancel)",
-      "    printf '%s\\n' '{\"status\":\"cancel-requested\"}'",
+      '    printf \'%s\\n\' \'{"ok":true,"data":{"status":"cancel-requested"}}\'',
       "    exit 2",
       "    ;;",
       "  events)",
@@ -639,7 +639,7 @@ function fakeLifecycleSmithersEnv(
       "    ;;",
       "  fork)",
       '    if [ -n "$SMITHERS_FAKE_FORKED_RUN_ID" ]; then',
-      '      printf \'{"forkedRunId":"%s"}\\n\' "$SMITHERS_FAKE_FORKED_RUN_ID"',
+      '      printf \'{"ok":true,"data":{"forkedRunId":"%s"}}\\n\' "$SMITHERS_FAKE_FORKED_RUN_ID"',
       "    else",
       "      printf '%s\\n' '{\"ok\":true}'",
       "    fi",
@@ -5682,7 +5682,12 @@ test("linked lifecycle commands reuse sealed bytes after mutable project sources
   const snapshotBytesLog = path.join(project, "snapshot-consumed-bytes.log");
   env.SMITHERS_FAKE_SNAPSHOT_BYTES_LOG = snapshotBytesLog;
   env.SMITHERS_FAKE_SNAPSHOT_ATTEMPT = renderedPrompt.attempt_id;
-  const resumed = await resumeRun({ projectRoot: project, runId: "snapshot-source-replacement", env });
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: "snapshot-source-replacement",
+    force: true,
+    env
+  });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   const consumed = fs.readFileSync(snapshotBytesLog, "utf8");
   assert.match(consumed, /^workflow=\/proc\/(?:self|[1-9][0-9]*)\/fd\/[0-9]+\/\.smithers\/workflows\//mu);
@@ -6892,7 +6897,7 @@ test("startRun repairs a target-local Smithers shim that points outside the pinn
   assert.equal(fs.realpathSync(paths.shim), fs.realpathSync(paths.target));
 });
 
-test("generated workflow dependencies require exact runner versions while allowing custom packages", () => {
+test("generated workflow dependencies require exact runner pins while allowing typed custom packages", () => {
   assert.throws(
     () =>
       assertSmithersPackageManifest({
@@ -6951,6 +6956,14 @@ test("generated workflow dependencies require exact runner versions while allowi
       ...rendered,
       dependencies: { ...rendered.dependencies, "custom-agent-package": "1.2.3" }
     })
+  );
+  assert.throws(
+    () =>
+      assertSmithersPackageManifest({
+        ...rendered,
+        dependencies: { ...rendered.dependencies, "custom-agent-package": 123 }
+      }),
+    /must retain Ultrafuzz's exact runner versions/u
   );
 });
 
@@ -7126,19 +7139,17 @@ test("syncRun marks task-output validation failures for terminal disposition", a
     false
   );
 
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-  const manifestPath = path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json");
-  fs.mkdirSync(manifestPath);
-
-  const operational = await syncRun({ projectRoot: project, runId: "sync-invalid-output", env });
-
-  assert.equal(operational.ok, true, JSON.stringify(operational.diagnostics));
-  assert.equal(operational.value?.status, "failed");
-  assert.ok(operational.diagnostics.some((diagnostic) => diagnostic.source === "artifacts"));
-  const operationalState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+  const repeated = await syncRun({ projectRoot: project, runId: "sync-invalid-output", env });
+  assert.equal(repeated.ok, true, JSON.stringify(repeated.diagnostics));
+  assert.equal(repeated.value?.status, "failed");
+  assert.deepEqual(fs.readFileSync(invalidFindingsPath), invalidFindingsBefore);
+  const repeatedState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
     nodes?: Record<string, { provenance?: Record<string, unknown> }>;
   };
-  assert.equal(operationalState.nodes?.["project-discovery"]?.provenance?.terminal_disposition, undefined);
+  assert.deepEqual(repeatedState.nodes?.["project-discovery"]?.provenance?.terminal_disposition, {
+    schema_version: "ultrafuzz.terminal-disposition.v1",
+    kind: "task-output-validation-failure"
+  });
 });
 
 test("syncRun surfaces a terminal preparation wrapper failure as a failed durable node", async () => {
@@ -7708,7 +7719,7 @@ test("syncRun appends unseen usage events to the current control segment", async
   assert.equal(fs.readFileSync(path.join(run.value!.run_root, "usage.jsonl"), "utf8").trim().split("\n").length, 2);
 });
 
-test("syncRun propagates malformed-only usage ledger state into cumulative accounting", async () => {
+test("syncRun rejects a malformed-present usage ledger without accounting fallback", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -7730,37 +7741,16 @@ test("syncRun propagates malformed-only usage ledger state into cumulative accou
   writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
   fs.writeFileSync(path.join(run.value!.run_root, "usage.jsonl"), "{malformed\n", "utf8");
 
-  const sync = await syncRun({ projectRoot: project, runId: "malformed-only-usage", env });
-  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const usagePath = path.join(run.value!.run_root, "usage.jsonl");
+  const usageBefore = fs.readFileSync(usagePath);
+  const metadataBefore = fs.readFileSync(path.join(run.value!.run_root, "run.json"));
 
-  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
-    accounting?: {
-      current?: { event_count?: number; usage_complete?: boolean; usage_incomplete_reasons?: Array<{ code?: string }> };
-      segments?: Array<{ event_count?: number; usage_complete?: boolean }>;
-      cumulative?: {
-        event_count?: number;
-        usage_complete?: boolean;
-        usage_incomplete_reasons?: Array<{ code?: string }>;
-      };
-      checkpoint?: { malformed_entry_count?: number };
-    };
-  };
-  assert.equal(metadata.accounting?.current?.event_count, 1);
-  assert.equal(metadata.accounting?.current?.usage_complete, false);
-  assert.equal(metadata.accounting?.segments?.length, 1);
-  assert.equal(metadata.accounting?.segments?.[0]?.event_count, 1);
-  assert.equal(metadata.accounting?.segments?.[0]?.usage_complete, false);
-  assert.equal(metadata.accounting?.cumulative?.event_count, 1);
-  assert.equal(metadata.accounting?.cumulative?.usage_complete, false);
-  assert.deepEqual(
-    metadata.accounting?.current?.usage_incomplete_reasons?.map((reason) => reason.code),
-    ["ledger-entry-malformed"]
+  await assert.rejects(
+    () => syncRun({ projectRoot: project, runId: "malformed-only-usage", env }),
+    /usage ledger record 1 is invalid strict JSON/u
   );
-  assert.deepEqual(
-    metadata.accounting?.cumulative?.usage_incomplete_reasons?.map((reason) => reason.code),
-    ["ledger-entry-malformed"]
-  );
-  assert.equal(metadata.accounting?.checkpoint?.malformed_entry_count, 1);
+  assert.deepEqual(fs.readFileSync(usagePath), usageBefore);
+  assert.deepEqual(fs.readFileSync(path.join(run.value!.run_root, "run.json")), metadataBefore);
 });
 
 test("syncRun records unavailable spend when workflow token events are unpriced", async () => {
@@ -9344,7 +9334,9 @@ test("syncRun records model fan-out attempts independently", async () => {
       ]
     }),
     events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery__model_0__attempt_0", attempt: 1 },
       { type: "NodeFinished", nodeId: "node:project-discovery__model_0__attempt_0", attempt: 1 },
+      { type: "NodeStarted", nodeId: "node:project-discovery__model_1__attempt_1", attempt: 1 },
       {
         type: "NodeFailed",
         nodeId: "node:project-discovery__model_1__attempt_1",
@@ -9449,7 +9441,13 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   fs.writeFileSync(staleStatePath, `${JSON.stringify(staleState, null, 2)}\n`, "utf8");
   const resumeSubmittedAfterMs = Date.now();
 
-  const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, maxConcurrency: 8, env });
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: run.value!.run_id,
+    maxConcurrency: 8,
+    force: true,
+    env
+  });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-lifecycle-run");
   assert.equal(resumed.value?.submitted, true);
@@ -10107,22 +10105,14 @@ test("resume suppresses duplicate submissions for every active workflow run stat
     inspect: workflowInspect({
       workflowRunId: "ultrafuzz-retrying-lifecycle-run",
       status: "running",
-      state: "retrying",
-      steps: [{ id: "node:project-discovery", state: "retrying", attempt: 2 }]
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "running", attempt: 2 }]
     })
   });
   const run = await startRun({ projectRoot: project, runId: "retrying-lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
 
-  for (const state of [
-    "in-progress",
-    "started",
-    "queued",
-    "retrying",
-    "waiting-approval",
-    "waiting-event",
-    "waiting-timer"
-  ]) {
+  for (const state of ["running", "waiting-approval", "waiting-event", "waiting-timer"]) {
     fs.writeFileSync(
       env.SMITHERS_FAKE_INSPECT!,
       `${JSON.stringify(
@@ -10256,8 +10246,8 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
       '  printf \'%s|%s\\n\' "$UFZ_PROVIDER_ONE" "$UFZ_PROVIDER_TWO" >> "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
       "fi",
       'if [ "$1" = "inspect" ]; then',
-      "  printf '%s\\n' '{\"code\":\"INSPECT_FAILED\",\"message\":\"No Smithers run history found at /workspace/target/smithers.db. Run '\\''smithers up <workflow>'\\'' to start a run first.\"}'",
-      "  exit 1",
+      '  printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_FOUND","message":"No Smithers run history found at /workspace/target/smithers.db. Run \'\\\'\'smithers up <workflow>\'\\\'\' to start a run first."}}\'',
+      "  exit 4",
       "fi",
       'if [ "$1" = "up" ] && [ ! -f "$SMITHERS_FAKE_MARKER" ]; then',
       '  : > "$SMITHERS_FAKE_MARKER"',

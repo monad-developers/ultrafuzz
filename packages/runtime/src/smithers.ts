@@ -997,13 +997,7 @@ const SMITHERS_EXECUTION_CONTEXT_ENVIRONMENT_VARIABLES = new Set([
   "SMITHERS_RUN_ID",
   "SMITHERS_SNAPSHOT_SOCK"
 ]);
-const SMITHERS_ACTIVE_RUN_STATES = new Set([
-  "running",
-  "waiting-approval",
-  "waiting-event",
-  "waiting-timer",
-  "waiting-quota"
-]);
+const SMITHERS_ACTIVE_RUN_STATES = new Set(["running", "waiting-approval", "waiting-event", "waiting-timer"]);
 
 export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = SMITHERS_TASK_MANIFEST_SCHEMA_VERSION;
 export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = REGISTERED_SMITHERS_TASK_METADATA_SCHEMA_VERSION;
@@ -1774,7 +1768,7 @@ export async function requestSmithersCancel(input: {
 
 function smithersStdoutHasErrorCode(stdout: string, code: string): boolean {
   const parsed = jsonField(stdout).json;
-  return isObjectRecord(parsed) && parsed.code === code;
+  return isObjectRecord(parsed) && parsed.ok === false && isObjectRecord(parsed.error) && parsed.error.code === code;
 }
 
 /**
@@ -2426,7 +2420,9 @@ export async function runSmithersInspectionCommand(input: {
 
 function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: string): boolean {
   if (!isObjectRecord(snapshot.json)) return false;
-  if (snapshot.json.code === code) return true;
+  if (snapshot.json.ok === false && isObjectRecord(snapshot.json.error)) {
+    return snapshot.json.error.code === code;
+  }
   if (snapshot.json.ok !== true || !isObjectRecord(snapshot.json.data)) return false;
   const run = snapshot.json.data.run;
   return isObjectRecord(run) && isObjectRecord(run.error) && run.error.code === code;

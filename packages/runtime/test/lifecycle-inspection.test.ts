@@ -746,7 +746,7 @@ test("cancelRun converges when the engine reports the run is already terminal", 
     [
       "#!/bin/sh",
       'if [ "$1" = "cancel" ]; then',
-      '  printf \'%s\\n\' \'{"code":"RUN_NOT_ACTIVE","message":"Run is not active"}\'',
+      '  printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_ACTIVE","message":"Run is not active"}}\'',
       "  exit 4",
       "fi",
       "printf '%s\\n' '{\"ok\":true}'",

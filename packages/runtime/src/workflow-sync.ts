@@ -2106,8 +2106,11 @@ async function synchronizeTasks(input: {
     }
     const evidence = attemptEvidence.evidence;
 
-    const previousIsTerminal = previous !== undefined && terminalStatus(previous.status);
-    const needsFinalization = !previousIsTerminal && terminalStatus(evidence.status);
+    const previousIsImmutable = immutableTerminalFinalization(previous);
+    const needsFinalization =
+      !previousIsImmutable &&
+      terminalStatus(evidence.status) &&
+      workflowEvidenceSupersedesPrevious(previous, attemptEvidence.taskId, evidence);
     const finalization = needsFinalization
       ? await finalizeTerminalTask({
           layout: input.layout,
@@ -2120,14 +2123,14 @@ async function synchronizeTasks(input: {
           control: input.control
         })
       : {
-          status: previousIsTerminal ? previous.status : evidence.status,
+          status: previousIsImmutable ? (previous?.status ?? evidence.status) : evidence.status,
           diagnostics: [],
           ...(evidence.error ? { lastError: evidence.error } : {}),
           provenance: {},
           events: []
         };
     diagnostics.push(...finalization.diagnostics);
-    const patchStatus = previousIsTerminal ? previous.status : finalization.status;
+    const patchStatus = previousIsImmutable ? (previous?.status ?? finalization.status) : finalization.status;
     nodeStatuses.set(task.attemptId, patchStatus);
     workflowStates.set(task.attemptId, evidence.workflowState ?? patchStatus);
     const concreteStatuses = taskStatusesByConcreteNode.get(task.concreteNodeId) ?? [];
@@ -2153,11 +2156,13 @@ async function synchronizeTasks(input: {
     } catch (error) {
       diagnostics.push(diagnosticFromError(error, "artifacts", "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
     }
-    if (previousIsTerminal) {
-      // Durable terminal node state is immutable. A later synchronization may
-      // finish recording source-ledger evidence, but it cannot re-finalize the
-      // node, clear its failure, create a manifest, or recover it from files
-      // that appeared after Smithers completion.
+    if (previousIsImmutable) {
+      // A successful publication and a terminal invalid-output disposition are
+      // immutable. A later synchronization may finish recording source-ledger
+      // evidence, but it cannot re-finalize the node, clear its failure, create
+      // a manifest, or recover it from files that appeared after completion.
+      // Operational failures remain recoverable only when newer Smithers task
+      // evidence reaches the finalization path above.
       syncedNodes += 1;
       continue;
     }
@@ -3144,6 +3149,26 @@ function aggregateAttemptStatuses(statuses: NodeStatus[]): NodeStatus {
 
 function terminalStatus(status: NodeStatus): boolean {
   return NODE_TERMINAL_STATUSES.has(status);
+}
+
+function immutableTerminalFinalization(previous: NodeState | undefined): boolean {
+  if (previous === undefined || !terminalStatus(previous.status)) return false;
+  if (NODE_RECOVERED_STATUSES.has(previous.status)) return true;
+  const disposition = recordField(previous.provenance, "terminal_disposition");
+  return (
+    disposition?.schema_version === "ultrafuzz.terminal-disposition.v1" &&
+    disposition.kind === "task-output-validation-failure"
+  );
+}
+
+function workflowEvidenceSupersedesPrevious(
+  previous: NodeState | undefined,
+  taskId: string,
+  evidence: NodeWorkflowEvidence
+): boolean {
+  if (previous === undefined || previous.status !== evidence.status) return true;
+  const workflow = recordField(previous.provenance, "workflow");
+  return stringField(workflow, "task_id") !== taskId || numberField(workflow, "attempt") !== evidence.attempt;
 }
 
 function preparationWorkflowStateIsFailure(workflowState: string | undefined): boolean {
