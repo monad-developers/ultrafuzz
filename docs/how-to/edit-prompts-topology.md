@@ -67,10 +67,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@2
   - id: __finish__
     kind: meta
     role: finish
@@ -102,6 +102,35 @@ Read {{artifact_handoff:property-specification-fanin}} before writing tests.
 Handoff variables resolve only to ancestor nodes. Producers must declare the
 artifacts they hand off.
 
+## Author A JSON Handoff
+
+Choose a current, named contract from the
+[contract migration inventory](../reference/artifact-contract-migration-v2.md).
+Do not use the removed `ultrafuzz/json-object@1` or
+`ultrafuzz/json-array@1` contracts, and do not copy an old version literal from
+an earlier run. The checked-in JSON Schema is the canonical whole-document
+shape; prompt prose should explain the domain task without inventing aliases or
+alternate empty forms.
+
+Ultrafuzz centrally appends the resolved schema, valid-empty form, and one exact
+command for every declared JSON output. You do not need to hard-code a schema
+path in the editable prompt. The rendered instruction looks like:
+
+```bash
+ultrafuzz json validate --schema '<trusted absolute schema path>' --file '<absolute artifact path>'
+```
+
+Tell the producer to finish the file, run every displayed command, correct and
+rerun an exit-`1` draft in the same session, and return only after all commands
+exit `0`. Exit `2` means the trusted validator or schema setup failed; it is not
+permission to edit the schema. If the file changes after validation, its
+command must be rerun.
+
+Do not ask a downstream node or the host to repair, normalize, convert, or
+reconstruct invalid JSON. Once the producer returns, its bytes are immutable.
+The host still applies named semantic/context gates and makes missing or invalid
+required output a terminal attempt failure.
+
 ## Work With References
 
 Reference nodes bind to IDs in `.ultrafuzz/references.yml`. If you add or
@@ -121,3 +150,16 @@ ultrafuzz validate --project /path/to/target-protocol
 Validation rejects missing prompt files, invalid topology versions, duplicate
 node IDs, unknown dependencies, unsafe artifact paths, unknown model profiles,
 and prompt artifact references to non-ancestor producers.
+
+`ultrafuzz validate` checks project configuration and graph inputs. To check a
+JSON fixture against the same document-shape validator used by producers and
+the host, run the separate command with explicit files:
+
+```bash
+ultrafuzz json validate \
+  --schema /absolute/path/to/current.schema.json \
+  --file /absolute/path/to/fixture.json
+```
+
+Exit `0` proves portable shape conformance only. Cross-file joins, filesystem
+facts, Git facts, and digest relationships remain host gates.

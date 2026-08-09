@@ -50,6 +50,14 @@ is created for its first execution and for every retry. The task and its
 artifact-contract verifier run in that same VM; the controller independently
 verifies the published artifacts before dependent nodes can start.
 
+The image installs a root-owned, non-writable `/usr/local/bin/ultrafuzz`
+launcher for the same source build under `/opt/ultrafuzz`. Before model work,
+the worker runs `ultrafuzz json validate` on a real known-valid fixture and
+checks the registered schema ID, schema SHA-256, bundle SHA-256, and validator
+build returned by the command. A missing, writable, shadowed, or mismatched
+launcher/schema is a setup failure; the worker does not spend model tokens with
+another validator.
+
 The controller uses stable, bounded provider tags derived from the run and
 attempt identities. On resume it reattaches to one matching live sandbox. If a
 worker published its result before the controller stopped, the replacement
@@ -62,9 +70,11 @@ generation and passes the child a `/proc/<worker-pid>/fd/<descriptor>` path.
 Custom images must preserve that procfs view; the worker fails closed when the
 cross-process descriptor anchor is unavailable.
 
-Cancellation terminates the current sandbox. Worker failures and timeouts are
-normalized to provider-scoped workflow errors, then Smithers applies the
-existing node retry policy with a fresh VM.
+Cancellation terminates the current sandbox. Retryable provider failures and
+timeouts become provider-scoped workflow errors, then Smithers applies the
+existing node retry policy with a fresh VM. Once an agent session returns,
+however, a missing or schema-invalid required artifact is terminal. It does not
+trigger a correction turn, full-node model retry, or compatibility recovery.
 
 `resume` keeps the same workflow run and execution generation, so live attempts
 are reattached and proven publications are reused. `--reset-node` advances a
@@ -95,6 +105,12 @@ the complete bundle into place, and flushes the volume. The controller verifies
 the digest and filesystem shape before replacing local attempt directories.
 Downstream nodes therefore see either the prior complete publication or the new
 complete publication, never a partially copied result.
+
+Publication requires the current `ultrafuzz.artifact-verification.v2` marker and
+copies only the exact digest-bound files it names. There is no markerless legacy
+mode, manifest-v1 upgrade, artifact normalization, or fallback to a complete
+directory copy. The controller then validates the corresponding
+`ultrafuzz.artifact-manifest.v2` and its persisted schema bindings.
 
 ## Retention and Cleanup
 

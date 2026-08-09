@@ -6,6 +6,8 @@ Reference pages describe Ultrafuzz's factual product surfaces.
 - [Configuration and Environment](configuration.md)
 - [Cloud Node Execution](cloud-execution.md)
 - [Topology YAML](topology-yaml.md)
+- [JSON Schemas](../schemas.md)
+- [Strict Artifact Contract Migration](artifact-contract-migration-v2.md)
 - [Prompt Variables](prompt-variables.md)
 - [Pinned References](references.md)
 - [Run Artifacts and Reports](artifacts-reports.md)

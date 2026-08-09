@@ -38,7 +38,7 @@ nodes:
       - setup-foundry
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
   - id: final-report
     kind: agentic
@@ -51,7 +51,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: report.json
-        contract: ultrafuzz/report@1
+        contract: ultrafuzz/report@2
   - id: __finish__
     kind: meta
     role: finish
@@ -86,7 +86,10 @@ Node fields override group defaults. A node or group `model_profiles` list is
 the model fan-out surface. When neither a node nor its group selects model
 profiles, the node uses the configured default model profile only.
 `max_attempts` defaults to `1`; values greater than one retry the same agent task
-and its artifact-contract validation with Smithers' bounded retry policy.
+for retryable provider or execution failures that occur before agent completion
+under Smithers' bounded policy. They do not retry a completed agent session
+whose required output is missing or schema-invalid; that post-agent contract
+failure is terminal.
 
 ## Node Fields
 
@@ -118,14 +121,22 @@ are relative to the node artifact directory and must not start
 with `artifacts/` or `.ultrafuzz/`. The runtime-owned
 `artifact-manifest.json` path is reserved and cannot be declared as an output.
 
-Built-in contracts include `ultrafuzz/findings@1`,
-`ultrafuzz/generated-tests@1`, `ultrafuzz/properties@1`,
-`ultrafuzz/implemented-properties@1`, `ultrafuzz/implemented-properties@2`,
-`ultrafuzz/property-campaign@1`,
-`ultrafuzz/nonempty-markdown@1`, `ultrafuzz/json-object@1`,
-`ultrafuzz/json-array@1`, `ultrafuzz/report@1`, and `ultrafuzz/text@1`.
-Contract definitions supply both runtime validation and the shape and
-valid-empty guidance appended to prompts.
+Current JSON contracts include `ultrafuzz/findings@2`,
+`ultrafuzz/generated-tests@2`, `ultrafuzz/properties@2`,
+`ultrafuzz/implemented-properties@3`, `ultrafuzz/property-campaign@2`,
+`ultrafuzz/property-lens@2`, `ultrafuzz/reference-expectations@2`, and
+`ultrafuzz/report@2`, plus named contracts for the other workflow-specific JSON
+documents. `ultrafuzz/json-object@1` and `ultrafuzz/json-array@1` were removed;
+they are not generic escape hatches. See the
+[strict contract migration inventory](artifact-contract-migration-v2.md) for
+the breaking-version decisions. Non-JSON outputs use the explicit
+`ultrafuzz/nonempty-markdown@1` or `ultrafuzz/text@1` contracts.
+
+Every retained JSON contract maps to one complete checked-in Draft 2020-12
+schema. Contract definitions supply runtime validation plus the shape,
+valid-empty form, and exact validation command appended to producer prompts.
+Only the current contract ID and schema-version spelling are accepted. Old
+IDs, aliases, conversion readers, and generic JSON contracts are unsupported.
 
 ## Meta Nodes
 
@@ -163,7 +174,7 @@ Reference nodes materialize pinned cached reference content into run artifacts.
       contract: ultrafuzz/nonempty-markdown@1
       primary: true
     - path: references/manifest.json
-      contract: ultrafuzz/json-object@1
+      contract: ultrafuzz/reference-manifest@1
 ```
 
 Reference nodes must:
@@ -218,7 +229,7 @@ nodes:
       - base-test-setup
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
 ```
 
@@ -251,3 +262,40 @@ Topology validation rejects:
 - Invalid or unknown model profile IDs.
 - Prompt artifact references to unknown producers, non-ancestors, or producers
   without declared artifacts.
+
+## JSON Schema Bindings And Producer Validation
+
+Users declare `path`, `contract`, and `primary` in topology; they do not paste a
+schema path or digest into YAML. During planning, Ultrafuzz resolves each JSON
+contract through the checked-in registry and persists this complete binding on
+the planned output:
+
+- schema filename and fragment-free `$id`;
+- SHA-256 of the exact schema bytes;
+- package schema-bundle digest; and
+- validator build identity.
+
+The expanded graph, run state, verification marker, and
+`artifact-manifest.json` carry the same identity. The host rejects a missing,
+partial, stale, or mismatched binding before publication.
+
+Topology YAML remains version `2`; the persisted expanded graph uses
+`graphVersion: "3"` and schema ID
+`urn:ultrafuzz:schema:topology:expanded-graph:3` for this binding-bearing shape.
+
+The rendered output contract gives the producer one safely quoted command per
+JSON output:
+
+```bash
+ultrafuzz json validate --schema '<trusted absolute schema path>' --file '<absolute artifact path>'
+```
+
+The producer runs every command after its final write and before returning.
+Exit `1` means it must correct its own draft and rerun during that same agent
+session; exit `2` is a setup failure; all commands must exit `0`. Any later edit
+requires another run. After the session returns, Ultrafuzz validates the exact
+bytes again and applies named filesystem, Git, digest, uniqueness, and
+cross-artifact gates. It never converts, normalizes, synthesizes, or repairs a
+missing or invalid agent output, and it does not fall back to another file or
+the model's final message. A post-session shape failure is terminal for that
+attempt.

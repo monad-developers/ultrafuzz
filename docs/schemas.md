@@ -11,7 +11,7 @@ Schema IDs are stable, fragment-free URNs such as:
 
 - `urn:ultrafuzz:schema:artifacts:findings:2`
 - `urn:ultrafuzz:schema:artifacts:generated-tests:2`
-- `urn:ultrafuzz:schema:topology:expanded-graph:2`
+- `urn:ultrafuzz:schema:topology:expanded-graph:3`
 
 The IDs identify schemas and resolve bundled `$ref` values; they are never
 fetched. Package-local registries enumerate every checked-in schema, its role,
@@ -33,6 +33,20 @@ Bundled sibling schemas resolve offline without flags. The CLI and host use the
 same non-mutating parser, schema registry, Ajv configuration, resource limits,
 schema digest, bundle digest, and validator-build identity.
 
+Every planned JSON output persists the registered schema filename, `$id`,
+schema SHA-256, owning package's schema-bundle SHA-256, and validator build.
+The expanded graph, run state, `ultrafuzz.artifact-verification.v2` marker, and
+`ultrafuzz.artifact-manifest.v2` repeat that binding. A missing, partial, stale,
+or mismatched identity is a host setup/verification failure even when the JSON
+would match a different schema with the same general shape.
+
+Schema-backed producers receive a run-owned trusted launcher ahead of
+target-controlled `PATH` entries. Local and Modal environments use that launcher
+to validate a real known-valid fixture and compare the returned schema, bundle,
+and validator-build identity before model work. A path lookup alone is not a
+preflight, and a missing or tampered launcher is not silently repaired on
+resume.
+
 Exit `0` establishes portable document-shape conformance only. Cross-file
 joins, projected-key uniqueness, filesystem and Git facts, digest relationships,
 and other contextual rules remain named host semantic gates. Exit `1` means the
@@ -47,3 +61,10 @@ historical readers are not supported across this transition. Agent-authored
 bytes are immutable after the agent session returns: validation, publication,
 reporting, dashboards, and bundles may reject them, but may not normalize,
 synthesize, reseal, or rewrite them.
+
+The host also does not request a correction turn after the session returns,
+retry the model for an artifact-shape failure, create a canonical empty file,
+rebuild output from dependencies, or fall back to a sibling artifact or final
+response. Correction is ordinary producer authorship only while the original
+session is still active and must be followed by another successful validation
+command.

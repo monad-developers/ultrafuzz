@@ -19,19 +19,24 @@ The command reads agent-written final-report artifacts, typically:
 
 ## Inspect Findings Arrays
 
-Per-node findings are normalized arrays in `findings.json` files:
+Per-node findings are strict `ultrafuzz/findings@2` arrays in `findings.json`
+files:
 
 ```text
 .ultrafuzz/runs/<run-id>/artifacts/<node-id>/findings.json
 ```
 
-Each finding should include fields such as `id`, `title`, `status`,
-`severity_guess`, `confidence`, and `summary`. `schema_version` is optional;
-when present it must be `"1.0"` or the alias `"ultrafuzz.finding.v1"`. Status values include
-`candidate`, `needs-review`, `duplicate`, `false-positive`, `confirmed`,
-`fixed`, and `wont-fix`; agent-produced lifecycle statuses may also appear.
-Evidence may be recorded as non-empty string references or as metadata objects
-with optional `kind` and `path` fields.
+Each finding requires `schema_version: "ultrafuzz.finding.v2"`, a
+producer-authored `id`, `title`, canonical `status`, `severity_guess`, lowercase
+`confidence`, and `summary`. Status is one of `candidate`, `needs-review`,
+`duplicate`, `false-positive`, `confirmed`, `fixed`, or `wont-fix`. Evidence
+uses the exact array/string-or-closed-object shape in the current schema.
+
+Do not expect the runtime to fill a missing ID, accept an old version alias,
+turn scalars into arrays, normalize confidence or severity, strip path suffixes,
+or rebuild a missing file from review-stage dependencies. Producer bytes are
+immutable after the agent returns; malformed output is a terminal attempt
+failure.
 
 Review-stage artifacts may include:
 

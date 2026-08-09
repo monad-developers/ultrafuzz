@@ -121,3 +121,13 @@ same session; exit `2` is a tool/setup failure, not successful validation. Any
 later edit requires another validation run. Supplied schema files must not be
 edited, and the command never modifies the artifact. The host still applies
 named semantic and contextual gates after the session returns.
+
+The schema filename, fragment-free schema ID, schema SHA-256, schema-bundle
+SHA-256, and validator build identity are fixed during planning and persisted
+with the output contract. The agent command runs through a trusted launcher that
+is preflighted with a real fixture before model work; it must not select a
+target-repository shadow binary. Once the session returns, Ultrafuzz does not
+repair, normalize, convert, synthesize, or substitute required output and does
+not request a correction turn. Missing or invalid post-session output is a
+terminal attempt failure even if another file or the final response contains
+similar data.

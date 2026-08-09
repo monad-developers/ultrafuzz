@@ -134,6 +134,28 @@ Human-readable failures go to stderr. `--json` emits the standard
 `ultrafuzz.cli.result.v1` envelope. Neither success nor failure changes the
 schema or artifact bytes.
 
+Checked-in artifact and topology schemas are loaded from composed package-local
+registries. A registered schema whose filename or bytes differ from its pinned
+entry is a setup failure. Successful JSON output reports whether the schema was
+registered plus its fragment-free ID, schema SHA-256, owning package's bundle
+SHA-256, validator build identity, and the artifact SHA-256. These identities
+bind the producer command to the later host check; they are not a mutable
+validation receipt.
+
+For schema-backed producer tasks, Ultrafuzz places a run-owned trusted launcher
+before target-controlled `PATH` entries and validates a real known-valid fixture
+before model work. Modal uses a root-owned, read-only
+`/usr/local/bin/ultrafuzz`. Missing, stale, shadowed, or tampered validator
+identity is an exit-`2` setup failure, not a reason to use another binary or
+edit the supplied schema.
+
+Producer prompts display one exact command per JSON output. The producer must
+run every command after its final write and before returning; an exit `1` draft
+is corrected and rerun in the same session. Once the session returns, the host
+checks the same bytes and then applies named semantic/context gates. It never
+repairs, converts, normalizes, synthesizes, or falls back to another artifact,
+and post-session shape failure is terminal rather than a model retry.
+
 ## Run
 
 ```bash

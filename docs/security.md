@@ -40,6 +40,13 @@ normal process essentials, and `SMITHERS_*` variables. Other host variables are
 not inherited automatically. This reduces accidental credential disclosure but
 does not isolate an unrestricted agent from the host.
 
+Schema-backed tasks also receive a host-managed `ultrafuzz` launcher before
+target-controlled `PATH` entries. Its pinned CLI, schema-bundle, and validator
+identity are preflighted with a real fixture before model work, and every
+registered schema path is checked against its pinned digest. This keeps the
+producer and host on the same contract; it does not turn same-UID local agent
+execution into an OS security boundary.
+
 Workflows that intentionally need additional variables can opt in explicitly:
 
 ```sh
