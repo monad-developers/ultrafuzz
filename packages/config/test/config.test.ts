@@ -681,16 +681,14 @@ describe("model profile and triage validation", () => {
     });
 
     expect(resolved.ok).toBe(false);
-    expect(resolved.diagnostics.map((entry) => entry.code)).toEqual(
-      expect.arrayContaining([
-        "CONFIG_MODEL_PROFILE_ID_INVALID",
-        "CONFIG_MODEL_AGENT_INVALID",
-        "CONFIG_MODEL_DEFAULT_UNKNOWN",
-        "CONFIG_MODEL_NAME_EMPTY",
-        "CONFIG_MODEL_REASONING_EMPTY",
-        "CONFIG_MODEL_TIMEOUT_INVALID"
-      ])
-    );
+    expect(resolved.diagnostics.map(({ code, path }) => ({ code, path }))).toEqual([
+      { code: "CONFIG_MODEL_PROFILE_ID_INVALID", path: ["models", "../bad"] },
+      { code: "CONFIG_MODEL_DEFAULT_UNKNOWN", path: ["models", "default"] },
+      { code: "CONFIG_MODEL_AGENT_INVALID", path: ["models", "../bad", "agent"] },
+      { code: "CONFIG_MODEL_NAME_EMPTY", path: ["models", "../bad", "model"] },
+      { code: "CONFIG_MODEL_REASONING_EMPTY", path: ["models", "../bad", "reasoning"] },
+      { code: "CONFIG_MODEL_TIMEOUT_INVALID", path: ["models", "../bad", "timeout_seconds"] }
+    ]);
   });
 
   it("rejects Kimi reasoning values that Kimi Code cannot execute", () => {

@@ -46,7 +46,9 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
 
   syncDefaultModelProfile(config);
   sortConfig(config);
-  diagnostics.push(...validateResolvedConfig(config, environment));
+  for (const entry of validateResolvedConfig(config, environment)) {
+    if (!diagnostics.some((existing) => sameDiagnosticIdentity(existing, entry))) diagnostics.push(entry);
+  }
 
   if (hasErrors(diagnostics)) {
     return fail(diagnostics);
@@ -59,7 +61,7 @@ export function validateResolvedConfig(
   env: Record<string, string | undefined> = process.env
 ): ConfigDiagnostic[] {
   const diagnostics = schemaIssues(resolvedConfigZodSchema, config)
-    .filter((issue) => !isNamedSemanticSchemaIssue(issue))
+    .filter((issue) => !isNamedSemanticSchemaIssue(issue) && !isModelProfileSchemaIssue(issue))
     .map((issue) => resolvedConfigDiagnostic(issue, config));
   diagnostics.push(...validateAgentConfigs(config.agents));
   diagnostics.push(...validateTriageConfig(config.triage));
@@ -524,6 +526,18 @@ function schemaIssues(schema: ZodType, value: unknown): ZodIssue[] {
  */
 function isNamedSemanticSchemaIssue(issue: ZodIssue): boolean {
   return issue.code === "custom" && issue.message.startsWith("CONFIG_");
+}
+
+function isModelProfileSchemaIssue(issue: ZodIssue): boolean {
+  return issue.path[0] === "models" && issue.path[1] === "profiles";
+}
+
+function sameDiagnosticIdentity(left: ConfigDiagnostic, right: ConfigDiagnostic): boolean {
+  return (
+    left.code === right.code &&
+    left.path.length === right.path.length &&
+    left.path.every((part, i) => part === right.path[i])
+  );
 }
 
 function resolvedConfigDiagnostic(issue: ZodIssue, config: ResolvedConfig): ConfigDiagnostic {
