@@ -844,7 +844,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     "--yes",
     "--json"
   ]);
-  assert.equal(materialize.code, 0, materialize.stderr);
+  assert.equal(materialize.code, 0, `${materialize.stderr}\n${materialize.stdout}`);
   assertNoSmithersSurface(parseJson(materialize));
   assert.equal(fs.existsSync(path.join(project, "materialized", "stdout.txt")), true);
 

@@ -15,10 +15,12 @@ import {
   type SchemaRegistryEntry
 } from "@ultrafuzz/artifacts";
 import { configSchemaBundleDigest, configSchemaRegistry } from "@ultrafuzz/config";
+import { dashboardSchemaBundleDigest, dashboardSchemaRegistry } from "@ultrafuzz/dashboard";
 import { evmbenchSchemaBundleDigest, evmbenchSchemaRegistry } from "@ultrafuzz/evmbench";
 import { evalSchemaBundleDigest, evalSchemaRegistry } from "@ultrafuzz/evals";
 import { modalSchemaBundleDigest, modalSchemaRegistry } from "@ultrafuzz/modal";
 import { referenceSchemaBundleDigest, referenceSchemaRegistry } from "@ultrafuzz/references";
+import { runtimeSchemaBundleDigest, runtimeSchemaRegistry } from "@ultrafuzz/runtime";
 import { topologySchemaBundleDigest, topologySchemaRegistry } from "@ultrafuzz/topology";
 
 export const CLI_RESULT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:cli:result:2" as const;
@@ -150,10 +152,12 @@ export function cliSchemaRegistry(): ComposedCliSchemaRegistry {
     { entries: artifactSchemaRegistry(), bundle: artifactSchemaBundleDigest() },
     { entries: cliOwnedSchemaRegistry(), bundle: cliSchemaBundleDigest() },
     { entries: configSchemaRegistry(), bundle: configSchemaBundleDigest() },
+    { entries: dashboardSchemaRegistry(), bundle: dashboardSchemaBundleDigest() },
     { entries: evmbenchSchemaRegistry(), bundle: evmbenchSchemaBundleDigest() },
     { entries: evalSchemaRegistry(), bundle: evalSchemaBundleDigest() },
     { entries: modalSchemaRegistry(), bundle: modalSchemaBundleDigest() },
     { entries: referenceSchemaRegistry(), bundle: referenceSchemaBundleDigest() },
+    { entries: runtimeSchemaRegistry(), bundle: runtimeSchemaBundleDigest() },
     { entries: topologySchemaRegistry(), bundle: topologySchemaBundleDigest() }
   ];
   const entries = Object.freeze(owners.flatMap((owner) => [...owner.entries]));

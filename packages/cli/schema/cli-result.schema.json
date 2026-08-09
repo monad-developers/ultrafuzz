@@ -738,22 +738,24 @@
         "provenance": {
           "type": "object",
           "additionalProperties": false,
+          "required": ["workflow"],
           "properties": {
             "workflow": {
               "type": "object",
               "additionalProperties": false,
+              "required": ["inspection", "runId", "compiledRunId", "name", "controlGeneration", "linkId"],
               "properties": {
                 "inspection": {
                   "type": "object",
                   "additionalProperties": false,
                   "required": ["runId"],
-                  "properties": { "runId": { "type": "string" } }
+                  "properties": { "runId": { "type": "string", "minLength": 1 } }
                 },
-                "runId": { "type": "string" },
-                "compiledRunId": { "type": "string" },
-                "name": { "type": "string" },
-                "controlGeneration": { "type": "string" },
-                "linkId": { "type": "string" }
+                "runId": { "type": "string", "minLength": 1 },
+                "compiledRunId": { "type": "string", "minLength": 1 },
+                "name": { "type": "string", "minLength": 1 },
+                "controlGeneration": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "linkId": { "type": "string", "format": "uuid" }
               }
             }
           }
@@ -829,9 +831,10 @@
         "audit": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["schema_version", "mode", "unstaged", "audit_path", "copies", "patches"],
+          "required": ["schema_version", "audit_id", "mode", "unstaged", "audit_path", "copies", "patches"],
           "properties": {
             "schema_version": { "const": "ultrafuzz.materialize.audit.v1" },
+            "audit_id": { "type": "string", "format": "uuid" },
             "mode": { "enum": ["dry-run", "unstaged-working-tree"] },
             "unstaged": { "const": true },
             "audit_path": { "type": "string" },
@@ -877,9 +880,10 @@
         "audit": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["schema_version", "audit_path", "selections"],
+          "required": ["schema_version", "audit_id", "audit_path", "selections"],
           "properties": {
             "schema_version": { "const": "ultrafuzz.clean.audit.v1" },
+            "audit_id": { "type": "string", "format": "uuid" },
             "audit_path": { "type": "string" },
             "selections": { "$ref": "#/$defs/stringArray" }
           }

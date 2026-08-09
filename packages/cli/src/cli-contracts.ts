@@ -28,6 +28,8 @@ import type {
   InitProjectResult,
   MaterializeValue,
   PauseRunValue,
+  PublicRunState,
+  PublicRunWorkflowProvenance,
   ReferencesStatusValue,
   ReferencesSyncValue,
   ReferencesUpdateValue,
@@ -129,14 +131,7 @@ export interface CliValidateProjectData {
 
 export type CliPublicNodeState = Omit<NodeState, "artifact_dir" | "outputs" | "provenance">;
 
-export interface CliPublicWorkflowProvenance {
-  inspection?: { runId: string };
-  runId?: string;
-  compiledRunId?: string;
-  name?: string;
-  controlGeneration?: string;
-  linkId?: string;
-}
+export type CliPublicWorkflowProvenance = PublicRunWorkflowProvenance;
 
 export interface CliPublicRunState {
   schema_version: typeof CLI_PUBLIC_RUN_STATE_SCHEMA_VERSION;
@@ -153,7 +148,7 @@ export interface CliPublicRunState {
   last_transition_at: string;
   controller_lease: RunState["controller_lease"];
   concurrency: RunState["concurrency"];
-  provenance?: { workflow?: CliPublicWorkflowProvenance };
+  provenance?: { workflow: CliPublicWorkflowProvenance };
 }
 
 export interface CliPublicRunMetadata {
@@ -477,7 +472,7 @@ function publicPosture(value: ValidateProjectResult["policy_posture"]["config"])
   return { ok: value.ok, status: value.status, summary: value.summary };
 }
 
-function toCliPublicRunState(state: RunState): CliPublicRunState {
+function toCliPublicRunState(state: PublicRunState): CliPublicRunState {
   const nodes = Object.fromEntries(
     Object.entries(state.nodes).map(([nodeId, node]) => [
       nodeId,
@@ -521,18 +516,18 @@ function toCliPublicRunState(state: RunState): CliPublicRunState {
   };
 }
 
-function publicWorkflowProvenance(value: JsonValue | undefined): CliPublicWorkflowProvenance | undefined {
-  if (!isJsonObject(value)) return undefined;
-  const inspection = isJsonObject(value.inspection) ? value.inspection : undefined;
-  const result: CliPublicWorkflowProvenance = {
-    ...(typeof inspection?.runId === "string" ? { inspection: { runId: inspection.runId } } : {}),
-    ...(typeof value.runId === "string" ? { runId: value.runId } : {}),
-    ...(typeof value.compiledRunId === "string" ? { compiledRunId: value.compiledRunId } : {}),
-    ...(typeof value.name === "string" ? { name: value.name } : {}),
-    ...(typeof value.controlGeneration === "string" ? { controlGeneration: value.controlGeneration } : {}),
-    ...(typeof value.linkId === "string" ? { linkId: value.linkId } : {})
+function publicWorkflowProvenance(
+  value: PublicRunWorkflowProvenance | undefined
+): CliPublicWorkflowProvenance | undefined {
+  if (value === undefined) return undefined;
+  return {
+    inspection: { runId: value.inspection.runId },
+    runId: value.runId,
+    compiledRunId: value.compiledRunId,
+    name: value.name,
+    controlGeneration: value.controlGeneration,
+    linkId: value.linkId
   };
-  return Object.keys(result).length === 0 ? undefined : result;
 }
 
 function assertJsonValue(value: unknown, label: string): JsonValue {
@@ -547,8 +542,4 @@ function assertJsonValue(value: unknown, label: string): JsonValue {
     return value as JsonValue;
   }
   throw new Error(`${label} is not an RFC 8259 JSON value`);
-}
-
-function isJsonObject(value: JsonValue | undefined): value is { [key: string]: JsonValue } {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

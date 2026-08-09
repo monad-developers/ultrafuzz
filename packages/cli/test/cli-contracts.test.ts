@@ -3,7 +3,9 @@ import path from "node:path";
 import test from "node:test";
 
 import { parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
+import { dashboardSchemaBundleDigest, dashboardSchemaRegistry } from "@ultrafuzz/dashboard";
 import { parseEvmbenchCliResult, type EvmbenchCliCommand } from "@ultrafuzz/evmbench";
+import { runtimeSchemaBundleDigest, runtimeSchemaRegistry } from "@ultrafuzz/runtime";
 
 import { CLI_KNOWN_COMMANDS, CLI_SCHEMA_VERSION, type CliResultEnvelope } from "../src/cli-contracts.js";
 import {
@@ -13,6 +15,7 @@ import {
   OPERATOR_INPUT_SCHEMA_FILENAME,
   cliSchemaDirectory,
   cliOwnedSchemaRegistry,
+  cliSchemaRegistry,
   cliResultJsonSchema,
   validateCliResultEnvelope,
   validateOperatorInput
@@ -47,6 +50,23 @@ test("the CLI registry owns and compiles every CLI schema", () => {
       readRegularFileSnapshot(path.join(cliSchemaDirectory(), entry.filename), 4 * 1024 * 1024)
     );
     assert.deepEqual(entry.schema, checkedIn, `${entry.filename} export drifted from its checked-in schema`);
+  }
+});
+
+test("the composed CLI registry includes dashboard and runtime contract owners", () => {
+  const registry = cliSchemaRegistry();
+  for (const [entries, bundle] of [
+    [dashboardSchemaRegistry(), dashboardSchemaBundleDigest()],
+    [runtimeSchemaRegistry(), runtimeSchemaBundleDigest()]
+  ] as const) {
+    for (const entry of entries) {
+      assert.equal(
+        registry.entries.some((candidate) => candidate.id === entry.id),
+        true,
+        entry.id
+      );
+      assert.equal(registry.bundleByFilename.get(entry.filename), bundle, entry.filename);
+    }
   }
 });
 
