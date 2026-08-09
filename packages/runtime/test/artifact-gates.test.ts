@@ -23,6 +23,8 @@ import { loadBuiltInPromptAssets } from "@ultrafuzz/prompts";
 
 import {
   CAMPAIGN_LOGICAL_NODE_IDS,
+  captureWorkspacePatch,
+  captureWorkspaceTree,
   dependencyGateForNode,
   verifyRequiredArtifactsForAttempt,
   type PlannedGraphNode
@@ -59,6 +61,42 @@ function writeArtifact(
 ): string {
   registerArtifactNode(layout, nodeId);
   return writeArtifactFile(layout, nodeId, artifactPath, contents);
+}
+
+function writePropertyLens(
+  layout: ReturnType<typeof createRunLayout>,
+  logicalNodeId: string,
+  propertyIds: readonly string[]
+): void {
+  const lensName = logicalNodeId.replace(/^property-specification-/u, "");
+  writeArtifact(
+    layout,
+    logicalNodeId,
+    `properties/${lensName}.json`,
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: propertyIds.map((id) => ({
+        id,
+        description: `Source property ${id}`,
+        category: "accounting",
+        priority: "high"
+      }))
+    })
+  );
+}
+
+function writePlannedGraph(layout: ReturnType<typeof createRunLayout>, nodes: readonly PlannedGraphNode[]): void {
+  fs.writeFileSync(
+    layout.graphPath,
+    JSON.stringify({
+      schema_version: "ultrafuzz.planned-graph.v3",
+      graph_version: "3",
+      topology_version: 2,
+      groups: {},
+      nodes
+    }),
+    "utf8"
+  );
 }
 
 function boundOutput(
@@ -278,6 +316,12 @@ test("required artifact gate validates generated-test manifest shape and listed 
   const missingFile = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
   assert.equal(missingFile.ok, false);
   assert.ok(missingFile.diagnostics.some((diagnostic) => diagnostic.code === "GENERATED_TEST_FILE_MISSING"));
+  assert.ok(
+    missingFile.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" && diagnostic.details?.gate === "generated-test-path-exists"
+    )
+  );
 
   fs.mkdirSync(path.join(artifactDir, "generated-tests"), { recursive: true });
   fs.writeFileSync(path.join(artifactDir, "generated-tests", "Invariant.t.sol"), "", "utf8");
@@ -297,15 +341,34 @@ test("workspace patch exclusions pass the contract gate but surface a durable wa
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-workspace-exclusion" });
   const artifactDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
   const node = plannedNode(["workspace-patch.json"]);
+  const workspace = path.join(layout.workspacesDir, "strategy-a");
+  fs.mkdirSync(workspace, { recursive: true });
+  const git = (args: string[]): string =>
+    execFileSync("git", args, { cwd: workspace, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  git(["init", "--quiet", "--initial-branch=main"]);
+  git(["config", "user.name", "Ultrafuzz test"]);
+  git(["config", "user.email", "ultrafuzz@example.invalid"]);
+  fs.mkdirSync(path.join(workspace, "test"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, "test", "Handlers.t.sol"), "contract Handlers {}\n");
+  git(["add", "."]);
+  git(["commit", "--quiet", "-m", "baseline"]);
+  const baselineTree = captureWorkspaceTree(workspace);
+  fs.writeFileSync(path.join(workspace, "test", "Handlers.t.sol"), "contract Handlers { uint256 changed; }\n");
+  const capture = captureWorkspacePatch(workspace, baselineTree);
+  fs.writeFileSync(path.join(artifactDir, "workspace.patch"), capture.patch, "utf8");
+  fs.writeFileSync(
+    path.join(artifactDir, "workspace-patch-baseline.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.workspace-patch-baseline.v1",
+      attempt_id: "strategy-a",
+      baseline_tree: baselineTree
+    }),
+    "utf8"
+  );
   fs.writeFileSync(
     path.join(artifactDir, "workspace-patch.json"),
     JSON.stringify({
-      schema_version: "ultrafuzz.workspace-patch.v1",
-      base_commit: "a".repeat(40),
-      base_tree: "b".repeat(40),
-      result_tree: "c".repeat(40),
-      patch_sha256: "d".repeat(64),
-      files: [{ path: "test/Handlers.t.sol" }],
+      ...capture.manifest,
       excluded_files: [
         {
           path: "test/recon/corpus-deep/seed.bin",
@@ -329,6 +392,99 @@ test("workspace patch exclusions pass the contract gate but surface a durable wa
       reason: "git-diff-overflow"
     }
   ]);
+});
+
+test("contextual semantic gates fail closed when trusted host facts are unavailable", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-workspace-context-missing" });
+  const artifactDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const node = plannedNode(["workspace-patch.json"]);
+  fs.writeFileSync(
+    path.join(artifactDir, "workspace-patch.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.workspace-patch.v1",
+      base_commit: "a".repeat(40),
+      base_tree: "b".repeat(40),
+      result_tree: "c".repeat(40),
+      patch_sha256: "d".repeat(64),
+      files: []
+    }),
+    "utf8"
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+  assert.equal(result.ok, false);
+  const unavailable = result.diagnostics.find(
+    (diagnostic) => diagnostic.code === "ARTIFACT_SEMANTIC_GATE_CONTEXT_UNAVAILABLE"
+  );
+  assert.equal(unavailable?.details?.gate, "workspace-patch-git-binding");
+  assert.deepEqual(unavailable?.details?.missing_context, [
+    "git.baseCommit",
+    "git.baseTree",
+    "git.resultTree",
+    "git.patchSha256"
+  ]);
+});
+
+test("host artifact validation executes document semantic gates without rewriting the input", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-semantic-finding-ids" });
+  const artifactDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const artifactPath = path.join(artifactDir, "findings.json");
+  const node = plannedNode(["findings.json"]);
+  fs.writeFileSync(
+    artifactPath,
+    JSON.stringify([currentFinding("finding-duplicate"), currentFinding("finding-duplicate")]),
+    "utf8"
+  );
+  const before = fs.readFileSync(artifactPath);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" && diagnostic.details?.gate === "findings-id-uniqueness"
+    )
+  );
+  assert.deepEqual(fs.readFileSync(artifactPath), before);
+});
+
+test("sealed planned graph distinguishes an absent property track from a missing planned producer", () => {
+  const absentLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-no-property-track" });
+  const reportNode = {
+    ...plannedNode(["report.json"]),
+    id: "final-report",
+    logical_id: "final-report",
+    artifact_dir: "artifacts/final-report"
+  };
+  writePlannedGraph(absentLayout, [reportNode]);
+  writeArtifact(absentLayout, reportNode.id, "report.json", JSON.stringify(currentReport(absentLayout.runId)));
+  const absent = verifyRequiredArtifactsForAttempt(absentLayout, reportNode, reportNode.id);
+  assert.equal(absent.ok, true, JSON.stringify(absent.diagnostics));
+
+  const missingLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-missing-property-producer" });
+  const catalogNode = {
+    ...plannedNode(["properties.json"]),
+    id: "property-specification-fanin",
+    logical_id: "property-specification-fanin",
+    artifact_dir: "artifacts/property-specification-fanin"
+  };
+  const implementationNode = {
+    ...plannedNode(["implemented-properties.json"]),
+    id: "stateful-invariant-implement-properties",
+    logical_id: "stateful-invariant-implement-properties",
+    artifact_dir: "artifacts/stateful-invariant-implement-properties",
+    depends_on: [catalogNode.id]
+  };
+  const plannedReportNode = { ...reportNode, depends_on: [implementationNode.id] };
+  writePlannedGraph(missingLayout, [catalogNode, implementationNode, plannedReportNode]);
+  writeArtifact(missingLayout, reportNode.id, "report.json", JSON.stringify(currentReport(missingLayout.runId)));
+  const missing = verifyRequiredArtifactsForAttempt(missingLayout, plannedReportNode, plannedReportNode.id);
+  assert.equal(missing.ok, false);
+  assert.equal(
+    missing.diagnostics.filter((diagnostic) => diagnostic.code === "ARTIFACT_SEMANTIC_GATE_CONTEXT_UNAVAILABLE").length,
+    1
+  );
 });
 
 test("required artifact gate rejects contract-invalid empty files and final-component symlinks", () => {
@@ -988,8 +1144,54 @@ test("project discovery gate verifies immutable source proof after the discovery
       files: [{ path: "docs/overview.md", sha256: createHash("sha256").update(source).digest("hex"), content: source }]
     })
   );
+  fs.writeFileSync(
+    path.join(layout.root, "source-proofs", "project-discovery.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.agent-source-proof.v1",
+      attempt_id: "project-discovery",
+      commit: "a".repeat(40),
+      tree: "b".repeat(40),
+      base_ref: "refs/heads/ultrafuzz-pinned",
+      refs: [{ name: "refs/heads/ultrafuzz-pinned", object: "a".repeat(40) }],
+      remotes: [],
+      revision_count: 1,
+      commit_object_count: 1
+    })
+  );
   fs.rmSync(path.join(layout.workspacesDir, "project-discovery"), { recursive: true, force: true });
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
+
+  fs.writeFileSync(
+    path.join(layout.root, "source-proofs", "project-discovery.invariant.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-source-proof.v1",
+      attempt_id: "project-discovery",
+      commit: "a".repeat(40),
+      tree: "b".repeat(40),
+      ledger_sha256: createHash("sha256").update(ledgerBytes).digest("hex"),
+      files: [{ path: "docs/overview.md", sha256: "0".repeat(64), content: source }]
+    })
+  );
+  const digestMismatch = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(digestMismatch.ok, false);
+  assert.ok(
+    digestMismatch.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "invariant-source-proof-git-binding"
+    )
+  );
+  fs.writeFileSync(
+    path.join(layout.root, "source-proofs", "project-discovery.invariant.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-source-proof.v1",
+      attempt_id: "project-discovery",
+      commit: "a".repeat(40),
+      tree: "b".repeat(40),
+      ledger_sha256: createHash("sha256").update(ledgerBytes).digest("hex"),
+      files: [{ path: "docs/overview.md", sha256: createHash("sha256").update(source).digest("hex"), content: source }]
+    })
+  );
 
   writeArtifact(
     layout,
@@ -1316,6 +1518,7 @@ test("fanin gate checks scan probe containment against the discovery workspace",
     "properties.md",
     "### Canonical property: property-1\n- description: A canonical property with no ledger evidence behind it.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1\n### End canonical property: property-1\n"
   );
+  writePropertyLens(layout, "property-specification-recon", ["recon-1"]);
 
   writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", ledger("."));
   const contained = verifyRequiredArtifactsForAttempt(layout, node, node.id);
@@ -1396,6 +1599,7 @@ test("fanin gate requires every invariant ledger entry to map to a canonical pro
   assert.equal(missingUpstreamLedger.ok, false);
   assert.ok(missingUpstreamLedger.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MISSING"));
   writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", JSON.stringify(ledger));
+  writePropertyLens(layout, "property-specification-recon", ["recon-1"]);
   const catalog = (ledgerIds: string[]) =>
     JSON.stringify({
       schema_version: "ultrafuzz.properties.v2",
@@ -1858,6 +2062,7 @@ test("property fan-in gate ignores optional Markdown ledger evidence when checki
       "### End canonical property: property-supply"
     ].join("\n")
   );
+  writePropertyLens(layout, "property-specification-recon", ["recon-supply"]);
   const node = {
     ...plannedNode(["properties.json", "properties.md"]),
     id: "property-specification-fanin",
@@ -3568,6 +3773,7 @@ test("final report gate rejects legacy report shapes without rewriting them and 
     "report.json",
     JSON.stringify(
       currentReport(currentLayout.runId, {
+        non_production_outcomes: [currentNonProductionOutcome("finding-property", "finding-property")],
         property_provenance: [
           {
             finding_id: "finding-property",
@@ -3586,7 +3792,8 @@ test("final report gate rejects legacy report shapes without rewriting them and 
       })
     )
   );
-  assert.equal(verifyRequiredArtifactsForAttempt(currentLayout, node, node.id).ok, true);
+  const completeJoin = verifyRequiredArtifactsForAttempt(currentLayout, node, node.id);
+  assert.equal(completeJoin.ok, true, JSON.stringify(completeJoin.diagnostics));
 });
 
 test("current final reports preserve implementation coverage in JSON and Markdown", () => {
@@ -4358,6 +4565,13 @@ test("campaign gate conditionally reconciles the R55 summary failure counts with
   writeCampaignSummary(layout, campaignId, 0, 0);
   const mismatched = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(mismatched.ok, false);
+  assert.ok(
+    mismatched.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "campaign-summary-count-coupling"
+    )
+  );
   assert.deepEqual(
     mismatched.diagnostics
       .filter((diagnostic) => diagnostic.code === "CAMPAIGN_SUMMARY_FAILURE_COUNT_MISMATCH")

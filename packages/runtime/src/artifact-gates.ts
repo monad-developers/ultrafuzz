@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -5,6 +6,9 @@ import path from "node:path";
 import {
   artifactContractSchemaBinding,
   artifactSchemaDirectory,
+  artifactSchemaRegistry,
+  assertNoSymlinkComponents,
+  assertPlannedGraph,
   assertRegularFileInside,
   checkInvariantSourcePinned,
   getNodeArtifactDir,
@@ -12,7 +16,9 @@ import {
   invariantPinnedSourceRefExists,
   readArtifactManifest,
   readJsonFile,
+  readRegularFileSnapshot,
   readRunState,
+  parseStrictJsonBytes,
   redactValue,
   resolveCampaignFindingBackends,
   safeResolveInside,
@@ -29,8 +35,10 @@ import {
   validatePropertiesSchema,
   validatePropertyCampaignSchema,
   validatePropertyReferences,
-  validateRegisteredJsonFileSync,
+  validateRegisteredJsonBytesSync,
+  validateRegisteredJsonSchema,
   verifyArtifactManifestPrerequisites,
+  type ArtifactSchemaFilename,
   type ImplementedPropertiesArtifact,
   type InvariantLedgerEntry,
   type InvariantSourceProof,
@@ -39,12 +47,20 @@ import {
   type PropertyReferenceInput,
   type RunLayout,
   type RunState,
+  type SemanticArtifactSetContext,
+  type SemanticGateContext,
+  type SemanticGitContext,
+  type SemanticPropertyLensContext,
   type WorkspacePatchManifest
 } from "@ultrafuzz/artifacts";
 
+import { runtimeSemanticGateDiagnostics } from "./semantic-gates.js";
 import type { PlannedGraph, PlannedGraphNode, RuntimeDiagnostic } from "./types.js";
 import { diagnosticFromError } from "./utils.js";
 import { validateSeverityMatrixArtifact, type SeverityArtifactKind } from "./severity-matrix.js";
+import { deriveWorkspacePatchGitFacts } from "./workspace-handoff.js";
+
+const MAX_ARTIFACT_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 
 export interface DependencyGateDecision {
   ok: boolean;
@@ -172,11 +188,7 @@ export function verifyRequiredArtifactsForAttempt(
         });
       } else {
         assertRegularFileInside(artifactDir, absolutePath, "required artifact");
-        const requiredStat = fs.lstatSync(absolutePath);
-        if (!requiredStat.isFile() || requiredStat.isSymbolicLink()) {
-          throw new Error(`required artifact ${required} must be a regular file`);
-        }
-        diagnostics.push(...verifyRequiredArtifactShape(artifactDir, absolutePath, output));
+        diagnostics.push(...verifyRequiredArtifactShape(layout, artifactDir, absolutePath, output, node, attemptId));
       }
     } catch (error) {
       diagnostics.push(diagnosticFromError(error, "artifact-gates", "REQUIRED_ARTIFACT_INVALID"));
@@ -1117,7 +1129,10 @@ function readInvariantSourceProof(
 ): InvariantSourceProof | undefined {
   try {
     assertRegularFileInside(path.dirname(path.dirname(proofPath)), proofPath, "invariant source proof");
-    const parsed = validateInvariantSourceProofSchema(JSON.parse(fs.readFileSync(proofPath, "utf8")), proofPath);
+    const parsed = validateInvariantSourceProofSchema(
+      readStrictRegisteredDocument(proofPath, "invariant-source-proof.schema.json"),
+      proofPath
+    );
     if (!parsed.ok || parsed.value === undefined) {
       diagnostics.push({
         code: "INVARIANT_LEDGER_SOURCE_PROOF_INVALID",
@@ -1139,7 +1154,7 @@ function readInvariantSourceProof(
       });
       return undefined;
     }
-    const ledgerBytes = fs.readFileSync(ledgerPath);
+    const ledgerBytes = readRegularFileSnapshot(ledgerPath, MAX_ARTIFACT_SNAPSHOT_BYTES);
     const ledgerDigest = crypto.createHash("sha256").update(ledgerBytes).digest("hex");
     if (ledgerDigest !== parsed.value.ledger_sha256) {
       diagnostics.push({
@@ -1159,17 +1174,20 @@ function readInvariantSourceProof(
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
     }
+    let durableGitContext: SemanticGitContext | undefined;
     if (baseProofPresent) {
       assertRegularFileInside(path.dirname(path.dirname(proofPath)), baseProofPath, "pinned source proof");
-      const base = JSON.parse(fs.readFileSync(baseProofPath, "utf8")) as {
-        attempt_id?: unknown;
-        commit?: unknown;
-        tree?: unknown;
-      };
+      const base = readStrictRegisteredDocument(baseProofPath, "agent-source-proof.schema.json") as
+        | {
+            attempt_id?: unknown;
+            commit?: unknown;
+            tree?: unknown;
+          }
+        | undefined;
       if (
-        base.attempt_id !== expectedAttemptId ||
-        base.commit !== parsed.value.commit ||
-        base.tree !== parsed.value.tree
+        base?.attempt_id !== expectedAttemptId ||
+        base?.commit !== parsed.value.commit ||
+        base?.tree !== parsed.value.tree
       ) {
         diagnostics.push({
           code: "INVARIANT_LEDGER_SOURCE_PROOF_SOURCE_MISMATCH",
@@ -1180,7 +1198,17 @@ function readInvariantSourceProof(
         });
         return undefined;
       }
+      durableGitContext = { commit: parsed.value.commit, tree: parsed.value.tree };
     }
+    const semanticContext = invariantSourceProofGitContext(proofPath, expectedAttemptId, durableGitContext);
+    const semanticDiagnostics = runtimeSemanticGateDiagnostics({
+      schemaFilename: "invariant-source-proof.schema.json",
+      document: parsed.value,
+      artifactPath: proofPath,
+      ...(semanticContext === undefined ? {} : { context: { git: semanticContext } })
+    });
+    diagnostics.push(...semanticDiagnostics);
+    if (semanticDiagnostics.some((diagnostic) => diagnostic.severity === "error")) return undefined;
     return parsed.value;
   } catch (error) {
     diagnostics.push({
@@ -1192,6 +1220,29 @@ function readInvariantSourceProof(
     });
     return undefined;
   }
+}
+
+function invariantSourceProofGitContext(
+  proofPath: string,
+  attemptId: string,
+  durableContext: SemanticGitContext | undefined
+): SemanticGitContext | undefined {
+  const runRoot = path.dirname(path.dirname(proofPath));
+  const workspacePath = path.join(runRoot, "workspaces", attemptId);
+  if (fs.existsSync(workspacePath)) {
+    try {
+      assertNoSymlinkComponents(runRoot, workspacePath, "invariant source-proof workspace");
+      const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspacePath, encoding: "utf8" }).trim();
+      const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+        cwd: workspacePath,
+        encoding: "utf8"
+      }).trim();
+      return { commit, tree };
+    } catch {
+      // Fall through to the durable source proof below.
+    }
+  }
+  return durableContext;
 }
 
 function verifyInvariantSourceProofEvidence(
@@ -1458,13 +1509,21 @@ function escapeRegExp(value: string): string {
 }
 
 function verifyRequiredArtifactShape(
+  layout: RunLayout,
   artifactDir: string,
   absolutePath: string,
-  output: PlannedGraphNode["outputs"][number]
+  output: PlannedGraphNode["outputs"][number],
+  node: PlannedGraphNode,
+  attemptId: string
 ): RuntimeDiagnostic[] {
-  const schemaDiagnostics = verifyRequiredArtifactSchemaBinding(absolutePath, output);
+  const artifactBytes = readRegularFileSnapshot(absolutePath, MAX_ARTIFACT_SNAPSHOT_BYTES);
+  const schemaDiagnostics = verifyRequiredArtifactSchemaBinding(absolutePath, output, artifactBytes);
   if (schemaDiagnostics.some((diagnostic) => diagnostic.severity === "error")) return schemaDiagnostics;
-  const contract = validateArtifactContract(output.contract, fs.readFileSync(absolutePath, "utf8"), absolutePath);
+  const binding = artifactContractSchemaBinding(output.contract);
+  const contract =
+    binding === undefined
+      ? validateArtifactContract(output.contract, artifactBytes.toString("utf8"), absolutePath)
+      : { ok: true, issues: [], value: parseStrictJsonBytes(artifactBytes) };
   const diagnostics: RuntimeDiagnostic[] = [
     ...schemaDiagnostics,
     ...contract.issues.map((issue) => ({
@@ -1476,6 +1535,22 @@ function verifyRequiredArtifactShape(
       details: { contract: output.contract, contract_digest: output.contract_digest }
     }))
   ];
+  if (contract.ok && contract.value !== undefined && binding !== undefined) {
+    diagnostics.push(
+      ...runtimeSemanticGateDiagnostics({
+        schemaFilename: binding.schema_file as ArtifactSchemaFilename,
+        document: contract.value,
+        artifactPath: absolutePath,
+        context: semanticGateContextForArtifact({
+          layout,
+          artifactDir,
+          node,
+          attemptId,
+          schemaFilename: binding.schema_file as ArtifactSchemaFilename
+        })
+      })
+    );
+  }
   if (contract.ok && output.contract === "ultrafuzz/workspace-patch@1") {
     const manifest = contract.value as WorkspacePatchManifest;
     const excluded = manifest.excluded_files ?? [];
@@ -1500,7 +1575,7 @@ function verifyRequiredArtifactShape(
     return diagnostics;
   }
 
-  const parsed = validateGeneratedTestManifestSchema(readJsonFile(absolutePath));
+  const parsed = validateGeneratedTestManifestSchema(contract.value, absolutePath);
   if (!parsed.ok || parsed.value === undefined) {
     return parsed.issues.map((issue) => ({
       code: issue.code,
@@ -1546,9 +1621,268 @@ function verifyRequiredArtifactShape(
   return diagnostics;
 }
 
+function semanticGateContextForArtifact(input: {
+  layout: RunLayout;
+  artifactDir: string;
+  node: PlannedGraphNode;
+  attemptId: string;
+  schemaFilename: ArtifactSchemaFilename;
+}): SemanticGateContext {
+  const context: SemanticGateContext = {
+    filesystem: { rootDirectory: input.artifactDir },
+    plannedGraph: { node: input.node }
+  };
+  const artifactSet = semanticArtifactSetForSchema(input);
+  const git =
+    input.schemaFilename === "workspace-patch.schema.json"
+      ? workspacePatchGitContext(input.layout, input.artifactDir, input.attemptId)
+      : undefined;
+  return {
+    ...context,
+    ...(artifactSet === undefined ? {} : { artifactSet }),
+    ...(git === undefined ? {} : { git })
+  };
+}
+
+function semanticArtifactSetForSchema(input: {
+  layout: RunLayout;
+  artifactDir: string;
+  node: PlannedGraphNode;
+  schemaFilename: ArtifactSchemaFilename;
+}): SemanticArtifactSetContext | undefined {
+  if (input.schemaFilename === "campaign-summary.schema.json") {
+    return semanticCampaignArtifacts(input.artifactDir, input.node);
+  }
+  if (input.schemaFilename === "implemented-properties.schema.json") {
+    const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout);
+    return propertyCatalog === undefined ? {} : { propertyCatalog };
+  }
+  if (input.schemaFilename === "properties.schema.json") {
+    const propertyLenses = semanticPropertyLenses(input.layout);
+    return propertyLenses === undefined ? {} : { propertyLenses };
+  }
+  if (input.schemaFilename === "report.schema.json") {
+    const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout);
+    const implementedProperties = semanticImplementedProperties(input.layout);
+    return {
+      ...(propertyCatalog === undefined ? {} : { propertyCatalog }),
+      ...(implementedProperties === undefined ? {} : { implementedProperties })
+    };
+  }
+  return undefined;
+}
+
+function semanticCampaignArtifacts(artifactDir: string, node: PlannedGraphNode): SemanticArtifactSetContext {
+  const campaignOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/property-campaign@2");
+  const findingOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/findings@2");
+  const campaigns: PropertyCampaignArtifact[] = [];
+  const findings: Array<Readonly<Record<string, unknown>>> = [];
+  let campaignsAvailable = true;
+  let findingsAvailable = true;
+  for (const output of campaignOutputs) {
+    try {
+      const artifactPath = safeResolveInside(artifactDir, output.path, "campaign semantic context");
+      assertRegularFileInside(artifactDir, artifactPath, "campaign semantic context");
+      const parsed = validatePropertyCampaignSchema(
+        readStrictContractDocument(artifactPath, "ultrafuzz/property-campaign@2"),
+        artifactPath
+      );
+      if (!parsed.ok || parsed.value === undefined) campaignsAvailable = false;
+      else campaigns.push(parsed.value);
+    } catch {
+      campaignsAvailable = false;
+    }
+  }
+  for (const output of findingOutputs) {
+    try {
+      const artifactPath = safeResolveInside(artifactDir, output.path, "finding semantic context");
+      assertRegularFileInside(artifactDir, artifactPath, "finding semantic context");
+      const parsed = validateFindingsSchema(
+        readStrictContractDocument(artifactPath, "ultrafuzz/findings@2"),
+        artifactPath
+      );
+      if (!parsed.ok || parsed.value === undefined) findingsAvailable = false;
+      else findings.push(...parsed.value);
+    } catch {
+      findingsAvailable = false;
+    }
+  }
+  return {
+    ...(campaignsAvailable ? { campaigns } : {}),
+    ...(findingsAvailable ? { findings } : {})
+  };
+}
+
+function semanticCanonicalPropertyCatalog(layout: RunLayout): unknown | undefined {
+  const artifactPath = findLogicalNodeArtifact(layout, "property-specification-fanin", "properties.json");
+  if (artifactPath !== undefined) {
+    assertRegularFileInside(layout.root, artifactPath, "canonical property semantic context");
+    const parsed = validatePropertiesSchema(
+      readStrictContractDocument(artifactPath, "ultrafuzz/properties@2"),
+      artifactPath
+    );
+    return parsed.ok ? parsed.value : undefined;
+  }
+  return plannedProducerStatus(layout, "property-specification-fanin", "ultrafuzz/properties@2") === "absent"
+    ? { schema_version: "ultrafuzz.properties.v2", properties: [] }
+    : undefined;
+}
+
+function semanticImplementedProperties(layout: RunLayout): unknown | undefined {
+  const artifactPath = findLogicalNodeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json"
+  );
+  if (artifactPath !== undefined) {
+    assertRegularFileInside(layout.root, artifactPath, "implemented property semantic context");
+    const parsed = validateImplementedPropertiesSchema(
+      readStrictContractDocument(artifactPath, "ultrafuzz/implemented-properties@3"),
+      artifactPath
+    );
+    return parsed.ok ? parsed.value : undefined;
+  }
+  return plannedProducerStatus(
+    layout,
+    "stateful-invariant-implement-properties",
+    "ultrafuzz/implemented-properties@3"
+  ) === "absent"
+    ? {
+        schema_version: "ultrafuzz.implemented-properties.v3",
+        selection: { priority_threshold: "high", priorities: ["high"], property_ids: [] },
+        properties: []
+      }
+    : undefined;
+}
+
+function plannedProducerStatus(
+  layout: RunLayout,
+  logicalId: string,
+  contract: PlannedGraphNode["outputs"][number]["contract"]
+): "absent" | "present" | "unknown" {
+  if (!fs.existsSync(layout.graphPath)) return "unknown";
+  try {
+    assertRegularFileInside(layout.root, layout.graphPath, "planned graph semantic context");
+    const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
+    return graph.nodes.some(
+      (node) =>
+        (node.id === logicalId || node.logical_id === logicalId) &&
+        node.outputs.some((output) => output.contract === contract)
+    )
+      ? "present"
+      : "absent";
+  } catch {
+    return "unknown";
+  }
+}
+
+function semanticPropertyLenses(layout: RunLayout): SemanticPropertyLensContext[] | undefined {
+  const state = readRunState(layout);
+  const lenses: SemanticPropertyLensContext[] = [];
+  let producerCount = 0;
+  for (const [nodeId, nodeState] of Object.entries(state.nodes)) {
+    const logicalId = nodeState.logical_node_id ?? nodeId;
+    if (logicalId === "project-discovery") {
+      producerCount += 1;
+      const ledgerPath = path.join(getNodeArtifactDir(layout, nodeId), "setup", "invariant-evidence-ledger.json");
+      if (!fs.existsSync(ledgerPath)) return undefined;
+      assertRegularFileInside(layout.root, ledgerPath, "invariant ledger semantic context");
+      const ledger = validateInvariantLedgerSchema(
+        readStrictContractDocument(ledgerPath, "ultrafuzz/invariant-ledger@1"),
+        ledgerPath
+      );
+      if (!ledger.ok || ledger.value === undefined) return undefined;
+      lenses.push({
+        sourceNodeId: logicalId,
+        document: { properties: ledger.value.entries.map((entry) => ({ id: entry.id })) }
+      });
+      continue;
+    }
+    if (!logicalId.startsWith("property-specification-") || logicalId === "property-specification-fanin") continue;
+    producerCount += 1;
+    const declaredPaths = (nodeState.outputs ?? [])
+      .filter((output) => output.contract === "ultrafuzz/property-lens@2")
+      .map((output) => output.path);
+    const propertiesDir = path.join(getNodeArtifactDir(layout, nodeId), "properties");
+    const discoveredPaths =
+      declaredPaths.length > 0 || !fs.existsSync(propertiesDir)
+        ? []
+        : fs
+            .readdirSync(propertiesDir, { withFileTypes: true })
+            .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+            .map((entry) => path.posix.join("properties", entry.name));
+    const lensPaths = declaredPaths.length > 0 ? declaredPaths : discoveredPaths;
+    if (lensPaths.length === 0) return undefined;
+    for (const relativePath of lensPaths) {
+      const lensPath = safeResolveInside(getNodeArtifactDir(layout, nodeId), relativePath, "property lens context");
+      if (!fs.existsSync(lensPath)) return undefined;
+      assertRegularFileInside(layout.root, lensPath, "property lens semantic context");
+      const lens = validateLensPropertiesSchema(
+        readStrictContractDocument(lensPath, "ultrafuzz/property-lens@2"),
+        lensPath
+      );
+      if (!lens.ok || lens.value === undefined) return undefined;
+      lenses.push({ sourceNodeId: logicalId, document: lens.value });
+    }
+  }
+  return producerCount === 0 ? undefined : lenses;
+}
+
+function workspacePatchGitContext(
+  layout: RunLayout,
+  artifactDir: string,
+  attemptId: string
+): SemanticGitContext | undefined {
+  const baselinePath = path.join(artifactDir, "workspace-patch-baseline.json");
+  const patchPath = path.join(artifactDir, "workspace.patch");
+  const workspacePath = path.join(layout.workspacesDir, attemptId);
+  try {
+    assertRegularFileInside(artifactDir, baselinePath, "workspace patch baseline");
+    assertRegularFileInside(artifactDir, patchPath, "workspace patch bytes");
+    assertNoSymlinkComponents(layout.root, workspacePath, "workspace patch Git context");
+    const baseline = parseStrictJsonBytes(readRegularFileSnapshot(baselinePath, MAX_ARTIFACT_SNAPSHOT_BYTES));
+    if (
+      !isRecord(baseline) ||
+      baseline.schema_version !== "ultrafuzz.workspace-patch-baseline.v1" ||
+      baseline.attempt_id !== attemptId ||
+      typeof baseline.baseline_tree !== "string"
+    ) {
+      return undefined;
+    }
+    return deriveWorkspacePatchGitFacts(
+      workspacePath,
+      baseline.baseline_tree,
+      readRegularFileSnapshot(patchPath, MAX_ARTIFACT_SNAPSHOT_BYTES).toString("utf8")
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+function readStrictContractDocument(
+  artifactPath: string,
+  contract: Parameters<typeof artifactContractSchemaBinding>[0]
+): unknown | undefined {
+  const binding = artifactContractSchemaBinding(contract);
+  if (binding === undefined) return undefined;
+  const document = parseStrictJsonBytes(readRegularFileSnapshot(artifactPath, MAX_ARTIFACT_SNAPSHOT_BYTES));
+  return validateRegisteredJsonSchema(binding.schema_id, document).ok ? document : undefined;
+}
+
+function readStrictRegisteredDocument(
+  artifactPath: string,
+  schemaFilename: ArtifactSchemaFilename
+): unknown | undefined {
+  const registration = artifactSchemaRegistry().find((entry) => entry.filename === schemaFilename);
+  if (registration === undefined) throw new Error(`registered schema is unavailable: ${schemaFilename}`);
+  const document = parseStrictJsonBytes(readRegularFileSnapshot(artifactPath, MAX_ARTIFACT_SNAPSHOT_BYTES));
+  return validateRegisteredJsonSchema(registration.id, document).ok ? document : undefined;
+}
+
 function verifyRequiredArtifactSchemaBinding(
   absolutePath: string,
-  output: PlannedGraphNode["outputs"][number]
+  output: PlannedGraphNode["outputs"][number],
+  artifactBytes: Uint8Array
 ): RuntimeDiagnostic[] {
   const expected = artifactContractSchemaBinding(output.contract);
   const actual = {
@@ -1578,9 +1912,9 @@ function verifyRequiredArtifactSchemaBinding(
   }
   if (expected === undefined) return [];
 
-  const validation = validateRegisteredJsonFileSync({
+  const validation = validateRegisteredJsonBytesSync({
     schemaPath: path.join(artifactSchemaDirectory(), expected.schema_file),
-    filePath: absolutePath
+    instanceBytes: artifactBytes
   });
   if (
     validation.schema?.id !== expected.schema_id ||

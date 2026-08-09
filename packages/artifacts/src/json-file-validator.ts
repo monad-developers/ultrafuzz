@@ -177,13 +177,40 @@ export function validateRegisteredJsonFileSync(options: {
   schemaRegistry?: readonly SchemaRegistryEntry[];
   schemaBundleSha256?: string;
 }): JsonFileValidationResult {
-  const schemaPath = path.resolve(options.schemaPath);
   const filePath = path.resolve(options.filePath);
   let instanceBytes: Buffer;
   try {
     instanceBytes = readRegularFileSnapshot(filePath, MAX_INSTANCE_BYTES);
   } catch (error) {
     return failure("instance-error", "JSON_INSTANCE_UNREADABLE", errorMessage(error));
+  }
+  return validateRegisteredJsonBytesSync({
+    schemaPath: options.schemaPath,
+    instanceBytes,
+    ...(options.maxErrors === undefined ? {} : { maxErrors: options.maxErrors }),
+    ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
+    ...(options.schemaRegistry === undefined ? {} : { schemaRegistry: options.schemaRegistry }),
+    ...(options.schemaBundleSha256 === undefined ? {} : { schemaBundleSha256: options.schemaBundleSha256 })
+  });
+}
+
+/** Validate one already-captured immutable instance snapshot with the host worker. */
+export function validateRegisteredJsonBytesSync(options: {
+  schemaPath: string;
+  instanceBytes: Uint8Array;
+  maxErrors?: number;
+  deadlineMs?: number;
+  schemaRegistry?: readonly SchemaRegistryEntry[];
+  schemaBundleSha256?: string;
+}): JsonFileValidationResult {
+  const schemaPath = path.resolve(options.schemaPath);
+  const instanceBytes = Buffer.from(options.instanceBytes);
+  if (instanceBytes.byteLength > MAX_INSTANCE_BYTES) {
+    return failure(
+      "instance-error",
+      "JSON_INSTANCE_UNREADABLE",
+      `JSON instance exceeds the ${MAX_INSTANCE_BYTES}-byte limit`
+    );
   }
   let schemaBytes: Buffer;
   try {
