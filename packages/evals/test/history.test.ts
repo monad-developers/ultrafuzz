@@ -1661,6 +1661,40 @@ describe("longitudinal eval history", () => {
     expect(summary).toContain("2m 0s");
   });
 
+  it("assigns quality-chart profile markers in alphabetical model order", () => {
+    const observations = [
+      ...(["target-a", "target-b"] as const).map((target) =>
+        cohortObservation(target, {
+          id: `earlier:${target}:benchmark-smoke-zeta`,
+          source_eval_run_id: "earlier",
+          run_timestamp: "2026-07-19T00:00:00.000Z",
+          model_profile: "benchmark-smoke-zeta",
+          model: "zeta"
+        })
+      ),
+      ...(["target-a", "target-b"] as const).map((target) =>
+        cohortObservation(target, {
+          id: `later:${target}:benchmark-smoke-alpha`,
+          source_eval_run_id: "later",
+          run_timestamp: "2026-07-20T00:00:00.000Z",
+          candidate_commit: "3".repeat(40),
+          model_profile: "benchmark-smoke-alpha",
+          model: "alpha"
+        })
+      )
+    ];
+
+    const quality = renderEvalHistoryCharts(
+      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations })
+    ).get("quality.svg")!;
+
+    expect(quality).toContain('<circle data-metric="f1" data-profile="benchmark-smoke-alpha" fill="#2563eb"');
+    expect(quality).toContain('<rect data-metric="f1" data-profile="benchmark-smoke-zeta" fill="#c2410c"');
+    expect(quality.indexOf("benchmark-smoke-alpha · alpha")).toBeLessThan(
+      quality.indexOf("benchmark-smoke-zeta · zeta")
+    );
+  });
+
   it("renders visual guides across per-candidate scoring identities and bounds recent runs", () => {
     const commits = "0123456789abc".split("").map((character) => character.repeat(40));
     const observations = commits.flatMap((candidateCommit, index) =>
