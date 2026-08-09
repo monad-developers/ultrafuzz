@@ -44,6 +44,17 @@ nodes:
       - path: smoke-context.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+  - id: json-validation-correction
+    kind: agentic
+    prompt: smoke/json-validation-correction.md
+    group: setup
+    max_attempts: 1
+    depends_on:
+      - __start__
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+        primary: true
   - id: time-warp-sequences
     kind: agentic
     prompt: smoke/smoke-strategy.md
@@ -97,6 +108,7 @@ nodes:
     prompt: smoke/smoke-dedupe-findings.md
     group: review
     depends_on:
+      - json-validation-correction
       - time-warp-sequences
       - external-dependency-boundaries
       - externalized-state-accounting

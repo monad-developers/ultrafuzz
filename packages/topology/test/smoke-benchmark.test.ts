@@ -13,9 +13,10 @@ const STRATEGY_IDS = [
   "externalized-state-accounting",
   "lifecycle-view-boundaries"
 ];
+const VALIDATION_NODE_ID = "json-validation-correction";
 
 describe("smoke benchmark topology", () => {
-  it("runs one context pass, four strategies in one wave, and two review passes", () => {
+  it("runs one validation-correction probe, one context pass, four strategies, and two review passes", () => {
     const topology = loadTopology(REPOSITORY_ROOT, {
       topologyPath: SMOKE_TOPOLOGY_PATH,
       requirePromptFiles: true
@@ -26,6 +27,7 @@ describe("smoke benchmark topology", () => {
       "__start__",
       "__finish__",
       "smoke-context",
+      VALIDATION_NODE_ID,
       ...STRATEGY_IDS,
       "dedupe-findings",
       "final-report"
@@ -33,7 +35,18 @@ describe("smoke benchmark topology", () => {
     for (const strategyId of STRATEGY_IDS) {
       expect(topology.nodes.find((node) => node.id === strategyId)?.depends_on).toEqual(["smoke-context"]);
     }
-    expect(topology.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toEqual(STRATEGY_IDS);
+    expect(topology.nodes.find((node) => node.id === VALIDATION_NODE_ID)).toEqual(
+      expect.objectContaining({
+        prompt: "smoke/json-validation-correction.md",
+        max_attempts: 1,
+        depends_on: ["__start__"],
+        outputs: [expect.objectContaining({ path: "findings.json", contract: "ultrafuzz/findings@2", primary: true })]
+      })
+    );
+    expect(topology.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toEqual([
+      VALIDATION_NODE_ID,
+      ...STRATEGY_IDS
+    ]);
     expect(topology.nodes.find((node) => node.id === "dedupe-findings")?.outputs).toContainEqual(
       expect.objectContaining({ path: "deduped-findings.json", contract: "ultrafuzz/findings@2", primary: true })
     );
@@ -61,8 +74,13 @@ describe("smoke benchmark topology", () => {
       defaultModelProfileId: "benchmark"
     });
     const executable = graph.nodes.filter((node) => node.kind === "agentic");
-    expect(executable).toHaveLength(7);
-    expect(executable.every((node) => node.retryPolicy.maxAttempts === 2)).toBe(true);
+    expect(executable).toHaveLength(8);
+    expect(executable.find((node) => node.logicalId === VALIDATION_NODE_ID)?.retryPolicy.maxAttempts).toBe(1);
+    expect(
+      executable
+        .filter((node) => node.logicalId !== VALIDATION_NODE_ID)
+        .every((node) => node.retryPolicy.maxAttempts === 2)
+    ).toBe(true);
     expect(
       executable
         .filter((node) => STRATEGY_IDS.includes(node.logicalId))
@@ -70,7 +88,9 @@ describe("smoke benchmark topology", () => {
     ).toBe(true);
     expect(
       executable
-        .filter((node) => ["smoke-context", "dedupe-findings", "final-report"].includes(node.logicalId))
+        .filter((node) =>
+          [VALIDATION_NODE_ID, "smoke-context", "dedupe-findings", "final-report"].includes(node.logicalId)
+        )
         .every((node) => node.modelFanout[0]?.reasoningEffort === "medium")
     ).toBe(true);
   });
