@@ -21,6 +21,8 @@ export * from "./runtime-schemas.js";
 export * from "./safe-paths.js";
 export * from "./schema-bundle.js";
 export * from "./schema-registry.js";
+export * from "./semantic-gates.js";
+export * from "./smithers-task-manifest.js";
 export * from "./state.js";
 export * from "./state-schema.js";
 export * from "./strict-json.js";
