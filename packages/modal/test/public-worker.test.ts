@@ -61,6 +61,7 @@ import { OperationalDispositionError } from "../src/terminal-disposition.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "../src/worker-result.js";
 import {
   currentGenuineTaskFailureState,
+  currentRunState,
   writeCurrentSmithersTaskFixture,
   writeCurrentTerminalReport
 } from "./current-artifact-fixtures.js";
@@ -1324,6 +1325,7 @@ it("publishes only the final journal record for each benchmark row", () => {
   const reportRoot = path.join(runRoot, "artifacts/final-report");
   fs.mkdirSync(evalRoot, { recursive: true });
   const reportPath = writeCurrentTerminalReport(runRoot);
+  writeSuccessfulRunStateFixture(runRoot);
   fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
   const record = {
     schema_version: "ultrafuzz.eval.run.v1",
@@ -1389,6 +1391,7 @@ it("uses report.json as the sole public finding authority", () => {
   const dedupeRoot = path.join(runRoot, "artifacts/dedupe-findings");
   fs.mkdirSync(evalRoot, { recursive: true });
   writeCurrentTerminalReport(runRoot);
+  writeSuccessfulRunStateFixture(runRoot);
   fs.mkdirSync(dedupeRoot, { recursive: true });
   fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
   // These former authorities may still exist in an old workspace, but a new
@@ -1623,8 +1626,23 @@ function execGit(cwd: string, args: string[]): string {
 
 function writeGenuineTaskFailureFixture(runRoot: string): void {
   const attemptId = "task-one";
-  fs.writeFileSync(path.join(runRoot, "state.json"), `${JSON.stringify(currentGenuineTaskFailureState(attemptId))}\n`);
+  fs.writeFileSync(
+    path.join(runRoot, "state.json"),
+    `${JSON.stringify({ ...currentGenuineTaskFailureState(attemptId), run_id: "target-run" })}\n`
+  );
   writeCurrentSmithersTaskFixture(runRoot, attemptId);
+}
+
+function writeSuccessfulRunStateFixture(runRoot: string): void {
+  fs.writeFileSync(
+    path.join(runRoot, "state.json"),
+    `${JSON.stringify(
+      currentRunState(
+        { "final-report": { status: "succeeded", finished_at: "2026-07-20T00:00:00.000Z" } },
+        { run_id: "target-run" }
+      )
+    )}\n`
+  );
 }
 
 it("retains threat-model, goal-plan and vulnerability-database artifacts per row when the run produced them", () => {
@@ -1641,6 +1659,7 @@ it("retains threat-model, goal-plan and vulnerability-database artifacts per row
   const reportRoot = path.join(runRoot, "artifacts/final-report");
   fs.mkdirSync(evalRoot, { recursive: true });
   const reportPath = writeCurrentTerminalReport(runRoot);
+  writeSuccessfulRunStateFixture(runRoot);
   fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
 
   const threatModelRoot = path.join(runRoot, "artifacts/threat-model");

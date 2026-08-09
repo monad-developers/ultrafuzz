@@ -3,19 +3,25 @@ import fs from "node:fs";
 import { open, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 
-import { assertRegularFileInside, normalizeNodeAttemptFailureMessage } from "@ultrafuzz/artifacts";
+import { assertRegularFileInside, normalizeNodeAttemptFailureMessage, readRunState } from "@ultrafuzz/artifacts";
 import {
   MAX_PUBLIC_EVAL_FAILED_NODES_PER_ROW,
   MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
-  PUBLIC_EVAL_FAILED_NODE_STATUSES,
   PUBLIC_EVAL_FAILURE_CATEGORIES,
   PUBLIC_EVAL_FAILURE_CODES,
   PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION,
   comparePublicEvalDiagnosticIds,
+  parseEvalMatrix,
+  parseEvalRunSummary,
   parsePublicEvalDiagnostics,
   publicEvalDiagnosticsReadinessReasonCodes,
+  readEvalMatrix,
+  readEvalRunRecords,
+  readEvalRunSummary,
+  reconcileEvalRunRecords,
   resolveTerminalReportPath,
   summarizePublicEvalDiagnosticsRows,
+  type EvalMatrixRow,
   type EvalRunRecord,
   type PublicEvalDiagnostics,
   type PublicEvalFailedNode,
@@ -39,67 +45,8 @@ export type { PublicEvalDiagnostics } from "@ultrafuzz/evals";
 
 const MAX_ROWS = 2_048;
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
-const workflowId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u);
-const workflowStatus = z.enum([
-  "pending",
-  "running",
-  "paused",
-  "succeeded",
-  "failed",
-  "timed-out",
-  "canceled",
-  "unavailable"
-]);
-const finalStatus = z.enum([...workflowStatus.options, "launched"]);
-const terminalDisposition = z.enum([
-  "clean",
-  "genuine-task-failures",
-  "incomplete",
-  "operational-failure",
-  "unavailable"
-]);
-
-const matrixRowInputSchema = z.looseObject({
-  id: safeId,
-  target_id: safeId,
-  variant_id: safeId,
-  trial_id: safeId
-});
-const diagnosticInputSchema = z.looseObject({ code: z.unknown() });
-const workflowInputSchema = z.looseObject({
-  status: z.unknown(),
-  terminal: z.unknown()
-});
-const recordInputSchema = z.looseObject({
-  row_id: safeId,
-  target_id: safeId,
-  variant_id: safeId,
-  trial_id: safeId,
-  status: z.enum(["launched", "failed", "missing"]),
-  final_status: z.unknown().optional(),
-  workflow_ids: z.array(workflowId).max(32),
-  workflow: workflowInputSchema.optional(),
-  diagnostics: z.array(diagnosticInputSchema).max(64),
-  ultrafuzz_run_root: z.string().optional(),
-  report_json_path: z.string().optional()
-});
-// An eval that stopped before recording any row leaves no records at all. Every
-// planned row is then reported as `run_status: "missing"`, so the document still
-// describes the run rather than refusing to exist. The matrix itself still has to
-// be non-empty: a benchmark that planned nothing is an integrity failure, and an
-// empty row set would summarize as scoring-ready.
-const runSummaryInputSchema = z.looseObject({ records: z.array(recordInputSchema).max(MAX_ROWS) });
-const failedNodeStatus = z.enum(PUBLIC_EVAL_FAILED_NODE_STATUSES);
 const failureCategory = z.enum(PUBLIC_EVAL_FAILURE_CATEGORIES);
 const failureCode = z.enum(PUBLIC_EVAL_FAILURE_CODES);
-const failedNodeInputSchema = z.looseObject({
-  node_id: safeId,
-  status: failedNodeStatus,
-  timed_out: z.boolean(),
-  last_error: z.unknown().optional(),
-  provenance: z.unknown().optional()
-});
-const runStateInputSchema = z.looseObject({ nodes: z.record(z.string(), z.unknown()) });
 
 export function createPublicEvalDiagnosticsFromRun(input: {
   config: PublicModalBenchmarkConfig;
@@ -111,15 +58,15 @@ export function createPublicEvalDiagnosticsFromRun(input: {
   createdAt?: string;
 }): PublicEvalDiagnostics {
   const evalRoot = path.join(input.controlRoot, ".ultrafuzz/evals/runs", input.evalRunId);
-  const matrix = readBoundedJson(path.join(evalRoot, "matrix.json"), evalRoot, "matrix");
-  const runSummary = readDiagnosticRunSummary(evalRoot, matrix);
-  const result = createPublicEvalDiagnostics({
+  const matrix = readEvalMatrix(path.join(evalRoot, "matrix.json"));
+  const records = readDiagnosticRunRecords(evalRoot);
+  const result = createPublicEvalDiagnosticsFromRecords({
     config: input.config,
     model: input.model,
     lineage: input.lineage,
     evalRunId: input.evalRunId,
     matrix,
-    runSummary,
+    records,
     forbiddenSecretValues: input.forbiddenSecretValues,
     ...(input.createdAt === undefined ? {} : { createdAt: input.createdAt })
   });
@@ -137,81 +84,67 @@ export function createPublicEvalDiagnostics(input: {
   forbiddenSecretValues?: readonly string[];
   createdAt?: string;
 }): PublicEvalDiagnostics {
-  const matrix = z.array(matrixRowInputSchema).min(1).max(MAX_ROWS).parse(input.matrix);
-  const runSummary = runSummaryInputSchema.parse(input.runSummary);
-  const matrixIds = new Set(matrix.map((row) => row.id));
-  if (matrixIds.size !== matrix.length) throw new Error("public eval diagnostics matrix contains duplicate rows");
-  const recordsByRow = new Map(runSummary.records.map((record) => [record.row_id, record]));
-  // A duplicated record, or one for a row the matrix never planned, is a lineage
-  // integrity failure and stays fatal. A planned row with no record is not: it is
-  // what an eval that stopped early leaves behind, and `run_status: "missing"`
-  // with the `run-record-missing` reason code exists to describe exactly that.
-  if (recordsByRow.size !== runSummary.records.length || [...recordsByRow].some(([rowId]) => !matrixIds.has(rowId))) {
+  const matrix = parseEvalMatrix(input.matrix, "public eval diagnostics matrix");
+  const runSummary = parseEvalRunSummary(input.runSummary, "public eval diagnostics run summary");
+  if (runSummary.eval_run_id !== input.evalRunId) {
+    throw new Error("public eval diagnostics run summary names another eval run");
+  }
+  return createPublicEvalDiagnosticsFromRecords({ ...input, matrix, records: runSummary.records });
+}
+
+function createPublicEvalDiagnosticsFromRecords(input: {
+  config: PublicModalBenchmarkConfig;
+  model: ModalModelSpec;
+  lineage: ModalWorkerLineage;
+  evalRunId: string;
+  matrix: EvalMatrixRow[];
+  records: EvalRunRecord[];
+  forbiddenSecretValues?: readonly string[];
+  createdAt?: string;
+}): PublicEvalDiagnostics {
+  if (input.matrix.length === 0 || input.matrix.length > MAX_ROWS) {
+    throw new Error(`public eval diagnostics matrix must contain between 1 and ${MAX_ROWS} rows`);
+  }
+  const matrixIds = new Set(input.matrix.map((row) => row.id));
+  const recordsByRow = new Map(input.records.map((record) => [record.row_id, record]));
+  if (
+    recordsByRow.size !== input.records.length ||
+    recordsByRow.size !== input.matrix.length ||
+    [...recordsByRow].some(([rowId]) => !matrixIds.has(rowId))
+  ) {
     throw new Error("public eval diagnostics row set does not match the matrix");
   }
 
-  const rows = matrix.map((matrixRow): PublicEvalDiagnosticsRow => {
+  const rows = input.matrix.map((matrixRow): PublicEvalDiagnosticsRow => {
     const record = recordsByRow.get(matrixRow.id);
     if (record === undefined) {
-      const readiness = {
-        run_status: "missing",
-        final_status: "unavailable",
-        workflow_status: "unavailable",
-        workflow_terminal: false,
-        terminal_disposition: "unavailable",
-        terminal_report_present: false,
-        workflow_ids: []
-      } as const satisfies Pick<
-        PublicEvalDiagnosticsRow,
-        | "run_status"
-        | "final_status"
-        | "workflow_status"
-        | "workflow_terminal"
-        | "terminal_disposition"
-        | "terminal_report_present"
-        | "workflow_ids"
-      >;
-      return {
-        row_id: matrixRow.id,
-        target_id: matrixRow.target_id,
-        variant_id: matrixRow.variant_id,
-        trial_id: matrixRow.trial_id,
-        ...readiness,
-        workflow_ids: [],
-        diagnostic_codes: [],
-        failed_nodes: [],
-        scoring_ready: false,
-        reason_codes: publicEvalDiagnosticsReadinessReasonCodes(readiness)
-      };
+      throw new Error(`public eval diagnostics has no durable record for matrix row: ${matrixRow.id}`);
     }
     if (
+      record.eval_run_id !== input.evalRunId ||
       record.target_id !== matrixRow.target_id ||
       record.variant_id !== matrixRow.variant_id ||
       record.trial_id !== matrixRow.trial_id
     ) {
       throw new Error(`public eval diagnostics row identity does not match the matrix: ${matrixRow.id}`);
     }
-    const normalizedWorkflowStatus = normalizeWorkflowStatus(record.workflow?.status);
-    const normalizedFinalStatus = normalizeFinalStatus(record.final_status);
+    const workflowStatus: PublicEvalDiagnosticsRow["workflow_status"] = record.workflow?.status ?? "unavailable";
+    const finalStatus: PublicEvalDiagnosticsRow["final_status"] = record.final_status ?? "unavailable";
     const workflowTerminal = record.workflow?.terminal === true;
-    const normalizedTerminalDisposition = publicEvalRecordTerminalDisposition(record as unknown as EvalRunRecord);
-    const terminalReportPresent = hasTerminalReport(record as unknown as EvalRunRecord);
+    const terminalDisposition = publicEvalRecordTerminalDisposition(record);
+    const terminalReportPresent = hasTerminalReport(record);
     const readiness = {
       run_status: record.status,
-      final_status: normalizedFinalStatus,
-      workflow_status: normalizedWorkflowStatus,
+      final_status: finalStatus,
+      workflow_status: workflowStatus,
       workflow_terminal: workflowTerminal,
-      terminal_disposition: normalizedTerminalDisposition,
+      terminal_disposition: terminalDisposition,
       terminal_report_present: terminalReportPresent,
       workflow_ids: record.workflow_ids
     };
     const reasons = publicEvalDiagnosticsReadinessReasonCodes(readiness);
     const diagnosticCodes = [
-      ...new Set(
-        record.diagnostics.map((diagnostic) =>
-          safeId.safeParse(diagnostic.code).success ? String(diagnostic.code) : "unavailable"
-        )
-      )
+      ...new Set(record.diagnostics.map((diagnostic) => publicDiagnosticCode(diagnostic.code, record.row_id)))
     ].sort();
     return {
       row_id: matrixRow.id,
@@ -219,14 +152,14 @@ export function createPublicEvalDiagnostics(input: {
       variant_id: matrixRow.variant_id,
       trial_id: matrixRow.trial_id,
       run_status: record.status,
-      final_status: normalizedFinalStatus,
-      workflow_status: normalizedWorkflowStatus,
+      final_status: finalStatus,
+      workflow_status: workflowStatus,
       workflow_terminal: workflowTerminal,
-      terminal_disposition: normalizedTerminalDisposition,
+      terminal_disposition: terminalDisposition,
       terminal_report_present: terminalReportPresent,
-      workflow_ids: [...new Set(record.workflow_ids)].sort(),
+      workflow_ids: [...record.workflow_ids].sort(),
       diagnostic_codes: diagnosticCodes,
-      failed_nodes: publicEvalFailedNodes(record as unknown as EvalRunRecord, input.forbiddenSecretValues ?? []),
+      failed_nodes: publicEvalFailedNodes(record, input.forbiddenSecretValues ?? []),
       scoring_ready: reasons.length === 0,
       reason_codes: reasons
     };
@@ -302,19 +235,12 @@ export async function writePublicEvalDiagnosticsAtomic(
   }
 }
 
-function normalizeWorkflowStatus(value: unknown): z.infer<typeof workflowStatus> {
-  return workflowStatus.safeParse(value).success ? (value as z.infer<typeof workflowStatus>) : "unavailable";
-}
-
-function normalizeFinalStatus(value: unknown): z.infer<typeof finalStatus> {
-  return finalStatus.safeParse(value).success ? (value as z.infer<typeof finalStatus>) : "unavailable";
-}
-
 export function publicEvalRecordTerminalDisposition(
-  record: Pick<EvalRunRecord, "ultrafuzz_run_root">
-): z.infer<typeof terminalDisposition> {
+  record: Pick<EvalRunRecord, "ultrafuzz_run_id" | "ultrafuzz_run_root">
+): PublicEvalDiagnosticsRow["terminal_disposition"] {
   if (record.ultrafuzz_run_root === undefined) return "unavailable";
-  return terminalDisposition.parse(inspectTerminalDispositionAtRunRoot(record.ultrafuzz_run_root).kind);
+  readRecordRunState(record);
+  return inspectTerminalDispositionAtRunRoot(record.ultrafuzz_run_root).kind;
 }
 
 function hasTerminalReport(record: EvalRunRecord): boolean {
@@ -323,55 +249,64 @@ function hasTerminalReport(record: EvalRunRecord): boolean {
   });
   if (resolution.path === undefined || record.ultrafuzz_run_root === undefined) return false;
   try {
-    assertRegularFileInside(record.ultrafuzz_run_root, resolution.path, "public eval terminal report");
-    return true;
-  } catch {
-    return false;
+    fs.lstatSync(resolution.path);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return false;
+    throw error;
   }
+  assertRegularFileInside(record.ultrafuzz_run_root, resolution.path, "public eval terminal report");
+  return true;
 }
 
 function publicEvalFailedNodes(
-  record: Pick<EvalRunRecord, "ultrafuzz_run_root">,
+  record: Pick<EvalRunRecord, "ultrafuzz_run_id" | "ultrafuzz_run_root">,
   forbiddenSecretValues: readonly string[]
 ): PublicEvalFailedNode[] {
   if (record.ultrafuzz_run_root === undefined) return [];
-  try {
-    const statePath = path.join(record.ultrafuzz_run_root, "state.json");
-    assertRegularFileInside(record.ultrafuzz_run_root, statePath, "public eval run state");
-    const stat = fs.statSync(statePath);
-    if (stat.size > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES) return [];
-    const state = runStateInputSchema.parse(JSON.parse(fs.readFileSync(statePath, "utf8")) as unknown);
-    const failedNodes: PublicEvalFailedNode[] = [];
-    for (const [nodeId, value] of Object.entries(state.nodes)) {
-      const parsed = failedNodeInputSchema.safeParse(value);
-      if (!parsed.success || parsed.data.node_id !== nodeId) continue;
-      const provenance = recordValue(parsed.data.provenance);
-      const failure = recordValue(provenance?.failure);
-      const disposition = recordValue(provenance?.terminal_disposition);
-      const category = failureCategory.safeParse(failure?.category);
-      const code = failureCode.safeParse(
-        disposition?.schema_version === "ultrafuzz.terminal-disposition.v1" ? disposition.kind : undefined
-      );
-      const message =
-        typeof parsed.data.last_error === "string"
-          ? normalizeNodeAttemptFailureMessage(parsed.data.last_error, forbiddenSecretValues)
-          : undefined;
-      failedNodes.push({
-        node_id: parsed.data.node_id,
-        status: parsed.data.status,
-        timed_out: parsed.data.timed_out,
-        ...(category.success ? { failure_category: category.data } : {}),
-        ...(code.success ? { failure_code: code.data } : {}),
-        ...(message === undefined ? {} : { failure_message: message })
-      });
-    }
-    return failedNodes
-      .filter((node) => node.timed_out === (node.status === "timed-out"))
-      .sort((left, right) => comparePublicEvalDiagnosticIds(left.node_id, right.node_id))
-      .slice(0, MAX_PUBLIC_EVAL_FAILED_NODES_PER_ROW);
-  } catch {
-    return [];
+  const state = readRecordRunState(record);
+  const failedNodes: PublicEvalFailedNode[] = [];
+  for (const value of Object.values(state.nodes)) {
+    if (value.status !== "failed" && value.status !== "timed-out") continue;
+    const provenance = recordValue(value.provenance);
+    const failure = recordValue(provenance?.failure);
+    const disposition = recordValue(provenance?.terminal_disposition);
+    const category = failureCategory.safeParse(failure?.category);
+    const code = failureCode.safeParse(
+      disposition?.schema_version === "ultrafuzz.terminal-disposition.v1" ? disposition.kind : undefined
+    );
+    const message =
+      value.last_error === undefined
+        ? undefined
+        : normalizeNodeAttemptFailureMessage(value.last_error, forbiddenSecretValues);
+    failedNodes.push({
+      node_id: value.node_id,
+      status: value.status,
+      timed_out: value.timed_out,
+      ...(category.success ? { failure_category: category.data } : {}),
+      ...(code.success ? { failure_code: code.data } : {}),
+      ...(message === undefined ? {} : { failure_message: message })
+    });
   }
+  return failedNodes
+    .sort((left, right) => comparePublicEvalDiagnosticIds(left.node_id, right.node_id))
+    .slice(0, MAX_PUBLIC_EVAL_FAILED_NODES_PER_ROW);
+}
+
+function readRecordRunState(record: Pick<EvalRunRecord, "ultrafuzz_run_id" | "ultrafuzz_run_root">) {
+  if (record.ultrafuzz_run_root === undefined) {
+    throw new Error("public eval run root is unavailable");
+  }
+  const state = readRunState(path.join(record.ultrafuzz_run_root, "state.json"));
+  if (record.ultrafuzz_run_id !== undefined && state.run_id !== record.ultrafuzz_run_id) {
+    throw new Error("public eval durable run state names another workflow run");
+  }
+  return state;
+}
+
+function publicDiagnosticCode(value: string, rowId: string): string {
+  const parsed = safeId.safeParse(value);
+  if (!parsed.success) throw new Error(`public eval row ${rowId} contains an invalid diagnostic code`);
+  return parsed.data;
 }
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {
@@ -380,48 +315,22 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function readBoundedJson(filePath: string, root: string, label: string): unknown {
-  assertRegularFileInside(root, filePath, `public eval ${label}`);
-  const stat = fs.statSync(filePath);
-  if (stat.size > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES) throw new Error(`public eval ${label} exceeds the size limit`);
-  return JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+function readDiagnosticRunRecords(evalRoot: string): EvalRunRecord[] {
+  const summaryPath = path.join(evalRoot, "run-summary.json");
+  try {
+    fs.lstatSync(summaryPath);
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) throw error;
+    // The runner materializes runs.jsonl before launching rows, and appends each
+    // lifecycle observation before sealing run-summary.json. A watchdog may
+    // therefore interrupt the intentional in-progress state between those two
+    // writes. Reconcile only canonical journal records; the matrix join below
+    // still rejects any row the interruption left unrecorded.
+    return [...reconcileEvalRunRecords(readEvalRunRecords(path.join(evalRoot, "runs.jsonl"))).values()];
+  }
+  return readEvalRunSummary(summaryPath).records;
 }
 
-function readDiagnosticRunSummary(evalRoot: string, matrixValue: unknown): unknown {
-  const summaryPath = path.join(evalRoot, "run-summary.json");
-  if (fs.existsSync(summaryPath)) return readBoundedJson(summaryPath, evalRoot, "run summary");
-
-  const matrix = z.array(matrixRowInputSchema).min(1).max(MAX_ROWS).parse(matrixValue);
-  const recordsByRow = new Map<string, z.infer<typeof recordInputSchema>>();
-  const journalPath = path.join(evalRoot, "runs.jsonl");
-  if (fs.existsSync(journalPath)) {
-    assertRegularFileInside(evalRoot, journalPath, "public eval run journal");
-    const stat = fs.statSync(journalPath);
-    if (stat.size > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES) {
-      throw new Error("public eval run journal exceeds the size limit");
-    }
-    for (const line of fs.readFileSync(journalPath, "utf8").split(/\r?\n/u).filter(Boolean)) {
-      const record = recordInputSchema.parse(JSON.parse(line) as unknown);
-      recordsByRow.set(record.row_id, record);
-    }
-  }
-  const matrixIds = new Set(matrix.map((row) => row.id));
-  if ([...recordsByRow].some(([rowId]) => !matrixIds.has(rowId))) {
-    throw new Error("public eval run journal contains a row outside the matrix");
-  }
-  return {
-    records: matrix.map(
-      (row) =>
-        recordsByRow.get(row.id) ?? {
-          row_id: row.id,
-          target_id: row.target_id,
-          variant_id: row.variant_id,
-          trial_id: row.trial_id,
-          status: "missing",
-          final_status: "unavailable",
-          workflow_ids: [],
-          diagnostics: [{ code: "EVAL_ROW_RECORD_MISSING" }]
-        }
-    )
-  };
+function isErrno(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
