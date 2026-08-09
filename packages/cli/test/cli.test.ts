@@ -6,16 +6,19 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  ARTIFACT_VERIFICATION_SCHEMA_VERSION,
   FINDINGS_SCHEMA_VERSION,
   REPORT_SCHEMA_VERSION,
   artifactContractDefinition,
-  artifactContractSchemaBinding,
   createEventRecord,
   layoutForRunRoot,
+  readPlannedGraphDocument,
   readRunMetadataDocument,
+  updateNodeState,
   writeRunMetadataDocument,
   writeArtifactManifest
 } from "@ultrafuzz/artifacts";
+import { projectCanonicalFinalReport } from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
 
 import { validateReportBundleManifest } from "../src/cli-schema-registry.js";
@@ -35,7 +38,7 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function fakeSmithersEnv(project: string): Record<string, string | undefined> {
+function fakeSmithersEnv(project: string, includeFinalReport = false): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const inspectStatePath = path.join(project, "fake-smithers-inspect-state");
@@ -74,7 +77,28 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       '    inspect_nodes="[]"',
       '    if [ "$inspect_state" = "succeeded" ]; then',
       '      inspect_status="finished"',
-      '      inspect_nodes=\'[{"nodeId":"node:project-discovery","state":"finished","attempt":1,"label":"node:project-discovery"},{"nodeId":"verify:project-discovery","state":"finished","attempt":1,"label":"verify:project-discovery"}]\'',
+      `      inspect_nodes=${shellQuote(
+        JSON.stringify([
+          {
+            nodeId: "node:project-discovery",
+            state: "finished",
+            attempt: 1,
+            label: "node:project-discovery"
+          },
+          {
+            nodeId: "verify:project-discovery",
+            state: "finished",
+            attempt: 1,
+            label: "verify:project-discovery"
+          },
+          ...(includeFinalReport
+            ? [
+                { nodeId: "node:final-report", state: "finished", attempt: 1, label: "node:final-report" },
+                { nodeId: "verify:final-report", state: "finished", attempt: 1, label: "verify:final-report" }
+              ]
+            : [])
+        ])
+      )}`,
       "    fi",
       `    printf '{"ok":true,"data":{"run":{"id":"%s","workflow":"workflow","status":"%s","started":"2026-08-09T00:00:00.000Z","elapsed":"1s"},"runState":{"runId":"%s","state":"%s","computedAt":"2026-08-09T00:00:01.000Z"},"steps":%s,"nodes":%s},"meta":{"command":"inspect","duration":"1ms"}}\\n' "$2" "$inspect_status" "$2" "$inspect_state" "$inspect_nodes" "$inspect_nodes"`,
       "    ;;",
@@ -215,6 +239,48 @@ nodes:
     role: finish
     depends_on:
       - project-discovery
+`,
+    "utf8"
+  );
+}
+
+function writeReportTopology(project: string): void {
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: project-discovery
+    kind: agentic
+    prompt: setup/project-discovery.md
+    depends_on:
+      - __start__
+    outputs:
+      - path: stdout.txt
+        contract: ultrafuzz/text@1
+        primary: true
+  - id: final-report
+    kind: agentic
+    prompt: setup/project-discovery.md
+    depends_on:
+      - __start__
+    outputs:
+      - path: report.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: report.json
+        contract: ultrafuzz/report@2
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on:
+      - project-discovery
+      - final-report
 `,
     "utf8"
   );
@@ -366,49 +432,24 @@ function writeFinalReportAccounting(
 ): string {
   const reportDir = path.join(runRoot, "artifacts", "final-report");
   fs.mkdirSync(reportDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(reportDir, "report.md"),
-    [
-      "# Agent report",
-      "",
-      "## Run summary",
-      "",
-      `- Tokens used: \`${accounting.tokensUsed}\``,
-      `- Estimated spend: \`${accounting.estimatedSpend}\``,
-      ""
-    ].join("\n"),
-    "utf8"
+  writeCanonicalReportPair(
+    reportDir,
+    currentReport(path.basename(runRoot), [], {
+      tokens_used: accounting.tokensUsed,
+      estimated_spend: accounting.estimatedSpend,
+      partial_pricing: accounting.partialPricing,
+      source_run_ids: []
+    })
   );
-  fs.writeFileSync(
-    path.join(reportDir, "report.json"),
-    `${JSON.stringify(
-      {
-        schema_version: REPORT_SCHEMA_VERSION,
-        run_metadata: {
-          run_id: path.basename(runRoot),
-          source_run_id: "none",
-          repository: "unavailable",
-          elapsed_time: "unavailable",
-          models_used: [],
-          tokens_used: accounting.tokensUsed,
-          estimated_spend: accounting.estimatedSpend,
-          partial_pricing: accounting.partialPricing,
-          strategy_loops: 1,
-          source_run_ids: []
-        },
-        issues: [],
-        non_production_outcomes: [],
-        property_provenance: []
-      },
-      null,
-      2
-    )}\n`,
-    "utf8"
-  );
+  sealVerifiedFinalReport(runRoot);
   return reportDir;
 }
 
-function currentReport(runId: string, issues: Record<string, unknown>[] = []): Record<string, unknown> {
+function currentReport(
+  runId: string,
+  issues: Record<string, unknown>[] = [],
+  metadata: Record<string, unknown> = {}
+): Record<string, unknown> {
   return {
     schema_version: REPORT_SCHEMA_VERSION,
     run_metadata: {
@@ -420,15 +461,20 @@ function currentReport(runId: string, issues: Record<string, unknown>[] = []): R
       tokens_used: "unavailable",
       estimated_spend: "unavailable",
       partial_pricing: false,
-      strategy_loops: 1
+      strategy_loops: 1,
+      ...metadata
     },
     issues,
     non_production_outcomes: [],
-    property_provenance: []
+    property_provenance: [],
+    property_implementation_coverage: {
+      status: "not-planned",
+      reason: "property-implementation-track-not-declared"
+    }
   };
 }
 
-function currentReportIssue(id = "finding-1"): Record<string, unknown> {
+function currentReportIssue(id = "M-01"): Record<string, unknown> {
   return {
     schema_version: FINDINGS_SCHEMA_VERSION,
     id,
@@ -449,12 +495,128 @@ function currentReportIssue(id = "finding-1"): Record<string, unknown> {
       language: "solidity",
       code: "function testCanonicalFinding() public {}"
     },
+    strategy: "stateful-invariant",
+    strategy_provenance: {
+      detection_rates: [{ strategy: "stateful-invariant", detections: 1, configured_loops: 1 }]
+    },
     lifecycle: {
       dedupe_key: `dedupe-${id}`,
       source_artifacts: [],
-      strategy_hits: []
+      strategy_hits: [],
+      canonical_severity: "Medium"
     }
   };
+}
+
+function writeCanonicalReportPair(reportDir: string, report: Record<string, unknown>): void {
+  const projection = projectCanonicalFinalReport(report);
+  writeJsonRecord(path.join(reportDir, "report.json"), projection.report);
+  fs.writeFileSync(path.join(reportDir, "report.md"), projection.markdown, "utf8");
+}
+
+function sealVerifiedFinalReport(runRoot: string): void {
+  const layout = layoutForRunRoot(runRoot, path.basename(runRoot));
+  const graph = readPlannedGraphDocument(layout.graphPath);
+  const candidates = graph.nodes.filter((node) => node.logical_id === "final-report");
+  assert.equal(candidates.length, 1, "report fixtures require exactly one planned final-report attempt");
+  const plannedNode = candidates[0]!;
+  const attemptId = plannedNode.id;
+  const reportDir = path.join(layout.artifactsDir, attemptId);
+  const snapshots = plannedNode.outputs.map((output) => ({
+    output,
+    bytes: fs.readFileSync(path.join(reportDir, output.path))
+  }));
+  const runMetadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
+  assert.ok(runMetadata.workflow, "report fixtures require an active workflow link");
+  const workflowRunId = runMetadata.workflow.run_id;
+  const agentTaskId = `node:${attemptId}`;
+  const verifierTaskId = `verify:${attemptId}`;
+
+  writeArtifactManifest({
+    layout,
+    nodeId: attemptId,
+    include: plannedNode.outputs.map((output) => output.path),
+    outputs: plannedNode.outputs,
+    provenance: {
+      producer_node_id: attemptId,
+      logical_node_id: plannedNode.logical_id,
+      attempt_index: plannedNode.loop.attempt_index,
+      loop_index: plannedNode.loop.index,
+      model_index: 0,
+      agent_ref: "Codex",
+      workflow_run_id: workflowRunId,
+      workflow_task_id: agentTaskId,
+      origin: "workflow",
+      metadata: { concrete_node_id: plannedNode.id }
+    }
+  });
+  fs.mkdirSync(path.join(layout.root, ".ultrafuzz-verification"), { recursive: true });
+  writeJsonRecord(path.join(layout.root, ".ultrafuzz-verification", `${attemptId}.json`), {
+    schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+    attempt_id: attemptId,
+    node_id: plannedNode.logical_id,
+    artifacts: snapshots.map(({ output, bytes }) => ({ ...output, sha256: digest(bytes) })),
+    publications: snapshots.map(({ output, bytes }) => ({ path: output.path, sha256: digest(bytes) }))
+  });
+  updateNodeState(layout, attemptId, {
+    status: "succeeded",
+    finished_at: new Date().toISOString(),
+    wait_since: undefined,
+    wait_reason: undefined,
+    next_eligible_action: undefined,
+    provenance: {
+      workflow: {
+        run_id: workflowRunId,
+        task_id: verifierTaskId,
+        agent_task_id: agentTaskId,
+        verifier_task_id: verifierTaskId,
+        state: "finished",
+        attempt: 0
+      },
+      output_contracts: { ok: true, missing: [] }
+    }
+  });
+}
+
+function digest(bytes: Buffer): string {
+  return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
+interface FinalReportByteSnapshot {
+  json: Buffer;
+  markdown: Buffer;
+  jsonSha256: string;
+  markdownSha256: string;
+}
+
+function snapshotFinalReport(reportDir: string): FinalReportByteSnapshot {
+  const json = fs.readFileSync(path.join(reportDir, "report.json"));
+  const markdown = fs.readFileSync(path.join(reportDir, "report.md"));
+  return {
+    json,
+    markdown,
+    jsonSha256: digest(json),
+    markdownSha256: digest(markdown)
+  };
+}
+
+function assertFinalReportUnchanged(reportDir: string, expected: FinalReportByteSnapshot): void {
+  const actual = snapshotFinalReport(reportDir);
+  assert.deepEqual(actual.json, expected.json);
+  assert.deepEqual(actual.markdown, expected.markdown);
+  assert.equal(actual.jsonSha256, expected.jsonSha256);
+  assert.equal(actual.markdownSha256, expected.markdownSha256);
+}
+
+function assertBundledFinalReport(zip: AdmZip, expected: FinalReportByteSnapshot): void {
+  const bundledJson = zip.readFile("artifacts/final-report/report.json");
+  const bundledMarkdown = zip.readFile("artifacts/final-report/report.md");
+  assert.ok(bundledJson);
+  assert.ok(bundledMarkdown);
+  assert.deepEqual(bundledJson, expected.json);
+  assert.deepEqual(bundledMarkdown, expected.markdown);
+  assert.equal(digest(bundledJson), expected.jsonSha256);
+  assert.equal(digest(bundledMarkdown), expected.markdownSha256);
 }
 
 function accountingMismatchCount(value: Record<string, unknown>): number {
@@ -467,9 +629,9 @@ function accountingMismatchCount(value: Record<string, unknown>): number {
 
 async function createReportRun(project: string, runId: string): Promise<{ run_id: string; run_root: string }> {
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
-  writeSmallTopology(project);
+  writeReportTopology(project);
   const run = await cli(project, ["run", "--run-id", runId, "--json"], fakeSmithersEnv(project));
-  assert.equal(run.code, 0, run.stderr);
+  assert.equal(run.code, 0, `${run.stderr}\n${run.stdout}`);
   return parseJson(run).data as { run_id: string; run_root: string };
 }
 
@@ -606,9 +768,9 @@ test("run reads a bounded immutable workflow-input file", async () => {
 test("run, ps, status, inspect, report, materialize, clean, and lifecycle commands expose product workflow evidence", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
-  writeSmallTopology(project);
+  writeReportTopology(project);
 
-  const env = fakeSmithersEnv(project);
+  const env = fakeSmithersEnv(project, true);
   const run = await cli(
     project,
     [
@@ -759,6 +921,13 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     ]
   });
 
+  const reportDir = writeFinalReportAccounting(runData.run_root, {
+    tokensUsed: "123",
+    estimatedSpend: "$0.46+",
+    partialPricing: true
+  });
+  const reportSnapshot = snapshotFinalReport(reportDir);
+
   let resolveFirstStatusLine!: () => void;
   let rejectFirstStatusLine!: (error: Error) => void;
   let sawFirstStatusLine = false;
@@ -796,7 +965,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   fs.writeFileSync(statePath, `${JSON.stringify({ ...terminalState, status: "succeeded" }, null, 2)}\n`, "utf8");
   fs.writeFileSync(path.join(project, "fake-smithers-inspect-state"), "succeeded\n", "utf8");
   const watched = await watching;
-  assert.equal(watched.code, 0, watched.stderr);
+  assert.equal(watched.code, 0, `${watched.stderr}\n${watched.stdout}`);
   const watchedLines = watched.stdout.split("\n").filter(Boolean);
   assert.equal(watchedLines.length, 2);
   const watchedEnvelopes = watchedLines.map((line) => JSON.parse(line) as Record<string, unknown>);
@@ -815,12 +984,6 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     partialPricing: true,
     unpricedEventCount: 1
   });
-  const reportDir = writeFinalReportAccounting(runData.run_root, {
-    tokensUsed: "123",
-    estimatedSpend: "$0.46+",
-    partialPricing: true
-  });
-
   const report = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(report.code, 0, report.stderr);
   const reportBody = parseJson(report);
@@ -830,6 +993,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   const reportMarkdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
   assert.match(reportMarkdown, /- Tokens used: `123`/u);
   assert.match(reportMarkdown, /- Estimated spend: `\$0\.46\+`/u);
+  assertFinalReportUnchanged(reportDir, reportSnapshot);
 
   const escapedReport = await cli(project, ["report", "../../outside", "--json"]);
   const escapedReportBody = parseJson(escapedReport);
@@ -1019,7 +1183,7 @@ test("runtime command failures emit a failing exit code with JSON", async () => 
 test("report accepts populated accounting snapshots and preserves partial-pricing marker", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
-  writeSmallTopology(project);
+  writeReportTopology(project);
 
   const env = fakeSmithersEnv(project);
   const run = await cli(project, ["run", "--run-id", "report-accounting", "--json"], env);
@@ -1037,12 +1201,14 @@ test("report accepts populated accounting snapshots and preserves partial-pricin
     estimatedSpend: "$0.16+",
     partialPricing: true
   });
+  const initialSnapshot = snapshotFinalReport(reportDir);
 
   const initialReport = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(initialReport.code, 0, initialReport.stderr);
   const initialBody = parseJson(initialReport);
   assert.equal(accountingMismatchCount(initialBody), 0);
   assert.equal((initialBody.data as { json_path?: string }).json_path, path.join(reportDir, "report.json"));
+  assertFinalReportUnchanged(reportDir, initialSnapshot);
 
   writeRunAccounting(runData.run_root, {
     totalTokens: 725_905,
@@ -1054,15 +1220,18 @@ test("report accepts populated accounting snapshots and preserves partial-pricin
   const postSyncReport = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(postSyncReport.code, 0, postSyncReport.stderr);
   assert.equal(accountingMismatchCount(parseJson(postSyncReport)), 0);
+  assertFinalReportUnchanged(reportDir, initialSnapshot);
 
   writeFinalReportAccounting(runData.run_root, {
     tokensUsed: "56,523",
     estimatedSpend: "$0.16",
     partialPricing: true
   });
+  const missingPlusSnapshot = snapshotFinalReport(reportDir);
   const missingPlusReport = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(missingPlusReport.code, 0, missingPlusReport.stderr);
   assert.equal(accountingMismatchCount(parseJson(missingPlusReport)), 2);
+  assertFinalReportUnchanged(reportDir, missingPlusSnapshot);
 
   writeRunAccounting(runData.run_root, {
     totalTokens: 725_905,
@@ -1074,6 +1243,7 @@ test("report accepts populated accounting snapshots and preserves partial-pricin
   const inconsistentPartialReport = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(inconsistentPartialReport.code, 0, inconsistentPartialReport.stderr);
   assert.equal(accountingMismatchCount(parseJson(inconsistentPartialReport)), 2);
+  assertFinalReportUnchanged(reportDir, missingPlusSnapshot);
 
   writeRunAccounting(runData.run_root, {
     totalTokens: 725_905,
@@ -1087,9 +1257,11 @@ test("report accepts populated accounting snapshots and preserves partial-pricin
     estimatedSpend: "$0.16",
     partialPricing: false
   });
+  const estimatedSnapshot = snapshotFinalReport(reportDir);
   const estimatedReport = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(estimatedReport.code, 0, estimatedReport.stderr);
   assert.equal(accountingMismatchCount(parseJson(estimatedReport)), 0);
+  assertFinalReportUnchanged(reportDir, estimatedSnapshot);
 });
 
 test("report validates current artifacts without rewriting agent-owned bytes", async () => {
@@ -1099,10 +1271,11 @@ test("report validates current artifacts without rewriting agent-owned bytes", a
   const reportPath = path.join(reportDir, "report.json");
   const markdownPath = path.join(reportDir, "report.md");
   fs.mkdirSync(reportDir, { recursive: true });
-  writeJsonRecord(reportPath, currentReport(runData.run_id));
-  fs.writeFileSync(markdownPath, "# Agent-authored report\n\nNo issues reported.\n", "utf8");
-  const jsonBefore = fs.readFileSync(reportPath);
-  const markdownBefore = fs.readFileSync(markdownPath);
+  writeCanonicalReportPair(reportDir, currentReport(runData.run_id));
+  sealVerifiedFinalReport(runData.run_root);
+  const reportSnapshot = snapshotFinalReport(reportDir);
+  const jsonBefore = reportSnapshot.json;
+  const markdownBefore = reportSnapshot.markdown;
 
   const result = await cli(project, ["report", runData.run_id, "--json"]);
 
@@ -1110,9 +1283,10 @@ test("report validates current artifacts without rewriting agent-owned bytes", a
   const data = parseJson(result).data as { json_path: string; markdown_path: string; source: string };
   assert.equal(data.json_path, reportPath);
   assert.equal(data.markdown_path, markdownPath);
-  assert.equal(data.source, "validated-agent-report");
+  assert.equal(data.source, "verified-agent-report");
   assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
   assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
+  assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
 test("eval report validates the registered summary and never synthesizes missing Markdown", async () => {
@@ -1213,8 +1387,10 @@ test("report rejects final_severity compatibility aliases without rewriting arti
   fs.mkdirSync(reportDir, { recursive: true });
   writeJsonRecord(reportPath, currentReport(runData.run_id, [{ ...currentReportIssue(), final_severity: "Medium" }]));
   fs.writeFileSync(markdownPath, "# Agent-authored report\n", "utf8");
-  const jsonBefore = fs.readFileSync(reportPath);
-  const markdownBefore = fs.readFileSync(markdownPath);
+  sealVerifiedFinalReport(runData.run_root);
+  const reportSnapshot = snapshotFinalReport(reportDir);
+  const jsonBefore = reportSnapshot.json;
+  const markdownBefore = reportSnapshot.markdown;
 
   const result = await cli(project, ["report", runData.run_id, "--json"]);
 
@@ -1222,6 +1398,7 @@ test("report rejects final_severity compatibility aliases without rewriting arti
   assert.match(JSON.stringify(parseJson(result).diagnostics), /ARTIFACT_SCHEMA_INVALID|additional propert/iu);
   assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
   assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
+  assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
 test("report does not synthesize missing Markdown", async () => {
@@ -1233,13 +1410,18 @@ test("report does not synthesize missing Markdown", async () => {
   fs.mkdirSync(reportDir, { recursive: true });
   writeJsonRecord(reportPath, currentReport(runData.run_id));
   const jsonBefore = fs.readFileSync(reportPath);
+  const jsonSha256Before = digest(jsonBefore);
 
   const result = await cli(project, ["report", runData.run_id, "--json"]);
 
   assert.equal(result.code, 1);
-  assert.match(JSON.stringify(parseJson(result).diagnostics), /report Markdown path does not exist/iu);
+  assert.match(
+    JSON.stringify(parseJson(result).diagnostics),
+    /no successful current verification\/finalization authority is available/iu
+  );
   assert.equal(fs.existsSync(markdownPath), false);
   assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
+  assert.equal(digest(fs.readFileSync(reportPath)), jsonSha256Before);
 });
 
 test("report accepts canonical severity and complete proof without rewriting either artifact", async () => {
@@ -1249,16 +1431,18 @@ test("report accepts canonical severity and complete proof without rewriting eit
   const reportPath = path.join(reportDir, "report.json");
   const markdownPath = path.join(reportDir, "report.md");
   fs.mkdirSync(reportDir, { recursive: true });
-  writeJsonRecord(reportPath, currentReport(runData.run_id, [currentReportIssue()]));
-  fs.writeFileSync(markdownPath, "# Canonical agent-authored report\n", "utf8");
-  const jsonBefore = fs.readFileSync(reportPath);
-  const markdownBefore = fs.readFileSync(markdownPath);
+  writeCanonicalReportPair(reportDir, currentReport(runData.run_id, [currentReportIssue()]));
+  sealVerifiedFinalReport(runData.run_root);
+  const reportSnapshot = snapshotFinalReport(reportDir);
+  const jsonBefore = reportSnapshot.json;
+  const markdownBefore = reportSnapshot.markdown;
 
   const result = await cli(project, ["report", runData.run_id, "--json"]);
 
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
   assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
+  assertFinalReportUnchanged(reportDir, reportSnapshot);
   const report = JSON.parse(jsonBefore.toString("utf8")) as { issues: Array<Record<string, unknown>> };
   assert.equal(report.issues[0]?.severity, "Medium");
   assert.equal(Object.hasOwn(report.issues[0] ?? {}, "final_severity"), false);
@@ -1286,8 +1470,10 @@ test("current reports with malformed issues fail closed without preserving stale
     ])
   );
   fs.writeFileSync(markdownPath, "# Agent-authored malformed report\n", "utf8");
-  const jsonBefore = fs.readFileSync(reportPath);
-  const markdownBefore = fs.readFileSync(markdownPath);
+  sealVerifiedFinalReport(runData.run_root);
+  const reportSnapshot = snapshotFinalReport(reportDir);
+  const jsonBefore = reportSnapshot.json;
+  const markdownBefore = reportSnapshot.markdown;
 
   const result = await cli(project, ["report", runData.run_id, "--json"]);
 
@@ -1295,6 +1481,7 @@ test("current reports with malformed issues fail closed without preserving stale
   assert.match(JSON.stringify(parseJson(result).diagnostics), /ARTIFACT_SCHEMA_INVALID.*required/iu);
   assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
   assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
+  assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
 test("legacy report versions are rejected without a compatibility reader", async () => {
@@ -1306,8 +1493,10 @@ test("legacy report versions are rejected without a compatibility reader", async
   fs.mkdirSync(reportDir, { recursive: true });
   writeJsonRecord(reportPath, { ...currentReport(runData.run_id), schema_version: "1.0" });
   fs.writeFileSync(markdownPath, "# Legacy report\n", "utf8");
-  const jsonBefore = fs.readFileSync(reportPath);
-  const markdownBefore = fs.readFileSync(markdownPath);
+  sealVerifiedFinalReport(runData.run_root);
+  const reportSnapshot = snapshotFinalReport(reportDir);
+  const jsonBefore = reportSnapshot.json;
+  const markdownBefore = reportSnapshot.markdown;
 
   const result = await cli(project, ["report", runData.run_id, "--json"]);
 
@@ -1315,12 +1504,13 @@ test("legacy report versions are rejected without a compatibility reader", async
   assert.match(JSON.stringify(parseJson(result).diagnostics), /ARTIFACT_SCHEMA_INVALID.*constant/iu);
   assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
   assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
+  assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
 test("report bundle creates a portable ZIP without workspaces or stale report backups", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
-  writeSmallTopology(project);
+  writeReportTopology(project);
 
   const env = fakeSmithersEnv(project);
   const run = await cli(project, ["run", "--run-id", "report-bundle", "--json"], env);
@@ -1336,28 +1526,7 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
     estimatedSpend: "$0.46",
     partialPricing: false
   });
-  const reportSchemaBinding = artifactContractSchemaBinding("ultrafuzz/report@2");
-  assert.ok(reportSchemaBinding);
-  writeArtifactManifest({
-    layout: layoutForRunRoot(runData.run_root, runData.run_id),
-    nodeId: "final-report",
-    include: ["report.md", "report.json"],
-    outputs: [
-      {
-        path: "report.md",
-        contract: "ultrafuzz/nonempty-markdown@1",
-        contract_digest: artifactContractDefinition("ultrafuzz/nonempty-markdown@1").digest,
-        primary: true
-      },
-      {
-        path: "report.json",
-        contract: "ultrafuzz/report@2",
-        contract_digest: artifactContractDefinition("ultrafuzz/report@2").digest,
-        ...reportSchemaBinding,
-        primary: true
-      }
-    ]
-  });
+  const reportSnapshot = snapshotFinalReport(reportDir);
   fs.writeFileSync(path.join(reportDir, "report.json.pre-old"), '{"stale":true}\n', "utf8");
   const workspaceDir = path.join(runData.run_root, "workspaces", "project-discovery");
   fs.mkdirSync(workspaceDir, { recursive: true });
@@ -1368,6 +1537,7 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
 
   const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
   assert.equal(bundled.code, 0, bundled.stderr);
+  assertFinalReportUnchanged(reportDir, reportSnapshot);
   const body = parseJson(bundled);
   assertNoSmithersSurface(body);
   assert.match(JSON.stringify(body.diagnostics), /REPORT_BUNDLE_FILE_SKIPPED/u);
@@ -1378,6 +1548,7 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   assert.equal(data.entry_count > 0, true);
 
   const zip = new AdmZip(data.zip_path);
+  assertBundledFinalReport(zip, reportSnapshot);
   const entries = zip
     .getEntries()
     .filter((entry) => !entry.isDirectory)
@@ -1435,15 +1606,20 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   const existing = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
   assert.equal(existing.code, 1);
   assert.match(JSON.stringify(parseJson(existing).diagnostics), /already exists/u);
+  assertFinalReportUnchanged(reportDir, reportSnapshot);
 
   const forced = await cli(project, ["report", "bundle", runData.run_id, "--force", "--json"]);
   assert.equal(forced.code, 0, forced.stderr);
+  assertFinalReportUnchanged(reportDir, reportSnapshot);
+  assertBundledFinalReport(new AdmZip(data.zip_path), reportSnapshot);
 
   const customPath = "attachments/custom-report-bundle.zip";
   const custom = await cli(project, ["report", "bundle", runData.run_id, "--output", customPath, "--json"]);
   assert.equal(custom.code, 0, custom.stderr);
   const customData = parseJson(custom).data as { zip_path: string };
   assert.equal(customData.zip_path, path.join(project, customPath));
+  assertFinalReportUnchanged(reportDir, reportSnapshot);
+  assertBundledFinalReport(new AdmZip(customData.zip_path), reportSnapshot);
 
   const symlinkOutput = path.join(project, "attachments", "symlink-output.zip");
   fs.symlinkSync(path.join(project, "missing-target.zip"), symlinkOutput);
@@ -1473,6 +1649,7 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   ]);
   assert.equal(linkedParentAttempt.code, 1);
   assert.match(JSON.stringify(parseJson(linkedParentAttempt).diagnostics), /symlink/u);
+  assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
 test("report bundle preserves the exact validated event-record-v2 journal snapshot", async () => {

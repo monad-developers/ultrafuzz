@@ -271,7 +271,7 @@ function readAuthorityDocuments(layout: RunLayout, attemptId: string): Authority
     markerBytes = readAuthoritySnapshot(layout.root, markerPath, "artifact verification marker");
     manifestBytes = readAuthoritySnapshot(layout.root, manifestPath, "artifact manifest");
   } catch (error) {
-    throw unavailableAuthority(`current verification/finalization authority is unavailable for ${attemptId}`, error);
+    throw invalidAuthority(`current verification/finalization authority is incomplete or unreadable for ${attemptId}`, error);
   }
 
   let markerValue: unknown;

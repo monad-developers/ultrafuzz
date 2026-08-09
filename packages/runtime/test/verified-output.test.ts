@@ -89,6 +89,19 @@ test("shape-valid severity drift is rejected by current semantic gates despite m
   assert.deepEqual(fs.readFileSync(fixture.markdownPath), markdownBefore);
 });
 
+test("missing verification evidence after successful finalization is invalid authority, not unavailable authority", () => {
+  const fixture = createVerifiedReportFixture("verified-report-missing-marker");
+  fs.rmSync(path.join(fixture.layout.root, ".ultrafuzz-verification", "final-report.json"));
+
+  assert.throws(
+    () => loadVerifiedFinalReportSnapshot(fixture.layout.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+      /incomplete or unreadable/iu.test(error.message)
+  );
+});
+
 function createVerifiedReportFixture(
   runId: string,
   override: { report?: Record<string, unknown>; markdown?: string } = {}
