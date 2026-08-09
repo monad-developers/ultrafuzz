@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -17,12 +18,16 @@ import {
   assertPublicBenchmarkGeneration,
   createEvalHistoryObservations,
   emptyEvalHistory,
+  evalHistoryZodSchema,
   formatEvalHistoryJson,
   mergeEvalHistory,
   parseEvalHistory,
+  readEvalHistory,
   renderEvalHistoryCharts,
   type EvalHistoryObservation
 } from "../src/history.js";
+import { EVAL_HISTORY_SCHEMA_ID, validateEvalJsonSchema } from "../src/eval-schema-registry.js";
+import { executeEvalSchemaSemanticGates } from "../src/eval-semantic-gates.js";
 import { PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION } from "../src/public-diagnostics.js";
 import type { EvalMatrixRow, EvalRowScore, EvalScoreSummary, EvalSuiteSpec } from "../src/types.js";
 import { safeEvalId } from "../src/utils.js";
@@ -372,6 +377,57 @@ function publicDiagnostics(
 }
 
 describe("longitudinal eval history", () => {
+  it("keeps history v2 and observation v6 structurally exact across JSON Schema and retained Zod", () => {
+    const fixture = JSON.parse(fs.readFileSync(new URL("./fixtures/eval-history.valid.json", import.meta.url), "utf8"));
+    expectHistoryStructuralParity(fixture, true);
+    expect(executeEvalSchemaSemanticGates(EVAL_HISTORY_SCHEMA_ID, fixture)).toEqual([]);
+    expect(parseEvalHistory(fixture)).toEqual(fixture);
+
+    const extraRoot = { ...fixture, migrated: true };
+    const extraObservation = structuredClone(fixture);
+    extraObservation.observations[0].legacy_cost = 1.25;
+    const wrongVersion = structuredClone(fixture);
+    wrongVersion.observations[0].schema_version = "ultrafuzz.eval.history.observation.v5";
+    const unsafeCount = structuredClone(fixture);
+    unsafeCount.observations[0].trial_count = Number.MAX_SAFE_INTEGER + 1;
+    const invalidPath = structuredClone(fixture);
+    invalidPath.observations[0].target_publication.publication_location.bundle_path = "../public-results.json";
+    const oversizedId = structuredClone(fixture);
+    oversizedId.observations[0].id = "🙂".repeat(501);
+    for (const invalid of [extraRoot, extraObservation, wrongVersion, unsafeCount, invalidPath, oversizedId]) {
+      expectHistoryStructuralParity(invalid, false);
+    }
+
+    const inconsistent = structuredClone(fixture);
+    inconsistent.observations[0].target_publication.target = "other-target";
+    expectHistoryStructuralParity(inconsistent, true);
+    expect(executeEvalSchemaSemanticGates(EVAL_HISTORY_SCHEMA_ID, inconsistent)).toEqual([
+      expect.objectContaining({ gate: "eval-history-integrity", path: "$" })
+    ]);
+    expect(() => parseEvalHistory(inconsistent)).toThrow();
+  });
+
+  it("treats only a directly absent history file as empty", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-eval-history-"));
+    const historyPath = path.join(directory, "history.json");
+    try {
+      expect(readEvalHistory(historyPath)).toEqual(emptyEvalHistory());
+
+      fs.writeFileSync(
+        historyPath,
+        '{"schema_version":"ultrafuzz.eval.history.v2","schema_version":"ultrafuzz.eval.history.v2"}',
+        "utf8"
+      );
+      expect(() => readEvalHistory(historyPath)).toThrowError(/failed to parse eval history/u);
+
+      fs.rmSync(historyPath);
+      fs.mkdirSync(historyPath);
+      expect(() => readEvalHistory(historyPath)).toThrowError(/failed to read eval history/u);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("merges immutable observations idempotently and rejects conflicts", () => {
     const first = observation();
     const once = mergeEvalHistory(emptyEvalHistory(), [first]);
@@ -479,7 +535,10 @@ describe("longitudinal eval history", () => {
     });
 
     const partiallyMerged = mergeEvalHistory(pending, replacement.slice(0, 2));
-    expect(renderEvalHistoryCharts(partiallyMerged).get("cost.svg")).toContain("partial n/a 7777777");
+    const partialCost = renderEvalHistoryCharts(partiallyMerged).get("cost.svg")!;
+    expect(partialCost).toContain('data-completeness-marker="partial"');
+    expect(partialCost).toContain("0.2 partial (pricing-incomplete)");
+    expect(partialCost).not.toContain("partial n/a 7777777");
 
     const merged = mergeEvalHistory(partiallyMerged, replacement);
     expect(merged.supersessions).toEqual([supersession]);
@@ -1808,6 +1867,14 @@ describe("longitudinal eval history", () => {
     expect(svg).toContain(">2026-07-29</text>");
   });
 });
+
+function expectHistoryStructuralParity(value: unknown, expected: boolean): void {
+  const canonical = validateEvalJsonSchema(EVAL_HISTORY_SCHEMA_ID, value).ok;
+  const retained = evalHistoryZodSchema.safeParse(value);
+  expect(canonical).toBe(expected);
+  expect(retained.success).toBe(expected);
+  if (retained.success) expect(retained.data).toEqual(value);
+}
 
 function publicMatrix(suite: EvalSuiteSpec): EvalMatrixRow[] {
   const rows: EvalMatrixRow[] = [];

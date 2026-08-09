@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertRegularFileInside, parseStrictJsonBytes } from "@ultrafuzz/artifacts";
+import { assertRegularFileInside, parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
 import { z } from "zod/v4";
 
 import {
@@ -25,19 +25,15 @@ import {
   parsePublicEvalDiagnostics
 } from "./public-diagnostics.js";
 import { parseRecoveryEquivalence } from "./recovery-equivalence.js";
-import {
-  readEvalFindingScores,
-  readEvalMatrix,
-  readEvalRunManifest,
-  readEvalScoreSummary,
-  readStrictJsonDocument
-} from "./eval-durable.js";
+import { EVAL_HISTORY_SCHEMA_ID, validateEvalJsonSchema } from "./eval-schema-registry.js";
+import { readEvalFindingScores, readEvalMatrix, readEvalRunManifest, readEvalScoreSummary } from "./eval-durable.js";
 import { EvalError, evalRunRoot, safeEvalId } from "./utils.js";
 
 export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v2" as const;
 export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v6" as const;
 const EVAL_HISTORY_PUBLIC_BUNDLE_FILE = "public-results.json";
 const EVAL_HISTORY_PUBLIC_REPORT_FILES = ["report.md", "report.json"] as const;
+const MAX_EVAL_HISTORY_BYTES = 64 * 1024 * 1024;
 
 export type EvalHistoryBenchmark = "evmbench" | "ultrafuzz-bench";
 export type EvalHistoryLane = "smoke" | "full";
@@ -120,53 +116,48 @@ const shaSchema = z.string().regex(/^[0-9a-f]{40}$/u);
 const fingerprintSchema = z.string().regex(/^(?:sha256:)?[0-9a-f]{64}$/u);
 const finiteNonNegative = z.number().finite().nonnegative();
 const ratio = z.number().finite().min(0).max(1);
-const safeText = z
-  .string()
-  .min(1)
-  .max(500)
-  .refine((value) => [...value].every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127));
-const sourceArtifactSchema = z
-  .string()
-  .min(1)
-  .max(500)
-  .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u);
-const issueUrlSchema = z
-  .string()
-  .max(1_000)
-  .regex(/^https:\/\/github\.com\/monad-developers\/ultrafuzz\/issues\/[1-9][0-9]*$/u);
-const publicationUrlSchema = z
-  .string()
-  .url()
-  .max(1_000)
-  .regex(/^https:\/\//u);
-const githubRepositoryUrl = z
-  .string()
-  .url()
-  .regex(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/u);
+// eslint-disable-next-line no-control-regex -- matches the canonical JSON Schema control-character exclusion
+const safeTextPattern = /^[^\u0000-\u001f\u007f]+$/u;
+const timestampPattern =
+  /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$/u;
+const relativePathPattern =
+  // eslint-disable-next-line no-control-regex -- matches the canonical JSON Schema path-character exclusion
+  /^(?!\/)(?![A-Za-z]:\/)(?!.*\/\/)(?!\.?\.?$)(?!\.\.?\/)(?!.*\/\.\.?(?:\/|$))[^\\\u0000-\u001f\u007f]+$/u;
+
+function boundedCodePointString(maximum: number, pattern: RegExp): z.ZodType<string> {
+  return z
+    .string()
+    .min(1)
+    .regex(pattern)
+    .refine((value) => [...value].length <= maximum, `must contain at most ${maximum} Unicode code points`);
+}
+
+const safeText = boundedCodePointString(500, safeTextPattern);
+const sourceArtifactSchema = boundedCodePointString(500, /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u);
+const issueUrlSchema = boundedCodePointString(
+  1_000,
+  /^https:\/\/github\.com\/monad-developers\/ultrafuzz\/issues\/[1-9][0-9]*$/u
+);
+const publicationUrlSchema = boundedCodePointString(1_000, /^https:\/\/[^\s]+$/u);
+const repositoryUrlSchema = boundedCodePointString(2_048, /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s]+$/u);
+const githubRepositoryUrl = boundedCodePointString(
+  2_048,
+  /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/u
+);
+const timestampSchema = z.string().regex(timestampPattern);
 const publicationStatusSchema = z.enum(["succeeded", "genuine-task-failures", "failed"]);
-const positiveInteger = z.number().int().positive();
-const nonNegativeInteger = z.number().int().nonnegative();
-const relativePathSchema = z
-  .string()
-  .min(1)
-  .max(512)
-  .refine(
-    (value) =>
-      !path.posix.isAbsolute(value) &&
-      !path.win32.isAbsolute(value) &&
-      !value.includes("\\") &&
-      !value.split("/").some((part) => part === "" || part === "." || part === ".."),
-    "must be a canonical relative POSIX path"
-  );
+const positiveInteger = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const nonNegativeInteger = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const relativePathSchema = boundedCodePointString(512, relativePathPattern);
 
 const completenessSchema = z.strictObject({
   status: z.enum(["complete", "partial", "unavailable"]),
-  reasons: z.array(safeText)
+  reasons: z.array(safeText).max(64)
 });
 
 const targetPublicationIdentityShape = {
   target: safeText,
-  repository: z.string().url().max(2_048),
+  repository: repositoryUrlSchema,
   revision: shaSchema,
   framework: safeText.optional()
 } as const;
@@ -176,7 +167,7 @@ const targetPublicationResultShape = {
   graded_case_count: positiveInteger,
   publication_location: z.strictObject({
     bundle_path: relativePathSchema,
-    report_paths: z.array(relativePathSchema).min(1)
+    report_paths: z.array(relativePathSchema).min(1).max(64)
   })
 } as const;
 
@@ -193,11 +184,14 @@ const observationBaseShape = {
   target: safeText,
   variant: safeText,
   trial_count: positiveInteger,
-  run_timestamp: z.string().datetime({ offset: true }),
+  run_timestamp: timestampSchema,
   candidate_commit: shaSchema,
   candidate_repository_url: githubRepositoryUrl,
   cohort_fingerprint: fingerprintSchema,
-  target_revisions: z.array(z.strictObject({ target: safeText, revision: shaSchema })).min(1),
+  target_revisions: z
+    .array(z.strictObject({ target: safeText, revision: shaSchema }))
+    .min(1)
+    .max(10_000),
   model_profile: safeText,
   model: safeText,
   reasoning_effort: safeText,
@@ -206,7 +200,7 @@ const observationBaseShape = {
   precision: ratio,
   recall: ratio,
   f1: ratio,
-  cumulative_unique_true_positives: z.number().int().nonnegative(),
+  cumulative_unique_true_positives: nonNegativeInteger,
   wall_clock_seconds: finiteNonNegative.nullable(),
   wall_clock_completeness: completenessSchema,
   cost_usd: finiteNonNegative.nullable(),
@@ -236,19 +230,15 @@ const supersessionSchema = z.strictObject({
       superseded_cohort_fingerprint: fingerprintSchema,
       replacement_cohort_fingerprint: fingerprintSchema
     })
-    .refine(
-      (transition) => transition.superseded_cohort_fingerprint !== transition.replacement_cohort_fingerprint,
-      "a cohort transition must name distinct superseded and replacement fingerprints"
-    )
     .optional(),
   reason: safeText,
   issue_url: issueUrlSchema
 });
 
-const historySchema = z.strictObject({
+export const evalHistoryZodSchema = z.strictObject({
   schema_version: z.literal(EVAL_HISTORY_SCHEMA_VERSION),
-  supersessions: z.array(supersessionSchema),
-  observations: z.array(observationSchema)
+  supersessions: z.array(supersessionSchema).max(10_000),
+  observations: z.array(observationSchema).max(100_000)
 });
 
 export const EVAL_HISTORY_CHARTS = [
@@ -282,33 +272,85 @@ export function emptyEvalHistory(): EvalHistory {
 }
 
 export function parseEvalHistory(value: unknown, source = "eval history"): EvalHistory {
-  const parsed = historySchema.safeParse(value);
-  if (!parsed.success) {
+  const canonical = validateEvalJsonSchema(EVAL_HISTORY_SCHEMA_ID, value);
+  if (!canonical.ok) {
     throw new EvalError("EVAL_HISTORY_INVALID", `${source} failed schema validation`, {
-      issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
+      schema_id: EVAL_HISTORY_SCHEMA_ID,
+      issues: canonical.issues,
+      truncated: canonical.truncated
     });
   }
-  const history = parsed.data as EvalHistory;
+  const retained = evalHistoryZodSchema.safeParse(value);
+  if (!retained.success) {
+    throw new EvalError("EVAL_HISTORY_SCHEMA_DRIFT", "canonical eval-history schema and retained Zod parser disagree");
+  }
+  const history = retained.data as EvalHistory;
   assertHistoryIntegrity(history);
   return history;
 }
 
 export function readEvalHistory(filePath: string): EvalHistory {
-  if (!fs.existsSync(filePath)) return emptyEvalHistory();
-  let value: unknown;
   try {
-    value = readStrictJsonDocument(filePath);
+    fs.lstatSync(filePath);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return emptyEvalHistory();
+    throw new EvalError("EVAL_HISTORY_INVALID", `failed to inspect eval history ${filePath}`, {
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  }
+  let bytes: Buffer;
+  try {
+    bytes = readRegularFileSnapshot(filePath, MAX_EVAL_HISTORY_BYTES);
   } catch (error) {
     throw new EvalError("EVAL_HISTORY_INVALID", `failed to read eval history ${filePath}`, {
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  }
+  let value: unknown;
+  try {
+    value = parseStrictJsonBytes(bytes, {
+      maxBytes: MAX_EVAL_HISTORY_BYTES,
+      maxDepth: 128,
+      maxItems: 1_000_000,
+      maxProperties: 1_000_000
+    });
+  } catch (error) {
+    throw new EvalError("EVAL_HISTORY_INVALID", `failed to parse eval history ${filePath}`, {
       reason: error instanceof Error ? error.message : String(error)
     });
   }
   return parseEvalHistory(value, filePath);
 }
 
+export interface EvalHistorySemanticIssue {
+  path: string;
+  message: string;
+}
+
+export function evalHistorySemanticIssues(history: EvalHistory): EvalHistorySemanticIssue[] {
+  try {
+    assertHistoryIntegrity(history);
+    return [];
+  } catch (error) {
+    return [{ path: "$", message: error instanceof Error ? error.message : String(error) }];
+  }
+}
+
 function assertHistoryIntegrity(history: EvalHistory): void {
   const byId = new Map<string, string>();
   for (const observation of history.observations) {
+    if (!isValidTimestamp(observation.run_timestamp)) {
+      throw new EvalError("EVAL_HISTORY_INVALID", `observation ${observation.id} has an invalid run timestamp`);
+    }
+    for (const [label, value] of [
+      ["candidate repository", observation.candidate_repository_url],
+      ["publication URL", observation.publication_url],
+      ["target repository", observation.target_publication.repository]
+    ] as const) {
+      if (!isValidAbsoluteUrl(value)) {
+        throw new EvalError("EVAL_HISTORY_INVALID", `observation ${observation.id} has an invalid ${label}`);
+      }
+    }
     assertCompletenessValue(
       observation.wall_clock_seconds,
       observation.wall_clock_completeness,
@@ -442,6 +484,13 @@ function assertSupersessionIntegrity(history: EvalHistory): void {
   }
   const supersededSourceRuns = new Set<string>();
   for (const supersession of history.supersessions) {
+    if (
+      supersession.cohort_transition !== undefined &&
+      supersession.cohort_transition.superseded_cohort_fingerprint ===
+        supersession.cohort_transition.replacement_cohort_fingerprint
+    ) {
+      throw new EvalError("EVAL_HISTORY_INVALID", "a cohort transition must name distinct fingerprints");
+    }
     if (supersededSourceRuns.has(supersession.superseded_source_eval_run_id)) {
       throw new EvalError(
         "EVAL_HISTORY_INVALID",
@@ -1280,7 +1329,7 @@ function publicVariantScope(variant: EvalMatrixRow["variant"]): Omit<EvalMatrixR
 
 function normalizedPublicationUrl(value: string): string {
   const parsed = publicationUrlSchema.safeParse(value);
-  if (!parsed.success) {
+  if (!parsed.success || !isValidAbsoluteUrl(value)) {
     throw new EvalError("EVAL_HISTORY_SOURCE_INVALID", "publication URL must be a valid public URL");
   }
   return parsed.data;
@@ -2592,6 +2641,23 @@ function stableStringify(value: unknown): string {
 
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function isValidTimestamp(value: string): boolean {
+  return Number.isFinite(Date.parse(value));
+}
+
+function isValidAbsoluteUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol.length > 1 && parsed.hostname.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 function format(value: number): string {

@@ -21,6 +21,7 @@ export const EVAL_SUITE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:suite:2" as cons
 export const EVAL_ADJUDICATION_HANDOFF_SCHEMA_ID = "urn:ultrafuzz:schema:evals:adjudication-handoff:1" as const;
 export const EVAL_FINDING_MANIFEST_SCHEMA_ID = "urn:ultrafuzz:schema:evals:finding-manifest:1" as const;
 export const EVAL_GROUND_TRUTH_SCHEMA_ID = "urn:ultrafuzz:schema:evals:ground-truth:1" as const;
+export const EVAL_HISTORY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:history:2" as const;
 export const EVAL_INSTANCE_CLUSTERS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:instance-clusters:1" as const;
 export const EVAL_GROUND_TRUTH_CREDITS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:ground-truth-credits:1" as const;
 export const EVAL_BENCHMARK_PROVENANCE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:benchmark-provenance:1" as const;
@@ -53,6 +54,7 @@ interface EvalSchemaMetadata {
     | "benchmarkLanesZodSchema"
     | "evalSuiteInputSchema"
     | "evmbenchCohortZodSchema"
+    | "evalHistoryZodSchema"
     | "groundTruthDocumentZodSchema"
     | "publicEvalDiagnosticsZodSchema"
     | "recoveryEquivalenceZodSchema"
@@ -108,6 +110,12 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
     typescriptExport: "evalGroundTruthJsonSchema",
     zodParser: "groundTruthDocumentZodSchema",
     semanticGates: ["eval-ground-truth-integrity"]
+  },
+  "eval-history.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalHistoryJsonSchema",
+    zodParser: "evalHistoryZodSchema",
+    semanticGates: ["eval-history-integrity"]
   },
   "eval-matrix.schema.json": {
     role: "runtime-state",
@@ -235,6 +243,7 @@ export const evalBenchmarkProvenanceJsonSchema = loadSchemaDocument("benchmark-p
 export const evalBenchmarkSourceManifestJsonSchema = loadSchemaDocument("benchmark-source-manifest.schema.json");
 export const evalFindingScoreJsonSchema = loadSchemaDocument("eval-finding-score.schema.json");
 export const evalGroundTruthJsonSchema = loadSchemaDocument("eval-ground-truth.schema.json");
+export const evalHistoryJsonSchema = loadSchemaDocument("eval-history.schema.json");
 export const evalFindingManifestJsonSchema = loadSchemaDocument("finding-manifest.schema.json");
 export const evalGroundTruthCreditsJsonSchema = loadSchemaDocument("ground-truth-credits.schema.json");
 export const evalInstanceClustersJsonSchema = loadSchemaDocument("instance-clusters.schema.json");
@@ -262,6 +271,7 @@ export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalCommonJsonSchema,
   evalFindingScoreJsonSchema,
   evalGroundTruthJsonSchema,
+  evalHistoryJsonSchema,
   evalFindingManifestJsonSchema,
   evalGroundTruthCreditsJsonSchema,
   evalInstanceClustersJsonSchema,
@@ -290,6 +300,7 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "eval-common.schema.json": evalCommonJsonSchema,
   "eval-finding-score.schema.json": evalFindingScoreJsonSchema,
   "eval-ground-truth.schema.json": evalGroundTruthJsonSchema,
+  "eval-history.schema.json": evalHistoryJsonSchema,
   "eval-matrix.schema.json": evalMatrixJsonSchema,
   "eval-public-diagnostics.schema.json": evalPublicDiagnosticsJsonSchema,
   "eval-publication-state.schema.json": evalPublicationStateJsonSchema,

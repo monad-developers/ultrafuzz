@@ -10,6 +10,7 @@ import {
   EVAL_FINDING_MANIFEST_SCHEMA_ID,
   EVAL_GROUND_TRUTH_SCHEMA_ID,
   EVAL_GROUND_TRUTH_CREDITS_SCHEMA_ID,
+  EVAL_HISTORY_SCHEMA_ID,
   EVAL_INSTANCE_CLUSTERS_SCHEMA_ID,
   EVAL_MATRIX_SCHEMA_ID,
   EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID,
@@ -38,6 +39,7 @@ import type {
   BenchmarkSourceManifest
 } from "./benchmark-analysis-contracts.js";
 import { groundTruthSemanticIssues, type GroundTruthDocument } from "./ground-truth.js";
+import { evalHistorySemanticIssues, type EvalHistory } from "./history.js";
 import { publicEvalDiagnosticsSemanticIssues, type PublicEvalDiagnostics } from "./public-diagnostics.js";
 import { evalStatusSemanticIssues, type EvalStatusSnapshot } from "./status.js";
 import type {
@@ -79,6 +81,7 @@ const gateHandlers: Readonly<Record<string, EvalSemanticGate>> = Object.freeze({
   "eval-finding-manifest-identity-joins": findingManifestIdentityJoins,
   "eval-ground-truth-integrity": groundTruthIntegrity,
   "eval-ground-truth-credits-identity-joins": groundTruthCreditsIdentityJoins,
+  "eval-history-integrity": historyIntegrity,
   "eval-instance-clusters-identity-joins": instanceClustersIdentityJoins,
   "eval-matrix-identity-joins": matrixIdentityJoins,
   "eval-public-diagnostics-consistency": publicDiagnosticsConsistency,
@@ -104,6 +107,7 @@ const gatesBySchema: Readonly<Record<string, readonly string[]>> = Object.freeze
   [EVAL_FINDING_MANIFEST_SCHEMA_ID]: ["eval-finding-manifest-identity-joins"],
   [EVAL_GROUND_TRUTH_SCHEMA_ID]: ["eval-ground-truth-integrity"],
   [EVAL_GROUND_TRUTH_CREDITS_SCHEMA_ID]: ["eval-ground-truth-credits-identity-joins"],
+  [EVAL_HISTORY_SCHEMA_ID]: ["eval-history-integrity"],
   [EVAL_INSTANCE_CLUSTERS_SCHEMA_ID]: ["eval-instance-clusters-identity-joins"],
   [EVAL_MATRIX_SCHEMA_ID]: ["eval-matrix-identity-joins"],
   [EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID]: ["eval-public-diagnostics-consistency"],
@@ -331,6 +335,12 @@ function statusConsistency(value: unknown): EvalSemanticGateIssue[] {
 function groundTruthIntegrity(value: unknown): EvalSemanticGateIssue[] {
   return groundTruthSemanticIssues(value as GroundTruthDocument).map((entry) =>
     issue("eval-ground-truth-integrity", entry.path, entry.message)
+  );
+}
+
+function historyIntegrity(value: unknown): EvalSemanticGateIssue[] {
+  return evalHistorySemanticIssues(value as EvalHistory).map((entry) =>
+    issue("eval-history-integrity", entry.path, entry.message)
   );
 }
 
