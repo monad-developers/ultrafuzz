@@ -2853,6 +2853,7 @@ function verifyFinalReportPropertyReferences(
       catalog.value,
       implementation.value,
       readCampaignFuzzerBackends(layout),
+      report,
       reportPath
     )
   );
@@ -3081,6 +3082,7 @@ function reportPropertyJoinDiagnostics(
   catalog: PropertiesArtifact,
   implementation: ImplementedPropertiesArtifact,
   fuzzerBackendsByFinding: ReadonlyMap<string, readonly string[]>,
+  report: Record<string, unknown>,
   reportPath: string
 ): RuntimeDiagnostic[] {
   const catalogById = new Map(catalog.properties.map((property) => [property.id, property]));
@@ -3150,7 +3152,7 @@ function reportPropertyJoinDiagnostics(
       `${reportPath}#$.property_provenance[${entryIndex}].test_paths`
     );
 
-    const expectedBackends = reportFindingAliases(entry).flatMap(
+    const expectedBackends = verifiedReportFindingAliases(entry, report).flatMap(
       (findingId) => fuzzerBackendsByFinding.get(findingId) ?? []
     );
     const actualBackends = Array.isArray(entry.fuzzer_backends)
@@ -3169,8 +3171,42 @@ function reportPropertyJoinDiagnostics(
   return diagnostics;
 }
 
-function reportFindingAliases(entry: Record<string, unknown>): string[] {
-  return [...new Set(stringArray([entry.finding_id, entry.upstream_id, entry.source_finding_id]))];
+function verifiedReportFindingAliases(entry: Record<string, unknown>, report: Record<string, unknown>): string[] {
+  const findingId = typeof entry.finding_id === "string" ? entry.finding_id : undefined;
+  if (findingId === undefined) {
+    return [];
+  }
+  const verifiedAliases = new Set([findingId]);
+  const outcomes = [report.issues, report.non_production_outcomes].flatMap((entries) =>
+    Array.isArray(entries) ? entries.filter(isRecord) : []
+  );
+  for (const outcome of outcomes) {
+    if (
+      outcome.id !== findingId ||
+      !isRecord(outcome.lifecycle) ||
+      !Array.isArray(outcome.lifecycle.source_artifacts)
+    ) {
+      continue;
+    }
+    const lifecycleFindingIds = new Set(
+      outcome.lifecycle.source_artifacts.flatMap((source) =>
+        isRecord(source) &&
+        campaignLogicalNodeIds.some((nodeId) => nodeId === source.node_id) &&
+        source.relationship === "primary" &&
+        typeof source.finding_id === "string"
+          ? [source.finding_id]
+          : []
+      )
+    );
+    for (const alias of stringArray([outcome.finding_id, outcome.upstream_id, outcome.source_finding_id])) {
+      if (lifecycleFindingIds.has(alias)) {
+        verifiedAliases.add(alias);
+      }
+    }
+  }
+  return [...new Set(stringArray([entry.finding_id, entry.upstream_id, entry.source_finding_id]))].filter((alias) =>
+    verifiedAliases.has(alias)
+  );
 }
 
 function readCampaignFuzzerBackends(layout: RunLayout): ReadonlyMap<string, readonly string[]> {

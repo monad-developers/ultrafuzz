@@ -4062,9 +4062,9 @@ test("final report gate joins renumbered findings through their source finding i
       ]
     })
   );
-  for (const [artifactName, backend] of [
-    ["recon-fuzzer-results.json", "recon"],
-    ["medusa-results.json", "medusa"]
+  for (const [artifactName, backend, failureId] of [
+    ["recon-fuzzer-results.json", "recon", "failure-1"],
+    ["medusa-results.json", "medusa", "failure-2"]
   ] as const) {
     writeArtifact(
       layout,
@@ -4073,21 +4073,48 @@ test("final report gate joins renumbered findings through their source finding i
       JSON.stringify({
         schema_version: "ultrafuzz.property-campaign.v1",
         fuzzer_backend: backend,
-        failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
+        failures: [{ id: failureId, status: "reproduced", property_ids: ["property-1"] }]
       })
     );
   }
 
-  const report = (fuzzerBackends: string[]) =>
+  const report = (sourceFindingId: string, fuzzerBackends: string[]) =>
     JSON.stringify({
       schema_version: "1.0",
       run_metadata: {},
       issues: [],
-      non_production_outcomes: [],
+      non_production_outcomes: [
+        {
+          id: "NP-01",
+          finding_id: "failure-1",
+          lifecycle: {
+            source_artifacts: [
+              {
+                node_id: "stateful-invariant-campaign",
+                finding_id: "failure-1",
+                relationship: "primary"
+              }
+            ]
+          }
+        },
+        {
+          id: "NP-02",
+          finding_id: "failure-2",
+          lifecycle: {
+            source_artifacts: [
+              {
+                node_id: "stateful-invariant-campaign",
+                finding_id: "failure-2",
+                relationship: "primary"
+              }
+            ]
+          }
+        }
+      ],
       property_provenance: [
         {
           finding_id: "NP-01",
-          source_finding_id: "failure-1",
+          source_finding_id: sourceFindingId,
           title: "Renumbered non-production outcome",
           property_ids: ["property-1"],
           sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-1" }],
@@ -4098,12 +4125,12 @@ test("final report gate joins renumbered findings through their source finding i
       ]
     });
 
-  writeArtifact(layout, node.id, "report.json", report(["medusa", "recon"]));
+  writeArtifact(layout, node.id, "report.json", report("failure-1", ["recon"]));
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
 
-  // Aliases are additive: a presentation ID cannot conceal a backend recorded
-  // against the source finding by claiming only a subset of the campaign set.
-  writeArtifact(layout, node.id, "report.json", report(["recon"]));
+  // NP-02 owns failure-2. NP-01 cannot borrow that unrelated finding's Medusa
+  // provenance merely by placing its ID in source_finding_id.
+  writeArtifact(layout, node.id, "report.json", report("failure-2", ["medusa"]));
   const mismatch = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(mismatch.ok, false);
   assert.ok(mismatch.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_FUZZER_BACKEND_MISMATCH"));
