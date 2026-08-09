@@ -56,7 +56,7 @@ it("keeps the flag for model-node work and for genuinely ambiguous durable evide
     graphNodes: [{ id: "model", kind: "agentic", model_fanout: [] }],
     stateNodes: { model: { node_id: "different", status: "pending" } }
   });
-  expect(() => privateEvalModelWorkEvidence(malformed)).toThrow(/node key/u);
+  expect(() => privateEvalModelWorkEvidence(malformed)).toThrow(/node_id must match map key/u);
 
   const incomplete = privateRunFixture({
     status: "failed",
