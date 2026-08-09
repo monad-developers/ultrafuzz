@@ -117,17 +117,17 @@ export function isDirectiveConformingFinalReportMarkdown(
   if (!markdown.includes("\n## Property provenance\n")) {
     return false;
   }
+  const prose = markdownOutsideFencedCode(markdown).replace(/<br\s*\/?\s*>/giu, "");
   if (
-    /\bCritical\b/iu.test(markdown) ||
-    /(?:^|\n)#### Sources\s*$/imu.test(markdown) ||
-    /\*\*Source (?:Node|Property) Id\*\*/iu.test(markdown) ||
-    /(?:^|\n)- \*\*Item \d+\*\*/imu.test(markdown) ||
-    /(?:^|\n)## (?:Executive summary|Issue index|Additional report data)\s*$/imu.test(markdown) ||
-    /(?:^|\n)#{3,6} (?:Lifecycle|Strategy provenance)\s*$/imu.test(markdown)
+    /\bCritical\b/iu.test(prose) ||
+    /(?:^|\n)#### Sources\s*$/imu.test(prose) ||
+    /\*\*Source (?:Node|Property) Id\*\*/iu.test(prose) ||
+    /(?:^|\n)- \*\*Item \d+\*\*/imu.test(prose) ||
+    /(?:^|\n)## (?:Executive summary|Issue index|Additional report data)\s*$/imu.test(prose) ||
+    /(?:^|\n)#{3,6} (?:Lifecycle|Strategy provenance)\s*$/imu.test(prose)
   ) {
     return false;
   }
-  const prose = markdownOutsideFencedCode(markdown).replace(/<br\s*\/?\s*>/giu, "");
   if (
     containsUnredactedSecret(markdown) ||
     containsPrivatePath(markdown) ||

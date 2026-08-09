@@ -128,3 +128,30 @@ test("directive validation rejects injected or presentation-divergent Markdown",
     false
   );
 });
+
+test("directive validation treats fenced proof code as code while retaining prose restrictions", () => {
+  const input = renderableReport();
+  const issue = (input.issues as Array<Record<string, unknown>>)[0]!;
+  issue.proof_of_concept = {
+    scenario: ["Prepare the bounded state.", "Execute the transition and observe the mismatch."],
+    language: "solidity",
+    code: [
+      "contract CriticalStateProbe {",
+      '    string internal constant label = "#### Sources";',
+      "    // **Source Node Id** and ### Strategy provenance are target identifiers here.",
+      "}"
+    ].join("\n")
+  };
+
+  const projection = projectCanonicalFinalReport(input);
+  assert.match(projection.markdown, /contract CriticalStateProbe/u);
+  assert.match(projection.markdown, /#### Sources/u);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      projection.markdown.replace("### Proof of Concept\n", "### Proof of Concept\n\nCritical\n"),
+      projection.report
+    ),
+    false
+  );
+});
