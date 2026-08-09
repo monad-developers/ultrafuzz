@@ -4040,6 +4040,8 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   });
 
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  assert.equal(compiled.pinnedSubmodules, undefined);
+  assert.match(workflowSource, /"pinnedSubmodules": null/u);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
   assert.match(workflowSource, /const taskOutput = z\.object\(\{/);
   assert.match(workflowSource, /summary: z\.string\(\)\.min\(1\)/);
@@ -4051,8 +4053,10 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
 
   const smithersTasks = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as {
     layers?: unknown;
+    pinned_submodules?: unknown;
     tasks: Array<{ attemptId: string; dependencySmithersNodeIds: string[] }>;
   };
+  assert.equal(smithersTasks.pinned_submodules, null);
   assert.equal("layers" in smithersTasks, false);
   assert.equal(workflowSource.match(/"runtimeContext":/gu)?.length, smithersTasks.tasks.length);
   assert.deepEqual(
@@ -4614,7 +4618,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /function artifactAwareAgent/);
   assert.match(
     workflowSource,
-    /const result = await agent\.generate\(attemptArgs\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\);/
+    /const result = await agent\.generate\(attemptArgs\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, pinnedSubmodules: "verify" \}\);/
   );
   assert.match(workflowSource, /materializeMissingMarkdownArtifacts\(task, result\)/);
   assert.match(workflowSource, /normalizeLegacyFindingFields\(task\)/);

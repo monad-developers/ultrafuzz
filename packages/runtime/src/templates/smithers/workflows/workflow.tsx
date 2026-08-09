@@ -53,10 +53,12 @@ const {
   applyWorkspacePatch,
   captureWorkspacePatch,
   captureWorkspaceTree,
+  hydratePinnedSubmodulesFromExecutionSnapshot,
   MAX_FINAL_REPORT_JSON_BYTES,
   normalizeFinalReportSeverityRecord,
   projectCanonicalFinalReport,
-  validateWorkspacePatchCapture
+  validateWorkspacePatchCapture,
+  verifyPinnedSubmodulesFromExecutionSnapshot
 } = await import(runtimeModule);
 
 const inputTaskSchema = z.object({
@@ -345,7 +347,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
         // captured the producer baseline and applied all dependency patches;
         // replaying them here would either overwrite that baseline or fail with
         // a base-tree mismatch.
-        prepareArtifactMirror(task, { replayWorkspacePatches: false });
+        prepareArtifactMirror(task, { replayWorkspacePatches: false, pinnedSubmodules: "verify" });
         materializeMissingMarkdownArtifacts(task, result);
         materializeMissingDedupeArtifact(task);
         normalizeLegacyFindingFields(task);
@@ -548,10 +550,23 @@ function taskArtifactRoots(task: (typeof taskSpecs)[number], canonicalArtifactDi
 
 function prepareArtifactMirror(
   task: (typeof taskSpecs)[number],
-  options: { replayWorkspacePatches?: boolean } = {}
+  options: { replayWorkspacePatches?: boolean; pinnedSubmodules?: "restore" | "verify" } = {}
 ): z.infer<typeof preparationOutput> {
-  preservePinnedSourceProof(task);
   const workspaceRoot = realpathSync(task.workspacePath);
+  if (options.pinnedSubmodules === "verify") {
+    verifyPinnedSubmodulesFromExecutionSnapshot({
+      executionSnapshotRoot: task.executionSnapshotRoot,
+      workspaceRoot,
+      expectation: task.pinnedSubmodules ?? undefined
+    });
+  } else {
+    hydratePinnedSubmodulesFromExecutionSnapshot({
+      executionSnapshotRoot: task.executionSnapshotRoot,
+      workspaceRoot,
+      expectation: task.pinnedSubmodules ?? undefined
+    });
+  }
+  preservePinnedSourceProof(task);
   materializePromptSchemas(path.join(workspaceRoot, ".ultrafuzz", "schemas"));
   assertTaskInputs(task, workspaceRoot);
   materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true);
@@ -1795,6 +1810,7 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
   const unreachableCommitCount = Number(gitUnreachableCommitCount());
   const commitObjectCount = reachableCommitCount + unreachableCommitCount;
   const pinnedSourceRefPresent = refs.some((ref) => ref.name === pinnedSourceRef && ref.object === pinnedCommit);
+  const pinnedDependencies = task.pinnedSubmodules ?? null;
   if (
     !/^[0-9a-f]{40}$/u.test(commit) ||
     !/^[0-9a-f]{40}$/u.test(tree) ||
@@ -1828,7 +1844,7 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
   const proofPath = path.join(resolvedProofRoot, `${task.attemptId}.json`);
   const proofContents = `${JSON.stringify(
     {
-      schema_version: "ultrafuzz.agent-source-proof.v1",
+      schema_version: "ultrafuzz.agent-source-proof.v2",
       attempt_id: task.attemptId,
       commit,
       tree,
@@ -1836,7 +1852,8 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
       refs: [{ name: pinnedSourceRef, object: pinnedCommit }],
       remotes,
       revision_count: reachableCommitCount,
-      commit_object_count: commitObjectCount
+      commit_object_count: commitObjectCount,
+      dependencies: pinnedDependencies
     },
     null,
     2
@@ -1861,7 +1878,8 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
       "refs",
       "remotes",
       "revision_count",
-      "commit_object_count"
+      "commit_object_count",
+      "dependencies"
     ];
     const previousProofKeys =
       previousProof !== null && typeof previousProof === "object" && !Array.isArray(previousProof)
@@ -1896,7 +1914,8 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
         refs: [{ name: pinnedSourceRef, object: pinnedCommit }],
         remotes: previousProof?.remotes,
         revision_count: previousProof?.revision_count,
-        commit_object_count: previousProof?.commit_object_count
+        commit_object_count: previousProof?.commit_object_count,
+        dependencies: previousProof?.dependencies
       },
       null,
       2
@@ -1904,7 +1923,7 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
     const previousProofMatches =
       previousProofKeys.length === expectedProofKeys.length &&
       previousProofKeys.every((key, index) => key === expectedProofKeys[index]) &&
-      previousProof?.schema_version === "ultrafuzz.agent-source-proof.v1" &&
+      previousProof?.schema_version === "ultrafuzz.agent-source-proof.v2" &&
       previousProof.attempt_id === task.attemptId &&
       previousProof.commit === commit &&
       previousProof.tree === tree &&
@@ -1913,6 +1932,7 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
       previousProof.remotes.length === 0 &&
       previousProof.revision_count === reachableCommitCount &&
       previousProof.commit_object_count === commitObjectCount &&
+      JSON.stringify(previousProof.dependencies) === JSON.stringify(pinnedDependencies) &&
       previousRefs.some((ref) => ref?.name === pinnedSourceRef && ref.object === pinnedCommit) &&
       previousRefsAreCanonical &&
       previousProofIsCanonicalJson &&

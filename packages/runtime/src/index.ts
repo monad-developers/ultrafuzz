@@ -7,6 +7,7 @@ export * from "./lifecycle-inspection.js";
 export * from "./materialize.js";
 export * from "./npm-install-retry.js";
 export * from "./plan-run.js";
+export * from "./pinned-submodules.js";
 export * from "./references.js";
 export * from "./run-progress.js";
 export * from "./severity-matrix.js";
