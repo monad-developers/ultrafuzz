@@ -26,7 +26,7 @@ import {
   type WorkflowLifecycleInput,
   type WorkflowLifecycleValue
 } from "./types.js";
-import { planRun, repairMissingRenderedPromptsFromExecutionSnapshot } from "./plan-run.js";
+import { planRun } from "./plan-run.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import { prepareTrustedCliEnvironment, runTrustedJsonValidatorPreflight } from "./trusted-cli.js";
 import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
@@ -274,12 +274,6 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
   try {
     const sealedConfig = parseSealedResolvedConfig(evidence.verifiedControl.executionFiles);
     const requestedConcurrency = input.maxConcurrency ?? sealedConfig.run.maxParallelAgents;
-    await repairMissingRenderedPromptsFromExecutionSnapshot({
-      projectRoot: path.resolve(input.projectRoot),
-      runId: input.runId,
-      runRoot: evidence.layout.root,
-      executionFiles: evidence.verifiedControl.executionFiles
-    });
     const forgeGuard = prepareForgeGuardEnvironment({
       layout: evidence.layout,
       config: sealedConfig,

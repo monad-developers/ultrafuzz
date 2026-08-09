@@ -3,7 +3,6 @@ import { readFileSync, realpathSync } from "node:fs";
 import { access, appendFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { repairMissingRenderedPromptsForRun } from "@ultrafuzz/runtime";
 import { assertGroundTruthSubject, readGroundTruthDocument, type GroundTruthSubject } from "@ultrafuzz/evals";
 
 import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig, type PrivateModalBenchmarkConfig } from "./config.js";
@@ -266,12 +265,6 @@ async function resumeExistingEvaluation(
     if (error instanceof CheckpointIncompatibleError) throw error;
     throw new CheckpointIncompatibleError("persistent ground truth subject binding is incompatible", { cause: error });
   });
-  const repairedPrompts = await repairMissingRenderedPromptsForRun({
-    projectRoot: workspace.target,
-    runId: workspace.productRunId,
-    runRoot: path.join(workspace.target, ".ultrafuzz", "runs", workspace.productRunId)
-  });
-  if (repairedPrompts > 0) await flushVolume();
   await writer.writePartial(await readWorkerCheckpoint(workspace.target));
   let state = await durableRunState(workspace.target, workspace.productRunId);
   if (state === undefined) throw new CheckpointIncompatibleError("persistent workspace is missing durable run state");
