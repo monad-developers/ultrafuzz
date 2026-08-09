@@ -3,7 +3,12 @@
   "$id": "urn:ultrafuzz:schema:topology:expanded-graph:3",
   "title": "Ultrafuzz expanded graph",
   "type": "object",
-  "required": ["graphVersion", "topologyVersion", "groups", "nodes"],
+  "required": [
+    "graphVersion",
+    "topologyVersion",
+    "groups",
+    "nodes"
+  ],
   "additionalProperties": false,
   "properties": {
     "graphVersion": {
@@ -11,16 +16,77 @@
     },
     "runId": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 256
     },
     "topologyVersion": {
       "const": 2
     },
     "groups": {
-      "type": "object"
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9_][a-z0-9_-]{0,127}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "color": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$"
+          },
+          "defaults": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "loops": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_attempts": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "model_profiles": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9_][a-z0-9_-]{0,127}$"
+                }
+              }
+            }
+          }
+        }
+      }
     },
     "fingerprintInputs": {
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "promptDigests": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128}(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128})*$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
     },
     "nodes": {
       "type": "array",
@@ -42,21 +108,28 @@
         "properties": {
           "id": {
             "type": "string",
-            "minLength": 1
+            "pattern": "^[a-z0-9_][a-z0-9_-]{0,127}$"
           },
           "logicalId": {
             "type": "string",
-            "minLength": 1
+            "pattern": "^[a-z0-9_][a-z0-9_-]{0,127}$"
           },
           "label": {
             "type": "string",
             "minLength": 1
           },
           "kind": {
-            "enum": ["agentic", "meta", "reference"]
+            "enum": [
+              "agentic",
+              "meta",
+              "reference"
+            ]
           },
           "role": {
-            "enum": ["start", "finish"]
+            "enum": [
+              "start",
+              "finish"
+            ]
           },
           "promptPath": {
             "type": "string",
@@ -68,7 +141,12 @@
           },
           "referenceRevision": {
             "type": "object",
-            "required": ["provider", "repo", "commit", "paths"],
+            "required": [
+              "provider",
+              "repo",
+              "commit",
+              "paths"
+            ],
             "additionalProperties": false,
             "properties": {
               "provider": {
@@ -93,18 +171,19 @@
           },
           "group": {
             "type": "string",
-            "minLength": 1
+            "pattern": "^[a-z0-9_][a-z0-9_-]{0,127}$"
           },
           "dependsOn": {
             "type": "array",
+            "uniqueItems": true,
             "items": {
               "type": "string",
-              "minLength": 1
+              "pattern": "^[a-z0-9_][a-z0-9_-]{0,127}$"
             }
           },
           "artifactDir": {
             "type": "string",
-            "minLength": 1
+            "pattern": "^artifacts/[a-z0-9_][a-z0-9_-]{0,127}$"
           },
           "timeoutSeconds": {
             "type": "number",
@@ -112,7 +191,9 @@
           },
           "retryPolicy": {
             "type": "object",
-            "required": ["maxAttempts"],
+            "required": [
+              "maxAttempts"
+            ],
             "additionalProperties": false,
             "properties": {
               "maxAttempts": {
@@ -123,7 +204,12 @@
           },
           "loop": {
             "type": "object",
-            "required": ["index", "count", "mode", "attemptIndex"],
+            "required": [
+              "index",
+              "count",
+              "mode",
+              "attemptIndex"
+            ],
             "additionalProperties": false,
             "properties": {
               "index": {
@@ -135,7 +221,10 @@
                 "minimum": 1
               },
               "mode": {
-                "enum": ["parallel", "series"]
+                "enum": [
+                  "parallel",
+                  "series"
+                ]
               },
               "attemptIndex": {
                 "type": "integer",
@@ -147,12 +236,17 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["path", "contract", "primary", "contractDigest"],
+              "required": [
+                "path",
+                "contract",
+                "primary",
+                "contractDigest"
+              ],
               "additionalProperties": false,
               "properties": {
                 "path": {
                   "type": "string",
-                  "minLength": 1
+                  "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128}(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128})*$"
                 },
                 "contract": {
                   "enum": [
@@ -206,11 +300,11 @@
                 },
                 "schemaFile": {
                   "type": "string",
-                  "pattern": "^[^/\\\\]+\\.schema\\.json$"
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$"
                 },
                 "schemaId": {
                   "type": "string",
-                  "minLength": 1
+                  "pattern": "^urn:ultrafuzz:schema:"
                 },
                 "schemaSha256": {
                   "type": "string",
@@ -222,17 +316,78 @@
                 },
                 "validatorBuild": {
                   "type": "string",
-                  "minLength": 1
+                  "pattern": "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$"
                 }
               },
               "allOf": [
                 {
-                  "dependentRequired": {
-                    "schemaFile": ["schemaId", "schemaSha256", "schemaBundleSha256", "validatorBuild"],
-                    "schemaId": ["schemaFile", "schemaSha256", "schemaBundleSha256", "validatorBuild"],
-                    "schemaSha256": ["schemaFile", "schemaId", "schemaBundleSha256", "validatorBuild"],
-                    "schemaBundleSha256": ["schemaFile", "schemaId", "schemaSha256", "validatorBuild"],
-                    "validatorBuild": ["schemaFile", "schemaId", "schemaSha256", "schemaBundleSha256"]
+                  "if": {
+                    "properties": {
+                      "contract": {
+                        "enum": [
+                          "ultrafuzz/nonempty-markdown@1",
+                          "ultrafuzz/text@1"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "contract"
+                    ]
+                  },
+                  "then": {
+                    "not": {
+                      "anyOf": [
+                        {
+                          "properties": {
+                            "schemaFile": true
+                          },
+                          "required": [
+                            "schemaFile"
+                          ]
+                        },
+                        {
+                          "properties": {
+                            "schemaId": true
+                          },
+                          "required": [
+                            "schemaId"
+                          ]
+                        },
+                        {
+                          "properties": {
+                            "schemaSha256": true
+                          },
+                          "required": [
+                            "schemaSha256"
+                          ]
+                        },
+                        {
+                          "properties": {
+                            "schemaBundleSha256": true
+                          },
+                          "required": [
+                            "schemaBundleSha256"
+                          ]
+                        },
+                        {
+                          "properties": {
+                            "validatorBuild": true
+                          },
+                          "required": [
+                            "validatorBuild"
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "else": {
+                    "required": [
+                      "schemaFile",
+                      "schemaId",
+                      "schemaSha256",
+                      "schemaBundleSha256",
+                      "validatorBuild"
+                    ]
                   }
                 }
               ]
@@ -242,7 +397,13 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["modelProfileId", "agentRef", "modelIndex", "loopIndex", "attemptIndex"],
+              "required": [
+                "modelProfileId",
+                "agentRef",
+                "modelIndex",
+                "loopIndex",
+                "attemptIndex"
+              ],
               "additionalProperties": false,
               "properties": {
                 "modelProfileId": {

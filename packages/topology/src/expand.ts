@@ -19,6 +19,7 @@ import type {
   ReferenceRevision
 } from "./types.js";
 import { titleFromId } from "./path-utils.js";
+import { assertExpandedGraphSchema } from "./expanded-graph-schema.js";
 
 export function expandTopology(topologyInput: unknown, options: ExpandTopologyOptions = {}): ExpandedGraph {
   const { topology, effectiveLoopCounts } = validateTopology(topologyInput, options);
@@ -37,14 +38,14 @@ export function expandTopology(topologyInput: unknown, options: ExpandTopologyOp
     });
   }
 
-  return {
+  return assertExpandedGraphSchema({
     graphVersion: GRAPH_VERSION,
     ...(options.runId ? { runId: options.runId } : {}),
     topologyVersion: TOPOLOGY_VERSION,
     groups: topology.groups,
     nodes,
     fingerprintInputs: buildFingerprintInputs(topology, options)
-  };
+  });
 }
 
 function expandNode(

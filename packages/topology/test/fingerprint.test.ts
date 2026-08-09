@@ -14,7 +14,7 @@ describe("fingerprintGraph", () => {
   it("changes for topology, prompt, and config edits", () => {
     const base = fingerprintGraph(
       expandTopology(validTopology(), {
-        configFingerprint: { agent_profile: "codex-default" },
+        configFingerprint: "a".repeat(64),
         promptTexts: { "strategies/strategy.md": "original" }
       })
     );
@@ -25,7 +25,7 @@ describe("fingerprintGraph", () => {
     expect(
       fingerprintGraph(
         expandTopology(validTopology(), {
-          configFingerprint: { agent_profile: "codex-default" },
+          configFingerprint: "a".repeat(64),
           promptTexts: { "strategies/strategy.md": "changed" }
         })
       )
@@ -34,7 +34,7 @@ describe("fingerprintGraph", () => {
     expect(
       fingerprintGraph(
         expandTopology(validTopology(), {
-          configFingerprint: { agent_profile: "claude-default" },
+          configFingerprint: "b".repeat(64),
           promptTexts: { "strategies/strategy.md": "original" }
         })
       )

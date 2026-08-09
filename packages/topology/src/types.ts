@@ -122,7 +122,8 @@ export interface ExpandedGraph {
 }
 
 export interface FingerprintInputs {
-  config?: unknown;
+  /** SHA-256 of the redacted, canonical runtime configuration used for expansion. */
+  config?: string;
   promptDigests?: Record<string, string>;
 }
 
@@ -198,5 +199,5 @@ export interface ExpandTopologyOptions extends TopologyValidationOptions {
     version: number;
     references: Record<string, { provider: "github"; repo: string; commit: string; paths: string[] }>;
   };
-  configFingerprint?: unknown;
+  configFingerprint?: string;
 }

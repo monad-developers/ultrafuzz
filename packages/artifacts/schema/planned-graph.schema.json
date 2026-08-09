@@ -4,7 +4,13 @@
   "title": "Ultrafuzz planned graph",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "graph_version", "topology_version", "groups", "nodes"],
+  "required": [
+    "schema_version",
+    "graph_version",
+    "topology_version",
+    "groups",
+    "nodes"
+  ],
   "properties": {
     "schema_version": {
       "const": "ultrafuzz.planned-graph.v3"
@@ -54,7 +60,10 @@
             "minLength": 1
           },
           "kind": {
-            "enum": ["agentic", "reference"]
+            "enum": [
+              "agentic",
+              "reference"
+            ]
           },
           "depends_on": {
             "type": "array",
@@ -73,7 +82,12 @@
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["path", "contract", "contract_digest", "primary"],
+              "required": [
+                "path",
+                "contract",
+                "contract_digest",
+                "primary"
+              ],
               "properties": {
                 "path": {
                   "$ref": "#/$defs/safePath"
@@ -152,10 +166,15 @@
                   "if": {
                     "properties": {
                       "contract": {
-                        "enum": ["ultrafuzz/nonempty-markdown@1", "ultrafuzz/text@1"]
+                        "enum": [
+                          "ultrafuzz/nonempty-markdown@1",
+                          "ultrafuzz/text@1"
+                        ]
                       }
                     },
-                    "required": ["contract"]
+                    "required": [
+                      "contract"
+                    ]
                   },
                   "then": {
                     "not": {
@@ -164,37 +183,53 @@
                           "properties": {
                             "schema_file": true
                           },
-                          "required": ["schema_file"]
+                          "required": [
+                            "schema_file"
+                          ]
                         },
                         {
                           "properties": {
                             "schema_id": true
                           },
-                          "required": ["schema_id"]
+                          "required": [
+                            "schema_id"
+                          ]
                         },
                         {
                           "properties": {
                             "schema_sha256": true
                           },
-                          "required": ["schema_sha256"]
+                          "required": [
+                            "schema_sha256"
+                          ]
                         },
                         {
                           "properties": {
                             "schema_bundle_sha256": true
                           },
-                          "required": ["schema_bundle_sha256"]
+                          "required": [
+                            "schema_bundle_sha256"
+                          ]
                         },
                         {
                           "properties": {
                             "validator_build": true
                           },
-                          "required": ["validator_build"]
+                          "required": [
+                            "validator_build"
+                          ]
                         }
                       ]
                     }
                   },
                   "else": {
-                    "required": ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"]
+                    "required": [
+                      "schema_file",
+                      "schema_id",
+                      "schema_sha256",
+                      "schema_bundle_sha256",
+                      "validator_build"
+                    ]
                   }
                 }
               ]
@@ -214,7 +249,12 @@
           "reference_revision": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["provider", "repo", "commit", "paths"],
+            "required": [
+              "provider",
+              "repo",
+              "commit",
+              "paths"
+            ],
             "properties": {
               "provider": {
                 "const": "github"
@@ -240,7 +280,12 @@
           "loop": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["index", "count", "mode", "attempt_index"],
+            "required": [
+              "index",
+              "count",
+              "mode",
+              "attempt_index"
+            ],
             "properties": {
               "index": {
                 "type": "integer",
@@ -251,7 +296,10 @@
                 "minimum": 1
               },
               "mode": {
-                "enum": ["parallel", "series"]
+                "enum": [
+                  "parallel",
+                  "series"
+                ]
               },
               "attempt_index": {
                 "type": "integer",
@@ -264,7 +312,13 @@
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["model_profile_id", "agent_ref", "model_index", "loop_index", "attempt_index"],
+              "required": [
+                "model_profile_id",
+                "agent_ref",
+                "model_index",
+                "loop_index",
+                "attempt_index"
+              ],
               "properties": {
                 "model_profile_id": {
                   "type": "string",
@@ -300,7 +354,10 @@
           "workflow": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["node_id", "task_node_ids"],
+            "required": [
+              "node_id",
+              "task_node_ids"
+            ],
             "properties": {
               "node_id": {
                 "$ref": "#/$defs/workflowTaskId"
@@ -324,10 +381,15 @@
                   "const": "reference"
                 }
               },
-              "required": ["kind"]
+              "required": [
+                "kind"
+              ]
             },
             "then": {
-              "required": ["reference", "reference_revision"],
+              "required": [
+                "reference",
+                "reference_revision"
+              ],
               "properties": {
                 "reference": {},
                 "reference_revision": {},
@@ -353,13 +415,17 @@
                     "properties": {
                       "reference": true
                     },
-                    "required": ["reference"]
+                    "required": [
+                      "reference"
+                    ]
                   },
                   {
                     "properties": {
                       "reference_revision": true
                     },
-                    "required": ["reference_revision"]
+                    "required": [
+                      "reference_revision"
+                    ]
                   }
                 ]
               }
@@ -380,7 +446,7 @@
     },
     "safePath": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9._@+-]{1,128}(?:/[A-Za-z0-9._@+-]{1,128})*$"
+      "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128}(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128})*$"
     },
     "sha256": {
       "type": "string",

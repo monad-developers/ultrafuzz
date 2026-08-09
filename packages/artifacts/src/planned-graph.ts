@@ -10,7 +10,8 @@ export const PLANNED_GRAPH_SCHEMA_VERSION = "ultrafuzz.planned-graph.v3" as cons
 export const PLANNED_GRAPH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:planned-graph:3" as const;
 
 const SAFE_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$";
-const SAFE_PATH_PATTERN = "^[A-Za-z0-9._@+-]{1,128}(?:/[A-Za-z0-9._@+-]{1,128})*$";
+const SAFE_PATH_PATTERN =
+  "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128}(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128})*$";
 const SHA256_PATTERN = "^[0-9a-f]{64}$";
 const SCHEMA_FILE_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$";
 const VALIDATOR_BUILD_PATTERN = "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$";

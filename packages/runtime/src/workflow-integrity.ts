@@ -15,7 +15,7 @@ import {
   type RunLayout,
   writeJsonDurable
 } from "@ultrafuzz/artifacts";
-import { fingerprintGraph, type ExpandedGraph } from "@ultrafuzz/topology";
+import { assertExpandedGraphSchema, fingerprintGraph } from "@ultrafuzz/topology";
 
 import { bindSmithersExecutableCapability } from "./smithers-executable-capability.js";
 import {
@@ -1378,7 +1378,7 @@ function deriveWorkflowControlBindings(
   planContents: Buffer | undefined
 ): WorkflowControlBindings {
   const graph = assertPlannedGraph(parseStrictJsonBytes(contents.graph));
-  const expandedGraph = parseRecordJson(contents.expanded_graph, "expanded workflow graph") as unknown as ExpandedGraph;
+  const expandedGraph = assertExpandedGraphSchema(parseStrictJsonBytes(contents.expanded_graph));
   const tasksDocument = parseRecordJson(contents.tasks, "workflow task manifest");
   const state = parseRecordJson(stateContents, "run state");
   const graphFingerprint = contents.graph_fingerprint.toString("utf8").trim();

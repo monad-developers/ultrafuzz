@@ -15,6 +15,7 @@ import {
   GRAPH_VERSION,
   TOPOLOGY_SCHEMA_BUNDLE_DIGEST,
   TOPOLOGY_VERSION,
+  assertExpandedGraphSchema,
   expandedGraphJsonSchema,
   topologySchemaDirectory,
   topologySchemaRegistry,
@@ -101,8 +102,85 @@ describe("expanded graph schema", () => {
     });
 
     expect(invalid.ok).toBe(false);
-    expect(invalid.issues.some((issue) => issue.path.endsWith(".logicalId"))).toBe(true);
-    expect(invalid.issues.some((issue) => issue.path.endsWith(".attemptIndex"))).toBe(true);
+    expect(invalid.issues.some((issue) => issue.message.includes("'logicalId'"))).toBe(true);
+    expect(invalid.issues.some((issue) => issue.message.includes("'attemptIndex'"))).toBe(true);
+  });
+
+  it("fully types groups and fingerprint inputs in the canonical host validator", () => {
+    const valid = {
+      graphVersion: GRAPH_VERSION,
+      topologyVersion: TOPOLOGY_VERSION,
+      groups: {
+        review: {
+          label: "Review",
+          color: "#0f766e",
+          defaults: { loops: 1, timeout_seconds: 60, max_attempts: 2, model_profiles: ["default"] }
+        }
+      },
+      fingerprintInputs: {
+        config: "a".repeat(64),
+        promptDigests: { "review/final-report.md": "b".repeat(64) }
+      },
+      nodes: []
+    };
+    expect(validateExpandedGraphSchema(valid).ok).toBe(true);
+
+    const invalidDocuments = [
+      { ...valid, groups: { review: { label: "Review", legacy: true } } },
+      { ...valid, groups: { review: { defaults: { model_profiles: [1] } } } },
+      { ...valid, fingerprintInputs: { config: { legacy: true } } },
+      { ...valid, fingerprintInputs: { promptDigests: { "../escape.md": "b".repeat(64) } } },
+      { ...valid, fingerprintInputs: { config: "not-a-digest" } },
+      { ...valid, legacy: true }
+    ];
+    const ajv = createStrictAjv();
+    const canonical = ajv.compile(structuredClone(expandedGraphJsonSchema));
+    for (const document of invalidDocuments) {
+      expect(validateExpandedGraphSchema(document).ok).toBe(false);
+      expect(canonical(document)).toBe(false);
+    }
+  });
+
+  it("executes every registered expanded-graph document semantic gate", () => {
+    const node = {
+      id: "node-a",
+      logicalId: "node-a",
+      label: "Node A",
+      kind: "agentic" as const,
+      promptPath: "review/node-a.md",
+      dependsOn: [] as string[],
+      artifactDir: "artifacts/node-a",
+      retryPolicy: { maxAttempts: 1 },
+      loop: { index: 0, count: 1, mode: "parallel" as const, attemptIndex: 0 },
+      outputs: [
+        {
+          path: "report.md",
+          contract: "ultrafuzz/nonempty-markdown@1" as const,
+          primary: true,
+          contractDigest: "a".repeat(64)
+        }
+      ],
+      modelFanout: []
+    };
+    const graph: ExpandedGraph = {
+      graphVersion: GRAPH_VERSION,
+      topologyVersion: TOPOLOGY_VERSION,
+      groups: {},
+      nodes: [node]
+    };
+    expect(assertExpandedGraphSchema(graph)).toEqual(graph);
+    expect(() => assertExpandedGraphSchema({ ...graph, nodes: [node, structuredClone(node)] })).toThrow(
+      /repeats node ID/u
+    );
+    expect(() => assertExpandedGraphSchema({ ...graph, nodes: [{ ...node, dependsOn: ["missing"] }] })).toThrow(
+      /depends on unknown node/u
+    );
+    expect(() =>
+      assertExpandedGraphSchema({
+        ...graph,
+        nodes: [{ ...node, outputs: [node.outputs[0]!, { ...node.outputs[0]!, primary: false }] }]
+      })
+    ).toThrow(/repeats output path/u);
   });
 
   it("snapshot is present and aligned with exported schema constants", () => {
@@ -193,13 +271,13 @@ describe("expanded graph schema", () => {
       ]
     };
 
-    const handwritten = validateExpandedGraphSchema(graph);
-    expect(handwritten.ok).toBe(false);
-    expect(handwritten.issues.map((issue) => issue.code)).toContain("EXPANDED_NODE_OUTPUT_SCHEMA_BINDING_INCOMPLETE");
+    const canonical = validateExpandedGraphSchema(graph);
+    expect(canonical.ok).toBe(false);
+    expect(canonical.issues.some((issue) => issue.message.includes("schemaId"))).toBe(true);
 
     const ajv = createStrictAjv();
     const validate = ajv.compile(structuredClone(expandedGraphJsonSchema));
     expect(validate(graph)).toBe(false);
-    expect(validate.errors?.some((error) => error.keyword === "dependentRequired")).toBe(true);
+    expect(validate.errors?.some((error) => error.keyword === "required")).toBe(true);
   });
 });
