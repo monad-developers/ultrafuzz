@@ -77,13 +77,7 @@
           },
           "classification": {
             "type": "string",
-            "enum": [
-              "production-bug",
-              "implementation-drift",
-              "incomplete-spec",
-              "harness-defect",
-              "inconclusive"
-            ]
+            "enum": ["production-bug", "implementation-drift", "incomplete-spec", "harness-defect", "inconclusive"]
           }
         },
         "required": [
@@ -152,10 +146,7 @@
           },
           "classification": {
             "type": "string",
-            "enum": [
-              "implementation-drift",
-              "incomplete-spec"
-            ]
+            "enum": ["implementation-drift", "incomplete-spec"]
           },
           "reason": {
             "type": "string",
@@ -186,10 +177,7 @@
           },
           "classification": {
             "type": "string",
-            "enum": [
-              "implementation-drift",
-              "incomplete-spec"
-            ]
+            "enum": ["implementation-drift", "incomplete-spec"]
           },
           "reason": {
             "type": "string",
@@ -205,12 +193,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "surface_id",
-          "classification",
-          "reason",
-          "evidence_paths"
-        ],
+        "required": ["surface_id", "classification", "reason", "evidence_paths"],
         "additionalProperties": false
       }
     },
@@ -233,10 +216,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "path",
-          "checks"
-        ],
+        "required": ["path", "checks"],
         "additionalProperties": false
       }
     },
@@ -254,10 +234,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "surface_id",
-          "reason"
-        ],
+        "required": ["surface_id", "reason"],
         "additionalProperties": false
       }
     }

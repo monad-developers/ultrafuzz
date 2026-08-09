@@ -277,9 +277,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "report-finding-id-uniqueness",
     "report-property-provenance-join"
   ]),
-  "run-plan.schema.json": runtime("runPlanJsonSchema", undefined, [
-    "run-plan-attempt-id-uniqueness"
-  ]),
+  "run-plan.schema.json": runtime("runPlanJsonSchema", undefined, ["run-plan-attempt-id-uniqueness"]),
   "run-metadata.schema.json": runtime("runMetadataJsonSchema", undefined, [
     "run-metadata-workflow-id-equality",
     "run-metadata-current-segment-equality",

@@ -675,9 +675,7 @@ async function synchronizeWorkflowAccounting(input: {
     throw new Error("run.json workflow control generation does not match the linked Smithers run");
   }
   const storedAccounting =
-    metadata.accounting === undefined
-      ? undefined
-      : storedAccountingDocument(metadata.accounting, input.workflowRunId);
+    metadata.accounting === undefined ? undefined : storedAccountingDocument(metadata.accounting, input.workflowRunId);
   const existingUsageReplay = replayUsageEvents(input.layout);
   if (storedAccounting !== undefined) {
     assertAccountingMatchesUsageLedger(storedAccounting, existingUsageReplay.entries, "run.json#$.accounting");
@@ -704,9 +702,7 @@ async function synchronizeWorkflowAccounting(input: {
   const storedPricingCatalog = storedAccounting?.pricingCatalog;
   const storedPricing = storedAccounting?.pricing ?? new Map<string, ModelPricing>();
   const previouslyUnresolvedModels =
-    storedPricingCatalog?.status === "disabled"
-      ? new Set(storedPricingCatalog.unresolved_models)
-      : new Set<string>();
+    storedPricingCatalog?.status === "disabled" ? new Set(storedPricingCatalog.unresolved_models) : new Set<string>();
   const ledgerEvents = workflowEventsFromUsageLedger(preparedUsage.entries);
   const requiredModels = modelsRequiringPricing(ledgerEvents);
   const missingModels = requiredModels.filter(
@@ -780,10 +776,7 @@ async function synchronizeWorkflowAccounting(input: {
     updated_at:
       accountingChanged || metadata.accounting === undefined ? new Date().toISOString() : metadata.accounting.updated_at
   };
-  const nextMetadata = assertRunMetadataDocument(
-    { ...metadata, accounting: nextAccounting },
-    input.layout.runId
-  );
+  const nextMetadata = assertRunMetadataDocument({ ...metadata, accounting: nextAccounting }, input.layout.runId);
   const validatedAccounting = storedAccountingDocument(nextMetadata.accounting, input.workflowRunId);
   assertAccountingMatchesUsageLedger(validatedAccounting, preparedUsage.entries, "proposed run.json#$.accounting");
 
@@ -982,13 +975,22 @@ function normalizedUsageLedgerInput(
       output_tokens: requiredWorkflowEventCount(payload.outputTokens, "TokenUsageReported outputTokens"),
       ...(payload.cacheReadTokens === undefined
         ? {}
-        : { cache_read_tokens: requiredWorkflowEventCount(payload.cacheReadTokens, "TokenUsageReported cacheReadTokens") }),
+        : {
+            cache_read_tokens: requiredWorkflowEventCount(payload.cacheReadTokens, "TokenUsageReported cacheReadTokens")
+          }),
       ...(payload.cacheWriteTokens === undefined
         ? {}
-        : { cache_write_tokens: requiredWorkflowEventCount(payload.cacheWriteTokens, "TokenUsageReported cacheWriteTokens") }),
+        : {
+            cache_write_tokens: requiredWorkflowEventCount(
+              payload.cacheWriteTokens,
+              "TokenUsageReported cacheWriteTokens"
+            )
+          }),
       ...(payload.reasoningTokens === undefined
         ? {}
-        : { reasoning_tokens: requiredWorkflowEventCount(payload.reasoningTokens, "TokenUsageReported reasoningTokens") })
+        : {
+            reasoning_tokens: requiredWorkflowEventCount(payload.reasoningTokens, "TokenUsageReported reasoningTokens")
+          })
     }
   };
 }
@@ -1161,7 +1163,13 @@ function storedAccountingSegment(value: unknown, label: string): AccountingSegme
   const stored = exactStoredRecord(
     value,
     label,
-    [...ACCOUNTING_SUMMARY_REQUIRED_FIELDS, "control_generation", "workflow_run_id", "source_event_sequences", "attempts"],
+    [
+      ...ACCOUNTING_SUMMARY_REQUIRED_FIELDS,
+      "control_generation",
+      "workflow_run_id",
+      "source_event_sequences",
+      "attempts"
+    ],
     ACCOUNTING_SUMMARY_OPTIONAL_FIELDS
   );
   const summary = storedAccountingSummary(
@@ -1244,13 +1252,7 @@ function storedAccountingCheckpoint(
   const stored = exactStoredRecord(
     value,
     label,
-    [
-      "schema_version",
-      "ledger_event_count",
-      "last_source_event_sequence",
-      "control_generation",
-      "workflow_run_id"
-    ],
+    ["schema_version", "ledger_event_count", "last_source_event_sequence", "control_generation", "workflow_run_id"],
     []
   );
   if (stored.schema_version !== ACCOUNTING_CHECKPOINT_SCHEMA_VERSION) {
@@ -1318,9 +1320,7 @@ function assertAccountingMatchesUsageLedger(
     group.lastLedgerIndex = ledgerIndex;
     grouped.set(identity, group);
   }
-  const expectedSegments = [...grouped.values()].sort(
-    (left, right) => left.lastLedgerIndex - right.lastLedgerIndex
-  );
+  const expectedSegments = [...grouped.values()].sort((left, right) => left.lastLedgerIndex - right.lastLedgerIndex);
   if (accounting.segments.length !== expectedSegments.length) {
     throw new Error(`${label}.segments do not exactly correspond to the usage ledger`);
   }
@@ -1387,7 +1387,8 @@ function storedPricingCatalog(value: unknown, label: string): StoredPricingCatal
   if (!sameJsonValue(Object.keys(modelPrices), resolvedModels)) {
     throw new Error(`${label}.resolved_models must exactly equal model_prices keys`);
   }
-  if (status === "disabled" && source !== "disabled") throw new Error(`${label} disabled status requires disabled source`);
+  if (status === "disabled" && source !== "disabled")
+    throw new Error(`${label} disabled status requires disabled source`);
   return {
     source,
     status,
@@ -1445,10 +1446,7 @@ function storedModelPricingTiers(value: unknown, label: string): NonNullable<Mod
     if (contextTokens === 0) throw new Error(`${tierLabel}.contextTokens must be positive`);
     return {
       contextTokens,
-      inputUsdPerMillion: requiredStoredNonNegativeNumber(
-        stored.inputUsdPerMillion,
-        `${tierLabel}.inputUsdPerMillion`
-      ),
+      inputUsdPerMillion: requiredStoredNonNegativeNumber(stored.inputUsdPerMillion, `${tierLabel}.inputUsdPerMillion`),
       ...(Object.prototype.hasOwnProperty.call(stored, "cachedInputUsdPerMillion")
         ? {
             cachedInputUsdPerMillion: requiredStoredNonNegativeNumber(
@@ -1507,7 +1505,9 @@ function cumulativeAccountingForSourceRun(
     throw new Error(`referenced source run ${JSON.stringify(safeSourceRunId)} has no accounting.v3 evidence`);
   }
   if (sourceMetadata.workflow === undefined) {
-    throw new Error(`referenced source run ${JSON.stringify(safeSourceRunId)} has accounting without workflow metadata`);
+    throw new Error(
+      `referenced source run ${JSON.stringify(safeSourceRunId)} has accounting without workflow metadata`
+    );
   }
   const accounting = storedAccountingDocument(sourceMetadata.accounting, sourceMetadata.workflow.run_id);
   assertAccountingMatchesUsageLedger(
@@ -1657,8 +1657,7 @@ function storedAccountingSummary(value: unknown, label: string): AccountingSumma
   const agents = requiredStoredStringArray(stored.agents, `${label}.agents`, { sorted: true });
 
   if (inputTokens !== uncachedInputTokens) throw new Error(`${label}.input_tokens must equal uncached_input_tokens`);
-  const calculatedInclusive =
-    uncachedInputTokens + cacheReadTokens + cacheWriteTokens + outputTokens + reasoningTokens;
+  const calculatedInclusive = uncachedInputTokens + cacheReadTokens + cacheWriteTokens + outputTokens + reasoningTokens;
   if (inclusiveTokenTotal !== calculatedInclusive || totalTokens !== inclusiveTokenTotal) {
     throw new Error(`${label} token totals do not equal the exact component sum`);
   }
@@ -2496,9 +2495,7 @@ function appendTerminalTaskAttempts(input: {
   const outputManifestDigest = fs.existsSync(manifestPath) ? sha256File(manifestPath) : undefined;
   const allExisting = replayNodeAttempts(input.layout).entries;
   const existing = allExisting.filter((entry) => entry.strategy_attempt_id === input.task.attemptId);
-  const existingByIdentity = new Map(
-    allExisting.map((entry) => [nodeAttemptLedgerIdentity(entry), entry] as const)
-  );
+  const existingByIdentity = new Map(allExisting.map((entry) => [nodeAttemptLedgerIdentity(entry), entry] as const));
   const sourceEntries = sourceNodeAttempts(input.layout, state.source_run_id, input.task.attemptId);
   const currentTerminalAttempt =
     input.currentAttempt === undefined
@@ -2594,7 +2591,10 @@ function appendTerminalTaskAttempts(input: {
     pending.push(appendInput);
     currentAttemptExecuted ||= isCurrent && reuse?.status !== "reused";
   }
-  const proposedEntries = [...allExisting, ...candidates.filter((candidate) => !existingByIdentity.has(nodeAttemptLedgerIdentity(candidate)))];
+  const proposedEntries = [
+    ...allExisting,
+    ...candidates.filter((candidate) => !existingByIdentity.has(nodeAttemptLedgerIdentity(candidate)))
+  ];
   const gateContext = {
     attemptLedger: { entries: proposedEntries, sourceEntries },
     eventLog: {
@@ -2630,10 +2630,7 @@ function appendTerminalTaskAttempts(input: {
 function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAttempt[] {
   const active = new Map<
     string,
-    Pick<
-      TerminalWorkflowAttempt,
-      "retry" | "iteration" | "nodeId" | "startedSequence" | "startedAt"
-    >
+    Pick<TerminalWorkflowAttempt, "retry" | "iteration" | "nodeId" | "startedSequence" | "startedAt">
   >();
   const attempts: TerminalWorkflowAttempt[] = [];
   for (const event of events) {
@@ -3299,7 +3296,8 @@ function parseWorkflowEvents(stdout: string, expectedWorkflowRunId: string): Wor
   const lines = stdout.split("\n");
   lines.pop();
   const events = lines.map((line, index): WorkflowEvent => {
-    if (line.trim().length === 0) throw new Error(`Smithers event snapshot contains a blank record at line ${index + 1}`);
+    if (line.trim().length === 0)
+      throw new Error(`Smithers event snapshot contains a blank record at line ${index + 1}`);
     let parsed: unknown;
     try {
       parsed = parseStrictJsonBytes(Buffer.from(line, "utf8"), {
@@ -3318,7 +3316,10 @@ function parseWorkflowEvents(stdout: string, expectedWorkflowRunId: string): Wor
     }
     const workflowRunId = requiredWorkflowEventString(parsed.runId, `Smithers event record ${index + 1} runId`);
     const sourceEventSequence = requiredWorkflowEventCount(parsed.seq, `Smithers event record ${index + 1} seq`);
-    const timestampMs = requiredWorkflowEventCount(parsed.timestampMs, `Smithers event record ${index + 1} timestampMs`);
+    const timestampMs = requiredWorkflowEventCount(
+      parsed.timestampMs,
+      `Smithers event record ${index + 1} timestampMs`
+    );
     const type = requiredWorkflowEventString(parsed.type, `Smithers event record ${index + 1} type`);
     if (!isRecord(parsed.payload)) throw new Error(`Smithers event record ${index + 1} payload must be an object`);
     const payload = parsed.payload;
@@ -3343,7 +3344,13 @@ function parseWorkflowEvents(stdout: string, expectedWorkflowRunId: string): Wor
 
 function validateSmithersEventPayload(type: string, payload: Record<string, unknown>, lineNumber: number): void {
   const label = `Smithers ${type} payload at line ${lineNumber}`;
-  const attemptEventTypes = new Set(["NodeStarted", "NodeFinished", "NodeFailed", "NodeRetrying", "TokenUsageReported"]);
+  const attemptEventTypes = new Set([
+    "NodeStarted",
+    "NodeFinished",
+    "NodeFailed",
+    "NodeRetrying",
+    "TokenUsageReported"
+  ]);
   if (attemptEventTypes.has(type)) {
     requiredWorkflowEventString(payload.nodeId, `${label} nodeId`);
     requiredWorkflowEventCount(payload.iteration, `${label} iteration`);
@@ -3590,11 +3597,7 @@ function optionalStoredNonNegativeNumber(
     : undefined;
 }
 
-function requiredStoredStringArray(
-  value: unknown,
-  label: string,
-  options: { sorted?: boolean } = {}
-): string[] {
+function requiredStoredStringArray(value: unknown, label: string, options: { sorted?: boolean } = {}): string[] {
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
   const entries = value.map((entry, index) => requiredStoredString(entry, `${label}[${index}]`));
   if (new Set(entries).size !== entries.length) throw new Error(`${label} must not contain duplicates`);
@@ -3609,10 +3612,7 @@ function storedUsageCompletenessMarkers(value: unknown, label: string): UsageCom
   return storedCompletenessMarkers(
     value,
     label,
-    new Set<ComponentUsageIncompleteReason["code"]>([
-      "component-usage-unavailable",
-      "component-usage-estimated"
-    ])
+    new Set<ComponentUsageIncompleteReason["code"]>(["component-usage-unavailable", "component-usage-estimated"])
   );
 }
 
@@ -3630,13 +3630,7 @@ function storedCompletenessMarkers<Code extends string>(
   codes: ReadonlySet<Code>
 ): Array<{ code: Code; component: UsageComponent; model: string }> {
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
-  const components = new Set<UsageComponent>([
-    "uncached_input",
-    "cache_read",
-    "cache_write",
-    "output",
-    "reasoning"
-  ]);
+  const components = new Set<UsageComponent>(["uncached_input", "cache_read", "cache_write", "output", "reasoning"]);
   const markers = value.map((entry, index) => {
     const markerLabel = `${label}[${index}]`;
     const stored = exactStoredRecord(entry, markerLabel, ["code", "component", "model"], []);
@@ -3652,7 +3646,10 @@ function storedCompletenessMarkers<Code extends string>(
   const canonical = [...markers].sort((left, right) =>
     `${left.code}:${left.component}:${left.model}`.localeCompare(`${right.code}:${right.component}:${right.model}`)
   );
-  if (!sameJsonValue(markers, canonical) || new Set(markers.map((marker) => JSON.stringify(marker))).size !== markers.length) {
+  if (
+    !sameJsonValue(markers, canonical) ||
+    new Set(markers.map((marker) => JSON.stringify(marker))).size !== markers.length
+  ) {
     throw new Error(`${label} must be unique and sorted canonically`);
   }
   return markers;

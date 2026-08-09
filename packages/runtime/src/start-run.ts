@@ -886,9 +886,7 @@ function initialWorkflowBinding(
 
 function metadataIsPristineInitialWorkflowBinding(metadata: RunMetadataDocument): boolean {
   return (
-    Array.isArray(metadata.workflow_ids) &&
-    metadata.workflow_ids.length === 0 &&
-    !Object.hasOwn(metadata, "workflow")
+    Array.isArray(metadata.workflow_ids) && metadata.workflow_ids.length === 0 && !Object.hasOwn(metadata, "workflow")
   );
 }
 

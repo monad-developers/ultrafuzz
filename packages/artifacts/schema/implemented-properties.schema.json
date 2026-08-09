@@ -17,12 +17,7 @@
           },
           "status": {
             "type": "string",
-            "enum": [
-              "implemented",
-              "pending",
-              "deferred",
-              "blocked"
-            ]
+            "enum": ["implemented", "pending", "deferred", "blocked"]
           },
           "implementation_paths": {
             "type": "array",
@@ -64,20 +59,11 @@
                 "minLength": 1
               }
             },
-            "required": [
-              "code",
-              "summary",
-              "next_action"
-            ],
+            "required": ["code", "summary", "next_action"],
             "additionalProperties": false
           }
         },
-        "required": [
-          "property_id",
-          "status",
-          "implementation_paths",
-          "test_paths"
-        ],
+        "required": ["property_id", "status", "implementation_paths", "test_paths"],
         "additionalProperties": false
       }
     },
@@ -86,22 +72,14 @@
       "properties": {
         "priority_threshold": {
           "type": "string",
-          "enum": [
-            "high",
-            "medium",
-            "low"
-          ]
+          "enum": ["high", "medium", "low"]
         },
         "priorities": {
           "minItems": 1,
           "type": "array",
           "items": {
             "type": "string",
-            "enum": [
-              "high",
-              "medium",
-              "low"
-            ]
+            "enum": ["high", "medium", "low"]
           },
           "uniqueItems": true
         },
@@ -113,19 +91,11 @@
           }
         }
       },
-      "required": [
-        "priority_threshold",
-        "priorities",
-        "property_ids"
-      ],
+      "required": ["priority_threshold", "priorities", "property_ids"],
       "additionalProperties": false
     }
   },
-  "required": [
-    "schema_version",
-    "properties",
-    "selection"
-  ],
+  "required": ["schema_version", "properties", "selection"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:implemented-properties:3",
   "title": "Ultrafuzz implemented property records",
@@ -144,9 +114,7 @@
                       "const": "implemented"
                     }
                   },
-                  "required": [
-                    "status"
-                  ]
+                  "required": ["status"]
                 },
                 "then": {
                   "not": {
@@ -161,10 +129,7 @@
                         "maxItems": 0
                       }
                     },
-                    "required": [
-                      "implementation_paths",
-                      "test_paths"
-                    ]
+                    "required": ["implementation_paths", "test_paths"]
                   }
                 },
                 "else": {
@@ -172,9 +137,7 @@
                   "properties": {
                     "blocker": true
                   },
-                  "required": [
-                    "blocker"
-                  ]
+                  "required": ["blocker"]
                 }
               },
               {
@@ -183,9 +146,7 @@
                   "properties": {
                     "blocker": true
                   },
-                  "required": [
-                    "blocker"
-                  ]
+                  "required": ["blocker"]
                 },
                 "then": {
                   "type": "object",

@@ -25,17 +25,12 @@
             "minLength": 1
           }
         },
-        "required": [
-          "id"
-        ],
+        "required": ["id"],
         "additionalProperties": false
       }
     }
   },
-  "required": [
-    "schema_version",
-    "expectations"
-  ],
+  "required": ["schema_version", "expectations"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:reference-expectations:2",
   "title": "Ultrafuzz supplied reference expectation catalog"

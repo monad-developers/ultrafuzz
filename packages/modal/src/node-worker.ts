@@ -97,7 +97,6 @@ async function main(): Promise<void> {
 
     const artifactDir = anchoredProjectPath(projectRoot, input.artifact_dir);
     const workspaceDir = anchoredProjectPath(projectRoot, input.workspace_dir);
-    mergeWorkspaceArtifacts(workspaceDir, artifactDir, input.attempt_id);
     const completedCheckpoint = durableWorkspace.recordCheckpoint("completed");
     syncDurableData(projectRoot);
     cleanupStalePublicationDirectories(dataRoot);
@@ -1165,13 +1164,7 @@ function workerErrorPayload(error: unknown): Record<string, unknown> {
   };
 }
 
-function mergeWorkspaceArtifacts(workspaceDir: string, artifactDir: string, attemptId: string): void {
-  const mirror = path.join(workspaceDir, "artifacts", attemptId);
-  if (!fs.existsSync(mirror)) return;
-  copySafeTree(mirror, artifactDir, true);
-}
-
-export function copySafeTree(source: string, destination: string, onlyMissing = false): void {
+export function copySafeTree(source: string, destination: string): void {
   const resolvedSource = path.resolve(source);
   const sourceStat = fs.lstatSync(resolvedSource);
   const root = fs.realpathSync(resolvedSource);
@@ -1184,11 +1177,10 @@ export function copySafeTree(source: string, destination: string, onlyMissing = 
     const sourcePath = path.join(root, entry.name);
     const destinationPath = path.join(destination, entry.name);
     if (entry.isDirectory()) {
-      copySafeTree(sourcePath, destinationPath, onlyMissing);
+      copySafeTree(sourcePath, destinationPath);
     } else if (entry.isFile()) {
       const stat = fs.lstatSync(sourcePath);
       if (stat.nlink !== 1) throw new Error("cloud publication file is hard-linked");
-      if (onlyMissing && fs.existsSync(destinationPath)) continue;
       fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
       fs.copyFileSync(sourcePath, destinationPath);
     } else {

@@ -82,26 +82,20 @@
               "type": "null"
             }
           },
-          "required": [
-            "reproducer_path"
-          ]
+          "required": ["reproducer_path"]
         },
         "then": {
           "properties": {
             "reproducer_unavailable_reason": true
           },
-          "required": [
-            "reproducer_unavailable_reason"
-          ]
+          "required": ["reproducer_unavailable_reason"]
         },
         "else": {
           "not": {
             "properties": {
               "reproducer_unavailable_reason": true
             },
-            "required": [
-              "reproducer_unavailable_reason"
-            ]
+            "required": ["reproducer_unavailable_reason"]
           }
         }
       }

@@ -111,9 +111,7 @@ function writeSingleEvalSources(
   fs.mkdirSync(evalRoot, { recursive: true });
   fs.writeFileSync(
     path.join(evalRoot, "runs.jsonl"),
-    `${JSON.stringify(
-      currentEvalRunRecord({ row, runRoot, runId: path.basename(runRoot), evalRunId })
-    )}\n`,
+    `${JSON.stringify(currentEvalRunRecord({ row, runRoot, runId: path.basename(runRoot), evalRunId }))}\n`,
     "utf8"
   );
   const summaryPath = path.join(evalRoot, "summary.json");

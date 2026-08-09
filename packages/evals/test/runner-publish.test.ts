@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { createNodeAttemptLedgerEntry } from "@ultrafuzz/artifacts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { summarizeEvalTerminal } from "../src/efficiency.js";
+import { appendEvalRunRecord, readEvalMatrix, readEvalRunRecords } from "../src/eval-durable.js";
 import { publishEvalRun } from "../src/publish.js";
 import { launchEvalRow, runEvalSuite, watchEvalRow } from "../src/runner.js";
 import { readJsonLines } from "../src/utils.js";
@@ -131,7 +132,118 @@ function launchedRecord(row: ReturnType<typeof testRow>, runRoot: string) {
   return record;
 }
 
+function materializeLaunchedJournal(
+  row: ReturnType<typeof testRow>,
+  runRoot: string,
+  evalRunRoot: string
+): ReturnType<typeof launchedRecord> {
+  const record = launchedRecord(row, runRoot);
+  fs.mkdirSync(evalRunRoot, { recursive: true });
+  fs.writeFileSync(path.join(evalRunRoot, "runs.jsonl"), "");
+  appendEvalRunRecord(path.join(evalRunRoot, "runs.jsonl"), record);
+  return record;
+}
+
+function initializationFixture(prefix: string): {
+  project: string;
+  groundTruthRoot: string;
+  suitePath: string;
+} {
+  const base = mkdtempSync(path.join(tmpdir(), prefix));
+  const project = path.join(base, "project");
+  const groundTruthRoot = path.join(base, "gt");
+  fs.mkdirSync(project, { recursive: true });
+  fs.mkdirSync(groundTruthRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(groundTruthRoot, "target-a.yml"),
+    "schema_version: ultrafuzz.eval-ground-truth.v1\nbugs: []\n",
+    "utf8"
+  );
+  const suite = testSuite(groundTruthRoot);
+  suite.targets[0]!.ref = "0".repeat(40);
+  const suitePath = path.join(project, "suite.yml");
+  fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");
+  initializeTestGitRepository(project);
+  return { project, groundTruthRoot, suitePath };
+}
+
 describe("runner", () => {
+  it("leaves the required empty journal and matrix durable when manifest publication is interrupted", async () => {
+    const { project, groundTruthRoot, suitePath } = initializationFixture("ufz-evals-init-kill-");
+    const evalRunId = "eval-init-kill";
+    const evalRoot = path.join(project, ".ultrafuzz", "evals", "runs", evalRunId);
+    const manifestPath = path.join(evalRoot, "eval.json");
+    const publicationOrder: string[] = [];
+    let launches = 0;
+    const originalRename = fs.renameSync.bind(fs);
+    const rename = vi.spyOn(fs, "renameSync").mockImplementation((source, destination) => {
+      publicationOrder.push(path.basename(String(destination)));
+      if (path.resolve(String(destination)) === manifestPath) throw new Error("initialization kill point");
+      originalRename(source, destination);
+    });
+    try {
+      await expect(
+        runEvalSuite({
+          projectRoot: project,
+          suitePath,
+          evalRunId,
+          groundTruthRoot,
+          provider: "none",
+          launcher: async () => {
+            launches += 1;
+            return { ok: false, workflowIds: [], diagnostics: [] };
+          }
+        })
+      ).rejects.toThrow(/initialization kill point/u);
+    } finally {
+      rename.mockRestore();
+    }
+
+    expect(publicationOrder.slice(0, 3)).toEqual(["runs.jsonl", "matrix.json", "eval.json"]);
+    expect(launches).toBe(0);
+    expect(fs.existsSync(manifestPath)).toBe(false);
+    expect(readEvalRunRecords(path.join(evalRoot, "runs.jsonl"))).toEqual([]);
+    expect(readEvalMatrix(path.join(evalRoot, "matrix.json"))).toHaveLength(1);
+  });
+
+  it("publishes eval.json only after its required journal and matrix are readable", async () => {
+    const { project, groundTruthRoot, suitePath } = initializationFixture("ufz-evals-init-order-");
+    const evalRunId = "eval-init-order";
+    const evalRoot = path.join(project, ".ultrafuzz", "evals", "runs", evalRunId);
+    const manifestPath = path.join(evalRoot, "eval.json");
+    const journalPath = path.join(evalRoot, "runs.jsonl");
+    const matrixPath = path.join(evalRoot, "matrix.json");
+    const publicationOrder: string[] = [];
+    let manifestPreconditionsObserved = false;
+    const originalRename = fs.renameSync.bind(fs);
+    const rename = vi.spyOn(fs, "renameSync").mockImplementation((source, destination) => {
+      publicationOrder.push(path.basename(String(destination)));
+      if (path.resolve(String(destination)) === manifestPath) {
+        expect(readEvalRunRecords(journalPath)).toEqual([]);
+        expect(readEvalMatrix(matrixPath)).toHaveLength(1);
+        manifestPreconditionsObserved = true;
+      }
+      originalRename(source, destination);
+    });
+    try {
+      await runEvalSuite({
+        projectRoot: project,
+        suitePath,
+        evalRunId,
+        groundTruthRoot,
+        provider: "none",
+        watch: false,
+        launcher: async () => ({ ok: false, workflowIds: [], diagnostics: [] })
+      });
+    } finally {
+      rename.mockRestore();
+    }
+
+    expect(manifestPreconditionsObserved).toBe(true);
+    expect(publicationOrder.slice(0, 3)).toEqual(["runs.jsonl", "matrix.json", "eval.json"]);
+    expect(fs.existsSync(manifestPath)).toBe(true);
+  });
+
   it("rejects unbound private ground truth before launching any model work", async () => {
     const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-private-binding-"));
     const project = path.join(base, "project");
@@ -210,6 +322,8 @@ describe("runner", () => {
     const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-runner-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
+    fs.mkdirSync(path.join(base, "eval-run"), { recursive: true });
+    fs.writeFileSync(path.join(base, "eval-run", "runs.jsonl"), "");
     const record = await launchEvalRow({
       projectRoot: base,
       suitePath: "suite.yml",
@@ -448,13 +562,14 @@ describe("runner", () => {
     terminalRunFixture(runRoot);
     const reporter = new RecordingReporter();
     let syncCalls = 0;
+    const evalRunRoot = path.join(base, "eval-run");
 
     const watched = await watchEvalRow({
       plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
       row,
-      record: launchedRecord(row, runRoot),
+      record: materializeLaunchedJournal(row, runRoot, evalRunRoot),
       reporters: [reporter],
-      evalRunRoot: path.join(base, "eval-run"),
+      evalRunRoot,
       sync: async () => {
         syncCalls += 1;
       },
@@ -503,13 +618,14 @@ describe("runner", () => {
     });
     const reporter = new RecordingReporter();
     let syncCalls = 0;
+    const evalRunRoot = path.join(base, "eval-run");
 
     const watched = await watchEvalRow({
       plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
       row,
-      record: launchedRecord(row, runRoot),
+      record: materializeLaunchedJournal(row, runRoot, evalRunRoot),
       reporters: [reporter],
-      evalRunRoot: path.join(base, "eval-run"),
+      evalRunRoot,
       sync: async () => {
         syncCalls += 1;
         if (syncCalls === 2) {
@@ -553,13 +669,14 @@ describe("runner", () => {
       }),
       graph: currentPlannedGraph([], undefined)
     });
+    const evalRunRoot = path.join(base, "eval-run");
 
     const watched = await watchEvalRow({
       plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
       row,
-      record: launchedRecord(row, runRoot),
+      record: materializeLaunchedJournal(row, runRoot, evalRunRoot),
       reporters: [],
-      evalRunRoot: path.join(base, "eval-run"),
+      evalRunRoot,
       sync: async () => undefined,
       pollIntervalMs: 1,
       timeoutSeconds: 0
@@ -590,13 +707,14 @@ describe("runner", () => {
       })
     });
     let syncCalls = 0;
+    const evalRunRoot = path.join(base, "eval-run");
 
     const watched = await watchEvalRow({
       plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
       row,
-      record: launchedRecord(row, runRoot),
+      record: materializeLaunchedJournal(row, runRoot, evalRunRoot),
       reporters: [],
-      evalRunRoot: path.join(base, "eval-run"),
+      evalRunRoot,
       sync: async () => {
         syncCalls += 1;
         if (syncCalls <= 2) throw new Error("WORKFLOW_INSPECT_FAILED: control dependency unavailable");

@@ -4,13 +4,7 @@
   "title": "Ultrafuzz artifact verification marker",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema_version",
-    "attempt_id",
-    "node_id",
-    "artifacts",
-    "publications"
-  ],
+  "required": ["schema_version", "attempt_id", "node_id", "artifacts", "publications"],
   "properties": {
     "schema_version": {
       "const": "ultrafuzz.artifact-verification.v2"
@@ -29,13 +23,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "path",
-          "contract",
-          "contract_digest",
-          "sha256",
-          "primary"
-        ],
+        "required": ["path", "contract", "contract_digest", "sha256", "primary"],
         "properties": {
           "path": {
             "$ref": "#/$defs/safePath"
@@ -117,77 +105,56 @@
             "if": {
               "properties": {
                 "contract": {
-                  "enum": [
-                    "ultrafuzz/nonempty-markdown@1",
-                    "ultrafuzz/text@1"
-                  ]
+                  "enum": ["ultrafuzz/nonempty-markdown@1", "ultrafuzz/text@1"]
                 }
               },
-              "required": [
-                "contract"
-              ]
+              "required": ["contract"]
             },
             "then": {
               "not": {
                 "anyOf": [
-            {
-              "properties": {
-                "schema_file": true
-              },
-              "required": [
-                "schema_file"
-              ]
-            },
-            {
-              "properties": {
-                "schema_id": true
-              },
-              "required": [
-                "schema_id"
-              ]
-            },
-            {
-              "properties": {
-                "schema_sha256": true
-              },
-              "required": [
-                "schema_sha256"
-              ]
-            },
-            {
-              "properties": {
-                "schema_bundle_sha256": true
-              },
-              "required": [
-                "schema_bundle_sha256"
-              ]
-            },
-            {
-              "properties": {
-                "validator_build": true
-              },
-              "required": [
-                "validator_build"
-              ]
+                  {
+                    "properties": {
+                      "schema_file": true
+                    },
+                    "required": ["schema_file"]
+                  },
+                  {
+                    "properties": {
+                      "schema_id": true
+                    },
+                    "required": ["schema_id"]
+                  },
+                  {
+                    "properties": {
+                      "schema_sha256": true
+                    },
+                    "required": ["schema_sha256"]
+                  },
+                  {
+                    "properties": {
+                      "schema_bundle_sha256": true
+                    },
+                    "required": ["schema_bundle_sha256"]
+                  },
+                  {
+                    "properties": {
+                      "validator_build": true
+                    },
+                    "required": ["validator_build"]
                   }
                 ]
               }
-      },
-      "else": {
-        "properties": {
-          "schema_file": true,
-          "schema_id": true,
-          "schema_sha256": true,
-          "schema_bundle_sha256": true,
-          "validator_build": true
-        },
-        "required": [
-                "schema_file",
-                "schema_id",
-                "schema_sha256",
-                "schema_bundle_sha256",
-                "validator_build"
-              ]
+            },
+            "else": {
+              "properties": {
+                "schema_file": true,
+                "schema_id": true,
+                "schema_sha256": true,
+                "schema_bundle_sha256": true,
+                "validator_build": true
+              },
+              "required": ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"]
             }
           }
         ]
@@ -199,10 +166,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "path",
-          "sha256"
-        ],
+        "required": ["path", "sha256"],
         "properties": {
           "path": {
             "$ref": "#/$defs/safePath"

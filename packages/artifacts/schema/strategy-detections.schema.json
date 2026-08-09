@@ -54,18 +54,12 @@
               "maximum": 9007199254740991
             }
           },
-          "required": [
-            "strategy"
-          ],
+          "required": ["strategy"],
           "additionalProperties": false
         }
       }
     },
-    "required": [
-      "dedupe_key",
-      "title",
-      "hits"
-    ],
+    "required": ["dedupe_key", "title", "hits"],
     "additionalProperties": false
   },
   "$id": "urn:ultrafuzz:schema:artifacts:strategy-detections:1",

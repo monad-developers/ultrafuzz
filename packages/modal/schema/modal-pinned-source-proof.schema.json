@@ -4,7 +4,16 @@
   "title": "Ultrafuzz pinned source proof",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "commit", "tree", "base_ref", "refs", "remotes", "revision_count", "commit_object_count"],
+  "required": [
+    "schema_version",
+    "commit",
+    "tree",
+    "base_ref",
+    "refs",
+    "remotes",
+    "revision_count",
+    "commit_object_count"
+  ],
   "properties": {
     "schema_version": { "const": "ultrafuzz.pinned-source-proof.v1" },
     "commit": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },

@@ -19,10 +19,7 @@
           "maximum": 100
         }
       },
-      "required": [
-        "metric",
-        "value"
-      ],
+      "required": ["metric", "value"],
       "additionalProperties": false
     },
     "current_measurement": {
@@ -39,13 +36,7 @@
     },
     "current_status": {
       "type": "string",
-      "enum": [
-        "not-run",
-        "in-progress",
-        "target-met",
-        "below-target",
-        "blocked"
-      ]
+      "enum": ["not-run", "in-progress", "target-met", "below-target", "blocked"]
     },
     "planned_commands": {
       "minItems": 0,
@@ -105,11 +96,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "category",
-          "summary",
-          "evidence_paths"
-        ],
+        "required": ["category", "summary", "evidence_paths"],
         "additionalProperties": false
       }
     }

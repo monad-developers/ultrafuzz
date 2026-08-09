@@ -50,10 +50,7 @@
           ]
         }
       },
-      "required": [
-        "name",
-        "version"
-      ],
+      "required": ["name", "version"],
       "additionalProperties": false
     },
     "command_plan": {
@@ -63,22 +60,14 @@
         "properties": {
           "phase": {
             "type": "string",
-            "enum": [
-              "validation",
-              "smoke",
-              "campaign",
-              "finalization"
-            ]
+            "enum": ["validation", "smoke", "campaign", "finalization"]
           },
           "command": {
             "type": "string",
             "minLength": 1
           }
         },
-        "required": [
-          "phase",
-          "command"
-        ],
+        "required": ["phase", "command"],
         "additionalProperties": false
       }
     },
@@ -106,13 +95,7 @@
           "minLength": 1
         }
       },
-      "required": [
-        "corpus",
-        "cache",
-        "log",
-        "raw_results",
-        "reproducers"
-      ],
+      "required": ["corpus", "cache", "log", "raw_results", "reproducers"],
       "additionalProperties": false
     }
   },

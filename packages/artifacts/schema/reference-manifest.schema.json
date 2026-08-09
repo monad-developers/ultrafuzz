@@ -46,11 +46,7 @@
             "pattern": "^[a-f0-9]{64}$"
           }
         },
-        "required": [
-          "path",
-          "size_bytes",
-          "sha256"
-        ],
+        "required": ["path", "size_bytes", "sha256"],
         "additionalProperties": false
       }
     },
@@ -74,25 +70,12 @@
             "pattern": "^[a-f0-9]{64}$"
           }
         },
-        "required": [
-          "path",
-          "size_bytes",
-          "sha256"
-        ],
+        "required": ["path", "size_bytes", "sha256"],
         "additionalProperties": false
       }
     }
   },
-  "required": [
-    "schema_version",
-    "reference",
-    "provider",
-    "repo",
-    "commit",
-    "resolved_at",
-    "source_files",
-    "artifacts"
-  ],
+  "required": ["schema_version", "reference", "provider", "repo", "commit", "resolved_at", "source_files", "artifacts"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:reference-manifest:1",
   "title": "Ultrafuzz materialized reference manifest"

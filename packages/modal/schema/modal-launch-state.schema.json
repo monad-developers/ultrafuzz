@@ -26,7 +26,15 @@
     "generation": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/positiveInteger" },
     "generation_mode": { "enum": ["resume", "fresh"] },
     "generation_start_reason": {
-      "enum": ["initial", "pre-model-retry", "post-model-resume", "image-rollout", "stale-probe-rotation", "operator-restart", "unknown"]
+      "enum": [
+        "initial",
+        "pre-model-retry",
+        "post-model-resume",
+        "image-rollout",
+        "stale-probe-rotation",
+        "operator-restart",
+        "unknown"
+      ]
     },
     "app": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonEmptyString" },
     "image": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonEmptyString" },

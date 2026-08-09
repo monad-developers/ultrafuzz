@@ -8,11 +8,7 @@
     },
     "outcome": {
       "type": "string",
-      "enum": [
-        "complete",
-        "partial",
-        "blocked"
-      ]
+      "enum": ["complete", "partial", "blocked"]
     },
     "implemented_property_suite_refs": {
       "minItems": 1,
@@ -38,25 +34,14 @@
           },
           "status": {
             "type": "string",
-            "enum": [
-              "complete",
-              "partial",
-              "blocked",
-              "failed",
-              "timed-out",
-              "unavailable"
-            ]
+            "enum": ["complete", "partial", "blocked", "failed", "timed-out", "unavailable"]
           },
           "result_ref": {
             "type": "string",
             "minLength": 1
           }
         },
-        "required": [
-          "fuzzer_backend",
-          "status",
-          "result_ref"
-        ],
+        "required": ["fuzzer_backend", "status", "result_ref"],
         "additionalProperties": false
       }
     },
@@ -101,11 +86,7 @@
             ]
           }
         },
-        "required": [
-          "finding_id",
-          "path",
-          "blocker"
-        ],
+        "required": ["finding_id", "path", "blocker"],
         "additionalProperties": false
       }
     },
@@ -123,10 +104,7 @@
           "maximum": 9007199254740991
         }
       },
-      "required": [
-        "pre_deduplication",
-        "post_deduplication"
-      ],
+      "required": ["pre_deduplication", "post_deduplication"],
       "additionalProperties": false
     }
   },

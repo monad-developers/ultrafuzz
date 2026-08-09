@@ -65,13 +65,7 @@
           },
           "expected_classification_if_red": {
             "type": "string",
-            "enum": [
-              "production-bug",
-              "implementation-drift",
-              "incomplete-spec",
-              "harness-defect",
-              "inconclusive"
-            ]
+            "enum": ["production-bug", "implementation-drift", "incomplete-spec", "harness-defect", "inconclusive"]
           },
           "preferred_downstream_lane": {
             "type": "string",
@@ -139,11 +133,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "id",
-          "reason",
-          "evidence_paths"
-        ],
+        "required": ["id", "reason", "evidence_paths"],
         "additionalProperties": false
       }
     },
@@ -158,32 +148,19 @@
           },
           "priority": {
             "type": "string",
-            "enum": [
-              "high",
-              "medium",
-              "low"
-            ]
+            "enum": ["high", "medium", "low"]
           },
           "rationale": {
             "type": "string",
             "minLength": 1
           }
         },
-        "required": [
-          "workflow",
-          "priority",
-          "rationale"
-        ],
+        "required": ["workflow", "priority", "rationale"],
         "additionalProperties": false
       }
     }
   },
-  "required": [
-    "schema_version",
-    "recipes",
-    "deferred_or_spec_gated",
-    "coverage_priorities"
-  ],
+  "required": ["schema_version", "recipes", "deferred_or_spec_gated", "coverage_priorities"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:boundary-recipes:1",
   "title": "Ultrafuzz boundary recipes"

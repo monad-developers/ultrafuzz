@@ -30,6 +30,7 @@ import {
   MODAL_WORKER_LINEAGE_SCHEMA_ID,
   MODAL_WORKER_RESULT_SCHEMA_ID
 } from "./modal-contracts.js";
+import { MODAL_SEMANTIC_GATES_BY_SCHEMA_ID, type ModalSemanticGateName } from "./modal-semantic-gates.js";
 
 type ModalAjv = ReturnType<typeof createStrictAjv>;
 
@@ -40,15 +41,14 @@ export interface ModalSchemaMetadata {
   id: string;
   role: "runtime-state" | "subschema";
   typescriptExport: keyof typeof MODAL_SCHEMA_EXPORTS;
-  semanticGates: readonly string[];
+  semanticGates: readonly ModalSemanticGateName[];
 }
 
 export function modalSchemaDirectory(): string {
   const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-  const source = [
-    path.resolve(moduleDirectory, "schema"),
-    path.resolve(moduleDirectory, "..", "schema")
-  ].find((candidate) => fs.existsSync(candidate));
+  const source = [path.resolve(moduleDirectory, "schema"), path.resolve(moduleDirectory, "..", "schema")].find(
+    (candidate) => fs.existsSync(candidate)
+  );
   if (source === undefined) throw new Error(`Modal schema source is unavailable near ${moduleDirectory}`);
   const stat = fs.lstatSync(source);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`Modal schema source is unsafe: ${source}`);
@@ -72,9 +72,7 @@ export const modalExecutionDependencyManifestJsonSchema = loadSchemaDocument(
   "modal-execution-dependency-manifest.schema.json"
 );
 export const modalLaunchStateJsonSchema = loadSchemaDocument("modal-launch-state.schema.json");
-export const modalNodeCheckpointIndexJsonSchema = loadSchemaDocument(
-  "modal-node-checkpoint-index.schema.json"
-);
+export const modalNodeCheckpointIndexJsonSchema = loadSchemaDocument("modal-node-checkpoint-index.schema.json");
 export const modalNodeCheckpointJsonSchema = loadSchemaDocument("modal-node-checkpoint.schema.json");
 export const modalNodeInputJsonSchema = loadSchemaDocument("modal-node-input.schema.json");
 export const modalNodeRestoreJsonSchema = loadSchemaDocument("modal-node-restore.schema.json");
@@ -116,97 +114,85 @@ export const MODAL_SCHEMA_METADATA: Readonly<Record<string, ModalSchemaMetadata>
     id: MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalExecutionDependencyManifestJsonSchema",
-    semanticGates: [
-      "modal-execution-dependency-target-identity",
-      "modal-execution-dependency-issuer-closure",
-      "modal-execution-dependency-smithers-executable"
-    ]
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID]
   },
   "modal-launch-state.schema.json": {
     id: MODAL_LAUNCH_STATE_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalLaunchStateJsonSchema",
-    semanticGates: [
-      "modal-launch-attempt-identity",
-      "modal-launch-recovery-lineage",
-      "modal-launch-active-recovery-uniqueness"
-    ]
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_LAUNCH_STATE_SCHEMA_ID]
   },
   "modal-node-checkpoint-index.schema.json": {
     id: MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalNodeCheckpointIndexJsonSchema",
-    semanticGates: ["modal-node-checkpoint-index-sequence"]
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID]
   },
   "modal-node-checkpoint.schema.json": {
     id: MODAL_NODE_CHECKPOINT_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalNodeCheckpointJsonSchema",
-    semanticGates: []
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_NODE_CHECKPOINT_SCHEMA_ID]
   },
   "modal-node-input.schema.json": {
     id: MODAL_NODE_INPUT_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalNodeInputJsonSchema",
-    semanticGates: []
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_NODE_INPUT_SCHEMA_ID]
   },
   "modal-node-restore.schema.json": {
     id: MODAL_NODE_RESTORE_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalNodeRestoreJsonSchema",
-    semanticGates: []
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_NODE_RESTORE_SCHEMA_ID]
   },
   "modal-node-result.schema.json": {
     id: MODAL_NODE_RESULT_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalNodeResultJsonSchema",
-    semanticGates: []
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_NODE_RESULT_SCHEMA_ID]
   },
   "modal-node-worker-error.schema.json": {
     id: MODAL_NODE_WORKER_ERROR_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalNodeWorkerErrorJsonSchema",
-    semanticGates: []
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_NODE_WORKER_ERROR_SCHEMA_ID]
   },
   "modal-pinned-source-proof.schema.json": {
     id: MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalPinnedSourceProofJsonSchema",
-    semanticGates: ["modal-pinned-source-ref-object-lineage"]
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID]
   },
   "modal-recovery-lifecycle.schema.json": {
     id: MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalRecoveryLifecycleJsonSchema",
-    semanticGates: [
-      "modal-recovery-lifecycle-parent-order",
-      "modal-recovery-lifecycle-timestamp-order",
-      "modal-recovery-lifecycle-summary-reconciliation"
-    ]
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID]
   },
   "modal-recovery-state.schema.json": {
     id: MODAL_RECOVERY_STATE_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalRecoveryStateJsonSchema",
-    semanticGates: ["modal-recovery-state-row-worker-identity"]
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_RECOVERY_STATE_SCHEMA_ID]
   },
   "modal-smoke-result.schema.json": {
     id: MODAL_SMOKE_RESULT_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalSmokeResultJsonSchema",
-    semanticGates: ["modal-smoke-status-check-reconciliation"]
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_SMOKE_RESULT_SCHEMA_ID]
   },
   "modal-worker-lineage.schema.json": {
     id: MODAL_WORKER_LINEAGE_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalWorkerLineageJsonSchema",
-    semanticGates: []
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_WORKER_LINEAGE_SCHEMA_ID]
   },
   "modal-worker-result.schema.json": {
     id: MODAL_WORKER_RESULT_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalWorkerResultJsonSchema",
-    semanticGates: ["modal-worker-result-accounting-counts"]
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_WORKER_RESULT_SCHEMA_ID]
   }
 });
 

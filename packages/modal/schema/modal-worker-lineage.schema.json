@@ -4,7 +4,16 @@
   "title": "Ultrafuzz Modal worker lineage",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "logical_run_id", "generation", "attempt", "attempt_id", "workspace_mode", "fingerprints", "model_fingerprint"],
+  "required": [
+    "schema_version",
+    "logical_run_id",
+    "generation",
+    "attempt",
+    "attempt_id",
+    "workspace_mode",
+    "fingerprints",
+    "model_fingerprint"
+  ],
   "properties": {
     "schema_version": { "const": "ultrafuzz.modal.worker-lineage.v1" },
     "logical_run_id": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" },

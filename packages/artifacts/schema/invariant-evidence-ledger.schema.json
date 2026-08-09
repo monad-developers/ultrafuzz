@@ -4,12 +4,7 @@
   "title": "Ultrafuzz invariant evidence ledger",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema_version",
-    "entries",
-    "inventory_rows",
-    "scan_probes"
-  ],
+  "required": ["schema_version", "entries", "inventory_rows", "scan_probes"],
   "properties": {
     "schema_version": {
       "const": "ultrafuzz.invariant-evidence-ledger.v1"
@@ -19,14 +14,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "id",
-          "source_path",
-          "source_location",
-          "kind",
-          "verbatim",
-          "inventory_ids"
-        ],
+        "required": ["id", "source_path", "source_location", "kind", "verbatim", "inventory_ids"],
         "properties": {
           "id": {
             "type": "string",
@@ -77,11 +65,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "id",
-          "description",
-          "ledger_ids"
-        ],
+        "required": ["id", "description", "ledger_ids"],
         "properties": {
           "id": {
             "type": "string",
@@ -115,12 +99,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "id",
-          "source_path",
-          "query",
-          "result"
-        ],
+        "required": ["id", "source_path", "query", "result"],
         "properties": {
           "id": {
             "type": "string",
@@ -155,9 +134,7 @@
       },
       "then": {
         "not": {
-          "required": [
-            "no_invariants_justification"
-          ],
+          "required": ["no_invariants_justification"],
           "properties": {
             "no_invariants_justification": {}
           }
@@ -180,9 +157,7 @@
         }
       },
       "then": {
-        "required": [
-          "no_invariants_justification"
-        ],
+        "required": ["no_invariants_justification"],
         "properties": {
           "inventory_rows": {
             "type": "array",

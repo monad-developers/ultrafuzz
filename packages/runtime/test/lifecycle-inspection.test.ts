@@ -262,7 +262,7 @@ test("lifecycle commands reject a missing product run and an unlinked run", asyn
   const metadataPath = path.join(runRoot, "run.json");
   const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as Record<string, unknown>;
   delete metadata.workflow;
-  delete metadata.workflow_ids;
+  metadata.workflow_ids = [];
   fs.writeFileSync(metadataPath, `${JSON.stringify(metadata)}\n`, "utf8");
 
   for (const command of [cancelRun, diagnoseRun, getRunTimeline, listRunSnapshots, queryWorkflowEvents]) {

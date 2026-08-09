@@ -276,9 +276,7 @@ describe("eval status", () => {
       evalRunId: fixture.evalRunId,
       now: SNAPSHOT
     });
-    expect(snapshot.rows).toEqual([
-      expect.objectContaining({ row: "row-01", status: "invalid", terminal: false })
-    ]);
+    expect(snapshot.rows).toEqual([expect.objectContaining({ row: "row-01", status: "invalid", terminal: false })]);
   });
 });
 

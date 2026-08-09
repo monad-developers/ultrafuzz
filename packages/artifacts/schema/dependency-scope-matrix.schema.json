@@ -78,12 +78,7 @@
             "anyOf": [
               {
                 "type": "string",
-                "enum": [
-                  "production-bug",
-                  "incomplete-spec",
-                  "harness-defect",
-                  "false-positive"
-                ]
+                "enum": ["production-bug", "incomplete-spec", "harness-defect", "false-positive"]
               },
               {
                 "type": "null"
@@ -136,10 +131,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "dependency_id",
-          "rationale"
-        ],
+        "required": ["dependency_id", "rationale"],
         "additionalProperties": false
       }
     },
@@ -157,10 +149,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "dependency_id",
-          "reason"
-        ],
+        "required": ["dependency_id", "reason"],
         "additionalProperties": false
       }
     },
@@ -183,10 +172,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "path",
-          "checks"
-        ],
+        "required": ["path", "checks"],
         "additionalProperties": false
       }
     },
@@ -213,11 +199,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "finding_candidate_id",
-          "dependency_id",
-          "evidence_paths"
-        ],
+        "required": ["finding_candidate_id", "dependency_id", "evidence_paths"],
         "additionalProperties": false
       }
     },
@@ -235,10 +217,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "dependency_id",
-          "reason"
-        ],
+        "required": ["dependency_id", "reason"],
         "additionalProperties": false
       }
     }

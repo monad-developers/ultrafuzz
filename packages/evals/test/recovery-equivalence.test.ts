@@ -4,11 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import {
-  createEventRecord,
-  createNodeAttemptLedgerEntry,
-  type AppendNodeAttemptInput
-} from "@ultrafuzz/artifacts";
+import { createEventRecord, createNodeAttemptLedgerEntry, type AppendNodeAttemptInput } from "@ultrafuzz/artifacts";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -47,10 +43,7 @@ function workflowRunId(controller: string): string {
   return `workflow-${controller}`;
 }
 
-function evidenceRoot(input: {
-  controllers: string[];
-  attempts?: AttemptFixture[];
-}): string {
+function evidenceRoot(input: { controllers: string[]; attempts?: AttemptFixture[] }): string {
   const root = mkdtempSync(path.join(tmpdir(), "ufz-recovery-equivalence-"));
   const attemptedNodeIds = new Set((input.attempts ?? []).map((attempt) => attempt.nodeId));
   const graph = currentPlannedGraph(["model-a", "model-b", "metadata"], undefined);
@@ -100,9 +93,7 @@ function evidenceRoot(input: {
   );
   fs.writeFileSync(
     path.join(root, "events.jsonl"),
-    controllerEvents.length === 0
-      ? ""
-      : `${controllerEvents.map((event) => JSON.stringify(event)).join("\n")}\n`,
+    controllerEvents.length === 0 ? "" : `${controllerEvents.map((event) => JSON.stringify(event)).join("\n")}\n`,
     "utf8"
   );
   const attemptCounts = new Map<string, number>();

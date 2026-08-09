@@ -3,11 +3,7 @@
   "$id": "urn:ultrafuzz:schema:artifacts:analysis-bundle:1",
   "title": "Ultrafuzz privacy-safe analysis bundle manifest",
   "type": "object",
-  "required": [
-    "schema_version",
-    "policy_version",
-    "files"
-  ],
+  "required": ["schema_version", "policy_version", "files"],
   "additionalProperties": false,
   "properties": {
     "schema_version": {
@@ -24,13 +20,7 @@
         "oneOf": [
           {
             "type": "object",
-            "required": [
-              "kind",
-              "path",
-              "media_type",
-              "size_bytes",
-              "sha256"
-            ],
+            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
             "additionalProperties": false,
             "properties": {
               "kind": {
@@ -54,13 +44,7 @@
           },
           {
             "type": "object",
-            "required": [
-              "kind",
-              "path",
-              "media_type",
-              "size_bytes",
-              "sha256"
-            ],
+            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
             "additionalProperties": false,
             "properties": {
               "kind": {
@@ -84,13 +68,7 @@
           },
           {
             "type": "object",
-            "required": [
-              "kind",
-              "path",
-              "media_type",
-              "size_bytes",
-              "sha256"
-            ],
+            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
             "additionalProperties": false,
             "properties": {
               "kind": {
@@ -114,13 +92,7 @@
           },
           {
             "type": "object",
-            "required": [
-              "kind",
-              "path",
-              "media_type",
-              "size_bytes",
-              "sha256"
-            ],
+            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
             "additionalProperties": false,
             "properties": {
               "kind": {
@@ -144,13 +116,7 @@
           },
           {
             "type": "object",
-            "required": [
-              "kind",
-              "path",
-              "media_type",
-              "size_bytes",
-              "sha256"
-            ],
+            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
             "additionalProperties": false,
             "properties": {
               "kind": {
@@ -174,13 +140,7 @@
           },
           {
             "type": "object",
-            "required": [
-              "kind",
-              "path",
-              "media_type",
-              "size_bytes",
-              "sha256"
-            ],
+            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
             "additionalProperties": false,
             "properties": {
               "kind": {

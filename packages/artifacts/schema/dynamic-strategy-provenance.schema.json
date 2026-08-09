@@ -33,11 +33,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "agent_id",
-          "label",
-          "role"
-        ],
+        "required": ["agent_id", "label", "role"],
         "additionalProperties": false
       }
     },
@@ -59,11 +55,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "agent_id",
-          "model",
-          "backend"
-        ],
+        "required": ["agent_id", "model", "backend"],
         "additionalProperties": false
       }
     },
@@ -94,11 +86,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "strategy_id",
-          "source_path",
-          "destination_intent"
-        ],
+        "required": ["strategy_id", "source_path", "destination_intent"],
         "additionalProperties": false
       }
     },
@@ -117,24 +105,14 @@
           },
           "status": {
             "type": "string",
-            "enum": [
-              "passed",
-              "failed",
-              "blocked",
-              "not-run"
-            ]
+            "enum": ["passed", "failed", "blocked", "not-run"]
           },
           "summary": {
             "type": "string",
             "minLength": 1
           }
         },
-        "required": [
-          "subject",
-          "command",
-          "status",
-          "summary"
-        ],
+        "required": ["subject", "command", "status", "summary"],
         "additionalProperties": false
       }
     },

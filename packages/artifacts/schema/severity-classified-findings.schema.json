@@ -18,31 +18,15 @@
       },
       "status": {
         "type": "string",
-        "enum": [
-          "candidate",
-          "needs-review",
-          "duplicate",
-          "false-positive",
-          "confirmed",
-          "fixed",
-          "wont-fix"
-        ]
+        "enum": ["candidate", "needs-review", "duplicate", "false-positive", "confirmed", "fixed", "wont-fix"]
       },
       "severity_guess": {
         "type": "string",
-        "enum": [
-          "High",
-          "Medium",
-          "Low"
-        ]
+        "enum": ["High", "Medium", "Low"]
       },
       "confidence": {
         "type": "string",
-        "enum": [
-          "high",
-          "medium",
-          "low"
-        ]
+        "enum": ["high", "medium", "low"]
       },
       "summary": {
         "type": "string",
@@ -171,10 +155,7 @@
                   "minLength": 1
                 }
               },
-              "required": [
-                "fuzzer_backend",
-                "failure_id"
-              ],
+              "required": ["fuzzer_backend", "failure_id"],
               "additionalProperties": false
             }
           ]
@@ -194,9 +175,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "pre_dedup_count"
-        ],
+        "required": ["pre_dedup_count"],
         "additionalProperties": false
       },
       "dedupe_key": {
@@ -322,12 +301,7 @@
               }
             }
           },
-          "required": [
-            "id",
-            "title",
-            "summary",
-            "dedupe_key"
-          ],
+          "required": ["id", "title", "summary", "dedupe_key"],
           "additionalProperties": false
         }
       },
@@ -357,12 +331,7 @@
               "minLength": 1
             }
           },
-          "required": [
-            "id",
-            "title",
-            "relationship",
-            "summary"
-          ],
+          "required": ["id", "title", "relationship", "summary"],
           "additionalProperties": false
         }
       },
@@ -425,27 +394,15 @@
       },
       "severity": {
         "type": "string",
-        "enum": [
-          "High",
-          "Medium",
-          "Low"
-        ]
+        "enum": ["High", "Medium", "Low"]
       },
       "impact": {
         "type": "string",
-        "enum": [
-          "High",
-          "Medium",
-          "Low"
-        ]
+        "enum": ["High", "Medium", "Low"]
       },
       "likelihood": {
         "type": "string",
-        "enum": [
-          "High",
-          "Medium",
-          "Low"
-        ]
+        "enum": ["High", "Medium", "Low"]
       },
       "impact_rationale": {
         "type": "string",
@@ -483,11 +440,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "scenario",
-          "language",
-          "code"
-        ],
+        "required": ["scenario", "language", "code"],
         "additionalProperties": false
       },
       "recommendation": {
@@ -524,11 +477,7 @@
                       "maximum": 9007199254740991
                     }
                   },
-                  "required": [
-                    "strategy",
-                    "detections",
-                    "configured_loops"
-                  ],
+                  "required": ["strategy", "detections", "configured_loops"],
                   "additionalProperties": false
                 }
               },
@@ -565,16 +514,12 @@
                       "maximum": 9007199254740991
                     }
                   },
-                  "required": [
-                    "strategy"
-                  ],
+                  "required": ["strategy"],
                   "additionalProperties": false
                 }
               }
             },
-            "required": [
-              "detection_rates"
-            ],
+            "required": ["detection_rates"],
             "additionalProperties": false
           },
           {
@@ -601,11 +546,7 @@
                       "maximum": 9007199254740991
                     }
                   },
-                  "required": [
-                    "strategy",
-                    "detections",
-                    "configured_loops"
-                  ],
+                  "required": ["strategy", "detections", "configured_loops"],
                   "additionalProperties": false
                 }
               },
@@ -642,16 +583,12 @@
                       "maximum": 9007199254740991
                     }
                   },
-                  "required": [
-                    "strategy"
-                  ],
+                  "required": ["strategy"],
                   "additionalProperties": false
                 }
               }
             },
-            "required": [
-              "strategies"
-            ],
+            "required": ["strategies"],
             "additionalProperties": false
           }
         ]
@@ -686,20 +623,10 @@
                 },
                 "relationship": {
                   "type": "string",
-                  "enum": [
-                    "primary",
-                    "duplicate",
-                    "family-variant"
-                  ]
+                  "enum": ["primary", "duplicate", "family-variant"]
                 }
               },
-              "required": [
-                "path",
-                "node_id",
-                "finding_id",
-                "title",
-                "relationship"
-              ],
+              "required": ["path", "node_id", "finding_id", "title", "relationship"],
               "additionalProperties": false
             }
           },
@@ -736,9 +663,7 @@
                   "maximum": 9007199254740991
                 }
               },
-              "required": [
-                "strategy"
-              ],
+              "required": ["strategy"],
               "additionalProperties": false
             }
           },
@@ -781,28 +706,15 @@
           },
           "canonical_severity": {
             "type": "string",
-            "enum": [
-              "High",
-              "Medium",
-              "Low"
-            ]
+            "enum": ["High", "Medium", "Low"]
           },
           "final_disposition": {
             "type": "string",
-            "enum": [
-              "promoted",
-              "non-production",
-              "dropped"
-            ]
+            "enum": ["promoted", "non-production", "dropped"]
           },
           "comparison_disposition": {
             "type": "string",
-            "enum": [
-              "promoted-again",
-              "rediscovered-but-demoted",
-              "not-reproduced",
-              "not-searched"
-            ]
+            "enum": ["promoted-again", "rediscovered-but-demoted", "not-reproduced", "not-searched"]
           },
           "stages": {
             "type": "array",
@@ -811,12 +723,7 @@
               "properties": {
                 "stage": {
                   "type": "string",
-                  "enum": [
-                    "raw",
-                    "deduped",
-                    "triaged",
-                    "severity-classified"
-                  ]
+                  "enum": ["raw", "deduped", "triaged", "severity-classified"]
                 },
                 "artifact_path": {
                   "type": "string",
@@ -827,19 +734,12 @@
                   "minLength": 1
                 }
               },
-              "required": [
-                "stage",
-                "artifact_path"
-              ],
+              "required": ["stage", "artifact_path"],
               "additionalProperties": false
             }
           }
         },
-        "required": [
-          "dedupe_key",
-          "source_artifacts",
-          "strategy_hits"
-        ],
+        "required": ["dedupe_key", "source_artifacts", "strategy_hits"],
         "additionalProperties": false
       }
     },
@@ -862,9 +762,7 @@
               "const": "true-positive"
             }
           },
-          "required": [
-            "triage_classification"
-          ]
+          "required": ["triage_classification"]
         },
         "then": {
           "properties": {

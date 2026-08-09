@@ -17,21 +17,14 @@
           },
           "repair_kind": {
             "type": "string",
-            "enum": [
-              "harness",
-              "reference"
-            ]
+            "enum": ["harness", "reference"]
           },
           "summary": {
             "type": "string",
             "minLength": 1
           }
         },
-        "required": [
-          "stable_failure_hash",
-          "repair_kind",
-          "summary"
-        ],
+        "required": ["stable_failure_hash", "repair_kind", "summary"],
         "additionalProperties": false
       }
     },
@@ -46,10 +39,7 @@
           },
           "result": {
             "type": "string",
-            "enum": [
-              "repaired",
-              "still-red"
-            ]
+            "enum": ["repaired", "still-red"]
           },
           "evidence_paths": {
             "minItems": 0,
@@ -61,11 +51,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "stable_failure_hash",
-          "result",
-          "evidence_paths"
-        ],
+        "required": ["stable_failure_hash", "result", "evidence_paths"],
         "additionalProperties": false
       }
     },
@@ -80,22 +66,14 @@
           },
           "classification": {
             "type": "string",
-            "enum": [
-              "production_bug",
-              "spec_mismatch",
-              "unknown"
-            ]
+            "enum": ["production_bug", "spec_mismatch", "unknown"]
           },
           "reason": {
             "type": "string",
             "minLength": 1
           }
         },
-        "required": [
-          "stable_failure_hash",
-          "classification",
-          "reason"
-        ],
+        "required": ["stable_failure_hash", "classification", "reason"],
         "additionalProperties": false
       }
     },

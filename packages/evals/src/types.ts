@@ -288,9 +288,7 @@ export interface EvalRowLifecycle {
 }
 
 export type EvalEfficiencyReason =
-  | "node-attempt-timestamps-final-attempt-only"
-  | "usage-incomplete"
-  | "pricing-incomplete";
+  "node-attempt-timestamps-final-attempt-only" | "usage-incomplete" | "pricing-incomplete";
 
 export type EvalEfficiencyCompleteness =
   { status: "complete"; reason: null } | { status: "partial"; reason: EvalEfficiencyReason };

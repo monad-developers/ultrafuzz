@@ -1,8 +1,8 @@
 import fs from "node:fs";
+import path from "node:path";
 import { TextDecoder } from "node:util";
 
 import {
-  appendLineDurable,
   parseStrictJson,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
@@ -44,6 +44,9 @@ import { EvalError } from "./utils.js";
 
 const MAX_EVAL_DOCUMENT_BYTES = 64 * 1024 * 1024;
 const MAX_EVAL_JSONL_RECORD_BYTES = 16 * 1024 * 1024;
+const EVAL_JOURNAL_LOCK_TIMEOUT_MS = 30_000;
+const EVAL_JOURNAL_LOCK_POLL_MS = 10;
+const journalLockWaiter = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 
 export function parseEvalRunManifest(value: unknown, source = "eval.json"): EvalRunManifest {
   assertVersion(value, "schema_version", EVAL_RUN_SCHEMA_VERSION, source);
@@ -75,16 +78,218 @@ export function parseEvalRunRecord(value: unknown, source = "runs.jsonl record")
   return validate<EvalRunRecord>(EVAL_RUN_RECORD_SCHEMA_ID, value, source);
 }
 
-/**
- * A missing journal is accepted only when the caller explicitly owns a
- * pre-launch window. A present empty or malformed journal is always corrupt.
- */
-export function readEvalRunRecords(filePath: string, options: { allowMissing?: boolean } = {}): EvalRunRecord[] {
-  return readStrictJsonLines(filePath, parseEvalRunRecord, options.allowMissing === true, false);
+/** The runner materializes this journal before launch, so absence is corruption while zero rows is valid. */
+export function readEvalRunRecords(filePath: string): EvalRunRecord[] {
+  return readStrictJsonLines(filePath, parseEvalRunRecord, true);
 }
 
 export function appendEvalRunRecord(filePath: string, value: EvalRunRecord): void {
-  appendLineDurable(filePath, JSON.stringify(parseEvalRunRecord(value, filePath)));
+  const release = acquireEvalJournalLock(filePath);
+  try {
+    appendEvalRunRecordLocked(filePath, value);
+  } finally {
+    release();
+  }
+}
+
+function appendEvalRunRecordLocked(filePath: string, value: EvalRunRecord): void {
+  let descriptor: number;
+  try {
+    descriptor = fs.openSync(
+      filePath,
+      fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0)
+    );
+  } catch (error) {
+    throw durableError("EVAL_DURABLE_READ_FAILED", `failed to open durable JSONL ${filePath}`, filePath, error);
+  }
+
+  try {
+    const snapshot = readOpenedEvalJournal(descriptor, filePath);
+    parseStrictJsonLinesBytes(snapshot.bytes, filePath, parseEvalRunRecord, true);
+    const record = parseEvalRunRecord(value, filePath);
+    const payload = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+    if (snapshot.bytes.byteLength + payload.byteLength > MAX_EVAL_DOCUMENT_BYTES) {
+      throw new EvalError("EVAL_DURABLE_JSONL_TOO_LARGE", `durable JSONL exceeds its byte limit: ${filePath}`, {
+        path: filePath
+      });
+    }
+
+    assertEvalJournalUnchanged(descriptor, filePath, snapshot.stat);
+    let offset = 0;
+    while (offset < payload.byteLength) {
+      const written = fs.writeSync(
+        descriptor,
+        payload,
+        offset,
+        payload.byteLength - offset,
+        snapshot.bytes.byteLength + offset
+      );
+      if (written <= 0) {
+        throw new EvalError("EVAL_DURABLE_APPEND_FAILED", `durable JSONL append made no progress: ${filePath}`, {
+          path: filePath
+        });
+      }
+      offset += written;
+    }
+    fs.fsyncSync(descriptor);
+    assertEvalJournalPublished(descriptor, filePath, snapshot.stat, snapshot.bytes.byteLength + payload.byteLength);
+  } catch (error) {
+    if (error instanceof EvalError) throw error;
+    throw durableError("EVAL_DURABLE_APPEND_FAILED", `failed to append durable JSONL ${filePath}`, filePath, error);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  fsyncEvalDirectory(path.dirname(filePath));
+}
+
+function readOpenedEvalJournal(descriptor: number, filePath: string): { bytes: Buffer; stat: fs.BigIntStats } {
+  const opened = fs.fstatSync(descriptor, { bigint: true });
+  assertSinglyLinkedEvalJournal(opened, filePath);
+  if (opened.size < 0n || opened.size > BigInt(MAX_EVAL_DOCUMENT_BYTES)) {
+    throw new EvalError(
+      "EVAL_DURABLE_JSONL_TOO_LARGE",
+      `durable JSONL exceeds the ${MAX_EVAL_DOCUMENT_BYTES}-byte limit: ${filePath}`,
+      { path: filePath }
+    );
+  }
+
+  const bytes = Buffer.alloc(Number(opened.size));
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const read = fs.readSync(descriptor, bytes, offset, bytes.byteLength - offset, offset);
+    if (read === 0) {
+      throw new EvalError("EVAL_DURABLE_APPEND_RACE", `durable JSONL changed while it was read: ${filePath}`, {
+        path: filePath
+      });
+    }
+    offset += read;
+  }
+  const completed = fs.fstatSync(descriptor, { bigint: true });
+  if (!sameStableEvalJournal(opened, completed) || completed.size !== BigInt(offset)) {
+    throw new EvalError("EVAL_DURABLE_APPEND_RACE", `durable JSONL changed while it was read: ${filePath}`, {
+      path: filePath
+    });
+  }
+  return { bytes, stat: completed };
+}
+
+function assertEvalJournalUnchanged(descriptor: number, filePath: string, expected: fs.BigIntStats): void {
+  const descriptorStat = fs.fstatSync(descriptor, { bigint: true });
+  const pathStat = fs.lstatSync(filePath, { bigint: true });
+  if (!sameStableEvalJournal(expected, descriptorStat) || !sameStableEvalJournal(expected, pathStat)) {
+    throw new EvalError(
+      "EVAL_DURABLE_APPEND_RACE",
+      `durable JSONL path changed after validation and before append: ${filePath}`,
+      { path: filePath }
+    );
+  }
+}
+
+function assertEvalJournalPublished(
+  descriptor: number,
+  filePath: string,
+  expected: fs.BigIntStats,
+  expectedSize: number
+): void {
+  const descriptorStat = fs.fstatSync(descriptor, { bigint: true });
+  const pathStat = fs.lstatSync(filePath, { bigint: true });
+  if (
+    !sameEvalJournalIdentity(expected, descriptorStat) ||
+    !sameEvalJournalIdentity(expected, pathStat) ||
+    descriptorStat.size !== BigInt(expectedSize) ||
+    pathStat.size !== BigInt(expectedSize) ||
+    descriptorStat.nlink !== 1n ||
+    pathStat.nlink !== 1n
+  ) {
+    throw new EvalError("EVAL_DURABLE_APPEND_RACE", `durable JSONL path changed while appending: ${filePath}`, {
+      path: filePath
+    });
+  }
+}
+
+function assertSinglyLinkedEvalJournal(stat: fs.BigIntStats, filePath: string): void {
+  if (!stat.isFile() || stat.nlink !== 1n) {
+    throw new EvalError("EVAL_DURABLE_READ_FAILED", `durable JSONL must be a singly linked regular file: ${filePath}`, {
+      path: filePath
+    });
+  }
+}
+
+function sameEvalJournalIdentity(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
+  return right.isFile() && left.dev === right.dev && left.ino === right.ino && left.mode === right.mode;
+}
+
+function sameStableEvalJournal(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
+  return (
+    sameEvalJournalIdentity(left, right) &&
+    left.nlink === right.nlink &&
+    right.nlink === 1n &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+function acquireEvalJournalLock(filePath: string): () => void {
+  const lockPath = `${filePath}.lock`;
+  const deadline = Date.now() + EVAL_JOURNAL_LOCK_TIMEOUT_MS;
+  for (;;) {
+    try {
+      fs.mkdirSync(lockPath, { mode: 0o700 });
+      const owned = fs.lstatSync(lockPath, { bigint: true });
+      if (!owned.isDirectory() || owned.isSymbolicLink()) {
+        throw new Error(`eval journal lock is not a physical directory: ${lockPath}`);
+      }
+      return () => releaseEvalJournalLock(lockPath, owned, filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw durableError(
+          "EVAL_DURABLE_LOCK_FAILED",
+          `failed to acquire durable JSONL lock ${lockPath}`,
+          filePath,
+          error
+        );
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new EvalError("EVAL_DURABLE_LOCK_TIMEOUT", `timed out acquiring durable JSONL lock: ${lockPath}`, {
+          path: filePath,
+          lock_path: lockPath
+        });
+      }
+      Atomics.wait(journalLockWaiter, 0, 0, Math.min(EVAL_JOURNAL_LOCK_POLL_MS, remaining));
+    }
+  }
+}
+
+function releaseEvalJournalLock(lockPath: string, owned: fs.BigIntStats, filePath: string): void {
+  let current: fs.BigIntStats;
+  try {
+    current = fs.lstatSync(lockPath, { bigint: true });
+  } catch (error) {
+    throw durableError(
+      "EVAL_DURABLE_LOCK_COMPROMISED",
+      `durable JSONL lock disappeared before release: ${lockPath}`,
+      filePath,
+      error
+    );
+  }
+  if (!current.isDirectory() || current.dev !== owned.dev || current.ino !== owned.ino) {
+    throw new EvalError("EVAL_DURABLE_LOCK_COMPROMISED", `durable JSONL lock changed before release: ${lockPath}`, {
+      path: filePath,
+      lock_path: lockPath
+    });
+  }
+  try {
+    fs.rmdirSync(lockPath);
+  } catch (error) {
+    throw durableError(
+      "EVAL_DURABLE_LOCK_COMPROMISED",
+      `failed to release durable JSONL lock ${lockPath}`,
+      filePath,
+      error
+    );
+  }
 }
 
 export function parseEvalRunSummary(value: unknown, source = "run-summary.json"): EvalRunSummary {
@@ -107,7 +312,7 @@ export function parseEvalFindingScore(value: unknown, source = "scores.jsonl rec
 
 /** `scores.jsonl` is materialized even for zero findings, so absence is not an empty score set. */
 export function readEvalFindingScores(filePath: string): EvalFindingScore[] {
-  return readStrictJsonLines(filePath, parseEvalFindingScore, false, true);
+  return readStrictJsonLines(filePath, parseEvalFindingScore, true);
 }
 
 export function serializeEvalFindingScores(values: readonly EvalFindingScore[]): string {
@@ -123,7 +328,7 @@ export function parseEvalReviewQueueItem(
 }
 
 export function readEvalReviewQueue(filePath: string): HumanReviewQueueItem[] {
-  return readStrictJsonLines(filePath, parseEvalReviewQueueItem, false, true);
+  return readStrictJsonLines(filePath, parseEvalReviewQueueItem, true);
 }
 
 export function serializeEvalReviewQueue(values: readonly HumanReviewQueueItem[]): string {
@@ -187,15 +392,27 @@ export function readStrictJsonDocument(filePath: string): unknown {
 function readStrictJsonLines<T>(
   filePath: string,
   parser: (value: unknown, source?: string) => T,
-  allowMissing: boolean,
   allowEmpty: boolean
 ): T[] {
-  if (allowMissing && pathIsAbsent(filePath)) return [];
   let bytes: Buffer;
   try {
     bytes = readRegularFileSnapshot(filePath, MAX_EVAL_DOCUMENT_BYTES);
   } catch (error) {
     throw durableError("EVAL_DURABLE_READ_FAILED", `failed to read durable JSONL ${filePath}`, filePath, error);
+  }
+  return parseStrictJsonLinesBytes(bytes, filePath, parser, allowEmpty);
+}
+
+function parseStrictJsonLinesBytes<T>(
+  bytes: Buffer,
+  filePath: string,
+  parser: (value: unknown, source?: string) => T,
+  allowEmpty: boolean
+): T[] {
+  if (bytes.byteLength > 0 && bytes[bytes.byteLength - 1] !== 0x0a) {
+    throw new EvalError("EVAL_DURABLE_JSONL_INVALID", `durable JSONL has an unterminated final record: ${filePath}`, {
+      path: filePath
+    });
   }
   let text: string;
   try {
@@ -211,14 +428,18 @@ function readStrictJsonLines<T>(
   }
   const lines = text.split("\n");
   if (lines.at(-1) === "") lines.pop();
-  return lines.map((rawLine, index) => {
+  const records = lines.map((rawLine, index) => {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     const lineNumber = index + 1;
     if (line.trim().length === 0) {
-      throw new EvalError("EVAL_DURABLE_JSONL_INVALID", `durable JSONL contains a blank record at ${filePath}:${lineNumber}`, {
-        path: filePath,
-        line: lineNumber
-      });
+      throw new EvalError(
+        "EVAL_DURABLE_JSONL_INVALID",
+        `durable JSONL contains a blank record at ${filePath}:${lineNumber}`,
+        {
+          path: filePath,
+          line: lineNumber
+        }
+      );
     }
     if (Buffer.byteLength(line, "utf8") > MAX_EVAL_JSONL_RECORD_BYTES) {
       throw new EvalError(
@@ -246,6 +467,7 @@ function readStrictJsonLines<T>(
     }
     return parser(value, `${filePath}:${lineNumber}`);
   });
+  return records;
 }
 
 function serializeStrictJsonLines<T>(values: readonly T[], parser: (value: unknown, source?: string) => T): string {
@@ -275,7 +497,12 @@ function validate<T>(schemaId: string, value: unknown, source: string): T {
   return value as T;
 }
 
-function assertVersion(value: unknown, field: "schema_version" | "schemaVersion", expected: string, source: string): void {
+function assertVersion(
+  value: unknown,
+  field: "schema_version" | "schemaVersion",
+  expected: string,
+  source: string
+): void {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return;
   const observed = (value as Record<string, unknown>)[field];
   if (observed !== undefined && observed !== expected) {
@@ -287,23 +514,32 @@ function assertVersion(value: unknown, field: "schema_version" | "schemaVersion"
   }
 }
 
-function pathIsAbsent(filePath: string): boolean {
+function fsyncEvalDirectory(directory: string): void {
+  let descriptor: number;
   try {
-    fs.lstatSync(filePath);
-    return false;
+    descriptor = fs.openSync(directory, "r");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
-    throw durableError("EVAL_DURABLE_READ_FAILED", `failed to inspect durable JSONL ${filePath}`, filePath, error);
+    if (isUnsupportedDirectoryFsyncError(error)) return;
+    throw error;
+  }
+  try {
+    fs.fsyncSync(descriptor);
+  } catch (error) {
+    if (!isUnsupportedDirectoryFsyncError(error)) throw error;
+  } finally {
+    fs.closeSync(descriptor);
   }
 }
 
-function durableError(
-  code: string,
-  message: string,
-  filePath: string,
-  error: unknown,
-  line?: number
-): EvalError {
+function isUnsupportedDirectoryFsyncError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    ["EINVAL", "ENOTSUP", "EOPNOTSUPP"].includes(String((error as NodeJS.ErrnoException).code))
+  );
+}
+
+function durableError(code: string, message: string, filePath: string, error: unknown, line?: number): EvalError {
   return new EvalError(code, message, {
     path: filePath,
     ...(line === undefined ? {} : { line }),

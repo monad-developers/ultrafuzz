@@ -21,10 +21,7 @@
             "maximum": 9007199254740991
           }
         },
-        "required": [
-          "lane_id",
-          "attempt_index"
-        ],
+        "required": ["lane_id", "attempt_index"],
         "additionalProperties": false
       }
     },
@@ -44,19 +41,10 @@
           },
           "status": {
             "type": "string",
-            "enum": [
-              "green",
-              "semantic_red_frozen",
-              "compile_or_harness_defect",
-              "no_assigned_lane"
-            ]
+            "enum": ["green", "semantic_red_frozen", "compile_or_harness_defect", "no_assigned_lane"]
           }
         },
-        "required": [
-          "lane_id",
-          "attempt_index",
-          "status"
-        ],
+        "required": ["lane_id", "attempt_index", "status"],
         "additionalProperties": false
       }
     },
@@ -83,11 +71,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "lane_id",
-          "summary",
-          "evidence_paths"
-        ],
+        "required": ["lane_id", "summary", "evidence_paths"],
         "additionalProperties": false
       }
     },
@@ -114,11 +98,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "lane_id",
-          "summary",
-          "evidence_paths"
-        ],
+        "required": ["lane_id", "summary", "evidence_paths"],
         "additionalProperties": false
       }
     },
@@ -141,11 +121,7 @@
             "maximum": 9007199254740991
           }
         },
-        "required": [
-          "lane_id",
-          "command",
-          "matched_test_count"
-        ],
+        "required": ["lane_id", "command", "matched_test_count"],
         "additionalProperties": false
       }
     },
@@ -172,11 +148,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "category",
-          "summary",
-          "evidence_paths"
-        ],
+        "required": ["category", "summary", "evidence_paths"],
         "additionalProperties": false
       }
     }

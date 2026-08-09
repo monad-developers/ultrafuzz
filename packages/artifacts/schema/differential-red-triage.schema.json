@@ -8,10 +8,7 @@
     },
     "pass": {
       "type": "string",
-      "enum": [
-        "a",
-        "b"
-      ]
+      "enum": ["a", "b"]
     },
     "classifications": {
       "type": "array",
@@ -50,22 +47,12 @@
             "type": "boolean"
           }
         },
-        "required": [
-          "stable_failure_hash",
-          "classification",
-          "rationale",
-          "public_evidence_paths",
-          "repair_allowed"
-        ],
+        "required": ["stable_failure_hash", "classification", "rationale", "public_evidence_paths", "repair_allowed"],
         "additionalProperties": false
       }
     }
   },
-  "required": [
-    "schema_version",
-    "pass",
-    "classifications"
-  ],
+  "required": ["schema_version", "pass", "classifications"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:differential-red-triage:1",
   "title": "Ultrafuzz differential red triage"

@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { layoutForRunRoot } from "@ultrafuzz/artifacts";
+import { layoutForRunRoot, writeRunMetadataDocument, type RunMetadataDocument } from "@ultrafuzz/artifacts";
 import {
   evalRunRoot,
   readEvalRunSummary,
@@ -29,6 +29,43 @@ const T0 = "2026-07-19T00:00:00.000Z";
 const T1 = "2026-07-19T00:01:00.000Z";
 const T2 = "2026-07-19T00:02:00.000Z";
 
+function currentRunMetadata(runId: string, linked: boolean): RunMetadataDocument {
+  return {
+    schema_version: "ultrafuzz.run-metadata.v2",
+    run_id: runId,
+    created_at: T0,
+    mode: "run",
+    workflow_ids: linked ? ["wf-1"] : [],
+    redacted_config_fingerprint: "a".repeat(64),
+    forge_guard: {
+      enabled: false,
+      active: false,
+      virtual_memory_limit_kb: 1,
+      rayon_threads: 1
+    },
+    ...(linked
+      ? {
+          workflow: {
+            run_id: "wf-1",
+            compiled_run_id: "compiled-wf-1",
+            name: "modal-resume-fixture",
+            path: "workflow.tsx",
+            evidence_path: "smithers/workflow.json",
+            expanded_graph_path: "smithers/expanded-graph.json",
+            config_path: "smithers/config.json",
+            input_path: "smithers/input.json",
+            tasks_path: "smithers/tasks.json",
+            control_integrity_path: "smithers/control-integrity.json",
+            control_generation: "b".repeat(64),
+            workflow_link_id: "11111111-1111-4111-8111-111111111111",
+            execution_snapshot_path: "smithers/execution-snapshot.json",
+            task_node_ids: ["node:fixture"]
+          }
+        }
+      : {})
+  };
+}
+
 function writeRunRoot(target: string, runId: string, options: { linked: boolean }) {
   const runRoot = path.join(target, ".ultrafuzz", "runs", runId);
   fs.mkdirSync(runRoot, { recursive: true });
@@ -36,16 +73,10 @@ function writeRunRoot(target: string, runId: string, options: { linked: boolean 
     path.join(runRoot, "state.json"),
     JSON.stringify(currentRunState({}, { run_id: runId, status: "pending" }))
   );
-  if (options.linked) {
-    // The workflow link `resume` requires, at the path the RUNTIME writes it to. Derived from
-    // `layoutForRunRoot`, never spelled out: an earlier revision invented the filename here and in the
-    // source, so the suite agreed with the bug and all tests passed while every real run root was
-    // misclassified as unresumable -- and therefore deletable.
-    fs.writeFileSync(
-      layoutForRunRoot(runRoot).runMetadataPath,
-      JSON.stringify({ workflow: { run_id: "wf-1", path: "workflow.tsx" } })
-    );
-  }
+  // The workflow link `resume` requires, at the path the runtime writes it to. The fixture is always a
+  // complete current run document; an unlinked run is represented by the canonical empty workflow_ids
+  // projection, never by missing or historical metadata.
+  writeRunMetadataDocument(layoutForRunRoot(runRoot).runMetadataPath, currentRunMetadata(runId, options.linked));
   return runRoot;
 }
 
@@ -367,13 +398,22 @@ describe("Modal durable evaluation resume", () => {
     writeUnlinkedEvalJournal(value);
     const runRoot = writeRunRoot(value.target, "durable-run-one", { linked: true });
     const metadataPath = layoutForRunRoot(runRoot).runMetadataPath;
-    fs.writeFileSync(metadataPath, '{"workflow":{"run_id":"wf-1","run_id":"wf-2"}}\n');
-    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("is not strict JSON");
-
-    fs.writeFileSync(metadataPath, `${JSON.stringify({ workflow: { workflowRunId: "wf-1" } })}\n`);
-    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow(
-      "unsupported historical workflow-link field"
+    const current = fs.readFileSync(metadataPath, "utf8");
+    fs.writeFileSync(
+      metadataPath,
+      current.replace('"run_id": "durable-run-one"', '"run_id": "durable-run-one",\n  "run_id": "another-run"')
     );
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("is not a valid current run document");
+
+    const historical = structuredClone(currentRunMetadata("durable-run-one", true)) as unknown as Record<
+      string,
+      unknown
+    >;
+    const workflow = historical.workflow as Record<string, unknown>;
+    delete workflow.run_id;
+    workflow.workflowRunId = "wf-1";
+    fs.writeFileSync(metadataPath, `${JSON.stringify(historical)}\n`);
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("is not a valid current run document");
   });
 
   it("refuses a symlinked durable run metadata file", async () => {
@@ -382,7 +422,7 @@ describe("Modal durable evaluation resume", () => {
     const runRoot = writeRunRoot(value.target, "durable-run-one", { linked: true });
     const metadataPath = layoutForRunRoot(runRoot).runMetadataPath;
     const elsewhere = path.join(value.workRoot, "run-metadata-elsewhere.json");
-    fs.writeFileSync(elsewhere, `${JSON.stringify({ workflow: { run_id: "wf-1" } })}\n`);
+    fs.writeFileSync(elsewhere, `${JSON.stringify(currentRunMetadata("durable-run-one", true))}\n`);
     fs.rmSync(metadataPath);
     fs.symlinkSync(elsewhere, metadataPath);
     await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("must be a regular file");
@@ -398,12 +438,14 @@ describe("Modal durable evaluation resume", () => {
     expect(found.kind === "not-started" && found.staleEvalRunIds).toEqual([value.evalRunId]);
   });
 
-  it("classifies a journal that was never written, rather than crashing on it (#378)", async () => {
+  it("rejects an evaluation manifest whose required runs.jsonl journal is missing (#378)", async () => {
     const value = fixture();
-    // `eval.json` is written before the first journal append, so a kill in between leaves no runs.jsonl.
+    // Current durable evaluation state requires both documents. Absence is not an empty journal and must
+    // never be converted into a restartable "not started" classification.
     fs.rmSync(path.join(value.evalDir, "runs.jsonl"));
-    const found = await findModalResumeWorkspace(value.workRoot);
-    expect(found.kind).toBe("not-started");
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow(
+      /failed to read durable JSONL .*runs\.jsonl/u
+    );
   });
 
   it("refuses to infer journal links for several durable runs on disk", async () => {

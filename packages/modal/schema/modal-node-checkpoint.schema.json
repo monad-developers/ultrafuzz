@@ -4,7 +4,19 @@
   "title": "Ultrafuzz Modal durable node checkpoint",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "checkpoint_id", "sequence", "stage", "created_at", "storage_lineage", "workspace_path", "run_root", "execution_snapshot_root", "handoff_archive", "project_archive_sha256"],
+  "required": [
+    "schema_version",
+    "checkpoint_id",
+    "sequence",
+    "stage",
+    "created_at",
+    "storage_lineage",
+    "workspace_path",
+    "run_root",
+    "execution_snapshot_root",
+    "handoff_archive",
+    "project_archive_sha256"
+  ],
   "properties": {
     "schema_version": { "const": "ultrafuzz.modal.node-checkpoint.v1" },
     "checkpoint_id": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" },

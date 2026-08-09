@@ -3,12 +3,7 @@
   "$id": "urn:ultrafuzz:schema:topology:expanded-graph:3",
   "title": "Ultrafuzz expanded graph",
   "type": "object",
-  "required": [
-    "graphVersion",
-    "topologyVersion",
-    "groups",
-    "nodes"
-  ],
+  "required": ["graphVersion", "topologyVersion", "groups", "nodes"],
   "additionalProperties": false,
   "properties": {
     "graphVersion": {
@@ -119,17 +114,10 @@
             "minLength": 1
           },
           "kind": {
-            "enum": [
-              "agentic",
-              "meta",
-              "reference"
-            ]
+            "enum": ["agentic", "meta", "reference"]
           },
           "role": {
-            "enum": [
-              "start",
-              "finish"
-            ]
+            "enum": ["start", "finish"]
           },
           "promptPath": {
             "type": "string",
@@ -141,12 +129,7 @@
           },
           "referenceRevision": {
             "type": "object",
-            "required": [
-              "provider",
-              "repo",
-              "commit",
-              "paths"
-            ],
+            "required": ["provider", "repo", "commit", "paths"],
             "additionalProperties": false,
             "properties": {
               "provider": {
@@ -191,9 +174,7 @@
           },
           "retryPolicy": {
             "type": "object",
-            "required": [
-              "maxAttempts"
-            ],
+            "required": ["maxAttempts"],
             "additionalProperties": false,
             "properties": {
               "maxAttempts": {
@@ -204,12 +185,7 @@
           },
           "loop": {
             "type": "object",
-            "required": [
-              "index",
-              "count",
-              "mode",
-              "attemptIndex"
-            ],
+            "required": ["index", "count", "mode", "attemptIndex"],
             "additionalProperties": false,
             "properties": {
               "index": {
@@ -221,10 +197,7 @@
                 "minimum": 1
               },
               "mode": {
-                "enum": [
-                  "parallel",
-                  "series"
-                ]
+                "enum": ["parallel", "series"]
               },
               "attemptIndex": {
                 "type": "integer",
@@ -236,12 +209,7 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": [
-                "path",
-                "contract",
-                "primary",
-                "contractDigest"
-              ],
+              "required": ["path", "contract", "primary", "contractDigest"],
               "additionalProperties": false,
               "properties": {
                 "path": {
@@ -324,15 +292,10 @@
                   "if": {
                     "properties": {
                       "contract": {
-                        "enum": [
-                          "ultrafuzz/nonempty-markdown@1",
-                          "ultrafuzz/text@1"
-                        ]
+                        "enum": ["ultrafuzz/nonempty-markdown@1", "ultrafuzz/text@1"]
                       }
                     },
-                    "required": [
-                      "contract"
-                    ]
+                    "required": ["contract"]
                   },
                   "then": {
                     "not": {
@@ -341,53 +304,37 @@
                           "properties": {
                             "schemaFile": true
                           },
-                          "required": [
-                            "schemaFile"
-                          ]
+                          "required": ["schemaFile"]
                         },
                         {
                           "properties": {
                             "schemaId": true
                           },
-                          "required": [
-                            "schemaId"
-                          ]
+                          "required": ["schemaId"]
                         },
                         {
                           "properties": {
                             "schemaSha256": true
                           },
-                          "required": [
-                            "schemaSha256"
-                          ]
+                          "required": ["schemaSha256"]
                         },
                         {
                           "properties": {
                             "schemaBundleSha256": true
                           },
-                          "required": [
-                            "schemaBundleSha256"
-                          ]
+                          "required": ["schemaBundleSha256"]
                         },
                         {
                           "properties": {
                             "validatorBuild": true
                           },
-                          "required": [
-                            "validatorBuild"
-                          ]
+                          "required": ["validatorBuild"]
                         }
                       ]
                     }
                   },
                   "else": {
-                    "required": [
-                      "schemaFile",
-                      "schemaId",
-                      "schemaSha256",
-                      "schemaBundleSha256",
-                      "validatorBuild"
-                    ]
+                    "required": ["schemaFile", "schemaId", "schemaSha256", "schemaBundleSha256", "validatorBuild"]
                   }
                 }
               ]
@@ -397,13 +344,7 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": [
-                "modelProfileId",
-                "agentRef",
-                "modelIndex",
-                "loopIndex",
-                "attemptIndex"
-              ],
+              "required": ["modelProfileId", "agentRef", "modelIndex", "loopIndex", "attemptIndex"],
               "additionalProperties": false,
               "properties": {
                 "modelProfileId": {

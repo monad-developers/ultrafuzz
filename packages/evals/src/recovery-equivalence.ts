@@ -378,10 +378,7 @@ function modelWorkMayHaveStarted(state: RunState, modelNodeIds: ReadonlySet<stri
   });
 }
 
-function startedModelNodeIds(
-  state: RunState,
-  modelNodeIds: ReadonlySet<string>
-): ReadonlySet<string> {
+function startedModelNodeIds(state: RunState, modelNodeIds: ReadonlySet<string>): ReadonlySet<string> {
   return new Set(
     [...modelNodeIds].filter((nodeId) => {
       const node = state.nodes[nodeId];

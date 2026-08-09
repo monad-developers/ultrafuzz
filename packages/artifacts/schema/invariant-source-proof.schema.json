@@ -4,14 +4,7 @@
   "title": "Ultrafuzz invariant source proof",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema_version",
-    "attempt_id",
-    "commit",
-    "tree",
-    "ledger_sha256",
-    "files"
-  ],
+  "required": ["schema_version", "attempt_id", "commit", "tree", "ledger_sha256", "files"],
   "properties": {
     "schema_version": {
       "const": "ultrafuzz.invariant-source-proof.v1"
@@ -37,11 +30,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "path",
-          "sha256",
-          "content"
-        ],
+        "required": ["path", "sha256", "content"],
         "properties": {
           "path": {
             "type": "string",

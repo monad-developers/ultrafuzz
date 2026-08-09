@@ -4,7 +4,20 @@
   "title": "Ultrafuzz Modal worker result",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "result_type", "generation", "launch_generation", "attempt", "model_work_started", "counts", "checkpoint", "exit_category", "runtime_ms", "usage", "diagnostic_code"],
+  "required": [
+    "schema_version",
+    "result_type",
+    "generation",
+    "launch_generation",
+    "attempt",
+    "model_work_started",
+    "counts",
+    "checkpoint",
+    "exit_category",
+    "runtime_ms",
+    "usage",
+    "diagnostic_code"
+  ],
   "properties": {
     "schema_version": { "const": "ultrafuzz.modal.worker-result.v2" },
     "result_type": { "enum": ["partial", "terminal"] },
@@ -14,16 +27,36 @@
     "model_work_started": { "type": "boolean" },
     "counts": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/aggregateCounts" },
     "checkpoint": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/checkpointMetadata" },
-    "exit_category": { "enum": ["live", "finished", "capacity-unavailable", "authentication-failure", "sandbox-exited", "unreachable", "genuine-evaluation-failure"] },
-    "runtime_ms": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonNegativeInteger" },
-    "usage": {
-      "oneOf": [
-        { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/aggregateUsage" },
-        { "type": "null" }
+    "exit_category": {
+      "enum": [
+        "live",
+        "finished",
+        "capacity-unavailable",
+        "authentication-failure",
+        "sandbox-exited",
+        "unreachable",
+        "genuine-evaluation-failure"
       ]
     },
+    "runtime_ms": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonNegativeInteger" },
+    "usage": {
+      "oneOf": [{ "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/aggregateUsage" }, { "type": "null" }]
+    },
     "pricing": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/pricingProvenance" },
-    "diagnostic_code": { "enum": ["worker-live", "worker-finished", "capacity-unavailable", "authentication-failure", "sandbox-exited", "dependency-unreachable", "genuine-evaluation-failure", "terminal-run-non-resumable", "checkpoint-incompatible", "public-eval-diagnostics-invalid"] }
+    "diagnostic_code": {
+      "enum": [
+        "worker-live",
+        "worker-finished",
+        "capacity-unavailable",
+        "authentication-failure",
+        "sandbox-exited",
+        "dependency-unreachable",
+        "genuine-evaluation-failure",
+        "terminal-run-non-resumable",
+        "checkpoint-incompatible",
+        "public-eval-diagnostics-invalid"
+      ]
+    }
   },
   "allOf": [
     {

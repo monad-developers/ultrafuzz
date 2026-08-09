@@ -166,23 +166,14 @@
     },
     "status": {
       "type": "string",
-      "enum": [
-        "green",
-        "semantic_red_frozen",
-        "compile_or_harness_defect",
-        "no_assigned_lane"
-      ]
+      "enum": ["green", "semantic_red_frozen", "compile_or_harness_defect", "no_assigned_lane"]
     },
     "red_preservation_audit": {
       "type": "object",
       "properties": {
         "result": {
           "type": "string",
-          "enum": [
-            "no_semantic_red_observed",
-            "semantic_red_frozen",
-            "not_applicable"
-          ]
+          "enum": ["no_semantic_red_observed", "semantic_red_frozen", "not_applicable"]
         },
         "pre_repair_file_hash": {
           "anyOf": [
@@ -207,11 +198,7 @@
           ]
         }
       },
-      "required": [
-        "result",
-        "pre_repair_file_hash",
-        "assertion_predicate"
-      ],
+      "required": ["result", "pre_repair_file_hash", "assertion_predicate"],
       "additionalProperties": false
     },
     "red_candidates": {
@@ -287,10 +274,7 @@
         "properties": {
           "category": {
             "type": "string",
-            "enum": [
-              "compile",
-              "harness"
-            ]
+            "enum": ["compile", "harness"]
           },
           "summary": {
             "type": "string",
@@ -306,11 +290,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "category",
-          "summary",
-          "evidence_paths"
-        ],
+        "required": ["category", "summary", "evidence_paths"],
         "additionalProperties": false
       }
     },
@@ -360,9 +340,7 @@
             "const": "no_assigned_lane"
           }
         },
-        "required": [
-          "status"
-        ]
+        "required": ["status"]
       },
       "then": {
         "properties": {
@@ -399,9 +377,7 @@
             "const": "semantic_red_frozen"
           }
         },
-        "required": [
-          "status"
-        ]
+        "required": ["status"]
       },
       "then": {
         "properties": {
@@ -416,9 +392,7 @@
                 "const": "semantic_red_frozen"
               }
             },
-            "required": [
-              "result"
-            ]
+            "required": ["result"]
           }
         }
       }

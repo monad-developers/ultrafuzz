@@ -8,11 +8,7 @@
     },
     "campaign_status": {
       "type": "string",
-      "enum": [
-        "complete",
-        "incomplete",
-        "blocked_by_preserved_reds"
-      ]
+      "enum": ["complete", "incomplete", "blocked_by_preserved_reds"]
     },
     "production_bug_reds": {
       "type": "array",
@@ -41,12 +37,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "stable_failure_hash",
-          "lane_id",
-          "summary",
-          "evidence_paths"
-        ],
+        "required": ["stable_failure_hash", "lane_id", "summary", "evidence_paths"],
         "additionalProperties": false
       }
     },
@@ -77,12 +68,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "stable_failure_hash",
-          "lane_id",
-          "summary",
-          "evidence_paths"
-        ],
+        "required": ["stable_failure_hash", "lane_id", "summary", "evidence_paths"],
         "additionalProperties": false
       }
     },
@@ -109,11 +95,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "lane_id",
-          "summary",
-          "evidence_paths"
-        ],
+        "required": ["lane_id", "summary", "evidence_paths"],
         "additionalProperties": false
       }
     },
@@ -144,12 +126,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "stable_failure_hash",
-          "lane_id",
-          "summary",
-          "evidence_paths"
-        ],
+        "required": ["stable_failure_hash", "lane_id", "summary", "evidence_paths"],
         "additionalProperties": false
       }
     },

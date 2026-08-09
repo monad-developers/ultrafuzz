@@ -40,13 +40,7 @@
           },
           "status": {
             "type": "string",
-            "enum": [
-              "conformant",
-              "reference_gap",
-              "ambiguous_spec",
-              "out_of_scope",
-              "ready"
-            ]
+            "enum": ["conformant", "reference_gap", "ambiguous_spec", "out_of_scope", "ready"]
           },
           "public_evidence_paths": {
             "minItems": 0,
@@ -72,13 +66,7 @@
             }
           }
         },
-        "required": [
-          "surface_id",
-          "status",
-          "public_evidence_paths",
-          "audit_notes",
-          "required_narrowing"
-        ],
+        "required": ["surface_id", "status", "public_evidence_paths", "audit_notes", "required_narrowing"],
         "additionalProperties": false
       }
     },
@@ -172,21 +160,14 @@
           },
           "disposition": {
             "type": "string",
-            "enum": [
-              "rejected",
-              "narrowed"
-            ]
+            "enum": ["rejected", "narrowed"]
           },
           "reason": {
             "type": "string",
             "minLength": 1
           }
         },
-        "required": [
-          "lane_id",
-          "disposition",
-          "reason"
-        ],
+        "required": ["lane_id", "disposition", "reason"],
         "additionalProperties": false
       }
     },
@@ -213,11 +194,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "surface_id",
-          "summary",
-          "evidence_paths"
-        ],
+        "required": ["surface_id", "summary", "evidence_paths"],
         "additionalProperties": false
       }
     },
@@ -244,11 +221,7 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "surface_id",
-          "summary",
-          "evidence_paths"
-        ],
+        "required": ["surface_id", "summary", "evidence_paths"],
         "additionalProperties": false
       }
     }

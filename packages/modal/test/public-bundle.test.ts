@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { parseEvalRunRecord, type EvalRunRecord } from "@ultrafuzz/evals";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -703,22 +704,7 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
     ["matrix.json", `${JSON.stringify(matrix, null, 2)}\n`],
     [
       "runs.jsonl",
-      `${matrix
-        .map((row) =>
-          JSON.stringify({
-            schema_version: "ultrafuzz.eval.run.v1",
-            eval_run_id: TEST_EVAL_RUN_ID,
-            row_id: row.id,
-            target_id: row.target_id,
-            variant_id: row.variant_id,
-            trial_id: row.trial_id,
-            ultrafuzz_run_id: row.run_id,
-            status: "launched",
-            workflow_ids: [],
-            diagnostics: []
-          })
-        )
-        .join("\n")}\n`
+      `${matrix.map((row, index) => JSON.stringify(canonicalEvalRunRecord(root, row, index))).join("\n")}\n`
     ],
     ["run-summary.json", `${JSON.stringify({ succeeded: rowIds.length }, null, 2)}\n`],
     ["public-eval-diagnostics.json", `${JSON.stringify(diagnostics, null, 2)}\n`],
@@ -783,6 +769,44 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
     }
   }
   return sources;
+}
+
+function canonicalEvalRunRecord(
+  root: string,
+  row: ReturnType<typeof realisticMatrix>[number],
+  index: number
+): EvalRunRecord {
+  const runRoot = path.join(root, "runs", row.run_id);
+  return parseEvalRunRecord(
+    {
+      schema_version: "ultrafuzz.eval.run.v2",
+      eval_run_id: TEST_EVAL_RUN_ID,
+      row_id: row.id,
+      target_id: row.target_id,
+      variant_id: row.variant_id,
+      trial_id: row.trial_id,
+      ultrafuzz_run_id: row.run_id,
+      ultrafuzz_run_root: runRoot,
+      report_json_path: path.join(runRoot, "artifacts", "final-report", "report.json"),
+      status: "launched",
+      final_status: "succeeded",
+      candidate_commit: TEST_CANDIDATE,
+      workflow_ids: [`workflow-${index + 1}`],
+      launcher: {
+        status: "succeeded",
+        started_at: TEST_CREATED_AT,
+        finished_at: TEST_CREATED_AT
+      },
+      workflow: {
+        status: "succeeded",
+        terminal: true,
+        started_at: TEST_CREATED_AT,
+        finished_at: TEST_CREATED_AT
+      },
+      diagnostics: []
+    },
+    `public bundle fixture ${row.id}`
+  );
 }
 
 function realisticMatrix(rowIds: string[]) {

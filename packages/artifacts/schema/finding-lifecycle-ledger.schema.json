@@ -38,20 +38,10 @@
                 },
                 "relationship": {
                   "type": "string",
-                  "enum": [
-                    "primary",
-                    "duplicate",
-                    "family-variant"
-                  ]
+                  "enum": ["primary", "duplicate", "family-variant"]
                 }
               },
-              "required": [
-                "path",
-                "node_id",
-                "finding_id",
-                "title",
-                "relationship"
-              ],
+              "required": ["path", "node_id", "finding_id", "title", "relationship"],
               "additionalProperties": false
             }
           },
@@ -88,9 +78,7 @@
                   "maximum": 9007199254740991
                 }
               },
-              "required": [
-                "strategy"
-              ],
+              "required": ["strategy"],
               "additionalProperties": false
             }
           },
@@ -133,28 +121,15 @@
           },
           "canonical_severity": {
             "type": "string",
-            "enum": [
-              "High",
-              "Medium",
-              "Low"
-            ]
+            "enum": ["High", "Medium", "Low"]
           },
           "final_disposition": {
             "type": "string",
-            "enum": [
-              "promoted",
-              "non-production",
-              "dropped"
-            ]
+            "enum": ["promoted", "non-production", "dropped"]
           },
           "comparison_disposition": {
             "type": "string",
-            "enum": [
-              "promoted-again",
-              "rediscovered-but-demoted",
-              "not-reproduced",
-              "not-searched"
-            ]
+            "enum": ["promoted-again", "rediscovered-but-demoted", "not-reproduced", "not-searched"]
           },
           "stages": {
             "minItems": 1,
@@ -164,12 +139,7 @@
               "properties": {
                 "stage": {
                   "type": "string",
-                  "enum": [
-                    "raw",
-                    "deduped",
-                    "triaged",
-                    "severity-classified"
-                  ]
+                  "enum": ["raw", "deduped", "triaged", "severity-classified"]
                 },
                 "artifact_path": {
                   "type": "string",
@@ -180,28 +150,17 @@
                   "minLength": 1
                 }
               },
-              "required": [
-                "stage",
-                "artifact_path"
-              ],
+              "required": ["stage", "artifact_path"],
               "additionalProperties": false
             }
           }
         },
-        "required": [
-          "dedupe_key",
-          "source_artifacts",
-          "strategy_hits",
-          "stages"
-        ],
+        "required": ["dedupe_key", "source_artifacts", "strategy_hits", "stages"],
         "additionalProperties": false
       }
     }
   },
-  "required": [
-    "schema_version",
-    "records"
-  ],
+  "required": ["schema_version", "records"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:finding-lifecycle-ledger:1",
   "title": "Ultrafuzz finding lifecycle ledger"

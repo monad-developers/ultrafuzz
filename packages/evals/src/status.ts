@@ -220,7 +220,7 @@ function readMatrix(matrixPath: string): MatrixRow[] {
 
 function readRunRecords(recordsPath: string, expectedEvalRunId: string): RunRecords {
   const latestByRowId = new Map<string, EvalRunRecord>();
-  for (const record of readEvalRunRecords(recordsPath, { allowMissing: true })) {
+  for (const record of readEvalRunRecords(recordsPath)) {
     if (record.eval_run_id !== expectedEvalRunId) {
       throw new EvalError("EVAL_STATUS_RECORD_LINEAGE_INVALID", "eval status run record names another eval run", {
         expected_eval_run_id: expectedEvalRunId,

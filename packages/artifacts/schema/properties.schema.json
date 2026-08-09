@@ -25,11 +25,7 @@
           },
           "priority": {
             "type": "string",
-            "enum": [
-              "high",
-              "medium",
-              "low"
-            ]
+            "enum": ["high", "medium", "low"]
           },
           "reference_expectations": {
             "type": "array",
@@ -54,10 +50,7 @@
                   "minLength": 1
                 }
               },
-              "required": [
-                "source_node_id",
-                "source_property_id"
-              ],
+              "required": ["source_node_id", "source_property_id"],
               "additionalProperties": false
             }
           },
@@ -71,21 +64,12 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "id",
-          "description",
-          "category",
-          "priority",
-          "sources"
-        ],
+        "required": ["id", "description", "category", "priority", "sources"],
         "additionalProperties": false
       }
     }
   },
-  "required": [
-    "schema_version",
-    "properties"
-  ],
+  "required": ["schema_version", "properties"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:properties:2",
   "title": "Ultrafuzz canonical property catalog"

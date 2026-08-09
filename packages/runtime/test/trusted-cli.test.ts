@@ -5,11 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import {
-  artifactSchemaDirectory,
-  createRunLayout,
-  validateRegisteredJsonFileSync
-} from "@ultrafuzz/artifacts";
+import { artifactSchemaDirectory, createRunLayout, validateRegisteredJsonFileSync } from "@ultrafuzz/artifacts";
 
 import { composeSmithersCommandPath } from "../src/smithers.js";
 import {

@@ -235,10 +235,7 @@ function sha256File(filePath: string): string {
   }
 }
 
-function resolveTargetProvenance(
-  targetPath: string | undefined,
-  ref: string
-): { commit: string; dirty: boolean } {
+function resolveTargetProvenance(targetPath: string | undefined, ref: string): { commit: string; dirty: boolean } {
   if (targetPath !== undefined) {
     try {
       return {
@@ -246,17 +243,25 @@ function resolveTargetProvenance(
         dirty: git(targetPath, ["status", "--porcelain", "--untracked-files=no"]).length > 0
       };
     } catch {
-      throw new EvalError("EVAL_TARGET_PROVENANCE_UNAVAILABLE", `target Git provenance is unavailable for ${targetPath}`, {
-        target_path: targetPath
-      });
+      throw new EvalError(
+        "EVAL_TARGET_PROVENANCE_UNAVAILABLE",
+        `target Git provenance is unavailable for ${targetPath}`,
+        {
+          target_path: targetPath
+        }
+      );
     }
   }
   return /^[0-9a-f]{40}$/iu.test(ref)
     ? { commit: ref.toLowerCase(), dirty: false }
     : (() => {
-        throw new EvalError("EVAL_TARGET_PROVENANCE_UNAVAILABLE", "target requires a local Git checkout or full commit ref", {
-          ref
-        });
+        throw new EvalError(
+          "EVAL_TARGET_PROVENANCE_UNAVAILABLE",
+          "target requires a local Git checkout or full commit ref",
+          {
+            ref
+          }
+        );
       })();
 }
 

@@ -382,6 +382,31 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
+  it("does not promote workspace-mirrored output into the canonical cloud artifact root", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-worker-no-mirror-promotion-"));
+    try {
+      const canonical = path.join(root, "artifacts", "attempt-one");
+      const mirror = path.join(root, "workspace", "artifacts", "attempt-one");
+      const destination = path.join(root, "published");
+      const marker = path.join(root, "attempt-one.json");
+      const mirroredFinding = path.join(mirror, "finding.json");
+      fs.mkdirSync(canonical, { recursive: true });
+      fs.mkdirSync(mirror, { recursive: true });
+      fs.writeFileSync(mirroredFinding, '{"workspace_only":true}\n');
+      const mirroredBytes = fs.readFileSync(mirroredFinding);
+      fs.writeFileSync(marker, verificationMarkerFixture(sha256Hex(mirroredBytes.toString("utf8"))));
+
+      expect(() => copyVerifiedPublishedEvidenceTree(canonical, destination, marker, "attempt-one")).toThrow(
+        /verified publication is unavailable/u
+      );
+      expect(fs.existsSync(path.join(canonical, "finding.json"))).toBe(false);
+      expect(fs.existsSync(path.join(destination, "finding.json"))).toBe(false);
+      expect(fs.readFileSync(mirroredFinding)).toEqual(mirroredBytes);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("stages the current cloud attempt verification marker for controller publication", () => {
     const fixture = createProjectFixture();
     const destination = path.join(path.dirname(fixture.root), "verification-staging");

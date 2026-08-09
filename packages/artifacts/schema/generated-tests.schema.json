@@ -106,9 +106,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "path"
-        ],
+        "required": ["path"],
         "additionalProperties": false
       }
     },
@@ -174,12 +172,7 @@
       "additionalProperties": false
     }
   },
-  "required": [
-    "schema_version",
-    "run_id",
-    "node_id",
-    "generated_tests"
-  ],
+  "required": ["schema_version", "run_id", "node_id", "generated_tests"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:generated-tests:2",
   "title": "Ultrafuzz generated tests manifest"

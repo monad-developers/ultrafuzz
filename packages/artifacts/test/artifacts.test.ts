@@ -605,7 +605,10 @@ test("event indexes encode long IDs in a collision-free hash namespace", () => {
     .split("\n")
     .map((line) => JSON.parse(line) as { run_id: string });
   assert.equal(maximumRecords.length, 5);
-  assert.equal(maximumRecords.every((record) => record.run_id === maximumRunId), true);
+  assert.equal(
+    maximumRecords.every((record) => record.run_id === maximumRunId),
+    true
+  );
   const facadeAfterAppend = readEventQueryFacade(layout) as {
     filters?: unknown;
     long_filters?: unknown;

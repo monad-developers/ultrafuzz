@@ -121,12 +121,7 @@
           }
         }
       },
-      "required": [
-        "commands",
-        "passed",
-        "compiler_errors",
-        "notes"
-      ],
+      "required": ["commands", "passed", "compiler_errors", "notes"],
       "additionalProperties": false
     },
     "lane_readiness_notes": {

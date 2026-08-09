@@ -175,16 +175,10 @@ const fixtures = {
   },
   "config-redactions-path-uniqueness": {
     positive: {
-      entries: [
-        { path: ["models", "profiles", "a", "model"] },
-        { path: ["models", "profiles", "b", "model"] }
-      ]
+      entries: [{ path: ["models", "profiles", "a", "model"] }, { path: ["models", "profiles", "b", "model"] }]
     },
     negative: {
-      entries: [
-        { path: ["models", "profiles", "a", "model"] },
-        { path: ["models", "profiles", "a", "model"] }
-      ]
+      entries: [{ path: ["models", "profiles", "a", "model"] }, { path: ["models", "profiles", "a", "model"] }]
     }
   },
   "dependency-id-uniqueness": {
@@ -679,11 +673,11 @@ test("every contextual registration executes real positive and negative checks",
           }
         }
       },
-  "campaign-summary-count-coupling": {
+      "campaign-summary-count-coupling": {
         positive: { failure_counts: { pre_deduplication: 1, post_deduplication: 1 } },
         negative: { failure_counts: { pre_deduplication: 2, post_deduplication: 1 } },
         context: { artifactSet: { campaigns: [{ failures: [{}] }], findings: [{}] } }
-  },
+      },
       "generated-test-path-exists": {
         positive: { generated_tests: [{ path: "generated-tests/test.sol" }] },
         negative: { generated_tests: [{ path: "generated-tests/missing.sol" }] },
@@ -706,7 +700,7 @@ test("every contextual registration executes real positive and negative checks",
           artifactSet: { propertyLenses: [{ sourceNodeId: "lens", document: { properties: [{ id: "a" }] } }] }
         }
       },
-  "report-property-provenance-join": {
+      "report-property-provenance-join": {
         positive: {
           issues: [{ id: "finding" }],
           property_provenance: [
@@ -718,7 +712,7 @@ test("every contextual registration executes real positive and negative checks",
               test_paths: ["test"]
             }
           ]
-  },
+        },
         negative: {
           issues: [{ id: "finding" }],
           property_provenance: [
@@ -812,7 +806,7 @@ test("every contextual registration executes real positive and negative checks",
           }
         }
       },
-  "smithers-task-planned-graph-dependency-join": {
+      "smithers-task-planned-graph-dependency-join": {
         positive: {
           tasks: [
             {
@@ -822,7 +816,7 @@ test("every contextual registration executes real positive and negative checks",
               metadata: { dependencies: { concreteNodeIds: ["node-b"] } }
             }
           ]
-  },
+        },
         negative: {
           tasks: [
             {

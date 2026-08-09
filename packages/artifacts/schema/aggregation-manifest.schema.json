@@ -314,13 +314,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "strategy",
-          "node_id",
-          "source_manifest_path",
-          "source_relative_path",
-          "reason"
-        ],
+        "required": ["strategy", "node_id", "source_manifest_path", "source_relative_path", "reason"],
         "additionalProperties": false
       }
     }

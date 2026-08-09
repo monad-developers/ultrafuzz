@@ -200,7 +200,7 @@ export async function findModalResumeWorkspace(workRoot: string): Promise<ModalR
   }
   // A missing journal is the earliest form of the same window: `eval.json` is written before the first
   // append, so a kill in between leaves no file at all. That is a state to classify, not to crash on.
-  const records = readEvalRunRecords(path.join(evalRoot, evalRunId, "runs.jsonl"), { allowMissing: true });
+  const records = readEvalRunRecords(path.join(evalRoot, evalRunId, "runs.jsonl"));
   const productRunIds = new Set(
     records
       .map((record) => record.ultrafuzz_run_id)

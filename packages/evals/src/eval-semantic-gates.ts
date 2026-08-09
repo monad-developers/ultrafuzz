@@ -60,7 +60,8 @@ export function assertEvalSemanticGateRegistry(): void {
   for (const entry of evalSchemaRegistry()) {
     for (const gate of entry.semanticGates) {
       const existing = metadataGates.get(gate);
-      if (existing !== undefined) throw new Error(`eval semantic gate ${gate} is registered by both ${existing} and ${entry.id}`);
+      if (existing !== undefined)
+        throw new Error(`eval semantic gate ${gate} is registered by both ${existing} and ${entry.id}`);
       metadataGates.set(gate, entry.id);
     }
   }
@@ -121,7 +122,9 @@ function judgeDecisionIssues(decision: FindingJudgeResult, path: string, gate: s
     issues.push(issue(gate, `${path}.panel.vote_split`, "vote split totals must equal panel total"));
   }
   if (panel.aggregate_decision.votes < panel.quorum || panel.aggregate_decision.votes > panel.total) {
-    issues.push(issue(gate, `${path}.panel.aggregate_decision.votes`, "aggregate votes must satisfy quorum and panel bounds"));
+    issues.push(
+      issue(gate, `${path}.panel.aggregate_decision.votes`, "aggregate votes must satisfy quorum and panel bounds")
+    );
   }
   return issues;
 }
@@ -146,14 +149,31 @@ function runManifestSuiteJoins(value: unknown): EvalSemanticGateIssue[] {
   const manifest = value as EvalRunManifest;
   const suite = manifest.suite;
   const issues: EvalSemanticGateIssue[] = [];
-  issues.push(...uniqueFieldIssues(suite.targets, (target) => target.id, "$.suite.targets", "target ID", "eval-run-manifest-suite-joins"));
-  issues.push(...uniqueFieldIssues(suite.variants, (variant) => variant.id, "$.suite.variants", "variant ID", "eval-run-manifest-suite-joins"));
+  issues.push(
+    ...uniqueFieldIssues(
+      suite.targets,
+      (target) => target.id,
+      "$.suite.targets",
+      "target ID",
+      "eval-run-manifest-suite-joins"
+    )
+  );
+  issues.push(
+    ...uniqueFieldIssues(
+      suite.variants,
+      (variant) => variant.id,
+      "$.suite.variants",
+      "variant ID",
+      "eval-run-manifest-suite-joins"
+    )
+  );
   const profiles = new Set(Object.keys(suite.model_profiles));
   for (const [path, profile] of [
     ["$.suite.run.runner_model_profile", suite.run.runner_model_profile],
     ["$.suite.run.judge_model_profile", suite.run.judge_model_profile]
   ] as const) {
-    if (!profiles.has(profile)) issues.push(issue("eval-run-manifest-suite-joins", path, `unknown model profile ${JSON.stringify(profile)}`));
+    if (!profiles.has(profile))
+      issues.push(issue("eval-run-manifest-suite-joins", path, `unknown model profile ${JSON.stringify(profile)}`));
   }
   suite.variants.forEach((variant, index) => {
     for (const [field, profile] of [
@@ -161,17 +181,38 @@ function runManifestSuiteJoins(value: unknown): EvalSemanticGateIssue[] {
       ["judge_model_profile", variant.judge_model_profile]
     ] as const) {
       if (profile !== undefined && !profiles.has(profile)) {
-        issues.push(issue("eval-run-manifest-suite-joins", `$.suite.variants[${index}].${field}`, `unknown model profile ${JSON.stringify(profile)}`));
+        issues.push(
+          issue(
+            "eval-run-manifest-suite-joins",
+            `$.suite.variants[${index}].${field}`,
+            `unknown model profile ${JSON.stringify(profile)}`
+          )
+        );
       }
     }
     for (const [profileIndex, profile] of (variant.model_profiles ?? []).entries()) {
       if (!profiles.has(profile)) {
-        issues.push(issue("eval-run-manifest-suite-joins", `$.suite.variants[${index}].model_profiles[${profileIndex}]`, `unknown model profile ${JSON.stringify(profile)}`));
+        issues.push(
+          issue(
+            "eval-run-manifest-suite-joins",
+            `$.suite.variants[${index}].model_profiles[${profileIndex}]`,
+            `unknown model profile ${JSON.stringify(profile)}`
+          )
+        );
       }
     }
   });
-  if (suite.judge_panel !== undefined && (suite.judge_panel.quorum > suite.judge_panel.total || suite.judge_panel.quorum * 2 <= suite.judge_panel.total)) {
-    issues.push(issue("eval-run-manifest-suite-joins", "$.suite.judge_panel.quorum", "judge quorum must be a strict majority no greater than total"));
+  if (
+    suite.judge_panel !== undefined &&
+    (suite.judge_panel.quorum > suite.judge_panel.total || suite.judge_panel.quorum * 2 <= suite.judge_panel.total)
+  ) {
+    issues.push(
+      issue(
+        "eval-run-manifest-suite-joins",
+        "$.suite.judge_panel.quorum",
+        "judge quorum must be a strict majority no greater than total"
+      )
+    );
   }
   return issues;
 }
@@ -181,12 +222,25 @@ function runRecordLifecycleCoupling(value: unknown): EvalSemanticGateIssue[] {
   const issues: EvalSemanticGateIssue[] = [];
   const terminalStatuses = new Set(["succeeded", "failed", "timed-out", "canceled"]);
   if (record.workflow !== undefined && record.workflow.terminal !== terminalStatuses.has(record.workflow.status)) {
-    issues.push(issue("eval-run-record-lifecycle-coupling", "$.workflow.terminal", "workflow terminal flag must match workflow status"));
+    issues.push(
+      issue(
+        "eval-run-record-lifecycle-coupling",
+        "$.workflow.terminal",
+        "workflow terminal flag must match workflow status"
+      )
+    );
   }
   if (record.recovery_equivalence !== undefined && record.workflow?.terminal !== true) {
-    issues.push(issue("eval-run-record-lifecycle-coupling", "$.recovery_equivalence", "recovery equivalence requires a terminal workflow observation"));
+    issues.push(
+      issue(
+        "eval-run-record-lifecycle-coupling",
+        "$.recovery_equivalence",
+        "recovery equivalence requires a terminal workflow observation"
+      )
+    );
   }
-  if (record.expansion !== undefined) issues.push(...expansionIssues(record.expansion, "$.expansion", "eval-run-record-lifecycle-coupling"));
+  if (record.expansion !== undefined)
+    issues.push(...expansionIssues(record.expansion, "$.expansion", "eval-run-record-lifecycle-coupling"));
   return issues;
 }
 
@@ -197,21 +251,47 @@ function runSummaryCountCoupling(value: unknown): EvalSemanticGateIssue[] {
   const incomplete = summary.records.filter(
     (record) =>
       record.status === "launched" &&
-      (record.workflow?.terminal !== true || record.workflow.status === "timed-out" || record.workflow.status === "canceled")
+      (record.workflow?.terminal !== true ||
+        record.workflow.status === "timed-out" ||
+        record.workflow.status === "canceled")
   ).length;
   return [
-    ...(summary.launched === launched ? [] : [issue("eval-run-summary-count-coupling", "$.launched", "launched must equal launched record count")]),
-    ...(summary.failed === failed ? [] : [issue("eval-run-summary-count-coupling", "$.failed", "failed must equal failed record count")]),
-    ...(summary.incomplete === incomplete ? [] : [issue("eval-run-summary-count-coupling", "$.incomplete", "incomplete must equal incomplete launched record count")])
+    ...(summary.launched === launched
+      ? []
+      : [issue("eval-run-summary-count-coupling", "$.launched", "launched must equal launched record count")]),
+    ...(summary.failed === failed
+      ? []
+      : [issue("eval-run-summary-count-coupling", "$.failed", "failed must equal failed record count")]),
+    ...(summary.incomplete === incomplete
+      ? []
+      : [
+          issue(
+            "eval-run-summary-count-coupling",
+            "$.incomplete",
+            "incomplete must equal incomplete launched record count"
+          )
+        ])
   ];
 }
 
 function runSummaryRecordLineage(value: unknown): EvalSemanticGateIssue[] {
   const summary = value as EvalRunSummary;
-  const issues = uniqueFieldIssues(summary.records, (record) => record.row_id, "$.records", "row ID", "eval-run-summary-record-lineage");
+  const issues = uniqueFieldIssues(
+    summary.records,
+    (record) => record.row_id,
+    "$.records",
+    "row ID",
+    "eval-run-summary-record-lineage"
+  );
   summary.records.forEach((record, index) => {
     if (record.eval_run_id !== summary.eval_run_id) {
-      issues.push(issue("eval-run-summary-record-lineage", `$.records[${index}].eval_run_id`, "record eval_run_id must equal summary eval_run_id"));
+      issues.push(
+        issue(
+          "eval-run-summary-record-lineage",
+          `$.records[${index}].eval_run_id`,
+          "record eval_run_id must equal summary eval_run_id"
+        )
+      );
     }
   });
   return issues;
@@ -222,17 +302,33 @@ function scoreSummaryCountCoupling(value: unknown): EvalSemanticGateIssue[] {
   const issues: EvalSemanticGateIssue[] = [];
   for (const row of summary.rows) {
     if (row.true_positives + row.missed !== row.ground_truth_bug_count) {
-      issues.push(issue("eval-score-summary-count-coupling", `$.rows[${JSON.stringify(row.row_id)}].ground_truth_bug_count`, "ground-truth count must equal true positives plus missed"));
+      issues.push(
+        issue(
+          "eval-score-summary-count-coupling",
+          `$.rows[${JSON.stringify(row.row_id)}].ground_truth_bug_count`,
+          "ground-truth count must equal true positives plus missed"
+        )
+      );
     }
     const classified = row.true_positives + row.false_positives + row.duplicate_count + row.human_review_queue_count;
     if (classified !== row.finding_count) {
-      issues.push(issue("eval-score-summary-count-coupling", `$.rows[${JSON.stringify(row.row_id)}].finding_count`, "finding count must equal classified finding counts"));
+      issues.push(
+        issue(
+          "eval-score-summary-count-coupling",
+          `$.rows[${JSON.stringify(row.row_id)}].finding_count`,
+          "finding count must equal classified finding counts"
+        )
+      );
     }
-    issues.push(...expansionIssues(row.expansion, `$.rows[${JSON.stringify(row.row_id)}].expansion`, "eval-score-summary-count-coupling"));
+    issues.push(
+      ...expansionIssues(
+        row.expansion,
+        `$.rows[${JSON.stringify(row.row_id)}].expansion`,
+        "eval-score-summary-count-coupling"
+      )
+    );
   }
-  const nonComparableRows = summary.rows.filter(
-    (row) => row.recovery_equivalence.classification === "non-comparable"
-  );
+  const nonComparableRows = summary.rows.filter((row) => row.recovery_equivalence.classification === "non-comparable");
   const includedRows =
     summary.recovery_equivalence.aggregate_non_comparable === "include"
       ? summary.rows
@@ -240,14 +336,32 @@ function scoreSummaryCountCoupling(value: unknown): EvalSemanticGateIssue[] {
   const counts = countRowsByVariant(includedRows);
   for (const [index, variant] of summary.variants.entries()) {
     if (variant.row_count !== (counts.get(variant.variant_id) ?? 0)) {
-      issues.push(issue("eval-score-summary-count-coupling", `$.variants[${index}].row_count`, "variant row_count must equal its included summary row count"));
+      issues.push(
+        issue(
+          "eval-score-summary-count-coupling",
+          `$.variants[${index}].row_count`,
+          "variant row_count must equal its included summary row count"
+        )
+      );
     }
   }
   if (summary.recovery_equivalence.included_row_count !== includedRows.length) {
-    issues.push(issue("eval-score-summary-count-coupling", "$.recovery_equivalence.included_row_count", "included row count must match the aggregation policy"));
+    issues.push(
+      issue(
+        "eval-score-summary-count-coupling",
+        "$.recovery_equivalence.included_row_count",
+        "included row count must match the aggregation policy"
+      )
+    );
   }
   if (summary.recovery_equivalence.excluded_row_count !== summary.rows.length - includedRows.length) {
-    issues.push(issue("eval-score-summary-count-coupling", "$.recovery_equivalence.excluded_row_count", "excluded row count must match the aggregation policy"));
+    issues.push(
+      issue(
+        "eval-score-summary-count-coupling",
+        "$.recovery_equivalence.excluded_row_count",
+        "excluded row count must match the aggregation policy"
+      )
+    );
   }
   for (const classification of [
     "clean",
@@ -286,7 +400,15 @@ function scoreSummaryCountCoupling(value: unknown): EvalSemanticGateIssue[] {
 function scoreSummaryLineage(value: unknown): EvalSemanticGateIssue[] {
   const summary = value as EvalScoreSummary;
   const issues = uniqueFieldIssues(summary.rows, (row) => row.row_id, "$.rows", "row ID", "eval-score-summary-lineage");
-  issues.push(...uniqueFieldIssues(summary.variants, (variant) => variant.variant_id, "$.variants", "variant ID", "eval-score-summary-lineage"));
+  issues.push(
+    ...uniqueFieldIssues(
+      summary.variants,
+      (variant) => variant.variant_id,
+      "$.variants",
+      "variant ID",
+      "eval-score-summary-lineage"
+    )
+  );
   issues.push(
     ...uniqueFieldIssues(
       summary.recovery_equivalence.non_comparable_variants,
@@ -303,12 +425,24 @@ function scoreSummaryLineage(value: unknown): EvalSemanticGateIssue[] {
   const variants = new Set(summary.variants.map((variant) => variant.variant_id));
   includedRows.forEach((row, index) => {
     if (!variants.has(row.variant_id)) {
-      issues.push(issue("eval-score-summary-lineage", `$.rows[${index}].variant_id`, "included row variant must exist in variants"));
+      issues.push(
+        issue(
+          "eval-score-summary-lineage",
+          `$.rows[${index}].variant_id`,
+          "included row variant must exist in variants"
+        )
+      );
     }
   });
   for (const [index, variant] of summary.variants.entries()) {
     if (!includedRows.some((row) => row.variant_id === variant.variant_id)) {
-      issues.push(issue("eval-score-summary-lineage", `$.variants[${index}].variant_id`, "variant must reference at least one included row"));
+      issues.push(
+        issue(
+          "eval-score-summary-lineage",
+          `$.variants[${index}].variant_id`,
+          "variant must reference at least one included row"
+        )
+      );
     }
   }
   const separateRows =
@@ -352,10 +486,17 @@ function countRowsByVariant(rows: readonly EvalScoreSummary["rows"][number][]): 
 function expansionIssues(expansion: EvalRunExpansion, path: string, gate: string): EvalSemanticGateIssue[] {
   const statusCount = Object.values(expansion.status_counts).reduce((sum, count) => sum + count, 0);
   const issues: EvalSemanticGateIssue[] = [];
-  if (statusCount !== expansion.node_count) issues.push(issue(gate, `${path}.status_counts`, "status counts must equal node_count"));
-  if (expansion.failed_node_count < expansion.failed_node_ids.length) issues.push(issue(gate, `${path}.failed_node_ids`, "failed node IDs cannot exceed failed_node_count"));
-  if (expansion.timed_out_node_count < expansion.timed_out_node_ids.length) issues.push(issue(gate, `${path}.timed_out_node_ids`, "timed-out node IDs cannot exceed timed_out_node_count"));
-  if (expansion.dynamic_nodes !== null && expansion.dynamic_node_count !== null && expansion.dynamic_node_count < expansion.dynamic_nodes.length) {
+  if (statusCount !== expansion.node_count)
+    issues.push(issue(gate, `${path}.status_counts`, "status counts must equal node_count"));
+  if (expansion.failed_node_count < expansion.failed_node_ids.length)
+    issues.push(issue(gate, `${path}.failed_node_ids`, "failed node IDs cannot exceed failed_node_count"));
+  if (expansion.timed_out_node_count < expansion.timed_out_node_ids.length)
+    issues.push(issue(gate, `${path}.timed_out_node_ids`, "timed-out node IDs cannot exceed timed_out_node_count"));
+  if (
+    expansion.dynamic_nodes !== null &&
+    expansion.dynamic_node_count !== null &&
+    expansion.dynamic_node_count < expansion.dynamic_nodes.length
+  ) {
     issues.push(issue(gate, `${path}.dynamic_nodes`, "dynamic node rows cannot exceed dynamic_node_count"));
   }
   return issues;

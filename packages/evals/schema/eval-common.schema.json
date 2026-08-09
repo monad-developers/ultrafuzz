@@ -343,10 +343,7 @@
         "revision": { "$ref": "#/$defs/nonEmptyString" },
         "fingerprint": { "$ref": "#/$defs/sha256" },
         "max_parallel_targets": {
-          "oneOf": [
-            { "$ref": "#/$defs/positiveInteger" },
-            { "type": "null" }
-          ]
+          "oneOf": [{ "$ref": "#/$defs/positiveInteger" }, { "type": "null" }]
         },
         "max_parallel_runs": { "$ref": "#/$defs/positiveInteger" },
         "node_telemetry": { "type": "boolean" },
@@ -454,15 +451,7 @@
     "evalRunManifest": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "schema_version",
-        "eval_run_id",
-        "suite_path",
-        "project_root",
-        "created_at",
-        "suite",
-        "provenance"
-      ],
+      "required": ["schema_version", "eval_run_id", "suite_path", "project_root", "created_at", "suite", "provenance"],
       "properties": {
         "schema_version": { "const": "ultrafuzz.eval.run.v2" },
         "eval_run_id": { "$ref": "#/$defs/nonEmptyString" },
@@ -538,16 +527,10 @@
         },
         "terminal": { "type": "boolean" },
         "started_at": {
-          "oneOf": [
-            { "$ref": "#/$defs/timestamp" },
-            { "type": "null" }
-          ]
+          "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }]
         },
         "finished_at": {
-          "oneOf": [
-            { "$ref": "#/$defs/timestamp" },
-            { "type": "null" }
-          ]
+          "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }]
         }
       }
     },
@@ -595,10 +578,7 @@
       "properties": {
         "node_id": { "$ref": "#/$defs/nonEmptyString" },
         "logical_node_id": {
-          "oneOf": [
-            { "$ref": "#/$defs/nonEmptyString" },
-            { "type": "null" }
-          ]
+          "oneOf": [{ "$ref": "#/$defs/nonEmptyString" }, { "type": "null" }]
         },
         "status": {
           "enum": [
@@ -615,20 +595,14 @@
           ]
         },
         "source_node_id": {
-          "oneOf": [
-            { "$ref": "#/$defs/nonEmptyString" },
-            { "type": "null" }
-          ]
+          "oneOf": [{ "$ref": "#/$defs/nonEmptyString" }, { "type": "null" }]
         },
         "retry_count": { "$ref": "#/$defs/nonNegativeInteger" },
         "timed_out": { "type": "boolean" }
       }
     },
     "nullableNonNegativeInteger": {
-      "oneOf": [
-        { "$ref": "#/$defs/nonNegativeInteger" },
-        { "type": "null" }
-      ]
+      "oneOf": [{ "$ref": "#/$defs/nonNegativeInteger" }, { "type": "null" }]
     },
     "runExpansion": {
       "type": "object",
@@ -737,10 +711,7 @@
           "enum": ["clean", "infrastructure-recovered", "model-reexecuted-within-policy", "non-comparable"]
         },
         "reason": {
-          "oneOf": [
-            { "$ref": "#/$defs/nonEmptyString" },
-            { "type": "null" }
-          ]
+          "oneOf": [{ "$ref": "#/$defs/nonEmptyString" }, { "type": "null" }]
         }
       },
       "allOf": [
@@ -968,14 +939,7 @@
     "evalFindingScore": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "schema_version",
-        "row_id",
-        "finding_id",
-        "report_path",
-        "deterministic_match",
-        "judge_result"
-      ],
+      "required": ["schema_version", "row_id", "finding_id", "report_path", "deterministic_match", "judge_result"],
       "properties": {
         "schema_version": { "const": "ultrafuzz.eval.finding-score.v1" },
         "row_id": { "$ref": "#/$defs/nonEmptyString" },
@@ -1069,21 +1033,14 @@
           "properties": {
             "status": { "const": "partial" },
             "reason": {
-              "enum": [
-                "node-attempt-timestamps-final-attempt-only",
-                "usage-incomplete",
-                "pricing-incomplete"
-              ]
+              "enum": ["node-attempt-timestamps-final-attempt-only", "usage-incomplete", "pricing-incomplete"]
             }
           }
         }
       ]
     },
     "nullableNonNegativeNumber": {
-      "oneOf": [
-        { "$ref": "#/$defs/nonNegativeNumber" },
-        { "type": "null" }
-      ]
+      "oneOf": [{ "$ref": "#/$defs/nonNegativeNumber" }, { "type": "null" }]
     },
     "efficiency": {
       "type": "object",
@@ -1157,10 +1114,7 @@
         "f1_score": { "$ref": "#/$defs/unitMetric" },
         "full_match_rate": { "$ref": "#/$defs/unitMetric" },
         "severity_accuracy": {
-          "oneOf": [
-            { "$ref": "#/$defs/unitMetric" },
-            { "type": "null" }
-          ]
+          "oneOf": [{ "$ref": "#/$defs/unitMetric" }, { "type": "null" }]
         },
         "true_positive_accuracy": { "$ref": "#/$defs/unitMetric" },
         "duplicate_rate": { "$ref": "#/$defs/unitMetric" },

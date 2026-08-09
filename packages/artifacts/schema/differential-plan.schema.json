@@ -68,11 +68,7 @@
           },
           "priority": {
             "type": "string",
-            "enum": [
-              "high",
-              "medium",
-              "low"
-            ]
+            "enum": ["high", "medium", "low"]
           }
         },
         "required": [
@@ -110,10 +106,7 @@
           "uniqueItems": true
         }
       },
-      "required": [
-        "allowed_structures",
-        "forbidden_sources"
-      ],
+      "required": ["allowed_structures", "forbidden_sources"],
       "additionalProperties": false
     },
     "deployment_assumptions": {
@@ -176,27 +169,15 @@
           },
           "oracle_type": {
             "type": "string",
-            "enum": [
-              "independent_reference",
-              "metamorphic",
-              "self_consistency",
-              "sanity_probe"
-            ]
+            "enum": ["independent_reference", "metamorphic", "self_consistency", "sanity_probe"]
           },
           "calibration_bucket": {
             "type": "string",
-            "enum": [
-              "red_seeking_adversarial",
-              "green_safe_sanity"
-            ]
+            "enum": ["red_seeking_adversarial", "green_safe_sanity"]
           },
           "red_seeking_priority": {
             "type": "string",
-            "enum": [
-              "high",
-              "medium",
-              "low"
-            ]
+            "enum": ["high", "medium", "low"]
           }
         },
         "required": [
@@ -228,10 +209,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "lane_id",
-          "reason"
-        ],
+        "required": ["lane_id", "reason"],
         "additionalProperties": false
       }
     },
@@ -249,10 +227,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "surface_id",
-          "reason"
-        ],
+        "required": ["surface_id", "reason"],
         "additionalProperties": false
       }
     }

@@ -46,11 +46,7 @@
           },
           "priority": {
             "type": "string",
-            "enum": [
-              "high",
-              "medium",
-              "low"
-            ]
+            "enum": ["high", "medium", "low"]
           },
           "enumerator_ids": {
             "minItems": 1,
@@ -86,10 +82,7 @@
       }
     }
   },
-  "required": [
-    "schema_version",
-    "strategies"
-  ],
+  "required": ["schema_version", "strategies"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:selected-strategies:1",
   "title": "Ultrafuzz selected dynamic strategies"

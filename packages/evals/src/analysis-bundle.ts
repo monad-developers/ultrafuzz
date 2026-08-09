@@ -96,10 +96,7 @@ function assertAnalysisLineage(
   }
   for (const record of records) {
     if (record.eval_run_id !== evalRunId) {
-      throw new EvalError(
-        "EVAL_ANALYSIS_LINEAGE_INVALID",
-        `eval run record ${record.row_id} names another eval run`
-      );
+      throw new EvalError("EVAL_ANALYSIS_LINEAGE_INVALID", `eval run record ${record.row_id} names another eval run`);
     }
   }
   const recordIds = new Set(latestRecordsByRow(records).map((record) => record.row_id));
@@ -136,9 +133,7 @@ function terminalStatus(
   const startedAt = minTimestamp(
     latest.map((record) => workflowObservations.get(record)?.started_at ?? record.launcher.started_at ?? undefined)
   );
-  const observedFinishedAt = maxTimestamp(
-    latest.map((record) => workflowObservations.get(record)?.finished_at)
-  );
+  const observedFinishedAt = maxTimestamp(latest.map((record) => workflowObservations.get(record)?.finished_at));
   const finishedAt =
     startedAt !== undefined && observedFinishedAt !== undefined && observedFinishedAt < startedAt
       ? undefined
@@ -205,10 +200,7 @@ function evaluationMetrics(rows: EvalRowMetricsSource[]): AnalysisEvaluationMetr
   };
 }
 
-function accountingSummary(
-  records: EvalRunRecordSource[],
-  rows: EvalRowMetricsSource[]
-): AnalysisAccountingSummary {
+function accountingSummary(records: EvalRunRecordSource[], rows: EvalRowMetricsSource[]): AnalysisAccountingSummary {
   const summaries = uniqueRunRoots(records).map(readAccountingSummary);
   if (summaries.length !== records.length) {
     throw new EvalError(
@@ -218,10 +210,7 @@ function accountingSummary(
   }
   const runtimes = rows.map((row) => {
     if (row.runtime_seconds === null) {
-      throw new EvalError(
-        "EVAL_ANALYSIS_ACCOUNTING_INCOMPLETE",
-        `eval row ${row.row_id} has no authoritative runtime`
-      );
+      throw new EvalError("EVAL_ANALYSIS_ACCOUNTING_INCOMPLETE", `eval row ${row.row_id} has no authoritative runtime`);
     }
     return row.runtime_seconds;
   });

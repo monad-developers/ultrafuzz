@@ -270,7 +270,9 @@ export function assertConfigRedactionsDocument(value: unknown): ConfigRedactions
   for (const entry of document.entries) {
     const key = entry.path.join(".");
     if (entry.key !== key) {
-      throw new Error(`configuration redaction key ${JSON.stringify(entry.key)} does not match path ${JSON.stringify(key)}`);
+      throw new Error(
+        `configuration redaction key ${JSON.stringify(entry.key)} does not match path ${JSON.stringify(key)}`
+      );
     }
     if (paths.has(key)) throw new Error(`configuration redaction manifest repeats path ${JSON.stringify(key)}`);
     paths.add(key);

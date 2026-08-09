@@ -21,12 +21,7 @@
           },
           "status": {
             "type": "string",
-            "enum": [
-              "complete",
-              "failed",
-              "timed-out",
-              "blocked"
-            ]
+            "enum": ["complete", "failed", "timed-out", "blocked"]
           },
           "diagnostics": {
             "type": "array",
@@ -75,11 +70,7 @@
                 },
                 "priority": {
                   "type": "string",
-                  "enum": [
-                    "high",
-                    "medium",
-                    "low"
-                  ]
+                  "enum": ["high", "medium", "low"]
                 }
               },
               "required": [
@@ -109,10 +100,7 @@
                     "minLength": 1
                   }
                 },
-                "required": [
-                  "kind",
-                  "value"
-                ],
+                "required": ["kind", "value"],
                 "additionalProperties": false
               },
               {
@@ -126,30 +114,18 @@
                     "$ref": "#/$defs/__schema0"
                   }
                 },
-                "required": [
-                  "kind",
-                  "value"
-                ],
+                "required": ["kind", "value"],
                 "additionalProperties": false
               }
             ]
           }
         },
-        "required": [
-          "enumerator_id",
-          "agent_label",
-          "status",
-          "diagnostics",
-          "recommendations"
-        ],
+        "required": ["enumerator_id", "agent_label", "status", "diagnostics", "recommendations"],
         "additionalProperties": false
       }
     }
   },
-  "required": [
-    "schema_version",
-    "enumerators"
-  ],
+  "required": ["schema_version", "enumerators"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:dynamic-enumerator-outputs:1",
   "title": "Ultrafuzz dynamic enumerator outputs",

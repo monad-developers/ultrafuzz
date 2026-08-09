@@ -990,11 +990,7 @@ describe("deterministic scorer math", () => {
     const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
       report_json_path: string;
     };
-    fs.writeFileSync(
-      record.report_json_path,
-      JSON.stringify(canonicalReport([])),
-      "utf8"
-    );
+    fs.writeFileSync(record.report_json_path, JSON.stringify(canonicalReport([])), "utf8");
 
     const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
 

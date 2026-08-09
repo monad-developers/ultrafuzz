@@ -26,11 +26,7 @@
           },
           "priority": {
             "type": "string",
-            "enum": [
-              "high",
-              "medium",
-              "low"
-            ]
+            "enum": ["high", "medium", "low"]
           },
           "reference_expectations": {
             "type": "array",
@@ -41,20 +37,12 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "id",
-          "description",
-          "category",
-          "priority"
-        ],
+        "required": ["id", "description", "category", "priority"],
         "additionalProperties": false
       }
     }
   },
-  "required": [
-    "schema_version",
-    "properties"
-  ],
+  "required": ["schema_version", "properties"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:property-lens:2",
   "title": "Ultrafuzz property lens catalog"

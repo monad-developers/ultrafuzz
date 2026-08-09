@@ -13,11 +13,7 @@
     },
     "status": {
       "type": "string",
-      "enum": [
-        "selected",
-        "no-actionable-strategies",
-        "blocked"
-      ]
+      "enum": ["selected", "no-actionable-strategies", "blocked"]
     },
     "selected_strategy_count": {
       "type": "integer",
@@ -47,10 +43,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "strategy_id",
-          "reason"
-        ],
+        "required": ["strategy_id", "reason"],
         "additionalProperties": false
       }
     },
@@ -68,10 +61,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "path",
-          "relevance"
-        ],
+        "required": ["path", "relevance"],
         "additionalProperties": false
       }
     },

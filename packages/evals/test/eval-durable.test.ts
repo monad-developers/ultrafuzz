@@ -1,9 +1,12 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { schemaRegistryBundleDigest } from "@ultrafuzz/artifacts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   appendEvalRunRecord,
@@ -125,6 +128,53 @@ function canonicalFixtures() {
   return { root, row, record, manifest, runSummary, scoreSummary };
 }
 
+interface AppendChild {
+  process: ChildProcess;
+  completed: Promise<void>;
+}
+
+function startAppendChild(args: string[]): AppendChild {
+  const localRequire = createRequire(import.meta.url);
+  const requireFromVitest = createRequire(localRequire.resolve("vitest"));
+  const viteNode = requireFromVitest.resolve("vite-node/vite-node.mjs");
+  const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const childScript = path.join(testDirectory, "append-eval-run-record-child.ts");
+  const child = spawn(process.execPath, [viteNode, "--script", childScript, ...args], {
+    cwd: path.resolve(testDirectory, "../../.."),
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
+  child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+  return {
+    process: child,
+    completed: new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code, signal) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(
+          new Error(
+            `append child exited with ${code ?? signal ?? "unknown"}: ${Buffer.concat(stderr).toString("utf8")} ${Buffer.concat(stdout).toString("utf8")}`
+          )
+        );
+      });
+    })
+  };
+}
+
+async function waitForFiles(filePaths: string[], timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!filePaths.every((filePath) => fs.existsSync(filePath))) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for child markers: ${filePaths.join(", ")}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 describe("eval durable schema registry", () => {
   it("enumerates, compiles, and digests the complete sorted schema bundle", () => {
     const registry = evalSchemaRegistry();
@@ -206,6 +256,7 @@ describe("eval durable readers and writers", () => {
     const publicationPath = path.join(root, "publication-state.json");
     writeEvalRunManifest(manifestPath, manifest);
     writeEvalMatrix(matrixPath, [row]);
+    fs.writeFileSync(recordsPath, "");
     appendEvalRunRecord(recordsPath, record);
     writeEvalRunSummary(runSummaryPath, runSummary);
     writeEvalScoreSummary(scoreSummaryPath, scoreSummary);
@@ -237,15 +288,113 @@ describe("eval durable readers and writers", () => {
     expect(() => parseEvalScoreSummary({ ...fixtures.scoreSummary, schema_version: "1.0" })).toThrow();
   });
 
-  it("allows only explicitly missing pre-launch run journals and rejects present empty or malformed journals", () => {
+  it("requires a materialized run journal, accepts its canonical empty state, and rejects malformed rows", () => {
     const root = fixtureRoot("ufz-eval-journal");
     const journal = path.join(root, "runs.jsonl");
+    const record = canonicalFixtures().record;
     expect(() => readEvalRunRecords(journal)).toThrow();
-    expect(readEvalRunRecords(journal, { allowMissing: true })).toEqual([]);
+    expect(() => appendEvalRunRecord(journal, record)).toThrow();
+    expect(fs.existsSync(journal)).toBe(false);
     fs.writeFileSync(journal, "");
-    expect(() => readEvalRunRecords(journal, { allowMissing: true })).toThrow(/empty/iu);
-    fs.writeFileSync(journal, '{"schema_version":');
-    expect(() => readEvalRunRecords(journal, { allowMissing: true })).toThrow(/invalid/iu);
+    expect(readEvalRunRecords(journal)).toEqual([]);
+    appendEvalRunRecord(journal, record);
+    expect(readEvalRunRecords(journal)).toEqual([record]);
+    fs.writeFileSync(journal, JSON.stringify(record));
+    const unterminated = fs.readFileSync(journal);
+    expect(() => readEvalRunRecords(journal)).toThrow(/unterminated/iu);
+    expect(() => appendEvalRunRecord(journal, record)).toThrow(/unterminated/iu);
+    expect(fs.readFileSync(journal)).toEqual(unterminated);
+    fs.writeFileSync(journal, '{"schema_version":\n');
+    const malformed = fs.readFileSync(journal);
+    expect(() => readEvalRunRecords(journal)).toThrow(/invalid/iu);
+    expect(() => appendEvalRunRecord(journal, record)).toThrow(/invalid/iu);
+    expect(fs.readFileSync(journal)).toEqual(malformed);
+  });
+
+  it("serializes contending process writers without losing any validated run record", async () => {
+    const root = fixtureRoot("ufz-eval-journal-concurrent");
+    const journal = path.join(root, "runs.jsonl");
+    const lockPath = `${journal}.lock`;
+    const gatePath = path.join(root, "append.gate");
+    fs.writeFileSync(journal, "");
+    // Hold the real lock path until every independent process has reached the
+    // same gate, making lock contention deterministic instead of scheduler luck.
+    fs.mkdirSync(lockPath);
+    const baseRecord = canonicalFixtures().record;
+    const records = Array.from({ length: 4 }, (_, index) => ({
+      ...baseRecord,
+      candidate_label: `concurrent-${index}`
+    }));
+    const readyPaths = records.map((_, index) => path.join(root, `ready-${index}`));
+    const contendingPaths = records.map((_, index) => path.join(root, `contending-${index}`));
+    const children = records.map((record, index) =>
+      startAppendChild([
+        journal,
+        readyPaths[index]!,
+        gatePath,
+        contendingPaths[index]!,
+        Buffer.from(JSON.stringify(record), "utf8").toString("base64url")
+      ])
+    );
+    let released = false;
+    try {
+      await waitForFiles(readyPaths);
+      fs.writeFileSync(gatePath, "");
+      await waitForFiles(contendingPaths);
+      fs.rmdirSync(lockPath);
+      released = true;
+      await Promise.all(children.map((child) => child.completed));
+    } finally {
+      if (!released && fs.existsSync(lockPath)) fs.rmdirSync(lockPath);
+      for (const child of children) {
+        if (child.process.exitCode === null && child.process.signalCode === null) child.process.kill("SIGKILL");
+      }
+      await Promise.allSettled(children.map((child) => child.completed));
+    }
+
+    const observed = readEvalRunRecords(journal);
+    expect(observed).toHaveLength(records.length);
+    expect(observed.map((record) => record.candidate_label).sort()).toEqual(
+      records.map((record) => record.candidate_label).sort()
+    );
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
+  it("rejects a same-size canonical path replacement after validation and before append", () => {
+    const root = fixtureRoot("ufz-eval-journal-replacement");
+    const journal = path.join(root, "runs.jsonl");
+    const retained = path.join(root, "runs.validated.jsonl");
+    const baseRecord = canonicalFixtures().record;
+    const originalRecord = { ...baseRecord, candidate_label: "original-aa" };
+    const replacementRecord = { ...baseRecord, candidate_label: "replacement" };
+    const candidateRecord = { ...baseRecord, candidate_label: "candidate-c" };
+    const originalBytes = Buffer.from(`${JSON.stringify(originalRecord)}\n`, "utf8");
+    const replacementBytes = Buffer.from(`${JSON.stringify(replacementRecord)}\n`, "utf8");
+    expect(replacementBytes.byteLength).toBe(originalBytes.byteLength);
+    fs.writeFileSync(journal, originalBytes);
+
+    const originalLstat = fs.lstatSync.bind(fs);
+    let replaced = false;
+    const lstat = vi.spyOn(fs, "lstatSync").mockImplementation(((candidate: fs.PathLike, options: { bigint: true }) => {
+      if (!replaced && path.resolve(String(candidate)) === journal) {
+        replaced = true;
+        fs.renameSync(journal, retained);
+        fs.writeFileSync(journal, replacementBytes);
+      }
+      return originalLstat(candidate, options);
+    }) as typeof fs.lstatSync);
+    try {
+      expect(() => appendEvalRunRecord(journal, candidateRecord)).toThrow(
+        expect.objectContaining({ code: "EVAL_DURABLE_APPEND_RACE" })
+      );
+    } finally {
+      lstat.mockRestore();
+    }
+
+    expect(replaced).toBe(true);
+    expect(fs.readFileSync(journal)).toEqual(replacementBytes);
+    expect(fs.readFileSync(retained)).toEqual(originalBytes);
+    expect(fs.existsSync(`${journal}.lock`)).toBe(false);
   });
 
   it("requires score/review files but permits explicit zero-record materializations", () => {

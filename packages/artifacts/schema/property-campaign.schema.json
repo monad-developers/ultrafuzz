@@ -53,14 +53,7 @@
     },
     "terminal_status": {
       "type": "string",
-      "enum": [
-        "complete",
-        "partial",
-        "blocked",
-        "failed",
-        "timed-out",
-        "unavailable"
-      ]
+      "enum": ["complete", "partial", "blocked", "failed", "timed-out", "unavailable"]
     },
     "exit_code": {
       "anyOf": [
@@ -109,13 +102,7 @@
           "minLength": 1
         }
       },
-      "required": [
-        "corpus",
-        "cache",
-        "log",
-        "raw_results",
-        "reproducers"
-      ],
+      "required": ["corpus", "cache", "log", "raw_results", "reproducers"],
       "additionalProperties": false
     },
     "failures": {
@@ -163,18 +150,12 @@
             "minLength": 1
           }
         },
-        "required": [
-          "id",
-          "status"
-        ],
+        "required": ["id", "status"],
         "additionalProperties": false
       }
     }
   },
-  "required": [
-    "schema_version",
-    "failures"
-  ],
+  "required": ["schema_version", "failures"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:property-campaign:2",
   "title": "Ultrafuzz property campaign result"

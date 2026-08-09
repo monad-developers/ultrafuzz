@@ -4,7 +4,15 @@
   "title": "Ultrafuzz Modal node result",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "status", "artifact_archive", "artifact_sha256", "storage_lineage", "durable_checkpoint", "durable_checkpoint_index"],
+  "required": [
+    "schema_version",
+    "status",
+    "artifact_archive",
+    "artifact_sha256",
+    "storage_lineage",
+    "durable_checkpoint",
+    "durable_checkpoint_index"
+  ],
   "properties": {
     "schema_version": { "const": "ultrafuzz.modal.node-result.v2" },
     "status": { "const": "succeeded" },

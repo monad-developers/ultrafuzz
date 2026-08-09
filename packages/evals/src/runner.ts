@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { readRunState, type RunState } from "@ultrafuzz/artifacts";
+import { readRunState, writeFileDurable, type RunState } from "@ultrafuzz/artifacts";
 import type { EvalConfig, RuntimeConfigOverrides } from "@ultrafuzz/config";
 import { startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
@@ -131,6 +131,8 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
       ? resolvedProvenance
       : { ...resolvedProvenance, candidate: input.candidateProvenance };
   const plan: EvalPlanValue = { ...planned, provenance };
+  writeFileDurable(path.join(root, "runs.jsonl"), "");
+  writeEvalMatrix(path.join(root, "matrix.json"), plan.matrix);
   writeEvalRunManifest(path.join(root, "eval.json"), {
     schema_version: EVAL_RUN_SCHEMA_VERSION,
     eval_run_id: evalRunId,
@@ -140,7 +142,6 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
     suite: plan.suite,
     provenance
   });
-  writeEvalMatrix(path.join(root, "matrix.json"), plan.matrix);
   for (const reporter of reporters) {
     await reporter.onPlan(plan);
   }
@@ -230,7 +231,7 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
           candidate_label: input.candidateProvenance.label,
           candidate_commit: input.candidateProvenance.commit
         }
-      : {}),
+      : {})
   } as const;
 
   const launcher = input.launcher ?? runtimeRowLauncher;

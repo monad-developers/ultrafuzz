@@ -156,13 +156,43 @@
           "enum": ["initial-launch", "retry", "resume", "replace-image", "rotate-stale-probe", "restart", "unknown"]
         },
         "start_reason": {
-          "enum": ["initial", "pre-model-retry", "post-model-resume", "image-rollout", "stale-probe-rotation", "operator-restart", "unknown"]
+          "enum": [
+            "initial",
+            "pre-model-retry",
+            "post-model-resume",
+            "image-rollout",
+            "stale-probe-rotation",
+            "operator-restart",
+            "unknown"
+          ]
         },
         "terminal_reason": {
-          "enum": ["active", "succeeded", "genuine-worker-failure", "operational-failure", "image-rollout", "stale-probe-rotation", "operator-request", "timeout", "resource-termination", "recovery-budget-exhausted", "unknown"]
+          "enum": [
+            "active",
+            "succeeded",
+            "genuine-worker-failure",
+            "operational-failure",
+            "image-rollout",
+            "stale-probe-rotation",
+            "operator-request",
+            "timeout",
+            "resource-termination",
+            "recovery-budget-exhausted",
+            "unknown"
+          ]
         },
         "terminal_class": {
-          "enum": ["active", "succeeded", "genuine-worker-failure", "operational-failure", "controller-rotation", "timeout", "resource-termination", "recovery-budget-exhausted", "unknown"]
+          "enum": [
+            "active",
+            "succeeded",
+            "genuine-worker-failure",
+            "operational-failure",
+            "controller-rotation",
+            "timeout",
+            "resource-termination",
+            "recovery-budget-exhausted",
+            "unknown"
+          ]
         },
         "launched_at": { "$ref": "#/$defs/timestamp" },
         "finished_at": { "$ref": "#/$defs/timestamp" },
@@ -184,26 +214,101 @@
       "allOf": [
         {
           "oneOf": [
-            { "properties": { "start_reason": { "const": "initial" }, "trigger_action": { "const": "initial-launch" } }, "required": ["start_reason", "trigger_action"] },
-            { "properties": { "start_reason": { "const": "pre-model-retry" }, "trigger_action": { "const": "retry" } }, "required": ["start_reason", "trigger_action"] },
-            { "properties": { "start_reason": { "const": "post-model-resume" }, "trigger_action": { "const": "resume" } }, "required": ["start_reason", "trigger_action"] },
-            { "properties": { "start_reason": { "const": "image-rollout" }, "trigger_action": { "const": "replace-image" } }, "required": ["start_reason", "trigger_action"] },
-            { "properties": { "start_reason": { "const": "stale-probe-rotation" }, "trigger_action": { "const": "rotate-stale-probe" } }, "required": ["start_reason", "trigger_action"] },
-            { "properties": { "start_reason": { "const": "operator-restart" }, "trigger_action": { "const": "restart" } }, "required": ["start_reason", "trigger_action"] },
-            { "properties": { "start_reason": { "const": "unknown" }, "trigger_action": { "const": "unknown" } }, "required": ["start_reason", "trigger_action"] }
+            {
+              "properties": { "start_reason": { "const": "initial" }, "trigger_action": { "const": "initial-launch" } },
+              "required": ["start_reason", "trigger_action"]
+            },
+            {
+              "properties": { "start_reason": { "const": "pre-model-retry" }, "trigger_action": { "const": "retry" } },
+              "required": ["start_reason", "trigger_action"]
+            },
+            {
+              "properties": {
+                "start_reason": { "const": "post-model-resume" },
+                "trigger_action": { "const": "resume" }
+              },
+              "required": ["start_reason", "trigger_action"]
+            },
+            {
+              "properties": {
+                "start_reason": { "const": "image-rollout" },
+                "trigger_action": { "const": "replace-image" }
+              },
+              "required": ["start_reason", "trigger_action"]
+            },
+            {
+              "properties": {
+                "start_reason": { "const": "stale-probe-rotation" },
+                "trigger_action": { "const": "rotate-stale-probe" }
+              },
+              "required": ["start_reason", "trigger_action"]
+            },
+            {
+              "properties": {
+                "start_reason": { "const": "operator-restart" },
+                "trigger_action": { "const": "restart" }
+              },
+              "required": ["start_reason", "trigger_action"]
+            },
+            {
+              "properties": { "start_reason": { "const": "unknown" }, "trigger_action": { "const": "unknown" } },
+              "required": ["start_reason", "trigger_action"]
+            }
           ]
         },
         {
           "oneOf": [
-            { "properties": { "terminal_reason": { "const": "active" }, "terminal_class": { "const": "active" } }, "required": ["terminal_reason", "terminal_class"] },
-            { "properties": { "terminal_reason": { "const": "succeeded" }, "terminal_class": { "const": "succeeded" } }, "required": ["terminal_reason", "terminal_class"] },
-            { "properties": { "terminal_reason": { "const": "genuine-worker-failure" }, "terminal_class": { "const": "genuine-worker-failure" } }, "required": ["terminal_reason", "terminal_class"] },
-            { "properties": { "terminal_reason": { "const": "operational-failure" }, "terminal_class": { "const": "operational-failure" } }, "required": ["terminal_reason", "terminal_class"] },
-            { "properties": { "terminal_reason": { "enum": ["image-rollout", "stale-probe-rotation", "operator-request"] }, "terminal_class": { "const": "controller-rotation" } }, "required": ["terminal_reason", "terminal_class"] },
-            { "properties": { "terminal_reason": { "const": "timeout" }, "terminal_class": { "const": "timeout" } }, "required": ["terminal_reason", "terminal_class"] },
-            { "properties": { "terminal_reason": { "const": "resource-termination" }, "terminal_class": { "const": "resource-termination" } }, "required": ["terminal_reason", "terminal_class"] },
-            { "properties": { "terminal_reason": { "const": "recovery-budget-exhausted" }, "terminal_class": { "const": "recovery-budget-exhausted" } }, "required": ["terminal_reason", "terminal_class"] },
-            { "properties": { "terminal_reason": { "const": "unknown" }, "terminal_class": { "const": "unknown" } }, "required": ["terminal_reason", "terminal_class"] }
+            {
+              "properties": { "terminal_reason": { "const": "active" }, "terminal_class": { "const": "active" } },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": { "terminal_reason": { "const": "succeeded" }, "terminal_class": { "const": "succeeded" } },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": {
+                "terminal_reason": { "const": "genuine-worker-failure" },
+                "terminal_class": { "const": "genuine-worker-failure" }
+              },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": {
+                "terminal_reason": { "const": "operational-failure" },
+                "terminal_class": { "const": "operational-failure" }
+              },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": {
+                "terminal_reason": { "enum": ["image-rollout", "stale-probe-rotation", "operator-request"] },
+                "terminal_class": { "const": "controller-rotation" }
+              },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": { "terminal_reason": { "const": "timeout" }, "terminal_class": { "const": "timeout" } },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": {
+                "terminal_reason": { "const": "resource-termination" },
+                "terminal_class": { "const": "resource-termination" }
+              },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": {
+                "terminal_reason": { "const": "recovery-budget-exhausted" },
+                "terminal_class": { "const": "recovery-budget-exhausted" }
+              },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": { "terminal_reason": { "const": "unknown" }, "terminal_class": { "const": "unknown" } },
+              "required": ["terminal_reason", "terminal_class"]
+            }
           ]
         },
         {
@@ -211,11 +316,17 @@
           "then": { "properties": { "finished_at": false } }
         },
         {
-          "if": { "properties": { "terminal_reason": { "not": { "enum": ["active", "unknown"] } } }, "required": ["terminal_reason"] },
+          "if": {
+            "properties": { "terminal_reason": { "not": { "enum": ["active", "unknown"] } } },
+            "required": ["terminal_reason"]
+          },
           "then": { "properties": { "finished_at": {} }, "required": ["finished_at"] }
         },
         {
-          "if": { "properties": { "terminal_class": { "const": "controller-rotation" } }, "required": ["terminal_class"] },
+          "if": {
+            "properties": { "terminal_class": { "const": "controller-rotation" } },
+            "required": ["terminal_class"]
+          },
           "then": { "properties": { "controller_requested": { "const": true } } }
         },
         {
@@ -228,10 +339,21 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "total_generations", "terminal_generations", "active_generations", "progress_generations",
-        "no_progress_generations", "unknown_progress_generations", "model_work_generations",
-        "no_model_work_generations", "unknown_model_work_generations", "genuine_failures", "rotations",
-        "resumptions", "start_reasons", "terminal_reasons", "terminal_classes"
+        "total_generations",
+        "terminal_generations",
+        "active_generations",
+        "progress_generations",
+        "no_progress_generations",
+        "unknown_progress_generations",
+        "model_work_generations",
+        "no_model_work_generations",
+        "unknown_model_work_generations",
+        "genuine_failures",
+        "rotations",
+        "resumptions",
+        "start_reasons",
+        "terminal_reasons",
+        "terminal_classes"
       ],
       "properties": {
         "total_generations": { "$ref": "#/$defs/nonNegativeInteger" },
@@ -254,7 +376,15 @@
     "startReasonCounts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["initial", "pre-model-retry", "post-model-resume", "image-rollout", "stale-probe-rotation", "operator-restart", "unknown"],
+      "required": [
+        "initial",
+        "pre-model-retry",
+        "post-model-resume",
+        "image-rollout",
+        "stale-probe-rotation",
+        "operator-restart",
+        "unknown"
+      ],
       "properties": {
         "initial": { "$ref": "#/$defs/nonNegativeInteger" },
         "pre-model-retry": { "$ref": "#/$defs/nonNegativeInteger" },
@@ -268,7 +398,19 @@
     "terminalReasonCounts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["active", "succeeded", "genuine-worker-failure", "operational-failure", "image-rollout", "stale-probe-rotation", "operator-request", "timeout", "resource-termination", "recovery-budget-exhausted", "unknown"],
+      "required": [
+        "active",
+        "succeeded",
+        "genuine-worker-failure",
+        "operational-failure",
+        "image-rollout",
+        "stale-probe-rotation",
+        "operator-request",
+        "timeout",
+        "resource-termination",
+        "recovery-budget-exhausted",
+        "unknown"
+      ],
       "properties": {
         "active": { "$ref": "#/$defs/nonNegativeInteger" },
         "succeeded": { "$ref": "#/$defs/nonNegativeInteger" },
@@ -286,7 +428,17 @@
     "terminalClassCounts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["active", "succeeded", "genuine-worker-failure", "operational-failure", "controller-rotation", "timeout", "resource-termination", "recovery-budget-exhausted", "unknown"],
+      "required": [
+        "active",
+        "succeeded",
+        "genuine-worker-failure",
+        "operational-failure",
+        "controller-rotation",
+        "timeout",
+        "resource-termination",
+        "recovery-budget-exhausted",
+        "unknown"
+      ],
       "properties": {
         "active": { "$ref": "#/$defs/nonNegativeInteger" },
         "succeeded": { "$ref": "#/$defs/nonNegativeInteger" },
@@ -302,7 +454,23 @@
     "launchRecord": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["slug", "model", "provider", "agent", "reasoning", "auth_mode", "generation", "attempt", "attempt_id", "model_fingerprint", "volume_name", "remote_root", "workspace_mode", "phase", "reserved_at"],
+      "required": [
+        "slug",
+        "model",
+        "provider",
+        "agent",
+        "reasoning",
+        "auth_mode",
+        "generation",
+        "attempt",
+        "attempt_id",
+        "model_fingerprint",
+        "volume_name",
+        "remote_root",
+        "workspace_mode",
+        "phase",
+        "reserved_at"
+      ],
       "properties": {
         "slug": { "$ref": "#/$defs/safeId" },
         "model": { "$ref": "#/$defs/nonEmptyString" },
@@ -326,15 +494,37 @@
         "failure_category": { "enum": ["transient-operational-failure", "permanent-operational-failure"] }
       },
       "allOf": [
-        { "if": { "properties": { "phase": { "enum": ["sandbox-created", "launched"] } }, "required": ["phase"] }, "then": { "properties": { "sandbox_id": {} }, "required": ["sandbox_id"] } },
-        { "if": { "properties": { "phase": { "const": "launched" } }, "required": ["phase"] }, "then": { "properties": { "launched_at": {} }, "required": ["launched_at"] } },
-        { "if": { "properties": { "phase": { "const": "failed" } }, "required": ["phase"] }, "then": { "properties": { "failure_category": {}, "finished_at": {} }, "required": ["failure_category", "finished_at"] } }
+        {
+          "if": { "properties": { "phase": { "enum": ["sandbox-created", "launched"] } }, "required": ["phase"] },
+          "then": { "properties": { "sandbox_id": {} }, "required": ["sandbox_id"] }
+        },
+        {
+          "if": { "properties": { "phase": { "const": "launched" } }, "required": ["phase"] },
+          "then": { "properties": { "launched_at": {} }, "required": ["launched_at"] }
+        },
+        {
+          "if": { "properties": { "phase": { "const": "failed" } }, "required": ["phase"] },
+          "then": {
+            "properties": { "failure_category": {}, "finished_at": {} },
+            "required": ["failure_category", "finished_at"]
+          }
+        }
       ]
     },
     "attemptProvenance": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["slug", "generation", "attempt", "attempt_id", "model_fingerprint", "fingerprints", "workspace_mode", "reserved_at", "phase"],
+      "required": [
+        "slug",
+        "generation",
+        "attempt",
+        "attempt_id",
+        "model_fingerprint",
+        "fingerprints",
+        "workspace_mode",
+        "reserved_at",
+        "phase"
+      ],
       "properties": {
         "slug": { "$ref": "#/$defs/safeId" },
         "generation": { "$ref": "#/$defs/positiveInteger" },
@@ -354,7 +544,18 @@
     "recoveryWorker": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["generation", "attempt", "attempt_id", "name", "image", "phase", "reserved_at", "baseline_successful_nodes", "made_progress", "no_progress_accounted"],
+      "required": [
+        "generation",
+        "attempt",
+        "attempt_id",
+        "name",
+        "image",
+        "phase",
+        "reserved_at",
+        "baseline_successful_nodes",
+        "made_progress",
+        "no_progress_accounted"
+      ],
       "properties": {
         "generation": { "$ref": "#/$defs/positiveInteger" },
         "attempt": { "$ref": "#/$defs/positiveInteger" },
@@ -372,8 +573,14 @@
         "no_progress_accounted": { "type": "boolean" }
       },
       "allOf": [
-        { "if": { "properties": { "phase": { "const": "launched" } }, "required": ["phase"] }, "then": { "properties": { "sandbox_id": {}, "launched_at": {} }, "required": ["sandbox_id", "launched_at"] } },
-        { "if": { "properties": { "phase": { "const": "stopped" } }, "required": ["phase"] }, "then": { "properties": { "stopped_at": {}, "stop_reason": {} }, "required": ["stopped_at", "stop_reason"] } }
+        {
+          "if": { "properties": { "phase": { "const": "launched" } }, "required": ["phase"] },
+          "then": { "properties": { "sandbox_id": {}, "launched_at": {} }, "required": ["sandbox_id", "launched_at"] }
+        },
+        {
+          "if": { "properties": { "phase": { "const": "stopped" } }, "required": ["phase"] },
+          "then": { "properties": { "stopped_at": {}, "stop_reason": {} }, "required": ["stopped_at", "stop_reason"] }
+        }
       ]
     },
     "recoveryRow": {
@@ -400,7 +607,11 @@
         "workers": { "type": "array", "maxItems": 100000, "items": { "$ref": "#/$defs/recoveryWorker" } }
       },
       "allOf": [
-        { "if": { "properties": { "status": { "const": "terminal" } }, "required": ["status"] }, "then": { "properties": { "terminal": {} }, "required": ["terminal"] }, "else": { "properties": { "terminal": false } } }
+        {
+          "if": { "properties": { "status": { "const": "terminal" } }, "required": ["status"] },
+          "then": { "properties": { "terminal": {} }, "required": ["terminal"] },
+          "else": { "properties": { "terminal": false } }
+        }
       ]
     },
     "aggregateCounts": {
@@ -425,7 +636,19 @@
     "aggregateUsage": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "total_tokens", "estimated_cost_usd", "partial_pricing", "event_count", "priced_event_count", "unpriced_event_count"],
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "total_tokens",
+        "estimated_cost_usd",
+        "partial_pricing",
+        "event_count",
+        "priced_event_count",
+        "unpriced_event_count"
+      ],
       "properties": {
         "input_tokens": { "$ref": "#/$defs/nonNegativeInteger" },
         "output_tokens": { "$ref": "#/$defs/nonNegativeInteger" },
@@ -455,7 +678,21 @@
     "nodeInput": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "run_id", "task_id", "attempt_id", "execution_generation", "execution_snapshot_root", "workflow_path", "run_root", "artifact_dir", "workspace_dir", "dependency_artifact_dirs", "resources", "agent_credential_env"],
+      "required": [
+        "schema_version",
+        "run_id",
+        "task_id",
+        "attempt_id",
+        "execution_generation",
+        "execution_snapshot_root",
+        "workflow_path",
+        "run_root",
+        "artifact_dir",
+        "workspace_dir",
+        "dependency_artifact_dirs",
+        "resources",
+        "agent_credential_env"
+      ],
       "properties": {
         "schema_version": { "const": "ultrafuzz.modal.node.v1" },
         "run_id": { "$ref": "#/$defs/nonEmptyString" },
@@ -468,7 +705,12 @@
         "run_root": { "$ref": "#/$defs/boundedPath" },
         "artifact_dir": { "$ref": "#/$defs/boundedPath" },
         "workspace_dir": { "$ref": "#/$defs/boundedPath" },
-        "dependency_artifact_dirs": { "type": "array", "maxItems": 100000, "uniqueItems": true, "items": { "$ref": "#/$defs/boundedPath" } },
+        "dependency_artifact_dirs": {
+          "type": "array",
+          "maxItems": 100000,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/boundedPath" }
+        },
         "project_archive_sha256": { "$ref": "#/$defs/sha256" },
         "resources": {
           "type": "object",
@@ -480,7 +722,12 @@
             "timeout_seconds": { "$ref": "#/$defs/positiveInteger" }
           }
         },
-        "agent_credential_env": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/environmentVariable" } },
+        "agent_credential_env": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/environmentVariable" }
+        },
         "operator_prompt": { "type": "string", "maxLength": 1000000 }
       }
     },

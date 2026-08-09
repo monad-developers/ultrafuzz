@@ -58,7 +58,10 @@ export function summarizeEvalTerminal(record: EvalRunRecord): EvalTerminalSummar
     workflow: evalWorkflowLifecycle(state)
   };
   if (!lifecycle.workflow.terminal) {
-    throw new EvalError("EVAL_WORKFLOW_NOT_TERMINAL", `eval row ${record.row_id} cannot be summarized before terminal state`);
+    throw new EvalError(
+      "EVAL_WORKFLOW_NOT_TERMINAL",
+      `eval row ${record.row_id} cannot be summarized before terminal state`
+    );
   }
   return {
     lifecycle,
@@ -83,7 +86,10 @@ export function evalWorkflowLifecycle(state: RunState): EvalRowLifecycle["workfl
   const startedAt = optionalTimestamp(state.started_at, "workflow started_at");
   const finishedAt = optionalTimestamp(state.finished_at, "workflow finished_at");
   if (terminal && (startedAt === null || finishedAt === null)) {
-    throw new EvalError("EVAL_WORKFLOW_TIMESTAMPS_MISSING", "terminal workflow state requires started_at and finished_at");
+    throw new EvalError(
+      "EVAL_WORKFLOW_TIMESTAMPS_MISSING",
+      "terminal workflow state requires started_at and finished_at"
+    );
   }
   if (!terminal && finishedAt !== null) {
     throw new EvalError("EVAL_WORKFLOW_LIFECYCLE_INVALID", "nonterminal workflow state cannot carry finished_at");
@@ -116,9 +122,7 @@ function runtimeEfficiency(
   };
 }
 
-function accountingEfficiency(
-  runRoot: string
-): Pick<EvalEfficiency, "total_tokens" | "cost_usd" | "usage" | "cost"> {
+function accountingEfficiency(runRoot: string): Pick<EvalEfficiency, "total_tokens" | "cost_usd" | "usage" | "cost"> {
   const cumulative = readCumulativeAccounting(runRoot);
   const usageComplete = requiredBoolean(cumulative.usage_complete, "accounting.cumulative.usage_complete");
   const pricingComplete = requiredBoolean(cumulative.pricing_complete, "accounting.cumulative.pricing_complete");
@@ -141,10 +145,7 @@ function accountingEfficiency(
     "accounting.cumulative.estimated_spend_usd"
   );
   if (pricingComplete && storedCost === undefined) {
-    throw new EvalError(
-      "EVAL_ACCOUNTING_EVIDENCE_INVALID",
-      "complete pricing requires cumulative.estimated_spend_usd"
-    );
+    throw new EvalError("EVAL_ACCOUNTING_EVIDENCE_INVALID", "complete pricing requires cumulative.estimated_spend_usd");
   }
 
   return {
@@ -171,10 +172,7 @@ function activeMilliseconds(
     const started = requiredTimestamp(node.started_at, `node ${node.node_id} started_at`);
     const finished = requiredTimestamp(node.finished_at, `node ${node.node_id} finished_at`);
     if (finished < started) {
-      throw new EvalError(
-        "EVAL_EFFICIENCY_EVIDENCE_INVALID",
-        `node ${node.node_id} finished_at precedes started_at`
-      );
+      throw new EvalError("EVAL_EFFICIENCY_EVIDENCE_INVALID", `node ${node.node_id} finished_at precedes started_at`);
     }
     const intervalStart = Math.max(runStartedAt, started);
     const intervalFinish = Math.min(runFinishedAt, finished);
@@ -214,10 +212,7 @@ function readObservedRunState(runRoot: string): RunState {
 function readCumulativeAccounting(runRoot: string): Record<string, unknown> {
   const metadata = readStrictJsonDocument(path.join(runRoot, "run.json"));
   if (!isRecord(metadata) || !isRecord(metadata.accounting) || !isRecord(metadata.accounting.cumulative)) {
-    throw new EvalError(
-      "EVAL_ACCOUNTING_EVIDENCE_MISSING",
-      "current run metadata requires accounting.cumulative"
-    );
+    throw new EvalError("EVAL_ACCOUNTING_EVIDENCE_MISSING", "current run metadata requires accounting.cumulative");
   }
   return metadata.accounting.cumulative;
 }

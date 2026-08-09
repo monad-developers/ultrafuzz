@@ -1,22 +1,18 @@
 export const MODAL_COMMON_SCHEMA_ID = "urn:ultrafuzz:schema:modal:common:1" as const;
 export const MODAL_LAUNCH_STATE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:launch-state:3" as const;
-export const MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID =
-  "urn:ultrafuzz:schema:modal:recovery-lifecycle:1" as const;
+export const MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:recovery-lifecycle:1" as const;
 export const MODAL_RECOVERY_STATE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:recovery-state:1" as const;
 export const MODAL_WORKER_LINEAGE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:worker-lineage:1" as const;
 export const MODAL_WORKER_RESULT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:worker-result:2" as const;
 export const MODAL_NODE_INPUT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-input:1" as const;
 export const MODAL_NODE_RESULT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-result:2" as const;
 export const MODAL_NODE_CHECKPOINT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-checkpoint:1" as const;
-export const MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID =
-  "urn:ultrafuzz:schema:modal:node-checkpoint-index:1" as const;
+export const MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-checkpoint-index:1" as const;
 export const MODAL_NODE_RESTORE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-restore:1" as const;
-export const MODAL_NODE_WORKER_ERROR_SCHEMA_ID =
-  "urn:ultrafuzz:schema:modal:node-worker-error:1" as const;
+export const MODAL_NODE_WORKER_ERROR_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-worker-error:1" as const;
 export const MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID =
   "urn:ultrafuzz:schema:modal:execution-dependency-manifest:1" as const;
-export const MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID =
-  "urn:ultrafuzz:schema:modal:pinned-source-proof:1" as const;
+export const MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID = "urn:ultrafuzz:schema:modal:pinned-source-proof:1" as const;
 export const MODAL_SMOKE_RESULT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:smoke-result:1" as const;
 
 export type StrictModalLaunchMode = "fresh" | "resume";
@@ -33,13 +29,7 @@ export type StrictModalRecoveryStartReason =
   | "operator-restart"
   | "unknown";
 export type StrictModalRecoveryTriggerAction =
-  | "initial-launch"
-  | "retry"
-  | "resume"
-  | "replace-image"
-  | "rotate-stale-probe"
-  | "restart"
-  | "unknown";
+  "initial-launch" | "retry" | "resume" | "replace-image" | "rotate-stale-probe" | "restart" | "unknown";
 export type StrictModalRecoveryTerminalReason =
   | "active"
   | "succeeded"
@@ -191,13 +181,7 @@ export interface StrictModalLaunchStateDocument {
 export type StrictModalRecoveryWorkerPhase = "reserved" | "launched" | "stopped";
 export type StrictModalRecoveryWorkerStopReason = "exited" | "stalled" | "rollout" | "completed";
 export type StrictModalRecoveryRowStatus =
-  | "idle"
-  | "healthy"
-  | "grace"
-  | "backoff"
-  | "rollout-deferred"
-  | "terminal"
-  | "completed";
+  "idle" | "healthy" | "grace" | "backoff" | "rollout-deferred" | "terminal" | "completed";
 
 export interface StrictModalRecoveryWorker {
   generation: number;
@@ -442,13 +426,7 @@ export interface StrictModalPinnedSourceProofDocument {
 }
 
 export type StrictModalSmokeFailureStage =
-  | "prepare"
-  | "fresh-launch"
-  | "checkpoint"
-  | "fresh-terminate"
-  | "resume-launch"
-  | "completion"
-  | "cleanup";
+  "prepare" | "fresh-launch" | "checkpoint" | "fresh-terminate" | "resume-launch" | "completion" | "cleanup";
 
 export interface StrictModalSmokeResultDocument {
   schema_version: "ultrafuzz.modal.smoke-result.v1";
@@ -491,8 +469,7 @@ export interface ModalContractBySchemaId {
 }
 
 export type ModalContractSchemaId = keyof ModalContractBySchemaId;
-export type ModalContractForSchemaId<SchemaId extends ModalContractSchemaId> =
-  ModalContractBySchemaId[SchemaId];
+export type ModalContractForSchemaId<SchemaId extends ModalContractSchemaId> = ModalContractBySchemaId[SchemaId];
 
 export type DeepReadonly<T> = T extends (...args: never[]) => unknown
   ? T
