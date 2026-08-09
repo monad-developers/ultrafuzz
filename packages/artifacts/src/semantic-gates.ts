@@ -1601,7 +1601,8 @@ function attemptSourceEventJoinIssues(document: unknown, context: SemanticGateCo
       issue("$.source_event_sequence", `Attempt terminal does not join an exact ${expectedTerminal} source event`)
     );
   }
-  const nodeId = stringField(document, "node_id");
+  const strategyAttemptId = stringField(document, "strategy_attempt_id");
+  const workflowTaskId = strategyAttemptId === undefined ? undefined : `node:${strategyAttemptId}`;
   const iteration = numberField(document, "iteration");
   const attempt = numberField(document, "attempt");
   for (const [name, event, recordPath] of [
@@ -1610,11 +1611,16 @@ function attemptSourceEventJoinIssues(document: unknown, context: SemanticGateCo
   ] as const) {
     if (!isRecord(event?.payload)) continue;
     if (
-      stringField(event.payload, "nodeId") !== nodeId ||
+      stringField(event.payload, "nodeId") !== workflowTaskId ||
       numberField(event.payload, "iteration") !== iteration ||
       numberField(event.payload, "attempt") !== attempt
     ) {
-      issues.push(issue(recordPath, `Attempt ${name} event identity does not match node_id, iteration, and attempt`));
+      issues.push(
+        issue(
+          recordPath,
+          `Attempt ${name} event identity does not match the strategy_attempt_id workflow task, iteration, and attempt`
+        )
+      );
     }
   }
   const lifecycle = at(document, ["lifecycle"]);

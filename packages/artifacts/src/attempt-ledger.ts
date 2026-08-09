@@ -129,6 +129,7 @@ export interface NodeAttemptLedgerSummary {
 const DIMENSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u;
 const DIMENSION_ID_MAX_LENGTH = 512;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+const safeId = z.string().regex(SAFE_ID_PATTERN);
 const dimensionId = z.string().min(1).max(DIMENSION_ID_MAX_LENGTH).regex(DIMENSION_ID_PATTERN);
 const digest = z.string().regex(SHA256_PATTERN);
 const count = z.number().int().nonnegative().safe();
@@ -147,10 +148,10 @@ const reusedReuseSchema = z.strictObject({
 export const nodeAttemptLedgerEntrySchema = z
   .strictObject({
     schema_version: z.literal(NODE_ATTEMPT_LEDGER_SCHEMA_VERSION),
-    run_id: z.string().regex(SAFE_ID_PATTERN),
+    run_id: safeId,
     workflow_run_id: dimensionId,
     control_generation: digest,
-    node_id: dimensionId,
+    node_id: safeId,
     strategy_attempt_id: dimensionId,
     iteration: count,
     attempt: count,
@@ -199,6 +200,12 @@ const dimensionJsonSchema = {
   maxLength: DIMENSION_ID_MAX_LENGTH,
   pattern: DIMENSION_ID_PATTERN.source
 } as const;
+const safeIdJsonSchema = {
+  type: "string",
+  minLength: 1,
+  maxLength: 128,
+  pattern: SAFE_ID_PATTERN.source
+} as const;
 const countJsonSchema = { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER } as const;
 
 export const nodeAttemptLedgerJsonSchema = {
@@ -225,10 +232,10 @@ export const nodeAttemptLedgerJsonSchema = {
   additionalProperties: false,
   properties: {
     schema_version: { const: NODE_ATTEMPT_LEDGER_SCHEMA_VERSION },
-    run_id: { type: "string", minLength: 1, maxLength: 128, pattern: SAFE_ID_PATTERN.source },
+    run_id: safeIdJsonSchema,
     workflow_run_id: dimensionJsonSchema,
     control_generation: { type: "string", pattern: SHA256_PATTERN.source },
-    node_id: dimensionJsonSchema,
+    node_id: safeIdJsonSchema,
     strategy_attempt_id: dimensionJsonSchema,
     iteration: countJsonSchema,
     attempt: countJsonSchema,

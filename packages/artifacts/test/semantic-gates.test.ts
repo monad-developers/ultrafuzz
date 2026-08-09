@@ -634,7 +634,8 @@ test("every contextual registration executes real positive and negative checks",
       "attempt-source-event-join": {
         positive: {
           workflow_run_id: "workflow-a",
-          node_id: "node:a",
+          node_id: "project-discovery",
+          strategy_attempt_id: "project-discovery__model_0__attempt_0",
           iteration: 0,
           attempt: 1,
           started_event_sequence: 1,
@@ -644,7 +645,8 @@ test("every contextual registration executes real positive and negative checks",
         },
         negative: {
           workflow_run_id: "workflow-a",
-          node_id: "node:a",
+          node_id: "project-discovery",
+          strategy_attempt_id: "project-discovery__model_0__attempt_0",
           iteration: 0,
           attempt: 1,
           started_event_sequence: 1,
@@ -660,14 +662,14 @@ test("every contextual registration executes real positive and negative checks",
                 source_event_sequence: 1,
                 timestamp_ms: Date.parse("2026-01-01T00:00:00.000Z"),
                 type: "NodeStarted",
-                payload: { nodeId: "node:a", iteration: 0, attempt: 1 }
+                payload: { nodeId: "node:project-discovery__model_0__attempt_0", iteration: 0, attempt: 1 }
               },
               {
                 workflow_run_id: "workflow-a",
                 source_event_sequence: 2,
                 timestamp_ms: Date.parse("2026-01-01T00:00:01.000Z"),
                 type: "NodeFinished",
-                payload: { nodeId: "node:a", iteration: 0, attempt: 1 }
+                payload: { nodeId: "node:project-discovery__model_0__attempt_0", iteration: 0, attempt: 1 }
               }
             ]
           }
@@ -941,7 +943,8 @@ test("attempt source-event joins accept only declared host-side validation failu
   };
   const failedAttempt = {
     workflow_run_id: "workflow-a",
-    node_id: "node:a",
+    node_id: "planned-a",
+    strategy_attempt_id: "a",
     iteration: 0,
     attempt: 1,
     started_event_sequence: 1,

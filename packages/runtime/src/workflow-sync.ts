@@ -2554,7 +2554,7 @@ function appendTerminalTaskAttempts(input: {
     const appendInput: AppendNodeAttemptInput = {
       workflowRunId: input.workflowRunId,
       controlGeneration: input.controlGeneration,
-      nodeId: attempt.nodeId,
+      nodeId: input.task.concreteNodeId,
       strategyAttemptId: input.task.attemptId,
       iteration: attempt.iteration,
       attempt: attempt.retry,

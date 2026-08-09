@@ -30,7 +30,7 @@
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
     },
     "control_generation": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-    "node_id": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" },
+    "node_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
     "strategy_attempt_id": {
       "type": "string",
       "minLength": 1,

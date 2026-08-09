@@ -1081,7 +1081,7 @@ test("node attempt ledger shape stays structural while byte and ordering rules r
     run_id: "run-1",
     workflow_run_id: "workflow-1",
     control_generation: "c".repeat(64),
-    node_id: "node:1",
+    node_id: "node-1",
     strategy_attempt_id: "strategy-1",
     iteration: 0,
     attempt: 1,
@@ -1101,6 +1101,7 @@ test("node attempt ledger shape stays structural while byte and ordering rules r
     failure_message: "artifact contract rejected findings.json"
   };
   assert.equal(validateNodeAttemptLedgerEntry(entry).ok, true);
+  assert.equal(validateNodeAttemptLedgerEntry({ ...entry, node_id: "node:strategy-1" }).ok, false);
   assert.equal(validateNodeAttemptLedgerEntry({ ...entry, failure_message: "" }).ok, false);
   assert.equal(validateNodeAttemptLedgerEntry({ ...entry, failure_message: "🙂".repeat(251) }).ok, true);
   assert.equal(validateNodeAttemptLedgerEntry({ ...entry, failure_message: "x".repeat(1_001) }).ok, false);
@@ -1151,8 +1152,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(generatedTestsSnapshot, generatedTestsJsonSchema);
   assert.deepEqual(invariantLedgerSnapshot, invariantLedgerJsonSchema);
   assert.deepEqual(invariantSourceProofSnapshot, invariantSourceProofJsonSchema);
-  assert.equal(nodeAttemptLedgerSnapshot.$id, nodeAttemptLedgerJsonSchema.$id);
-  assert.deepEqual(nodeAttemptLedgerSnapshot.required, nodeAttemptLedgerJsonSchema.required);
+  assert.deepEqual(nodeAttemptLedgerSnapshot, nodeAttemptLedgerJsonSchema);
   assert.equal(runStateSnapshot.$id, runStateJsonSchema.$id);
   assert.deepEqual(runStateSnapshot.required, runStateJsonSchema.required);
   const runStateContractEnum = (

@@ -376,7 +376,7 @@ function zodPositiveFixture(filename: string, contractIds: readonly string[]): u
         run_id: "run-1",
         workflow_run_id: "workflow-1",
         control_generation: "c".repeat(64),
-        node_id: "node:1",
+        node_id: "node-1",
         strategy_attempt_id: "strategy-1",
         iteration: 0,
         attempt: 1,

@@ -165,7 +165,7 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
   const firstInput = {
     workflowRunId: "workflow-run-attempts",
     controlGeneration: "c".repeat(64),
-    nodeId: "node:strategy-a",
+    nodeId: "strategy-a",
     strategyAttemptId: "strategy-a",
     iteration: 0,
     attempt: 1,
@@ -203,7 +203,7 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
   });
   appendNodeAttempt(layout, {
     ...firstInput,
-    nodeId: "node:strategy-b",
+    nodeId: "strategy-b",
     strategyAttemptId: "strategy-b",
     attempt: 1,
     startedEventSequence: 5,
