@@ -35,6 +35,76 @@ function loadRetryFailureAwareArgs(): (
   ) as ReturnType<typeof loadRetryFailureAwareArgs>;
 }
 
+function loadTaskPromptPathForArtifactReset(): (
+  artifactDir: string,
+  promptPath: string | undefined
+) => string | undefined {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function taskPromptPathForArtifactReset");
+  const helperEnd = source.indexOf("\n\nfunction resetTaskArtifactsForRetry", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function("path", `${helper}; return taskPromptPathForArtifactReset;`)(path) as ReturnType<
+    typeof loadTaskPromptPathForArtifactReset
+  >;
+}
+
+function loadCanonicalTaskArtifactRetryReset(): (
+  artifactDir: string,
+  attemptId: string,
+  promptPath: string | undefined
+) => void {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const selectorStart = source.indexOf("function taskPromptPathForArtifactReset");
+  const selectorEnd = source.indexOf("\n\nfunction resetTaskArtifactsForRetry", selectorStart);
+  const resetStart = source.indexOf("function resetTaskArtifactContents");
+  const resetEnd = source.indexOf("\n\nfunction isMissingPathError", resetStart);
+  const resolverStart = source.indexOf("function resolveRegularArtifactFile");
+  const resolverEnd = source.indexOf("\n\nfunction resolveNonEmptyRegularArtifactFile", resolverStart);
+  assert.ok(selectorStart >= 0 && selectorEnd > selectorStart, source);
+  assert.ok(resetStart >= 0 && resetEnd > resetStart, source);
+  assert.ok(resolverStart >= 0 && resolverEnd > resolverStart, source);
+  const helpers = ts.transpileModule(
+    [
+      source.slice(selectorStart, selectorEnd),
+      source.slice(resetStart, resetEnd),
+      source.slice(resolverStart, resolverEnd)
+    ].join("\n"),
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  return new Function(
+    "path",
+    "realpathSync",
+    "lstatSync",
+    "readdirSync",
+    "rmSync",
+    "statSync",
+    "assertRegularFileInside",
+    "isStrictlyInsideDirectory",
+    "isMissingPathError",
+    "INVARIANT_SUITE_BASELINE_FILE",
+    "WORKSPACE_PATCH_BASELINE_FILE",
+    "WORKSPACE_PATCH_PREPARATION_FILE",
+    `${helpers}; return (artifactDir, attemptId, promptPath) => resetTaskArtifactContents(artifactDir, attemptId, "canonical", taskPromptPathForArtifactReset(artifactDir, promptPath));`
+  )(
+    path,
+    fs.realpathSync,
+    fs.lstatSync,
+    fs.readdirSync,
+    fs.rmSync,
+    fs.statSync,
+    assertRegularFileInside,
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT",
+    "invariant-suite-baseline.json",
+    "workspace-patch-baseline.json",
+    "workspace-patch-preparation.json"
+  ) as ReturnType<typeof loadCanonicalTaskArtifactRetryReset>;
+}
+
 function loadWorkflowControlPathResolvers(): {
   admitWorkflowControls: (
     loadedPath: string,
@@ -1037,6 +1107,55 @@ test("retry feedback diagnostics are secret-redacted and UTF-8 byte bounded befo
   );
 });
 
+test("retry cleanup preserves only a task-owned prompt and accepts a sealed snapshot prompt", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-retry-prompt-"));
+  try {
+    const artifactDir = path.join(root, "run", "artifacts", "final-report");
+    const taskPrompt = path.join(artifactDir, "prompt.rendered.md");
+    const sealedPrompt = path.join(
+      root,
+      "run",
+      "smithers",
+      "execution-snapshots",
+      "sealed",
+      "controls",
+      "rendered-prompts",
+      "final-report.md"
+    );
+    fs.mkdirSync(path.dirname(taskPrompt), { recursive: true });
+    fs.mkdirSync(path.dirname(sealedPrompt), { recursive: true });
+    fs.writeFileSync(taskPrompt, "legacy prompt\n");
+    fs.writeFileSync(sealedPrompt, "sealed prompt\n");
+
+    const taskPromptPathForArtifactReset = loadTaskPromptPathForArtifactReset();
+    const resetCanonicalArtifacts = loadCanonicalTaskArtifactRetryReset();
+    assert.equal(taskPromptPathForArtifactReset(artifactDir, taskPrompt), taskPrompt);
+    assert.equal(taskPromptPathForArtifactReset(artifactDir, sealedPrompt), undefined);
+    assert.equal(taskPromptPathForArtifactReset(artifactDir, path.join(artifactDir, "nested", "prompt.md")), undefined);
+
+    fs.writeFileSync(path.join(artifactDir, "stale-report.json"), "{}\n");
+    resetCanonicalArtifacts(artifactDir, "final-report", taskPrompt);
+    assert.equal(fs.readFileSync(taskPrompt, "utf8"), "legacy prompt\n");
+    assert.equal(fs.existsSync(path.join(artifactDir, "stale-report.json")), false);
+
+    fs.mkdirSync(path.join(artifactDir, "stale", "nested"), { recursive: true });
+    fs.writeFileSync(path.join(artifactDir, "stale", "nested", "report.md"), "stale\n");
+    resetCanonicalArtifacts(artifactDir, "final-report", sealedPrompt);
+    assert.deepEqual(fs.readdirSync(artifactDir), []);
+    assert.equal(fs.readFileSync(sealedPrompt, "utf8"), "sealed prompt\n");
+
+    const linkedPrompt = path.join(artifactDir, "prompt.rendered.md");
+    fs.symlinkSync(sealedPrompt, linkedPrompt);
+    assert.throws(
+      () => resetCanonicalArtifacts(artifactDir, "final-report", linkedPrompt),
+      /unsafe canonical task input final-report/u
+    );
+    assert.equal(fs.readFileSync(sealedPrompt, "utf8"), "sealed prompt\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("generated Smithers retries reset exact task-owned artifact contents after the first attempt", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const agentStart = source.indexOf("function artifactAwareAgent");
@@ -1057,7 +1176,11 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
   const reset = source.slice(rootsStart, preparationStart);
   assert.match(
     reset,
-    /resetTaskArtifactContents\(task\.metadata\.artifacts\.dir, task\.attemptId, "canonical", task\.promptPath\)/u
+    /const promptPath = taskPromptPathForArtifactReset\(task\.metadata\.artifacts\.dir, task\.promptPath\)/u
+  );
+  assert.match(
+    reset,
+    /resetTaskArtifactContents\(task\.metadata\.artifacts\.dir, task\.attemptId, "canonical", promptPath\)/u
   );
   assert.match(
     reset,

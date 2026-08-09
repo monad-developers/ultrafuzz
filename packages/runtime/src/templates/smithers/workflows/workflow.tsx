@@ -402,8 +402,20 @@ function mirroredArtifactDir(task: (typeof taskSpecs)[number]): string {
   return path.join(task.workspacePath, "artifacts", task.attemptId);
 }
 
+function taskPromptPathForArtifactReset(artifactDir: string, promptPath: string | undefined): string | undefined {
+  if (promptPath === undefined) return undefined;
+  const candidate = path.resolve(promptPath);
+  return path.dirname(candidate) === path.resolve(artifactDir) ? candidate : undefined;
+}
+
 function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
-  resetTaskArtifactContents(task.metadata.artifacts.dir, task.attemptId, "canonical", task.promptPath);
+  // Legacy runs keep prompt.rendered.md directly in the task artifact root, so
+  // retry cleanup must preserve it. Sealed runs instead rebind task.promptPath
+  // to the immutable execution snapshot. That file is outside this cleanup
+  // root and is validated independently; treating it as a task-owned child
+  // rejects every second attempt as an unsafe canonical input.
+  const promptPath = taskPromptPathForArtifactReset(task.metadata.artifacts.dir, task.promptPath);
+  resetTaskArtifactContents(task.metadata.artifacts.dir, task.attemptId, "canonical", promptPath);
   const canonicalArtifactRoot = realpathSync(task.metadata.artifacts.dir);
   const baselinePath = path.join(canonicalArtifactRoot, INVARIANT_SUITE_BASELINE_FILE);
   const baselineSnapshot = invariantSuiteBaselineSnapshots.get(canonicalArtifactRoot);
