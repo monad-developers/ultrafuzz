@@ -52,7 +52,7 @@ describe("trusted automatic eval-history publication handoff", () => {
       auth_mode: "api-key"
     };
     const config = {
-      schema_version: "ultrafuzz.modal.benchmark.v1",
+      schema_version: "ultrafuzz.modal.benchmark.v2",
       run_id: "ci-12345-2-smoke-ultrafuzz-bench-openai",
       app_name: "ultrafuzz-evals",
       image_name: `ufz-runner-${"a".repeat(40)}`,

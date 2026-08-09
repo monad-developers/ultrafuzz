@@ -24,23 +24,34 @@ const MODEL: ModalModelSpec = {
 
 function privateConfig(
   provider: "braintrust" | "none",
-  options: { judgeApiKeyEnv?: string | undefined; judgeUrl?: string | undefined } = { judgeApiKeyEnv: "OPENAI_API_KEY" }
+  options: { judgeApiKeyEnv: string; judgeUrl: string } = {
+    judgeApiKeyEnv: "OPENAI_API_KEY",
+    judgeUrl: "https://api.openai.com/v1/chat/completions"
+  }
 ): PrivateModalBenchmarkConfig {
   const config = parseModalBenchmarkConfig({
     schema_version: MODAL_BENCHMARK_SCHEMA_VERSION,
     run_id: "private-no-braintrust",
+    app_name: "ultrafuzz-evals",
+    image_name: "ultrafuzz-security-runner:latest",
     target: { repo: "https://github.com/aave/aave-v4", ref: "6959e3219b5506bf2acae18551cbb2a68a5b8fba" },
     ground_truth: {
       repo: "https://github.com/example/ground-truth",
       ref: "main",
-      file: "findings.yml"
+      file: "findings.yml",
+      format: "ultrafuzz"
     },
     braintrust: {
       project: "private-evals",
-      ...(options.judgeApiKeyEnv === undefined ? {} : { judge_api_key_env: options.judgeApiKeyEnv }),
-      ...(options.judgeUrl === undefined ? {} : { judge_url: options.judgeUrl })
+      api_key_env: "BRAINTRUST_API_KEY",
+      judge_api_key_env: options.judgeApiKeyEnv,
+      judge_url: options.judgeUrl,
+      judge_credential_ttl_seconds: 57_600
     },
+    node_timeout_seconds: 7_200,
+    loops: 3,
     models: [MODEL],
+    benchmark_execution: { excluded_node_ids: [] },
     eval_reporting: { provider }
   });
   if (!("target" in config)) throw new Error("expected private config");
@@ -63,8 +74,8 @@ provider = "none"
   });
 });
 
-it("defaults private no-reporting scoring to OPENAI_API_KEY instead of the Braintrust reporting key", () => {
-  const config = privateConfig("none", { judgeApiKeyEnv: undefined });
+it("uses the explicitly configured private judge credential and endpoint", () => {
+  const config = privateConfig("none");
 
   expect(privateJudgeApiKeyEnv(config)).toBe("OPENAI_API_KEY");
   expect(privateJudgeUrl(config)).toBe("https://api.openai.com/v1/chat/completions");

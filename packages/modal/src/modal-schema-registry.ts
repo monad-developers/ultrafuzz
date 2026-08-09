@@ -14,6 +14,7 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import {
+  MODAL_BENCHMARK_CONFIG_SCHEMA_ID,
   MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID,
   MODAL_COMMON_SCHEMA_ID,
   MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
@@ -42,6 +43,7 @@ export interface ModalSchemaMetadata {
   id: string;
   role: "runtime-state" | "subschema";
   typescriptExport: keyof typeof MODAL_SCHEMA_EXPORTS;
+  zodParser?: "modalBenchmarkConfigZodSchema";
   semanticGates: readonly ModalSemanticGateName[];
 }
 
@@ -69,6 +71,7 @@ function loadSchemaDocument(filename: string): Readonly<Record<string, unknown>>
 }
 
 export const modalCommonJsonSchema = loadSchemaDocument("modal-common.schema.json");
+export const modalBenchmarkConfigJsonSchema = loadSchemaDocument("modal-benchmark-config.schema.json");
 export const modalBenchmarkControlManifestJsonSchema = loadSchemaDocument(
   "modal-benchmark-control-manifest.schema.json"
 );
@@ -90,6 +93,7 @@ export const modalWorkerLineageJsonSchema = loadSchemaDocument("modal-worker-lin
 export const modalWorkerResultJsonSchema = loadSchemaDocument("modal-worker-result.schema.json");
 
 export const MODAL_SCHEMA_EXPORTS = Object.freeze({
+  modalBenchmarkConfigJsonSchema,
   modalBenchmarkControlManifestJsonSchema,
   modalCommonJsonSchema,
   modalExecutionDependencyManifestJsonSchema,
@@ -109,6 +113,13 @@ export const MODAL_SCHEMA_EXPORTS = Object.freeze({
 });
 
 export const MODAL_SCHEMA_METADATA: Readonly<Record<string, ModalSchemaMetadata>> = Object.freeze({
+  "modal-benchmark-config.schema.json": {
+    id: MODAL_BENCHMARK_CONFIG_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "modalBenchmarkConfigJsonSchema",
+    zodParser: "modalBenchmarkConfigZodSchema",
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_BENCHMARK_CONFIG_SCHEMA_ID]
+  },
   "modal-benchmark-control-manifest.schema.json": {
     id: MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID,
     role: "runtime-state",
@@ -208,6 +219,7 @@ export const MODAL_SCHEMA_METADATA: Readonly<Record<string, ModalSchemaMetadata>
 });
 
 const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, unknown>>>> = Object.freeze({
+  "modal-benchmark-config.schema.json": modalBenchmarkConfigJsonSchema,
   "modal-benchmark-control-manifest.schema.json": modalBenchmarkControlManifestJsonSchema,
   "modal-common.schema.json": modalCommonJsonSchema,
   "modal-execution-dependency-manifest.schema.json": modalExecutionDependencyManifestJsonSchema,
@@ -277,7 +289,8 @@ export function modalSchemaRegistry(): readonly SchemaRegistryEntry[] {
         schema,
         localReferences: Object.freeze(localReferences),
         semanticGates: Object.freeze([...metadata.semanticGates]),
-        typescriptExport: metadata.typescriptExport
+        typescriptExport: metadata.typescriptExport,
+        ...(metadata.zodParser === undefined ? {} : { zodParser: metadata.zodParser })
       });
     })
   );

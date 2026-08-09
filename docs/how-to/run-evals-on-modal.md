@@ -66,17 +66,18 @@ refresh-token rotation remains single-writer.
 
 ## Create a private runtime config
 
-The eight-model matrix is built in, so `models` may be omitted. The default is
-one run each for GPT-5.5, GPT-5.6 Sol/Terra/Luna, Claude Fable 5, Claude Opus
-4.8, Kimi K3, and DeepSeek V4 Pro, with the default production strategy loop
-count `loops = 3`.
-Public CI launch configs intentionally set `loops = 1` for their smoke and full
+The v2 document is an exact contract: every operational value is explicit.
+The loader does not add models, loop counts, image names, credential names,
+timeouts, reporting settings, or target selections. Configure each model row you
+intend to run; public CI launch configs set `loops = 1` for their smoke and full
 lanes.
 
 ```json
 {
-  "schema_version": "ultrafuzz.modal.benchmark.v1",
+  "schema_version": "ultrafuzz.modal.benchmark.v2",
   "run_id": "example-run",
+  "app_name": "ultrafuzz-evals",
+  "image_name": "ultrafuzz-security-runner:latest",
   "target": {
     "repo": "https://example.invalid/subject.git",
     "ref": "full-commit-sha"
@@ -84,18 +85,47 @@ lanes.
   "ground_truth": {
     "repo": "https://example.invalid/reference-findings.git",
     "ref": "full-commit-sha",
-    "file": "findings.yml"
+    "file": "findings.yml",
+    "format": "ultrafuzz"
+  },
+  "benchmark_execution": {
+    "excluded_node_ids": []
+  },
+  "eval_reporting": {
+    "provider": "braintrust"
   },
   "braintrust": {
     "project": "private-evals",
-    "api_key_env": "BRAINTRUST_API_KEY"
-  }
+    "api_key_env": "BRAINTRUST_API_KEY",
+    "judge_api_key_env": "OPENAI_API_KEY",
+    "judge_url": "https://api.openai.com/v1/chat/completions",
+    "judge_credential_ttl_seconds": 57600
+  },
+  "node_timeout_seconds": 7200,
+  "loops": 3,
+  "models": [
+    {
+      "slug": "gpt-5-6-sol",
+      "model": "gpt-5.6-sol",
+      "provider": "openai",
+      "agent": "CodexAgent",
+      "reasoning": "xhigh",
+      "auth_mode": "subscription"
+    }
+  ]
 }
 ```
 
 The ground-truth file must use the format accepted by `ultrafuzz eval score`.
 The config schema intentionally accepts credential environment-variable names,
-not inline credential values.
+not inline credential values. Validate the exact file before launch; validation
+does not repair or rewrite it:
+
+```bash
+ultrafuzz json validate \
+  --schema packages/modal/schema/modal-benchmark-config.schema.json \
+  --file .ultrafuzz/modal/benchmark.json
+```
 
 For a private benchmark, the ground-truth file must bind the bugs to the target
 codebase, independently of the repository that stores the file:
@@ -112,8 +142,8 @@ bugs: []
 the materialized target commit before model work, before scoring, and when a
 Modal workspace resumes. A storage repository may therefore be a separate
 private repository, but an upstream repository and its fork are different
-subjects. Legacy unbound documents remain usable only for public or historical
-compatibility paths; a new private benchmark fails closed without this binding.
+subjects. Private benchmarks fail closed without this binding; there is no
+historical compatibility reader.
 
 Audit reports with bracketed issue headings can set `ground_truth.format` to
 `audit-markdown` and provide `ground_truth.expected_findings`. Conversion runs

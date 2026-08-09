@@ -2,6 +2,7 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
+  MODAL_BENCHMARK_CONFIG_SCHEMA_ID,
   MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID,
   MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
   MODAL_LAUNCH_STATE_SCHEMA_ID,
@@ -19,6 +20,7 @@ import {
   MODAL_WORKER_RESULT_SCHEMA_ID,
   type ModalContractForSchemaId,
   type ModalContractSchemaId,
+  type StrictModalBenchmarkConfigDocument,
   type StrictModalBenchmarkControlManifestDocument,
   type StrictModalExecutionDependencyManifestDocument,
   type StrictModalLaunchStateDocument,
@@ -38,6 +40,7 @@ import {
 } from "./modal-contracts.js";
 
 export const IMPLEMENTED_MODAL_SEMANTIC_GATES = Object.freeze([
+  "modal-benchmark-config-identity",
   "modal-benchmark-control-manifest-identity",
   "modal-benchmark-control-manifest-uniqueness",
   "modal-execution-dependency-target-identity",
@@ -81,6 +84,7 @@ export interface ModalNodeCheckpointResultContext {
 
 /** The exact gates each document dispatch can invoke; registry metadata imports this table directly. */
 export const MODAL_SEMANTIC_GATES_BY_SCHEMA_ID = Object.freeze({
+  [MODAL_BENCHMARK_CONFIG_SCHEMA_ID]: ["modal-benchmark-config-identity"],
   [MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID]: [
     "modal-benchmark-control-manifest-identity",
     "modal-benchmark-control-manifest-uniqueness"
@@ -190,6 +194,9 @@ export function assertModalDocumentSemantics<SchemaId extends ModalContractSchem
   value: ModalContractForSchemaId<SchemaId>
 ): void {
   switch (schemaId) {
+    case MODAL_BENCHMARK_CONFIG_SCHEMA_ID:
+      assertBenchmarkConfigSemantics(value as StrictModalBenchmarkConfigDocument);
+      return;
     case MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID:
       assertBenchmarkControlManifestSemantics(value as StrictModalBenchmarkControlManifestDocument);
       return;
@@ -222,6 +229,32 @@ export function assertModalDocumentSemantics<SchemaId extends ModalContractSchem
       return;
     default:
       return;
+  }
+}
+
+function assertBenchmarkConfigSemantics(config: StrictModalBenchmarkConfigDocument): void {
+  assertUniqueIdentity(
+    config.models.map((model) => model.slug),
+    "model slug"
+  );
+  if ("target" in config) {
+    assertUniqueIdentity(config.benchmark_execution.excluded_node_ids, "excluded node ID");
+    return;
+  }
+  if (config.models.length !== 1 || config.models[0]?.slug !== config.public_benchmark.runner_model_profile) {
+    fail("modal-benchmark-config-identity", "public runner profile must identify the only configured model");
+  }
+  assertUniqueIdentity(
+    config.public_benchmark.targets.map((target) => target.id),
+    "public target ID"
+  );
+}
+
+function assertUniqueIdentity(values: readonly string[], label: string): void {
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (seen.has(value)) fail("modal-benchmark-config-identity", `duplicate ${label} ${value}`);
+    seen.add(value);
   }
 }
 

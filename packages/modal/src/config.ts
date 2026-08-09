@@ -1,14 +1,10 @@
-import fs from "node:fs";
 import { createHash } from "node:crypto";
-import path from "node:path";
 
 import { z } from "zod/v4";
 
+import { MODAL_BENCHMARK_CONFIG_SCHEMA_ID, type StrictModalBenchmarkConfigDocument } from "./modal-contracts.js";
+import { assertModalDocumentValue, readModalDocument } from "./modal-documents.js";
 import {
-  DEFAULT_BENCHMARK_MODELS,
-  DEFAULT_MODAL_APP,
-  DEFAULT_MODAL_IMAGE,
-  DEFAULT_NODE_TIMEOUT_SECONDS,
   MODAL_BENCHMARK_SCHEMA_VERSION,
   MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS,
   MODAL_PUBLIC_SANDBOX_TIMEOUT_MS,
@@ -20,14 +16,12 @@ const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
 const gitRef = z.string().min(1).max(256);
 const gitUrl = z.string().url().max(2048);
 const fullSha = z.string().regex(/^[0-9a-f]{40}$/u);
-const relativeFile = z
-  .string()
-  .min(1)
-  .refine((value) => !path.isAbsolute(value) && !value.split(/[\\/]/u).includes(".."), "must be a safe relative path");
+const relativeFile = z.string().regex(/^(?!\/)(?![A-Za-z]:[\\/])(?!.*(?:^|[\\/])\.\.(?:[\\/]|$)).+$/u);
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u);
 const httpsUrl = z
   .string()
   .url()
+  .max(2048)
   .refine((value) => {
     const parsed = new URL(value);
     return parsed.protocol === "https:" && parsed.username === "" && parsed.password === "";
@@ -75,7 +69,7 @@ const publicBenchmarkTargetSchema = z
 
 const privateBenchmarkExecutionSchema = z
   .object({
-    excluded_node_ids: z.array(safeId).max(512).default([])
+    excluded_node_ids: z.array(safeId).max(512)
   })
   .strict()
   .superRefine((execution, context) => {
@@ -90,37 +84,32 @@ const privateBenchmarkExecutionSchema = z
       }
       seen.add(id);
     }
-  })
-  .default({ excluded_node_ids: [] });
+  });
 
 const privateEvalReportingSchema = z
   .object({
-    provider: z.enum(["braintrust", "none"]).default("braintrust")
+    provider: z.enum(["braintrust", "none"])
   })
-  .strict()
-  .default({ provider: "braintrust" });
+  .strict();
 
 const commonBenchmarkConfig = {
   schema_version: z.literal(MODAL_BENCHMARK_SCHEMA_VERSION),
   run_id: safeId,
-  app_name: z.string().min(1).max(128).default(DEFAULT_MODAL_APP),
-  image_name: z.string().min(1).max(256).default(DEFAULT_MODAL_IMAGE),
+  app_name: z.string().min(1).max(128),
+  image_name: z.string().min(1).max(256),
   braintrust: z
     .object({
       project: z.string().min(1).max(256),
-      api_key_env: envName.default("BRAINTRUST_API_KEY"),
-      judge_api_key_env: envName.optional(),
-      judge_url: httpsUrl.optional(),
+      api_key_env: envName,
+      judge_api_key_env: envName,
+      judge_url: httpsUrl,
       judge_credential_endpoint: httpsUrl.optional(),
-      judge_credential_ttl_seconds: z.number().int().min(60).max(86_400).default(57_600)
+      judge_credential_ttl_seconds: z.number().int().min(60).max(86_400)
     })
     .strict(),
-  node_timeout_seconds: z.number().int().positive().max(86_400).default(DEFAULT_NODE_TIMEOUT_SECONDS),
-  loops: z.number().int().positive().max(256).default(3),
-  models: z
-    .array(modelSchema)
-    .min(1)
-    .default(() => DEFAULT_BENCHMARK_MODELS.map((model) => ({ ...model })))
+  node_timeout_seconds: z.number().int().positive().max(86_400),
+  loops: z.number().int().positive().max(256),
+  models: z.array(modelSchema).min(1)
 } as const;
 
 const privateBenchmarkConfigSchema = z
@@ -134,7 +123,7 @@ const privateBenchmarkConfigSchema = z
         repo: gitUrl,
         ref: gitRef,
         file: relativeFile,
-        format: z.enum(["ultrafuzz", "audit-markdown"]).default("ultrafuzz"),
+        format: z.enum(["ultrafuzz", "audit-markdown"]),
         expected_findings: z.number().int().positive().max(10_000).optional()
       })
       .strict()
@@ -147,12 +136,12 @@ const publicBenchmarkConfigSchema = z
     public_benchmark: z
       .object({
         benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
-        lane: z.enum(["smoke", "full"]).default("smoke"),
+        lane: z.enum(["smoke", "full"]),
         runner_model_profile: safeId,
         candidate_repository: httpsUrl,
         candidate_commit: fullSha,
-        targets: z.array(publicBenchmarkTargetSchema).min(1).max(2_048).optional(),
-        max_runtime_seconds: z.number().int().min(300).max(15_000).default(3_600)
+        targets: z.array(publicBenchmarkTargetSchema).min(1).max(2_048),
+        max_runtime_seconds: z.number().int().min(300).max(15_000)
       })
       .strict()
   })
@@ -165,11 +154,28 @@ const publicBenchmarkConfigSchema = z
         message: "public benchmarks must configure exactly their selected runner model profile"
       });
     }
+    for (const duplicate of duplicateIdentities(config.public_benchmark.targets, (target) => target.id)) {
+      context.addIssue({
+        code: "custom",
+        path: ["public_benchmark", "targets", duplicate.index],
+        message: `duplicate public benchmark target ID: ${duplicate.id}`
+      });
+    }
   });
 
-const benchmarkConfigSchema = z.union([privateBenchmarkConfigSchema, publicBenchmarkConfigSchema]);
+export const modalBenchmarkConfigZodSchema = z
+  .union([privateBenchmarkConfigSchema, publicBenchmarkConfigSchema])
+  .superRefine((config, context) => {
+    for (const duplicate of duplicateIdentities(config.models, (model) => model.slug)) {
+      context.addIssue({
+        code: "custom",
+        path: ["models", duplicate.index],
+        message: `duplicate model slug: ${duplicate.id}`
+      });
+    }
+  });
 
-export type ModalBenchmarkConfig = z.infer<typeof benchmarkConfigSchema> & { models: ModalModelSpec[] };
+export type ModalBenchmarkConfig = StrictModalBenchmarkConfigDocument;
 
 export type PublicModalBenchmarkConfig = Extract<ModalBenchmarkConfig, { public_benchmark: unknown }>;
 export type PrivateModalBenchmarkConfig = Extract<ModalBenchmarkConfig, { target: unknown }>;
@@ -187,24 +193,19 @@ export function configuredModalSandboxTimeoutMs(config: ModalBenchmarkConfig): n
 }
 
 export function parseModalBenchmarkConfig(value: unknown): ModalBenchmarkConfig {
-  const parsed = benchmarkConfigSchema.parse(value);
-  const slugs = new Set<string>();
-  for (const model of parsed.models) {
-    if (slugs.has(model.slug)) throw new Error(`duplicate model slug: ${model.slug}`);
-    slugs.add(model.slug);
-  }
-  return parsed as ModalBenchmarkConfig;
+  assertModalDocumentValue(MODAL_BENCHMARK_CONFIG_SCHEMA_ID, value as ModalBenchmarkConfig);
+  assertModalBenchmarkConfigZod(value);
+  return value;
 }
 
 export function loadModalBenchmarkConfig(filePath: string): ModalBenchmarkConfig {
-  const absolute = path.resolve(filePath);
-  return parseModalBenchmarkConfig(JSON.parse(fs.readFileSync(absolute, "utf8")) as unknown);
+  const config = readModalDocument(filePath, MODAL_BENCHMARK_CONFIG_SCHEMA_ID).value;
+  assertModalBenchmarkConfigZod(config);
+  return config as ModalBenchmarkConfig;
 }
 
 export function fingerprintModalConfigFile(filePath: string): string {
-  return createHash("sha256")
-    .update(fs.readFileSync(path.resolve(filePath)))
-    .digest("hex");
+  return readModalDocument(filePath, MODAL_BENCHMARK_CONFIG_SCHEMA_ID).bytes_sha256;
 }
 
 export function fingerprintModalModel(model: ModalModelSpec): string {
@@ -220,4 +221,41 @@ export function fingerprintModalModel(model: ModalModelSpec): string {
       })
     )
     .digest("hex");
+}
+
+export function assertModalBenchmarkConfigZod(
+  value: unknown,
+  label = "Modal benchmark configuration"
+): asserts value is ModalBenchmarkConfig {
+  const result = modalBenchmarkConfigZodSchema.safeParse(value);
+  if (result.success) return;
+  const summary = result.error.issues
+    .slice(0, 10)
+    .map((issue) => `${issue.path.join(".") || "/"}: ${issue.message}`)
+    .join("; ");
+  throw new Error(`${label} does not match ${MODAL_BENCHMARK_CONFIG_SCHEMA_ID}: ${summary}`);
+}
+
+export function modalBenchmarkConfigValidatorsAgree(value: unknown): boolean {
+  let canonical = true;
+  try {
+    assertModalDocumentValue(MODAL_BENCHMARK_CONFIG_SCHEMA_ID, value as ModalBenchmarkConfig);
+  } catch {
+    canonical = false;
+  }
+  return canonical === modalBenchmarkConfigZodSchema.safeParse(value).success;
+}
+
+function duplicateIdentities<Item>(
+  items: readonly Item[],
+  identity: (item: Item) => string
+): Array<{ id: string; index: number }> {
+  const seen = new Set<string>();
+  const duplicates: Array<{ id: string; index: number }> = [];
+  for (const [index, item] of items.entries()) {
+    const id = identity(item);
+    if (seen.has(id)) duplicates.push({ id, index });
+    seen.add(id);
+  }
+  return duplicates;
 }

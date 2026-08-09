@@ -45,7 +45,7 @@ const MODEL: ModalModelSpec = {
   auth_mode: "api-key"
 };
 const CONFIG: PublicModalBenchmarkConfig = {
-  schema_version: "ultrafuzz.modal.benchmark.v1",
+  schema_version: "ultrafuzz.modal.benchmark.v2",
   run_id: "public-diagnostics",
   app_name: "ultrafuzz-evals",
   image_name: "fixture-image",
@@ -53,6 +53,7 @@ const CONFIG: PublicModalBenchmarkConfig = {
     project: "fixture",
     api_key_env: "BRAINTRUST_API_KEY",
     judge_api_key_env: "OPENAI_API_KEY",
+    judge_url: "https://api.openai.com/v1/chat/completions",
     judge_credential_ttl_seconds: 57_600
   },
   node_timeout_seconds: 1_800,
@@ -64,6 +65,14 @@ const CONFIG: PublicModalBenchmarkConfig = {
     runner_model_profile: MODEL.slug,
     candidate_repository: "https://github.com/monad-developers/ultrafuzz",
     candidate_commit: "a".repeat(40),
+    targets: [
+      {
+        id: "target-one",
+        repository: "https://github.com/example/target-one",
+        revision: "b".repeat(40),
+        framework: "foundry"
+      }
+    ],
     max_runtime_seconds: 3_600
   }
 };

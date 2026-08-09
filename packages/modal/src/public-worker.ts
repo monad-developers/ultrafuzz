@@ -300,7 +300,7 @@ export async function runPublicBenchmarkWorker(input: {
       if (checkpoint.runError !== undefined && !publicEvalRunErrorCanBePublished(checkpoint.diagnostics)) {
         throw checkpoint.runError;
       }
-      const judgeKeyEnv = input.config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY";
+      const judgeKeyEnv = input.config.braintrust.judge_api_key_env;
       await runCommand(
         ["node", CLI, "eval", "score", prepared.evalRunId, "--project", prepared.controlRoot, "--llm-judge", "--json"],
         {
@@ -656,9 +656,7 @@ export async function publicBenchmarkWorkerSecretValues(
           remoteAuthDir("kimi"),
           path.join(dataRoot, "kimi-code-auth")
         );
-  return [
-    ...new Set([...runnerSecretValues, requiredEnv(config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY", env)])
-  ];
+  return [...new Set([...runnerSecretValues, requiredEnv(config.braintrust.judge_api_key_env, env)])];
 }
 
 async function preparePublicBenchmark(

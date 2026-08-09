@@ -8,6 +8,8 @@ import {
   configuredModalSandboxTimeoutMs,
   fingerprintModalConfigFile,
   fingerprintModalModel,
+  loadModalBenchmarkConfig,
+  modalBenchmarkConfigValidatorsAgree,
   parseModalBenchmarkConfig
 } from "../src/config.js";
 import {
@@ -20,15 +22,35 @@ import {
 
 function minimalConfig(): Record<string, unknown> {
   return {
-    schema_version: MODAL_BENCHMARK_SCHEMA_VERSION,
-    run_id: "example-run",
+    ...commonConfig("example-run", [...DEFAULT_BENCHMARK_MODELS]),
     target: { repo: "https://example.invalid/target.git", ref: "0123456789abcdef" },
     ground_truth: {
       repo: "https://example.invalid/ground-truth.git",
       ref: "fedcba9876543210",
-      file: "findings.yml"
+      file: "findings.yml",
+      format: "ultrafuzz"
     },
-    braintrust: { project: "example-evals" }
+    benchmark_execution: { excluded_node_ids: [] },
+    eval_reporting: { provider: "braintrust" }
+  };
+}
+
+function commonConfig(runId: string, models: unknown[]): Record<string, unknown> {
+  return {
+    schema_version: MODAL_BENCHMARK_SCHEMA_VERSION,
+    run_id: runId,
+    app_name: "ultrafuzz-evals",
+    image_name: "ultrafuzz-security-runner:latest",
+    braintrust: {
+      project: "example-evals",
+      api_key_env: "BRAINTRUST_API_KEY",
+      judge_api_key_env: "OPENAI_API_KEY",
+      judge_url: "https://api.openai.com/v1/chat/completions",
+      judge_credential_ttl_seconds: 57_600
+    },
+    node_timeout_seconds: 7_200,
+    loops: 3,
+    models
   };
 }
 
@@ -37,17 +59,23 @@ describe("Modal benchmark config", () => {
     const privateConfig = parseModalBenchmarkConfig(minimalConfig());
     const model = DEFAULT_BENCHMARK_MODELS[0]!;
     const publicConfig = parseModalBenchmarkConfig({
-      schema_version: MODAL_BENCHMARK_SCHEMA_VERSION,
-      run_id: "public-run",
-      braintrust: { project: "public-evals" },
+      ...commonConfig("public-run", [model]),
       public_benchmark: {
         benchmark: "ultrafuzz-bench",
         lane: "smoke",
         runner_model_profile: model.slug,
         candidate_repository: "https://github.com/monad-developers/ultrafuzz",
-        candidate_commit: "a".repeat(40)
-      },
-      models: [model]
+        candidate_commit: "a".repeat(40),
+        targets: [
+          {
+            id: "target-one",
+            repository: "https://github.com/example/target",
+            revision: "b".repeat(40),
+            framework: "foundry"
+          }
+        ],
+        max_runtime_seconds: 3_600
+      }
     });
     if (!("public_benchmark" in publicConfig)) throw new Error("expected a public benchmark config");
     const publicFullConfig = parseModalBenchmarkConfig({
@@ -61,21 +89,19 @@ describe("Modal benchmark config", () => {
     expect(configuredModalSandboxTimeoutMs(privateConfig)).toBe(MODAL_SANDBOX_TIMEOUT_MS);
   });
 
-  it("defaults to the eight benchmark models and production strategy loops", () => {
-    const config = parseModalBenchmarkConfig(minimalConfig());
+  it("requires every operational value instead of defaulting omitted configuration", () => {
+    const config = minimalConfig();
+    expect(parseModalBenchmarkConfig(config)).toBe(config);
 
-    expect(config.loops).toBe(3);
-    expect(config.models).toEqual(DEFAULT_BENCHMARK_MODELS);
-    expect(config.models.map((model) => model.model)).toEqual([
-      "gpt-5.5",
-      "gpt-5.6-sol",
-      "gpt-5.6-terra",
-      "gpt-5.6-luna",
-      "claude-fable-5",
-      "claude-opus-4-8",
-      "kimi-k3",
-      "deepseek-v4-pro"
-    ]);
+    for (const field of ["app_name", "image_name", "node_timeout_seconds", "loops", "models"] as const) {
+      const missing = { ...minimalConfig() };
+      delete missing[field];
+      expect(() => parseModalBenchmarkConfig(missing), field).toThrow();
+    }
+
+    const missingNested = minimalConfig();
+    delete (missingNested.braintrust as Record<string, unknown>).judge_credential_ttl_seconds;
+    expect(() => parseModalBenchmarkConfig(missingNested)).toThrow();
   });
 
   it("rejects inline secret fields and duplicate model slugs", () => {
@@ -91,7 +117,7 @@ describe("Modal benchmark config", () => {
         ...minimalConfig(),
         models: [DEFAULT_BENCHMARK_MODELS[0], DEFAULT_BENCHMARK_MODELS[0]]
       })
-    ).toThrow(/duplicate model slug/u);
+    ).toThrow();
   });
 
   it("requires provider and agent pairs to match", () => {
@@ -100,7 +126,7 @@ describe("Modal benchmark config", () => {
         ...minimalConfig(),
         models: [{ ...DEFAULT_BENCHMARK_MODELS[0], agent: "ClaudeAgent" }]
       })
-    ).toThrow(/provider and agent/u);
+    ).toThrow();
   });
 
   it("accepts Kimi K3 model configs with the Kimi agent", () => {
@@ -143,7 +169,7 @@ describe("Modal benchmark config", () => {
           }
         ]
       })
-    ).toThrow(/Kimi reasoning must be low, high, or max/u);
+    ).toThrow();
   });
 
   it("rejects whitespace-padded Kimi reasoning values", () => {
@@ -161,7 +187,7 @@ describe("Modal benchmark config", () => {
           }
         ]
       })
-    ).toThrow(/Kimi reasoning must be low, high, or max/u);
+    ).toThrow();
   });
 
   it("accepts only supported DeepSeek V4 API-key model configs", () => {
@@ -181,13 +207,13 @@ describe("Modal benchmark config", () => {
         ...minimalConfig(),
         models: [{ ...deepseek, reasoning: "xhigh" }]
       })
-    ).toThrow(/DeepSeek reasoning must be low, high, or max/u);
+    ).toThrow();
     expect(() =>
       parseModalBenchmarkConfig({
         ...minimalConfig(),
         models: [{ ...deepseek, auth_mode: "subscription" }]
       })
-    ).toThrow(/DeepSeek authentication must use an API key/u);
+    ).toThrow();
   });
 
   it("accepts audit Markdown conversion and temporary judge credentials", () => {
@@ -201,15 +227,16 @@ describe("Modal benchmark config", () => {
         expected_findings: 2
       },
       braintrust: {
-        project: "example-evals",
+        ...(minimalConfig().braintrust as Record<string, unknown>),
         judge_api_key_env: "JUDGE_KEY",
         judge_url: "https://gateway.example.invalid/v1/chat/completions",
-        judge_credential_endpoint: "https://gateway.example.invalid/v1/credentials"
+        judge_credential_endpoint: "https://gateway.example.invalid/v1/credentials",
+        judge_credential_ttl_seconds: 900
       }
     });
 
     expect("ground_truth" in config && config.ground_truth.expected_findings).toBe(2);
-    expect(config.braintrust.judge_credential_ttl_seconds).toBe(57_600);
+    expect(config.braintrust.judge_credential_ttl_seconds).toBe(900);
   });
 
   it("accepts bounded private benchmark execution controls", () => {
@@ -279,27 +306,33 @@ describe("Modal benchmark config", () => {
     ).toThrow();
   });
 
-  it("accepts only the strict public benchmark shape and its one-hour default", () => {
+  it("accepts only an explicit strict public benchmark shape", () => {
+    const model = {
+      slug: "benchmark-smoke-gpt-5-6-luna-high",
+      model: "gpt-5.6-luna",
+      provider: "openai",
+      agent: "CodexAgent",
+      reasoning: "high",
+      auth_mode: "api-key"
+    } as const;
     const config = parseModalBenchmarkConfig({
-      schema_version: MODAL_BENCHMARK_SCHEMA_VERSION,
-      run_id: "public-main-a1b2c3",
+      ...commonConfig("public-main-a1b2c3", [model]),
       public_benchmark: {
         benchmark: "evmbench",
+        lane: "full",
         runner_model_profile: "benchmark-smoke-gpt-5-6-luna-high",
         candidate_repository: "https://github.com/monad-developers/ultrafuzz",
-        candidate_commit: "a".repeat(40)
-      },
-      braintrust: { project: "ultrafuzz-public-benchmarks", judge_api_key_env: "OPENAI_API_KEY" },
-      models: [
-        {
-          slug: "benchmark-smoke-gpt-5-6-luna-high",
-          model: "gpt-5.6-luna",
-          provider: "openai",
-          agent: "CodexAgent",
-          reasoning: "high",
-          auth_mode: "api-key"
-        }
-      ]
+        candidate_commit: "a".repeat(40),
+        targets: [
+          {
+            id: "target-one",
+            repository: "https://github.com/example/target-one",
+            revision: "b".repeat(40),
+            framework: "foundry"
+          }
+        ],
+        max_runtime_seconds: 3_600
+      }
     });
 
     expect("public_benchmark" in config && config.public_benchmark.max_runtime_seconds).toBe(3_600);
@@ -324,18 +357,52 @@ describe("Modal benchmark config", () => {
         ...config,
         models: [{ ...config.models[0]!, slug: "different-profile" }]
       })
-    ).toThrow(/selected runner model profile/u);
+    ).toThrow();
   });
 
   it("fingerprints exact configuration bytes and every model field", () => {
     const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-config-"));
     const file = path.join(root, "config.json");
-    fs.writeFileSync(file, '{"value":1}\n');
+    fs.writeFileSync(file, `${JSON.stringify(minimalConfig())}\n`);
     const first = fingerprintModalConfigFile(file);
-    fs.writeFileSync(file, '{ "value": 1 }\n');
+    fs.writeFileSync(file, `${JSON.stringify(minimalConfig(), null, 2)}\n`);
     expect(fingerprintModalConfigFile(file)).not.toBe(first);
     expect(fingerprintModalModel(DEFAULT_BENCHMARK_MODELS[0]!)).not.toBe(
       fingerprintModalModel({ ...DEFAULT_BENCHMARK_MODELS[0]!, reasoning: "different" })
     );
+  });
+
+  it("strictly loads one registered v2 document without repair or conversion", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-config-strict-"));
+    const file = path.join(root, "config.json");
+    const config = minimalConfig();
+    fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
+    expect(loadModalBenchmarkConfig(file)).toEqual(config);
+
+    const duplicate = `${JSON.stringify(config, null, 2)}\n`.replace(
+      '"run_id": "example-run",',
+      '"run_id": "example-run",\n  "run_id": "different-run",'
+    );
+    fs.writeFileSync(file, duplicate);
+    expect(() => loadModalBenchmarkConfig(file)).toThrow(/duplicate/iu);
+
+    fs.writeFileSync(file, `${JSON.stringify({ ...config, schema_version: "ultrafuzz.modal.benchmark.v1" })}\n`);
+    expect(() => loadModalBenchmarkConfig(file)).toThrow();
+  });
+
+  it("keeps the nontransforming Zod parser aligned with canonical schema and semantic gates", () => {
+    const valid = minimalConfig();
+    const variants: unknown[] = [
+      valid,
+      { ...valid, unexpected: true },
+      { ...valid, loops: "3" },
+      { ...valid, models: [DEFAULT_BENCHMARK_MODELS[0], DEFAULT_BENCHMARK_MODELS[0]] },
+      {
+        ...valid,
+        benchmark_execution: { excluded_node_ids: ["boundary-tests", "boundary-tests"] }
+      },
+      { ...valid, schema_version: "ultrafuzz.modal.benchmark.v1" }
+    ];
+    for (const variant of variants) expect(modalBenchmarkConfigValidatorsAgree(variant)).toBe(true);
   });
 });

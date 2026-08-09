@@ -159,7 +159,7 @@ export function prepareModalBenchmarkCleanup(input) {
 
 function validateThreatModelCleanupConfig(config, model, pair, context) {
   const expected = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: `ci-${context.generation}-threat-model-ultrafuzz-bench-openai`,
     app_name: "ultrafuzz-evals",
     image_name: `ufz-runner-${context.candidateCommit}`,

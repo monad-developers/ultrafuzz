@@ -236,7 +236,7 @@ function cleanupFixture() {
   };
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
   const config: CleanupConfig = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: "ci-12345-2-smoke-ultrafuzz-bench-openai",
     app_name: "ultrafuzz-evals",
     image_name: `ufz-runner-${candidate}`,
@@ -358,7 +358,7 @@ function threatModelCleanupFixture() {
   };
   writeJson(manifestPath, manifest);
   const config: CleanupConfig = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: "ci-54321-3-threat-model-ultrafuzz-bench-openai",
     app_name: "ultrafuzz-evals",
     image_name: `ufz-runner-${threatCandidate}`,

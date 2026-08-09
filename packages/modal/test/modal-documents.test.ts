@@ -6,6 +6,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  MODAL_BENCHMARK_CONFIG_SCHEMA_ID,
   MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID,
   MODAL_COMMON_SCHEMA_ID,
   MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
@@ -104,6 +105,40 @@ function emptyRecoverySummary(): StrictModalRecoveryLifecycleSummary {
 
 function contractFixtures(): ContractFixtures {
   return {
+    [MODAL_BENCHMARK_CONFIG_SCHEMA_ID]: {
+      schema_version: "ultrafuzz.modal.benchmark.v2",
+      run_id: "private-run",
+      app_name: "ultrafuzz-evals",
+      image_name: "ultrafuzz-security-runner:latest",
+      braintrust: {
+        project: "private-evals",
+        api_key_env: "BRAINTRUST_API_KEY",
+        judge_api_key_env: "OPENAI_API_KEY",
+        judge_url: "https://api.openai.com/v1/chat/completions",
+        judge_credential_ttl_seconds: 57_600
+      },
+      node_timeout_seconds: 7_200,
+      loops: 3,
+      models: [
+        {
+          slug: "gpt-5-6-sol",
+          model: "gpt-5.6-sol",
+          provider: "openai",
+          agent: "CodexAgent",
+          reasoning: "xhigh",
+          auth_mode: "subscription"
+        }
+      ],
+      target: { repo: "https://github.com/example/target", ref: gitA },
+      benchmark_execution: { excluded_node_ids: [] },
+      eval_reporting: { provider: "braintrust" },
+      ground_truth: {
+        repo: "https://github.com/example/ground-truth",
+        ref: gitB,
+        file: "findings.yml",
+        format: "ultrafuzz"
+      }
+    },
     [MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID]: {
       schema_version: "ultrafuzz.modal.benchmark-control-manifest.v1",
       candidate_commit: gitA,
@@ -305,7 +340,7 @@ function bytes(value: unknown): Buffer {
 describe("Modal strict JSON contract foundation", () => {
   it("registers and strictly compiles every schema with matching checked-in exports and gates", () => {
     const registry = modalSchemaRegistry();
-    expect(registry).toHaveLength(16);
+    expect(registry).toHaveLength(17);
     expect(registry.map((entry) => entry.filename)).toEqual(Object.keys(MODAL_SCHEMA_METADATA).sort());
     expect(modalSchemaBundleDigest()).toMatch(/^[0-9a-f]{64}$/u);
 
@@ -315,6 +350,9 @@ describe("Modal strict JSON contract foundation", () => {
       for (const gate of entry.semanticGates) expect(implemented.has(gate)).toBe(true);
     }
     expect(registry.find((entry) => entry.id === MODAL_COMMON_SCHEMA_ID)?.role).toBe("subschema");
+    expect(registry.find((entry) => entry.id === MODAL_BENCHMARK_CONFIG_SCHEMA_ID)?.zodParser).toBe(
+      "modalBenchmarkConfigZodSchema"
+    );
   });
 
   it("validates one exact TypeScript fixture for every root contract", () => {

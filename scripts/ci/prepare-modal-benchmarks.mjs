@@ -99,8 +99,9 @@ for (const model of models) {
     `${candidateCommit}:${generation}:${mode}:${benchmark}:${model.provider}`
   );
   const config = parseModalBenchmarkConfig({
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: runId,
+    app_name: "ultrafuzz-evals",
     image_name: imageName,
     public_benchmark: {
       benchmark,
@@ -115,7 +116,8 @@ for (const model of models) {
       project: "ultrafuzz-public-benchmarks",
       api_key_env: "BRAINTRUST_API_KEY",
       judge_api_key_env: "OPENAI_API_KEY",
-      judge_url: "https://api.openai.com/v1/chat/completions"
+      judge_url: "https://api.openai.com/v1/chat/completions",
+      judge_credential_ttl_seconds: 57_600
     },
     node_timeout_seconds: PUBLIC_NODE_TIMEOUT_SECONDS,
     loops: 1,

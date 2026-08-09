@@ -2729,11 +2729,7 @@ export async function publicBenchmarkCollectionSecretValues(
       ? [requiredAnyEnv(env, runnerApiKeySourceEnv(model.provider))]
       : await kimiSubscriptionAuthSecretValues(model.model, env);
   return [
-    ...new Set([
-      ...retainedSecretValues,
-      ...runnerSecretValues,
-      requiredEnv(env, config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY")
-    ])
+    ...new Set([...retainedSecretValues, ...runnerSecretValues, requiredEnv(env, config.braintrust.judge_api_key_env)])
   ];
 }
 
@@ -2987,7 +2983,7 @@ export function modalBenchmarkSecretValues(
 function secretEnvNames(config: ModalBenchmarkConfig, model: ModalModelSpec): Set<string> {
   const names = new Set<string>();
   if (isPublicModalBenchmarkConfig(config)) {
-    names.add(config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY");
+    names.add(config.braintrust.judge_api_key_env);
   } else {
     if (privateEvalProvider(config) === "braintrust") names.add(config.braintrust.api_key_env);
     names.add(privateJudgeApiKeyEnv(config));

@@ -763,7 +763,7 @@ export function validateAutomaticPairConfig(config, model, pair, context, usedMo
   assertUnique(usedModelSlugs, expectedModelSlug, "derived benchmark model slug");
   const scope = config.public_benchmark;
   const mismatches = [
-    config.schema_version === "ultrafuzz.modal.benchmark.v1" ? undefined : "schema version",
+    config.schema_version === "ultrafuzz.modal.benchmark.v2" ? undefined : "schema version",
     config.run_id === expectedRunId ? undefined : "run ID",
     config.app_name === "ultrafuzz-evals" ? undefined : "app name",
     config.image_name === `ufz-runner-${context.candidateCommit}` ? undefined : "image name",

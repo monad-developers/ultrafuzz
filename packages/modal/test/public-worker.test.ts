@@ -66,6 +66,27 @@ import {
   writeCurrentTerminalReport
 } from "./current-artifact-fixtures.js";
 
+function publicBraintrustConfig() {
+  return {
+    project: "fixture",
+    api_key_env: "BRAINTRUST_API_KEY",
+    judge_api_key_env: "OPENAI_API_KEY",
+    judge_url: "https://api.openai.com/v1/chat/completions",
+    judge_credential_ttl_seconds: 57_600
+  } as const;
+}
+
+function publicTargets() {
+  return [
+    {
+      id: "target-one",
+      repository: "https://github.com/example/target-one",
+      revision: "b".repeat(40),
+      framework: "foundry"
+    }
+  ];
+}
+
 it("keeps high-fanout public benchmark work off the persistent Modal volume", () => {
   const dataRoot = "/data/public-run/model";
   const workRoot = publicBenchmarkWorkRoot(dataRoot);
@@ -88,11 +109,11 @@ it("recognizes and cleans the legacy persistent public workspace without treatin
     auth_mode: "api-key"
   };
   const config = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: "public-preflight",
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: { project: "fixture", api_key_env: "BRAINTRUST_API_KEY", judge_credential_ttl_seconds: 57_600 },
+    braintrust: publicBraintrustConfig(),
     node_timeout_seconds: 1800,
     loops: 1,
     models: [model],
@@ -102,6 +123,7 @@ it("recognizes and cleans the legacy persistent public workspace without treatin
       runner_model_profile: model.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: "a".repeat(40),
+      targets: publicTargets(),
       max_runtime_seconds: 3_600
     }
   } satisfies PublicModalBenchmarkConfig;
@@ -162,11 +184,11 @@ it("accepts the bounded full lane before reading paid-run credentials", async ()
     auth_mode: "api-key"
   };
   const config = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: "public-full-lane",
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: { project: "fixture", api_key_env: "BRAINTRUST_API_KEY", judge_credential_ttl_seconds: 57_600 },
+    braintrust: publicBraintrustConfig(),
     node_timeout_seconds: 1800,
     loops: 1,
     models: [model],
@@ -176,6 +198,7 @@ it("accepts the bounded full lane before reading paid-run credentials", async ()
       runner_model_profile: model.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: "a".repeat(40),
+      targets: publicTargets(),
       max_runtime_seconds: 3_600
     }
   } satisfies PublicModalBenchmarkConfig;
@@ -220,11 +243,11 @@ it("allows only API-key public workers plus Kimi subscription workers", () => {
     auth_mode: "api-key"
   };
   const config = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: "public-auth-admission",
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: { project: "fixture", api_key_env: "BRAINTRUST_API_KEY", judge_credential_ttl_seconds: 57_600 },
+    braintrust: publicBraintrustConfig(),
     node_timeout_seconds: 1800,
     loops: 1,
     models: [apiKeyModel],
@@ -234,6 +257,7 @@ it("allows only API-key public workers plus Kimi subscription workers", () => {
       runner_model_profile: apiKeyModel.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: "a".repeat(40),
+      targets: publicTargets(),
       max_runtime_seconds: 3_600
     }
   } satisfies PublicModalBenchmarkConfig;
@@ -1449,15 +1473,11 @@ it("rejects a persisted public bundle unless every worker lineage field matches"
     auth_mode: "api-key"
   };
   const config: PublicModalBenchmarkConfig = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: "public-worker-lineage",
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: {
-      project: "fixture",
-      api_key_env: "BRAINTRUST_API_KEY",
-      judge_credential_ttl_seconds: 57_600
-    },
+    braintrust: publicBraintrustConfig(),
     node_timeout_seconds: 900,
     loops: 1,
     models: [model],
@@ -1467,6 +1487,7 @@ it("rejects a persisted public bundle unless every worker lineage field matches"
       runner_model_profile: model.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: "a".repeat(40),
+      targets: publicTargets(),
       max_runtime_seconds: 3_600
     }
   };
@@ -1547,15 +1568,11 @@ it("bounds composed public eval run IDs without losing model identity or bundle 
     auth_mode: "api-key"
   };
   const config = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: runId,
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: {
-      project: "fixture",
-      api_key_env: "BRAINTRUST_API_KEY",
-      judge_credential_ttl_seconds: 57_600
-    },
+    braintrust: publicBraintrustConfig(),
     node_timeout_seconds: 900,
     loops: 1,
     models: [model],
@@ -1565,6 +1582,7 @@ it("bounds composed public eval run IDs without losing model identity or bundle 
       runner_model_profile: model.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: "a".repeat(40),
+      targets: publicTargets(),
       max_runtime_seconds: 3_600
     }
   } satisfies PublicModalBenchmarkConfig;

@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:benchmark-config:2",
+  "title": "Ultrafuzz Modal benchmark configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "app_name",
+    "image_name",
+    "braintrust",
+    "node_timeout_seconds",
+    "loops",
+    "models"
+  ],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.modal.benchmark.v2" },
+    "run_id": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" },
+    "app_name": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "image_name": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "braintrust": { "$ref": "#/$defs/braintrust" },
+    "node_timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+    "loops": { "type": "integer", "minimum": 1, "maximum": 256 },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/model" }
+    },
+    "target": { "$ref": "#/$defs/privateTarget" },
+    "benchmark_execution": { "$ref": "#/$defs/privateBenchmarkExecution" },
+    "eval_reporting": { "$ref": "#/$defs/privateEvalReporting" },
+    "ground_truth": { "$ref": "#/$defs/privateGroundTruth" },
+    "public_benchmark": { "$ref": "#/$defs/publicBenchmark" }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "target": {},
+        "benchmark_execution": {},
+        "eval_reporting": {},
+        "ground_truth": {},
+        "public_benchmark": {}
+      },
+      "required": ["target", "benchmark_execution", "eval_reporting", "ground_truth"],
+      "not": { "properties": { "public_benchmark": {} }, "required": ["public_benchmark"] }
+    },
+    {
+      "properties": {
+        "public_benchmark": {},
+        "target": {},
+        "benchmark_execution": {},
+        "eval_reporting": {},
+        "ground_truth": {}
+      },
+      "required": ["public_benchmark"],
+      "not": {
+        "anyOf": [
+          { "properties": { "target": {} }, "required": ["target"] },
+          { "properties": { "benchmark_execution": {} }, "required": ["benchmark_execution"] },
+          { "properties": { "eval_reporting": {} }, "required": ["eval_reporting"] },
+          { "properties": { "ground_truth": {} }, "required": ["ground_truth"] }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "gitUrl": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "format": "uri"
+    },
+    "httpsUrl": {
+      "type": "string",
+      "maxLength": 2048,
+      "format": "uri",
+      "pattern": "^https://(?![^/?#]*@)"
+    },
+    "gitRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "relativeFile": {
+      "type": "string",
+      "pattern": "^(?!/)(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$"
+    },
+    "braintrust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "api_key_env", "judge_api_key_env", "judge_url", "judge_credential_ttl_seconds"],
+      "properties": {
+        "project": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "api_key_env": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/environmentVariable" },
+        "judge_api_key_env": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/environmentVariable" },
+        "judge_url": { "$ref": "#/$defs/httpsUrl" },
+        "judge_credential_endpoint": { "$ref": "#/$defs/httpsUrl" },
+        "judge_credential_ttl_seconds": { "type": "integer", "minimum": 60, "maximum": 86400 }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slug", "model", "provider", "agent", "reasoning", "auth_mode"],
+      "properties": {
+        "slug": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" },
+        "model": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "provider": { "enum": ["openai", "anthropic", "deepseek", "kimi"] },
+        "agent": { "enum": ["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent"] },
+        "reasoning": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "auth_mode": { "enum": ["api-key", "subscription"] }
+      },
+      "oneOf": [
+        {
+          "properties": { "provider": { "const": "openai" }, "agent": { "const": "CodexAgent" } },
+          "required": ["provider", "agent"]
+        },
+        {
+          "properties": { "provider": { "const": "anthropic" }, "agent": { "const": "ClaudeAgent" } },
+          "required": ["provider", "agent"]
+        },
+        {
+          "properties": {
+            "provider": { "const": "kimi" },
+            "agent": { "const": "KimiAgent" },
+            "reasoning": { "enum": ["low", "high", "max"] }
+          },
+          "required": ["provider", "agent", "reasoning"]
+        },
+        {
+          "properties": {
+            "provider": { "const": "deepseek" },
+            "agent": { "const": "DeepSeekAgent" },
+            "reasoning": { "enum": ["low", "high", "max"] },
+            "auth_mode": { "const": "api-key" }
+          },
+          "required": ["provider", "agent", "reasoning", "auth_mode"]
+        }
+      ]
+    },
+    "privateTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo", "ref"],
+      "properties": {
+        "repo": { "$ref": "#/$defs/gitUrl" },
+        "ref": { "$ref": "#/$defs/gitRef" }
+      }
+    },
+    "privateBenchmarkExecution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["excluded_node_ids"],
+      "properties": {
+        "excluded_node_ids": {
+          "type": "array",
+          "maxItems": 512,
+          "uniqueItems": true,
+          "items": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" }
+        }
+      }
+    },
+    "privateEvalReporting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider"],
+      "properties": {
+        "provider": { "enum": ["braintrust", "none"] }
+      }
+    },
+    "privateGroundTruth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo", "ref", "file", "format"],
+      "properties": {
+        "repo": { "$ref": "#/$defs/gitUrl" },
+        "ref": { "$ref": "#/$defs/gitRef" },
+        "file": { "$ref": "#/$defs/relativeFile" },
+        "format": { "enum": ["ultrafuzz", "audit-markdown"] },
+        "expected_findings": { "type": "integer", "minimum": 1, "maximum": 10000 }
+      }
+    },
+    "publicTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "repository", "revision", "framework"],
+      "properties": {
+        "id": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" },
+        "repository": { "$ref": "#/$defs/httpsUrl" },
+        "revision": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },
+        "framework": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" }
+      }
+    },
+    "publicBenchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "benchmark",
+        "lane",
+        "runner_model_profile",
+        "candidate_repository",
+        "candidate_commit",
+        "targets",
+        "max_runtime_seconds"
+      ],
+      "properties": {
+        "benchmark": { "enum": ["evmbench", "ultrafuzz-bench"] },
+        "lane": { "enum": ["smoke", "full"] },
+        "runner_model_profile": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" },
+        "candidate_repository": { "$ref": "#/$defs/httpsUrl" },
+        "candidate_commit": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2048,
+          "items": { "$ref": "#/$defs/publicTarget" }
+        },
+        "max_runtime_seconds": { "type": "integer", "minimum": 300, "maximum": 15000 }
+      }
+    }
+  }
+}
