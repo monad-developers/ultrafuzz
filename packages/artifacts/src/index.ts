@@ -15,6 +15,7 @@ export * from "./json-schema-validator.js";
 export * from "./json-file-validator.js";
 export * from "./manifests.js";
 export * from "./property-provenance.js";
+export * from "./release-validation.js";
 export * from "./planned-graph.js";
 export * from "./run-layout.js";
 export * from "./run-documents.js";

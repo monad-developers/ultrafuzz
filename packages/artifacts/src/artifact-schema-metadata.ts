@@ -274,6 +274,9 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "referenceManifestSchema",
     ["reference-manifest-path-uniqueness"]
   ),
+  "release-validation-report.schema.json": runtime("releaseValidationReportJsonSchema", undefined, [
+    "release-validation-report-reconciliation"
+  ]),
   "report.schema.json": artifact("ultrafuzz/report@2", "reportJsonSchema", "reportSchema", [
     "report-finding-evidence-span-consistency",
     "report-finding-id-uniqueness",

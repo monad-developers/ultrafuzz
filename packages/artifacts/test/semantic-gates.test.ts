@@ -449,6 +449,16 @@ const fixtures = {
     positive: { source_files: [{ path: "a" }], artifacts: [{ path: "b" }] },
     negative: { source_files: [{ path: "a" }], artifacts: [{ path: "a" }] }
   },
+  "release-validation-report-reconciliation": {
+    positive: { overall_status: "pass", commands: [{ id: "a", status: "passed" }] },
+    negative: {
+      overall_status: "pass",
+      commands: [
+        { id: "a", status: "passed" },
+        { id: "a", status: "failed" }
+      ]
+    }
+  },
   "report-finding-id-uniqueness": {
     positive: { issues: [{ id: "a" }], non_production_outcomes: [{ id: "b" }] },
     negative: { issues: [{ id: "a" }], non_production_outcomes: [{ id: "a" }] }

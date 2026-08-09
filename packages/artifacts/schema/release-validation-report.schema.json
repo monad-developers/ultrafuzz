@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:artifacts:release-validation-report:2",
+  "title": "Ultrafuzz release validation report",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "package_id",
+    "generated_at",
+    "project_root",
+    "report_path",
+    "overall_status",
+    "commands"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.release-validation.report.v2"
+    },
+    "package_id": {
+      "const": "ultrafuzz"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "project_root": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^/"
+    },
+    "report_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
+    },
+    "overall_status": {
+      "enum": ["pass", "fail"]
+    },
+    "commands": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "command", "required", "status", "exit_code", "duration_ms", "validation_gates"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "command": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "required": {
+            "const": true
+          },
+          "status": {
+            "enum": ["passed", "failed"]
+          },
+          "exit_code": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "validation_gates": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^G-[A-Z0-9][A-Z0-9-]{0,63}$"
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "const": "passed"
+                }
+              },
+              "required": ["status"]
+            },
+            "then": {
+              "type": "object",
+              "properties": {
+                "exit_code": {
+                  "const": 0
+                }
+              }
+            },
+            "else": {
+              "type": "object",
+              "properties": {
+                "exit_code": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

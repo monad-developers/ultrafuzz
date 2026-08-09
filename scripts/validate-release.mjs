@@ -3,8 +3,10 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { serializeReleaseValidationReport } from "../packages/artifacts/dist/index.js";
+
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const reportPath = path.resolve(root, readOption("--report") ?? ".ultrafuzz/release-validation.report.json");
+const reportPath = releaseReportPath(readOption("--report") ?? ".ultrafuzz/release-validation.report.json");
 
 const gates = [
   gate("docs", "Documentation inventory", "pnpm", ["-w", "docs:check"], ["G-DOCS"]),
@@ -25,20 +27,17 @@ const failedCommands = commands.filter((command) => command.status === "failed")
 const overallStatus = failedCommands.length === 0 ? "pass" : "fail";
 
 const report = {
-  schema_version: "ultrafuzz.release-validation.report.v1",
+  schema_version: "ultrafuzz.release-validation.report.v2",
   package_id: "ultrafuzz",
   generated_at: new Date().toISOString(),
   project_root: root,
   report_path: path.relative(root, reportPath).split(path.sep).join("/"),
   overall_status: overallStatus,
-  commands,
-  failures: {
-    commands: failedCommands.map((command) => command.id)
-  }
+  commands
 };
 
 mkdirSync(path.dirname(reportPath), { recursive: true });
-writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+writeFileSync(reportPath, serializeReleaseValidationReport(report));
 console.log(`release validation report: ${path.relative(root, reportPath)}`);
 process.exit(overallStatus === "pass" ? 0 : 1);
 
@@ -77,5 +76,20 @@ function runGate(item) {
 function readOption(name) {
   const index = process.argv.indexOf(name);
   if (index === -1) return undefined;
-  return process.argv[index + 1];
+  const value = process.argv[index + 1];
+  if (value === undefined || value.startsWith("--")) throw new Error(`${name} requires a path`);
+  return value;
+}
+
+function releaseReportPath(value) {
+  const absolute = path.resolve(root, value);
+  const relative = path.relative(root, absolute);
+  if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error("release validation report must remain inside the project root");
+  }
+  const parts = relative.split(path.sep);
+  if (parts.some((part) => part === "" || part === "." || part === ".." || !/^[A-Za-z0-9._-]+$/u.test(part))) {
+    throw new Error("release validation report path must be canonical and contain only safe segments");
+  }
+  return absolute;
 }

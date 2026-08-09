@@ -939,6 +939,20 @@ function reportFindingIdIssues(document: unknown): SemanticGateIssue[] {
   ]);
 }
 
+function releaseValidationReportIssues(document: unknown): SemanticGateIssue[] {
+  const commands = arrayAt(document, ["commands"]);
+  const issues = uniqueFieldGate([["commands"]], "id", "release validation command ID")(document, {});
+  const reportPath = stringField(document, "report_path");
+  if (reportPath !== undefined && reportPath.split("/").some((segment) => segment === "." || segment === "..")) {
+    issues.push(issue("$.report_path", "Release validation report path must remain project-relative"));
+  }
+  const passed = commands.every((command) => stringField(command, "status") === "passed");
+  if (stringField(document, "overall_status") !== (passed ? "pass" : "fail")) {
+    issues.push(issue("$.overall_status", "Release validation status does not reconcile with command results"));
+  }
+  return issues;
+}
+
 function runStateNodeKeyIssues(document: unknown): SemanticGateIssue[] {
   const nodes = at(document, ["nodes"]);
   if (!isRecord(nodes)) return [];
@@ -1997,6 +2011,7 @@ const gateSpecifications = {
   "reference-manifest-path-uniqueness": documentGate(
     uniqueFieldGate([["source_files"], ["artifacts"]], "path", "reference manifest path", { global: true })
   ),
+  "release-validation-report-reconciliation": documentGate(releaseValidationReportIssues),
   "report-finding-id-uniqueness": documentGate(reportFindingIdIssues),
   "report-finding-evidence-span-consistency": documentGate(reportFindingEvidenceSpanIssues),
   "report-property-provenance-join": contextualGate(
