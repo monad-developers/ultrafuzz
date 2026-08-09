@@ -860,6 +860,7 @@
       {
         "properties": {
           "notes": {
+            "type": "array",
             "contains": {
               "type": "string",
               "pattern": "^(?:triage_reason|classification_reason)="
@@ -889,6 +890,7 @@
         "then": {
           "properties": {
             "notes": {
+              "type": "array",
               "contains": {
                 "type": "string",
                 "pattern": "^demotion_reason="

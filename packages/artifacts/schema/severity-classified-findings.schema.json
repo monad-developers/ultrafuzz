@@ -867,6 +867,14 @@
           ]
         },
         "then": {
+          "properties": {
+            "severity": true,
+            "impact": true,
+            "likelihood": true,
+            "impact_rationale": true,
+            "likelihood_rationale": true,
+            "severity_rationale": true
+          },
           "required": [
             "severity",
             "impact",

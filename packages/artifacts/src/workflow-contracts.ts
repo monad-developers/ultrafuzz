@@ -78,8 +78,16 @@ const harnessRepairEntrySchema = z
     allOf: [
       {
         if: { properties: { reproducer_path: { type: "null" } }, required: ["reproducer_path"] },
-        then: { required: ["reproducer_unavailable_reason"] },
-        else: { not: { required: ["reproducer_unavailable_reason"] } }
+        then: {
+          properties: { reproducer_unavailable_reason: true },
+          required: ["reproducer_unavailable_reason"]
+        },
+        else: {
+          not: {
+            properties: { reproducer_unavailable_reason: true },
+            required: ["reproducer_unavailable_reason"]
+          }
+        }
       }
     ]
   })
@@ -132,6 +140,7 @@ const triagedFindingSchema = findingSchema
       {
         properties: {
           notes: {
+            type: "array",
             contains: { type: "string", pattern: "^(?:triage_reason|classification_reason)=" },
             minContains: 1
           }
@@ -148,7 +157,11 @@ const triagedFindingSchema = findingSchema
         },
         then: {
           properties: {
-            notes: { contains: { type: "string", pattern: "^demotion_reason=" }, minContains: 1 }
+            notes: {
+              type: "array",
+              contains: { type: "string", pattern: "^demotion_reason=" },
+              minContains: 1
+            }
           }
         }
       }
@@ -193,6 +206,14 @@ const severityClassifiedFindingSchema = findingSchema
           required: ["triage_classification"]
         },
         then: {
+          properties: {
+            severity: true,
+            impact: true,
+            likelihood: true,
+            impact_rationale: true,
+            likelihood_rationale: true,
+            severity_rationale: true
+          },
           required: [
             "severity",
             "impact",
@@ -684,8 +705,8 @@ export const differentialLaneResultSchema = withDocumentMetadata(
               focused_command: { type: "null" },
               focused_command_ran: { const: false },
               matched_test_count: { const: 0 },
-              authored_paths: { maxItems: 0 },
-              red_candidates: { maxItems: 0 }
+              authored_paths: { type: "array", maxItems: 0 },
+              red_candidates: { type: "array", maxItems: 0 }
             }
           }
         },
@@ -693,8 +714,9 @@ export const differentialLaneResultSchema = withDocumentMetadata(
           if: { properties: { status: { const: "semantic_red_frozen" } }, required: ["status"] },
           then: {
             properties: {
-              red_candidates: { minItems: 1 },
+              red_candidates: { type: "array", minItems: 1 },
               red_preservation_audit: {
+                type: "object",
                 properties: { result: { const: "semantic_red_frozen" } },
                 required: ["result"]
               }
@@ -1025,7 +1047,12 @@ const reportPropertyProvenanceSchema = z
     fuzzer_backend: nonEmptyString.optional(),
     fuzzer_backends: uniqueStrings(1).optional()
   })
-  .meta({ not: { required: ["fuzzer_backend", "fuzzer_backends"] } })
+  .meta({
+    not: {
+      properties: { fuzzer_backend: true, fuzzer_backends: true },
+      required: ["fuzzer_backend", "fuzzer_backends"]
+    }
+  })
   .superRefine((entry, context) => {
     if (entry.fuzzer_backend !== undefined && entry.fuzzer_backends !== undefined) {
       context.addIssue({ code: "custom", message: "Use one backend representation", path: ["fuzzer_backends"] });

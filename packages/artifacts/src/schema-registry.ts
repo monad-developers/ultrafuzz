@@ -4,6 +4,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
+import { ARTIFACT_SCHEMA_METADATA } from "./artifact-schema-metadata.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
 export type SchemaRole = "artifact-contract" | "runtime-state" | "subschema";
@@ -36,7 +37,7 @@ interface SchemaMetadata {
   zodParser?: string;
 }
 
-const metadataByFilename: Readonly<Record<string, SchemaMetadata>> = Object.freeze({
+const foundationMetadataByFilename: Readonly<Record<string, SchemaMetadata>> = Object.freeze({
   "analysis-bundle.schema.json": {
     role: "artifact-contract",
     contractIds: ["ultrafuzz/analysis-bundle@1"],
@@ -123,6 +124,11 @@ const metadataByFilename: Readonly<Record<string, SchemaMetadata>> = Object.free
     zodParser: "workspacePatchSchema",
     semanticGates: ["workspace-patch-path-uniqueness", "workspace-patch-git-binding"]
   }
+});
+
+const metadataByFilename: Readonly<Record<string, SchemaMetadata>> = Object.freeze({
+  ...foundationMetadataByFilename,
+  ...ARTIFACT_SCHEMA_METADATA
 });
 
 export const VALIDATOR_BUILD_IDENTITY = validatorBuildIdentity();

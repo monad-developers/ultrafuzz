@@ -405,24 +405,26 @@ export const implementedPropertiesSchema = z
       {
         properties: {
           properties: {
+            type: "array",
             items: {
               allOf: [
                 {
-                  if: { properties: { status: { const: "implemented" } }, required: ["status"] },
+                  if: { type: "object", properties: { status: { const: "implemented" } }, required: ["status"] },
                   then: {
                     not: {
+                      type: "object",
                       properties: {
-                        implementation_paths: { maxItems: 0 },
-                        test_paths: { maxItems: 0 }
+                        implementation_paths: { type: "array", maxItems: 0 },
+                        test_paths: { type: "array", maxItems: 0 }
                       },
                       required: ["implementation_paths", "test_paths"]
                     }
                   },
-                  else: { required: ["blocker"] }
+                  else: { type: "object", properties: { blocker: true }, required: ["blocker"] }
                 },
                 {
-                  if: { required: ["blocker"] },
-                  then: { properties: { status: { not: { const: "implemented" } } } }
+                  if: { type: "object", properties: { blocker: true }, required: ["blocker"] },
+                  then: { type: "object", properties: { status: { not: { const: "implemented" } } } }
                 }
               ]
             }

@@ -133,10 +133,12 @@
     {
       "properties": {
         "properties": {
+          "type": "array",
           "items": {
             "allOf": [
               {
                 "if": {
+                  "type": "object",
                   "properties": {
                     "status": {
                       "const": "implemented"
@@ -148,11 +150,14 @@
                 },
                 "then": {
                   "not": {
+                    "type": "object",
                     "properties": {
                       "implementation_paths": {
+                        "type": "array",
                         "maxItems": 0
                       },
                       "test_paths": {
+                        "type": "array",
                         "maxItems": 0
                       }
                     },
@@ -163,6 +168,10 @@
                   }
                 },
                 "else": {
+                  "type": "object",
+                  "properties": {
+                    "blocker": true
+                  },
                   "required": [
                     "blocker"
                   ]
@@ -170,11 +179,16 @@
               },
               {
                 "if": {
+                  "type": "object",
+                  "properties": {
+                    "blocker": true
+                  },
                   "required": [
                     "blocker"
                   ]
                 },
                 "then": {
+                  "type": "object",
                   "properties": {
                     "status": {
                       "not": {

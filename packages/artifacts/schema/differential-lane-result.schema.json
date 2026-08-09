@@ -382,9 +382,11 @@
             "const": 0
           },
           "authored_paths": {
+            "type": "array",
             "maxItems": 0
           },
           "red_candidates": {
+            "type": "array",
             "maxItems": 0
           }
         }
@@ -404,9 +406,11 @@
       "then": {
         "properties": {
           "red_candidates": {
+            "type": "array",
             "minItems": 1
           },
           "red_preservation_audit": {
+            "type": "object",
             "properties": {
               "result": {
                 "const": "semantic_red_frozen"

@@ -130,36 +130,58 @@
             "then": {
               "not": {
                 "anyOf": [
-                  {
-                    "required": [
-                      "schema_file"
-                    ]
-                  },
-                  {
-                    "required": [
-                      "schema_id"
-                    ]
-                  },
-                  {
-                    "required": [
-                      "schema_sha256"
-                    ]
-                  },
-                  {
-                    "required": [
-                      "schema_bundle_sha256"
-                    ]
-                  },
-                  {
-                    "required": [
-                      "validator_build"
-                    ]
+            {
+              "properties": {
+                "schema_file": true
+              },
+              "required": [
+                "schema_file"
+              ]
+            },
+            {
+              "properties": {
+                "schema_id": true
+              },
+              "required": [
+                "schema_id"
+              ]
+            },
+            {
+              "properties": {
+                "schema_sha256": true
+              },
+              "required": [
+                "schema_sha256"
+              ]
+            },
+            {
+              "properties": {
+                "schema_bundle_sha256": true
+              },
+              "required": [
+                "schema_bundle_sha256"
+              ]
+            },
+            {
+              "properties": {
+                "validator_build": true
+              },
+              "required": [
+                "validator_build"
+              ]
                   }
                 ]
               }
-            },
-            "else": {
-              "required": [
+      },
+      "else": {
+        "properties": {
+          "schema_file": true,
+          "schema_id": true,
+          "schema_sha256": true,
+          "schema_bundle_sha256": true,
+          "validator_build": true
+        },
+        "required": [
                 "schema_file",
                 "schema_id",
                 "schema_sha256",

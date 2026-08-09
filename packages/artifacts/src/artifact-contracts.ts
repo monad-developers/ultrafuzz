@@ -141,7 +141,7 @@ export function artifactContractSchemaFile(id: ArtifactContractId): string | und
 }
 
 export function artifactContractSchemaBinding(id: ArtifactContractId): ArtifactContractSchemaBinding | undefined {
-  const schemaFile = contractSchemaFiles[id];
+  const schemaFile = ARTIFACT_CONTRACT_SCHEMA_FILES[id];
   if (schemaFile === undefined) return undefined;
   const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === schemaFile);
   if (entry === undefined) throw new Error(`Artifact contract ${id} names an unregistered schema ${schemaFile}`);
@@ -183,7 +183,10 @@ export function validateArtifactContract(
     );
   }
 
-  const schemaFile = contractSchemaFiles[contract];
+  const schemaFile = ARTIFACT_CONTRACT_SCHEMA_FILES[contract];
+  if (schemaFile === undefined) {
+    return failure("ARTIFACT_SCHEMA_UNAVAILABLE", `No JSON Schema is registered for ${contract}`, artifactPath);
+  }
   const registryEntry = artifactSchemaRegistry().find((entry) => entry.filename === schemaFile);
   if (registryEntry === undefined) {
     return failure("ARTIFACT_SCHEMA_UNAVAILABLE", `Registered schema is unavailable: ${schemaFile}`, artifactPath);

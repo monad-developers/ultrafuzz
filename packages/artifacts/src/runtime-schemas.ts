@@ -160,10 +160,13 @@ const artifactVerificationEntryJsonSchema = {
       },
       then: {
         not: {
-          anyOf: schemaBindingFieldNames.map((field) => ({ required: [field] }))
+          anyOf: schemaBindingFieldNames.map((field) => ({ properties: { [field]: true }, required: [field] }))
         }
       },
-      else: { required: schemaBindingFieldNames }
+      else: {
+        properties: Object.fromEntries(schemaBindingFieldNames.map((field) => [field, true])),
+        required: schemaBindingFieldNames
+      }
     }
   ]
 } as const;

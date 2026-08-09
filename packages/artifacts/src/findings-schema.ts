@@ -192,6 +192,10 @@ export const findingSchema = z
     allOf: [
       {
         not: {
+          properties: {
+            fuzzer_backend: true,
+            fuzzer_backends: true
+          },
           required: ["fuzzer_backend", "fuzzer_backends"]
         }
       }
