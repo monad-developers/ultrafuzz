@@ -43,11 +43,14 @@ assert.deepStrictEqual(
   "eval schema metadata must name every TypeScript schema export exactly once"
 );
 
-const registryIds = new Set([
-  ...registry.map((entry) => entry.id),
-  ...artifactSchemaRegistry().map((entry) => entry.id)
-]);
-assert.strictEqual(registryIds.size, registry.length, "eval schema IDs must be unique");
+const evalRegistryIds = new Set(registry.map((entry) => entry.id));
+assert.strictEqual(evalRegistryIds.size, registry.length, "eval schema IDs must be unique");
+
+const artifactRegistry = artifactSchemaRegistry();
+for (const entry of artifactRegistry) {
+  assert.ok(!evalRegistryIds.has(entry.id), `eval schema ID collides with artifact schema ID ${entry.id}`);
+}
+const resolvableSchemaIds = new Set([...evalRegistryIds, ...artifactRegistry.map((entry) => entry.id)]);
 
 for (const entry of registry) {
   const metadata = registryModule.EVAL_SCHEMA_METADATA[entry.filename];
@@ -87,7 +90,7 @@ for (const entry of registry) {
     if (reference.startsWith("#")) continue;
     assert.doesNotMatch(reference, /^(?:file|https?):/u, `${entry.filename} contains a remote or file reference`);
     const referencedId = reference.split("#", 1)[0];
-    assert.ok(registryIds.has(referencedId), `${entry.filename} has unresolved bundled reference ${reference}`);
+    assert.ok(resolvableSchemaIds.has(referencedId), `${entry.filename} has unresolved bundled reference ${reference}`);
   }
 
   assert.doesNotThrow(
