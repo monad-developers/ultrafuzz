@@ -666,12 +666,6 @@ export function validateAnalysisBundle(bundleRoot: string): AnalysisBundleManife
 
   for (const kind of ANALYSIS_BUNDLE_DATA_KINDS) {
     const entry = entriesByKind.get(kind);
-    if (kind === "recovery-summary" && entry === undefined && !omittedKinds.has(kind)) {
-      // recovery-summary was added additively to v1. Bundles written before
-      // that addition remain valid; new writers surface the missing source in
-      // omissions.json instead of inventing recovery evidence.
-      continue;
-    }
     if ((entry === undefined) === !omittedKinds.has(kind)) {
       throw new Error(`analysis bundle ${kind} must be either included or omitted exactly once`);
     }

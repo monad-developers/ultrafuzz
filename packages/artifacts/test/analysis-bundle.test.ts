@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -315,6 +316,35 @@ test("analysis bundle validation rejects duplicate manifest keys without changin
 
   assert.throws(() => validateAnalysisBundle(output), /duplicate property name/u);
   assert.equal(fs.readFileSync(manifestPath, "utf8"), duplicated);
+});
+
+test("analysis bundle validation rejects a data kind that is neither included nor explicitly omitted", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-current-only-"));
+  const output = path.join(root, "bundle");
+  writeAnalysisBundle({ outputDir: output, payloads: {} });
+
+  const omissionsPath = path.join(output, "omissions.json");
+  const omissions = JSON.parse(fs.readFileSync(omissionsPath, "utf8")) as {
+    omissions: Array<{ kind: string }>;
+  };
+  omissions.omissions = omissions.omissions.filter((entry) => entry.kind !== "recovery-summary");
+  const omissionsBytes = Buffer.from(`${JSON.stringify(omissions, null, 2)}\n`, "utf8");
+  fs.writeFileSync(omissionsPath, omissionsBytes);
+
+  const manifestPath = path.join(output, ANALYSIS_BUNDLE_MANIFEST_FILE);
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+    files: Array<{ kind: string; size_bytes: number; sha256: string }>;
+  };
+  const omissionEntry = manifest.files.find((entry) => entry.kind === "omissions");
+  assert.ok(omissionEntry);
+  omissionEntry.size_bytes = omissionsBytes.byteLength;
+  omissionEntry.sha256 = crypto.createHash("sha256").update(omissionsBytes).digest("hex");
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+  assert.throws(
+    () => validateAnalysisBundle(output),
+    /analysis bundle recovery-summary must be either included or omitted exactly once/u
+  );
 });
 
 test("analysis bundle validation rejects directories outside the fixed layout", () => {
