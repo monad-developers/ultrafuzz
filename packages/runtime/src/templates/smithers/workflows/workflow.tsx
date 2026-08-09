@@ -2506,9 +2506,27 @@ function reconstructAuthoritativeReportImplementationCoverage(task: (typeof task
     "ultrafuzz/implemented-properties@2",
     "ultrafuzz/implemented-properties@1"
   );
-  // Historical plans declare @1 and intentionally retain their agent-authored
-  // unavailable/no-selection behavior.
+  const implementationProducerDeclared = taskSpecs.some(
+    (candidate) => candidate.metadata.node.logicalNodeId === "stateful-invariant-implement-properties"
+  );
+  // A producer-free topology has no authoritative implementation coverage to
+  // report. Replace a model-authored optional value with the contract's
+  // canonical no-coverage sentinel rather than letting an invented or
+  // malformed object break an otherwise valid terminal report. Historical
+  // plans do declare an explicit @1 producer, so they keep their agent-authored
+  // unavailable/no-selection compatibility behavior.
   if (implementationArtifact === undefined) {
+    if (!implementationProducerDeclared) {
+      for (const reportPath of reportPaths) {
+        const reconstructed = replaceReportImplementationCoverage(
+          readBoundedFinalReportJson(reportPath),
+          "unavailable"
+        );
+        if (reconstructed !== undefined) {
+          writeFileDurable(reportPath, reconstructed);
+        }
+      }
+    }
     return;
   }
   const catalogArtifact = verifiedAncestorJsonArtifact(
