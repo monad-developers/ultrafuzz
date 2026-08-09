@@ -431,7 +431,12 @@ const COMPANION_HELPERS = [
   "materializeInvariantSuiteCompanions"
 ] as const;
 
-const RETRY_HELPERS = ["invariantTestRoots", "generatedTestNodeIds", "resetTaskArtifactsForRetry"] as const;
+const RETRY_HELPERS = [
+  "invariantTestRoots",
+  "generatedTestNodeIds",
+  "taskPromptPathForArtifactReset",
+  "resetTaskArtifactsForRetry"
+] as const;
 
 const DISCOVERY_HELPERS = [
   "gitTestTreePaths",

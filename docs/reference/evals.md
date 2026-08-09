@@ -261,7 +261,13 @@ per-target observation cardinality parity. At that point renderers exclude the
 old source run while retaining its observations in the append-only file. The
 replacement must match the old run's benchmark identity and target revisions;
 over-counted targets, duplicate ledger entries, self-references, and chains are
-rejected.
+rejected. Cohort fingerprints must match by default. An exceptional migration
+between provenance schemas can declare a `cohort_transition` with the exact
+superseded and replacement fingerprints; the old pin is checked even while the
+entry is pending, the new pin is checked when its source run arrives, and every
+non-cohort identity field (including the execution-policy fingerprint) must
+still match. This is an auditable migration guardrail, not a general
+comparability waiver.
 
 EVMBench and Ultrafuzz-bench reports are non-sensitive public benchmark output.
 The Modal publication bundle therefore includes the scored generation and the

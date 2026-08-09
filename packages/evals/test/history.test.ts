@@ -40,6 +40,7 @@ const TARGET_REVISION = "2222222222222222222222222222222222222222";
 const FINGERPRINT = `sha256:${"a".repeat(64)}`;
 const EXECUTION_POLICY_FINGERPRINT = `sha256:${"d".repeat(64)}`;
 const SCORING_FINGERPRINT = `sha256:${"b".repeat(64)}`;
+const REPLACEMENT_COHORT_FINGERPRINT = `sha256:${"c".repeat(64)}`;
 const PUBLICATION_URL = "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts";
 const SUPERSESSION_ISSUE_URL = "https://github.com/monad-developers/ultrafuzz/issues/427";
 
@@ -135,6 +136,9 @@ function supersessionRun(input: {
   commitCharacter: string;
   partialLastTarget?: boolean;
   model?: string;
+  cohortFingerprint?: string;
+  executionPolicyFingerprint?: string;
+  trialCount?: number;
 }): EvalHistoryObservation[] {
   return SUPERSESSION_TARGETS.map((target, index) => {
     const base = observation();
@@ -146,6 +150,11 @@ function supersessionRun(input: {
       target,
       target_revisions: SUPERSESSION_TARGET_REVISIONS,
       model: input.model ?? "deepseek-v4-flash",
+      cohort_fingerprint: input.cohortFingerprint ?? FINGERPRINT,
+      execution_policy_fingerprint: input.executionPolicyFingerprint ?? EXECUTION_POLICY_FINGERPRINT,
+      trial_count: input.trialCount ?? 1,
+      executed_case_count: input.trialCount ?? 1,
+      graded_case_count: input.trialCount ?? 1,
       run_timestamp: input.timestamp,
       candidate_commit: input.commitCharacter.repeat(40),
       source_eval_run_id: input.sourceRunId,
@@ -158,7 +167,9 @@ function supersessionRun(input: {
         ...base.target_publication!,
         target,
         revision,
-        repository: `https://example.com/${target}`
+        repository: `https://example.com/${target}`,
+        executed_case_count: input.trialCount ?? 1,
+        graded_case_count: input.trialCount ?? 1
       }
     });
   });
@@ -436,6 +447,46 @@ describe("longitudinal eval history", () => {
     expect(replacedCharts.get("precision.svg")).toContain(`/commit/${"8".repeat(40)}`);
   });
 
+  it("activates an explicit cohort transition only when both immutable fingerprints match", () => {
+    const supersededSourceRun = "superseded-cohort-run";
+    const replacementSourceRun = "replacement-cohort-run";
+    const supersession = {
+      superseded_source_eval_run_id: supersededSourceRun,
+      replacement_source_eval_run_id: replacementSourceRun,
+      cohort_transition: {
+        superseded_cohort_fingerprint: FINGERPRINT,
+        replacement_cohort_fingerprint: REPLACEMENT_COHORT_FINGERPRINT
+      },
+      reason: "Replace a legacy cohort whose fingerprint algorithm changed.",
+      issue_url: SUPERSESSION_ISSUE_URL
+    };
+    const superseded = supersessionRun({
+      sourceRunId: supersededSourceRun,
+      timestamp: "2026-08-04T00:00:00.000Z",
+      commitCharacter: "7",
+      legacyPartialLastTarget: true
+    });
+    const pending = parseEvalHistory({
+      schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+      supersessions: [supersession],
+      observations: superseded
+    });
+    const replacement = supersessionRun({
+      sourceRunId: replacementSourceRun,
+      timestamp: "2026-08-05T00:00:00.000Z",
+      commitCharacter: "8",
+      cohortFingerprint: REPLACEMENT_COHORT_FINGERPRINT
+    });
+
+    const partiallyMerged = mergeEvalHistory(pending, replacement.slice(0, 2));
+    expect(renderEvalHistoryCharts(partiallyMerged).get("cost.svg")).toContain("partial n/a 7777777");
+
+    const merged = mergeEvalHistory(partiallyMerged, replacement);
+    expect(merged.supersessions).toEqual([supersession]);
+    expect(renderEvalHistoryCharts(merged).get("cost.svg")).not.toContain("7777777");
+    expect(renderEvalHistoryCharts(merged).get("precision.svg")).toContain(`/commit/${"8".repeat(40)}`);
+  });
+
   it("rejects invalid source-run supersession ledgers", () => {
     const supersededSourceRun = "superseded-run";
     const replacementSourceRun = "replacement-run";
@@ -516,6 +567,105 @@ describe("longitudinal eval history", () => {
     expect(() => parse([entry], [...superseded, ...duplicateTargetReplacement])).toThrowError(
       expect.objectContaining({ code: "EVAL_HISTORY_INVALID" })
     );
+
+    const transitionedReplacement = supersessionRun({
+      sourceRunId: replacementSourceRun,
+      timestamp: "2026-08-05T00:00:00.000Z",
+      commitCharacter: "8",
+      cohortFingerprint: REPLACEMENT_COHORT_FINGERPRINT
+    });
+    const cohortTransition = {
+      superseded_cohort_fingerprint: FINGERPRINT,
+      replacement_cohort_fingerprint: REPLACEMENT_COHORT_FINGERPRINT
+    };
+    expect(() => parse([entry], [...superseded, ...transitionedReplacement])).toThrowError(
+      expect.objectContaining({ code: "EVAL_HISTORY_INVALID" })
+    );
+    expect(() =>
+      parse(
+        [
+          {
+            ...entry,
+            cohort_transition: {
+              ...cohortTransition,
+              superseded_cohort_fingerprint: REPLACEMENT_COHORT_FINGERPRINT
+            }
+          }
+        ],
+        superseded
+      )
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    expect(() =>
+      parse(
+        [
+          {
+            ...entry,
+            cohort_transition: {
+              ...cohortTransition,
+              replacement_cohort_fingerprint: `sha256:${"e".repeat(64)}`
+            }
+          }
+        ],
+        [...superseded, ...transitionedReplacement]
+      )
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    expect(() =>
+      parse(
+        [
+          {
+            ...entry,
+            cohort_transition: {
+              superseded_cohort_fingerprint: FINGERPRINT
+            }
+          }
+        ],
+        superseded
+      )
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    expect(() =>
+      parse(
+        [
+          {
+            ...entry,
+            cohort_transition: {
+              superseded_cohort_fingerprint: FINGERPRINT,
+              replacement_cohort_fingerprint: FINGERPRINT
+            }
+          }
+        ],
+        superseded
+      )
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    expect(() =>
+      parse(
+        [{ ...entry, cohort_transition: cohortTransition }],
+        [
+          ...superseded,
+          ...supersessionRun({
+            sourceRunId: replacementSourceRun,
+            timestamp: "2026-08-05T00:00:00.000Z",
+            commitCharacter: "8",
+            cohortFingerprint: REPLACEMENT_COHORT_FINGERPRINT,
+            executionPolicyFingerprint: `sha256:${"e".repeat(64)}`
+          })
+        ]
+      )
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    expect(() =>
+      parse(
+        [{ ...entry, cohort_transition: cohortTransition }],
+        [
+          ...superseded,
+          ...supersessionRun({
+            sourceRunId: replacementSourceRun,
+            timestamp: "2026-08-05T00:00:00.000Z",
+            commitCharacter: "8",
+            cohortFingerprint: REPLACEMENT_COHORT_FINGERPRINT,
+            trialCount: 2
+          })
+        ]
+      )
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
   });
 
   it("preserves historical multi-trial observations without applying current lane defaults", () => {

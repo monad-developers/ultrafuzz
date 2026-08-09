@@ -30,7 +30,24 @@ Each finding requires `schema_version: "ultrafuzz.finding.v2"`, a
 producer-authored `id`, `title`, canonical `status`, `severity_guess`, lowercase
 `confidence`, and `summary`. Status is one of `candidate`, `needs-review`,
 `duplicate`, `false-positive`, `confirmed`, `fixed`, or `wont-fix`. Evidence
-uses the exact array/string-or-closed-object shape in the current schema.
+uses the exact array/string-or-closed-object shape in the current schema. Keep
+selectors out of `path`: put a section anchor in `fragment`, use positive
+integer `line` and optional `end_line` for one span, or a typed `line_ranges`
+array with at least two entries for disjoint spans. Every `end_line` must be no
+smaller than its `line`, and `line_ranges` cannot coexist with `line` or
+`end_line`. Keep independent explanatory prose in `detail`:
+
+```json
+{
+  "kind": "source",
+  "path": "src/Vault.sol",
+  "line_ranges": [
+    { "line": 105, "end_line": 107 },
+    { "line": 154, "end_line": 185 }
+  ],
+  "detail": "The two ranges jointly establish the accounting boundary."
+}
+```
 
 Do not expect the runtime to fill a missing ID, accept an old version alias,
 turn scalars into arrays, normalize confidence or severity, strip path suffixes,

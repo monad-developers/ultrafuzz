@@ -3014,12 +3014,26 @@ async function requiredLaunchStateForInspection(
     }
     throw error;
   }
-  const metadata = launchStateMetadata(raw);
-  const app = await modal.apps.fromName(metadata.app, { createIfMissing: false });
-  const image = await modal.images.fromName(metadata.image);
-  const state = parseModalLaunchState(raw);
-  assertStateImage(state, image);
+  const { state, image } = await resolveModalLaunchStateImageForInspection(raw, modal.images);
+  const app = await modal.apps.fromName(state.app, { createIfMissing: false });
   return { state, app, image };
+}
+
+/**
+ * Resolve the immutable image identity that status and collect use to inspect a launch.
+ *
+ * Current launch states persist the exact image ID. Looking them up by the published name
+ * would let a concurrent same-name build silently rebind inspection to a different image
+ * before the fingerprint check runs.
+ */
+export async function resolveModalLaunchStateImageForInspection(
+  value: unknown,
+  images: Pick<ModalClient["images"], "fromId">
+): Promise<{ state: ModalLaunchState; image: Image }> {
+  const state = parseModalLaunchState(value);
+  const image = await images.fromId(state.image_id);
+  assertStateImage(state, image);
+  return { state, image };
 }
 
 async function requiredCurrentLaunchStateForTermination(
@@ -3039,18 +3053,6 @@ async function requiredCurrentLaunchStateForTermination(
   const state = parseModalLaunchState(raw);
   const app = await modal.apps.fromName(state.app, { createIfMissing: false });
   return { state, app };
-}
-
-function launchStateMetadata(value: unknown): { app: string; image: string } {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("Modal launch state is invalid");
-  }
-  const app = (value as { app?: unknown }).app;
-  const image = (value as { image?: unknown }).image;
-  if (typeof app !== "string" || app.trim() === "" || typeof image !== "string" || image.trim() === "") {
-    throw new Error("Modal launch state is invalid");
-  }
-  return { app, image };
 }
 
 function assertStateImage(state: ModalLaunchState, image: Image): void {

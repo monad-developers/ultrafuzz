@@ -173,11 +173,12 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
   "finding.schema.json": {
     role: "subschema",
     contractIds: [],
-    semanticGates: ["finding-projected-reference-uniqueness"],
+    semanticGates: ["finding-evidence-span-consistency", "finding-projected-reference-uniqueness"],
     typescriptExport: "findingJsonSchema",
     zodParser: "findingSchema"
   },
   "findings.schema.json": artifact("ultrafuzz/findings@2", "findingsJsonSchema", "findingsSchema", [
+    "findings-evidence-span-consistency",
     "findings-id-uniqueness"
   ]),
   "generated-tests.schema.json": artifact(
@@ -274,6 +275,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     ["reference-manifest-path-uniqueness"]
   ),
   "report.schema.json": artifact("ultrafuzz/report@2", "reportJsonSchema", "reportSchema", [
+    "report-finding-evidence-span-consistency",
     "report-finding-id-uniqueness",
     "report-property-provenance-join"
   ]),
@@ -304,7 +306,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/severity-classified-findings@1",
     "severityClassifiedFindingsJsonSchema",
     "severityClassifiedFindingsSchema",
-    ["severity-finding-id-uniqueness"]
+    ["severity-finding-evidence-span-consistency", "severity-finding-id-uniqueness"]
   ),
   "smithers-task-manifest.schema.json": runtime("smithersTaskManifestJsonSchema", undefined, [
     "smithers-task-attempt-id-uniqueness",
@@ -326,7 +328,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/triaged-findings@1",
     "triagedFindingsJsonSchema",
     "triagedFindingsSchema",
-    ["triaged-finding-id-uniqueness"]
+    ["triaged-finding-evidence-span-consistency", "triaged-finding-id-uniqueness"]
   ),
   "trusted-cli.schema.json": runtime("trustedCliMetadataJsonSchema"),
   "usage-ledger.schema.json": runtime("usageLedgerJsonSchema", "usageLedgerEntrySchema", [

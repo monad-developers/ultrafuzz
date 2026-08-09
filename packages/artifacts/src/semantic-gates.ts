@@ -575,6 +575,63 @@ function findingProjectedReferenceIssues(document: unknown): SemanticGateIssue[]
   return issues;
 }
 
+function findingEvidenceSpanIssues(document: unknown, findingPath = "$"): SemanticGateIssue[] {
+  if (!isRecord(document)) return [];
+  const issues = evidenceArraySpanIssues(arrayAt(document, ["evidence"]), `${findingPath}.evidence`);
+  for (const [variantIndex, variant] of arrayAt(document, ["family_variants"]).entries()) {
+    issues.push(
+      ...evidenceArraySpanIssues(
+        arrayAt(variant, ["evidence"]),
+        `${findingPath}.family_variants[${variantIndex}].evidence`
+      )
+    );
+  }
+  return issues;
+}
+
+function evidenceArraySpanIssues(evidence: readonly unknown[], evidencePath: string): SemanticGateIssue[] {
+  const issues: SemanticGateIssue[] = [];
+  for (const [evidenceIndex, entry] of evidence.entries()) {
+    if (!isRecord(entry)) continue;
+    const entryPath = `${evidencePath}[${evidenceIndex}]`;
+    const line = numberField(entry, "line");
+    const endLine = numberField(entry, "end_line");
+    if (line !== undefined && endLine !== undefined && endLine < line) {
+      issues.push(issue(`${entryPath}.end_line`, "Evidence end_line must not precede line"));
+    }
+
+    let previousLine: number | undefined;
+    let previousEndLine: number | undefined;
+    for (const [rangeIndex, range] of arrayAt(entry, ["line_ranges"]).entries()) {
+      const rangePath = `${entryPath}.line_ranges[${rangeIndex}]`;
+      const rangeLine = numberField(range, "line");
+      const rangeEndLine = numberField(range, "end_line");
+      if (rangeLine === undefined) continue;
+      if (rangeEndLine !== undefined && rangeEndLine < rangeLine) {
+        issues.push(issue(`${rangePath}.end_line`, "Evidence range end_line must not precede line"));
+      }
+      if (previousLine !== undefined && rangeLine <= previousLine) {
+        issues.push(issue(`${rangePath}.line`, "Evidence line_ranges must be ordered by ascending line"));
+      } else if (previousEndLine !== undefined && rangeLine <= previousEndLine) {
+        issues.push(issue(`${rangePath}.line`, "Evidence line_ranges must contain nonoverlapping disjoint spans"));
+      }
+      previousLine = rangeLine;
+      previousEndLine = Math.max(rangeLine, rangeEndLine ?? rangeLine);
+    }
+  }
+  return issues;
+}
+
+function findingArrayEvidenceSpanIssues(document: unknown): SemanticGateIssue[] {
+  return arrayAt(document, []).flatMap((finding, index) => findingEvidenceSpanIssues(finding, `$[${index}]`));
+}
+
+function reportFindingEvidenceSpanIssues(document: unknown): SemanticGateIssue[] {
+  return (["issues", "non_production_outcomes"] as const).flatMap((key) =>
+    arrayAt(document, [key]).flatMap((finding, index) => findingEvidenceSpanIssues(finding, `$.${key}[${index}]`))
+  );
+}
+
 function invariantLedgerUniquenessIssues(document: unknown): SemanticGateIssue[] {
   const issues: SemanticGateIssue[] = [
     ...uniqueFieldGate([["entries"]], "id", "invariant ledger entry ID")(document, {}),
@@ -1859,7 +1916,9 @@ const gateSpecifications = {
   "finding-lifecycle-dedupe-key-uniqueness": documentGate(
     uniqueFieldGate([["records"]], "dedupe_key", "finding lifecycle dedupe key")
   ),
+  "finding-evidence-span-consistency": documentGate((document) => findingEvidenceSpanIssues(document)),
   "finding-projected-reference-uniqueness": documentGate(findingProjectedReferenceIssues),
+  "findings-evidence-span-consistency": documentGate(findingArrayEvidenceSpanIssues),
   "findings-id-uniqueness": documentGate(uniqueFieldGate([[]], "id", "finding ID")),
   "generated-test-path-exists": contextualGate(
     "filesystem",
@@ -1939,6 +1998,7 @@ const gateSpecifications = {
     uniqueFieldGate([["source_files"], ["artifacts"]], "path", "reference manifest path", { global: true })
   ),
   "report-finding-id-uniqueness": documentGate(reportFindingIdIssues),
+  "report-finding-evidence-span-consistency": documentGate(reportFindingEvidenceSpanIssues),
   "report-property-provenance-join": contextualGate(
     "cross-artifact",
     ["artifactSet.propertyCatalog", "artifactSet.implementedProperties"],
@@ -1989,6 +2049,7 @@ const gateSpecifications = {
     uniqueFieldGate([["semantic_reds"]], "stable_failure_hash", "semantic red hash")
   ),
   "severity-finding-id-uniqueness": documentGate(uniqueFieldGate([[]], "id", "severity finding ID")),
+  "severity-finding-evidence-span-consistency": documentGate(findingArrayEvidenceSpanIssues),
   "smithers-task-attempt-id-uniqueness": documentGate(uniqueFieldGate([["tasks"]], "attemptId", "Smithers attempt ID")),
   "smithers-task-workflow-id-uniqueness": documentGate(smithersWorkflowIdentityIssues),
   "smithers-task-document-identity": documentGate(smithersDocumentIdentityIssues),
@@ -2018,6 +2079,7 @@ const gateSpecifications = {
     uniqueFieldGate([[]], "dedupe_key", "strategy detection dedupe key")
   ),
   "triaged-finding-id-uniqueness": documentGate(uniqueFieldGate([[]], "id", "triaged finding ID")),
+  "triaged-finding-evidence-span-consistency": documentGate(findingArrayEvidenceSpanIssues),
   "usage-ledger-event-order": contextualGate("runtime-state", ["usageLedger.entries"], usageEventOrderIssues),
   "usage-ledger-source-event-join": contextualGate("runtime-state", ["eventLog.events"], usageSourceEventJoinIssues),
   "workspace-patch-git-binding": contextualGate(

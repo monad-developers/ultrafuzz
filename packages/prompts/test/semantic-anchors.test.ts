@@ -585,6 +585,9 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("Use exactly one of\nthese array keys; never emit both");
     expect(markdown).toContain("Never emit both fields");
     expect(markdown).toContain("When no known campaign backend produced the\nfinding, omit both");
+    expect(markdown).toContain("never emit a one-entry `line_ranges`");
+    expect(markdown).toContain("never combine `line_ranges` with");
+    expect(markdown).toContain("`line` or `end_line`");
   });
 
   it("keeps the empty findings array contract in prompt-owned templates", () => {
@@ -596,6 +599,11 @@ describe("prompt semantic anchors", () => {
     expect(template).toContain('Every finding must set `schema_version` to exactly `"ultrafuzz.finding.v2"`');
     expect(template).toContain("Unknown fields are invalid");
     expect(template).toContain("Evidence entries are either non-empty strings or closed objects");
+    expect(template).toContain("without anchors or line selectors");
+    expect(template).toContain("disjoint spans with `line_ranges`");
+    expect(template).toContain("Never emit a one-entry `line_ranges`");
+    expect(template).toContain("never combine `line_ranges` with `line` or `end_line`");
+    expect(template).toContain("Keep independent explanatory prose in `detail`");
     expect(template).not.toContain("`schema_version` is optional");
     expect(template).toContain("exactly `High`, `Medium`, or `Low`");
     expect(template).toContain("later severity review owns the final `severity`");

@@ -14,23 +14,47 @@ export const FINDINGS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:findings:
 
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
+const positiveSafeInteger = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const uniqueNonEmptyStrings = z
   .array(nonEmptyString)
   .meta({ uniqueItems: true })
   .refine((values) => new Set(values).size === values.length, { message: "Values must be unique" });
 
+const evidenceMetadataShape = {
+  kind: nonEmptyString.optional(),
+  path: nonEmptyString.optional(),
+  fragment: nonEmptyString.optional(),
+  detail: nonEmptyString.optional(),
+  symbol: nonEmptyString.optional(),
+  command: nonEmptyString.optional(),
+  summary: nonEmptyString.optional(),
+  observed: nonEmptyString.optional(),
+  expected: nonEmptyString.optional()
+} as const;
+
+const findingEvidenceLineRangeSchema = z.strictObject({
+  line: positiveSafeInteger,
+  end_line: positiveSafeInteger.optional()
+});
+
+const findingMetadataEvidenceSchema = z.strictObject(evidenceMetadataShape);
+
+const findingSingleSpanEvidenceSchema = z.strictObject({
+  ...evidenceMetadataShape,
+  line: positiveSafeInteger,
+  end_line: positiveSafeInteger.optional()
+});
+
+const findingDisjointSpanEvidenceSchema = z.strictObject({
+  ...evidenceMetadataShape,
+  line_ranges: z.array(findingEvidenceLineRangeSchema).min(2)
+});
+
 export const findingEvidenceSchema = z.union([
   nonEmptyString,
-  z.strictObject({
-    kind: nonEmptyString.optional(),
-    path: nonEmptyString.optional(),
-    line: nonNegativeInteger.optional(),
-    symbol: nonEmptyString.optional(),
-    command: nonEmptyString.optional(),
-    summary: nonEmptyString.optional(),
-    observed: nonEmptyString.optional(),
-    expected: nonEmptyString.optional()
-  })
+  findingMetadataEvidenceSchema,
+  findingSingleSpanEvidenceSchema,
+  findingDisjointSpanEvidenceSchema
 ]);
 
 export const findingStrategyHitSchema = z.strictObject({

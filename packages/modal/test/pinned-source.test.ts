@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  GITHUB_HTTPS_SUBMODULE_CONFIG,
   inspectPinnedSource,
   materializePinnedSource,
   PINNED_SOURCE_BRANCH,
@@ -20,6 +21,27 @@ afterEach(() => {
 });
 
 describe("pinned benchmark source", () => {
+  it("rewrites only GitHub SSH submodule transports to HTTPS", () => {
+    const resolve = (url: string): string =>
+      execFileSync("git", [...GITHUB_HTTPS_SUBMODULE_CONFIG, "ls-remote", "--get-url", url], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"]
+      }).trim();
+
+    expect(resolve("git@github.com:Recon-Fuzz/chimera.git")).toBe("https://github.com/Recon-Fuzz/chimera.git");
+    expect(resolve("ssh://git@github.com/Recon-Fuzz/setup-helpers.git")).toBe(
+      "https://github.com/Recon-Fuzz/setup-helpers.git"
+    );
+    expect(resolve("https://github.com/Recon-Fuzz/chimera.git")).toBe("https://github.com/Recon-Fuzz/chimera.git");
+    expect(resolve("git@gitlab.com:Recon-Fuzz/chimera.git")).toBe("git@gitlab.com:Recon-Fuzz/chimera.git");
+    expect(resolve("git@github.com.example:Recon-Fuzz/chimera.git")).toBe(
+      "git@github.com.example:Recon-Fuzz/chimera.git"
+    );
+    expect(resolve("ssh://git@github.com.example/Recon-Fuzz/chimera.git")).toBe(
+      "ssh://git@github.com.example/Recon-Fuzz/chimera.git"
+    );
+  });
+
   it("uses bounded git revision queries for source proof inspection", () => {
     const source = fs.readFileSync(new URL("../src/pinned-source.ts", import.meta.url), "utf8");
 
@@ -88,14 +110,17 @@ describe("pinned benchmark source", () => {
     await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(/isolation verification/u);
   });
 
-  it("hydrates submodules at the gitlink revisions recorded by the pinned commit", async () => {
+  it("hydrates recursive submodules at the recorded gitlink revisions", async () => {
     const fixture = submoduleSourceRepository();
     expect(gitlinkHash(fixture.repository, "vendor/dependency")).toBe(fixture.submoduleCommit);
-    expect(git(fixture.submodule, ["ls-tree", "HEAD", "nested/child"])).toMatch(/\tnested\/child$/u);
+    expect(gitlinkHash(fixture.submodule, "nested/child")).toBe(fixture.nestedCommit);
     const destination = path.join(fixture.root, "sanitized-submodule");
 
     const previousAllowedProtocols = process.env.GIT_ALLOW_PROTOCOL;
+    const previousPath = process.env.PATH;
+    const gitProbe = installGitInvocationProbe(fixture.root);
     process.env.GIT_ALLOW_PROTOCOL = "file";
+    process.env.PATH = `${gitProbe.bin}${path.delimiter}${previousPath ?? ""}`;
     let proof: Awaited<ReturnType<typeof materializePinnedSource>>;
     try {
       proof = await materializePinnedSource({
@@ -106,6 +131,8 @@ describe("pinned benchmark source", () => {
     } finally {
       if (previousAllowedProtocols === undefined) delete process.env.GIT_ALLOW_PROTOCOL;
       else process.env.GIT_ALLOW_PROTOCOL = previousAllowedProtocols;
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
     }
 
     expect(fs.readFileSync(path.join(destination, "vendor/dependency/dependency.txt"), "utf8")).toBe(
@@ -118,9 +145,22 @@ describe("pinned benchmark source", () => {
     expect(fs.existsSync(path.join(destination, ".git", "modules"))).toBe(false);
     expect(fs.existsSync(path.join(destination, "vendor/dependency/.git"))).toBe(false);
     expect(fs.existsSync(path.join(destination, "vendor/dependency/nested/child/.git"))).toBe(false);
+    expect(git(destination, ["remote"])).toBe("");
+    const persistedUrlConfig = spawnSync("git", ["config", "--local", "--get-regexp", "^url\\."], {
+      cwd: destination,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    expect(persistedUrlConfig.status).toBe(1);
+    expect(persistedUrlConfig.stdout).toBe("");
+    const invocations = fs.readFileSync(gitProbe.log, "utf8").trim().split("\n").filter(Boolean);
+    expect(invocations).toContain([...GITHUB_HTTPS_SUBMODULE_CONFIG, "submodule", "sync", "--recursive"].join(" "));
+    expect(invocations).toContain(
+      [...GITHUB_HTTPS_SUBMODULE_CONFIG, "submodule", "update", "--init", "--recursive", "--depth", "1"].join(" ")
+    );
     expect(proof).toMatchObject({ commit: fixture.pinned, revision_count: 1, remotes: [] });
     await expect(inspectPinnedSource(destination, fixture.pinned)).resolves.toEqual(proof);
-  });
+  }, 15_000);
 
   it("fails closed for symbolic refs and revisions that are not full commits", async () => {
     const fixture = sourceRepository();
@@ -174,6 +214,7 @@ function submoduleSourceRepository(): {
   pinned: string;
   submoduleCommit: string;
   submodule: string;
+  nestedCommit: string;
 } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-pinned-submodule-"));
   roots.push(root);
@@ -185,6 +226,7 @@ function submoduleSourceRepository(): {
   fs.writeFileSync(path.join(nested, "child.txt"), "nested dependency\n");
   git(nested, ["add", "child.txt"]);
   git(nested, ["commit", "--quiet", "-m", "nested dependency"]);
+  const nestedCommit = git(nested, ["rev-parse", "HEAD"]);
 
   const submodule = path.join(root, "dependency");
   fs.mkdirSync(submodule);
@@ -197,6 +239,8 @@ function submoduleSourceRepository(): {
   git(submodule, ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", "../nested", "nested/child"]);
   git(submodule, ["commit", "--quiet", "-am", "nested submodule"]);
   const submoduleCommit = git(submodule, ["rev-parse", "HEAD"]);
+  fs.writeFileSync(path.join(nested, "child.txt"), "later nested dependency\n");
+  git(nested, ["commit", "--quiet", "-am", "later nested dependency"]);
 
   const repository = path.join(root, "source");
   fs.mkdirSync(repository);
@@ -217,7 +261,41 @@ function submoduleSourceRepository(): {
   ]);
   git(repository, ["commit", "--quiet", "-am", "submodule"]);
   const pinned = git(repository, ["rev-parse", "HEAD"]);
-  return { root, repository, pinned, submoduleCommit, submodule };
+  fs.writeFileSync(path.join(submodule, "dependency.txt"), "later dependency\n");
+  git(submodule, ["add", "dependency.txt"]);
+  git(submodule, ["commit", "--quiet", "-m", "later dependency"]);
+  return { root, repository, pinned, submoduleCommit, submodule, nestedCommit };
+}
+
+function installGitInvocationProbe(root: string): { bin: string; log: string } {
+  const realGit = executableOnPath("git");
+  const bin = path.join(root, "git-probe-bin");
+  const wrapper = path.join(bin, "git");
+  const log = path.join(root, "git-invocations.jsonl");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(
+    wrapper,
+    ["#!/bin/sh", `printf '%s\\n' "$*" >> ${shellQuote(log)}`, `exec ${shellQuote(realGit)} "$@"`, ""].join("\n"),
+    { mode: 0o700 }
+  );
+  return { bin, log };
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function executableOnPath(name: string): string {
+  for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
+    const candidate = path.join(directory, name);
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // Continue searching the path.
+    }
+  }
+  throw new Error(`${name} is not executable on PATH`);
 }
 
 function git(cwd: string, args: string[]): string {

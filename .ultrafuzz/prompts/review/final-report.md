@@ -618,6 +618,13 @@ issue `title` value must include the same severity-local title ID rendered in th
 Markdown heading, for example
 `[H-01] - Selectorless fallback can refund or spend stale contract ETH`.
 
+In every `report.json` evidence object, keep `path` as a safe relative base path
+without selectors and preserve independent `detail` prose exactly. Put section
+anchors in `fragment`. Represent one source span with positive integer `line`
+and optional `end_line`. Use `line_ranges` only for at least two disjoint spans;
+never emit a one-entry `line_ranges`, and never combine `line_ranges` with
+`line` or `end_line`.
+
 Each non-production outcome is also a canonical finding v2 object and preserves
 machine-readable `triage_classification`, `status`, evidence, strategy
 provenance, and `recommended_next_action`. Both production issues and non-production outcomes

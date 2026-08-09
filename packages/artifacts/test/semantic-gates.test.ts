@@ -254,6 +254,12 @@ const fixtures = {
     positive: { records: [{ dedupe_key: "a" }] },
     negative: { records: [{ dedupe_key: "a" }, { dedupe_key: "a" }] }
   },
+  "finding-evidence-span-consistency": {
+    positive: {
+      evidence: [{ line: 4, end_line: 8 }, { line_ranges: [{ line: 10, end_line: 12 }, { line: 14 }] }]
+    },
+    negative: { evidence: [{ line: 8, end_line: 4 }] }
+  },
   "finding-projected-reference-uniqueness": {
     positive: { family_variants: [{ id: "a", dedupe_key: "a" }] },
     negative: {
@@ -266,6 +272,32 @@ const fixtures = {
   "findings-id-uniqueness": {
     positive: [{ id: "a" }],
     negative: [{ id: "a" }, { id: "a" }]
+  },
+  "findings-evidence-span-consistency": {
+    positive: [
+      {
+        evidence: [
+          {
+            line_ranges: [
+              { line: 10, end_line: 12 },
+              { line: 13, end_line: 15 }
+            ]
+          }
+        ]
+      }
+    ],
+    negative: [
+      {
+        evidence: [
+          {
+            line_ranges: [
+              { line: 10, end_line: 12 },
+              { line: 12, end_line: 15 }
+            ]
+          }
+        ]
+      }
+    ]
   },
   "generated-test-path-uniqueness": {
     positive: { generated_tests: [{ path: "a" }] },
@@ -421,6 +453,16 @@ const fixtures = {
     positive: { issues: [{ id: "a" }], non_production_outcomes: [{ id: "b" }] },
     negative: { issues: [{ id: "a" }], non_production_outcomes: [{ id: "a" }] }
   },
+  "report-finding-evidence-span-consistency": {
+    positive: {
+      issues: [{ evidence: [{ line: 1, end_line: 2 }] }],
+      non_production_outcomes: [{ evidence: [{ line_ranges: [{ line: 3 }, { line: 5 }] }] }]
+    },
+    negative: {
+      issues: [],
+      non_production_outcomes: [{ evidence: [{ line_ranges: [{ line: 5 }, { line: 3 }] }] }]
+    }
+  },
   "run-metadata-accounting-workflow-identity": {
     positive: {
       workflow: { run_id: "workflow-a" },
@@ -458,6 +500,10 @@ const fixtures = {
   "severity-finding-id-uniqueness": {
     positive: [{ id: "a" }],
     negative: [{ id: "a" }, { id: "a" }]
+  },
+  "severity-finding-evidence-span-consistency": {
+    positive: [{ family_variants: [{ evidence: [{ line_ranges: [{ line: 3 }, { line: 5 }] }] }] }],
+    negative: [{ family_variants: [{ evidence: [{ line_ranges: [{ line: 3, end_line: 2 }, { line: 5 }] }] }] }]
   },
   "smithers-task-attempt-id-uniqueness": {
     positive: { tasks: [{ attemptId: "a" }] },
@@ -529,6 +575,21 @@ const fixtures = {
     positive: [{ id: "a" }],
     negative: [{ id: "a" }, { id: "a" }]
   },
+  "triaged-finding-evidence-span-consistency": {
+    positive: [{ evidence: [{ line: 3, end_line: 5 }] }],
+    negative: [
+      {
+        evidence: [
+          {
+            line_ranges: [
+              { line: 3, end_line: 6 },
+              { line: 5, end_line: 8 }
+            ]
+          }
+        ]
+      }
+    ]
+  },
   "workspace-patch-path-uniqueness": {
     positive: { files: [{ path: "a" }], excluded_files: [{ path: "b" }] },
     negative: { files: [{ path: "a" }], excluded_files: [{ path: "a" }] }
@@ -560,6 +621,65 @@ test("every document-local gate has a passing and failing non-mutating fixture",
     assert.equal(executeSemanticGate(name, { document: fixture.negative }).status, "failed", `${name}:negative`);
     assert.deepEqual(fixture.positive, positiveBefore, `${name}:positive mutated`);
     assert.deepEqual(fixture.negative, negativeBefore, `${name}:negative mutated`);
+  }
+});
+
+test("canonical finding span semantics run for every embedding schema", () => {
+  const cases = [
+    {
+      filename: "finding.schema.json",
+      gate: "finding-evidence-span-consistency",
+      positive: { evidence: [{ line: 3, end_line: 5 }] },
+      negative: { evidence: [{ line: 5, end_line: 3 }] },
+      path: "$.evidence[0].end_line"
+    },
+    {
+      filename: "findings.schema.json",
+      gate: "findings-evidence-span-consistency",
+      positive: [{ evidence: [{ line_ranges: [{ line: 3, end_line: 5 }, { line: 6 }] }] }],
+      negative: [{ evidence: [{ line_ranges: [{ line: 3, end_line: 5 }, { line: 5 }] }] }],
+      path: "$[0].evidence[0].line_ranges[1].line"
+    },
+    {
+      filename: "triaged-findings.schema.json",
+      gate: "triaged-finding-evidence-span-consistency",
+      positive: [{ evidence: [{ line_ranges: [{ line: 3 }, { line: 5, end_line: 7 }] }] }],
+      negative: [{ evidence: [{ line_ranges: [{ line: 5 }, { line: 3 }] }] }],
+      path: "$[0].evidence[0].line_ranges[1].line"
+    },
+    {
+      filename: "severity-classified-findings.schema.json",
+      gate: "severity-finding-evidence-span-consistency",
+      positive: [{ family_variants: [{ evidence: [{ line: 3, end_line: 5 }] }] }],
+      negative: [{ family_variants: [{ evidence: [{ line: 5, end_line: 3 }] }] }],
+      path: "$[0].family_variants[0].evidence[0].end_line"
+    },
+    {
+      filename: "report.schema.json",
+      gate: "report-finding-evidence-span-consistency",
+      positive: { issues: [{ evidence: [{ line: 3 }] }], non_production_outcomes: [] },
+      negative: {
+        issues: [],
+        non_production_outcomes: [{ evidence: [{ line_ranges: [{ line: 3, end_line: 6 }, { line: 5 }] }] }]
+      },
+      path: "$.non_production_outcomes[0].evidence[0].line_ranges[1].line"
+    }
+  ] as const;
+
+  for (const fixture of cases) {
+    assert.ok(ARTIFACT_SCHEMA_METADATA[fixture.filename].semanticGates.includes(fixture.gate));
+    const positive = executeOfflineSchemaSemanticGates(fixture.filename, fixture.positive).find(
+      (result) => result.gate === fixture.gate
+    );
+    const negative = executeOfflineSchemaSemanticGates(fixture.filename, fixture.negative).find(
+      (result) => result.gate === fixture.gate
+    );
+    assert.equal(positive?.status, "passed", `${fixture.filename}:positive`);
+    assert.equal(negative?.status, "failed", `${fixture.filename}:negative`);
+    assert.ok(
+      negative?.status === "failed" && negative.issues.some((entry) => entry.path === fixture.path),
+      `${fixture.filename}:${fixture.path}`
+    );
   }
 });
 

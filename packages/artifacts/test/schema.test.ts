@@ -644,6 +644,81 @@ test("the findings v2 contract rejects aliases, omissions, lowercase severities,
   assert.equal(validateFindingSchema({ ...finding, unexpected: true }).ok, false);
 });
 
+test("the findings v2 schema validates closed typed evidence spans without repair", () => {
+  const finding = {
+    schema_version: FINDINGS_SCHEMA_VERSION,
+    id: "failure-1",
+    title: "Disjoint source evidence",
+    status: "candidate",
+    severity_guess: "Medium",
+    confidence: "high",
+    summary: "Two disjoint source ranges support the finding.",
+    evidence: [
+      {
+        kind: "source",
+        path: "src/VeryLiquidVault.sol",
+        fragment: "deposit-boundary",
+        detail: "The ranges jointly establish the boundary.",
+        line_ranges: [
+          { line: 105, end_line: 107 },
+          { line: 154, end_line: 185 }
+        ]
+      }
+    ]
+  };
+
+  for (const candidate of [
+    finding,
+    {
+      ...finding,
+      evidence: [
+        {
+          kind: "source",
+          path: "src/VeryLiquidVault.sol",
+          detail: "One source span establishes the boundary.",
+          line: 105,
+          end_line: 107
+        }
+      ]
+    }
+  ]) {
+    assert.equal(validateFindingSchema(candidate).ok, true);
+    assert.equal(validateArtifactContract("ultrafuzz/findings@2", JSON.stringify([candidate])).ok, true);
+  }
+
+  const evidenceSchema = JSON.stringify(findingJsonSchema);
+  for (const field of ["fragment", "detail", "line", "end_line", "line_ranges"]) {
+    assert.match(evidenceSchema, new RegExp(field, "u"));
+  }
+
+  for (const evidence of [
+    { kind: "source", path: "src/VeryLiquidVault.sol", end_line: 107 },
+    { kind: "source", path: "src/VeryLiquidVault.sol", line: 0 },
+    { kind: "source", path: "src/VeryLiquidVault.sol", line: Number.MAX_SAFE_INTEGER + 1 },
+    { kind: "source", path: "src/VeryLiquidVault.sol", line_ranges: [{ line: 105, end_line: 107 }] },
+    {
+      kind: "source",
+      path: "src/VeryLiquidVault.sol",
+      line: 105,
+      line_ranges: [{ line: 105 }, { line: 154 }]
+    },
+    {
+      kind: "source",
+      path: "src/VeryLiquidVault.sol",
+      line_ranges: [{ line: 105, note: "not canonical" }, { line: 154 }]
+    },
+    { kind: "source", path: "src/VeryLiquidVault.sol", detail: "evidence", repair_hint: "strip me" }
+  ]) {
+    const malformed = { ...finding, evidence: [evidence] };
+    assert.equal(validateFindingSchema(malformed).ok, false, JSON.stringify(evidence));
+    assert.equal(
+      validateArtifactContract("ultrafuzz/findings@2", JSON.stringify([malformed])).ok,
+      false,
+      JSON.stringify(evidence)
+    );
+  }
+});
+
 test("the findings v2 schema retains typed campaign deduplication accounting", () => {
   const finding = {
     schema_version: FINDINGS_SCHEMA_VERSION,
@@ -731,6 +806,37 @@ test("finding and report v2 schemas require their current canonical shapes", () 
   const withoutProvenance = { ...report } as Partial<typeof report>;
   delete withoutProvenance.property_provenance;
   assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(withoutProvenance)).ok, false);
+
+  const nonProductionOutcome = {
+    ...nonPropertyFinding,
+    triage_classification: "harness-defect",
+    recommended_next_action: "Repair the harness before treating this as a production issue.",
+    evidence: [
+      {
+        kind: "source",
+        path: "test/Harness.t.sol",
+        fragment: "setup",
+        detail: "The disjoint ranges establish the incomplete setup.",
+        line_ranges: [{ line: 12, end_line: 14 }, { line: 21 }]
+      }
+    ],
+    lifecycle: { dedupe_key: "harness-setup", source_artifacts: [], strategy_hits: [] }
+  };
+  const reportWithTypedEvidence = { ...report, non_production_outcomes: [nonProductionOutcome] };
+  assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(reportWithTypedEvidence)).ok, true);
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@2",
+      JSON.stringify({
+        ...reportWithTypedEvidence,
+        non_production_outcomes: [
+          { ...nonProductionOutcome, evidence: [{ path: "test/Harness.t.sol", line_ranges: [{ line: 12 }] }] }
+        ]
+      })
+    ).ok,
+    false,
+    "report findings must use scalar line for a single span"
+  );
 });
 test("run state schema covers all required node states and rejects malformed state", () => {
   assert.ok(RUN_STATE_STATUSES.includes("paused"));
