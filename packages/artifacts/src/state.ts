@@ -192,6 +192,7 @@ export interface NodeReferenceExpectationProvenance {
 }
 
 export interface ExecutionNodeProvenance {
+  source_node_id?: string;
   workflow?: NodeWorkflowProvenance;
   output_contracts?: NodeOutputContractProvenance;
   findings_count?: number;

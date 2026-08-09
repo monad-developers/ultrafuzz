@@ -40,7 +40,6 @@ function syntheticWorkflowRun(root: string, status: "succeeded" | "failed", toke
       last_transition_at: "2026-01-01T00:01:00.000Z"
     }
   });
-  state.provenance = { execution_root: root };
   writeJson(path.join(root, "state.json"), state);
   writeJson(path.join(root, "run.json"), {
     accounting: {

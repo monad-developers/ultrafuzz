@@ -284,6 +284,11 @@ test("run-state v4 JSON Schema and Zod agree on every closed provenance variant"
       expected: true
     },
     {
+      label: "execution-dynamic-lineage",
+      value: withNodeProvenance({ source_node_id: "threat-model" }),
+      expected: true
+    },
+    {
       label: "reference",
       value: withNodeProvenance({
         origin: "pinned-reference",
@@ -319,6 +324,11 @@ test("run-state v4 JSON Schema and Zod agree on every closed provenance variant"
     {
       label: "empty-aggregate",
       value: withNodeProvenance({ workflow: { run_id: "workflow-1", aggregate_attempt_statuses: [] } }),
+      expected: false
+    },
+    {
+      label: "empty-dynamic-lineage",
+      value: withNodeProvenance({ source_node_id: "" }),
       expected: false
     },
     {

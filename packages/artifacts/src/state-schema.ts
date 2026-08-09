@@ -66,6 +66,7 @@ const terminalDispositionSchema = z.strictObject({
 });
 const executionNodeProvenanceSchema = z
   .strictObject({
+    source_node_id: nonEmptyString.optional(),
     workflow: z.union([taskWorkflowProvenanceSchema, aggregateWorkflowProvenanceSchema]).optional(),
     output_contracts: outputContractProvenanceSchema.optional(),
     findings_count: nonNegativeInteger.optional(),
@@ -417,6 +418,7 @@ export const runStateJsonSchema = {
       minProperties: 1,
       additionalProperties: false,
       properties: {
+        source_node_id: { type: "string", minLength: 1 },
         workflow: {
           oneOf: [{ $ref: "#/$defs/taskWorkflowProvenance" }, { $ref: "#/$defs/aggregateWorkflowProvenance" }]
         },

@@ -96,7 +96,7 @@ function readStaticNodeIds(runRoot: string): Set<string> {
 
 function describeDynamicNode(node: NodeState): EvalDynamicNode {
   const provenance = node.provenance;
-  const source = provenance?.[EVAL_EXPANSION_SOURCE_NODE_KEY];
+  const source = provenance !== undefined && "source_node_id" in provenance ? provenance.source_node_id : undefined;
   return {
     node_id: node.node_id,
     logical_node_id: node.logical_node_id ?? null,

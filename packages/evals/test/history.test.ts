@@ -464,7 +464,7 @@ describe("longitudinal eval history", () => {
       sourceRunId: supersededSourceRun,
       timestamp: "2026-08-04T00:00:00.000Z",
       commitCharacter: "7",
-      legacyPartialLastTarget: true
+      partialLastTarget: true
     });
     const pending = parseEvalHistory({
       schema_version: EVAL_HISTORY_SCHEMA_VERSION,
