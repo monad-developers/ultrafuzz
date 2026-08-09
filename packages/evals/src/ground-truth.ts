@@ -1,5 +1,5 @@
-import { TextDecoder } from "node:util";
-import { isDeepStrictEqual } from "node:util";
+import fs from "node:fs";
+import { isDeepStrictEqual, TextDecoder } from "node:util";
 
 import { readRegularFileSnapshot } from "@ultrafuzz/artifacts";
 import { parse } from "yaml";
@@ -280,15 +280,36 @@ export function readGroundTruthDocument(
   filePath: string,
   options: { requireSubject?: boolean } = {}
 ): GroundTruthDocument {
-  let bytes: Buffer;
+  let inspected: fs.Stats;
   try {
-    bytes = readRegularFileSnapshot(filePath, MAX_GROUND_TRUTH_BYTES);
+    inspected = fs.lstatSync(filePath);
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") {
       throw new EvalError("EVAL_GROUND_TRUTH_MISSING", `ground truth file is missing: ${filePath}`, {
         path: filePath
       });
     }
+    throw new EvalError("EVAL_GROUND_TRUTH_INVALID", `ground truth file is unreadable: ${filePath}`, {
+      path: filePath,
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  }
+  if (!inspected.isFile()) {
+    throw new EvalError("EVAL_GROUND_TRUTH_INVALID", `ground truth path is not a regular file: ${filePath}`, {
+      path: filePath
+    });
+  }
+  if (inspected.size > MAX_GROUND_TRUTH_BYTES) {
+    throw new EvalError("EVAL_GROUND_TRUTH_TOO_LARGE", `ground truth file exceeds ${MAX_GROUND_TRUTH_BYTES} bytes`, {
+      path: filePath,
+      sizeBytes: inspected.size,
+      maxBytes: MAX_GROUND_TRUTH_BYTES
+    });
+  }
+  let bytes: Buffer;
+  try {
+    bytes = readRegularFileSnapshot(filePath, MAX_GROUND_TRUTH_BYTES);
+  } catch (error) {
     throw new EvalError("EVAL_GROUND_TRUTH_INVALID", `ground truth file is unreadable: ${filePath}`, {
       path: filePath,
       reason: error instanceof Error ? error.message : String(error)
