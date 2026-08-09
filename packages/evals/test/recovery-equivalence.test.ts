@@ -59,6 +59,14 @@ function workflowRunId(controller: string): string {
   return `workflow-${controller}`;
 }
 
+function controllerInvocationEventId(controller: string): string {
+  return `evt-${crypto.createHash("sha256").update(`controller:${controller}`).digest("hex").slice(0, 24)}`;
+}
+
+function workflowLinkId(index: number): string {
+  return `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
+}
+
 function evidenceRoot(input: { controllers: string[]; attempts?: AttemptFixture[] }): string {
   const root = mkdtempSync(path.join(tmpdir(), "ufz-recovery-equivalence-"));
   const attemptedNodeIds = new Set((input.attempts ?? []).map((attempt) => attempt.nodeId));
@@ -92,21 +100,31 @@ function evidenceRoot(input: { controllers: string[]; attempts?: AttemptFixture[
       }
     })
   });
-  const controllerEvents = input.controllers.map((controller, index) =>
-    createEventRecord(
+  const controllerEvents = input.controllers.map((controller, index) => {
+    const timestamp = new Date(Date.parse(T0) + index * 1_000).toISOString();
+    const common = {
+      workflow_run_id: workflowRunId(controller),
+      control_generation: controlGeneration(controller),
+      workflow_link_id: workflowLinkId(index),
+      controller_invocation_id: controllerInvocationEventId(controller),
+      controller_invoked_at: timestamp
+    };
+    if (index === 0) {
+      return createEventRecord(
+        { runId: "generated-run" },
+        { timestamp, eventType: "workflow-submitted", status: "running", payload: common }
+      );
+    }
+    return createEventRecord(
       { runId: "generated-run" },
       {
-        timestamp: new Date(Date.parse(T0) + index * 1_000).toISOString(),
-        eventType: index === 0 ? "workflow-submitted" : "workflow-lifecycle-submitted",
-        payload: {
-          workflow_run_id: workflowRunId(controller),
-          control_generation: controlGeneration(controller),
-          controller_invocation_id: controller,
-          controller_invoked_at: new Date(Date.parse(T0) + index * 1_000).toISOString()
-        }
+        timestamp,
+        eventType: "workflow-lifecycle-submitted",
+        status: "running",
+        payload: { action: "resume", ...common }
       }
-    )
-  );
+    );
+  });
   fs.writeFileSync(
     path.join(root, "events.jsonl"),
     controllerEvents.length === 0 ? "" : `${controllerEvents.map((event) => JSON.stringify(event)).join("\n")}\n`,
@@ -674,6 +692,21 @@ describe("recovery equivalence", () => {
       })}\n`,
       "utf8"
     );
+
+    expect(() => classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toThrowError(
+      expect.objectContaining({ code: "EVAL_RECOVERY_EVIDENCE_INVALID" })
+    );
+  });
+
+  it("fails closed when the canonical controller journal belongs to another run", () => {
+    const root = evidenceRoot({
+      controllers: ["controller-1"],
+      attempts: [{ nodeId: "model-a", strategyAttemptId: "model-a", controllerInvocationId: "controller-1" }]
+    });
+    const eventsPath = path.join(root, "events.jsonl");
+    const event = JSON.parse(fs.readFileSync(eventsPath, "utf8")) as Record<string, unknown>;
+    event.run_id = "another-run";
+    fs.writeFileSync(eventsPath, `${JSON.stringify(event)}\n`, "utf8");
 
     expect(() => classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toThrowError(
       expect.objectContaining({ code: "EVAL_RECOVERY_EVIDENCE_INVALID" })

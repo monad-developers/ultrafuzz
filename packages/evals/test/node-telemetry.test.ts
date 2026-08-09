@@ -1,9 +1,12 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
+
+import { EVENT_SCHEMA_VERSION } from "@ultrafuzz/artifacts";
 
 import { NodeTelemetryPump, loadTelemetryCursor } from "../src/node-telemetry.js";
 import { guardReporter, type EvalNodeEventEnvelope } from "../src/reporter.js";
@@ -14,15 +17,16 @@ import {
   testReportingPolicy,
   testRow,
   testSuite,
-  writeRunFixture
+  writeRunFixture,
+  type JournalEventInput
 } from "./helpers.js";
 
 function setup(overrides: { policy?: ReturnType<typeof testReportingPolicy> } = {}) {
   const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-pump-"));
-  const runRoot = path.join(base, "run");
+  const runRoot = path.join(base, "run-1");
   const cursorPath = path.join(base, "cursor.json");
   const suite = testSuite(path.join(base, "gt"));
-  const row = testRow(suite);
+  const row = testRow(suite, { run_id: "run-1" });
   const reporter = new RecordingReporter();
   const policy = overrides.policy ?? testReportingPolicy();
   const pump = () =>
@@ -42,31 +46,77 @@ const T0 = "2026-07-09T00:00:00.000Z";
 const T1 = "2026-07-09T00:01:00.000Z";
 const T2 = "2026-07-09T00:05:00.000Z";
 
+function eventId(label: string): string {
+  return `evt-${crypto.createHash("sha256").update(label).digest("hex").slice(0, 24)}`;
+}
+
+function nodeSyncedEvent(
+  label: string,
+  timestamp: string,
+  status: "pending" | "running" | "succeeded" | "failed" | "timed-out" | "skipped",
+  attempt = 1
+): JournalEventInput {
+  return {
+    event_id: eventId(label),
+    event_type: "node-synced",
+    timestamp,
+    node_id: "setup-1",
+    status,
+    payload: {
+      workflow_run_id: "workflow-1",
+      workflow_task_id: "node:setup-1",
+      attempt
+    }
+  };
+}
+
+function manifestWrittenEvent(label: string, timestamp: string, fileCount = 1): JournalEventInput {
+  return {
+    event_id: eventId(label),
+    event_type: "artifact-manifest-written",
+    timestamp,
+    node_id: "setup-1",
+    status: "succeeded",
+    payload: { file_count: fileCount, path: "artifacts/setup-1/artifact-manifest.json" }
+  };
+}
+
+function completeEventRecord(event: JournalEventInput, runId = "run-1") {
+  return { schema_version: EVENT_SCHEMA_VERSION, run_id: runId, ...event };
+}
+
 describe("NodeTelemetryPump", () => {
   it("translates journal records into exact envelope sequences", async () => {
     const { runRoot, reporter, pump } = setup();
     writeRunFixture({
       runRoot,
       events: [
-        { event_id: "evt-1", event_type: "node-synced", timestamp: T0, node_id: "setup-1", status: "running" },
+        nodeSyncedEvent("sequence-started", T0, "running"),
         {
-          event_id: "evt-2",
+          event_id: eventId("sequence-findings"),
           event_type: "findings-validated",
           timestamp: T1,
           node_id: "setup-1",
           status: "succeeded",
           payload: { count: 3, path: "artifacts/setup-1/deduped-findings.json" }
         },
+        manifestWrittenEvent("sequence-manifest", T1, 2),
+        nodeSyncedEvent("sequence-finished", T2, "succeeded"),
         {
-          event_id: "evt-3",
-          event_type: "artifact-manifest-written",
-          timestamp: T1,
-          node_id: "setup-1",
-          status: "succeeded",
-          payload: { file_count: 2, path: "artifacts/setup-1/artifact-manifest.json" }
-        },
-        { event_id: "evt-4", event_type: "node-synced", timestamp: T2, node_id: "setup-1", status: "succeeded" },
-        { event_id: "evt-5", event_type: "workflow-synced", timestamp: T2, payload: {} }
+          event_id: eventId("sequence-workflow"),
+          event_type: "workflow-synced",
+          timestamp: T2,
+          status: "running",
+          payload: {
+            workflow_run_id: "workflow-1",
+            workflow_status: "running",
+            workflow_state: "running",
+            synced_nodes: 1,
+            accounting_available: true,
+            recovery_due: false,
+            deadline_exceeded: false
+          }
+        }
       ],
       state: currentRunState({
         runId: "run-1",
@@ -92,7 +142,7 @@ describe("NodeTelemetryPump", () => {
       "node-finished"
     ]);
     expect(envelopes[0]).toMatchObject({
-      eventId: "evt-1",
+      eventId: eventId("sequence-started"),
       rowId: "target-a-baseline-trial-1",
       nodeId: "setup-1",
       event: { type: "node-started", at: T0, attempt: 1 }
@@ -118,7 +168,7 @@ describe("NodeTelemetryPump", () => {
     expect(uploads[0]?.read).toBeUndefined();
     // node-finished folds findingsCount and backdates startedAt from state.json.
     expect(envelopes[2]).toMatchObject({
-      eventId: "evt-4",
+      eventId: eventId("sequence-finished"),
       event: { type: "node-finished", status: "succeeded", at: T2, startedAt: T0, attempt: 1, findingsCount: 3 }
     });
   });
@@ -130,15 +180,7 @@ describe("NodeTelemetryPump", () => {
     const { runRoot, reporter, pump } = setup({ policy });
     writeRunFixture({
       runRoot,
-      events: [
-        {
-          event_id: "evt-a",
-          event_type: "artifact-manifest-written",
-          timestamp: T1,
-          node_id: "setup-1",
-          status: "succeeded"
-        }
-      ],
+      events: [manifestWrittenEvent("stream-upload", T1)],
       artifacts: { "setup-1": { "report.md": "# hello" } }
     });
     await pump().drain();
@@ -156,15 +198,7 @@ describe("NodeTelemetryPump", () => {
     const { runRoot, reporter, pump } = setup({ policy });
     writeRunFixture({
       runRoot,
-      events: [
-        {
-          event_id: "evt-a",
-          event_type: "artifact-manifest-written",
-          timestamp: T1,
-          node_id: "setup-1",
-          status: "succeeded"
-        }
-      ],
+      events: [manifestWrittenEvent("unsafe-manifest", T1)],
       artifacts: { "setup-1": { "report.md": "# hello" } }
     });
     const manifestPath = path.join(runRoot, "artifacts", "setup-1", "artifact-manifest.json");
@@ -188,15 +222,7 @@ describe("NodeTelemetryPump", () => {
     const { runRoot, reporter, pump } = setup({ policy });
     writeRunFixture({
       runRoot,
-      events: [
-        {
-          event_id: "evt-a",
-          event_type: "artifact-manifest-written",
-          timestamp: T1,
-          node_id: "setup-1",
-          status: "succeeded"
-        }
-      ],
+      events: [manifestWrittenEvent("artifact-digest", T1)],
       artifacts: { "setup-1": { "report.md": "# hello" } }
     });
     fs.writeFileSync(path.join(runRoot, "artifacts", "setup-1", "report.md"), "# changed", "utf8");
@@ -215,15 +241,7 @@ describe("NodeTelemetryPump", () => {
     const { runRoot, reporter, pump } = setup({ policy });
     writeRunFixture({
       runRoot,
-      events: [
-        {
-          event_id: "evt-a",
-          event_type: "artifact-manifest-written",
-          timestamp: T1,
-          node_id: "setup-1",
-          status: "succeeded"
-        }
-      ],
+      events: [manifestWrittenEvent("exact-allowlist", T1)],
       artifacts: { "setup-1": { "nested/report.md": "# nested" } }
     });
 
@@ -239,15 +257,7 @@ describe("NodeTelemetryPump", () => {
     row.target.sensitivity = "private";
     writeRunFixture({
       runRoot,
-      events: [
-        {
-          event_id: "evt-a",
-          event_type: "artifact-manifest-written",
-          timestamp: T1,
-          node_id: "setup-1",
-          status: "succeeded"
-        }
-      ],
+      events: [manifestWrittenEvent("private-manifest", T1)],
       artifacts: { "setup-1": { "report.md": "# hello" } }
     });
     await pump().drain();
@@ -259,10 +269,7 @@ describe("NodeTelemetryPump", () => {
     const { runRoot, cursorPath, reporter, pump } = setup();
     writeRunFixture({
       runRoot,
-      events: [
-        { event_id: "evt-1", event_type: "node-synced", timestamp: T0, node_id: "setup-1", status: "running" },
-        { event_id: "evt-2", event_type: "node-synced", timestamp: T1, node_id: "setup-1", status: "succeeded" }
-      ]
+      events: [nodeSyncedEvent("resume-started", T0, "running"), nodeSyncedEvent("resume-finished", T1, "succeeded")]
     });
     await pump().drain();
     expect(reporter.envelopes()).toHaveLength(2);
@@ -299,9 +306,7 @@ describe("NodeTelemetryPump", () => {
     const { runRoot, cursorPath, row, policy } = setup();
     writeRunFixture({
       runRoot,
-      events: [
-        { event_id: "evt-concurrent", event_type: "node-synced", timestamp: T0, node_id: "setup-1", status: "running" }
-      ]
+      events: [nodeSyncedEvent("concurrent", T0, "running")]
     });
 
     let callbackEntered!: () => void;
@@ -333,22 +338,14 @@ describe("NodeTelemetryPump", () => {
     const results = await Promise.all([firstDrain, secondDrain]);
     expect(results.reduce((total, result) => total + result.deliveredEvents, 0)).toBe(1);
     expect(reporter.envelopes()).toHaveLength(1);
-    expect(loadTelemetryCursor(cursorPath).deliveredEventIds).toEqual(["evt-concurrent"]);
+    expect(loadTelemetryCursor(cursorPath).deliveredEventIds).toEqual([eventId("concurrent")]);
   });
 
   it("throws on cursor persistence failure and restores the in-memory durable snapshot", async () => {
     const { runRoot, cursorPath, row, policy } = setup();
     writeRunFixture({
       runRoot,
-      events: [
-        {
-          event_id: "evt-write-failure",
-          event_type: "node-synced",
-          timestamp: T0,
-          node_id: "setup-1",
-          status: "running"
-        }
-      ]
+      events: [nodeSyncedEvent("write-failure", T0, "running")]
     });
     class CursorBlockingReporter extends RecordingReporter {
       override async onNodeEvent(envelope: EvalNodeEventEnvelope): Promise<void> {
@@ -376,15 +373,7 @@ describe("NodeTelemetryPump", () => {
     const { base, runRoot, cursorPath, row, policy } = setup();
     writeRunFixture({
       runRoot,
-      events: [
-        {
-          event_id: "evt-symlink-swap",
-          event_type: "node-synced",
-          timestamp: T0,
-          node_id: "setup-1",
-          status: "running"
-        }
-      ]
+      events: [nodeSyncedEvent("symlink-swap", T0, "running")]
     });
     const victimPath = path.join(base, "victim.txt");
     fs.writeFileSync(victimPath, "unchanged\n", "utf8");
@@ -408,7 +397,7 @@ describe("NodeTelemetryPump", () => {
     expect(fs.lstatSync(cursorPath).isFile()).toBe(true);
     expect(fs.lstatSync(cursorPath).isSymbolicLink()).toBe(false);
     expect(fs.readFileSync(victimPath, "utf8")).toBe("unchanged\n");
-    expect(loadTelemetryCursor(cursorPath).deliveredEventIds).toEqual(["evt-symlink-swap"]);
+    expect(loadTelemetryCursor(cursorPath).deliveredEventIds).toEqual([eventId("symlink-swap")]);
   });
 
   it("rejects malformed and dangling-symlink cursors instead of treating them as absent", () => {
@@ -445,9 +434,7 @@ describe("NodeTelemetryPump", () => {
     const { runRoot, cursorPath, row, policy } = setup();
     writeRunFixture({
       runRoot,
-      events: [
-        { event_id: "evt-retry", event_type: "node-synced", timestamp: T0, node_id: "setup-1", status: "running" }
-      ]
+      events: [nodeSyncedEvent("retry", T0, "running")]
     });
     const reporter = new FlakyReporter();
     const guardWarnings: Array<{ code: string }> = [];
@@ -483,22 +470,73 @@ describe("NodeTelemetryPump", () => {
     const { runRoot, reporter, pump } = setup();
     writeRunFixture({ runRoot, events: [] });
     const eventsPath = path.join(runRoot, "events.jsonl");
-    const record = JSON.stringify({
-      schema_version: "1.0",
-      run_id: "run-1",
-      event_id: "evt-1",
-      event_type: "node-synced",
-      timestamp: T0,
-      node_id: "setup-1",
-      status: "running",
-      payload: {}
-    });
+    const record = JSON.stringify(completeEventRecord(nodeSyncedEvent("partial-line", T0, "running")));
     fs.writeFileSync(eventsPath, record.slice(0, 20), "utf8");
     await pump().drain();
     expect(reporter.envelopes()).toHaveLength(0);
     fs.writeFileSync(eventsPath, `${record}\n`, "utf8");
     await pump().drain();
     expect(reporter.envelopes()).toHaveLength(1);
+  });
+
+  it("does not require an attempt for node states that do not produce a reporter transition", async () => {
+    const { runRoot, reporter, pump } = setup();
+    writeRunFixture({ runRoot, events: [nodeSyncedEvent("pending", T0, "pending", 0)] });
+
+    await expect(pump().drain()).resolves.toMatchObject({ deliveredEvents: 0, warnings: [] });
+    expect(reporter.envelopes()).toEqual([]);
+  });
+
+  it("rejects translated node transitions without a positive canonical payload attempt", async () => {
+    const { runRoot, cursorPath, reporter, pump } = setup();
+    writeRunFixture({
+      runRoot,
+      events: [
+        {
+          event_id: eventId("missing-attempt"),
+          event_type: "node-synced",
+          timestamp: T0,
+          node_id: "setup-1",
+          status: "running",
+          payload: { workflow_run_id: "workflow-1", workflow_task_id: "node:setup-1" }
+        }
+      ]
+    });
+
+    await expect(pump().drain()).rejects.toMatchObject({ code: "EVAL_TELEMETRY_EVENT_UNUSABLE" });
+    expect(reporter.envelopes()).toEqual([]);
+    expect(loadTelemetryCursor(cursorPath).byteOffset).toBe(0);
+  });
+
+  it("fails closed on schema-invalid complete records and records for another run", async () => {
+    const { runRoot, cursorPath, reporter, pump } = setup();
+    writeRunFixture({ runRoot, events: [] });
+    const eventsPath = path.join(runRoot, "events.jsonl");
+    const canonical = completeEventRecord(nodeSyncedEvent("strict-row", T0, "running"));
+
+    fs.writeFileSync(eventsPath, `${JSON.stringify({ ...canonical, schema_version: "1.0" })}\n`, "utf8");
+    await expect(pump().drain()).rejects.toMatchObject({ code: "EVAL_TELEMETRY_JOURNAL_MALFORMED" });
+
+    fs.writeFileSync(eventsPath, `${JSON.stringify({ ...canonical, run_id: "another-run" })}\n`, "utf8");
+    await expect(pump().drain()).rejects.toMatchObject({ code: "EVAL_TELEMETRY_JOURNAL_MALFORMED" });
+
+    expect(reporter.envelopes()).toEqual([]);
+    expect(loadTelemetryCursor(cursorPath).byteOffset).toBe(0);
+  });
+
+  it("rejects duplicate identities and out-of-order timestamps across the complete journal history", async () => {
+    const { runRoot, cursorPath, reporter, pump } = setup();
+    const first = nodeSyncedEvent("history-first", T1, "running");
+    const second = nodeSyncedEvent("history-second", T0, "succeeded");
+    writeRunFixture({ runRoot, events: [first, second] });
+
+    await expect(pump().drain()).rejects.toMatchObject({ code: "EVAL_TELEMETRY_JOURNAL_MALFORMED" });
+
+    writeRunFixture({ runRoot, events: [first, first] });
+    await expect(pump().drain()).rejects.toMatchObject({ code: "EVAL_TELEMETRY_JOURNAL_MALFORMED" });
+
+    expect(reporter.envelopes()).toEqual([]);
+    expect(loadTelemetryCursor(cursorPath).byteOffset).toBe(0);
   });
 
   it("synthesizes rate-limited heartbeats for running nodes", async () => {
@@ -544,32 +582,20 @@ describe("NodeTelemetryPump", () => {
     expect(reporter.envelopes().filter((envelope) => envelope.event.type === "node-heartbeat")).toHaveLength(2);
   });
 
-  it("degrades journal read errors to warnings instead of aborting the drain", async () => {
+  it("fails closed on present unreadable journals and can resume after the journal is restored", async () => {
     const { runRoot, reporter, pump } = setup();
     writeRunFixture({ runRoot, events: [] });
     const eventsPath = path.join(runRoot, "events.jsonl");
-    // Simulate a racy/unreadable journal (e.g. run dir replaced mid-drain):
-    // a directory passes existsSync/statSync but fails on read.
     fs.rmSync(eventsPath);
     fs.mkdirSync(eventsPath);
-    const result = await pump().drain();
-    expect(result.warnings.some((warning) => warning.code === "EVAL_TELEMETRY_JOURNAL_UNREADABLE")).toBe(true);
+    await expect(pump().drain()).rejects.toMatchObject({ code: "EVAL_TELEMETRY_JOURNAL_UNREADABLE" });
     expect(reporter.envelopes()).toHaveLength(0);
 
     // Once the journal is healthy again the pump resumes from its cursor.
     fs.rmdirSync(eventsPath);
     fs.writeFileSync(
       eventsPath,
-      `${JSON.stringify({
-        schema_version: "1.0",
-        run_id: "run-1",
-        event_id: "evt-1",
-        event_type: "node-synced",
-        timestamp: T0,
-        node_id: "setup-1",
-        status: "running",
-        payload: {}
-      })}\n`,
+      `${JSON.stringify(completeEventRecord(nodeSyncedEvent("restored", T0, "running")))}\n`,
       "utf8"
     );
     await pump().drain();
@@ -581,7 +607,7 @@ describe("NodeTelemetryPump", () => {
     reporter.failOn = new Set(["onNodeEvent"]);
     writeRunFixture({
       runRoot,
-      events: [{ event_id: "evt-1", event_type: "node-synced", timestamp: T0, node_id: "setup-1", status: "running" }]
+      events: [nodeSyncedEvent("reporter-failure", T0, "running")]
     });
     const result = await pump().drain();
     expect(result.warnings.some((warning) => warning.code === "EVAL_TELEMETRY_DELIVERY_FAILED")).toBe(true);

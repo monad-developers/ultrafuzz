@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   assertPlannedGraph,
   assertRegularFileInside,
+  layoutForRunRoot,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   readRunState,
@@ -112,7 +113,7 @@ export function classifyRecoveryEquivalence(input: {
     throw evidenceError("model execution exposure is incomplete");
   }
 
-  const controllerObservations = controllerInvocations(path.join(runRoot, "events.jsonl"), runRoot, state.run_id);
+  const controllerObservations = controllerInvocations(runRoot, state.run_id);
   const generationsById = new Map<string, RecoveryGeneration>();
   for (const observation of controllerObservations) {
     const generationId = recoveryGenerationId(observation.controlGeneration, observation.workflowRunId);
@@ -299,30 +300,20 @@ function isModelBackedNode(node: PlannedGraphDocument["nodes"][number]): boolean
   return node.kind === "agentic";
 }
 
-function controllerInvocations(eventsPath: string, root: string, expectedRunId: string): ControllerObservation[] {
+function controllerInvocations(root: string, expectedRunId: string): ControllerObservation[] {
+  const layout = layoutForRunRoot(root, expectedRunId);
   let records: EventRecord[];
   try {
-    assertRegularFileInside(root, eventsPath, "recovery equivalence event ledger");
-    records = replayEvents(eventsPath, Number.MAX_SAFE_INTEGER).records;
+    assertRegularFileInside(root, layout.eventsPath, "recovery equivalence event ledger");
+    records = replayEvents(layout, Number.MAX_SAFE_INTEGER).records;
   } catch (error) {
-    throw evidenceError(`failed to read current recovery ledger ${eventsPath}`, error);
+    throw evidenceError(`failed to read current recovery ledger ${layout.eventsPath}`, error);
   }
   const observations = new Map<string, ControllerObservation>();
-  for (const [index, record] of records.entries()) {
-    if (record.run_id !== expectedRunId) throw evidenceError(`workflow event ${index + 1} names another run`);
-    const eventType = requireString(record.event_type, `workflow event ${index + 1} event_type`);
-    if (!["workflow-submitted", "workflow-lifecycle-submitted"].includes(eventType)) continue;
-    const payload = requireRecord(record.payload, `workflow event ${index + 1} payload`);
-    const id = requireString(payload.controller_invocation_id, `workflow event ${index + 1} controller_invocation_id`);
-    const at = requireTimestamp(payload.controller_invoked_at, `workflow event ${index + 1} controller_invoked_at`);
-    const workflowRunId = requireString(payload.workflow_run_id, `workflow event ${index + 1} workflow_run_id`);
-    const controlGeneration = requireString(
-      payload.control_generation,
-      `workflow event ${index + 1} control_generation`
-    );
-    if (!/^[a-f0-9]{64}$/u.test(controlGeneration)) {
-      throw evidenceError(`workflow event ${index + 1} control_generation must be a lowercase SHA-256 digest`);
-    }
+  for (const record of records) {
+    if (record.event_type !== "workflow-submitted" && record.event_type !== "workflow-lifecycle-submitted") continue;
+    const { controller_invocation_id: id, controller_invoked_at: at, workflow_run_id: workflowRunId } = record.payload;
+    const controlGeneration = record.payload.control_generation;
     if (observations.has(id)) throw evidenceError(`duplicate controller invocation ${JSON.stringify(id)}`);
     observations.set(id, { id, at, workflowRunId, controlGeneration });
   }
@@ -355,24 +346,6 @@ function readNodeAttemptLedger(filePath: string, root: string, expectedRunId: st
   } catch (error) {
     throw evidenceError(`failed to read current recovery ledger ${filePath}`, error);
   }
-}
-
-function requireRecord(value: unknown, field: string): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw evidenceError(`${field} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function requireString(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.length === 0) throw evidenceError(`${field} must be a non-empty string`);
-  return value;
-}
-
-function requireTimestamp(value: unknown, field: string): string {
-  const timestamp = requireString(value, field);
-  if (!Number.isFinite(Date.parse(timestamp))) throw evidenceError(`${field} must be a valid timestamp`);
-  return timestamp;
 }
 
 function evidenceError(message: string, cause?: unknown): EvalError {

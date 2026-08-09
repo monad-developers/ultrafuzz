@@ -7,8 +7,10 @@ import {
   EVENT_SCHEMA_VERSION,
   PLANNED_GRAPH_SCHEMA_VERSION,
   STATE_SCHEMA_VERSION,
+  assertEventRecord,
   artifactContractDefinition,
   artifactContractSchemaBinding,
+  type EventRecord,
   type NodeState,
   type PlannedGraphDocument,
   type RunState
@@ -622,14 +624,11 @@ export class RecordingReporter implements EvalReporter {
   }
 }
 
-export interface JournalEventInput {
-  event_id: string;
-  event_type: string;
-  timestamp: string;
-  node_id?: string;
-  status?: string;
-  payload?: unknown;
-}
+type JournalEventInputFor<RecordType> = RecordType extends EventRecord
+  ? Omit<RecordType, "schema_version" | "run_id">
+  : never;
+
+export type JournalEventInput = JournalEventInputFor<EventRecord>;
 
 export function writeRunFixture(input: {
   runRoot: string;
@@ -643,7 +642,9 @@ export function writeRunFixture(input: {
   const runId = input.runId ?? "run-1";
   if (input.events !== undefined) {
     const lines = input.events
-      .map((event) => JSON.stringify({ schema_version: EVENT_SCHEMA_VERSION, run_id: runId, payload: {}, ...event }))
+      .map((event) =>
+        JSON.stringify(assertEventRecord({ schema_version: EVENT_SCHEMA_VERSION, run_id: runId, ...event }))
+      )
       .join("\n");
     fs.writeFileSync(path.join(input.runRoot, "events.jsonl"), lines.length > 0 ? `${lines}\n` : "", "utf8");
   }

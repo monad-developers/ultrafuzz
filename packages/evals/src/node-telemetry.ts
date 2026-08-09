@@ -6,6 +6,10 @@ import lockfile from "proper-lockfile";
 
 import {
   ARTIFACT_MANIFEST_FILE,
+  DEFAULT_STRICT_JSONL_MAX_BYTES,
+  DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES,
+  DEFAULT_STRICT_JSONL_MAX_RECORDS,
+  assertEventRecord,
   assertNoSymlinkComponents,
   assertRegularFileInside,
   getNodeArtifactDir,
@@ -16,6 +20,7 @@ import {
   readRunState,
   safeResolveInside,
   sha256Bytes,
+  validateStrictJsonlHistory,
   validateSafeId,
   type ArtifactManifest,
   type ArtifactManifestEntry,
@@ -165,7 +170,7 @@ export class NodeTelemetryPump {
   private async drainLocked(): Promise<TelemetryDrainResult> {
     const warnings: RuntimeDiagnostic[] = [];
     const state = this.readState();
-    const { records, nextOffset } = this.readNewJournalRecords(warnings);
+    const { records, nextOffset } = this.readNewJournalRecords();
     const replayOffset = this.cursor.byteOffset;
 
     const envelopes: EvalNodeEventEnvelope[] = [];
@@ -221,90 +226,168 @@ export class NodeTelemetryPump {
 
   private readState(): RunState | undefined {
     const statePath = path.join(this.input.runRoot, "state.json");
-    if (!fs.existsSync(statePath)) {
-      return undefined;
+    const expectedRunId = layoutForRunRoot(this.input.runRoot).runId;
+    try {
+      fs.lstatSync(statePath);
+    } catch (error) {
+      if (isErrnoException(error, "ENOENT")) return undefined;
+      throw new EvalError(
+        "EVAL_TELEMETRY_STATE_READ_FAILED",
+        `failed to inspect run state ${statePath}: ${error instanceof Error ? error.message : String(error)}`,
+        { path: statePath }
+      );
     }
-    return readRunState(statePath);
+    try {
+      assertRegularFileInside(this.input.runRoot, statePath, "telemetry run state");
+      const state = readRunState(statePath);
+      if (state.run_id !== expectedRunId) {
+        throw new Error(
+          `run state belongs to ${JSON.stringify(state.run_id)}, expected ${JSON.stringify(expectedRunId)}`
+        );
+      }
+      return state;
+    } catch (error) {
+      throw new EvalError(
+        "EVAL_TELEMETRY_STATE_READ_FAILED",
+        `failed to read run state ${statePath}: ${error instanceof Error ? error.message : String(error)}`,
+        { path: statePath }
+      );
+    }
   }
 
-  private readNewJournalRecords(warnings: RuntimeDiagnostic[]): { records: EventRecord[]; nextOffset: number } {
+  private readNewJournalRecords(): { records: EventRecord[]; nextOffset: number } {
     const eventsPath = path.join(this.input.runRoot, "events.jsonl");
-    // The existsSync/statSync/openSync sequence is not atomic: the run dir can
-    // vanish between calls (CI cleanup, crash recovery). Treat any filesystem
-    // error as "no new records this tick" instead of aborting the whole suite.
+    const expectedRunId = layoutForRunRoot(this.input.runRoot).runId;
     let buffer: Buffer;
     try {
-      if (!fs.existsSync(eventsPath)) {
-        return { records: [], nextOffset: this.cursor.byteOffset };
-      }
-      const size = fs.statSync(eventsPath).size;
-      if (size < this.cursor.byteOffset) {
-        warnings.push(
-          warningDiagnostic(
-            "EVAL_TELEMETRY_JOURNAL_REWRITTEN",
-            `run journal ${eventsPath} is shorter than its durable cursor; refusing to reset accounting state`
-          )
-        );
-        return { records: [], nextOffset: this.cursor.byteOffset };
-      }
-      if (size === this.cursor.byteOffset) {
-        return { records: [], nextOffset: this.cursor.byteOffset };
-      }
-      buffer = Buffer.alloc(size - this.cursor.byteOffset);
-      const fd = fs.openSync(eventsPath, "r");
       try {
-        fs.readSync(fd, buffer, 0, buffer.length, this.cursor.byteOffset);
+        fs.lstatSync(eventsPath);
+      } catch (error) {
+        if (isErrnoException(error, "ENOENT")) {
+          if (this.cursor.byteOffset !== 0) {
+            throw new Error("event journal disappeared after the cursor advanced", { cause: error });
+          }
+          return { records: [], nextOffset: this.cursor.byteOffset };
+        }
+        throw error;
+      }
+      assertRegularFileInside(this.input.runRoot, eventsPath, "telemetry event journal");
+      const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
+      const fd = fs.openSync(eventsPath, flags);
+      let size: number;
+      try {
+        const stat = fs.fstatSync(fd);
+        if (!stat.isFile()) throw new Error("event journal is not a regular file");
+        size = stat.size;
+        if (size < this.cursor.byteOffset) {
+          throw new Error("event journal is shorter than its durable cursor");
+        }
+        if (size > DEFAULT_STRICT_JSONL_MAX_BYTES) {
+          throw new Error(`event journal exceeds the ${DEFAULT_STRICT_JSONL_MAX_BYTES}-byte limit`);
+        }
+        buffer = Buffer.alloc(size);
+        let bytesRead = 0;
+        while (bytesRead < buffer.byteLength) {
+          const count = fs.readSync(fd, buffer, bytesRead, buffer.byteLength - bytesRead, bytesRead);
+          if (count === 0) throw new Error("event journal changed while it was read");
+          bytesRead += count;
+        }
       } finally {
         fs.closeSync(fd);
       }
     } catch (error) {
-      warnings.push(
-        warningDiagnostic(
-          "EVAL_TELEMETRY_JOURNAL_UNREADABLE",
-          `failed to read run journal ${eventsPath}: ${error instanceof Error ? error.message : String(error)}`
-        )
+      throw new EvalError(
+        "EVAL_TELEMETRY_JOURNAL_UNREADABLE",
+        `failed to read run journal ${eventsPath}: ${error instanceof Error ? error.message : String(error)}`,
+        { path: eventsPath }
       );
-      return { records: [], nextOffset: this.cursor.byteOffset };
     }
+    if (buffer.byteLength === 0) return { records: [], nextOffset: 0 };
     const lastNewline = buffer.lastIndexOf(0x0a);
     if (lastNewline === -1) {
       // Partial line only — wait for the writer to finish it.
       return { records: [], nextOffset: this.cursor.byteOffset };
     }
     const completeBytes = buffer.subarray(0, lastNewline + 1);
+    if (this.cursor.byteOffset > completeBytes.byteLength) {
+      throw new EvalError(
+        "EVAL_TELEMETRY_JOURNAL_UNREADABLE",
+        `run journal ${eventsPath} no longer has a complete record boundary at its durable cursor`,
+        { path: eventsPath }
+      );
+    }
+    if (this.cursor.byteOffset > 0 && buffer[this.cursor.byteOffset - 1] !== 0x0a) {
+      throw new EvalError(
+        "EVAL_TELEMETRY_JOURNAL_UNREADABLE",
+        `run journal ${eventsPath} durable cursor is not at a record boundary`,
+        { path: eventsPath }
+      );
+    }
     let complete: string;
     try {
       complete = new TextDecoder("utf-8", { fatal: true }).decode(completeBytes);
-    } catch {
-      warnings.push(
-        warningDiagnostic(
-          "EVAL_TELEMETRY_JOURNAL_MALFORMED",
-          `run journal ${eventsPath} contains invalid UTF-8; the cursor was not advanced`
-        )
+    } catch (error) {
+      throw new EvalError(
+        "EVAL_TELEMETRY_JOURNAL_MALFORMED",
+        `run journal ${eventsPath} contains invalid UTF-8; the cursor was not advanced`,
+        { path: eventsPath, reason: error instanceof Error ? error.message : String(error) }
       );
-      return { records: [], nextOffset: this.cursor.byteOffset };
     }
-    const nextOffset = this.cursor.byteOffset + completeBytes.byteLength;
+    const nextOffset = completeBytes.byteLength;
     const records: EventRecord[] = [];
     const lines = complete.split("\n");
     lines.pop();
-    for (const [index, rawLine] of lines.entries()) {
-      const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (lines.length > DEFAULT_STRICT_JSONL_MAX_RECORDS) {
+      throw new EvalError(
+        "EVAL_TELEMETRY_JOURNAL_MALFORMED",
+        `run journal ${eventsPath} exceeds the ${DEFAULT_STRICT_JSONL_MAX_RECORDS}-record limit`,
+        { path: eventsPath }
+      );
+    }
+    for (const [index, line] of lines.entries()) {
       try {
-        const record = parseStrictJson(line);
-        if (!isEventRecord(record)) throw new Error("journal record has an invalid event envelope");
+        if (Buffer.byteLength(line, "utf8") > DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES) {
+          throw new Error(`record exceeds the ${DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES}-byte limit`);
+        }
+        const record = assertEventRecord(parseStrictJson(line), `$[${index}]`);
+        if (record.run_id !== expectedRunId) {
+          throw new Error(
+            `record belongs to ${JSON.stringify(record.run_id)}, expected ${JSON.stringify(expectedRunId)}`
+          );
+        }
         records.push(record);
       } catch (error) {
-        warnings.push(
-          warningDiagnostic(
-            "EVAL_TELEMETRY_JOURNAL_MALFORMED",
-            `run journal ${eventsPath} has an invalid record at line ${index + 1}; the cursor was not advanced: ${error instanceof Error ? error.message : String(error)}`
-          )
+        throw new EvalError(
+          "EVAL_TELEMETRY_JOURNAL_MALFORMED",
+          `run journal ${eventsPath} has an invalid record at line ${index + 1}; the cursor was not advanced: ${error instanceof Error ? error.message : String(error)}`,
+          { path: eventsPath }
         );
-        return { records: [], nextOffset: this.cursor.byteOffset };
       }
     }
-    return { records, nextOffset };
+    try {
+      validateStrictJsonlHistory(records, {
+        label: "telemetry event journal",
+        parseRecord: (value, recordPath) => assertEventRecord(value, recordPath),
+        identity: (record) => record.event_id,
+        validateHistory: (history) => {
+          let priorTimestamp: string | undefined;
+          for (const [index, record] of history.entries()) {
+            if (priorTimestamp !== undefined && record.timestamp < priorTimestamp) {
+              throw new Error(`event journal timestamps are not ordered at record ${index + 1}`);
+            }
+            priorTimestamp = record.timestamp;
+          }
+        }
+      });
+    } catch (error) {
+      throw new EvalError(
+        "EVAL_TELEMETRY_JOURNAL_MALFORMED",
+        `run journal ${eventsPath} has invalid history; the cursor was not advanced: ${error instanceof Error ? error.message : String(error)}`,
+        { path: eventsPath }
+      );
+    }
+    const priorRecordCount = countByte(buffer.subarray(0, this.cursor.byteOffset), 0x0a);
+    return { records: records.slice(priorRecordCount), nextOffset };
   }
 
   private translate(
@@ -314,15 +397,20 @@ export class NodeTelemetryPump {
     uploads: EvalArtifactUpload[],
     warnings: RuntimeDiagnostic[]
   ): void {
-    const nodeId = record.node_id;
-    if (nodeId === undefined) {
-      return;
-    }
-    const payload = isRecord(record.payload) ? record.payload : {};
     switch (record.event_type) {
       case "node-synced": {
+        const nodeId = record.node_id;
         const status = record.status;
-        const attempt = attemptFromPayload(payload, state, nodeId);
+        if (
+          status !== "running" &&
+          status !== "succeeded" &&
+          status !== "failed" &&
+          status !== "timed-out" &&
+          status !== "skipped"
+        ) {
+          return;
+        }
+        const attempt = requireTelemetryAttempt(record.payload.attempt, record.event_id);
         if (status === "running") {
           envelopes.push(
             this.envelope(record.event_id, nodeId, { type: "node-started", at: record.timestamp, attempt })
@@ -347,12 +435,13 @@ export class NodeTelemetryPump {
         return;
       }
       case "findings-validated": {
-        if (typeof payload.count === "number") {
-          this.cursor.findingsCountByNode[nodeId] = payload.count;
+        if (record.payload.count !== undefined) {
+          this.cursor.findingsCountByNode[record.node_id] = record.payload.count;
         }
         return;
       }
       case "artifact-manifest-written": {
+        const nodeId = record.node_id;
         const manifest = this.readManifest(nodeId, warnings);
         if (manifest === undefined) {
           return;
@@ -384,7 +473,16 @@ export class NodeTelemetryPump {
       warnings.push(warningDiagnostic("EVAL_TELEMETRY_MANIFEST_UNSAFE", "skipped unsafe artifact manifest path"));
       return undefined;
     }
-    if (!fs.existsSync(manifestPath)) {
+    try {
+      fs.lstatSync(manifestPath);
+    } catch (error) {
+      if (isErrnoException(error, "ENOENT")) return undefined;
+      warnings.push(
+        warningDiagnostic(
+          "EVAL_TELEMETRY_MANIFEST_UNREADABLE",
+          `failed to inspect artifact manifest for ${nodeId}: ${error instanceof Error ? error.message : String(error)}`
+        )
+      );
       return undefined;
     }
     try {
@@ -648,26 +746,6 @@ function isErrnoException(error: unknown, code: string): error is NodeJS.ErrnoEx
   return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
 
-function isEventRecord(value: unknown): value is EventRecord {
-  return (
-    isRecord(value) &&
-    typeof value.schema_version === "string" &&
-    value.schema_version.length > 0 &&
-    typeof value.event_id === "string" &&
-    value.event_id.length > 0 &&
-    typeof value.timestamp === "string" &&
-    Number.isFinite(Date.parse(value.timestamp)) &&
-    typeof value.run_id === "string" &&
-    value.run_id.length > 0 &&
-    typeof value.event_type === "string" &&
-    value.event_type.length > 0 &&
-    Object.hasOwn(value, "payload") &&
-    (value.node_id === undefined || (typeof value.node_id === "string" && value.node_id.length > 0)) &&
-    (value.status === undefined || (typeof value.status === "string" && value.status.length > 0)) &&
-    (value.provenance === undefined || isRecord(value.provenance))
-  );
-}
-
 function isSafeManifestEntry(value: unknown): value is ArtifactManifestEntry {
   if (
     !isRecord(value) ||
@@ -711,12 +789,22 @@ function readValidatedArtifact(nodeDir: string, file: ArtifactManifestEntry, max
   }
 }
 
-function attemptFromPayload(payload: Record<string, unknown>, state: RunState | undefined, nodeId: string): number {
-  if (typeof payload.attempt === "number" && payload.attempt > 0) {
-    return payload.attempt;
+function requireTelemetryAttempt(attempt: number | undefined, eventId: string): number {
+  if (attempt === undefined || attempt < 1) {
+    throw new EvalError(
+      "EVAL_TELEMETRY_EVENT_UNUSABLE",
+      `node transition ${eventId} must carry a positive canonical payload.attempt`
+    );
   }
-  const retryCount = state?.nodes[nodeId]?.retry_count;
-  return typeof retryCount === "number" ? retryCount + 1 : 1;
+  return attempt;
+}
+
+function countByte(bytes: Buffer, expected: number): number {
+  let count = 0;
+  for (const byte of bytes) {
+    if (byte === expected) count += 1;
+  }
+  return count;
 }
 
 function sleep(ms: number): Promise<void> {

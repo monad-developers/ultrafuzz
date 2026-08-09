@@ -39,10 +39,12 @@ function terminalRunFixture(runRoot: string, status: "succeeded" | "timed-out" |
         event_id: `evt-${"0".repeat(24)}`,
         event_type: "workflow-submitted",
         timestamp: T0,
+        status: "running",
         payload: {
           workflow_run_id: "workflow-1",
           control_generation: controlGeneration,
-          controller_invocation_id: "controller-1",
+          workflow_link_id: "00000000-0000-4000-8000-000000000001",
+          controller_invocation_id: `evt-${"f".repeat(24)}`,
           controller_invoked_at: T0
         }
       },
@@ -51,21 +53,24 @@ function terminalRunFixture(runRoot: string, status: "succeeded" | "timed-out" |
         event_type: "node-synced",
         timestamp: T0,
         node_id: "setup-1",
-        status: "running"
+        status: "running",
+        payload: { workflow_run_id: "workflow-1", workflow_task_id: "node:setup-1", attempt: 1 }
       },
       {
         event_id: `evt-${"2".repeat(24)}`,
         event_type: "artifact-manifest-written",
         timestamp: T1,
         node_id: "setup-1",
-        status: "succeeded"
+        status: "succeeded",
+        payload: { file_count: 1, path: "artifacts/setup-1/artifact-manifest.json" }
       },
       {
         event_id: `evt-${"3".repeat(24)}`,
         event_type: "node-synced",
         timestamp: T1,
         node_id: "setup-1",
-        status: "succeeded"
+        status: "succeeded",
+        payload: { workflow_run_id: "workflow-1", workflow_task_id: "node:setup-1", attempt: 1 }
       }
     ],
     state: currentRunState({
