@@ -21,7 +21,12 @@ import {
   type ModalCollectedLineage
 } from "../src/runner.js";
 import { publicEvalRunId } from "../src/public-worker.js";
-import { currentRunState, writeCurrentTerminalReport } from "./current-artifact-fixtures.js";
+import {
+  currentGenuineTaskFailureState,
+  currentRunState,
+  writeCurrentSmithersTaskFixture,
+  writeCurrentTerminalReport
+} from "./current-artifact-fixtures.js";
 
 const MODEL: ModalModelSpec = {
   slug: "benchmark-smoke-claude-sonnet-5-low",
@@ -687,31 +692,6 @@ function collectedLineage(): ModalCollectedLineage {
 
 function writeGenuineTaskFailureFixture(runRoot: string): void {
   const attemptId = "task-one";
-  fs.writeFileSync(
-    path.join(runRoot, "state.json"),
-    `${JSON.stringify(
-      currentRunState({
-        [attemptId]: {
-          status: "failed",
-          finished_at: "2026-07-20T00:00:00.000Z",
-          last_error: "task output did not pass final validation",
-          provenance: {
-            workflow: { run_id: "workflow-one", task_id: `node:${attemptId}`, state: "finished" },
-            required_artifacts: { ok: true, missing: [] },
-            terminal_disposition: {
-              schema_version: "ultrafuzz.terminal-disposition.v1",
-              kind: "task-output-validation-failure"
-            }
-          }
-        }
-      })
-    )}\n`
-  );
-  fs.mkdirSync(path.join(runRoot, "smithers"), { recursive: true });
-  fs.writeFileSync(
-    path.join(runRoot, "smithers", "tasks.json"),
-    `${JSON.stringify({
-      tasks: [{ attemptId, concreteNodeId: attemptId, smithersNodeId: `node:${attemptId}` }]
-    })}\n`
-  );
+  fs.writeFileSync(path.join(runRoot, "state.json"), `${JSON.stringify(currentGenuineTaskFailureState(attemptId))}\n`);
+  writeCurrentSmithersTaskFixture(runRoot, attemptId);
 }

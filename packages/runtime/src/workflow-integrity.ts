@@ -7,10 +7,12 @@ import lockfile from "proper-lockfile";
 
 import {
   assertPlannedGraph,
+  assertSmithersTaskManifestMatchesPlannedGraph,
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
   parseStrictJsonBytes,
+  parseSmithersTaskManifestBytes,
   safeResolveInside,
   type RunLayout,
   writeJsonDurable
@@ -1379,7 +1381,8 @@ function deriveWorkflowControlBindings(
 ): WorkflowControlBindings {
   const graph = assertPlannedGraph(parseStrictJsonBytes(contents.graph));
   const expandedGraph = assertExpandedGraphSchema(parseStrictJsonBytes(contents.expanded_graph));
-  const tasksDocument = parseRecordJson(contents.tasks, "workflow task manifest");
+  const tasksDocument = parseSmithersTaskManifestBytes(contents.tasks);
+  assertSmithersTaskManifestMatchesPlannedGraph(tasksDocument, graph);
   const state = parseRecordJson(stateContents, "run state");
   const graphFingerprint = contents.graph_fingerprint.toString("utf8").trim();
   if (!SHA256_PATTERN.test(graphFingerprint)) throw new Error("run graph fingerprint is invalid");
@@ -1394,12 +1397,7 @@ function deriveWorkflowControlBindings(
     throw new Error("run state config fingerprint does not match the exact resolved config");
   }
   if (!Array.isArray(graph.nodes) || !isRecord(state.nodes)) throw new Error("run graph or state node set is invalid");
-  if (
-    tasksDocument.run_id !== runId ||
-    typeof tasksDocument.smithers_run_id !== "string" ||
-    tasksDocument.smithers_run_id.length === 0 ||
-    !Array.isArray(tasksDocument.tasks)
-  ) {
+  if (tasksDocument.run_id !== runId || tasksDocument.smithers_run_id.length === 0) {
     throw new Error("workflow task manifest identity is invalid");
   }
   const graphNodeIds = sortedUniqueIds(
@@ -1420,20 +1418,9 @@ function deriveWorkflowControlBindings(
   const taskNodes: string[] = [];
   const concreteNodes: string[] = [];
   for (const task of tasksDocument.tasks) {
-    if (
-      !isRecord(task) ||
-      typeof task.attemptId !== "string" ||
-      typeof task.concreteNodeId !== "string" ||
-      typeof task.smithersNodeId !== "string" ||
-      typeof task.verifierSmithersNodeId !== "string" ||
-      task.smithersNodeId !== `node:${task.attemptId}` ||
-      task.verifierSmithersNodeId !== `verify:${task.attemptId}`
-    ) {
-      throw new Error("workflow task manifest contains an invalid task identity");
-    }
     taskAttempts.push(task.attemptId);
     concreteNodes.push(task.concreteNodeId);
-    taskNodes.push(task.smithersNodeId, task.verifierSmithersNodeId);
+    taskNodes.push(task.preparationSmithersNodeId, task.smithersNodeId, task.verifierSmithersNodeId);
   }
   const expectedTaskAttemptIds = sortedUniqueIds(taskAttempts, "workflow task attempt");
   const expectedTaskNodeIds = sortedUniqueIds(taskNodes, "workflow task node");
@@ -1452,7 +1439,7 @@ function deriveWorkflowControlBindings(
   );
   if (
     JSON.stringify(declaredTaskNodeIds) !==
-    JSON.stringify(expectedTaskNodeIds.filter((nodeId) => !nodeId.startsWith("verify:")))
+    JSON.stringify(expectedTaskNodeIds.filter((nodeId) => nodeId.startsWith("node:")))
   ) {
     throw new Error("sealed graph workflow task set does not match the task manifest");
   }

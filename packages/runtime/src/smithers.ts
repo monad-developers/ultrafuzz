@@ -7,14 +7,20 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  assertValidSmithersTaskManifest,
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
   getNodeArtifactDir,
   getNodeWorkspaceDir,
+  SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+  SMITHERS_TASK_METADATA_SCHEMA_VERSION as REGISTERED_SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   writeFileDurable,
   writeJsonDurable,
-  type RunLayout
+  type RunLayout,
+  type SmithersTaskManifestDocument,
+  type SmithersTaskManifestMetadata,
+  type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 import { resolveExecutionResources, type ResolvedConfig } from "@ultrafuzz/config";
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
@@ -1003,8 +1009,8 @@ const SMITHERS_ACTIVE_RUN_STATES = new Set([
 // `smithers up` exits 4 with code RUN_EXISTS when a non-resume submission names an existing run.
 const SMITHERS_RUN_EXISTS_EXIT_CODE = 4;
 
-export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v1" as const;
-export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v1" as const;
+export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = SMITHERS_TASK_MANIFEST_SCHEMA_VERSION;
+export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = REGISTERED_SMITHERS_TASK_METADATA_SCHEMA_VERSION;
 export const SMITHERS_SUBMISSION_SCHEMA_VERSION = "ultrafuzz.smithers.submission.v1" as const;
 export const SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION = "ultrafuzz.smithers.reset-node.v1" as const;
 
@@ -1028,115 +1034,9 @@ export interface NodeAttemptProvenance {
   model?: ModelFanoutProvenance;
 }
 
-export interface CompiledSmithersTask {
-  attemptId: string;
-  concreteNodeId: string;
-  logicalNodeId: string;
-  smithersNodeId: string;
-  verifierSmithersNodeId: string;
-  agentRef: string;
-  modelName?: string;
-  reasoningEffort?: string;
-  dependencies: readonly string[];
-  dependencySmithersNodeIds: readonly string[];
-  timeoutMs: number;
-  heartbeatTimeoutMs: number;
-  retries: number;
-  retryPolicy: {
-    backoff: "exponential";
-    initialDelayMs: number;
-    maxDelayMs: number;
-  };
-  workspacePath: string;
-  artifactDir: string;
-  dependencyArtifactDirs: readonly string[];
-  renderedPromptPath?: string;
-  execution: {
-    mode: "local" | "cloud";
-    provider?: "modal";
-    resources: {
-      cpu: number;
-      memoryMiB: number;
-      timeoutSeconds: number;
-    };
-    modal?: {
-      app: string;
-      image: string;
-      region?: string;
-      credentialEnv: string[];
-    };
-    agentCredentialEnv: string[];
-  };
-  metadata: SmithersTaskMetadata;
-}
+export type CompiledSmithersTask = SmithersTaskManifestTask;
 
-export interface SmithersTaskMetadata {
-  schemaVersion: typeof SMITHERS_TASK_METADATA_SCHEMA_VERSION;
-  run: {
-    ultrafuzzRunId: string;
-    smithersWorkflowName: string;
-    graphVersion: string;
-    topologyVersion: number;
-  };
-  node: {
-    concreteNodeId: string;
-    logicalNodeId: string;
-    attemptId: string;
-    label: string;
-    kind: string;
-    role?: string;
-    promptPath?: string;
-    group?: string;
-  };
-  dependencies: {
-    concreteNodeIds: readonly string[];
-    attemptIds: readonly string[];
-    smithersNodeIds: readonly string[];
-  };
-  loop: {
-    index: number;
-    count: number;
-    mode: string;
-    attemptIndex: number;
-  };
-  model?: {
-    profileId: string;
-    agentRef: string;
-    modelName?: string;
-    reasoningEffort?: string;
-    modelIndex: number;
-    attemptIndex: number;
-  };
-  workspace: {
-    primitive: "worktree";
-    path: string;
-    repoPath: string;
-    trustModel: string;
-  };
-  artifacts: {
-    dir: string;
-    outputs: ExpandedNode["outputs"];
-    manifestPath: string;
-  };
-  retryPolicy: {
-    maxAttempts: number;
-    smithersRetries: number;
-  };
-  timeout: {
-    milliseconds: number;
-    seconds: number;
-    heartbeatTimeoutMs: number;
-  };
-  execution: {
-    mode: "local" | "cloud";
-    provider?: "modal";
-    resources: {
-      cpu: number;
-      memoryMiB: number;
-      timeoutSeconds: number;
-    };
-  };
-}
+export type SmithersTaskMetadata = SmithersTaskManifestMetadata;
 
 export interface CompiledSmithersWorkflow {
   schemaVersion: typeof SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION;
@@ -1318,20 +1218,18 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     `${JSON.stringify(input.config, null, 2)}\n`,
     "resolved workflow config"
   );
+  const taskManifest: SmithersTaskManifestDocument = {
+    schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
+    run_id: input.runLayout.runId,
+    smithers_run_id: smithersRunId,
+    workflow_name: workflowName,
+    tasks
+  };
+  assertValidSmithersTaskManifest(taskManifest);
   writePreparedWorkflowFile(
     input.runLayout.root,
     tasksPath,
-    `${JSON.stringify(
-      {
-        schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
-        run_id: input.runLayout.runId,
-        smithers_run_id: smithersRunId,
-        workflow_name: workflowName,
-        tasks
-      },
-      null,
-      2
-    )}\n`,
+    `${JSON.stringify(taskManifest, null, 2)}\n`,
     "workflow task manifest"
   );
   writePreparedWorkflowFile(
@@ -3469,14 +3367,13 @@ function compileTask(input: {
       logicalNodeId: input.node.logicalId,
       attemptId: input.attempt.attemptId,
       label: input.node.label,
-      kind: input.node.kind,
-      ...(input.node.role ? { role: input.node.role } : {}),
+      kind: "agentic",
       ...(input.node.promptPath ? { promptPath: input.node.promptPath } : {}),
       ...(input.node.group ? { group: input.node.group } : {})
     },
     dependencies: {
-      concreteNodeIds: input.node.dependsOn,
-      attemptIds: input.dependencyAttemptIds,
+      concreteNodeIds: [...input.node.dependsOn],
+      attemptIds: [...input.dependencyAttemptIds],
       smithersNodeIds: dependencySmithersNodeIds
     },
     loop: {
@@ -3523,12 +3420,13 @@ function compileTask(input: {
     attemptId: input.attempt.attemptId,
     concreteNodeId: input.node.id,
     logicalNodeId: input.node.logicalId,
+    preparationSmithersNodeId: `prepare:${input.attempt.attemptId}`,
     smithersNodeId: smithersNodeIdForAttempt(input.attempt.attemptId),
     verifierSmithersNodeId: verifierSmithersNodeIdForAttempt(input.attempt.attemptId),
     agentRef: profile.agent,
     ...(profile.model ? { modelName: profile.model } : {}),
     ...(profile.reasoning ? { reasoningEffort: profile.reasoning } : {}),
-    dependencies: input.dependencyAttemptIds,
+    dependencies: [...input.dependencyAttemptIds],
     dependencySmithersNodeIds,
     timeoutMs,
     heartbeatTimeoutMs,
@@ -3707,7 +3605,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
   const taskSpecs = JSON.stringify(
     compiled.tasks.map((task) => ({
       id: task.smithersNodeId,
-      preparationId: `prepare:${task.attemptId}`,
+      preparationId: task.preparationSmithersNodeId,
       verifierId: task.verifierSmithersNodeId,
       attemptId: task.attemptId,
       dependsOn: task.dependencySmithersNodeIds,

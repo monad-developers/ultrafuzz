@@ -8,6 +8,7 @@ import {
   appendNodeAttempts,
   appendEvent,
   assertPlannedGraph,
+  assertSmithersTaskManifestMatchesPlannedGraph,
   assertNoSymlinkComponents,
   assertPathInside,
   createNodeAttemptLedgerEntry,
@@ -20,6 +21,7 @@ import {
   replayEvents,
   readRunState,
   parseStrictJsonBytes,
+  parseSmithersTaskManifestBytes,
   replayUsageEvents,
   safeResolveInside,
   stableUsageDimension,
@@ -43,6 +45,8 @@ import {
   type NodeStatus,
   type RunLayout,
   type RunStatus,
+  type SmithersTaskManifestDocument,
+  type SmithersTaskManifestTask,
   PLANNED_GRAPH_SCHEMA_VERSION,
   type StateJsonValue,
   type UsageField,
@@ -84,32 +88,7 @@ import {
 import { runsRootForProject } from "./validate.js";
 import { projectWorkflowControlState } from "./workflow-control.js";
 
-interface StoredWorkflowTask {
-  attemptId: string;
-  concreteNodeId: string;
-  logicalNodeId: string;
-  smithersNodeId: string;
-  verifierSmithersNodeId: string;
-  dependencies: string[];
-  agentRef?: string;
-  modelName?: string;
-  metadata?: {
-    node?: {
-      concreteNodeId?: string;
-      logicalNodeId?: string;
-    };
-    loop?: {
-      attemptIndex?: number;
-      index?: number;
-    };
-    model?: {
-      profileId?: string;
-      modelName?: string;
-      modelIndex?: number;
-      attemptIndex?: number;
-    };
-  };
-}
+type StoredWorkflowTask = SmithersTaskManifestTask;
 
 interface WorkflowStep {
   id: string;
@@ -1878,7 +1857,7 @@ async function synchronizeTasks(input: {
         steps.get(task.verifierSmithersNodeId),
         eventsByNode.get(task.verifierSmithersNodeId) ?? []
       );
-      const preparationTaskId = preparationSmithersNodeIdForAttempt(task.attemptId);
+      const preparationTaskId = task.preparationSmithersNodeId;
       const preparationEvidence = mergeNodeWorkflowEvidence(
         steps.get(preparationTaskId),
         eventsByNode.get(preparationTaskId) ?? []
@@ -2037,10 +2016,7 @@ async function synchronizeTasks(input: {
   return { diagnostics, nodeStatuses, workflowStates, syncedNodes, changed };
 }
 
-function artifactReconciliationGrace(
-  previous: NodeState | undefined,
-  nowMs: number
-): ArtifactReconciliationGraceRead {
+function artifactReconciliationGrace(previous: NodeState | undefined, nowMs: number): ArtifactReconciliationGraceRead {
   const storedValue = previous?.provenance?.artifact_reconciliation_grace;
   if (storedValue === undefined) {
     return { status: "absent" };
@@ -2208,9 +2184,7 @@ async function finalizeTerminalTask(input: {
             : "agent-failure";
     const wrapperFailure = wrapperSource && category === "artifact-contract";
     const preparationFailure = wrapperFailure && input.evidenceSource === "preparation";
-    const wrapperTaskId = preparationFailure
-      ? preparationSmithersNodeIdForAttempt(input.task.attemptId)
-      : input.task.verifierSmithersNodeId;
+    const wrapperTaskId = preparationFailure ? input.task.preparationSmithersNodeId : input.task.verifierSmithersNodeId;
     const wrapperLabel = preparationFailure ? "artifact preparation" : "artifact verifier";
     return {
       status: input.evidence.status,
@@ -2444,7 +2418,7 @@ async function finalizeTerminalTask(input: {
         nodeId: input.task.attemptId,
         outputs: input.node.outputs,
         prerequisiteNodeIds: input.task.dependencies,
-        provenance: artifactProvenance(input.node, input.task, input.workflowRunId)
+        provenance: artifactProvenance(input.task, input.workflowRunId)
       });
       events.push({
         eventType: "artifact-manifest-written",
@@ -2570,7 +2544,7 @@ function appendTerminalTaskAttempts(input: {
       config_fingerprint: state.config_fingerprint,
       strategy_attempt_id: input.task.attemptId,
       workflow_task_id: input.task.smithersNodeId,
-      metadata: input.task.metadata ?? null
+      metadata: input.task.metadata
     })
   );
   const manifestPath = path.join(getNodeArtifactDir(input.layout, input.task.attemptId), "artifact-manifest.json");
@@ -3096,7 +3070,7 @@ function completionEvidenceForTask(
     return {
       evidence: preparationEvidence,
       source: "preparation",
-      taskId: preparationSmithersNodeIdForAttempt(task.attemptId)
+      taskId: task.preparationSmithersNodeId
     };
   }
   if (agentEvidence === undefined) {
@@ -3383,13 +3357,6 @@ function terminalStatus(status: NodeStatus): boolean {
   return NODE_TERMINAL_STATUSES.has(status);
 }
 
-// Mirrors the `prepare:` wrapper id compiled in smithers.ts. It is derived from
-// the attempt id rather than read from tasks.json so runs compiled before this
-// change still attribute their preparation failures on resume.
-function preparationSmithersNodeIdForAttempt(attemptId: string): string {
-  return `prepare:${attemptId}`;
-}
-
 function preparationWorkflowStateIsFailure(workflowState: string | undefined): boolean {
   // Every shape `evidenceFromStep` and `evidenceFromEvents` produce carries a
   // raw state. If a future one does not, trust the collapsed status rather than
@@ -3571,6 +3538,7 @@ function loadSynchronizationInputs(
   const diagnostics: RuntimeDiagnostic[] = [];
   let graph: PlannedGraph | undefined;
   let tasks: StoredWorkflowTask[] | undefined;
+  let taskManifest: SmithersTaskManifestDocument | undefined;
   try {
     const parsed = parseStrictJsonBytes(contents.graph);
     const version = isRecord(parsed) ? parsed.schema_version : undefined;
@@ -3589,51 +3557,22 @@ function loadSynchronizationInputs(
     diagnostics.push(diagnosticFromError(error, "runtime", "RUN_GRAPH_READ_FAILED"));
   }
   try {
-    const parsed = parseStrictJsonBytes(contents.tasks) as { tasks?: unknown };
-    tasks = Array.isArray(parsed.tasks) ? parsed.tasks.flatMap(parseStoredTask) : [];
+    taskManifest = parseSmithersTaskManifestBytes(contents.tasks);
+    tasks = taskManifest.tasks;
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "runtime", "WORKFLOW_TASKS_READ_FAILED"));
+  }
+  if (graph !== undefined && taskManifest !== undefined) {
+    try {
+      assertSmithersTaskManifestMatchesPlannedGraph(taskManifest, graph);
+    } catch (error) {
+      diagnostics.push(diagnosticFromError(error, "runtime", "WORKFLOW_TASKS_GRAPH_MISMATCH"));
+    }
   }
   if (graph === undefined || tasks === undefined || diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
     return { ok: false, diagnostics };
   }
   return { ok: true, graph, tasks };
-}
-
-function parseStoredTask(value: unknown): StoredWorkflowTask[] {
-  if (!isRecord(value)) {
-    return [];
-  }
-  const attemptId = stringField(value, "attemptId");
-  const concreteNodeId = stringField(value, "concreteNodeId");
-  const logicalNodeId = stringField(value, "logicalNodeId");
-  const smithersNodeId = stringField(value, "smithersNodeId");
-  const verifierSmithersNodeId = stringField(value, "verifierSmithersNodeId");
-  if (
-    attemptId === undefined ||
-    concreteNodeId === undefined ||
-    logicalNodeId === undefined ||
-    smithersNodeId === undefined ||
-    verifierSmithersNodeId === undefined
-  ) {
-    return [];
-  }
-  validateSafeId(attemptId, "attempt ID");
-  validateSafeId(concreteNodeId, "concrete node ID");
-  validateSafeId(logicalNodeId, "logical node ID");
-  return [
-    {
-      attemptId,
-      concreteNodeId,
-      logicalNodeId,
-      smithersNodeId,
-      verifierSmithersNodeId,
-      dependencies: stringArrayField(value, "dependencies"),
-      agentRef: stringField(value, "agentRef"),
-      modelName: stringField(value, "modelName"),
-      metadata: recordField(value, "metadata") as StoredWorkflowTask["metadata"]
-    }
-  ];
 }
 
 async function checkedRunLayout(
@@ -3668,20 +3607,16 @@ function artifactManifestExists(layout: RunLayout, nodeId: string): boolean {
   return fs.existsSync(path.join(getNodeArtifactDir(layout, nodeId, { create: true }), "artifact-manifest.json"));
 }
 
-function artifactProvenance(
-  node: PlannedGraphNode,
-  task: StoredWorkflowTask,
-  workflowRunId: string
-): Partial<ArtifactProvenance> {
-  const model = task.metadata?.model;
+function artifactProvenance(task: StoredWorkflowTask, workflowRunId: string): Partial<ArtifactProvenance> {
+  const model = task.metadata.model;
   return {
     producer_node_id: task.attemptId,
     logical_node_id: task.logicalNodeId,
-    attempt_index: model?.attemptIndex ?? task.metadata?.loop?.attemptIndex ?? node.loop.attempt_index,
-    loop_index: task.metadata?.loop?.index ?? node.loop.index,
-    model_id: model?.profileId ?? node.model_fanout[0]?.model_profile_id,
-    model: model?.modelName ?? task.modelName ?? node.model_fanout[0]?.model_name,
-    model_index: model?.modelIndex ?? node.model_fanout[0]?.model_index,
+    attempt_index: model.attemptIndex,
+    loop_index: task.metadata.loop.index,
+    model_id: model.profileId,
+    model: model.modelName,
+    model_index: model.modelIndex,
     agent_ref: task.agentRef,
     workflow_run_id: workflowRunId,
     workflow_task_id: task.smithersNodeId,

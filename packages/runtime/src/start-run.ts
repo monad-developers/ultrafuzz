@@ -4,15 +4,20 @@ import path from "node:path";
 import {
   appendEvent,
   assertPlannedGraph,
+  assertSmithersTaskManifestMatchesPlannedGraph,
   assertNoSymlinkComponents,
   assertPathInside,
   layoutForRunRoot,
+  parseSmithersTaskManifestBytes,
+  parseStrictJsonBytes,
   readRunState,
   updateRunStatus,
   validateSafeId,
   writeJsonDurable,
   writeRunState,
   type RunLayout,
+  type SmithersTaskManifestDocument,
+  type SmithersTaskManifestTask,
   type StateJsonValue
 } from "@ultrafuzz/artifacts";
 import type { ResolvedConfig } from "@ultrafuzz/config";
@@ -395,21 +400,16 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
 }
 
 function sealedTasksRequireTrustedCli(contents: Buffer): boolean {
-  const document = JSON.parse(contents.toString("utf8")) as { tasks?: unknown };
-  if (!Array.isArray(document.tasks)) return false;
-  return document.tasks.some((task) => {
-    if (typeof task !== "object" || task === null || Array.isArray(task)) return false;
-    const outputs = (task as { outputs?: unknown }).outputs;
-    return Array.isArray(outputs)
-      ? outputs.some(
-          (output) =>
-            typeof output === "object" &&
-            output !== null &&
-            !Array.isArray(output) &&
-            typeof (output as { schemaFile?: unknown }).schemaFile === "string"
-        )
-      : false;
-  });
+  return parseSmithersTaskManifestBytes(contents).tasks.some((task) =>
+    task.metadata.artifacts.outputs.some((output) => output.schemaFile !== undefined)
+  );
+}
+
+function parseSealedTaskManifest(contents: Readonly<{ graph: Buffer; tasks: Buffer }>): SmithersTaskManifestDocument {
+  const graph = assertPlannedGraph(parseStrictJsonBytes(contents.graph));
+  const manifest = parseSmithersTaskManifestBytes(contents.tasks);
+  assertSmithersTaskManifestMatchesPlannedGraph(manifest, graph);
+  return manifest;
 }
 
 async function persistSmithersEvidence(
@@ -438,6 +438,8 @@ async function persistSmithersEvidence(
     }
   }
   assertPlannedGraph(graph);
+  const taskManifest = parseSmithersTaskManifestBytes(fs.readFileSync(compiled.tasksPath));
+  assertSmithersTaskManifestMatchesPlannedGraph(taskManifest, graph);
   writeJsonDurable(layout.graphPath, graph);
 
   const executionFiles = await smithersExecutionControlFiles(compiled, layout, env);
@@ -590,13 +592,12 @@ export async function readLinkedWorkflowEvidence(
     }
 
     const verifiedControl = verifyWorkflowControlSnapshot(resolvedProjectRoot, layout);
-    const tasks = JSON.parse(verifiedControl.contents.tasks.toString("utf8")) as unknown;
-    const taskDocument = objectRecord(tasks);
+    const taskDocument = parseSealedTaskManifest(verifiedControl.contents);
     const compiledRunId = workflow.compiled_run_id;
     if (
       typeof compiledRunId !== "string" ||
       taskDocument.smithers_run_id !== compiledRunId ||
-      typeof taskDocument.workflow_name !== "string"
+      taskDocument.run_id !== runId
     ) {
       throw new Error("compiled workflow identity does not match the sealed task manifest");
     }
@@ -787,8 +788,7 @@ function reconcilePendingWorkflowRunLink(projectRoot: string, layout: RunLayout)
   if (pending.action === "start") {
     if (history.current !== undefined) throw new Error("initial workflow run link conflicts with committed history");
     const controlSnapshot = verifyWorkflowControlSnapshot(projectRoot, layout);
-    const tasks = JSON.parse(controlSnapshot.contents.tasks.toString("utf8")) as unknown;
-    const taskDocument = objectRecord(tasks);
+    const taskDocument = parseSealedTaskManifest(controlSnapshot.contents);
     if (
       taskDocument.smithers_run_id !== pending.workflow_run_id ||
       pending.control_generation !== controlSnapshot.generation
@@ -852,21 +852,11 @@ function initialWorkflowBinding(
   layout: RunLayout,
   controlSnapshot: VerifiedWorkflowControlSnapshot,
   executionSnapshotRoot: string,
-  taskDocument: Record<string, unknown>,
+  taskDocument: SmithersTaskManifestDocument,
   link: WorkflowRunLinkJournalEntry
 ): { metadataWorkflow: Record<string, unknown>; stateWorkflow: Record<string, StateJsonValue> } {
   const workflowName = taskDocument.workflow_name;
-  const tasks = taskDocument.tasks;
-  if (typeof workflowName !== "string" || !Array.isArray(tasks)) {
-    throw new Error("sealed workflow task manifest cannot reconstruct its initial link");
-  }
-  const taskNodeIds = tasks.map((value) => {
-    const smithersNodeId = objectRecord(value).smithersNodeId;
-    if (typeof smithersNodeId !== "string" || smithersNodeId.length === 0) {
-      throw new Error("sealed workflow task manifest contains an invalid Smithers node ID");
-    }
-    return smithersNodeId;
-  });
+  const taskNodeIds = taskDocument.tasks.map((task) => task.smithersNodeId);
   const executionSnapshot = runRelativePath(layout, executionSnapshotRoot);
   return {
     metadataWorkflow: {
@@ -1030,17 +1020,10 @@ function linkedWorkflowEnvironmentVariableNames(
 }
 
 function linkedWorkflowTasks(contents: Buffer): Array<{
-  agentRef?: unknown;
-  execution?: unknown;
+  agentRef: string;
+  execution: SmithersTaskManifestTask["execution"];
 }> {
-  const tasks = JSON.parse(contents.toString("utf8")) as {
-    tasks?: Array<{
-      agentRef?: unknown;
-      execution?: unknown;
-    }>;
-  };
-  if (!Array.isArray(tasks.tasks)) throw new Error("sealed workflow task manifest is invalid");
-  return tasks.tasks;
+  return parseSmithersTaskManifestBytes(contents).tasks;
 }
 
 function persistForgeGuardMetadata(layout: RunLayout, config: ResolvedConfig, active: boolean): void {

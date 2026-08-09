@@ -2,6 +2,15 @@ import { lstatSync, readFileSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 
+import {
+  assertPlannedGraph,
+  assertSmithersTaskManifestMatchesPlannedGraph,
+  parseSmithersTaskManifestBytes,
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
+  type SmithersTaskManifestDocument
+} from "@ultrafuzz/artifacts";
+
 export type TerminalDisposition =
   | { kind: "clean"; failedTasks: 0; operationalFailures: 0 }
   | { kind: "genuine-task-failures"; failedTasks: number; operationalFailures: 0 }
@@ -164,9 +173,7 @@ export async function inspectTerminalDisposition(projectRoot: string): Promise<T
     }
     if (candidates.length !== 1) return operationalFailure();
     const candidate = candidates[0]!;
-    const manifest = JSON.parse(
-      await readFile(path.join(candidate.runRoot, "smithers", "tasks.json"), "utf8")
-    ) as unknown;
+    const manifest = readSealedTaskManifest(candidate.runRoot);
     return classifyTerminalDisposition(candidate.state, manifest);
   } catch {
     return operationalFailure();
@@ -176,18 +183,22 @@ export async function inspectTerminalDisposition(projectRoot: string): Promise<T
 export function inspectTerminalDispositionAtRunRoot(runRoot: string): TerminalDisposition {
   try {
     const statePath = path.join(runRoot, "state.json");
-    const manifestPath = path.join(runRoot, "smithers", "tasks.json");
-    for (const filePath of [statePath, manifestPath]) {
-      const stat = lstatSync(filePath);
-      if (!stat.isFile() || stat.isSymbolicLink()) return operationalFailure();
-    }
-    return classifyTerminalDisposition(
-      JSON.parse(readFileSync(statePath, "utf8")) as unknown,
-      JSON.parse(readFileSync(manifestPath, "utf8")) as unknown
-    );
+    const stat = lstatSync(statePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return operationalFailure();
+    const manifest = readSealedTaskManifest(runRoot);
+    return classifyTerminalDisposition(JSON.parse(readFileSync(statePath, "utf8")) as unknown, manifest);
   } catch {
     return operationalFailure();
   }
+}
+
+function readSealedTaskManifest(runRoot: string): SmithersTaskManifestDocument {
+  const graphBytes = readRegularFileSnapshot(path.join(runRoot, "graph.json"), 64 * 1024 * 1024);
+  const manifestBytes = readRegularFileSnapshot(path.join(runRoot, "smithers", "tasks.json"), 64 * 1024 * 1024);
+  const graph = assertPlannedGraph(parseStrictJsonBytes(graphBytes));
+  const manifest = parseSmithersTaskManifestBytes(manifestBytes);
+  assertSmithersTaskManifestMatchesPlannedGraph(manifest, graph);
+  return manifest;
 }
 
 export async function runBenchmarkExecutionOnce(

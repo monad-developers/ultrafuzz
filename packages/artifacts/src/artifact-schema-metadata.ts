@@ -291,6 +291,16 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "severityClassifiedFindingsSchema",
     ["severity-finding-id-uniqueness"]
   ),
+  "smithers-task-manifest.schema.json": runtime("smithersTaskManifestJsonSchema", undefined, [
+    "smithers-task-attempt-id-uniqueness",
+    "smithers-task-workflow-id-uniqueness",
+    "smithers-task-document-identity",
+    "smithers-task-dependency-join",
+    "smithers-task-dependency-acyclicity",
+    "smithers-task-planned-graph-coverage",
+    "smithers-task-planned-graph-identity",
+    "smithers-task-planned-graph-dependency-join"
+  ]),
   "strategy-detections.schema.json": artifact(
     "ultrafuzz/strategy-detections@1",
     "strategyDetectionsJsonSchema",
