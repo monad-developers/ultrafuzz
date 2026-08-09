@@ -72,7 +72,7 @@ export function invariantSourceProofSchemaIssues(value: unknown, path = "$"): Sc
 
 export const invariantSourceProofJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/invariant-source-proof",
+  $id: "urn:ultrafuzz:schema:artifacts:invariant-source-proof:1",
   title: "Ultrafuzz invariant source proof",
   type: "object",
   additionalProperties: false,

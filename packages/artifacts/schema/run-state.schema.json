@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/run-state",
+  "$id": "urn:ultrafuzz:schema:artifacts:run-state:2",
   "title": "Ultrafuzz run state",
   "type": "object",
   "required": [
@@ -152,7 +152,12 @@
               "required": ["status"]
             },
             "then": {
-              "required": ["wait_since", "wait_reason", "next_eligible_action"]
+              "required": ["wait_since", "wait_reason", "next_eligible_action"],
+              "properties": {
+                "wait_since": {},
+                "wait_reason": {},
+                "next_eligible_action": {}
+              }
             }
           }
         ],

@@ -8,8 +8,7 @@ import { SAFE_ID_PATTERN, appendLineDurable, assertRegularFileInside, validateSa
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 export const USAGE_LEDGER_SCHEMA_VERSION = "1.0" as const;
-export const USAGE_LEDGER_JSON_SCHEMA_ID =
-  "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/usage-ledger" as const;
+export const USAGE_LEDGER_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:usage-ledger:1" as const;
 
 export const USAGE_INCOMPLETE_REASON_CODES = ["usage-missing", "usage-malformed", "attempt-identity-missing"] as const;
 export type UsageIncompleteReasonCode = (typeof USAGE_INCOMPLETE_REASON_CODES)[number];
@@ -233,13 +232,19 @@ export const usageLedgerJsonSchema = {
       },
       then: {
         properties: {
-          usage: { anyOf: USAGE_FIELDS.map((field) => ({ required: [field] })) },
-          usage_incomplete_reasons: { maxItems: 0 }
+          usage: {
+            anyOf: USAGE_FIELDS.map((field) => ({
+              type: "object",
+              required: [field],
+              properties: { [field]: {} }
+            }))
+          },
+          usage_incomplete_reasons: { type: "array", maxItems: 0 }
         }
       },
       else: {
         properties: {
-          usage_incomplete_reasons: { minItems: 1 }
+          usage_incomplete_reasons: { type: "array", minItems: 1 }
         }
       }
     }

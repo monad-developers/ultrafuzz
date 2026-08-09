@@ -5,7 +5,10 @@ import { z } from "zod/v4";
 import { validateFindingsSchema } from "./findings-schema.js";
 import { validateGeneratedTestManifestSchema } from "./generated-tests.js";
 import { validateInvariantLedgerSchema } from "./invariant-ledger.js";
+import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { validateWorkspacePatchSchema } from "./workspace-patch.js";
+import { artifactSchemaRegistry } from "./schema-registry.js";
+import { parseStrictJson, StrictJsonError } from "./strict-json.js";
 import {
   validateLensPropertiesSchema,
   validateReferenceExpectationsSchema,
@@ -301,13 +304,34 @@ export function validateArtifactContract(
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(contents) as unknown;
+    parsed = parseStrictJson(contents);
   } catch (error) {
     return failure(
-      "ARTIFACT_JSON_INVALID",
-      `Artifact is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      error instanceof StrictJsonError && error.kind === "duplicate-key"
+        ? "ARTIFACT_JSON_DUPLICATE_KEY"
+        : "ARTIFACT_JSON_INVALID",
+      `Artifact is not strict JSON: ${error instanceof Error ? error.message : String(error)}`,
       artifactPath
     );
+  }
+
+  const schemaFile = contractSchemaFiles[contract];
+  if (schemaFile !== undefined) {
+    const registryEntry = artifactSchemaRegistry().find((entry) => entry.filename === schemaFile);
+    if (registryEntry === undefined) {
+      return failure("ARTIFACT_SCHEMA_UNAVAILABLE", `Registered schema is unavailable: ${schemaFile}`, artifactPath);
+    }
+    const shape = validateRegisteredJsonSchema(registryEntry.id, parsed);
+    if (!shape.ok) {
+      return {
+        ok: false,
+        issues: shape.issues.map((issue) => ({
+          code: "ARTIFACT_SCHEMA_INVALID",
+          message: `${issue.message} (${issue.keyword}, ${issue.schemaPath})`,
+          path: `${artifactPath}${issue.instancePath}`
+        }))
+      };
+    }
   }
 
   if (contract === "ultrafuzz/json-array@1") {

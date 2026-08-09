@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/node-attempt-ledger",
+  "$id": "urn:ultrafuzz:schema:artifacts:node-attempt-ledger:1",
   "title": "Ultrafuzz node attempt ledger entry",
   "type": "object",
   "required": [

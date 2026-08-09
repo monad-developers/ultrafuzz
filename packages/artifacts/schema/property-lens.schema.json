@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/properties/lens",
+  "$id": "urn:ultrafuzz:schema:artifacts:property-lens:1",
   "title": "Ultrafuzz property lens catalog",
   "type": "object",
   "required": ["schema_version", "properties"],

@@ -11,8 +11,7 @@ import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from
 
 export const NODE_ATTEMPT_LEDGER_SCHEMA_VERSION = "1.0" as const;
 export const MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES = 1_000;
-export const NODE_ATTEMPT_LEDGER_JSON_SCHEMA_ID =
-  "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/node-attempt-ledger" as const;
+export const NODE_ATTEMPT_LEDGER_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:node-attempt-ledger:1" as const;
 
 export const NODE_ATTEMPT_OUTCOMES = ["succeeded", "failed", "timed-out", "canceled", "skipped", "reused"] as const;
 export type NodeAttemptOutcome = (typeof NODE_ATTEMPT_OUTCOMES)[number];

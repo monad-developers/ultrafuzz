@@ -15,7 +15,7 @@ import {
 } from "./state.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
-export const RUN_STATE_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/run-state" as const;
+export const RUN_STATE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-state:2" as const;
 
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
@@ -187,7 +187,14 @@ export const runStateJsonSchema = {
               properties: { status: { not: { enum: [...TERMINAL_NODE_STATE_STATUSES] } } },
               required: ["status"]
             },
-            then: { required: ["wait_since", "wait_reason", "next_eligible_action"] }
+            then: {
+              required: ["wait_since", "wait_reason", "next_eligible_action"],
+              properties: {
+                wait_since: {},
+                wait_reason: {},
+                next_eligible_action: {}
+              }
+            }
           }
         ],
         additionalProperties: false,

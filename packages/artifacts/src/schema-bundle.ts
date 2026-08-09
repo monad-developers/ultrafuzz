@@ -1,6 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+
+import {
+  artifactSchemaDirectory,
+  artifactSchemaRegistry,
+  readRegularFileSnapshot,
+  registeredSchemaForPath
+} from "./schema-registry.js";
 
 /**
  * Materialize the checked-in JSON schemas where an isolated task workspace
@@ -8,14 +14,7 @@ import { fileURLToPath } from "node:url";
  * this works both from the source tree and from the production image.
  */
 export function materializePromptSchemas(destination: string): string[] {
-  const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-  const source = [
-    path.resolve(moduleDirectory, "..", "schema"),
-    path.resolve(moduleDirectory, "..", "..", "schema")
-  ].find((candidate) => fs.existsSync(candidate));
-  if (source === undefined) {
-    throw new Error(`prompt schema source is unavailable near ${moduleDirectory}`);
-  }
+  const source = artifactSchemaDirectory();
   const target = path.resolve(destination);
   assertNoSymlinkComponents(target);
   const sourceStat = fs.lstatSync(source);
@@ -33,10 +32,8 @@ export function materializePromptSchemas(destination: string): string[] {
   }
 
   const copied: string[] = [];
-  for (const name of fs
-    .readdirSync(source)
-    .filter((entry) => entry.endsWith(".schema.json"))
-    .sort()) {
+  for (const schema of artifactSchemaRegistry()) {
+    const name = schema.filename;
     const sourcePath = path.join(source, name);
     const targetPath = path.join(target, name);
     const sourceEntry = fs.lstatSync(sourcePath);
@@ -48,13 +45,20 @@ export function materializePromptSchemas(destination: string): string[] {
       if (!targetEntry.isFile() || targetEntry.isSymbolicLink() || targetEntry.nlink !== 1) {
         throw new Error(`prompt schema destination entry is unsafe: ${targetPath}`);
       }
-      if (!fs.readFileSync(targetPath).equals(fs.readFileSync(sourcePath))) {
+      if (
+        !readRegularFileSnapshot(targetPath, 16 * 1024 * 1024).equals(
+          readRegularFileSnapshot(sourcePath, 16 * 1024 * 1024)
+        )
+      ) {
         throw new Error(`prompt schema destination differs from checked-in source: ${targetPath}`);
       }
     } else {
       fs.copyFileSync(sourcePath, targetPath);
     }
     fs.chmodSync(targetPath, 0o400);
+    if (registeredSchemaForPath(targetPath)?.sha256 !== schema.sha256) {
+      throw new Error(`prompt schema destination failed its pinned digest check: ${targetPath}`);
+    }
     copied.push(targetPath);
   }
   if (copied.length === 0) throw new Error(`prompt schema source is empty: ${source}`);

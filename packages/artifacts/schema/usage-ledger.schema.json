@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/usage-ledger",
+  "$id": "urn:ultrafuzz:schema:artifacts:usage-ledger:1",
   "title": "Ultrafuzz usage ledger entry",
   "type": "object",
   "required": [
@@ -106,20 +106,28 @@
         "properties": {
           "usage": {
             "anyOf": [
-              { "required": ["input_tokens"] },
-              { "required": ["output_tokens"] },
-              { "required": ["cache_read_tokens"] },
-              { "required": ["cache_write_tokens"] },
-              { "required": ["reasoning_tokens"] },
-              { "required": ["total_tokens"] }
+              { "type": "object", "required": ["input_tokens"], "properties": { "input_tokens": {} } },
+              { "type": "object", "required": ["output_tokens"], "properties": { "output_tokens": {} } },
+              {
+                "type": "object",
+                "required": ["cache_read_tokens"],
+                "properties": { "cache_read_tokens": {} }
+              },
+              {
+                "type": "object",
+                "required": ["cache_write_tokens"],
+                "properties": { "cache_write_tokens": {} }
+              },
+              { "type": "object", "required": ["reasoning_tokens"], "properties": { "reasoning_tokens": {} } },
+              { "type": "object", "required": ["total_tokens"], "properties": { "total_tokens": {} } }
             ]
           },
-          "usage_incomplete_reasons": { "maxItems": 0 }
+          "usage_incomplete_reasons": { "type": "array", "maxItems": 0 }
         }
       },
       "else": {
         "properties": {
-          "usage_incomplete_reasons": { "minItems": 1 }
+          "usage_incomplete_reasons": { "type": "array", "minItems": 1 }
         }
       }
     }

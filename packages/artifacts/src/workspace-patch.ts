@@ -5,8 +5,7 @@ import { z } from "zod/v4";
 import { validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 export const WORKSPACE_PATCH_SCHEMA_VERSION = "ultrafuzz.workspace-patch.v1" as const;
-export const WORKSPACE_PATCH_JSON_SCHEMA_ID =
-  "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/workspace-patch" as const;
+export const WORKSPACE_PATCH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:workspace-patch:1" as const;
 
 const gitObjectId = z.string().regex(/^[0-9a-f]{40,64}$/u);
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);

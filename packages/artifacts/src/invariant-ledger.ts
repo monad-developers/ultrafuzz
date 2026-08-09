@@ -227,7 +227,7 @@ export function invariantLedgerSchemaIssues(value: unknown, path = "$"): SchemaV
 
 export const invariantLedgerJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/invariant-evidence-ledger",
+  $id: "urn:ultrafuzz:schema:artifacts:invariant-evidence-ledger:1",
   title: "Ultrafuzz invariant evidence ledger",
   type: "object",
   additionalProperties: false,
@@ -313,25 +313,25 @@ export const invariantLedgerJsonSchema = {
   },
   allOf: [
     {
-      if: { properties: { entries: { minItems: 1 } } },
+      if: { properties: { entries: { type: "array", minItems: 1 } } },
       then: {
         // The zod validator rejects `no_invariants_justification` here, and the prompt tells the
         // agent to validate against THIS document first. Without the same rule the agent's own
         // validation passes and the discovery gate then fails the node on a generic
         // INVARIANT_LEDGER_SCHEMA_INVALID, which is the opaque failure this field exists to avoid.
-        not: { required: ["no_invariants_justification"] },
+        not: { required: ["no_invariants_justification"], properties: { no_invariants_justification: {} } },
         properties: {
-          inventory_rows: { minItems: 1 }
+          inventory_rows: { type: "array", minItems: 1 }
         }
       }
     },
     {
-      if: { properties: { entries: { maxItems: 0 } } },
+      if: { properties: { entries: { type: "array", maxItems: 0 } } },
       then: {
         required: ["no_invariants_justification"],
         properties: {
-          inventory_rows: { maxItems: 0 },
-          scan_probes: { minItems: 1 }
+          inventory_rows: { type: "array", maxItems: 0 },
+          scan_probes: { type: "array", minItems: 1 }
         }
       }
     }

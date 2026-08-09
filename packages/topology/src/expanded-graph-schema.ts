@@ -22,8 +22,7 @@ export interface TopologySchemaValidationResult<T> {
   value?: T;
 }
 
-export const EXPANDED_GRAPH_JSON_SCHEMA_ID =
-  "https://blog.monad.xyz/blog/ultrafuzz#schema/topology/expanded-graph" as const;
+export const EXPANDED_GRAPH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:topology:expanded-graph:2" as const;
 
 export const expandedGraphJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",

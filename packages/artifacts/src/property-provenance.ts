@@ -12,9 +12,8 @@ export const PROPERTY_LENS_SCHEMA_VERSION = "ultrafuzz.property-lens.v1" as cons
 export const IMPLEMENTED_PROPERTIES_SCHEMA_VERSION = "ultrafuzz.implemented-properties.v1" as const;
 export const PROPERTY_CAMPAIGN_SCHEMA_VERSION = "ultrafuzz.property-campaign.v1" as const;
 export const REFERENCE_EXPECTATIONS_SCHEMA_VERSION = "ultrafuzz.reference-expectations.v1" as const;
-export const PROPERTIES_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/properties" as const;
-export const REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID =
-  "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/reference-expectations" as const;
+export const PROPERTIES_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:properties:1" as const;
+export const REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:reference-expectations:1" as const;
 
 const nonEmptyString = z.string().min(1);
 const stableLedgerId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
@@ -546,7 +545,7 @@ export const referenceExpectationsJsonSchema = {
 
 export const lensPropertiesJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: `${PROPERTIES_JSON_SCHEMA_ID}/lens`,
+  $id: "urn:ultrafuzz:schema:artifacts:property-lens:1",
   title: "Ultrafuzz property lens catalog",
   type: "object",
   required: ["schema_version", "properties"],

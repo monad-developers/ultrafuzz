@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/topology/expanded-graph",
+  "$id": "urn:ultrafuzz:schema:topology:expanded-graph:2",
   "title": "Ultrafuzz expanded graph",
   "type": "object",
   "required": ["graphVersion", "topologyVersion", "groups", "nodes"],

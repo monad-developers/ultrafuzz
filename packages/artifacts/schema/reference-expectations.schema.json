@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/reference-expectations",
+  "$id": "urn:ultrafuzz:schema:artifacts:reference-expectations:1",
   "title": "Ultrafuzz supplied reference expectation catalog",
   "type": "object",
   "required": ["schema_version", "expectations"],

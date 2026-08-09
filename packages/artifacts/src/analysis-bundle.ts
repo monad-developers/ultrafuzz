@@ -434,18 +434,38 @@ const analysisBundleFilesJsonSchema = {
     ]
   },
   allOf: [
-    { contains: { properties: { kind: { const: "terminal-status" } } }, minContains: 0, maxContains: 1 },
-    { contains: { properties: { kind: { const: "evaluation-metrics" } } }, minContains: 0, maxContains: 1 },
-    { contains: { properties: { kind: { const: "accounting-summary" } } }, minContains: 0, maxContains: 1 },
-    { contains: { properties: { kind: { const: "attempt-history" } } }, minContains: 0, maxContains: 1 },
-    { contains: { properties: { kind: { const: "recovery-summary" } } }, minContains: 0, maxContains: 1 },
-    { contains: { properties: { kind: { const: "omissions" } } }, minContains: 1, maxContains: 1 }
+    {
+      contains: { type: "object", properties: { kind: { const: "terminal-status" } } },
+      minContains: 0,
+      maxContains: 1
+    },
+    {
+      contains: { type: "object", properties: { kind: { const: "evaluation-metrics" } } },
+      minContains: 0,
+      maxContains: 1
+    },
+    {
+      contains: { type: "object", properties: { kind: { const: "accounting-summary" } } },
+      minContains: 0,
+      maxContains: 1
+    },
+    {
+      contains: { type: "object", properties: { kind: { const: "attempt-history" } } },
+      minContains: 0,
+      maxContains: 1
+    },
+    {
+      contains: { type: "object", properties: { kind: { const: "recovery-summary" } } },
+      minContains: 0,
+      maxContains: 1
+    },
+    { contains: { type: "object", properties: { kind: { const: "omissions" } } }, minContains: 1, maxContains: 1 }
   ]
 } as const;
 
 export const analysisBundleManifestJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/analysis-bundle",
+  $id: "urn:ultrafuzz:schema:artifacts:analysis-bundle:1",
   title: "Ultrafuzz privacy-safe analysis bundle manifest",
   type: "object",
   required: ["schema_version", "policy_version", "files"],

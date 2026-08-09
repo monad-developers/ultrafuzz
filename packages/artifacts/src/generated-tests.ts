@@ -21,8 +21,7 @@ import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from
 export const GENERATED_TESTS_SCHEMA_VERSION = "1.0";
 export const GENERATED_TESTS_DIR = "generated-tests";
 export const GENERATED_TESTS_MANIFEST = "generated-tests.json";
-export const GENERATED_TESTS_JSON_SCHEMA_ID =
-  "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/generated-tests" as const;
+export const GENERATED_TESTS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:generated-tests:2" as const;
 export const GENERATED_TEST_MANIFEST_PATH_PATTERN =
   "^generated-tests/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127})*(?![\\s\\S])" as const;
 

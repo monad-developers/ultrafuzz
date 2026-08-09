@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/finding",
+  "$id": "urn:ultrafuzz:schema:artifacts:finding:2",
   "title": "Ultrafuzz normalized finding",
   "type": "object",
   "required": ["id", "title", "status", "severity_guess", "confidence", "summary"],
