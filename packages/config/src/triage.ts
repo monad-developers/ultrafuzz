@@ -2,7 +2,7 @@ import { z, type ZodIssue } from "zod/v4";
 import { diagnostic, type ConfigDiagnostic, type TriageConfig } from "./types.js";
 
 const triageConfigSchema = z
-  .object({
+  .strictObject({
     quorum: z.number().int().positive(),
     panelSize: z.number().int().positive()
   })
@@ -38,6 +38,9 @@ function triageConfigDiagnosticCode(issue: ZodIssue): string {
   if (issue.code === "custom") {
     return issue.message;
   }
+  if (issue.code === "unrecognized_keys") {
+    return "CONFIG_TRIAGE_FIELD_UNKNOWN";
+  }
   return issue.path[0] === "panelSize" ? "CONFIG_TRIAGE_PANEL_SIZE_INVALID" : "CONFIG_TRIAGE_QUORUM_INVALID";
 }
 
@@ -47,11 +50,14 @@ function triageConfigDiagnosticMessage(code: string, triage: TriageConfig): stri
       return "triage.panel_size must be greater than zero";
     case "CONFIG_TRIAGE_QUORUM_EXCEEDS_PANEL":
       return `triage.quorum (${triage.quorum}) cannot be greater than triage.panel_size (${triage.panelSize})`;
+    case "CONFIG_TRIAGE_FIELD_UNKNOWN":
+      return "triage contains an unknown field";
     default:
       return "triage.quorum must be greater than zero";
   }
 }
 
 function triageConfigPath(issue: ZodIssue): string[] {
-  return issue.path.map((segment) => (segment === "panelSize" ? "panel_size" : String(segment)));
+  const path = issue.path.map((segment) => (segment === "panelSize" ? "panel_size" : String(segment)));
+  return issue.code === "unrecognized_keys" ? [...path, issue.keys[0] ?? ""] : path;
 }

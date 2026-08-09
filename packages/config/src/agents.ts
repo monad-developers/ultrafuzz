@@ -13,12 +13,12 @@ const apiKeyEnvSchema = z.string().regex(ENVIRONMENT_VARIABLE_PATTERN);
 const configDirSchema = z.string().refine((value) => value.trim().length > 0);
 
 const agentConfigSchema = z.discriminatedUnion("auth", [
-  z.object({
+  z.strictObject({
     auth: z.literal("api-key"),
     apiKeyEnv: apiKeyEnvSchema,
     configDir: configDirSchema.optional()
   }),
-  z.object({
+  z.strictObject({
     auth: z.literal("subscription"),
     apiKeyEnv: apiKeyEnvSchema.optional(),
     configDir: configDirSchema.optional()
@@ -56,6 +56,9 @@ function agentConfigDiagnosticCode(issue: ZodIssue): string {
   if (issue.code === "invalid_key") {
     return "CONFIG_AGENT_ID_INVALID";
   }
+  if (issue.code === "unrecognized_keys") {
+    return "CONFIG_AGENT_FIELD_UNKNOWN";
+  }
   const field = String(issue.path[1] ?? "");
   if (field === "auth") {
     return "CONFIG_AGENT_AUTH_INVALID";
@@ -79,6 +82,8 @@ function agentConfigDiagnosticMessage(code: string, issue: ZodIssue): string {
       return "agent api_key_env must be an environment variable name";
     case "CONFIG_AGENT_CONFIG_DIR_EMPTY":
       return "agent config_dir cannot be empty";
+    case "CONFIG_AGENT_FIELD_UNKNOWN":
+      return `agent config contains unknown field \`${issue.code === "unrecognized_keys" ? (issue.keys[0] ?? "") : ""}\``;
     default:
       return "agent auth must be api-key or subscription";
   }
@@ -88,7 +93,8 @@ function agentConfigPath(issue: ZodIssue): string[] {
   if (issue.code === "invalid_key") {
     return ["agents", String(issue.path[0] ?? "")];
   }
-  return ["agents", ...issue.path.map((segment) => camelCaseConfigPathSegment(String(segment)))];
+  const path = ["agents", ...issue.path.map((segment) => camelCaseConfigPathSegment(String(segment)))];
+  return issue.code === "unrecognized_keys" ? [...path, issue.keys[0] ?? ""] : path;
 }
 
 function camelCaseConfigPathSegment(segment: string): string {

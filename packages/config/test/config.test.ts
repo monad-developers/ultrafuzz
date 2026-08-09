@@ -21,6 +21,7 @@ import {
   serializeRedactedResolvedConfigToml,
   type ConfigDiagnostic,
   type ProjectConfigInput,
+  validateAgentConfigs,
   validateExecutionNodeOverrides,
   validateTriageConfig
 } from "../src/index.js";
@@ -788,6 +789,29 @@ describe("model profile and triage validation", () => {
       })
     );
     expect(resolved.diagnostics.map((entry) => entry.code)).not.toContain("CONFIG_POSITIVE_INTEGER_INVALID");
+  });
+
+  it("rejects unknown agent and triage helper fields without stripping them", () => {
+    expect(
+      validateAgentConfigs({
+        CodexAgent: {
+          auth: "api-key",
+          apiKeyEnv: "OPENAI_API_KEY",
+          legacy: true
+        }
+      } as never)
+    ).toContainEqual(
+      expect.objectContaining({
+        code: "CONFIG_AGENT_FIELD_UNKNOWN",
+        path: ["agents", "CodexAgent", "legacy"]
+      })
+    );
+    expect(validateTriageConfig({ quorum: 3, panelSize: 4, legacy: true } as never)).toContainEqual(
+      expect.objectContaining({
+        code: "CONFIG_TRIAGE_FIELD_UNKNOWN",
+        path: ["triage", "legacy"]
+      })
+    );
   });
 
   it("redacts sensitive diagnostic messages", () => {
