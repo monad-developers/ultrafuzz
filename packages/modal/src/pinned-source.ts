@@ -1,8 +1,10 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, unlink } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+
+import { MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID } from "./modal-contracts.js";
+import { readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
 
 export const PINNED_SOURCE_BRANCH = "ultrafuzz-pinned" as const;
 export const PINNED_SOURCE_REF = `refs/heads/${PINNED_SOURCE_BRANCH}` as const;
@@ -30,7 +32,7 @@ export interface PinnedSourceProof {
   tree: string;
   base_ref: typeof PINNED_SOURCE_REF;
   refs: Array<{ name: string; object: string }>;
-  remotes: string[];
+  remotes: [];
   revision_count: 1;
   commit_object_count: 1;
 }
@@ -185,7 +187,7 @@ export async function inspectPinnedSource(
     tree: normalizedTree,
     base_ref: PINNED_SOURCE_REF,
     refs,
-    remotes,
+    remotes: [],
     revision_count: 1,
     commit_object_count: 1
   };
@@ -240,29 +242,19 @@ async function gitUnreachableCommitCount(cwd: string, signal?: AbortSignal): Pro
 }
 
 async function writeProofAtomic(filePath: string, proof: PinnedSourceProof): Promise<void> {
-  const absolute = path.resolve(filePath);
-  await mkdir(path.dirname(absolute), { recursive: true, mode: 0o700 });
-  const temporary = `${absolute}.${process.pid}.${randomUUID()}.tmp`;
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  try {
-    handle = await open(temporary, "wx", 0o600);
-    await handle.writeFile(`${JSON.stringify(proof, null, 2)}\n`, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await rename(temporary, absolute);
-    const directory = await open(path.dirname(absolute), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
-  } finally {
-    await handle?.close().catch(() => undefined);
-    await unlink(temporary).catch(() => undefined);
-  }
+  const target = path.resolve(filePath);
+  const trustedRoot = path.dirname(target);
+  await mkdir(trustedRoot, { recursive: true, mode: 0o700 });
+  await writeModalDocumentAtomic(target, MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID, proof, {
+    trustedRoot
+  });
 }
 
 export async function readPinnedSourceProof(filePath: string): Promise<PinnedSourceProof> {
-  return JSON.parse(await readFile(filePath, "utf8")) as PinnedSourceProof;
+  const proof = readModalDocument(path.resolve(filePath), MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID).value;
+  return {
+    ...proof,
+    refs: proof.refs.map((reference) => ({ ...reference })),
+    remotes: []
+  };
 }

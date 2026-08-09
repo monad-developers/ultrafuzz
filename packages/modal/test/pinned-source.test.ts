@@ -21,6 +21,30 @@ afterEach(() => {
 });
 
 describe("pinned benchmark source", () => {
+  it("rejects duplicate keys in a persisted pinned-source proof", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-pinned-proof-"));
+    roots.push(root);
+    const proofPath = path.join(root, "proof.json");
+    const commit = "a".repeat(40);
+    const proof = {
+      schema_version: "ultrafuzz.pinned-source-proof.v1",
+      commit,
+      tree: "b".repeat(40),
+      base_ref: PINNED_SOURCE_REF,
+      refs: [{ name: PINNED_SOURCE_REF, object: commit }],
+      remotes: [],
+      revision_count: 1,
+      commit_object_count: 1
+    };
+    const serialized = JSON.stringify(proof);
+    const field = `"commit":"${commit}"`;
+    const duplicate = serialized.replace(field, `${field},"commit":"${"c".repeat(40)}"`);
+    expect(duplicate).not.toBe(serialized);
+    fs.writeFileSync(proofPath, duplicate, { mode: 0o600 });
+
+    await expect(readPinnedSourceProof(proofPath)).rejects.toThrow(/duplicate|strict JSON/u);
+  });
+
   it("rewrites only GitHub SSH submodule transports to HTTPS", () => {
     const resolve = (url: string): string =>
       execFileSync("git", [...GITHUB_HTTPS_SUBMODULE_CONFIG, "ls-remote", "--get-url", url], {
