@@ -12,6 +12,9 @@ import * as ts from "typescript";
 import {
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
+  createEventRecord,
+  layoutForRunRoot,
+  replayEvents,
   VALIDATOR_BUILD_IDENTITY,
   type RunState,
   type SMITHERS_NODE_STATES,
@@ -570,7 +573,13 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "  inspect)",
       '    printf \'{"ok":true,"data":{"run":{"id":"%s","workflow":"%s","status":"running","started":"2026-07-03T00:00:00.000Z","elapsed":"0s"},"runState":{"runId":"%s","state":"running","computedAt":"2026-07-03T00:00:03.000Z"},"steps":[],"nodes":[]},"meta":{"command":"inspect","duration":"1ms"}}\\n\' "$2" "$2" "$2"',
       "    ;;",
+      "  ps)",
+      '    printf \'%s\\n\' \'{"ok":true,"data":{"runs":[]},"meta":{"command":"ps","duration":"1ms"}}\'',
+      "    ;;",
       "  events)",
+      '    case "$*" in',
+      '      *--full-output*) printf \'%s\\n\' \'{"ok":true,"data":[],"meta":{"command":"events","duration":"1ms"}}\' ;;',
+      "    esac",
       "    ;;",
       "  status)",
       '    printf \'%s\\n\' \'{"ok":true,"data":{"status":"running","verdict":"running-healthy","reason":"1 running, 2 finished in last 10m","counts":{"finished":2,"inProgress":1,"pending":3,"failed":0,"waitingApproval":0,"waitingEvent":0,"waitingTimer":0,"skipped":0,"other":0,"total":6},"modelMix":[{"engine":"codex","model":"gpt-test","attempts":3,"quotaParked":false}],"throughput":{"recentFinished":2,"windowMs":600000,"totalFinished":2,"lastFinishedAtMs":1000},"bottleneck":[{"nodeId":"project-discovery","iteration":0,"state":"in-progress","detail":"running 1m"}],"bottleneckOmitted":0,"quota":null,"generatedAtMs":2000}}\'',
@@ -591,9 +600,43 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   };
 }
 
+function currentPsEnvelope(runs: unknown[]): unknown {
+  return {
+    ok: true,
+    data: { runs },
+    meta: { command: "ps", duration: "1ms" }
+  };
+}
+
+function fakePsSmithersEnv(project: string, ps: unknown): Record<string, string | undefined> {
+  const binDir = path.join(project, "fake-ps-bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  const psPath = path.join(project, "fake-smithers-ps.json");
+  fs.writeFileSync(psPath, `${JSON.stringify(ps, null, 2)}\n`, "utf8");
+  const smithers = path.join(binDir, "smithers");
+  fs.writeFileSync(
+    smithers,
+    ["#!/bin/sh", 'if [ "$1" = "ps" ]; then', '  cat "$SMITHERS_FAKE_PS"', "  exit 0", "fi", "exit 1", ""].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(smithers, 0o755);
+  return {
+    PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    SMITHERS_BIN: smithers,
+    SMITHERS_FAKE_PS: psPath
+  };
+}
+
 function fakeLifecycleSmithersEnv(
   project: string,
-  input: { inspect: unknown; events?: string; tokenEvents?: string; inspectMarkerPath?: string; timeline?: unknown }
+  input: {
+    inspect: unknown;
+    events?: string;
+    tokenEvents?: string;
+    inspectMarkerPath?: string;
+    timeline?: unknown;
+    statusEvents?: unknown;
+  }
 ): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
@@ -602,12 +645,22 @@ function fakeLifecycleSmithersEnv(
   const tokenEventsPath =
     input.tokenEvents === undefined ? eventsPath : path.join(project, "fake-smithers-token-events.ndjson");
   const timelinePath = path.join(project, "fake-smithers-timeline.json");
+  const statusEventsPath = path.join(project, "fake-smithers-status-events.json");
   fs.writeFileSync(inspectPath, `${JSON.stringify(input.inspect, null, 2)}\n`, "utf8");
   fs.writeFileSync(eventsPath, input.events ?? "", "utf8");
   if (input.tokenEvents !== undefined) fs.writeFileSync(tokenEventsPath, input.tokenEvents, "utf8");
   fs.writeFileSync(
     timelinePath,
     `${JSON.stringify(input.timeline ?? { timeline: { frames: [] } }, null, 2)}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    statusEventsPath,
+    `${JSON.stringify(
+      input.statusEvents ?? { ok: true, data: [], meta: { command: "events", duration: "1ms" } },
+      null,
+      2
+    )}\n`,
     "utf8"
   );
   const smithers = path.join(binDir, "smithers");
@@ -628,11 +681,14 @@ function fakeLifecycleSmithersEnv(
       "    exit 2",
       "    ;;",
       "  events)",
-      '    if [ "$3" = "--type" ] && [ "$4" = "token" ]; then',
-      '      cat "$SMITHERS_FAKE_TOKEN_EVENTS"',
-      "    else",
-      '      cat "$SMITHERS_FAKE_EVENTS"',
-      "    fi",
+      '    case "$*" in',
+      '      *--full-output*) cat "$SMITHERS_FAKE_STATUS_EVENTS" ;;',
+      '      *) if [ "$3" = "--type" ] && [ "$4" = "token" ]; then',
+      '           cat "$SMITHERS_FAKE_TOKEN_EVENTS"',
+      "         else",
+      '           cat "$SMITHERS_FAKE_EVENTS"',
+      "         fi ;;",
+      "    esac",
       "    ;;",
       "  timeline)",
       '    cat "$SMITHERS_FAKE_TIMELINE"',
@@ -679,6 +735,7 @@ function fakeLifecycleSmithersEnv(
     SMITHERS_FAKE_INSPECT: inspectPath,
     SMITHERS_FAKE_EVENTS: eventsPath,
     SMITHERS_FAKE_TOKEN_EVENTS: tokenEventsPath,
+    SMITHERS_FAKE_STATUS_EVENTS: statusEventsPath,
     SMITHERS_FAKE_TIMELINE: timelinePath,
     ULTRAFUZZ_PRICING_CATALOG_URL: "off"
   };
@@ -4637,6 +4694,177 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.equal(durableState.workflow_deadline_at !== undefined, true);
   assert.equal(durableState.concurrency.requested_concurrency, 2);
   assert.equal(durableState.controller_lease.status, "active");
+});
+
+test("listRuns requires the exact current Smithers ps envelope and row shape", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const currentRow = {
+    id: "workflow-current-1",
+    workflow: "current-workflow",
+    status: "running",
+    dbStatus: "running",
+    state: "running",
+    step: "node:current",
+    started: "1s"
+  };
+  const env = fakePsSmithersEnv(project, currentPsEnvelope([currentRow]));
+
+  const current = await listRuns({ projectRoot: project, env });
+
+  assert.equal(current.ok, true, JSON.stringify(current.diagnostics));
+  assert.deepEqual(current.value?.runs, [
+    {
+      workflow_run_id: "workflow-current-1",
+      workflow_status: "running",
+      step: "node:current"
+    }
+  ]);
+
+  const invalidOutputs: Array<{ label: string; value: unknown; message: RegExp }> = [
+    {
+      label: "unwrapped data",
+      value: { runs: [currentRow] },
+      message: /exact current full-output envelope/iu
+    },
+    {
+      label: "malformed row mixed into the array",
+      value: currentPsEnvelope([currentRow, null]),
+      message: /runs\[1\].*exact current row shape/iu
+    },
+    {
+      label: "runId alias",
+      value: currentPsEnvelope([{ ...currentRow, id: undefined, runId: currentRow.id }]),
+      message: /exact current row shape/iu
+    },
+    {
+      label: "unknown state",
+      value: currentPsEnvelope([{ ...currentRow, status: "unknown", state: "unknown" }]),
+      message: /cannot be unknown/iu
+    },
+    {
+      label: "status alias drift",
+      value: currentPsEnvelope([{ ...currentRow, status: "failed" }]),
+      message: /status does not match/iu
+    },
+    {
+      label: "unknown row field",
+      value: currentPsEnvelope([{ ...currentRow, run_id: currentRow.id }]),
+      message: /exact current row shape/iu
+    }
+  ];
+  for (const invalid of invalidOutputs) {
+    fs.writeFileSync(env.SMITHERS_FAKE_PS!, `${JSON.stringify(invalid.value, null, 2)}\n`, "utf8");
+    await assert.rejects(() => listRuns({ projectRoot: project, env }), invalid.message, invalid.label);
+  }
+});
+
+test("getRunStatus uses only validated current runState and validates the events envelope", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "strict-state-export-inspection";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const launched = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const inspect = workflowInspect({
+    workflowRunId,
+    status: "failed",
+    state: "running",
+    steps: []
+  });
+  const env = fakeLifecycleSmithersEnv(project, { inspect });
+
+  const current = await getRunStatus({ projectRoot: project, runId, env });
+
+  assert.equal(current.ok, true, JSON.stringify(current.diagnostics));
+  assert.equal(current.value?.workflow?.status, "running");
+
+  const unknownState = structuredClone(inspect) as { data: { runState: { state: string } } };
+  unknownState.data.runState.state = "unknown";
+  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(unknownState)}\n`, "utf8");
+  await assert.rejects(() => getRunStatus({ projectRoot: project, runId, env }), /runState\.state is unknown/iu);
+
+  const statusAlias = structuredClone(inspect) as { data: Record<string, unknown> };
+  statusAlias.data.status = "running";
+  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(statusAlias)}\n`, "utf8");
+  await assert.rejects(() => getRunStatus({ projectRoot: project, runId, env }), /removed field aliases/iu);
+
+  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(inspect)}\n`, "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_STATUS_EVENTS!, "[]\n", "utf8");
+  await assert.rejects(
+    () => getRunStatus({ projectRoot: project, runId, env }),
+    /events output must use the exact current full-output envelope/iu
+  );
+
+  fs.writeFileSync(
+    env.SMITHERS_FAKE_STATUS_EVENTS!,
+    `${JSON.stringify({ ok: true, data: [{ malformed: true }], meta: { command: "events", duration: "1ms" } })}\n`,
+    "utf8"
+  );
+  await assert.rejects(
+    () => getRunStatus({ projectRoot: project, runId, env }),
+    /events data\[0\].*non-empty string/iu
+  );
+});
+
+test("getRunStatus counts only a canonical event-v2 journal and fails closed on invalid presence", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "strict-state-export-events";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const launched = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const layout = layoutForRunRoot(launched.value!.run_root, runId);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({ workflowRunId, status: "running", state: "running", steps: [] })
+  });
+
+  const current = await getRunStatus({ projectRoot: project, runId, env });
+
+  assert.equal(current.ok, true, JSON.stringify(current.diagnostics));
+  assert.equal(current.value?.events, replayEvents(layout, Number.MAX_SAFE_INTEGER).records.length);
+
+  const record = createEventRecord(
+    { runId },
+    {
+      eventType: "findings-validated",
+      nodeId: "final-report",
+      status: "succeeded",
+      timestamp: "2026-08-09T00:00:00.000Z",
+      payload: { count: 1, path: "artifacts/final-report/report.json" }
+    }
+  );
+  const line = JSON.stringify(record);
+  const invalidDocuments: Array<{ label: string; contents: string; message: RegExp }> = [
+    { label: "malformed", contents: '{"schema_version":\n', message: /invalid strict JSON/iu },
+    {
+      label: "duplicate key",
+      contents: `${line.replace(`"run_id":"${runId}"`, `"run_id":"${runId}","run_id":"${runId}"`)}\n`,
+      message: /duplicate property name/iu
+    },
+    {
+      label: "foreign run",
+      contents: `${JSON.stringify({ ...record, run_id: "foreign-run" })}\n`,
+      message: /belongs to.*expected/iu
+    },
+    { label: "duplicate identity", contents: `${line}\n${line}\n`, message: /duplicate identity/iu },
+    { label: "torn tail", contents: line, message: /torn or unterminated/iu }
+  ];
+  for (const invalid of invalidDocuments) {
+    fs.writeFileSync(layout.eventsPath, invalid.contents, "utf8");
+    const before = fs.readFileSync(layout.eventsPath);
+    await assert.rejects(() => getRunStatus({ projectRoot: project, runId, env }), invalid.message, invalid.label);
+    assert.deepEqual(fs.readFileSync(layout.eventsPath), before, invalid.label);
+  }
+
+  fs.unlinkSync(layout.eventsPath);
+  fs.symlinkSync(`${layout.eventsPath}.missing`, layout.eventsPath);
+  await assert.rejects(() => getRunStatus({ projectRoot: project, runId, env }), /cannot open regular file|symlink/iu);
+  fs.unlinkSync(layout.eventsPath);
+  fs.mkdirSync(layout.eventsPath);
+  await assert.rejects(() => getRunStatus({ projectRoot: project, runId, env }), /not a regular file/iu);
 });
 
 test("getRunHealth adapts the workflow health summary to the Ultrafuzz run", async () => {

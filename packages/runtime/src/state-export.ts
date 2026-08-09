@@ -2,10 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  SMITHERS_RUN_STATES,
+  SMITHERS_RUN_STATUSES,
   assertNoSymlinkComponents,
   assertPathInside,
   layoutForRunRoot,
   queryEvents,
+  replayEvents,
   replayNodeAttempts,
   readPlannedGraphDocument,
   readRunMetadataDocument,
@@ -29,7 +32,7 @@ import type {
 } from "./types.js";
 import { summarizeRunProgress } from "./run-progress.js";
 import { runtimeFailure, runtimeResult } from "./utils.js";
-import { runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
+import { parseCurrentSmithersInspect, runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
 import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
 import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
 import { runsRootForProject } from "./validate.js";
@@ -40,20 +43,24 @@ export async function listRuns(input: { projectRoot: string; env?: Record<string
   // Project-global discovery has no single linked run whose control snapshot
   // can authorize it. Every run-specific command below is snapshot-bound.
   const workflowSnapshot = await runSmithersInspectionCommand({
-    args: ["ps", "--all", "--format", "json"],
+    args: ["ps", "--all", "--format", "json", "--full-output"],
     projectRoot,
     env: input.env
   });
-  if (!fs.existsSync(runsRoot)) {
+  const runsRootStat = lstatIfPresent(runsRoot);
+  if (runsRootStat === undefined) {
     return runtimeResult<RunListValue>(
       true,
       {
         project_root: projectRoot,
         product_runs: [],
-        runs: workflowRunsWithProductEvidence(workflowSnapshot.json, [])
+        runs: workflowRunsWithProductEvidence(currentPsRows(workflowSnapshot), [])
       },
       diagnosticsForWorkflowSnapshot(workflowSnapshot, "WORKFLOW_PS_FAILED")
     );
+  }
+  if (!runsRootStat.isDirectory()) {
+    throw new Error(`runs root is not a directory: ${runsRoot}`);
   }
   const entries = fs
     .readdirSync(runsRoot, { withFileTypes: true })
@@ -65,7 +72,7 @@ export async function listRuns(input: { projectRoot: string; env?: Record<string
     {
       project_root: projectRoot,
       product_runs: entries,
-      runs: workflowRunsWithProductEvidence(workflowSnapshot.json, entries)
+      runs: workflowRunsWithProductEvidence(currentPsRows(workflowSnapshot), entries)
     },
     diagnosticsForWorkflowSnapshot(workflowSnapshot, "WORKFLOW_PS_FAILED")
   );
@@ -82,7 +89,7 @@ export async function getRunStatus(input: {
   if (!layout.ok) {
     return runtimeFailure<RunStatusValue>(layout.diagnostics);
   }
-  if (!fs.existsSync(layout.root)) {
+  if (lstatIfPresent(layout.root) === undefined) {
     return runtimeFailure<RunStatusValue>([
       {
         code: "RUN_NOT_FOUND",
@@ -103,9 +110,7 @@ export async function getRunStatus(input: {
   const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
   const base = readRunListEntry(layout.root, layout.runId);
   const state = readRunState(layout);
-  const events = fs.existsSync(layout.eventsPath)
-    ? fs.readFileSync(layout.eventsPath, "utf8").split(/\r?\n/u).filter(Boolean).length
-    : 0;
+  const events = replayEvents(layout, Number.MAX_SAFE_INTEGER).records.length;
   const metadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
   const workflowSnapshots = evidence.ok
     ? {
@@ -116,7 +121,7 @@ export async function getRunStatus(input: {
           env: linkedWorkflowExecutionEnvironment(evidence, input.env)
         }),
         events: await runSmithersInspectionCommand({
-          args: ["events", evidence.smithersRunId, "--limit", "200", "--format", "json"],
+          args: ["events", evidence.smithersRunId, "--limit", "200", "--format", "json", "--full-output"],
           projectRoot,
           env: linkedWorkflowExecutionEnvironment(evidence, input.env)
         })
@@ -204,7 +209,7 @@ export async function getRunHealth(input: {
     ]);
   }
   const base = readRunListEntry(evidence.layout.root, evidence.layout.runId);
-  const state = fs.existsSync(evidence.layout.statePath) ? readRunState(evidence.layout) : undefined;
+  const state = readRunState(evidence.layout);
   return runtimeResult<RunHealthValue>(
     true,
     {
@@ -234,7 +239,7 @@ export async function queryRunEvents(input: {
   if (!layout.ok) {
     return runtimeFailure<QueryRunEventsValue>(layout.diagnostics);
   }
-  if (!fs.existsSync(layout.root)) {
+  if (lstatIfPresent(layout.root) === undefined) {
     return runtimeFailure<QueryRunEventsValue>([
       {
         code: "RUN_NOT_FOUND",
@@ -256,7 +261,7 @@ function checkedRunLayout(runsRoot: string, runId: string) {
     const safeRunId = validateSafeId(runId, "run ID");
     const layout = layoutForRunRoot(path.join(runsRoot, safeRunId), safeRunId);
     assertPathInside(runsRoot, layout.root, "run root");
-    if (fs.existsSync(runsRoot)) {
+    if (lstatIfPresent(runsRoot) !== undefined) {
       assertNoSymlinkComponents(runsRoot, layout.root, "run root");
     }
     return { ok: true as const, ...layout };
@@ -291,7 +296,16 @@ function readRunListEntry(runRoot: string, runId: string): RunListEntry {
   };
 }
 
-function workflowRunsWithProductEvidence(workflowJson: unknown, productRuns: RunListEntry[]): RunListValue["runs"] {
+interface CurrentSmithersPsRow {
+  id: string;
+  status: string;
+  step: string;
+}
+
+function workflowRunsWithProductEvidence(
+  workflowRuns: readonly CurrentSmithersPsRow[],
+  productRuns: RunListEntry[]
+): RunListValue["runs"] {
   const productByWorkflowRun = new Map<string, RunListEntry>();
   for (const run of productRuns) {
     for (const workflowRunId of run.workflow_ids) {
@@ -299,21 +313,15 @@ function workflowRunsWithProductEvidence(workflowJson: unknown, productRuns: Run
     }
   }
 
-  const workflowRuns = extractWorkflowRuns(workflowJson);
   const merged: RunListValue["runs"] = workflowRuns.map((workflowRun) => {
-    const workflowRunId =
-      stringField(workflowRun, "id") ??
-      stringField(workflowRun, "runId") ??
-      stringField(workflowRun, "run_id") ??
-      "unknown";
-    const product = productByWorkflowRun.get(workflowRunId);
+    const product = productByWorkflowRun.get(workflowRun.id);
     return {
-      workflow_run_id: workflowRunId,
+      workflow_run_id: workflowRun.id,
       ...(product
         ? { ultrafuzz_run_id: product.run_id, ultrafuzz_status: product.status, run_root: product.run_root }
         : {}),
-      ...(stringField(workflowRun, "status") ? { workflow_status: stringField(workflowRun, "status") } : {}),
-      ...(stringField(workflowRun, "step") ? { step: stringField(workflowRun, "step") } : {})
+      workflow_status: workflowRun.status,
+      step: workflowRun.step
     };
   });
 
@@ -333,18 +341,216 @@ function workflowRunsWithProductEvidence(workflowJson: unknown, productRuns: Run
   return merged;
 }
 
-function extractWorkflowRuns(value: unknown): Record<string, unknown>[] {
-  if (value && typeof value === "object" && Array.isArray((value as { runs?: unknown }).runs)) {
-    return (value as { runs: unknown[] }).runs.filter(
-      (entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null && !Array.isArray(entry)
-    );
+function currentPsRows(snapshot: SmithersCommandSnapshot): CurrentSmithersPsRow[] {
+  if (!snapshot.ok) return [];
+  const data = currentSmithersCommandData(snapshot, "ps");
+  if (!hasExactKeys(data, ["runs"]) || !Array.isArray(data.runs)) {
+    throw new Error("Smithers ps data must use the exact current runs envelope");
   }
-  if (Array.isArray(value)) {
-    return value.filter(
-      (entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null && !Array.isArray(entry)
-    );
+  return data.runs.map((value, index) => parseCurrentPsRow(value, index));
+}
+
+function parseCurrentPsRow(value: unknown, index: number): CurrentSmithersPsRow {
+  const label = `Smithers ps data.runs[${index}]`;
+  const row = objectRecord(value);
+  const allowedKeys = [
+    "id",
+    "parentRunId",
+    "workflow",
+    "workflowId",
+    "status",
+    "dbStatus",
+    "state",
+    "unhealthy",
+    "step",
+    "timer",
+    "started",
+    "finishedAtMs",
+    "resetAtMs",
+    "pendingApprovals",
+    "startedBy"
+  ];
+  if (
+    row === undefined ||
+    !hasRequiredAndAllowedKeys(row, ["id", "workflow", "status", "dbStatus", "state", "step", "started"], allowedKeys)
+  ) {
+    throw new Error(`${label} must use the exact current row shape`);
   }
-  return [];
+
+  const id = requiredString(row.id, `${label}.id`);
+  requiredString(row.workflow, `${label}.workflow`);
+  const state = requiredEnum(row.state, SMITHERS_RUN_STATES, `${label}.state`);
+  if (state === "unknown") throw new Error(`${label}.state cannot be unknown`);
+  const expectedStatus = state === "succeeded" ? "finished" : state;
+  if (requiredString(row.status, `${label}.status`) !== expectedStatus) {
+    throw new Error(`${label}.status does not match the canonical derived state`);
+  }
+  requiredEnum(row.dbStatus, SMITHERS_RUN_STATUSES, `${label}.dbStatus`);
+  const step = requiredString(row.step, `${label}.step`);
+  requiredString(row.started, `${label}.started`);
+
+  for (const key of ["parentRunId", "workflowId"] as const) {
+    if (row[key] !== undefined) requiredString(row[key], `${label}.${key}`);
+  }
+  for (const key of ["finishedAtMs", "resetAtMs"] as const) {
+    if (row[key] !== undefined) requiredNonNegativeSafeInteger(row[key], `${label}.${key}`);
+  }
+  if (row.unhealthy !== undefined) validateCurrentPsUnhealthy(row.unhealthy, `${label}.unhealthy`);
+  if (row.timer !== undefined) validateCurrentPsTimer(row.timer, `${label}.timer`);
+  if (row.pendingApprovals !== undefined) {
+    if (!Array.isArray(row.pendingApprovals) || row.pendingApprovals.length === 0) {
+      throw new Error(`${label}.pendingApprovals must be a non-empty array when present`);
+    }
+    for (const [approvalIndex, approval] of row.pendingApprovals.entries()) {
+      const approvalLabel = `${label}.pendingApprovals[${approvalIndex}]`;
+      if (!hasExactKeys(approval, ["nodeId", "status"])) {
+        throw new Error(`${approvalLabel} must use the exact current shape`);
+      }
+      requiredString(approval.nodeId, `${approvalLabel}.nodeId`);
+      requiredString(approval.status, `${approvalLabel}.status`);
+    }
+  }
+  if (row.startedBy !== undefined) validateCurrentPsStartedBy(row.startedBy, `${label}.startedBy`);
+  return { id, status: expectedStatus, step };
+}
+
+function validateCurrentPsUnhealthy(value: unknown, label: string): void {
+  const unhealthy = objectRecord(value);
+  if (unhealthy === undefined) throw new Error(`${label} must be an object`);
+  switch (unhealthy.kind) {
+    case "engine-heartbeat-stale":
+      assertExactTaggedObject(unhealthy, ["kind", "lastHeartbeatAt"], label);
+      requiredString(unhealthy.lastHeartbeatAt, `${label}.lastHeartbeatAt`);
+      return;
+    case "timer-overdue":
+      assertExactTaggedObject(unhealthy, ["kind", "wakeAt", "overdueMs"], label);
+      requiredString(unhealthy.wakeAt, `${label}.wakeAt`);
+      requiredNonNegativeSafeInteger(unhealthy.overdueMs, `${label}.overdueMs`);
+      return;
+    case "ui-heartbeat-stale":
+      assertExactTaggedObject(unhealthy, ["kind", "lastSeenAt"], label);
+      requiredString(unhealthy.lastSeenAt, `${label}.lastSeenAt`);
+      return;
+    case "db-lock":
+    case "sandbox-unreachable":
+      assertExactTaggedObject(unhealthy, ["kind"], label);
+      return;
+    case "supervisor-backoff":
+      assertExactTaggedObject(unhealthy, ["kind", "attempt", "nextAt"], label);
+      requiredNonNegativeSafeInteger(unhealthy.attempt, `${label}.attempt`);
+      requiredString(unhealthy.nextAt, `${label}.nextAt`);
+      return;
+    default:
+      throw new Error(`${label}.kind is not a current unhealthy reason`);
+  }
+}
+
+function validateCurrentPsTimer(value: unknown, label: string): void {
+  if (!hasExactKeys(value, ["id", "iteration", "firesAt", "remaining"])) {
+    throw new Error(`${label} must use the exact current timer shape`);
+  }
+  requiredString(value.id, `${label}.id`);
+  requiredNonNegativeSafeInteger(value.iteration, `${label}.iteration`);
+  requiredString(value.firesAt, `${label}.firesAt`);
+  requiredString(value.remaining, `${label}.remaining`);
+}
+
+function validateCurrentPsStartedBy(value: unknown, label: string): void {
+  const startedBy = objectRecord(value);
+  if (
+    startedBy === undefined ||
+    Object.keys(startedBy).length === 0 ||
+    Object.keys(startedBy).some((key) => !["harness", "sessionId", "detected"].includes(key))
+  ) {
+    throw new Error(`${label} must use the exact current compact provenance shape`);
+  }
+  for (const key of ["harness", "sessionId"] as const) {
+    if (startedBy[key] !== undefined) requiredString(startedBy[key], `${label}.${key}`);
+  }
+  if (startedBy.detected !== undefined && startedBy.detected !== true) {
+    throw new Error(`${label}.detected must be true when present`);
+  }
+}
+
+function currentSmithersCommandData(snapshot: SmithersCommandSnapshot, command: "events" | "ps"): unknown {
+  const envelope = snapshot.json;
+  if (!hasExactKeys(envelope, ["ok", "data", "meta"]) || envelope.ok !== true) {
+    throw new Error(`Smithers ${command} output must use the exact current full-output envelope`);
+  }
+  validateCurrentCommandMeta(envelope.meta, command);
+  return envelope.data;
+}
+
+function validateCurrentCommandMeta(value: unknown, command: "events" | "ps"): void {
+  const meta = objectRecord(value);
+  if (meta === undefined || !hasRequiredAndAllowedKeys(meta, ["command", "duration"], ["command", "duration", "cta"])) {
+    throw new Error(`Smithers ${command} metadata must use the exact current shape`);
+  }
+  if (meta.command !== command) throw new Error(`Smithers ${command} metadata command must be ${command}`);
+  requiredString(meta.duration, `Smithers ${command} metadata duration`);
+  if (meta.cta === undefined) return;
+  if (!hasExactKeys(meta.cta, ["description", "commands"]) || !Array.isArray(meta.cta.commands)) {
+    throw new Error(`Smithers ${command} metadata CTA must use the exact current shape`);
+  }
+  requiredString(meta.cta.description, `Smithers ${command} metadata CTA description`);
+  if (meta.cta.commands.length === 0) {
+    throw new Error(`Smithers ${command} metadata CTA commands must be non-empty`);
+  }
+  for (const [index, value] of meta.cta.commands.entries()) {
+    const label = `Smithers ${command} metadata CTA commands[${index}]`;
+    const entry = objectRecord(value);
+    if (entry === undefined || !hasRequiredAndAllowedKeys(entry, ["command"], ["command", "description"])) {
+      throw new Error(`${label} must use the exact current shape`);
+    }
+    requiredString(entry.command, `${label}.command`);
+    if (entry.description !== undefined) requiredString(entry.description, `${label}.description`);
+  }
+}
+
+function assertExactTaggedObject(value: Record<string, unknown>, keys: readonly string[], label: string): void {
+  if (!hasExactKeys(value, keys)) throw new Error(`${label} must use the exact current shape`);
+}
+
+function hasExactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  const record = objectRecord(value);
+  return (
+    record !== undefined &&
+    Object.keys(record).length === keys.length &&
+    keys.every((key) => Object.hasOwn(record, key))
+  );
+}
+
+function hasRequiredAndAllowedKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  allowed: readonly string[]
+): boolean {
+  return required.every((key) => Object.hasOwn(value, key)) && Object.keys(value).every((key) => allowed.includes(key));
+}
+
+function requiredString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0 || value.includes("\0")) {
+    throw new Error(`${label} must be a non-empty string`);
+  }
+  return value;
+}
+
+function requiredEnum<const Values extends readonly string[]>(
+  value: unknown,
+  values: Values,
+  label: string
+): Values[number] {
+  if (typeof value !== "string" || !(values as readonly string[]).includes(value)) {
+    throw new Error(`${label} is not a current supported value`);
+  }
+  return value as Values[number];
+}
+
+function requiredNonNegativeSafeInteger(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative safe integer`);
+  }
+  return value;
 }
 
 function stringField(value: Record<string, unknown>, key: string): string | undefined {
@@ -556,28 +762,24 @@ function workflowSummary(input: {
   inspect: SmithersCommandSnapshot;
   events: SmithersCommandSnapshot;
 }): NonNullable<RunStatusValue["workflow"]> {
-  const inspectJson = commandData(input.inspect.json);
-  const runJson =
-    inspectJson && typeof inspectJson.run === "object" && inspectJson.run !== null && !Array.isArray(inspectJson.run)
-      ? (inspectJson.run as Record<string, unknown>)
-      : undefined;
-  const runStateJson =
-    inspectJson &&
-    typeof inspectJson.runState === "object" &&
-    inspectJson.runState !== null &&
-    !Array.isArray(inspectJson.runState)
-      ? (inspectJson.runState as Record<string, unknown>)
-      : undefined;
-  const workflowStatus =
-    runStateJson === undefined
-      ? stringField(runJson ?? inspectJson ?? {}, "status")
-      : (stringField(runStateJson, "state") ?? stringField(runJson ?? {}, "status"));
+  const inspect = input.inspect.ok ? parseCurrentSmithersInspect(input.inspect, input.run_id) : undefined;
+  if (input.events.ok) validateCurrentSmithersEvents(input.events);
   return {
     run_id: input.run_id,
-    ...(workflowStatus === undefined ? {} : { status: workflowStatus }),
+    ...(inspect === undefined ? {} : { status: inspect.runState }),
     inspect: commandSummary(input.inspect),
     events: commandSummary(input.events)
   };
+}
+
+function validateCurrentSmithersEvents(snapshot: SmithersCommandSnapshot): void {
+  const data = currentSmithersCommandData(snapshot, "events");
+  if (!Array.isArray(data)) {
+    throw new Error("Smithers events data must be the current streamed-line array");
+  }
+  for (const [index, line] of data.entries()) {
+    requiredString(line, `Smithers events data[${index}]`);
+  }
 }
 
 function commandSummary(snapshot: SmithersCommandSnapshot): WorkflowCommandSummary {
@@ -647,6 +849,17 @@ function workflowDiagnosticMessage(snapshot: { error?: string; stderr?: string }
     return "workflow inspection failed";
   }
   return source.replace(/smithers/giu, "workflow runner");
+}
+
+function lstatIfPresent(filePath: string): fs.Stats | undefined {
+  try {
+    return fs.lstatSync(filePath);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
 }
 
 function commandData(value: unknown): Record<string, unknown> | undefined {
