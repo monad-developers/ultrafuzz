@@ -12,6 +12,7 @@ import {
   artifactSchemaDirectory,
   createInitialRunState,
   createRunLayout,
+  derivePropertyImplementationCoverage,
   getNodeArtifactDir,
   readRunState,
   validateRegisteredJsonFileSync,
@@ -3852,39 +3853,46 @@ test("current final reports preserve implementation coverage in JSON and Markdow
     id: "final-report",
     logical_id: "final-report"
   };
-  writeArtifact(
-    layout,
-    "property-specification-fanin",
-    "properties.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.properties.v2",
-      properties: [
-        {
-          id: "property-high",
-          description: "The accounting relation holds.",
-          category: "accounting",
-          priority: "high",
-          sources: [{ source_node_id: "property-specification-recon", source_property_id: "hub-total" }]
-        }
-      ]
-    })
-  );
+  const catalog = {
+    schema_version: "ultrafuzz.properties.v2" as const,
+    properties: [
+      {
+        id: "property-high",
+        description: "The accounting relation holds.",
+        category: "accounting",
+        priority: "high" as const,
+        sources: [{ source_node_id: "property-specification-recon", source_property_id: "hub-total" }]
+      }
+    ]
+  };
+  const implementation = {
+    schema_version: "ultrafuzz.implemented-properties.v3" as const,
+    selection: {
+      priority_threshold: "high" as const,
+      priorities: ["high" as const],
+      property_ids: ["property-high"]
+    },
+    properties: [
+      {
+        property_id: "property-high",
+        status: "implemented" as const,
+        implementation_paths: ["test/recon/Properties.sol"],
+        test_paths: ["test/foundry/PropertyHigh.t.sol"]
+      }
+    ]
+  };
+  const expectedCoverage = derivePropertyImplementationCoverage(catalog, implementation, {
+    configuredSelection: { priority_threshold: "high", priorities: ["high"] },
+    requireConfiguredSelection: true
+  });
+  assert.equal(expectedCoverage.ok, true, JSON.stringify(expectedCoverage.issues));
+  assert.ok(expectedCoverage.value);
+  writeArtifact(layout, "property-specification-fanin", "properties.json", JSON.stringify(catalog));
   writeArtifact(
     layout,
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v3",
-      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-high"] },
-      properties: [
-        {
-          property_id: "property-high",
-          status: "implemented",
-          implementation_paths: ["test/recon/Properties.sol"],
-          test_paths: ["test/foundry/PropertyHigh.t.sol"]
-        }
-      ]
-    })
+    JSON.stringify(implementation)
   );
   const reportPath = "report.json";
   const baseReport = currentReport(layout.runId);
@@ -3908,18 +3916,7 @@ test("current final reports preserve implementation coverage in JSON and Markdow
     reportPath,
     JSON.stringify({
       ...baseReport,
-      property_implementation_coverage: {
-        priority_threshold: "high",
-        priorities: ["high"],
-        selected_property_ids: ["property-high"],
-        implemented_property_ids: ["property-high"],
-        blocked_property_ids: [],
-        pending_property_ids: [],
-        deferred_property_ids: [],
-        reference_expected_property_ids: [],
-        reference_expectation_ids: [],
-        blocker_summaries: []
-      }
+      property_implementation_coverage: expectedCoverage.value
     })
   );
   writeArtifact(

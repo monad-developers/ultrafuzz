@@ -32,6 +32,7 @@ import {
   createInitialRunState,
   assertPlannedGraph,
   assertPlannedGraphSemantics,
+  derivePropertyImplementationCoverage,
   findingJsonSchema,
   generatedTestsJsonSchema,
   invariantLedgerJsonSchema,
@@ -595,6 +596,135 @@ test("property implementation schema accepts selection metadata and typed blocke
   );
 });
 
+test("derives complete report implementation coverage only from authoritative property evidence", () => {
+  const catalog = validatePropertiesSchema({
+    schema_version: PROPERTIES_SCHEMA_VERSION,
+    properties: [
+      {
+        id: "property-high",
+        description: "High-priority implementation",
+        category: "accounting",
+        priority: "high",
+        sources: [{ source_node_id: "lens-a", source_property_id: "high-1" }]
+      },
+      {
+        id: "property-low-reference",
+        description: "Reference property below the threshold",
+        category: "liveness",
+        priority: "low",
+        reference_expectations: ["benchmark:expected-low", "benchmark:shared"],
+        sources: [{ source_node_id: "lens-b", source_property_id: "low-1" }]
+      },
+      {
+        id: "property-medium",
+        description: "Blocked medium-priority implementation",
+        category: "access-control",
+        priority: "medium",
+        reference_expectations: ["benchmark:shared"],
+        sources: [{ source_node_id: "lens-c", source_property_id: "medium-1" }]
+      },
+      {
+        id: "property-pending",
+        description: "Pending high-priority implementation",
+        category: "state-transition",
+        priority: "high",
+        sources: [{ source_node_id: "lens-d", source_property_id: "pending-1" }]
+      }
+    ]
+  });
+  const implementation = validateImplementedPropertiesSchema(
+    {
+      schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+      selection: {
+        priority_threshold: "medium",
+        priorities: ["high", "medium"],
+        property_ids: ["property-high", "property-low-reference", "property-medium", "property-pending"]
+      },
+      properties: [
+        {
+          property_id: "property-high",
+          status: "implemented",
+          implementation_paths: ["src/Properties.sol"],
+          test_paths: []
+        },
+        {
+          property_id: "property-low-reference",
+          status: "deferred",
+          implementation_paths: [],
+          test_paths: [],
+          reference_expectations: ["benchmark:expected-low", "benchmark:shared"],
+          blocker: {
+            code: "reference-harness-missing",
+            summary: "The reference harness does not expose the transition.",
+            next_action: "Add a reference-aware handler."
+          }
+        },
+        {
+          property_id: "property-medium",
+          status: "blocked",
+          implementation_paths: [],
+          test_paths: [],
+          reference_expectations: ["benchmark:shared"],
+          blocker: {
+            code: "oracle-missing",
+            summary: "The target exposes no stable accounting getter.",
+            next_action: "Add a read-only oracle."
+          }
+        },
+        {
+          property_id: "property-pending",
+          status: "pending",
+          implementation_paths: [],
+          test_paths: [],
+          blocker: {
+            code: "pending-review",
+            summary: "The generated handler requires bounded manual review.",
+            next_action: "Review and bind the handler."
+          }
+        }
+      ]
+    },
+    "implemented-properties.json",
+    { requireSelection: true }
+  );
+  assert.ok(catalog.value);
+  assert.ok(implementation.value);
+
+  const result = derivePropertyImplementationCoverage(catalog.value!, implementation.value!, {
+    configuredSelection: { priority_threshold: "medium", priorities: ["high", "medium"] },
+    requireConfiguredSelection: true
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.issues));
+  assert.deepEqual(result.value, {
+    priority_threshold: "medium",
+    priorities: ["high", "medium"],
+    selected_property_ids: ["property-high", "property-low-reference", "property-medium", "property-pending"],
+    implemented_property_ids: ["property-high"],
+    blocked_property_ids: ["property-medium"],
+    pending_property_ids: ["property-pending"],
+    deferred_property_ids: ["property-low-reference"],
+    reference_expected_property_ids: ["property-low-reference", "property-medium"],
+    reference_expectation_ids: ["benchmark:expected-low", "benchmark:shared"],
+    blocker_summaries: [
+      "property-low-reference: The reference harness does not expose the transition.",
+      "property-medium: The target exposes no stable accounting getter.",
+      "property-pending: The generated handler requires bounded manual review."
+    ]
+  });
+
+  const wrongConfig = derivePropertyImplementationCoverage(catalog.value!, implementation.value!, {
+    configuredSelection: { priority_threshold: "high", priorities: ["high"] },
+    requireConfiguredSelection: true
+  });
+  assert.equal(wrongConfig.ok, false);
+  assert.ok(wrongConfig.issues.some((issue) => issue.code === "PROPERTY_IMPLEMENTATION_SELECTION_CONFIG_MISMATCH"));
+
+  const missingConfig = derivePropertyImplementationCoverage(catalog.value!, implementation.value!, {
+    requireConfiguredSelection: true
+  });
+  assert.equal(missingConfig.ok, false);
+  assert.ok(missingConfig.issues.some((issue) => issue.code === "PROPERTY_IMPLEMENTATION_CONFIG_MISSING"));
+});
 test("unknown canonical property references produce a clear diagnostic", () => {
   const catalog = {
     schema_version: PROPERTIES_SCHEMA_VERSION,

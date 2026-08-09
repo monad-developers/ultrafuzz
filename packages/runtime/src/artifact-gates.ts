@@ -11,6 +11,7 @@ import {
   assertPlannedGraph,
   assertRegularFileInside,
   checkInvariantSourcePinned,
+  derivePropertyImplementationCoverage,
   getNodeArtifactDir,
   findingFuzzerBackendProvenance,
   invariantPinnedSourceRefExists,
@@ -2930,13 +2931,42 @@ function verifyFinalReportImplementationCoverage(
   report: Record<string, unknown>,
   reportPath: string
 ): RuntimeDiagnostic[] {
+  const declaredContracts = declaredLogicalArtifactContracts(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json"
+  );
+  if (declaredContracts.size > 1) {
+    return [
+      {
+        code: "PROPERTY_IMPLEMENTATION_HANDOFF_CONTRACT_AMBIGUOUS",
+        message: "Current invariant property implementation handoff contract is ambiguous",
+        severity: "error",
+        source: "property-provenance",
+        path: layout.graphPath
+      }
+    ];
+  }
+  const declaredContract = declaredContracts.values().next().value as string | undefined;
+  if (declaredContract !== undefined && declaredContract !== "ultrafuzz/implemented-properties@3") {
+    return [
+      {
+        code: "PROPERTY_IMPLEMENTATION_HANDOFF_CONTRACT_INVALID",
+        message: `Current invariant property implementation handoff declares unexpected contract ${JSON.stringify(declaredContract)}`,
+        severity: "error",
+        source: "property-provenance",
+        path: layout.graphPath
+      }
+    ];
+  }
+  const currentHandoffDeclared = declaredContract === "ultrafuzz/implemented-properties@3";
   const implementationPath = findLogicalNodeArtifact(
     layout,
     "stateful-invariant-implement-properties",
     "implemented-properties.json"
   );
   if (implementationPath === undefined) {
-    return [];
+    return currentHandoffDeclared ? readImplementedProperties(layout).diagnostics : [];
   }
   const implementation = validateImplementedPropertiesSchema(readJsonFile(implementationPath), implementationPath);
   if (!implementation.ok || implementation.value === undefined) {
@@ -2959,12 +2989,21 @@ function verifyFinalReportImplementationCoverage(
     return catalog.diagnostics;
   }
 
-  const diagnostics = verifyImplementationSelectionCoverage(
-    catalog.value,
-    implementation.value,
+  const catalogPath = findLogicalNodeArtifact(layout, "property-specification-fanin", "properties.json")!;
+  const derived = derivePropertyImplementationCoverage(catalog.value, implementation.value, {
+    configuredSelection: readConfiguredInvariantPrioritySelection(layout),
+    requireConfiguredSelection: true,
+    catalogPath,
     implementationPath,
-    layout
-  );
+    configPath: layout.resolvedConfigPath
+  });
+  const diagnostics: RuntimeDiagnostic[] = derived.issues.map((issue) => ({
+    code: issue.code,
+    message: issue.message,
+    severity: "error",
+    source: "property-provenance",
+    path: issue.path
+  }));
   const coverage = report.property_implementation_coverage;
   if (!isRecord(coverage)) {
     diagnostics.push({
@@ -2974,37 +3013,16 @@ function verifyFinalReportImplementationCoverage(
       source: "property-provenance",
       path: `${reportPath}#$.property_implementation_coverage`
     });
-  } else {
-    const selection = implementation.value.selection;
-    const expectedIds = catalog.value.properties
-      .filter(
-        (property) =>
-          selection.priorities.includes(property.priority) ||
-          (property.reference_expectations !== undefined && property.reference_expectations.length > 0)
-      )
-      .map((property) => property.id);
-    const recordsById = new Map(implementation.value.properties.map((record) => [record.property_id, record]));
-    const expectedReferencePropertyIds = catalog.value.properties
-      .filter((property) => (property.reference_expectations?.length ?? 0) > 0)
-      .map((property) => property.id);
-    const expectedReferenceExpectationIds = [
-      ...new Set(catalog.value.properties.flatMap((property) => property.reference_expectations ?? []))
-    ];
-    const expectedByStatus = (status: string): string[] =>
-      expectedIds.filter((propertyId) => recordsById.get(propertyId)?.status === status);
+  } else if (derived.value !== undefined) {
     const expectedFields: Record<string, readonly string[]> = {
-      selected_property_ids: expectedIds,
-      implemented_property_ids: expectedByStatus("implemented"),
-      blocked_property_ids: expectedByStatus("blocked"),
-      pending_property_ids: expectedByStatus("pending"),
-      deferred_property_ids: expectedByStatus("deferred"),
-      reference_expected_property_ids: expectedReferencePropertyIds,
-      reference_expectation_ids: expectedReferenceExpectationIds,
-      blocker_summaries: expectedIds.flatMap((propertyId) => {
-        const record = recordsById.get(propertyId);
-        if (record === undefined || record.status === "implemented" || record.blocker === undefined) return [];
-        return [`${propertyId}: ${record.blocker.summary}`];
-      })
+      selected_property_ids: derived.value.selected_property_ids,
+      implemented_property_ids: derived.value.implemented_property_ids,
+      blocked_property_ids: derived.value.blocked_property_ids,
+      pending_property_ids: derived.value.pending_property_ids,
+      deferred_property_ids: derived.value.deferred_property_ids,
+      reference_expected_property_ids: derived.value.reference_expected_property_ids,
+      reference_expectation_ids: derived.value.reference_expectation_ids,
+      blocker_summaries: derived.value.blocker_summaries
     };
     const mismatches: string[] = [];
     for (const field of ["reference_expected_property_ids", "reference_expectation_ids", "blocker_summaries"]) {
@@ -3012,10 +3030,10 @@ function verifyFinalReportImplementationCoverage(
         mismatches.push(field);
       }
     }
-    if (coverage.priority_threshold !== selection.priority_threshold) {
+    if (coverage.priority_threshold !== derived.value.priority_threshold) {
       mismatches.push("priority_threshold");
     }
-    if (!sameStringSequence(stringArray(coverage.priorities), selection.priorities)) {
+    if (!sameStringSequence(stringArray(coverage.priorities), derived.value.priorities)) {
       mismatches.push("priorities");
     }
     for (const [field, expected] of Object.entries(expectedFields)) {
@@ -3570,6 +3588,37 @@ function readImplementedProperties(layout: RunLayout): {
   return result.ok && result.value !== undefined
     ? { value: result.value, diagnostics: [] }
     : { diagnostics: schemaDiagnostics(result.issues) };
+}
+
+function declaredLogicalArtifactContracts(layout: RunLayout, logicalNodeId: string, fileName: string): Set<string> {
+  const contracts = new Set<string>();
+  const collect = (node: Record<string, unknown>, nodeId?: string): void => {
+    if (
+      nodeId !== logicalNodeId &&
+      node.id !== logicalNodeId &&
+      node.logical_id !== logicalNodeId &&
+      node.logical_node_id !== logicalNodeId
+    ) {
+      return;
+    }
+    for (const output of Array.isArray(node.outputs) ? node.outputs : []) {
+      if (isRecord(output) && output.path === fileName && typeof output.contract === "string") {
+        contracts.add(output.contract);
+      }
+    }
+  };
+
+  const state = readRunState(layout);
+  for (const [nodeId, nodeState] of Object.entries(state.nodes)) {
+    collect(nodeState as unknown as Record<string, unknown>, nodeId);
+  }
+  const graph = readJsonFile(layout.graphPath);
+  if (isRecord(graph) && Array.isArray(graph.nodes)) {
+    for (const node of graph.nodes) {
+      if (isRecord(node)) collect(node);
+    }
+  }
+  return contracts;
 }
 
 function findLogicalNodeArtifact(layout: RunLayout, logicalNodeId: string, fileName: string): string | undefined {
