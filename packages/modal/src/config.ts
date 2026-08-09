@@ -10,6 +10,7 @@ import {
   DEFAULT_MODAL_IMAGE,
   DEFAULT_NODE_TIMEOUT_SECONDS,
   MODAL_BENCHMARK_SCHEMA_VERSION,
+  MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS,
   MODAL_PUBLIC_SANDBOX_TIMEOUT_MS,
   MODAL_SANDBOX_TIMEOUT_MS,
   type ModalModelSpec
@@ -179,7 +180,10 @@ export function isPublicModalBenchmarkConfig(config: ModalBenchmarkConfig): conf
 
 /** Timeout recorded when a new benchmark launch generation is created. */
 export function configuredModalSandboxTimeoutMs(config: ModalBenchmarkConfig): number {
-  return isPublicModalBenchmarkConfig(config) ? MODAL_PUBLIC_SANDBOX_TIMEOUT_MS : MODAL_SANDBOX_TIMEOUT_MS;
+  if (!isPublicModalBenchmarkConfig(config)) return MODAL_SANDBOX_TIMEOUT_MS;
+  return config.public_benchmark.lane === "full"
+    ? MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS
+    : MODAL_PUBLIC_SANDBOX_TIMEOUT_MS;
 }
 
 export function parseModalBenchmarkConfig(value: unknown): ModalBenchmarkConfig {

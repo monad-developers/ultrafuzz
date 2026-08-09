@@ -13,6 +13,7 @@ import {
 import {
   DEFAULT_BENCHMARK_MODELS,
   MODAL_BENCHMARK_SCHEMA_VERSION,
+  MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS,
   MODAL_PUBLIC_SANDBOX_TIMEOUT_MS,
   MODAL_SANDBOX_TIMEOUT_MS
 } from "../src/defaults.js";
@@ -32,7 +33,7 @@ function minimalConfig(): Record<string, unknown> {
 }
 
 describe("Modal benchmark config", () => {
-  it("uses six hours for new public sandboxes and keeps private sandboxes at 24 hours", () => {
+  it("bounds new public sandboxes without cutting off the accepted full-lane envelope", () => {
     const privateConfig = parseModalBenchmarkConfig(minimalConfig());
     const model = DEFAULT_BENCHMARK_MODELS[0]!;
     const publicConfig = parseModalBenchmarkConfig({
@@ -48,8 +49,15 @@ describe("Modal benchmark config", () => {
       },
       models: [model]
     });
+    if (!("public_benchmark" in publicConfig)) throw new Error("expected a public benchmark config");
+    const publicFullConfig = parseModalBenchmarkConfig({
+      ...publicConfig,
+      run_id: "public-full-run",
+      public_benchmark: { ...publicConfig.public_benchmark, benchmark: "evmbench", lane: "full" }
+    });
 
     expect(configuredModalSandboxTimeoutMs(publicConfig)).toBe(MODAL_PUBLIC_SANDBOX_TIMEOUT_MS);
+    expect(configuredModalSandboxTimeoutMs(publicFullConfig)).toBe(MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS);
     expect(configuredModalSandboxTimeoutMs(privateConfig)).toBe(MODAL_SANDBOX_TIMEOUT_MS);
   });
 

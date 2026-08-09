@@ -17,7 +17,12 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import { fingerprintModalModel, isPublicModalBenchmarkConfig, parseModalBenchmarkConfig } from "../src/config.js";
-import { MODAL_PUBLIC_SANDBOX_TIMEOUT_MS, MODAL_SANDBOX_TIMEOUT_MS, type ModalModelSpec } from "../src/defaults.js";
+import {
+  MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS,
+  MODAL_PUBLIC_SANDBOX_TIMEOUT_MS,
+  MODAL_SANDBOX_TIMEOUT_MS,
+  type ModalModelSpec
+} from "../src/defaults.js";
 import {
   createModalLaunchState,
   latestModalWorkerStatus,
@@ -107,7 +112,8 @@ describe("Modal benchmark capacity", () => {
   });
 
   it.each([
-    ["new public", MODAL_PUBLIC_SANDBOX_TIMEOUT_MS],
+    ["new public smoke", MODAL_PUBLIC_SANDBOX_TIMEOUT_MS],
+    ["new public full", MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS],
     ["persisted 24-hour", MODAL_SANDBOX_TIMEOUT_MS]
   ])("creates a %s worker with the timeout recorded in launch state", async (_label, timeoutMs) => {
     const app = {} as App;
