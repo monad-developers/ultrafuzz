@@ -21,7 +21,11 @@ import {
   type SMITHERS_RUN_STATES,
   type SMITHERS_RUN_STATUSES
 } from "@ultrafuzz/artifacts";
-import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
+import {
+  CACHE_MANIFEST_FILE,
+  REFERENCE_CACHE_SCHEMA_VERSION,
+  RUN_REFERENCE_MANIFEST_FILE
+} from "@ultrafuzz/references";
 
 import {
   assertSmithersPackageManifest,
@@ -1094,7 +1098,7 @@ function writeReferenceCache(xdgCacheHome: string): void {
     path.join(cacheDir, CACHE_MANIFEST_FILE),
     `${JSON.stringify(
       {
-        schema_version: "1.0",
+        schema_version: REFERENCE_CACHE_SCHEMA_VERSION,
         provider: "github",
         repo: "example/repo",
         commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -3995,6 +3999,38 @@ test("plan provisions a validated trusted expectation catalog through pinned ref
     assert.ok(
       state.nodes?.[referenceNode.id]?.outputs?.some((output) => output.path === "references/expectations.json")
     );
+  } finally {
+    if (previousXdgCacheHome === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+    }
+  }
+});
+
+test("plan rejects duplicate-key expectation bytes before any schema or handoff processing", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeReferenceTopology(project);
+  fs.writeFileSync(
+    path.join(project, "reference-expectations.json"),
+    '{"schema_version":"ultrafuzz.reference-expectations.v2","expectations":[],"expectations":[]}\n',
+    "utf8"
+  );
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeReferenceCache(xdgCacheHome);
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  try {
+    const plan = await planRun({
+      projectRoot: project,
+      runId: "duplicate-reference-expectations",
+      referenceExpectationsPath: "reference-expectations.json",
+      env: {}
+    });
+
+    assert.equal(plan.ok, false);
+    assert.match(plan.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /duplicate property name/u);
   } finally {
     if (previousXdgCacheHome === undefined) {
       delete process.env.XDG_CACHE_HOME;

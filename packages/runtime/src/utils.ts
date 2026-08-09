@@ -1,5 +1,4 @@
 import crypto from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 
 import type { ConfigDiagnostic } from "@ultrafuzz/config";
@@ -120,10 +119,6 @@ export function stableJson(value: unknown): string {
 
 export function toProjectRelative(projectRoot: string, candidate: string): string {
   return path.relative(path.resolve(projectRoot), path.resolve(candidate)).split(path.sep).join("/");
-}
-
-export function readJsonIfExists<T = unknown>(filePath: string): T | undefined {
-  return fs.existsSync(filePath) ? (JSON.parse(fs.readFileSync(filePath, "utf8")) as T) : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

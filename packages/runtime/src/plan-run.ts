@@ -11,6 +11,8 @@ import {
   artifactContractSchemaBinding,
   createRunLayout,
   getNodeArtifactDir,
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
   RUN_PLAN_SCHEMA_VERSION,
   safeResolveInside,
   sha256Bytes,
@@ -372,12 +374,23 @@ function provisionReferenceExpectationOutput(
   }
   const sourcePath = safeResolveInside(projectRoot, sourcePathInput, "reference expectation catalog");
   assertNoSymlinkComponents(projectRoot, sourcePath, "reference expectation catalog");
-  const stat = fs.lstatSync(sourcePath);
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new Error(`reference expectation catalog must be a regular file: ${sourcePath}`);
+  let sourceContents: Buffer;
+  let sourceValue: unknown;
+  try {
+    sourceContents = readRegularFileSnapshot(sourcePath, 64 * 1024 * 1024);
+    sourceValue = parseStrictJsonBytes(sourceContents, {
+      maxBytes: 64 * 1024 * 1024,
+      maxDepth: 128,
+      maxItems: 1_000_000,
+      maxProperties: 1_000_000
+    });
+  } catch (error) {
+    throw new Error(
+      `reference expectation catalog must be one stable regular strict-JSON file: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
   }
-  const sourceContents = fs.readFileSync(sourcePath);
-  const parsed = validateReferenceExpectationsSchema(JSON.parse(sourceContents.toString("utf8")), sourcePath);
+  const parsed = validateReferenceExpectationsSchema(sourceValue, sourcePath);
   if (!parsed.ok || parsed.value === undefined) {
     // Include the field path. Mapping `message` alone reproduced the #328 symptom exactly on a
     // USER-SUPPLIED catalog: 40 malformed entries became 40 identical copies of
