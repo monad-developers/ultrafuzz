@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { artifactSchemaRegistry, schemaRegistryBundleDigest } from "@ultrafuzz/artifacts";
+import { artifactSchemaRegistry, parseStrictJsonBytes, schemaRegistryBundleDigest } from "@ultrafuzz/artifacts";
 import { topologySchemaRegistry } from "@ultrafuzz/topology";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -57,7 +57,7 @@ for (const entry of registry) {
 
   const sourceBytes = fs.readFileSync(path.join(sourceSchemaRoot, entry.filename));
   const distBytes = fs.readFileSync(path.join(distSchemaRoot, entry.filename));
-  const canonicalSchema = JSON.parse(sourceBytes.toString("utf8"));
+  const canonicalSchema = parseStrictJsonBytes(sourceBytes);
   assert.deepStrictEqual(distBytes, sourceBytes, `${entry.filename} differs in the shipped dist bundle`);
   assert.deepStrictEqual(exportedSchema, canonicalSchema, `${entry.filename} differs from its TypeScript export`);
   assert.deepStrictEqual(entry.schema, canonicalSchema, `${entry.filename} differs from its registry entry`);

@@ -27,6 +27,6 @@ if (JSON.stringify(checkedIn) !== JSON.stringify(exported)) {
 }
 
 for (const filename of checkedIn) {
-  const canonical = JSON.parse(fs.readFileSync(path.join(schemaRoot, filename), "utf8"));
+  const canonical = artifacts.parseStrictJsonBytes(fs.readFileSync(path.join(schemaRoot, filename)));
   assert.deepStrictEqual(schemas[filename], canonical, `${filename} differs from its checked-in canonical JSON Schema`);
 }

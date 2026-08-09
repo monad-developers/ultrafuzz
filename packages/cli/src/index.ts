@@ -4,9 +4,12 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { run as runOclif } from "@oclif/core";
+import { parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
 
 import { CLI_KNOWN_COMMANDS } from "./cli-contracts.js";
 import { CLI_SCHEMA_VERSION, commandFailure, envelope, type CliIo } from "./command-shared.js";
+
+const MAX_PACKAGE_JSON_BYTES = 1024 * 1024;
 
 export async function runCli(argv = process.argv.slice(2), io: CliIo = defaultIo()): Promise<number> {
   const previousIo = globalThis.__ultrafuzzCliIo;
@@ -63,14 +66,23 @@ function packageRoot(): string {
   while (current !== path.dirname(current)) {
     const packageJson = path.join(current, "package.json");
     if (fs.existsSync(packageJson)) {
-      const parsed = JSON.parse(fs.readFileSync(packageJson, "utf8")) as { name?: string };
-      if (parsed.name === "@ultrafuzz/cli") {
+      const parsed = parseStrictJsonBytes(readRegularFileSnapshot(packageJson, MAX_PACKAGE_JSON_BYTES), {
+        maxBytes: MAX_PACKAGE_JSON_BYTES,
+        maxDepth: 32,
+        maxItems: 10_000,
+        maxProperties: 10_000
+      });
+      if (isRecord(parsed) && parsed.name === "@ultrafuzz/cli") {
         return current;
       }
     }
     current = path.dirname(current);
   }
   throw new Error("unable to locate @ultrafuzz/cli package root");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export { CLI_SCHEMA_VERSION };

@@ -11,6 +11,7 @@ export type SchemaRole = "artifact-contract" | "runtime-state" | "subschema" | "
 
 const MAX_REGISTERED_SCHEMA_BYTES = 4 * 1024 * 1024;
 const MAX_REGISTERED_BUNDLE_BYTES = 16 * 1024 * 1024;
+const MAX_DEPENDENCY_PACKAGE_JSON_BYTES = 1024 * 1024;
 const MAX_REGISTERED_PATTERNS = 256;
 const MAX_REGISTERED_PATTERN_LENGTH = 1_024;
 
@@ -257,8 +258,15 @@ function validatorBuildIdentity(): string {
   const require = createRequire(import.meta.url);
   const dependencyVersions = ["ajv", "ajv-formats"].map((name) => {
     const packagePath = require.resolve(`${name}/package.json`);
-    const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8")) as { version?: unknown };
-    if (typeof packageJson.version !== "string") throw new Error(`validator dependency has no version: ${name}`);
+    const packageJson = parseStrictJsonBytes(readRegularFileSnapshot(packagePath, MAX_DEPENDENCY_PACKAGE_JSON_BYTES), {
+      maxBytes: MAX_DEPENDENCY_PACKAGE_JSON_BYTES,
+      maxDepth: 32,
+      maxItems: 10_000,
+      maxProperties: 10_000
+    });
+    if (!isRecord(packageJson) || typeof packageJson.version !== "string" || packageJson.version.length === 0) {
+      throw new Error(`validator dependency has no version: ${name}`);
+    }
     return `${name}@${packageJson.version}`;
   });
   const moduleDigests = modules.map((filename) => {

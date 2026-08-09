@@ -54,7 +54,7 @@ const fixtures = {};
 for (const contract of artifacts.JSON_ARTIFACT_CONTRACT_IDS) {
   const schemaFile = artifacts.artifactContractSchemaFile(contract);
   if (schemaFile === undefined) throw new Error(`Missing schema mapping for ${contract}`);
-  const schema = JSON.parse(fs.readFileSync(path.join(packageRoot, "schema", schemaFile), "utf8"));
+  const schema = artifacts.parseStrictJsonBytes(fs.readFileSync(path.join(packageRoot, "schema", schemaFile)));
   let valid = structuredClone(fixtureOverrides[contract] ?? sample(schema, schema));
   if (Array.isArray(valid) && valid.length === 0) valid = [sample(schema.items, schema)];
   const result = artifacts.validateArtifactContract(contract, JSON.stringify(valid));
