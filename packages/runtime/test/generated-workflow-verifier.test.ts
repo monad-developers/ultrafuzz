@@ -1967,6 +1967,7 @@ test("generated Smithers agent fails closed instead of promoting dedupe findings
     /candidate\.path === "report\.md" && candidate\.contract === "ultrafuzz\/nonempty-markdown@1"/u
   );
   assert.match(fallback, /candidate\.path === "findings\.normalized\.json"/u);
+  assert.match(fallback, /recoverableOutputs\.some\(\(output\) => finalReportOutputNeedsRecovery/u);
   assert.match(fallback, /if \(report === undefined\) \{[\s\S]*?return;\s*\}/u);
   assert.match(fallback, /const projection = projectCanonicalFinalReport\(report\)/u);
   assert.match(fallback, /writeValidatedTaskArtifact\(task, reportOutput, projection\.report\)/u);
@@ -1975,6 +1976,11 @@ test("generated Smithers agent fails closed instead of promoting dedupe findings
   assert.doesNotMatch(
     fallback,
     /dedupe-findings|retainedDedupeFindings|normalizedFindingsArtifact|recoveredReport|artifact_recovery/u
+  );
+  assert.ok(
+    fallback.indexOf("finalReportOutputNeedsRecovery(artifactRoots, output)") <
+      fallback.indexOf("projectCanonicalFinalReport(report)"),
+    fallback
   );
   assert.doesNotMatch(source, /function normalizedFallbackReportIssue|issue\.impact =|issue\.likelihood =/u);
 });
@@ -2169,7 +2175,7 @@ test("generated Smithers reads final-report JSON through a bounded no-follow des
   }
 });
 
-test("generated Smithers final-report materializer fails closed without renderable final-review JSON", async (t) => {
+test("generated Smithers bounds canonical final-report projection to artifact recovery", async (t) => {
   const materialize = loadFinalReportArtifactMaterializer();
   const runCase = (
     reportContents: string | undefined,
@@ -2222,7 +2228,7 @@ test("generated Smithers final-report materializer fails closed without renderab
     }
   });
 
-  await t.test("canonical-empty JSON fails even when all other outputs already validate", () => {
+  await t.test("complete canonical-empty artifacts bypass recovery unchanged", () => {
     const empty = `${JSON.stringify(
       { schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] },
       null,
@@ -2230,11 +2236,57 @@ test("generated Smithers final-report materializer fails closed without renderab
     )}\n`;
     const fixture = runCase(empty, { existingMarkdown: "# Existing final report\n", existingFindings: "[]\n" });
     try {
-      assert.throws(() => materialize(fixture.task), /canonical empty final report/u);
+      materialize(fixture.task);
+      assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "report.json"), "utf8"), empty);
       assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "report.md"), "utf8"), "# Existing final report\n");
       assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "findings.normalized.json"), "utf8"), "[]\n");
     } finally {
       fs.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("complete schema-valid but unrenderable artifacts bypass recovery unchanged", () => {
+    const report = generatedFinalReportFixture();
+    const issue = (report.issues as Array<Record<string, unknown>>)[0]!;
+    issue.strategy_provenance = { detection_rates: [{ strategy: "stateful-invariant" }] };
+    const reportBytes = `${JSON.stringify(report, null, 2)}\n`;
+    const findingsBytes = `${JSON.stringify(report.issues, null, 2)}\n`;
+    assert.equal(validateArtifactContract("ultrafuzz/report@1", reportBytes, "report.json").ok, true);
+    assert.equal(validateArtifactContract("ultrafuzz/findings@1", findingsBytes, "findings.normalized.json").ok, true);
+    const fixture = runCase(reportBytes, {
+      existingMarkdown: "# Existing final report\n",
+      existingFindings: findingsBytes
+    });
+    try {
+      materialize(fixture.task);
+      assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "report.json"), "utf8"), reportBytes);
+      assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "report.md"), "utf8"), "# Existing final report\n");
+      assert.equal(
+        fs.readFileSync(path.join(fixture.canonicalRoot, "findings.normalized.json"), "utf8"),
+        findingsBytes
+      );
+    } finally {
+      fs.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("canonical-empty JSON still fails closed when Markdown needs recovery", () => {
+    const empty = `${JSON.stringify(
+      { schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] },
+      null,
+      2
+    )}\n`;
+    for (const existingMarkdown of [undefined, " \n"]) {
+      const fixture = runCase(empty, { existingMarkdown, existingFindings: "[]\n" });
+      try {
+        assert.throws(() => materialize(fixture.task), /canonical empty final report/u);
+        assert.equal(fs.existsSync(path.join(fixture.canonicalRoot, "report.md")), existingMarkdown !== undefined);
+        if (existingMarkdown !== undefined) {
+          assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "report.md"), "utf8"), existingMarkdown);
+        }
+      } finally {
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
     }
   });
 

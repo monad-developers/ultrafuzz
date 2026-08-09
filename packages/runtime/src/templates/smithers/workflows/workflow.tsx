@@ -2133,6 +2133,14 @@ function materializeMissingFinalReportArtifacts(task: (typeof taskSpecs)[number]
 
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
+  const recoverableOutputs =
+    findingsOutput === undefined ? [reportOutput, markdownOutput] : [reportOutput, markdownOutput, findingsOutput];
+  if (!recoverableOutputs.some((output) => finalReportOutputNeedsRecovery(artifactRoots, output))) {
+    // Canonical projection is a recovery path, not an additional input
+    // contract for an already complete final-review attempt. The unchanged
+    // verifier below remains authoritative for the declared artifacts.
+    return;
+  }
   const report = validatedFinalReport(artifactRoots, reportOutput.path);
   if (report === undefined) {
     // Only the final-review worker may decide which findings are production
@@ -2149,6 +2157,32 @@ function materializeMissingFinalReportArtifacts(task: (typeof taskSpecs)[number]
     writeNormalizedFindings(task, findingsOutput.path, findings);
   }
   writeValidatedTaskArtifactContents(task, markdownOutput, projection.markdown);
+}
+
+function finalReportOutputNeedsRecovery(
+  artifactRoots: string[],
+  output: (typeof taskSpecs)[number]["outputs"][number]
+): boolean {
+  for (const candidateRoot of artifactRoots) {
+    let resolvedPath: string;
+    try {
+      resolvedPath = resolveRegularArtifactFile(
+        candidateRoot,
+        path.resolve(candidateRoot, output.path),
+        `artifact-contract failure: output is not a regular file ${output.path}`
+      );
+    } catch {
+      // Match verifier root selection: only a regular file claims this root.
+      continue;
+    }
+    try {
+      const contents = readFileSync(resolvedPath).toString("utf8");
+      return !validateArtifactContract(output.contract, contents, output.path).ok;
+    } catch {
+      return true;
+    }
+  }
+  return true;
 }
 
 function validatedFinalReport(
