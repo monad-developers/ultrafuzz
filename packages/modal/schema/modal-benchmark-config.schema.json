@@ -69,13 +69,12 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 2048,
-      "format": "uri"
+      "pattern": "^[A-Za-z][A-Za-z0-9+.-]*://(?=[^/?#]*[A-Za-z0-9])(?:[A-Za-z0-9._~:\\[\\]@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})+(?:[/?#](?:[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)?$"
     },
     "httpsUrl": {
       "type": "string",
       "maxLength": 2048,
-      "format": "uri",
-      "pattern": "^https://(?![^/?#]*@)"
+      "pattern": "^https://(?=[^/?#]*[A-Za-z0-9])(?:[A-Za-z0-9._~:\\[\\]!$&'()*+,;=-]|%[0-9A-Fa-f]{2})+(?:[/?#](?:[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)?$"
     },
     "gitRef": {
       "type": "string",

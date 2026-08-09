@@ -18,8 +18,11 @@ export const PUBLIC_EVAL_FAILURE_CATEGORIES = [
   "provider-interruption"
 ] as const;
 export const PUBLIC_EVAL_FAILURE_CODES = ["task-output-validation-failure"] as const;
+export const PUBLIC_EVAL_DIAGNOSTICS_TIMESTAMP_PATTERN_SOURCE =
+  "^(?:[0-9]{4})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$" as const;
 
 const MAX_ROWS = 2_048;
+const canonicalTimestamp = z.string().regex(new RegExp(PUBLIC_EVAL_DIAGNOSTICS_TIMESTAMP_PATTERN_SOURCE, "u"));
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
 // Runtime workflow IDs prefix an otherwise-safe 128-character run ID with
 // `ultrafuzz-` (and may add lifecycle suffixes). They are opaque identifiers,
@@ -139,7 +142,7 @@ const diagnosticsShape = {
   reasoning: boundedCodePointString(64),
   candidate_commit: z.string().regex(/^[0-9a-f]{40}$/u),
   eval_run_id: safeId,
-  created_at: z.string().datetime({ offset: true }),
+  created_at: canonicalTimestamp,
   lineage: lineageSchema,
   summary: summarySchema,
   rows: z.array(rowSchema).min(1).max(MAX_ROWS).refine(hasUniqueJsonItems, "diagnostic rows must be unique")
@@ -190,6 +193,9 @@ export function publicEvalDiagnosticsSemanticIssues(
   parsed: PublicEvalDiagnostics
 ): PublicEvalDiagnosticsSemanticIssue[] {
   const issues: PublicEvalDiagnosticsSemanticIssue[] = [];
+  if (!isCanonicalCalendarTimestamp(parsed.created_at)) {
+    issues.push({ path: "$.created_at", message: "must identify an actual canonical UTC calendar instant" });
+  }
   if (parsed.eval_run_id !== boundedEvalId([parsed.lineage.logical_run_id, parsed.model_slug], 128)) {
     issues.push({ path: "$.eval_run_id", message: "must match the bounded lineage and model slug" });
   }
@@ -236,6 +242,11 @@ export function publicEvalDiagnosticsSemanticIssues(
     issues.push({ path: "$", message: `must not exceed ${MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES} UTF-8 bytes` });
   }
   return issues;
+}
+
+function isCanonicalCalendarTimestamp(value: string): boolean {
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
 }
 
 // A zero-row set is never scoreable: an eval that planned nothing has nothing to

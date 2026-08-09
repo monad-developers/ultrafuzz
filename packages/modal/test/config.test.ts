@@ -9,6 +9,8 @@ import {
   fingerprintModalConfigFile,
   fingerprintModalModel,
   loadModalBenchmarkConfig,
+  MODAL_GIT_URL_PATTERN_SOURCE,
+  MODAL_HTTPS_URL_PATTERN_SOURCE,
   modalBenchmarkConfigZodSchema,
   modalBenchmarkConfigValidatorsAgree,
   parseModalBenchmarkConfig
@@ -22,7 +24,7 @@ import {
 } from "../src/defaults.js";
 import { MODAL_BENCHMARK_CONFIG_SCHEMA_ID } from "../src/modal-contracts.js";
 import { ModalDocumentValidationError } from "../src/modal-documents.js";
-import { validateModalJsonSchema } from "../src/modal-schema-registry.js";
+import { modalBenchmarkConfigJsonSchema, validateModalJsonSchema } from "../src/modal-schema-registry.js";
 import { ModalSemanticValidationError } from "../src/modal-semantic-gates.js";
 
 function minimalConfig(): Record<string, unknown> {
@@ -82,6 +84,31 @@ function minimalPublicConfig() {
   };
 }
 
+function privateRepositoryVariant(scope: "ground_truth" | "target", repository: string): Record<string, unknown> {
+  const config = minimalConfig();
+  config[scope] = { ...(config[scope] as Record<string, unknown>), repo: repository };
+  return config;
+}
+
+function braintrustUrlVariant(field: "judge_credential_endpoint" | "judge_url", url: string): Record<string, unknown> {
+  const config = minimalConfig();
+  config.braintrust = { ...(config.braintrust as Record<string, unknown>), [field]: url };
+  return config;
+}
+
+function publicRepositoryVariant(scope: "candidate" | "target", repository: string): Record<string, unknown> {
+  const config = minimalPublicConfig();
+  const benchmark = config.public_benchmark;
+  config.public_benchmark =
+    scope === "candidate"
+      ? { ...benchmark, candidate_repository: repository }
+      : {
+          ...benchmark,
+          targets: [{ ...benchmark.targets[0]!, repository }]
+        };
+  return config;
+}
+
 function expectBenchmarkConfigIdentityGate(value: unknown): void {
   try {
     parseModalBenchmarkConfig(value);
@@ -95,6 +122,95 @@ function expectBenchmarkConfigIdentityGate(value: unknown): void {
 }
 
 describe("Modal benchmark config", () => {
+  it("uses identical portable URL lexical rules in JSON Schema and retained Zod", () => {
+    const definitions = modalBenchmarkConfigJsonSchema.$defs as Record<string, Record<string, unknown>>;
+    expect(definitions.gitUrl?.pattern).toBe(MODAL_GIT_URL_PATTERN_SOURCE);
+    expect(definitions.httpsUrl?.pattern).toBe(MODAL_HTTPS_URL_PATTERN_SOURCE);
+    expect(definitions.gitUrl).not.toHaveProperty("format");
+    expect(definitions.httpsUrl).not.toHaveProperty("format");
+
+    const cases: Array<{ label: string; value: unknown; accepted: boolean }> = [
+      {
+        label: "an SSH repository URL",
+        value: privateRepositoryVariant("target", "ssh://git@github.com/example/target.git"),
+        accepted: true
+      },
+      {
+        label: "a git repository URL",
+        value: privateRepositoryVariant("ground_truth", "git://git.example.invalid/reference-data.git"),
+        accepted: true
+      },
+      {
+        label: "an encoded credential-free HTTPS endpoint",
+        value: braintrustUrlVariant(
+          "judge_credential_endpoint",
+          "https://gateway.example.invalid/v1/credentials%20temporary?mode=short#request"
+        ),
+        accepted: true
+      },
+      {
+        label: "an at-sign outside the HTTPS authority",
+        value: braintrustUrlVariant(
+          "judge_url",
+          "https://gateway.example.invalid/v1/user@example.invalid/chat?model=gpt-5.6-sol"
+        ),
+        accepted: true
+      },
+      {
+        label: "a malformed repository percent escape",
+        value: privateRepositoryVariant("target", "https://example.invalid/target%zz.git"),
+        accepted: false
+      },
+      {
+        label: "a repository URI without an authority",
+        value: privateRepositoryVariant("ground_truth", "urn:example:reference-data"),
+        accepted: false
+      },
+      {
+        label: "a normalization-prone repository backslash",
+        value: privateRepositoryVariant("target", "https://example.invalid\\target.git"),
+        accepted: false
+      },
+      {
+        label: "an uppercase HTTPS scheme",
+        value: braintrustUrlVariant("judge_url", "HTTPS://gateway.example.invalid/v1/chat"),
+        accepted: false
+      },
+      {
+        label: "embedded HTTPS credentials",
+        value: braintrustUrlVariant(
+          "judge_credential_endpoint",
+          "https://user:secret@gateway.example.invalid/v1/credentials"
+        ),
+        accepted: false
+      },
+      {
+        label: "a whitespace-padded public candidate URL",
+        value: publicRepositoryVariant("candidate", " https://github.com/example/candidate "),
+        accepted: false
+      },
+      {
+        label: "a Unicode public target host",
+        value: publicRepositoryVariant("target", "https://éxample.invalid/target"),
+        accepted: false
+      },
+      {
+        label: "an HTTPS URL without an authority",
+        value: publicRepositoryVariant("target", "https:///target"),
+        accepted: false
+      }
+    ];
+
+    for (const { label, value, accepted } of cases) {
+      const jsonSchema = validateModalJsonSchema(MODAL_BENCHMARK_CONFIG_SCHEMA_ID, value);
+      const retainedZod = modalBenchmarkConfigZodSchema.safeParse(value);
+      expect(jsonSchema.ok, `${label}: JSON Schema`).toBe(accepted);
+      expect(retainedZod.success, `${label}: retained Zod`).toBe(accepted);
+      if (retainedZod.success) expect(retainedZod.data).toEqual(value);
+      expect(modalBenchmarkConfigValidatorsAgree(value), label).toBe(true);
+    }
+  });
+
   it("bounds new public sandboxes without cutting off the accepted full-lane envelope", () => {
     const privateConfig = parseModalBenchmarkConfig(minimalConfig());
     const model = DEFAULT_BENCHMARK_MODELS[0]!;

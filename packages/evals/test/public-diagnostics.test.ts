@@ -2,12 +2,17 @@ import { describe, expect, it } from "vitest";
 
 import {
   parsePublicEvalDiagnostics,
+  PUBLIC_EVAL_DIAGNOSTICS_TIMESTAMP_PATTERN_SOURCE,
   PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION,
   publicEvalDiagnosticsZodSchema,
   summarizePublicEvalDiagnosticsRows,
   type PublicEvalDiagnosticsRow
 } from "../src/public-diagnostics.js";
-import { EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID, validateEvalJsonSchema } from "../src/eval-schema-registry.js";
+import {
+  EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID,
+  evalPublicDiagnosticsJsonSchema,
+  validateEvalJsonSchema
+} from "../src/eval-schema-registry.js";
 import { executeEvalSchemaSemanticGates } from "../src/eval-semantic-gates.js";
 import { boundedEvalId } from "../src/utils.js";
 
@@ -53,6 +58,13 @@ describe("public eval diagnostics summary", () => {
 
   it("keeps the canonical JSON Schema and non-transforming Zod parser aligned", () => {
     const canonical = diagnosticsDocument([scoreableRow("target-alpha"), scoreableRow("target-beta")]);
+    expect(
+      (
+        evalPublicDiagnosticsJsonSchema as {
+          $defs?: { canonicalTimestamp?: { pattern?: unknown } };
+        }
+      ).$defs?.canonicalTimestamp?.pattern
+    ).toBe(PUBLIC_EVAL_DIAGNOSTICS_TIMESTAMP_PATTERN_SOURCE);
     expectStructuralParity(canonical, true);
     expect(parsePublicEvalDiagnostics(canonical)).toEqual(canonical);
 
@@ -71,6 +83,18 @@ describe("public eval diagnostics summary", () => {
     duplicateRow.rows = [duplicateRow.rows[0]!, structuredClone(duplicateRow.rows[0]!)];
     const invalidTimestamp = structuredClone(canonical);
     invalidTimestamp.created_at = "not-a-timestamp";
+    const lowercaseTimestamp = structuredClone(canonical);
+    lowercaseTimestamp.created_at = "2026-08-07t21:57:32.733z";
+    const offsetTimestamp = structuredClone(canonical);
+    offsetTimestamp.created_at = "2026-08-07T21:57:32.733+00:00";
+    const missingFraction = structuredClone(canonical);
+    missingFraction.created_at = "2026-08-07T21:57:32Z";
+    const shortFraction = structuredClone(canonical);
+    shortFraction.created_at = "2026-08-07T21:57:32.73Z";
+    const longFraction = structuredClone(canonical);
+    longFraction.created_at = "2026-08-07T21:57:32.7330Z";
+    const leapSecond = structuredClone(canonical);
+    leapSecond.created_at = "2026-08-07T21:57:60.000Z";
     const unsafeGeneration = structuredClone(canonical);
     unsafeGeneration.lineage.generation = Number.MAX_SAFE_INTEGER + 1;
     const unknownLineageField = structuredClone(canonical);
@@ -98,6 +122,12 @@ describe("public eval diagnostics summary", () => {
       duplicateWorkflowId,
       duplicateRow,
       invalidTimestamp,
+      lowercaseTimestamp,
+      offsetTimestamp,
+      missingFraction,
+      shortFraction,
+      longFraction,
+      leapSecond,
       unsafeGeneration,
       unknownLineageField,
       unknownRowField,
@@ -108,6 +138,21 @@ describe("public eval diagnostics summary", () => {
     ]) {
       expectStructuralParity(invalid, false);
     }
+  });
+
+  it("leaves actual calendar validity in the named semantic gate", () => {
+    const impossibleDate = diagnosticsDocument([scoreableRow("target-alpha")]);
+    impossibleDate.created_at = "2026-02-30T21:57:32.733Z";
+
+    expectStructuralParity(impossibleDate, true);
+    expect(executeEvalSchemaSemanticGates(EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID, impossibleDate)).toEqual([
+      expect.objectContaining({
+        gate: "eval-public-diagnostics-consistency",
+        path: "$.created_at",
+        message: expect.stringContaining("calendar instant")
+      })
+    ]);
+    expect(() => parsePublicEvalDiagnostics(impossibleDate)).toThrow(/actual canonical UTC calendar instant/u);
   });
 
   it("accepts a bounded failed-node message and rejects an oversized one", () => {
