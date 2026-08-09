@@ -24,3 +24,8 @@ This inventory records the compatibility decision for every artifact contract th
 The migration also introduces named v1 contracts for previously generic workflow artifacts: admin/config boundary matrices, aggregation manifests, audited differential lanes, boundary recipes, coverage goals, dependency scope matrices, differential plans/results/triage/repair/gap/report review, dynamic enumerator outputs/plans/provenance, externalized-state accounting, finding lifecycle ledgers, harness repairs, invariant campaign plans, reference harnesses/manifests, selected strategies, semantic-red registries, strategy detections, triaged findings, and severity-classified findings. These are new identities rather than version bumps because no earlier canonical contract described their fields.
 
 Bare arrays are versioned by their contract and whole-document schema identity. Their items do not gain a synthetic `schema_version`; for example, each harness repair remains an ordinary record inside the versioned `ultrafuzz/harness-repairs@1` array.
+
+The runtime-owned ZIP index formerly emitted as the unregistered
+`ultrafuzz.report_bundle.v1` document is now the closed, registered
+`ultrafuzz.report-bundle-manifest.v2` document. Current readers and producers do
+not convert historical bundle manifests.

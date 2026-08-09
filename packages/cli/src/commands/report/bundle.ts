@@ -24,6 +24,7 @@ import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
 
 import { commandFailure, emitCommandResult, globalFlags, projectRoot } from "../../command-shared.js";
+import { validateReportBundleManifest } from "../../cli-schema-registry.js";
 import { loadValidatedReportSnapshot, type ValidatedReportSnapshot } from "../../report-artifacts.js";
 
 const TOP_LEVEL_RUN_FILES = [
@@ -61,6 +62,16 @@ interface BundleFile {
   absolutePath: string;
   archivePath: string;
   contents: Buffer;
+}
+
+interface ReportBundleManifest {
+  schema_version: "ultrafuzz.report-bundle-manifest.v2";
+  run_id: string;
+  created_at: string;
+  included_roots: string[];
+  excluded_roots: ["workspaces"];
+  excluded_patterns: ["artifacts/final-report/report.json.pre-*"];
+  entry_count_without_manifest: number;
 }
 
 export default class ReportBundle extends Command {
@@ -121,8 +132,8 @@ export default class ReportBundle extends Command {
       for (const file of files) {
         zip.addFile(file.archivePath, file.contents);
       }
-      const manifest = {
-        schema_version: "ultrafuzz.report_bundle.v1",
+      const manifest: ReportBundleManifest = {
+        schema_version: "ultrafuzz.report-bundle-manifest.v2",
         run_id: runId,
         created_at: new Date().toISOString(),
         included_roots: [
@@ -134,6 +145,14 @@ export default class ReportBundle extends Command {
         excluded_patterns: ["artifacts/final-report/report.json.pre-*"],
         entry_count_without_manifest: files.length
       };
+      const manifestValidation = validateReportBundleManifest(manifest);
+      if (!manifestValidation.ok) {
+        const summary = manifestValidation.issues
+          .slice(0, 10)
+          .map((issue) => `${issue.instancePath || "/"} ${issue.keyword}: ${issue.message}`)
+          .join("; ");
+        throw new Error(`report bundle manifest is invalid: ${summary}`);
+      }
       zip.addFile("bundle-manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8"));
       writeZipSafely(zip, outputPath);
 

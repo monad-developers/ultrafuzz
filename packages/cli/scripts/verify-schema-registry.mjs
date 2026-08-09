@@ -1,7 +1,8 @@
 import {
   cliOwnedSchemaRegistry,
   validateCliResultEnvelope,
-  validateOperatorInput
+  validateOperatorInput,
+  validateReportBundleManifest
 } from "../dist/cli-schema-registry.js";
 
 const registry = cliOwnedSchemaRegistry();
@@ -21,4 +22,32 @@ if (!invocationFailure.ok) {
 const operatorInput = validateOperatorInput({ nested: [null, true, 1, "value"] });
 if (!operatorInput.ok) {
   throw new Error(`operator-input schema build check failed: ${JSON.stringify(operatorInput.issues)}`);
+}
+
+const reportBundleManifest = validateReportBundleManifest({
+  schema_version: "ultrafuzz.report-bundle-manifest.v2",
+  run_id: "schema-registry-build-check",
+  created_at: "2026-08-09T00:00:00.000Z",
+  included_roots: [
+    "attempts.jsonl",
+    "config.redactions.json",
+    "config.resolved.toml",
+    "events.jsonl",
+    "graph.fingerprint",
+    "graph.json",
+    "plan.json",
+    "run.json",
+    "state.json",
+    "usage.jsonl",
+    "artifacts",
+    "review",
+    "events.index",
+    "engine-logs"
+  ],
+  excluded_roots: ["workspaces"],
+  excluded_patterns: ["artifacts/final-report/report.json.pre-*"],
+  entry_count_without_manifest: 1
+});
+if (!reportBundleManifest.ok) {
+  throw new Error(`report-bundle manifest schema build check failed: ${JSON.stringify(reportBundleManifest.issues)}`);
 }

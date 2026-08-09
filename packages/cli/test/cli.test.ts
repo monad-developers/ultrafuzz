@@ -18,6 +18,7 @@ import {
 } from "@ultrafuzz/artifacts";
 import AdmZip from "adm-zip";
 
+import { validateReportBundleManifest } from "../src/cli-schema-registry.js";
 import { runCli } from "../src/index.js";
 
 interface Capture {
@@ -1294,6 +1295,9 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
     .map((entry) => entry.entryName)
     .sort();
   assert.equal(entries.includes("bundle-manifest.json"), true);
+  const bundleManifest = JSON.parse(zip.readAsText("bundle-manifest.json")) as { schema_version?: unknown };
+  assert.equal(bundleManifest.schema_version, "ultrafuzz.report-bundle-manifest.v2");
+  assert.equal(validateReportBundleManifest(bundleManifest).ok, true);
   assert.equal(entries.includes("artifacts/final-report/report.md"), true);
   assert.equal(entries.includes("artifacts/final-report/report.json"), true);
   assert.equal(entries.includes("artifacts/project-discovery/stdout.txt"), true);

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:cli:report-bundle-manifest:2",
+  "title": "Ultrafuzz report bundle manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "created_at",
+    "included_roots",
+    "excluded_roots",
+    "excluded_patterns",
+    "entry_count_without_manifest"
+  ],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.report-bundle-manifest.v2" },
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "included_roots": {
+      "const": [
+        "attempts.jsonl",
+        "config.redactions.json",
+        "config.resolved.toml",
+        "events.jsonl",
+        "graph.fingerprint",
+        "graph.json",
+        "plan.json",
+        "run.json",
+        "state.json",
+        "usage.jsonl",
+        "artifacts",
+        "review",
+        "events.index",
+        "engine-logs"
+      ]
+    },
+    "excluded_roots": { "const": ["workspaces"] },
+    "excluded_patterns": { "const": ["artifacts/final-report/report.json.pre-*"] },
+    "entry_count_without_manifest": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    }
+  }
+}

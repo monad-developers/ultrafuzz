@@ -13,12 +13,15 @@ import {
   CLI_RESULT_SCHEMA_FILENAME,
   OPERATOR_INPUT_JSON_SCHEMA_ID,
   OPERATOR_INPUT_SCHEMA_FILENAME,
+  REPORT_BUNDLE_MANIFEST_JSON_SCHEMA_ID,
+  REPORT_BUNDLE_MANIFEST_SCHEMA_FILENAME,
   cliSchemaDirectory,
   cliOwnedSchemaRegistry,
   cliSchemaRegistry,
   cliResultJsonSchema,
   validateCliResultEnvelope,
-  validateOperatorInput
+  validateOperatorInput,
+  validateReportBundleManifest
 } from "../src/cli-schema-registry.js";
 
 const validInitEnvelope: CliResultEnvelope = {
@@ -40,11 +43,39 @@ test("the CLI registry owns and compiles every CLI schema", () => {
     registry.map((entry) => [entry.filename, entry.id]),
     [
       [CLI_RESULT_SCHEMA_FILENAME, CLI_RESULT_JSON_SCHEMA_ID],
-      [OPERATOR_INPUT_SCHEMA_FILENAME, OPERATOR_INPUT_JSON_SCHEMA_ID]
+      [OPERATOR_INPUT_SCHEMA_FILENAME, OPERATOR_INPUT_JSON_SCHEMA_ID],
+      [REPORT_BUNDLE_MANIFEST_SCHEMA_FILENAME, REPORT_BUNDLE_MANIFEST_JSON_SCHEMA_ID]
     ]
   );
   assert.equal(validateCliResultEnvelope(validInitEnvelope).ok, true);
   assert.equal(validateOperatorInput({ nested: [null, true, 1, "value"] }).ok, true);
+  assert.equal(
+    validateReportBundleManifest({
+      schema_version: "ultrafuzz.report-bundle-manifest.v2",
+      run_id: "registry-test",
+      created_at: "2026-08-09T00:00:00.000Z",
+      included_roots: [
+        "attempts.jsonl",
+        "config.redactions.json",
+        "config.resolved.toml",
+        "events.jsonl",
+        "graph.fingerprint",
+        "graph.json",
+        "plan.json",
+        "run.json",
+        "state.json",
+        "usage.jsonl",
+        "artifacts",
+        "review",
+        "events.index",
+        "engine-logs"
+      ],
+      excluded_roots: ["workspaces"],
+      excluded_patterns: ["artifacts/final-report/report.json.pre-*"],
+      entry_count_without_manifest: 1
+    }).ok,
+    true
+  );
   for (const entry of registry) {
     const checkedIn = parseStrictJsonBytes(
       readRegularFileSnapshot(path.join(cliSchemaDirectory(), entry.filename), 4 * 1024 * 1024)
