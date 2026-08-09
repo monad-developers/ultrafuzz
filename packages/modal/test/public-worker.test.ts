@@ -8,7 +8,9 @@ import { expect, it } from "vitest";
 import {
   adaptBenchmarkManifestToEvalSuite,
   loadBenchmarkCohortManifest,
-  loadBenchmarkLanesManifest
+  loadBenchmarkLanesManifest,
+  type EvalRunRecord,
+  type EvalRunSummary
 } from "@ultrafuzz/evals";
 
 import type { PublicModalBenchmarkConfig } from "../src/config.js";
@@ -412,9 +414,15 @@ it("reads model work evidence from the eval journal and never invents it", () =>
 
   // A row whose launcher failed after submitting a workflow may already have
   // spent tokens, so it counts as work having started.
+  const failedAfterLaunch = failedRunRecord(
+    "row-1",
+    "WORKFLOW_SUBMISSION_FAILED",
+    "workflow submission acknowledgement timed out",
+    ["workflow-1"]
+  );
   fs.writeFileSync(
     path.join(evalRoot, "run-summary.json"),
-    `${JSON.stringify({ records: [{ row_id: "row-1", status: "failed", workflow_ids: ["workflow-1"] }] })}\n`
+    `${JSON.stringify(runSummaryFromRecords([failedAfterLaunch]))}\n`
   );
   expect(publicEvalModelWorkEvidence(evalRoot)).toBe("launched");
 
@@ -422,43 +430,62 @@ it("reads model work evidence from the eval journal and never invents it", () =>
   fs.rmSync(path.join(evalRoot, "run-summary.json"));
   fs.writeFileSync(
     path.join(evalRoot, "runs.jsonl"),
-    `${JSON.stringify({ row_id: "row-1", status: "failed", workflow_ids: [] })}\n`
+    `${JSON.stringify(failedRunRecord("row-1", "EVAL_TARGET_PATH_MISSING", "target path is missing"))}\n`
   );
   expect(publicEvalModelWorkEvidence(evalRoot)).toBe("none");
 
+  // Malformed-present is not absence: the current summary remains
+  // authoritative and cannot silently fall back to the valid line journal.
   fs.writeFileSync(path.join(evalRoot, "run-summary.json"), "{ not json\n");
-  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("none");
+  expect(() => publicEvalModelWorkEvidence(evalRoot)).toThrow(/durable JSON is invalid/u);
+
+  const invalidRowSummary = runSummary(0) as unknown as Record<string, unknown>;
+  invalidRowSummary.records = [...runSummary(0).records, { row_id: "invalid-row" }];
+  invalidRowSummary.failed = 4;
+  fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(invalidRowSummary)}\n`);
+  expect(() => publicEvalModelWorkEvidence(evalRoot)).toThrow(/failed canonical schema/u);
+
+  fs.rmSync(path.join(evalRoot, "run-summary.json"));
+  fs.writeFileSync(
+    path.join(evalRoot, "runs.jsonl"),
+    `${JSON.stringify(failedRunRecord("row-1", "EVAL_TARGET_PATH_MISSING", "target path is missing"))}\n{}\n`
+  );
+  expect(() => publicEvalModelWorkEvidence(evalRoot)).toThrow(/failed canonical schema/u);
+
+  fs.symlinkSync(path.join(evalRoot, "runs.jsonl"), path.join(evalRoot, "run-summary.json"));
+  expect(() => publicEvalModelWorkEvidence(evalRoot)).toThrow(/must be a regular file/u);
 });
 
 it("never reports no model work for a row whose submission may have landed", () => {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-submission-"));
   const evalRoot = path.join(root, "eval-run");
   fs.mkdirSync(evalRoot, { recursive: true });
-  const submissionFailed = {
-    row_id: "row-1",
-    target_id: "row-1",
-    status: "failed",
+  const submissionFailed = failedRunRecord(
+    "row-4",
+    "WORKFLOW_SUBMISSION_FAILED",
     // `submitSmithersWorkflow` can fail after the engine has taken the workflow
     // -- a lease or acknowledgement that never comes back -- and the runtime
     // discards the id on that path, so the row names no workflow to count.
-    workflow_ids: [],
-    diagnostics: [{ code: "WORKFLOW_SUBMISSION_FAILED", message: "detached admission timed out" }]
-  };
+    "detached admission timed out"
+  );
 
-  fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify({ records: [submissionFailed] })}\n`);
+  fs.writeFileSync(
+    path.join(evalRoot, "run-summary.json"),
+    `${JSON.stringify(runSummaryFromRecords([submissionFailed]))}\n`
+  );
   expect(publicEvalModelWorkEvidence(evalRoot)).toBe("unknown");
 
   // One such row is enough to make the whole journal unable to say nothing ran.
   fs.writeFileSync(
     path.join(evalRoot, "run-summary.json"),
-    `${JSON.stringify({ records: [...runSummary(0).records, submissionFailed] })}\n`
+    `${JSON.stringify(runSummaryFromRecords([...runSummary(0).records, submissionFailed]))}\n`
   );
   expect(publicEvalModelWorkEvidence(evalRoot)).toBe("unknown");
 
   // A row that did launch still outranks it: the journal knows work began.
   fs.writeFileSync(
     path.join(evalRoot, "run-summary.json"),
-    `${JSON.stringify({ records: [...runSummary(1).records, submissionFailed] })}\n`
+    `${JSON.stringify(runSummaryFromRecords([...runSummary(1).records, submissionFailed]))}\n`
   );
   expect(publicEvalModelWorkEvidence(evalRoot)).toBe("launched");
 
@@ -469,7 +496,7 @@ it("never reports no model work for a row whose submission may have landed", () 
   expect(publicEvalModelWorkEvidence(evalRoot)).toBe("unknown");
   fs.writeFileSync(
     path.join(evalRoot, "runs.jsonl"),
-    `${JSON.stringify({ ...submissionFailed, diagnostics: [{ code: "EVAL_ROW_SYNC_FAILED" }] })}\n`
+    `${JSON.stringify(failedRunRecord("row-1", "EVAL_ROW_SYNC_FAILED", "row synchronization failed"))}\n`
   );
   expect(publicEvalModelWorkEvidence(evalRoot)).toBe("none");
 });
@@ -486,17 +513,9 @@ it("keeps a submission that may have landed out of the pre-model retry budget", 
   fs.mkdirSync(evalRoot, { recursive: true });
   fs.writeFileSync(
     path.join(evalRoot, "run-summary.json"),
-    `${JSON.stringify({
-      launched: 0,
-      records: [
-        {
-          row_id: "row-1",
-          status: "failed",
-          workflow_ids: [],
-          diagnostics: [{ code: "WORKFLOW_SUBMISSION_FAILED", message: "detached admission timed out" }]
-        }
-      ]
-    })}\n`
+    `${JSON.stringify(
+      runSummaryFromRecords([failedRunRecord("row-1", "WORKFLOW_SUBMISSION_FAILED", "detached admission timed out")])
+    )}\n`
   );
   let modelWorkStarted = false;
   const writer = await WorkerResultWriter.create({
@@ -590,19 +609,12 @@ it("settles model work against a journal the eval command left behind after exit
 });
 
 it("keeps the flag raised after a nonzero exit whose journal cannot rule model work out", async () => {
-  const mayHaveLaunched = await settleAfterFailedEvalRun({
-    launched: 0,
-    records: [
+  const mayHaveLaunched = await settleAfterFailedEvalRun(
+    runSummaryFromRecords([
       ...runSummary(0).records,
-      {
-        row_id: "row-4",
-        target_id: "row-4",
-        status: "failed",
-        workflow_ids: [],
-        diagnostics: [{ code: "WORKFLOW_SUBMISSION_FAILED", message: "detached admission timed out" }]
-      }
-    ]
-  });
+      failedRunRecord("row-4", "WORKFLOW_SUBMISSION_FAILED", "detached admission timed out")
+    ])
+  );
 
   // The read happens and declines to lower the flag, which is a different fact
   // from the read never happening -- and the only one of the two that survives
@@ -620,7 +632,7 @@ it("keeps the flag raised after a nonzero exit whose journal cannot rule model w
 });
 
 it("clears the flag for a nonzero exit over an empty matrix", async () => {
-  const empty = await settleAfterFailedEvalRun({ launched: 0, records: [] });
+  const empty = await settleAfterFailedEvalRun(runSummaryFromRecords([]));
 
   expect(empty.journalReads).toBe(1);
   expect(empty.contract).toMatchObject({ model_work_started: false });
@@ -632,10 +644,7 @@ it("clears the flag for a nonzero exit over an empty matrix", async () => {
  * flag, run the command, settle the flag against the journal, then fail the run
  * the way `scoring_ready === false` does, and read the terminal contract back.
  */
-async function settleAfterFailedEvalRun(journal: {
-  launched: number;
-  records: Array<Record<string, unknown>>;
-}): Promise<{
+async function settleAfterFailedEvalRun(journal: EvalRunSummary): Promise<{
   contract: unknown;
   journalReads: number;
   workerStatus: ReturnType<typeof parseModalWorkerStatus>;
@@ -839,16 +848,85 @@ it("reports an unbuildable diagnostics document without claiming a sandbox exit 
 // missing, so `runtimeRowLauncher` threw before it compiled anything to submit.
 // A row that failed at submission is a different journal and a different answer;
 // see "never reports no model work for a row whose submission may have landed".
-function runSummary(launched: number): { launched: number; records: Array<Record<string, unknown>> } {
+function runSummary(launched: number): EvalRunSummary {
+  return runSummaryFromRecords(
+    ["row-1", "row-2", "row-3"].map((rowId, index) =>
+      index < launched
+        ? launchedRunRecord(rowId)
+        : failedRunRecord(rowId, "EVAL_TARGET_PATH_MISSING", "target path is missing")
+    )
+  );
+}
+
+function runSummaryFromRecords(records: EvalRunRecord[]): EvalRunSummary {
   return {
-    launched,
-    records: ["row-1", "row-2", "row-3"].map((rowId, index) => ({
-      row_id: rowId,
-      target_id: rowId,
-      status: index < launched ? "launched" : "failed",
-      workflow_ids: index < launched ? [`workflow-${rowId}`] : [],
-      diagnostics: index < launched ? [] : [{ code: "EVAL_TARGET_PATH_MISSING" }]
-    }))
+    schema_version: "ultrafuzz.eval.run-summary.v1",
+    eval_run_id: "eval-public-evidence",
+    launched: records.filter((record) => record.status === "launched").length,
+    failed: records.filter((record) => record.status === "failed").length,
+    incomplete: records.filter(
+      (record) =>
+        record.status === "launched" &&
+        (record.workflow?.terminal !== true ||
+          record.workflow.status === "timed-out" ||
+          record.workflow.status === "canceled")
+    ).length,
+    records
+  };
+}
+
+function launchedRunRecord(rowId: string): EvalRunRecord {
+  return {
+    ...runRecordBase(rowId),
+    ultrafuzz_run_id: `run-${rowId}`,
+    ultrafuzz_run_root: `/tmp/run-${rowId}`,
+    status: "launched",
+    workflow_ids: [`workflow-${rowId}`],
+    launcher: {
+      status: "succeeded",
+      started_at: "2026-08-09T00:00:00.000Z",
+      finished_at: "2026-08-09T00:00:01.000Z"
+    },
+    diagnostics: []
+  };
+}
+
+function failedRunRecord(
+  rowId: string,
+  diagnosticCode: string,
+  diagnosticMessage: string,
+  workflowIds: string[] = []
+): EvalRunRecord {
+  return {
+    ...runRecordBase(rowId),
+    status: "failed",
+    workflow_ids: workflowIds,
+    launcher: {
+      status: "failed",
+      started_at: "2026-08-09T00:00:00.000Z",
+      finished_at: "2026-08-09T00:00:01.000Z"
+    },
+    diagnostics: [
+      {
+        code: diagnosticCode,
+        message: diagnosticMessage,
+        severity: "error",
+        source: "eval"
+      }
+    ]
+  };
+}
+
+function runRecordBase(
+  rowId: string
+): Pick<EvalRunRecord, "schema_version" | "eval_run_id" | "row_id" | "target_id" | "variant_id" | "trial_id"> {
+  return {
+    schema_version: "ultrafuzz.eval.run.v2",
+    eval_run_id: "eval-public-evidence",
+    row_id: rowId,
+    target_id: rowId,
+    variant_id: "runner",
+    trial_id: "trial-1"
   };
 }
 

@@ -17,6 +17,8 @@ import {
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
   publicEvalDiagnosticsFailedTargetCount,
+  readEvalRunRecords,
+  readEvalRunSummary,
   resolveTerminalReportPath,
   type BenchmarkCohortManifest,
   type EvalRunRecord,
@@ -461,9 +463,10 @@ const PUBLIC_EVAL_POST_SUBMISSION_DIAGNOSTIC_CODES: ReadonlySet<string> = new Se
  * `catch`, and `runtimeRowLauncher` records `workflowIds: []` for it -- so
  * `workflow_ids` cannot answer for that row and its diagnostics have to.
  *
- * Absence of a journal is reported as `unknown`, and so is a journal that cannot
- * rule model work out: only a journal that is present and positively accounts
- * for every record is evidence that nothing ran.
+ * Absence of both current journal documents is reported as `unknown`, and so is
+ * a valid journal that cannot rule model work out. A malformed-present summary
+ * or line journal throws and is reported by the caller; it is never treated as
+ * absence or bypassed in favor of another representation.
  */
 export function publicEvalModelWorkEvidence(evalRoot: string): PublicEvalModelWorkEvidence {
   const records = readPublicEvalRunRecords(evalRoot);
@@ -473,45 +476,44 @@ export function publicEvalModelWorkEvidence(evalRoot: string): PublicEvalModelWo
   return "none";
 }
 
-function recordNamesWorkflow(record: Record<string, unknown>): boolean {
-  return record.status === "launched" || (Array.isArray(record.workflow_ids) && record.workflow_ids.length > 0);
+function recordNamesWorkflow(record: EvalRunRecord): boolean {
+  return record.status === "launched" || record.workflow_ids.length > 0;
 }
 
-function recordMayHaveSubmittedWorkflow(record: Record<string, unknown>): boolean {
-  return (
-    Array.isArray(record.diagnostics) &&
-    record.diagnostics.some(
-      (entry) =>
-        isPlainRecord(entry) &&
-        typeof entry.code === "string" &&
-        PUBLIC_EVAL_POST_SUBMISSION_DIAGNOSTIC_CODES.has(entry.code)
-    )
-  );
+function recordMayHaveSubmittedWorkflow(record: EvalRunRecord): boolean {
+  return record.diagnostics.some((diagnostic) => PUBLIC_EVAL_POST_SUBMISSION_DIAGNOSTIC_CODES.has(diagnostic.code));
 }
 
-function readPublicEvalRunRecords(evalRoot: string): Array<Record<string, unknown>> | undefined {
-  for (const [name, parse] of [
-    ["run-summary.json", (text: string) => (JSON.parse(text) as { records?: unknown }).records],
-    [
-      "runs.jsonl",
-      (text: string) =>
-        text
-          .split(/\r?\n/u)
-          .filter(Boolean)
-          .map((line) => JSON.parse(line) as unknown)
-    ]
-  ] as const) {
-    const filePath = path.join(evalRoot, name);
-    try {
-      const stats = fs.lstatSync(filePath);
-      if (!stats.isFile() || stats.size > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES) continue;
-      const records = parse(fs.readFileSync(filePath, "utf8"));
-      if (Array.isArray(records)) return records.filter(isPlainRecord);
-    } catch {
-      // An unreadable or malformed journal is no evidence either way.
-    }
+function readPublicEvalRunRecords(evalRoot: string): EvalRunRecord[] | undefined {
+  const summaryPath = path.join(evalRoot, "run-summary.json");
+  if (publicEvalJournalFilePresent(summaryPath, "public eval run summary")) {
+    return readEvalRunSummary(summaryPath).records;
+  }
+
+  const journalPath = path.join(evalRoot, "runs.jsonl");
+  if (publicEvalJournalFilePresent(journalPath, "public eval run journal")) {
+    return readEvalRunRecords(journalPath);
   }
   return undefined;
+}
+
+function publicEvalJournalFilePresent(filePath: string, label: string): boolean {
+  let stats: fs.Stats;
+  try {
+    stats = fs.lstatSync(filePath);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw new Error(`failed to inspect ${label}: ${filePath}`, { cause: error });
+  }
+  if (!stats.isFile()) {
+    throw new Error(`${label} must be a regular file: ${filePath}`);
+  }
+  if (stats.size > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES) {
+    throw new Error(`${label} exceeds the ${MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES}-byte limit: ${filePath}`);
+  }
+  return true;
 }
 
 /**
