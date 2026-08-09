@@ -1,7 +1,6 @@
 import {
   assertPlannedGraph,
   type JsonFileValidationResult,
-  type JsonValue,
   type NodeState,
   type PlannedGraphDocument,
   type RunMetadataAccounting,
@@ -101,7 +100,9 @@ export const CLI_KNOWN_COMMANDS = [
 ] as const;
 
 export type CliKnownCommand = (typeof CLI_KNOWN_COMMANDS)[number];
-export type CliOperatorInput = JsonValue;
+type CliJsonValue = null | boolean | number | string | CliJsonValue[] | { [key: string]: CliJsonValue };
+/** Intentional opaque RFC 8259 value supplied by the operator at the CLI boundary. */
+export type CliOperatorInput = CliJsonValue;
 
 export interface CliDiagnostic {
   code: string;
@@ -177,9 +178,9 @@ export interface CliInspectData extends Omit<RunStatusValue, "state" | "graph" |
 
 export interface CliWorkflowNodeToolCall extends Omit<WorkflowNodeToolCall, "input" | "output"> {
   /** Redacted third-party tool payload; the tool defines its inner shape. */
-  input?: JsonValue;
+  input?: CliJsonValue;
   /** Redacted third-party tool payload; the tool defines its inner shape. */
-  output?: JsonValue;
+  output?: CliJsonValue;
 }
 
 export interface CliWorkflowNodeAttempt extends Omit<WorkflowNodeAttempt, "tool_calls"> {
@@ -218,13 +219,13 @@ export interface CliEvalPlanData {
 
 type CliResolvedEvalVariant = Omit<EvalMatrixRow["variant"], "workflow_input"> & {
   /** Explicit operator-controlled workflow input; Ultrafuzz does not infer its domain shape. */
-  workflow_input?: JsonValue;
+  workflow_input?: CliJsonValue;
 };
 
 export type CliEvalMatrixRow = Omit<EvalMatrixRow, "variant" | "workflow_input"> & {
   variant: CliResolvedEvalVariant;
   /** Explicit operator-controlled workflow input; Ultrafuzz does not infer its domain shape. */
-  workflow_input?: JsonValue;
+  workflow_input?: CliJsonValue;
 };
 
 export interface CliEvalRunData {
@@ -530,16 +531,16 @@ function publicWorkflowProvenance(
   };
 }
 
-function assertJsonValue(value: unknown, label: string): JsonValue {
+function assertJsonValue(value: unknown, label: string): CliJsonValue {
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (Array.isArray(value)) {
     for (const entry of value) assertJsonValue(entry, label);
-    return value as JsonValue;
+    return value as CliJsonValue;
   }
   if (value && typeof value === "object") {
     for (const [key, entry] of Object.entries(value)) assertJsonValue(entry, `${label}.${key}`);
-    return value as JsonValue;
+    return value as CliJsonValue;
   }
   throw new Error(`${label} is not an RFC 8259 JSON value`);
 }
