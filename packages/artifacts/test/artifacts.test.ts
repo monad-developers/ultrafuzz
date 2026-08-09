@@ -1133,6 +1133,74 @@ test("findings normalize source evidence line suffixes", () => {
     path.join(nodeDir, "findings.json"),
     JSON.stringify([
       {
+        title: "Natural-language separated source ranges",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "Two natural-language separated source ranges anchor the issue.",
+        evidence: [
+          { kind: "source", path: "VeryLiquidVault.sol:253-258 and 346-364" },
+          { kind: "source", path: "VToken.sol:698-728 and 1463-1478" }
+        ]
+      }
+    ])
+  );
+
+  const naturalLanguageListReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(naturalLanguageListReport.findings[0]!.evidence, [
+    { kind: "source", path: "VeryLiquidVault.sol", detail: "lines 253-258 and 346-364" },
+    { kind: "source", path: "VToken.sol", detail: "lines 698-728 and 1463-1478" }
+  ]);
+
+  const inlineDetail =
+    "maxDeposit only takes the minimum of the summed strategy maxDeposit values and the meta-vault limit";
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Source range with inline detail",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "A source range and inline description anchor the issue.",
+        evidence: [
+          { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}` },
+          {
+            kind: "source",
+            path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`,
+            line: 104,
+            end_line: 105,
+            detail: inlineDetail
+          }
+        ]
+      }
+    ])
+  );
+
+  const inlineDetailReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(inlineDetailReport.findings[0]!.evidence, [
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      line: 104,
+      end_line: 105,
+      detail: inlineDetail
+    },
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      line: 104,
+      end_line: 105,
+      detail: inlineDetail
+    }
+  ]);
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
         title: "Disjoint source ranges with matching detail",
         status: "candidate",
         severity_guess: "medium",
@@ -1176,7 +1244,33 @@ test("findings normalize source evidence line suffixes", () => {
     assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /line list conflicts/u);
   }
 
-  for (const descendingPath of ["VeryLiquidVault.sol:105-107,185-154", "CurveStableSwapNG.vy:17-19;35-33"]) {
+  for (const evidence of [
+    { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`, line: 103 },
+    { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`, end_line: 106 },
+    { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`, detail: "different detail" }
+  ]) {
+    fs.writeFileSync(
+      path.join(nodeDir, "findings.json"),
+      JSON.stringify([
+        {
+          title: "Conflicting inline source detail",
+          status: "candidate",
+          severity_guess: "medium",
+          confidence: "medium",
+          summary: "Conflicting structured metadata must fail closed.",
+          evidence: [evidence]
+        }
+      ])
+    );
+    assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /conflicts/u);
+  }
+
+  for (const descendingPath of [
+    "VeryLiquidVault.sol:105-107,185-154",
+    "CurveStableSwapNG.vy:17-19;35-33",
+    "VToken.sol:698-728 and 1478-1463",
+    "VeryLiquidVault.sol:105-104: descending inline range"
+  ]) {
     fs.writeFileSync(
       path.join(nodeDir, "findings.json"),
       JSON.stringify([
@@ -1200,7 +1294,12 @@ test("findings normalize source evidence line suffixes", () => {
     ["../VeryLiquidVault.sol:105-107,154-185", /traverse/u],
     ["VeryLiquidVault.sol:105-107,latest", /unsafe segment/u],
     ["CurveStableSwapNG.vy:17-19;33-35,40", /unsafe segment/u],
-    ["VeryLiquidVault.sol:9007199254740992,154-185", /positive safe integer/u]
+    ["VToken.sol:698-728 and 1463-1478,1500-1501", /unsafe segment/u],
+    ["VeryLiquidVault.sol:104-105: ", /unsafe segment/u],
+    ["VeryLiquidVault.sol:latest: prose", /unsafe segment/u],
+    ["../VeryLiquidVault.sol:104-105: prose", /traverse/u],
+    ["VeryLiquidVault.sol:9007199254740992,154-185", /positive safe integer/u],
+    ["VeryLiquidVault.sol:9007199254740992: prose", /positive safe integer/u]
   ] as const) {
     fs.writeFileSync(
       path.join(nodeDir, "findings.json"),
@@ -1217,6 +1316,34 @@ test("findings normalize source evidence line suffixes", () => {
     );
     assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), expectedError);
   }
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Command-like evidence remains a command",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "Command normalization takes precedence over path-reference parsing.",
+        evidence: [
+          {
+            kind: "validation",
+            path: "forge test --match-path VeryLiquidVault.sol:104-105: inline prose"
+          }
+        ]
+      }
+    ])
+  );
+
+  const commandReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(commandReport.findings[0]!.evidence, [
+    {
+      kind: "validation",
+      command: "forge test --match-path VeryLiquidVault.sol:104-105: inline prose"
+    }
+  ]);
 
   fs.writeFileSync(
     path.join(nodeDir, "findings.json"),

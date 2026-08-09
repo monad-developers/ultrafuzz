@@ -368,7 +368,7 @@ function validateEvidence(value: unknown, index: number): void {
       }
       if (reference.detail !== undefined) {
         const existingDetail = optionalString(entry, "detail");
-        if (existingLine !== undefined || existingEndLine !== undefined) {
+        if (reference.line === undefined && (existingLine !== undefined || existingEndLine !== undefined)) {
           throw new FindingsValidationError(`evidence path line list conflicts with existing line fields`);
         }
         if (existingDetail !== undefined && existingDetail !== reference.detail) {
@@ -422,12 +422,31 @@ function normalizeFindingMetadataPathReference(
 function splitLineReference(
   value: string
 ): { path: string; line?: number; endLine?: number; detail?: string } | undefined {
+  const describedLineMatch =
+    /^(?<path>.+):(?<line>[1-9][0-9]*)(?:-(?<endLine>[1-9][0-9]*))?: (?<detail>\S(?:[^\r\n]*\S)?)$/u.exec(value);
+  const describedLinePath = describedLineMatch?.groups?.path;
+  const describedLine = describedLineMatch?.groups?.line;
+  const describedEndLine = describedLineMatch?.groups?.endLine;
+  const describedDetail = describedLineMatch?.groups?.detail;
+  if (describedLinePath !== undefined && describedLine !== undefined && describedDetail !== undefined) {
+    const parsedLine = parseLineReferenceNumber(describedLine);
+    const parsedEndLine = describedEndLine === undefined ? undefined : parseLineReferenceNumber(describedEndLine);
+    if (parsedEndLine !== undefined && parsedEndLine < parsedLine) {
+      throw new FindingsValidationError(`evidence line range must not descend`);
+    }
+    return {
+      path: describedLinePath,
+      line: parsedLine,
+      ...(parsedEndLine === undefined ? {} : { endLine: parsedEndLine }),
+      detail: describedDetail
+    };
+  }
   const lineListMatch =
-    /^(?<path>.+):(?<ranges>[1-9][0-9]*(?:-[1-9][0-9]*)?(?:[;,][1-9][0-9]*(?:-[1-9][0-9]*)?)+)$/u.exec(value);
+    /^(?<path>.+):(?<ranges>[1-9][0-9]*(?:-[1-9][0-9]*)?(?:(?: and |[;,])[1-9][0-9]*(?:-[1-9][0-9]*)?)+)$/u.exec(value);
   const lineListPath = lineListMatch?.groups?.path;
   const lineListRanges = lineListMatch?.groups?.ranges;
   if (lineListPath !== undefined && lineListRanges !== undefined) {
-    const separators = lineListRanges.match(/[;,]/gu);
+    const separators = lineListRanges.match(/ and |[;,]/gu);
     if (separators === null) {
       return undefined;
     }
