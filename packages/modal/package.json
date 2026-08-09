@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@ultrafuzz/artifacts": "workspace:*",
+    "@ultrafuzz/config": "workspace:*",
     "@ultrafuzz/evals": "workspace:*",
     "@ultrafuzz/runtime": "workspace:*",
     "@ultrafuzz/security": "workspace:*",

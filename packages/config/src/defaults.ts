@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CONFIG_FILE_NAME } from "./constants.js";
+import { validateResolvedConfigJson } from "./config-schema-registry.js";
 import { parseProjectConfigToml } from "./loader.js";
 import type {
   AgentConfig,
@@ -24,7 +25,7 @@ export const DEFAULT_CODEX_MODEL = "gpt-5.5";
 export const DEFAULT_CODEX_REASONING = "xhigh";
 export const DEFAULT_TRIAGE_QUORUM = 3;
 export const DEFAULT_TRIAGE_PANEL_SIZE = 4;
-export const MAX_TIMEOUT_SECONDS = 86_400;
+export { MAX_TIMEOUT_SECONDS } from "./constants.js";
 export const DEFAULT_EVAL_PROVIDER = "none";
 
 const DEFAULT_CONFIG = loadDefaultConfig();
@@ -57,7 +58,14 @@ function loadDefaultConfig(): ResolvedConfig {
     throw new Error(`${filePath} failed default config validation: ${formatDefaultDiagnostics(parsed.diagnostics)}`);
   }
   const config = normalizeDefaultConfig(parsed.value, filePath);
-  assertResolvedConfig(config, filePath);
+  const structural = validateResolvedConfigJson(config);
+  if (!structural.ok) {
+    const summary = structural.issues
+      .slice(0, 10)
+      .map((issue) => `${issue.instancePath || "/"} ${issue.keyword}: ${issue.message}`)
+      .join("; ");
+    throw new Error(`${filePath} failed resolved config schema validation: ${summary}`);
+  }
   return config;
 }
 
@@ -254,116 +262,4 @@ function required<T>(value: T | undefined, label: string, filePath: string): T {
 
 function formatDefaultDiagnostics(diagnostics: Array<{ code: string; message: string }>): string {
   return diagnostics.map((entry) => `${entry.code}: ${entry.message}`).join("; ");
-}
-
-function assertResolvedConfig(value: unknown, filePath: string): asserts value is ResolvedConfig {
-  if (!isRecord(value)) {
-    throw new Error(`${filePath} must contain a mapping`);
-  }
-  assertString(value.schemaVersion, "schemaVersion", filePath);
-  assertNumber(value.dynamicStrategiesEnumerator, "dynamicStrategiesEnumerator", filePath);
-  assertRecord(value.project, "project", filePath);
-  assertString(value.project.repo, "project.repo", filePath);
-  assertRecord(value.run, "run", filePath);
-  for (const key of ["outputDir", "workspaceMode"] as const) {
-    assertString(value.run[key], `run.${key}`, filePath);
-  }
-  for (const key of [
-    "maxParallelAgents",
-    "maxParallelNodes",
-    "forgeVmemLimitKb",
-    "forgeRayonThreads",
-    "defaultTimeoutSeconds",
-    "workflowDeadlineSeconds",
-    "controllerLeaseSeconds"
-  ] as const) {
-    assertNumber(value.run[key], `run.${key}`, filePath);
-  }
-  assertBoolean(value.run.keepWorkspaces, "run.keepWorkspaces", filePath);
-  assertBoolean(value.run.forgeGuardEnabled, "run.forgeGuardEnabled", filePath);
-  assertRecord(value.execution, "execution", filePath);
-  assertString(value.execution.mode, "execution.mode", filePath);
-  assertNumber(value.execution.retentionDays, "execution.retentionDays", filePath);
-  assertRecord(value.execution.resources, "execution.resources", filePath);
-  assertNumber(value.execution.resources.cpu, "execution.resources.cpu", filePath);
-  assertNumber(value.execution.resources.memoryMiB, "execution.resources.memoryMiB", filePath);
-  assertNumber(value.execution.resources.timeoutSeconds, "execution.resources.timeoutSeconds", filePath);
-  assertRecord(value.execution.nodes, "execution.nodes", filePath);
-  assertRecord(value.execution.providers, "execution.providers", filePath);
-  assertRecord(value.models, "models", filePath);
-  assertString(value.models.default, "models.default", filePath);
-  assertBoolean(value.models.synthesizedDefault, "models.synthesizedDefault", filePath);
-  assertRecord(value.models.profiles, "models.profiles", filePath);
-  for (const [id, profile] of Object.entries(value.models.profiles)) {
-    assertRecord(profile, `models.profiles.${id}`, filePath);
-    assertString(profile.id, `models.profiles.${id}.id`, filePath);
-    assertString(profile.agent, `models.profiles.${id}.agent`, filePath);
-    if (profile.reasoning !== undefined) {
-      assertString(profile.reasoning, `models.profiles.${id}.reasoning`, filePath);
-    }
-  }
-  assertRecord(value.agents, "agents", filePath);
-  for (const [id, agent] of Object.entries(value.agents)) {
-    assertRecord(agent, `agents.${id}`, filePath);
-    assertString(agent.auth, `agents.${id}.auth`, filePath);
-    if (agent.apiKeyEnv !== undefined) {
-      assertString(agent.apiKeyEnv, `agents.${id}.apiKeyEnv`, filePath);
-    }
-    if (agent.configDir !== undefined) {
-      assertString(agent.configDir, `agents.${id}.configDir`, filePath);
-    }
-  }
-  assertRecord(value.permissions, "permissions", filePath);
-  assertString(value.permissions.trustModel, "permissions.trustModel", filePath);
-  if (value.permissions.trustModel !== "skip-permissions") {
-    throw new Error(`${filePath} permissions.trustModel must be skip-permissions`);
-  }
-  assertBoolean(value.permissions.promptReviewRequired, "permissions.promptReviewRequired", filePath);
-  assertBoolean(value.permissions.materializeOutputsAsUnstaged, "permissions.materializeOutputsAsUnstaged", filePath);
-  assertRecord(value.invariants, "invariants", filePath);
-  assertString(value.invariants.propertyPriorityThreshold, "invariants.propertyPriorityThreshold", filePath);
-  assertNumber(
-    value.invariants.invariantTestingSmokeTimeoutSeconds,
-    "invariants.invariantTestingSmokeTimeoutSeconds",
-    filePath
-  );
-  assertNumber(
-    value.invariants.invariantTestingFuzzerTimeoutSeconds,
-    "invariants.invariantTestingFuzzerTimeoutSeconds",
-    filePath
-  );
-  assertRecord(value.triage, "triage", filePath);
-  assertNumber(value.triage.quorum, "triage.quorum", filePath);
-  assertNumber(value.triage.panelSize, "triage.panelSize", filePath);
-  assertRecord(value.eval, "eval", filePath);
-  assertString(value.eval.provider, "eval.provider", filePath);
-  assertRecord(value.eval.providers, "eval.providers", filePath);
-}
-
-function assertRecord(value: unknown, label: string, filePath: string): asserts value is Record<string, unknown> {
-  if (!isRecord(value)) {
-    throw new Error(`${filePath} ${label} must be a mapping`);
-  }
-}
-
-function assertString(value: unknown, label: string, filePath: string): asserts value is string {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error(`${filePath} ${label} must be a non-empty string`);
-  }
-}
-
-function assertNumber(value: unknown, label: string, filePath: string): asserts value is number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`${filePath} ${label} must be a number`);
-  }
-}
-
-function assertBoolean(value: unknown, label: string, filePath: string): asserts value is boolean {
-  if (typeof value !== "boolean") {
-    throw new Error(`${filePath} ${label} must be a boolean`);
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

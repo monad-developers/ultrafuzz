@@ -1,0 +1,64 @@
+{
+  "schemaVersion": "1.0",
+  "dynamicStrategiesEnumerator": 3,
+  "project": {
+    "repo": "."
+  },
+  "run": {
+    "outputDir": ".ultrafuzz/runs",
+    "maxParallelAgents": 4,
+    "maxParallelNodes": 8,
+    "keepWorkspaces": false,
+    "forgeGuardEnabled": true,
+    "forgeVmemLimitKb": 12582912,
+    "forgeRayonThreads": 1,
+    "workspaceMode": "git-worktree",
+    "defaultTimeoutSeconds": 1800,
+    "workflowDeadlineSeconds": 86400,
+    "controllerLeaseSeconds": 30
+  },
+  "execution": {
+    "mode": "local",
+    "retentionDays": 30,
+    "resources": {
+      "cpu": 4,
+      "memoryMiB": 8192,
+      "timeoutSeconds": 1800
+    },
+    "nodes": {},
+    "providers": {}
+  },
+  "models": {
+    "default": "default",
+    "synthesizedDefault": false,
+    "profiles": {
+      "default": {
+        "id": "default",
+        "agent": "CodexAgent"
+      }
+    }
+  },
+  "agents": {
+    "CodexAgent": {
+      "auth": "subscription"
+    }
+  },
+  "permissions": {
+    "trustModel": "skip-permissions",
+    "promptReviewRequired": true,
+    "materializeOutputsAsUnstaged": true
+  },
+  "invariants": {
+    "propertyPriorityThreshold": "high",
+    "invariantTestingSmokeTimeoutSeconds": 600,
+    "invariantTestingFuzzerTimeoutSeconds": 3600
+  },
+  "triage": {
+    "quorum": 3,
+    "panelSize": 4
+  },
+  "eval": {
+    "provider": "none",
+    "providers": {}
+  }
+}

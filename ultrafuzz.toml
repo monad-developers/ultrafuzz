@@ -1,4 +1,4 @@
-schema_version = "1.0"
+schema_version = "ultrafuzz.config.v2"
 dynamic_strategies_enumerator = 3
 
 [project]

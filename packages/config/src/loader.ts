@@ -16,6 +16,7 @@ import {
   type LoadedProjectConfig,
   type ModelProfile,
   type ProjectConfigInput,
+  RESOLVED_CONFIG_SCHEMA_VERSION,
   type WorkspaceMode
 } from "./types.js";
 
@@ -120,7 +121,19 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
 
   const config: ProjectConfigInput = {};
   readString(root, "schema_version", ["schema_version"], diagnostics, (value) => {
-    config.schemaVersion = value;
+    if (value !== RESOLVED_CONFIG_SCHEMA_VERSION) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_SCHEMA_VERSION_UNSUPPORTED",
+          `schema_version must be exactly ${RESOLVED_CONFIG_SCHEMA_VERSION}`,
+          ["schema_version"],
+          "project-toml",
+          { file }
+        )
+      );
+      return;
+    }
+    config.schemaVersion = RESOLVED_CONFIG_SCHEMA_VERSION;
   });
   readInteger(root, "dynamic_strategies_enumerator", ["dynamic_strategies_enumerator"], diagnostics, (value) => {
     config.dynamicStrategiesEnumerator = value;

@@ -1,4 +1,4 @@
-import { z, type ZodIssue } from "zod/v4";
+import type { ZodIssue, ZodType } from "zod/v4";
 import {
   DEFAULT_AGENT,
   DEFAULT_MODEL_PROFILE_ID,
@@ -10,6 +10,7 @@ import {
 import { validateAgentConfigs } from "./agents.js";
 import { syncDefaultModelProfile, validateModelProfiles, validProfileId } from "./model-profiles.js";
 import { validateTriageConfig } from "./triage.js";
+import { resolvedConfigZodSchema } from "./resolved-config-schema.js";
 import {
   diagnostic,
   fail,
@@ -26,101 +27,15 @@ import {
   type RuntimeConfigOverrides
 } from "./types.js";
 
-const positiveIntegerSchema = z.number().int().positive();
-const positiveNumberSchema = z.number().positive().finite();
-const timeoutSecondsSchema = z.number().int().min(1).max(MAX_TIMEOUT_SECONDS);
-const nonEmptyStringSchema = z.string().refine((value) => value.trim().length > 0);
-const environmentVariableNameSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u);
-const projectLocalPathSchema = z.string().superRefine((value, context) => {
-  if (value.length === 0) {
-    context.addIssue({ code: "custom", message: "CONFIG_PATH_EMPTY" });
-    return;
-  }
-  if (value === ".") {
-    return;
-  }
-  if (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value)) {
-    context.addIssue({ code: "custom", message: "CONFIG_PATH_ABSOLUTE" });
-    return;
-  }
-  if (value.split(/[\\/]/).some((part) => part.length === 0 || part === "." || part === "..")) {
-    context.addIssue({ code: "custom", message: "CONFIG_PATH_TRAVERSAL" });
-  }
-});
-
-const resolvedConfigValidationSchema = z
-  .object({
-    schemaVersion: nonEmptyStringSchema,
-    dynamicStrategiesEnumerator: positiveIntegerSchema,
-    project: z
-      .object({
-        repo: projectLocalPathSchema
-      })
-      .passthrough(),
-    run: z
-      .object({
-        outputDir: projectLocalPathSchema,
-        maxParallelAgents: positiveIntegerSchema,
-        maxParallelNodes: positiveIntegerSchema,
-        forgeGuardEnabled: z.boolean(),
-        forgeVmemLimitKb: positiveIntegerSchema,
-        forgeRayonThreads: positiveIntegerSchema,
-        defaultTimeoutSeconds: timeoutSecondsSchema,
-        workflowDeadlineSeconds: timeoutSecondsSchema,
-        controllerLeaseSeconds: timeoutSecondsSchema,
-        workspaceMode: z.literal("git-worktree")
-      })
-      .passthrough(),
-    execution: z
-      .object({
-        mode: z.enum(["local", "cloud"]),
-        provider: z.literal("modal").optional(),
-        retentionDays: z.number().int().min(1).max(3650),
-        resources: z.object({
-          cpu: positiveNumberSchema.max(256),
-          memoryMiB: z.number().int().min(128).max(4_194_304),
-          timeoutSeconds: timeoutSecondsSchema
-        }),
-        nodes: z.record(
-          z.string(),
-          z.object({
-            resources: z.object({
-              cpu: positiveNumberSchema.max(256).optional(),
-              memoryMiB: z.number().int().min(128).max(4_194_304).optional(),
-              timeoutSeconds: timeoutSecondsSchema.optional()
-            })
-          })
-        ),
-        providers: z.object({
-          modal: z
-            .object({
-              app: nonEmptyStringSchema,
-              image: nonEmptyStringSchema,
-              region: nonEmptyStringSchema.optional(),
-              credentialEnv: z
-                .array(environmentVariableNameSchema)
-                .length(2)
-                .refine((names) => new Set(names).size === names.length)
-            })
-            .optional()
-        })
-      })
-      .passthrough(),
-    invariants: z
-      .object({
-        propertyPriorityThreshold: z.enum(["high", "medium", "low"]),
-        invariantTestingSmokeTimeoutSeconds: timeoutSecondsSchema,
-        invariantTestingFuzzerTimeoutSeconds: timeoutSecondsSchema,
-        referenceExpectationEnforcement: z.enum(["warn", "fail"]).optional()
-      })
-      .passthrough(),
-    permissions: z
-      .object({
-        trustModel: z.literal("skip-permissions")
-      })
-      .passthrough()
-  })
-  .passthrough();
+const NAMED_SEMANTIC_ZOD_ISSUES = new Set([
+  "CONFIG_AGENT_DEEPSEEK_AUTH_UNSUPPORTED",
+  "CONFIG_EXECUTION_LOCAL_PROVIDER",
+  "CONFIG_EXECUTION_LOCAL_PROVIDER_SETTINGS",
+  "CONFIG_EXECUTION_PROVIDER_REQUIRED",
+  "CONFIG_EXECUTION_PROVIDER_SETTINGS_REQUIRED",
+  "CONFIG_MODEL_DEEPSEEK_REASONING_UNSUPPORTED",
+  "CONFIG_MODEL_KIMI_REASONING_UNSUPPORTED"
+]);
 
 export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<ResolvedConfig> {
   const diagnostics: ConfigDiagnostic[] = [];
@@ -153,9 +68,9 @@ export function validateResolvedConfig(
   config: ResolvedConfig,
   env: Record<string, string | undefined> = process.env
 ): ConfigDiagnostic[] {
-  const diagnostics = schemaIssues(resolvedConfigValidationSchema, config).map((issue) =>
-    resolvedConfigDiagnostic(issue, config)
-  );
+  const diagnostics = schemaIssues(resolvedConfigZodSchema, config)
+    .filter((issue) => issue.code !== "custom" || !NAMED_SEMANTIC_ZOD_ISSUES.has(issue.message))
+    .map((issue) => resolvedConfigDiagnostic(issue, config));
   diagnostics.push(...validateAgentConfigs(config.agents));
   diagnostics.push(...validateTriageConfig(config.triage));
   diagnostics.push(...validateModelProfiles(config));
@@ -606,7 +521,7 @@ function applyIntegerEnv(
   void path;
 }
 
-function schemaIssues(schema: z.ZodType, value: unknown): ZodIssue[] {
+function schemaIssues(schema: ZodType, value: unknown): ZodIssue[] {
   const parsed = schema.safeParse(value);
   return parsed.success ? [] : parsed.error.issues;
 }
@@ -629,7 +544,7 @@ function resolvedConfigDiagnosticCode(issue: ZodIssue): string {
   const key = path.join(".");
   switch (key) {
     case "schema_version":
-      return "CONFIG_SCHEMA_VERSION_EMPTY";
+      return "CONFIG_SCHEMA_VERSION_UNSUPPORTED";
     case "run.default_timeout_seconds":
     case "run.workflow_deadline_seconds":
     case "run.controller_lease_seconds":
@@ -652,8 +567,8 @@ function resolvedConfigDiagnosticCode(issue: ZodIssue): string {
 function resolvedConfigDiagnosticMessage(code: string, issue: ZodIssue, config: ResolvedConfig): string {
   const label = resolvedConfigDiagnosticPath(issue).join(".");
   switch (code) {
-    case "CONFIG_SCHEMA_VERSION_EMPTY":
-      return "schema_version cannot be empty";
+    case "CONFIG_SCHEMA_VERSION_UNSUPPORTED":
+      return "schema_version must be exactly ultrafuzz.config.v2";
     case "CONFIG_PATH_EMPTY":
       return `${label} cannot be empty`;
     case "CONFIG_PATH_ABSOLUTE":

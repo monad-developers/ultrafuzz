@@ -21,6 +21,7 @@ import {
   type SMITHERS_RUN_STATES,
   type SMITHERS_RUN_STATUSES
 } from "@ultrafuzz/artifacts";
+import { parseResolvedConfigJsonBytes, serializeResolvedConfigJsonBytes } from "@ultrafuzz/config";
 import {
   CACHE_MANIFEST_FILE,
   REFERENCE_CACHE_SCHEMA_VERSION,
@@ -1124,7 +1125,7 @@ function writeFanoutProject(project: string): void {
   );
   fs.writeFileSync(
     path.join(project, "ultrafuzz.toml"),
-    `schema_version = "1.0"
+    `schema_version = "ultrafuzz.config.v2"
 
 [project]
 repo = "."
@@ -4084,6 +4085,10 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
     workflowName: "ultrafuzz-native-deps",
     renderedPrompts: plan.value!.rendered_prompts
   });
+
+  const resolvedConfigBytes = fs.readFileSync(compiled.resolvedConfigPath);
+  assert.deepEqual(resolvedConfigBytes, serializeResolvedConfigJsonBytes(plan.value!.resolved_config));
+  assert.equal(parseResolvedConfigJsonBytes(resolvedConfigBytes).schemaVersion, "ultrafuzz.config.v2");
 
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);

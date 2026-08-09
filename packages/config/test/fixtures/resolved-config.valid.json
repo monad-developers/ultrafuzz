@@ -1,0 +1,100 @@
+{
+  "schemaVersion": "ultrafuzz.config.v2",
+  "dynamicStrategiesEnumerator": 3,
+  "project": {
+    "repo": "."
+  },
+  "run": {
+    "outputDir": ".ultrafuzz/runs",
+    "maxParallelAgents": 4,
+    "maxParallelNodes": 8,
+    "keepWorkspaces": false,
+    "forgeGuardEnabled": true,
+    "forgeVmemLimitKb": 12582912,
+    "forgeRayonThreads": 1,
+    "workspaceMode": "git-worktree",
+    "defaultTimeoutSeconds": 1800,
+    "workflowDeadlineSeconds": 86400,
+    "controllerLeaseSeconds": 30
+  },
+  "execution": {
+    "mode": "local",
+    "retentionDays": 30,
+    "resources": {
+      "cpu": 4,
+      "memoryMiB": 8192,
+      "timeoutSeconds": 1800
+    },
+    "nodes": {},
+    "providers": {}
+  },
+  "models": {
+    "default": "default",
+    "synthesizedDefault": true,
+    "profiles": {
+      "claude": {
+        "id": "claude",
+        "agent": "ClaudeAgent",
+        "model": "claude-opus-4-8"
+      },
+      "deepseek": {
+        "id": "deepseek",
+        "agent": "DeepSeekAgent",
+        "model": "deepseek-v4-pro",
+        "reasoning": "max"
+      },
+      "default": {
+        "id": "default",
+        "agent": "CodexAgent",
+        "model": "gpt-5.5",
+        "reasoning": "xhigh"
+      },
+      "kimi": {
+        "id": "kimi",
+        "agent": "KimiAgent",
+        "model": "kimi-k3",
+        "reasoning": "max"
+      }
+    }
+  },
+  "agents": {
+    "ClaudeAgent": {
+      "auth": "subscription"
+    },
+    "CodexAgent": {
+      "auth": "api-key",
+      "apiKeyEnv": "OPENAI_API_KEY"
+    },
+    "DeepSeekAgent": {
+      "auth": "api-key",
+      "apiKeyEnv": "DEEPSEEK_API_KEY"
+    },
+    "KimiAgent": {
+      "auth": "subscription"
+    }
+  },
+  "permissions": {
+    "trustModel": "skip-permissions",
+    "promptReviewRequired": true,
+    "materializeOutputsAsUnstaged": true
+  },
+  "invariants": {
+    "propertyPriorityThreshold": "high",
+    "invariantTestingSmokeTimeoutSeconds": 600,
+    "invariantTestingFuzzerTimeoutSeconds": 3600
+  },
+  "triage": {
+    "quorum": 3,
+    "panelSize": 4
+  },
+  "eval": {
+    "provider": "none",
+    "providers": {
+      "braintrust": {
+        "apiKeyEnv": "BRAINTRUST_API_KEY",
+        "project": "ultrafuzz-evals"
+      }
+    },
+    "evalConfig": ".ultrafuzz/evals/bug-finding.yml"
+  }
+}

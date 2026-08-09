@@ -1,5 +1,7 @@
 import fs from "node:fs";
 
+import { RESOLVED_CONFIG_SCHEMA_VERSION } from "@ultrafuzz/config";
+
 import {
   DEFAULT_MODAL_MAX_PARALLEL_AGENTS,
   DEFAULT_MODAL_MAX_PARALLEL_NODES,
@@ -14,7 +16,7 @@ export function modalTargetToml(model: ModalModelSpec, nodeTimeoutSeconds: numbe
   const claude = agentToml(model, "ClaudeAgent", "anthropic");
   const deepseek = agentToml(model, "DeepSeekAgent", "deepseek");
   const kimi = agentToml(model, "KimiAgent", "kimi");
-  return `schema_version = "1.0"
+  return `schema_version = "${RESOLVED_CONFIG_SCHEMA_VERSION}"
 dynamic_strategies_enumerator = 3
 
 [project]

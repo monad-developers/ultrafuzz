@@ -251,12 +251,15 @@ credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
       expect(localProviderSettings.diagnostics.map((entry) => entry.code)).toContain(
         "CONFIG_EXECUTION_LOCAL_PROVIDER_SETTINGS"
       );
+      expect(localProviderSettings.diagnostics.map((entry) => entry.code)).not.toContain(
+        "CONFIG_POSITIVE_INTEGER_INVALID"
+      );
     }
   });
 
   it("applies defaults, prompt metadata, project TOML, env, then runtime overrides", () => {
     const project = parseProjectConfigToml(`
-schema_version = "1.0"
+schema_version = "ultrafuzz.config.v2"
 dynamic_strategies_enumerator = 5
 
 [run]
@@ -571,6 +574,7 @@ describe("model profile and triage validation", () => {
         path: ["models", "kimi-invalid", "reasoning"]
       })
     );
+    expect(resolved.diagnostics.map((entry) => entry.code)).not.toContain("CONFIG_POSITIVE_INTEGER_INVALID");
   });
 
   it("rejects whitespace-padded Kimi reasoning values instead of normalizing them away", () => {
@@ -621,6 +625,7 @@ describe("model profile and triage validation", () => {
         path: ["models", "deepseek-invalid", "reasoning"]
       })
     );
+    expect(resolved.diagnostics.map((entry) => entry.code)).not.toContain("CONFIG_POSITIVE_INTEGER_INVALID");
   });
 
   it("rejects unsupported DeepSeek subscription authentication during config validation", () => {
@@ -642,6 +647,7 @@ describe("model profile and triage validation", () => {
         path: ["agents", "DeepSeekAgent", "auth"]
       })
     );
+    expect(resolved.diagnostics.map((entry) => entry.code)).not.toContain("CONFIG_POSITIVE_INTEGER_INVALID");
   });
 
   it("redacts sensitive diagnostic messages", () => {

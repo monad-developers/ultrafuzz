@@ -62,6 +62,8 @@ export type TrustModel = "skip-permissions";
 
 export type AgentAuthMode = "api-key" | "subscription";
 
+export const RESOLVED_CONFIG_SCHEMA_VERSION = "ultrafuzz.config.v2" as const;
+
 export interface ProjectConfig {
   repo: string;
   name?: string;
@@ -177,7 +179,7 @@ export interface EvalConfig {
 }
 
 export interface ResolvedConfig {
-  schemaVersion: string;
+  schemaVersion: typeof RESOLVED_CONFIG_SCHEMA_VERSION;
   dynamicStrategiesEnumerator: number;
   project: ProjectConfig;
   run: RunConfig;
@@ -196,7 +198,7 @@ export interface PromptMetadataLayer {
 }
 
 export interface ProjectConfigInput {
-  schemaVersion?: string;
+  schemaVersion?: typeof RESOLVED_CONFIG_SCHEMA_VERSION;
   dynamicStrategiesEnumerator?: number;
   project?: Partial<ProjectConfig>;
   run?: Partial<RunConfig>;

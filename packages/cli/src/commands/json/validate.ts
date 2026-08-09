@@ -8,6 +8,7 @@ import {
   validateJsonFile,
   type SchemaRegistryEntry
 } from "@ultrafuzz/artifacts";
+import { configSchemaBundleDigest, configSchemaRegistry } from "@ultrafuzz/config";
 import { evmbenchSchemaBundleDigest, evmbenchSchemaRegistry } from "@ultrafuzz/evmbench";
 import { evalSchemaBundleDigest, evalSchemaRegistry } from "@ultrafuzz/evals";
 import { modalSchemaBundleDigest, modalSchemaRegistry } from "@ultrafuzz/modal";
@@ -73,6 +74,7 @@ function cliSchemaRegistry(): {
 } {
   const owners = [
     { entries: artifactSchemaRegistry(), bundle: artifactSchemaBundleDigest() },
+    { entries: configSchemaRegistry(), bundle: configSchemaBundleDigest() },
     { entries: evmbenchSchemaRegistry(), bundle: evmbenchSchemaBundleDigest() },
     { entries: evalSchemaRegistry(), bundle: evalSchemaBundleDigest() },
     { entries: modalSchemaRegistry(), bundle: modalSchemaBundleDigest() },

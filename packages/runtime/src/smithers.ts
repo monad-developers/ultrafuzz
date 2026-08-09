@@ -28,7 +28,7 @@ import {
   type SmithersTaskManifestMetadata,
   type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
-import { resolveExecutionResources, type ResolvedConfig } from "@ultrafuzz/config";
+import { resolveExecutionResources, serializeResolvedConfigJsonBytes, type ResolvedConfig } from "@ultrafuzz/config";
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
@@ -1198,6 +1198,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const expandedGraphPath = path.join(smithersDir, "expanded-graph.json");
   const configPath = path.join(smithersDir, "config.fingerprint-input");
   const resolvedConfigPath = path.join(smithersDir, "resolved-config.json");
+  const resolvedConfigBytes = serializeResolvedConfigJsonBytes(input.config);
   const workflowPath = path.join(
     projectRoot,
     ".smithers",
@@ -1235,12 +1236,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     stableJson(input.config),
     "workflow config fingerprint input"
   );
-  writePreparedWorkflowFile(
-    input.runLayout.root,
-    resolvedConfigPath,
-    `${JSON.stringify(input.config, null, 2)}\n`,
-    "resolved workflow config"
-  );
+  writePreparedWorkflowFile(input.runLayout.root, resolvedConfigPath, resolvedConfigBytes, "resolved workflow config");
   const taskManifest: SmithersTaskManifestDocument = {
     schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
     run_id: input.runLayout.runId,
@@ -3693,22 +3689,23 @@ function workflowFileStem(runId: string): string {
   return stem;
 }
 
-function writePreparedWorkflowFile(root: string, filePath: string, contents: string, label: string): void {
+function writePreparedWorkflowFile(root: string, filePath: string, contents: string | Uint8Array, label: string): void {
   const resolvedRoot = path.resolve(root);
   const resolvedPath = path.resolve(filePath);
+  const contentsBytes = typeof contents === "string" ? Buffer.from(contents, "utf8") : Buffer.from(contents);
   assertPathInside(resolvedRoot, resolvedPath, label);
   fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
   assertNoSymlinkComponents(resolvedRoot, resolvedPath, label);
   if (fs.existsSync(resolvedPath)) {
     assertRegularFileInside(resolvedRoot, resolvedPath, label);
-    if (!fs.readFileSync(resolvedPath).equals(Buffer.from(contents))) {
+    if (!fs.readFileSync(resolvedPath).equals(contentsBytes)) {
       throw new Error(`existing ${label} conflicts with the prepared workflow start`);
     }
     return;
   }
-  writeFileDurable(resolvedPath, contents);
+  writeFileDurable(resolvedPath, contentsBytes);
   assertRegularFileInside(resolvedRoot, resolvedPath, label);
-  if (!fs.readFileSync(resolvedPath).equals(Buffer.from(contents))) {
+  if (!fs.readFileSync(resolvedPath).equals(contentsBytes)) {
     throw new Error(`${label} changed while the prepared workflow start was written`);
   }
 }

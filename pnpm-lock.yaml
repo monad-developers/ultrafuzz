@@ -115,6 +115,9 @@ importers:
 
   packages/config:
     dependencies:
+      '@ultrafuzz/artifacts':
+        specifier: workspace:*
+        version: link:../artifacts
       '@ultrafuzz/security':
         specifier: workspace:*
         version: link:../security
@@ -213,6 +216,9 @@ importers:
       '@ultrafuzz/artifacts':
         specifier: workspace:*
         version: link:../artifacts
+      '@ultrafuzz/config':
+        specifier: workspace:*
+        version: link:../config
       '@ultrafuzz/evals':
         specifier: workspace:*
         version: link:../evals

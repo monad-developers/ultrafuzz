@@ -1,0 +1,247 @@
+import { z } from "zod/v4";
+
+import { MAX_TIMEOUT_SECONDS } from "./constants.js";
+import { RESOLVED_CONFIG_SCHEMA_VERSION, type ResolvedConfig } from "./types.js";
+
+export const RESOLVED_CONFIG_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:config:resolved-config:2" as const;
+export const RESOLVED_CONFIG_SCHEMA_FILENAME = "resolved-config.schema.json" as const;
+
+const NON_WHITESPACE_PATTERN = /.*\S.*/u;
+const ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+const PROFILE_ID_PATTERN = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const AGENT_ID_PATTERN = /^(?!.*\.\.)[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/u;
+const NODE_ID_PATTERN = /^[a-z0-9_][a-z0-9_-]{0,127}$/u;
+const EVAL_PROVIDER_ID_PATTERN = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/u;
+const HTTPS_ENDPOINT_PATTERN = /^https:\/\/\S+$/u;
+const PROJECT_LOCAL_PATH_PATTERN =
+  /^(?:\.|(?![A-Za-z]:[\\/])(?![\\/])(?!.*[\\/]$)(?!.*(?:^|[\\/])\.{1,2}(?:[\\/]|$))(?!.*[\\/]{2})[^\r\n]+)$/u;
+
+const nonWhitespaceStringSchema = z.string().min(1).regex(NON_WHITESPACE_PATTERN);
+const environmentVariableNameSchema = z.string().regex(ENVIRONMENT_VARIABLE_PATTERN);
+const projectLocalPathSchema = z.string().regex(PROJECT_LOCAL_PATH_PATTERN);
+const timeoutSecondsSchema = z.number().int().min(1).max(MAX_TIMEOUT_SECONDS);
+const positiveIntegerSchema = z.number().int().positive();
+
+const executionResourcesSchema = z
+  .object({
+    cpu: z.number().positive().max(256).finite(),
+    memoryMiB: z.number().int().min(128).max(4_194_304),
+    timeoutSeconds: timeoutSecondsSchema
+  })
+  .strict();
+
+const executionNodeOverrideSchema = z
+  .object({
+    resources: z
+      .object({
+        cpu: z.number().positive().max(256).finite().optional(),
+        memoryMiB: z.number().int().min(128).max(4_194_304).optional(),
+        timeoutSeconds: timeoutSecondsSchema.optional()
+      })
+      .strict()
+  })
+  .strict();
+
+const modalExecutionProviderSchema = z
+  .object({
+    app: nonWhitespaceStringSchema,
+    image: nonWhitespaceStringSchema,
+    region: nonWhitespaceStringSchema.optional(),
+    credentialEnv: z
+      .array(environmentVariableNameSchema)
+      .length(2)
+      .refine((names) => new Set(names).size === names.length)
+  })
+  .strict();
+
+const modelProfileSchema = z
+  .object({
+    id: z.string().regex(PROFILE_ID_PATTERN),
+    agent: z.string().regex(AGENT_ID_PATTERN),
+    model: nonWhitespaceStringSchema.optional(),
+    reasoning: nonWhitespaceStringSchema.optional(),
+    timeoutSeconds: timeoutSecondsSchema.optional()
+  })
+  .strict()
+  .superRefine((profile, context) => {
+    if (
+      (profile.agent === "KimiAgent" || profile.agent === "DeepSeekAgent") &&
+      profile.reasoning !== undefined &&
+      !["low", "high", "max"].includes(profile.reasoning)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["reasoning"],
+        message:
+          profile.agent === "KimiAgent"
+            ? "CONFIG_MODEL_KIMI_REASONING_UNSUPPORTED"
+            : "CONFIG_MODEL_DEEPSEEK_REASONING_UNSUPPORTED"
+      });
+    }
+  });
+
+const agentConfigSchema = z.discriminatedUnion("auth", [
+  z
+    .object({
+      auth: z.literal("api-key"),
+      apiKeyEnv: environmentVariableNameSchema,
+      configDir: nonWhitespaceStringSchema.optional()
+    })
+    .strict(),
+  z
+    .object({
+      auth: z.literal("subscription"),
+      apiKeyEnv: environmentVariableNameSchema.optional(),
+      configDir: nonWhitespaceStringSchema.optional()
+    })
+    .strict()
+]);
+
+const evalProviderProfileSchema = z
+  .object({
+    apiKeyEnv: environmentVariableNameSchema.optional(),
+    project: nonWhitespaceStringSchema.optional(),
+    endpoint: z.string().regex(HTTPS_ENDPOINT_PATTERN).optional()
+  })
+  .strict();
+
+const executionConfigSchema = z
+  .object({
+    mode: z.enum(["local", "cloud"]),
+    provider: z.literal("modal").optional(),
+    retentionDays: z.number().int().min(1).max(3_650),
+    resources: executionResourcesSchema,
+    nodes: z.record(z.string().regex(NODE_ID_PATTERN), executionNodeOverrideSchema),
+    providers: z
+      .object({
+        modal: modalExecutionProviderSchema.optional()
+      })
+      .strict()
+  })
+  .strict()
+  .superRefine((execution, context) => {
+    if (execution.mode === "local") {
+      if (execution.provider !== undefined) {
+        context.addIssue({ code: "custom", path: ["provider"], message: "CONFIG_EXECUTION_LOCAL_PROVIDER" });
+      }
+      if (execution.providers.modal !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["providers", "modal"],
+          message: "CONFIG_EXECUTION_LOCAL_PROVIDER_SETTINGS"
+        });
+      }
+      return;
+    }
+    if (execution.provider !== "modal") {
+      context.addIssue({ code: "custom", path: ["provider"], message: "CONFIG_EXECUTION_PROVIDER_REQUIRED" });
+    }
+    if (execution.providers.modal === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["providers", "modal"],
+        message: "CONFIG_EXECUTION_PROVIDER_SETTINGS_REQUIRED"
+      });
+    }
+  });
+
+const modelProfilesSchema = z
+  .record(z.string().regex(PROFILE_ID_PATTERN), modelProfileSchema)
+  .refine((profiles) => Object.keys(profiles).length > 0, { message: "models.profiles must not be empty" });
+
+const agentConfigsSchema = z
+  .record(z.string().regex(AGENT_ID_PATTERN), agentConfigSchema)
+  .refine((agents) => Object.keys(agents).length > 0, { message: "agents must not be empty" })
+  .superRefine((agents, context) => {
+    if (agents.DeepSeekAgent?.auth === "subscription") {
+      context.addIssue({
+        code: "custom",
+        path: ["DeepSeekAgent", "auth"],
+        message: "CONFIG_AGENT_DEEPSEEK_AUTH_UNSUPPORTED"
+      });
+    }
+  });
+
+/**
+ * Non-transforming structural mirror of the canonical checked-in JSON Schema.
+ * Portable conditionals are mirrored here; environment, filesystem, and
+ * dynamic-map key/value joins remain in the package's named semantic validators.
+ */
+export const resolvedConfigZodSchema: z.ZodType<ResolvedConfig> = z
+  .object({
+    schemaVersion: z.literal(RESOLVED_CONFIG_SCHEMA_VERSION),
+    dynamicStrategiesEnumerator: positiveIntegerSchema,
+    project: z
+      .object({
+        repo: projectLocalPathSchema,
+        name: nonWhitespaceStringSchema.optional()
+      })
+      .strict(),
+    run: z
+      .object({
+        outputDir: projectLocalPathSchema,
+        maxParallelAgents: positiveIntegerSchema,
+        maxParallelNodes: positiveIntegerSchema,
+        keepWorkspaces: z.boolean(),
+        forgeGuardEnabled: z.boolean(),
+        forgeVmemLimitKb: positiveIntegerSchema,
+        forgeRayonThreads: positiveIntegerSchema,
+        workspaceMode: z.literal("git-worktree"),
+        defaultTimeoutSeconds: timeoutSecondsSchema,
+        workflowDeadlineSeconds: timeoutSecondsSchema,
+        controllerLeaseSeconds: timeoutSecondsSchema
+      })
+      .strict(),
+    execution: executionConfigSchema,
+    models: z
+      .object({
+        default: z.string().regex(PROFILE_ID_PATTERN),
+        synthesizedDefault: z.boolean(),
+        profiles: modelProfilesSchema
+      })
+      .strict(),
+    agents: agentConfigsSchema,
+    permissions: z
+      .object({
+        trustModel: z.literal("skip-permissions"),
+        promptReviewRequired: z.boolean(),
+        materializeOutputsAsUnstaged: z.boolean()
+      })
+      .strict(),
+    invariants: z
+      .object({
+        propertyPriorityThreshold: z.enum(["high", "medium", "low"]),
+        invariantTestingSmokeTimeoutSeconds: timeoutSecondsSchema,
+        invariantTestingFuzzerTimeoutSeconds: timeoutSecondsSchema,
+        referenceExpectationEnforcement: z.enum(["warn", "fail"]).optional()
+      })
+      .strict(),
+    triage: z
+      .object({
+        quorum: positiveIntegerSchema,
+        panelSize: positiveIntegerSchema
+      })
+      .strict(),
+    eval: z
+      .object({
+        evalConfig: projectLocalPathSchema.optional(),
+        groundTruthRoot: nonWhitespaceStringSchema.optional(),
+        provider: z.string().regex(EVAL_PROVIDER_ID_PATTERN),
+        providers: z.record(z.string().regex(EVAL_PROVIDER_ID_PATTERN), evalProviderProfileSchema)
+      })
+      .strict()
+  })
+  .strict();
+
+export function assertResolvedConfigZod(
+  value: unknown,
+  label = "resolved configuration"
+): asserts value is ResolvedConfig {
+  const result = resolvedConfigZodSchema.safeParse(value);
+  if (result.success) return;
+  const summary = result.error.issues
+    .slice(0, 10)
+    .map((issue) => `${issue.path.join(".") || "/"}: ${issue.message}`)
+    .join("; ");
+  throw new Error(`${label} does not match ${RESOLVED_CONFIG_JSON_SCHEMA_ID}: ${summary}`);
+}

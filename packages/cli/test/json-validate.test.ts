@@ -6,6 +6,13 @@ import test from "node:test";
 
 import { artifactSchemaDirectory } from "@ultrafuzz/artifacts";
 import {
+  RESOLVED_CONFIG_JSON_SCHEMA_ID,
+  configSchemaBundleDigest,
+  configSchemaDirectory,
+  resolveConfig,
+  serializeResolvedConfigJsonBytes
+} from "@ultrafuzz/config";
+import {
   EVMBENCH_PROFILE_JSON_SCHEMA_ID,
   evmbenchSchemaBundleDigest,
   evmbenchSchemaDirectory
@@ -144,6 +151,41 @@ test("json validate recognizes the pinned topology schema and rejects a same-nam
     const tamperedSchema = path.join(temporary, "expanded-graph.schema.json");
     fs.writeFileSync(tamperedSchema, `${fs.readFileSync(schema, "utf8")} `, "utf8");
     const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", graph]);
+    assert.equal(tamperedCapture.code, 2);
+    assert.match(tamperedCapture.stderr, /JSON_SCHEMA_DIGEST_MISMATCH/u);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("json validate recognizes the pinned resolved-config schema and reports the config bundle", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-config-"));
+  try {
+    const schema = path.join(configSchemaDirectory(), "resolved-config.schema.json");
+    const configPath = path.join(temporary, "resolved-config.json");
+    const resolved = resolveConfig({ env: {} });
+    assert.equal(resolved.ok, true, JSON.stringify(resolved.diagnostics));
+    if (!resolved.ok) return;
+    fs.writeFileSync(configPath, serializeResolvedConfigJsonBytes(resolved.value));
+
+    const validCapture = await capture(["json", "validate", "--schema", schema, "--file", configPath, "--json"]);
+    assert.equal(validCapture.code, 0);
+    const envelope = JSON.parse(validCapture.stdout) as {
+      ok: boolean;
+      data: {
+        status: string;
+        schema: { id: string; bundle_sha256: string; registered: boolean };
+      };
+    };
+    assert.equal(envelope.ok, true);
+    assert.equal(envelope.data.status, "valid");
+    assert.equal(envelope.data.schema.registered, true);
+    assert.equal(envelope.data.schema.id, RESOLVED_CONFIG_JSON_SCHEMA_ID);
+    assert.equal(envelope.data.schema.bundle_sha256, configSchemaBundleDigest());
+
+    const tamperedSchema = path.join(temporary, "resolved-config.schema.json");
+    fs.writeFileSync(tamperedSchema, `${fs.readFileSync(schema, "utf8")} `, "utf8");
+    const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", configPath]);
     assert.equal(tamperedCapture.code, 2);
     assert.match(tamperedCapture.stderr, /JSON_SCHEMA_DIGEST_MISMATCH/u);
   } finally {

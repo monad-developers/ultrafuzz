@@ -25,7 +25,7 @@ import {
   type SmithersTaskManifestTask,
   type StateJsonValue
 } from "@ultrafuzz/artifacts";
-import type { ResolvedConfig } from "@ultrafuzz/config";
+import { parseResolvedConfigJsonBytes, type ResolvedConfig } from "@ultrafuzz/config";
 
 import {
   type PlannedGraph,
@@ -1168,17 +1168,7 @@ function parseSealedResolvedConfig(
   if (sealedConfig === undefined) {
     throw new Error("sealed workflow execution snapshot is missing its resolved configuration");
   }
-  const parsed = JSON.parse(sealedConfig.contents.toString("utf8")) as unknown;
-  const record = objectRecord(parsed);
-  if (
-    Object.keys(record).length === 0 ||
-    Object.keys(objectRecord(record.run)).length === 0 ||
-    Object.keys(objectRecord(record.agents)).length === 0 ||
-    Object.keys(objectRecord(record.permissions)).length === 0
-  ) {
-    throw new Error("sealed resolved workflow configuration is invalid");
-  }
-  return parsed as ResolvedConfig;
+  return parseResolvedConfigJsonBytes(sealedConfig.contents);
 }
 
 function runRelativePath(layout: RunLayout, candidate: string): string {
