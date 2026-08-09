@@ -15,8 +15,6 @@ import {
 } from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
-import { EVAL_RESULT_SCHEMA_VERSION, type EvalResult } from "./types.js";
-
 export class EvalError extends Error {
   readonly code: string;
   readonly details?: Record<string, unknown>;
@@ -27,15 +25,6 @@ export class EvalError extends Error {
     this.code = code;
     this.details = details;
   }
-}
-
-export function evalResult<T>(ok: boolean, value?: T, diagnostics: RuntimeDiagnostic[] = []): EvalResult<T> {
-  return {
-    schema_version: EVAL_RESULT_SCHEMA_VERSION,
-    ok,
-    diagnostics,
-    ...(value !== undefined ? { value } : {})
-  };
 }
 
 export function diagnosticFromError(error: unknown, fallbackCode = "EVAL_FAILED"): RuntimeDiagnostic {

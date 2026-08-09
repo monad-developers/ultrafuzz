@@ -36,6 +36,8 @@ export const EVAL_RUN_RECORD_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-record:
 export const EVAL_RUN_SUMMARY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-summary:2" as const;
 export const EVAL_FINDING_SCORE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:finding-score:1" as const;
 export const EVAL_SCORE_SUMMARY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:score-summary:1" as const;
+export const EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:recovery-equivalence:1" as const;
+export const EVAL_STATUS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:status:1" as const;
 export const EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID = "urn:ultrafuzz:schema:evals:review-queue-item:2" as const;
 export const EVAL_PUBLICATION_STATE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:publication-state:1" as const;
 export const EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:public-eval-diagnostics:2" as const;
@@ -51,6 +53,7 @@ interface EvalSchemaMetadata {
     | "evalSuiteInputSchema"
     | "evmbenchCohortZodSchema"
     | "publicEvalDiagnosticsZodSchema"
+    | "recoveryEquivalenceZodSchema"
     | "ultrafuzzBenchCohortZodSchema";
   semanticGates: readonly string[];
 }
@@ -108,6 +111,12 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
     typescriptExport: "evalPublicationStateJsonSchema",
     semanticGates: []
   },
+  "eval-recovery-equivalence.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalRecoveryEquivalenceJsonSchema",
+    zodParser: "recoveryEquivalenceZodSchema",
+    semanticGates: ["eval-recovery-equivalence-coupling"]
+  },
   "eval-public-diagnostics.schema.json": {
     role: "runtime-state",
     typescriptExport: "evalPublicDiagnosticsJsonSchema",
@@ -146,6 +155,11 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
       "eval-score-summary-lineage",
       "eval-recovery-equivalence-coupling"
     ]
+  },
+  "eval-status.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalStatusJsonSchema",
+    semanticGates: ["eval-status-consistency"]
   },
   "eval-suite.schema.json": {
     role: "runtime-state",
@@ -218,11 +232,13 @@ export const evalInstanceClustersJsonSchema = loadSchemaDocument("instance-clust
 export const evalMatrixJsonSchema = loadSchemaDocument("eval-matrix.schema.json");
 export const evalPublicDiagnosticsJsonSchema = loadSchemaDocument("eval-public-diagnostics.schema.json");
 export const evalPublicationStateJsonSchema = loadSchemaDocument("eval-publication-state.schema.json");
+export const evalRecoveryEquivalenceJsonSchema = loadSchemaDocument("eval-recovery-equivalence.schema.json");
 export const evalReviewQueueItemJsonSchema = loadSchemaDocument("eval-review-queue-item.schema.json");
 export const evalRunManifestJsonSchema = loadSchemaDocument("eval-run-manifest.schema.json");
 export const evalRunRecordJsonSchema = loadSchemaDocument("eval-run-record.schema.json");
 export const evalRunSummaryJsonSchema = loadSchemaDocument("eval-run-summary.schema.json");
 export const evalScoreSummaryJsonSchema = loadSchemaDocument("eval-score-summary.schema.json");
+export const evalStatusJsonSchema = loadSchemaDocument("eval-status.schema.json");
 export const evalSuiteJsonSchema = loadSchemaDocument("eval-suite.schema.json");
 export const evalEvmbenchCohortJsonSchema = loadSchemaDocument("evmbench-cohort.schema.json");
 export const evalTelemetryCursorJsonSchema = loadSchemaDocument("telemetry-cursor.schema.json");
@@ -242,11 +258,13 @@ export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalMatrixJsonSchema,
   evalPublicDiagnosticsJsonSchema,
   evalPublicationStateJsonSchema,
+  evalRecoveryEquivalenceJsonSchema,
   evalReviewQueueItemJsonSchema,
   evalRunManifestJsonSchema,
   evalRunRecordJsonSchema,
   evalRunSummaryJsonSchema,
   evalScoreSummaryJsonSchema,
+  evalStatusJsonSchema,
   evalSuiteJsonSchema,
   evalEvmbenchCohortJsonSchema,
   evalTelemetryCursorJsonSchema
@@ -264,11 +282,13 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "eval-matrix.schema.json": evalMatrixJsonSchema,
   "eval-public-diagnostics.schema.json": evalPublicDiagnosticsJsonSchema,
   "eval-publication-state.schema.json": evalPublicationStateJsonSchema,
+  "eval-recovery-equivalence.schema.json": evalRecoveryEquivalenceJsonSchema,
   "eval-review-queue-item.schema.json": evalReviewQueueItemJsonSchema,
   "eval-run-manifest.schema.json": evalRunManifestJsonSchema,
   "eval-run-record.schema.json": evalRunRecordJsonSchema,
   "eval-run-summary.schema.json": evalRunSummaryJsonSchema,
   "eval-score-summary.schema.json": evalScoreSummaryJsonSchema,
+  "eval-status.schema.json": evalStatusJsonSchema,
   "eval-suite.schema.json": evalSuiteJsonSchema,
   "evmbench-cohort.schema.json": evalEvmbenchCohortJsonSchema,
   "finding-manifest.schema.json": evalFindingManifestJsonSchema,

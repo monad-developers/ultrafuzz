@@ -10,9 +10,12 @@ import {
   calculateEvalEta,
   EVAL_STATUS_ETA_BASIS,
   EVAL_STATUS_SCHEMA_VERSION,
+  parseEvalStatusSnapshot,
   readEvalStatus,
   renderEvalStatusTable
 } from "../src/status.js";
+import { EVAL_STATUS_SCHEMA_ID, validateEvalJsonSchema } from "../src/eval-schema-registry.js";
+import { executeEvalSchemaSemanticGates } from "../src/eval-semantic-gates.js";
 import type { EvalMatrixRow } from "../src/types.js";
 import { currentEvalRunRecord, currentRunState, testRow, testSuite } from "./helpers.js";
 
@@ -22,6 +25,27 @@ const SNAPSHOT = new Date("2026-01-02T15:01:52.000Z");
 const EVAL_RUN_ID = "synthetic-status";
 
 describe("eval status", () => {
+  it("validates the checked-in whole-document fixture and executes nonportable consistency gates", () => {
+    const fixture = JSON.parse(
+      fs.readFileSync(new URL("./fixtures/eval-status.valid.json", import.meta.url), "utf8")
+    ) as ReturnType<typeof parseEvalStatusSnapshot>;
+    expect(validateEvalJsonSchema(EVAL_STATUS_SCHEMA_ID, fixture)).toMatchObject({ ok: true });
+    expect(executeEvalSchemaSemanticGates(EVAL_STATUS_SCHEMA_ID, fixture)).toEqual([]);
+    expect(parseEvalStatusSnapshot(fixture)).toEqual(fixture);
+
+    const extra = { ...fixture, legacy: true };
+    expect(validateEvalJsonSchema(EVAL_STATUS_SCHEMA_ID, extra).ok).toBe(false);
+    expect(() => parseEvalStatusSnapshot(extra)).toThrow();
+
+    const inconsistent = structuredClone(fixture);
+    inconsistent.rows[0]!.progress_percent = 99;
+    expect(validateEvalJsonSchema(EVAL_STATUS_SCHEMA_ID, inconsistent).ok).toBe(true);
+    expect(executeEvalSchemaSemanticGates(EVAL_STATUS_SCHEMA_ID, inconsistent)).toEqual([
+      expect.objectContaining({ gate: "eval-status-consistency", path: "$.rows[0].progress_percent" })
+    ]);
+    expect(() => parseEvalStatusSnapshot(inconsistent)).toThrow();
+  });
+
   it("reports every private matrix row with opaque labels and terminal node progress", () => {
     const fixture = evalFixture([privateRow("private-target-alpha"), privateRow("private-target-beta")]);
     const runningRoot = path.join(fixture.base, "sensitive-checkout-alpha");

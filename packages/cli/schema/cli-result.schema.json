@@ -1442,67 +1442,7 @@
         "report_url": { "type": "string" }
       }
     },
-    "evalStatusData": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["schema_version", "snapshot_at", "stale_after_seconds", "completed_node_statuses", "rows"],
-      "properties": {
-        "schema_version": { "const": "ultrafuzz.eval.status.v1" },
-        "snapshot_at": { "type": "string", "format": "date-time" },
-        "stale_after_seconds": { "$ref": "#/$defs/positiveInteger" },
-        "completed_node_statuses": { "$ref": "#/$defs/stringArray" },
-        "rows": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "row",
-              "status",
-              "terminal",
-              "executed_nodes",
-              "total_nodes",
-              "progress_percent",
-              "eta_remaining_seconds",
-              "eta_at",
-              "checkpoint_age_seconds",
-              "checkpoint_stale",
-              "eta_basis",
-              "eta_unavailable_reason"
-            ],
-            "properties": {
-              "row": { "type": "string" },
-              "status": {
-                "enum": [
-                  "pending",
-                  "running",
-                  "paused",
-                  "succeeded",
-                  "failed",
-                  "timed-out",
-                  "canceled",
-                  "not-launched",
-                  "inaccessible",
-                  "invalid"
-                ]
-              },
-              "terminal": { "type": "boolean" },
-              "executed_nodes": { "type": ["integer", "null"], "minimum": 0 },
-              "total_nodes": { "type": ["integer", "null"], "minimum": 0 },
-              "progress_percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
-              "eta_remaining_seconds": { "type": ["integer", "null"], "minimum": 0 },
-              "eta_at": { "type": ["string", "null"], "format": "date-time" },
-              "checkpoint_age_seconds": { "type": ["number", "null"], "minimum": 0 },
-              "checkpoint_stale": { "type": ["boolean", "null"] },
-              "eta_basis": { "enum": ["observed-terminal-node-throughput", "terminal", null] },
-              "eta_unavailable_reason": {
-                "enum": ["progress-unavailable", "no-completed-nodes", "timing-unavailable", "checkpoint-stale", null]
-              }
-            }
-          }
-        }
-      }
-    },
+    "evalStatusData": { "$ref": "urn:ultrafuzz:schema:evals:status:1" },
     "evalBundleData": {
       "type": "object",
       "additionalProperties": false,

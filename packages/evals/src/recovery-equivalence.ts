@@ -17,6 +17,7 @@ import {
 import { z } from "zod/v4";
 
 import { evalRecoveryEquivalenceSemanticIssues } from "./eval-semantic-gates.js";
+import { EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID, validateEvalJsonSchema } from "./eval-schema-registry.js";
 import { resolveRecoveryEquivalencePolicy } from "./suite.js";
 import {
   type EvalRecoveryEquivalence,
@@ -32,32 +33,22 @@ export const RECOVERY_EQUIVALENCE_SCHEMA_VERSION = "ultrafuzz.eval.recovery-equi
 const MAX_RECOVERY_SOURCE_BYTES = 16 * 1024 * 1024;
 const nonNegativeInteger = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 
-const recoveryEquivalenceSchema = z
-  .strictObject({
-    schema_version: z.literal(RECOVERY_EQUIVALENCE_SCHEMA_VERSION),
-    policy: z.strictObject({ max_repeated_model_executions: nonNegativeInteger }),
-    unique_model_backed_node_executions: nonNegativeInteger,
-    repeated_model_backed_node_executions: nonNegativeInteger,
-    recovery_reexecuted_model_backed_node_executions: nonNegativeInteger,
-    infrastructure_only_recovery_generations: nonNegativeInteger,
-    model_work_recovery_generations: nonNegativeInteger,
-    no_progress_recovery_generations: nonNegativeInteger,
-    recovery_generations: nonNegativeInteger,
-    observed_node_attempts: nonNegativeInteger,
-    observed_workflow_executions: nonNegativeInteger,
-    observed_controller_invocations: nonNegativeInteger,
-    classification: z.enum(["clean", "infrastructure-recovered", "model-reexecuted-within-policy", "non-comparable"]),
-    reason: z.string().min(1).regex(/\S/u).nullable()
-  })
-  .superRefine((value, context) => {
-    for (const issue of evalRecoveryEquivalenceSemanticIssues(value)) {
-      context.addIssue({
-        code: "custom",
-        path: [...issue.path],
-        message: issue.message
-      });
-    }
-  });
+export const recoveryEquivalenceZodSchema = z.strictObject({
+  schema_version: z.literal(RECOVERY_EQUIVALENCE_SCHEMA_VERSION),
+  policy: z.strictObject({ max_repeated_model_executions: nonNegativeInteger }),
+  unique_model_backed_node_executions: nonNegativeInteger,
+  repeated_model_backed_node_executions: nonNegativeInteger,
+  recovery_reexecuted_model_backed_node_executions: nonNegativeInteger,
+  infrastructure_only_recovery_generations: nonNegativeInteger,
+  model_work_recovery_generations: nonNegativeInteger,
+  no_progress_recovery_generations: nonNegativeInteger,
+  recovery_generations: nonNegativeInteger,
+  observed_node_attempts: nonNegativeInteger,
+  observed_workflow_executions: nonNegativeInteger,
+  observed_controller_invocations: nonNegativeInteger,
+  classification: z.enum(["clean", "infrastructure-recovered", "model-reexecuted-within-policy", "non-comparable"]),
+  reason: z.string().min(1).regex(/\S/u).nullable()
+});
 
 interface RecoveryGeneration {
   id: string;
@@ -75,7 +66,28 @@ interface ControllerObservation {
 }
 
 export function parseRecoveryEquivalence(value: unknown): EvalRecoveryEquivalence {
-  return recoveryEquivalenceSchema.parse(value) as EvalRecoveryEquivalence;
+  const canonical = validateEvalJsonSchema(EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID, value);
+  if (!canonical.ok) {
+    throw new EvalError("EVAL_RECOVERY_EQUIVALENCE_INVALID", "recovery equivalence failed canonical schema", {
+      schema_id: EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID,
+      issues: canonical.issues,
+      truncated: canonical.truncated
+    });
+  }
+  const retained = recoveryEquivalenceZodSchema.safeParse(value);
+  if (!retained.success) {
+    throw new EvalError(
+      "EVAL_RECOVERY_EQUIVALENCE_SCHEMA_DRIFT",
+      "canonical recovery-equivalence schema and retained Zod parser disagree"
+    );
+  }
+  const semanticIssues = evalRecoveryEquivalenceSemanticIssues(retained.data);
+  if (semanticIssues.length > 0) {
+    throw new EvalError("EVAL_RECOVERY_EQUIVALENCE_INVALID", "recovery equivalence failed semantic validation", {
+      issues: semanticIssues
+    });
+  }
+  return retained.data as EvalRecoveryEquivalence;
 }
 
 /**
@@ -261,13 +273,17 @@ export function recoveryEquivalenceIsPublishable(
   policyInput: EvalRecoveryEquivalencePolicy | undefined
 ): boolean {
   const policy = resolveRecoveryEquivalencePolicy(policyInput);
-  const parsed = recoveryEquivalenceSchema.safeParse(equivalence);
-  if (!parsed.success) return false;
+  let parsed: EvalRecoveryEquivalence;
+  try {
+    parsed = parseRecoveryEquivalence(equivalence);
+  } catch {
+    return false;
+  }
   return (
-    parsed.data.policy.max_repeated_model_executions === policy.max_repeated_model_executions &&
-    parsed.data.recovery_reexecuted_model_backed_node_executions <= policy.max_repeated_model_executions &&
-    parsed.data.classification !== "non-comparable" &&
-    (policy.publication !== "clean" || parsed.data.classification === "clean")
+    parsed.policy.max_repeated_model_executions === policy.max_repeated_model_executions &&
+    parsed.recovery_reexecuted_model_backed_node_executions <= policy.max_repeated_model_executions &&
+    parsed.classification !== "non-comparable" &&
+    (policy.publication !== "clean" || parsed.classification === "clean")
   );
 }
 

@@ -114,6 +114,11 @@ test("every known command has exactly one result discriminator", () => {
   }
 });
 
+test("eval status CLI data references the eval-owned whole-document contract", () => {
+  const definitions = cliResultJsonSchema.$defs as Record<string, unknown>;
+  assert.deepEqual(definitions.evalStatusData, { $ref: "urn:ultrafuzz:schema:evals:status:1" });
+});
+
 test("CLI result v2 rejects legacy, open, and mistyped envelopes", () => {
   const invalid = [
     { ...validInitEnvelope, schema_version: "ultrafuzz.cli.result.v1" },

@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:recovery-equivalence:1",
+  "title": "Ultrafuzz eval recovery equivalence v1",
+  "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/recoveryEquivalence"
+}

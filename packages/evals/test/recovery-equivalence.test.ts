@@ -8,6 +8,7 @@ import { createEventRecord, createNodeAttemptLedgerEntry, type AppendNodeAttempt
 import { describe, expect, it } from "vitest";
 
 import {
+  EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID,
   EVAL_RUN_RECORD_SCHEMA_ID,
   EVAL_RUN_SUMMARY_SCHEMA_ID,
   EVAL_SCORE_SUMMARY_SCHEMA_ID,
@@ -18,6 +19,7 @@ import {
   classifyRecoveryEquivalence,
   parseRecoveryEquivalence,
   reconcileEvalRunRecords,
+  recoveryEquivalenceZodSchema,
   recoveryEquivalenceCanBeRecorded,
   recoveryEquivalenceIsPublishable,
   withRecordedRecoveryEquivalence
@@ -263,6 +265,28 @@ function ajvAndGatesAccept(schemaId: string, value: unknown): boolean {
 }
 
 describe("recovery equivalence", () => {
+  it("materializes a direct JSON-first whole-document contract with exact retained Zod shape parity", () => {
+    const recovery = JSON.parse(
+      fs.readFileSync(new URL("./fixtures/recovery-equivalence.valid.json", import.meta.url), "utf8")
+    ) as EvalRecoveryEquivalence;
+    expect(validateEvalJsonSchema(EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID, recovery)).toMatchObject({ ok: true });
+    expect(recoveryEquivalenceZodSchema.safeParse(recovery)).toMatchObject({ success: true, data: recovery });
+    expect(executeEvalSchemaSemanticGates(EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID, recovery)).toEqual([]);
+    expect(parseRecoveryEquivalence(recovery)).toEqual(recovery);
+
+    const extra = { ...recovery, repaired: true };
+    expect(validateEvalJsonSchema(EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID, extra).ok).toBe(false);
+    expect(recoveryEquivalenceZodSchema.safeParse(extra).success).toBe(false);
+
+    const inconsistent = { ...recovery, observed_workflow_executions: 2 };
+    expect(validateEvalJsonSchema(EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID, inconsistent).ok).toBe(true);
+    expect(recoveryEquivalenceZodSchema.safeParse(inconsistent).success).toBe(true);
+    expect(executeEvalSchemaSemanticGates(EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID, inconsistent)).toEqual([
+      expect.objectContaining({ gate: EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE, path: "$.classification" })
+    ]);
+    expect(() => parseRecoveryEquivalence(inconsistent)).toThrow();
+  });
+
   it.each([
     { name: "clean execution", recovery: cleanRecoveryEquivalence() },
     { name: "infrastructure-only recovery", recovery: infrastructureRecoveryEquivalence() },

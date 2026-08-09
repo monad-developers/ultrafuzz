@@ -5,18 +5,20 @@ import {
   EVAL_BENCHMARK_LANES_SCHEMA_ID,
   EVAL_BENCHMARK_PROVENANCE_SCHEMA_ID,
   EVAL_BENCHMARK_SOURCE_MANIFEST_SCHEMA_ID,
+  EVAL_EVMBENCH_COHORT_SCHEMA_ID,
   EVAL_FINDING_SCORE_SCHEMA_ID,
   EVAL_FINDING_MANIFEST_SCHEMA_ID,
   EVAL_GROUND_TRUTH_CREDITS_SCHEMA_ID,
   EVAL_INSTANCE_CLUSTERS_SCHEMA_ID,
   EVAL_MATRIX_SCHEMA_ID,
   EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID,
+  EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID,
   EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID,
   EVAL_RUN_MANIFEST_SCHEMA_ID,
   EVAL_RUN_RECORD_SCHEMA_ID,
   EVAL_RUN_SUMMARY_SCHEMA_ID,
   EVAL_SCORE_SUMMARY_SCHEMA_ID,
-  EVAL_EVMBENCH_COHORT_SCHEMA_ID,
+  EVAL_STATUS_SCHEMA_ID,
   evalSchemaRegistry
 } from "./eval-schema-registry.js";
 import type {
@@ -35,6 +37,7 @@ import type {
   BenchmarkSourceManifest
 } from "./benchmark-analysis-contracts.js";
 import { publicEvalDiagnosticsSemanticIssues, type PublicEvalDiagnostics } from "./public-diagnostics.js";
+import { evalStatusSemanticIssues, type EvalStatusSnapshot } from "./status.js";
 import type {
   EvalFindingScore,
   EvalMatrixRow,
@@ -76,6 +79,7 @@ const gateHandlers: Readonly<Record<string, EvalSemanticGate>> = Object.freeze({
   "eval-instance-clusters-identity-joins": instanceClustersIdentityJoins,
   "eval-matrix-identity-joins": matrixIdentityJoins,
   "eval-public-diagnostics-consistency": publicDiagnosticsConsistency,
+  "eval-status-consistency": statusConsistency,
   "eval-review-queue-decision-coupling": reviewQueueDecisionCoupling,
   [EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE]: recoveryEquivalenceCoupling,
   "eval-run-manifest-suite-joins": runManifestSuiteJoins,
@@ -99,6 +103,7 @@ const gatesBySchema: Readonly<Record<string, readonly string[]>> = Object.freeze
   [EVAL_INSTANCE_CLUSTERS_SCHEMA_ID]: ["eval-instance-clusters-identity-joins"],
   [EVAL_MATRIX_SCHEMA_ID]: ["eval-matrix-identity-joins"],
   [EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID]: ["eval-public-diagnostics-consistency"],
+  [EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID]: [EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE],
   [EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID]: ["eval-review-queue-decision-coupling"],
   [EVAL_RUN_MANIFEST_SCHEMA_ID]: ["eval-run-manifest-suite-joins"],
   [EVAL_RUN_RECORD_SCHEMA_ID]: ["eval-run-record-lifecycle-coupling", EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE],
@@ -112,7 +117,8 @@ const gatesBySchema: Readonly<Record<string, readonly string[]>> = Object.freeze
     "eval-score-summary-lineage",
     EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE
   ],
-  [EVAL_EVMBENCH_COHORT_SCHEMA_ID]: ["eval-benchmark-cohort-identity-joins"]
+  [EVAL_EVMBENCH_COHORT_SCHEMA_ID]: ["eval-benchmark-cohort-identity-joins"],
+  [EVAL_STATUS_SCHEMA_ID]: ["eval-status-consistency"]
 });
 
 export function executeEvalSchemaSemanticGates(schemaId: string, value: unknown): EvalSemanticGateIssue[] {
@@ -310,6 +316,12 @@ function sameProfile(actual: BenchmarkModelProfileManifest, expected: BenchmarkM
 function publicDiagnosticsConsistency(value: unknown): EvalSemanticGateIssue[] {
   const gate = "eval-public-diagnostics-consistency";
   return publicEvalDiagnosticsSemanticIssues(value as PublicEvalDiagnostics).map((entry) => ({ gate, ...entry }));
+}
+
+function statusConsistency(value: unknown): EvalSemanticGateIssue[] {
+  return evalStatusSemanticIssues(value as EvalStatusSnapshot).map((entry) =>
+    issue("eval-status-consistency", entry.path, entry.message)
+  );
 }
 
 function findingManifestIdentityJoins(value: unknown): EvalSemanticGateIssue[] {
@@ -755,6 +767,13 @@ export function evalRecoveryEquivalenceSemanticIssues(
 }
 
 function recoveryEquivalenceCoupling(value: unknown): EvalSemanticGateIssue[] {
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { schema_version?: unknown }).schema_version === "ultrafuzz.eval.recovery-equivalence.v1"
+  ) {
+    return recoveryEquivalenceIssuesAt(value as EvalRecoveryEquivalence, "$");
+  }
   if (isEvalScoreSummary(value)) {
     return value.rows.flatMap((row, index) =>
       recoveryEquivalenceIssuesAt(row.recovery_equivalence, `$.rows[${index}].recovery_equivalence`)

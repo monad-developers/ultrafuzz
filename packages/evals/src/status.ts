@@ -11,6 +11,7 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import { readEvalMatrix, readEvalRunRecords } from "./eval-durable.js";
+import { EVAL_STATUS_SCHEMA_ID, validateEvalJsonSchema } from "./eval-schema-registry.js";
 import type { EvalRunRecord } from "./types.js";
 import { EvalError, evalRunRoot, isRecord } from "./utils.js";
 
@@ -44,6 +45,11 @@ export interface EvalStatusSnapshot {
   stale_after_seconds: number;
   completed_node_statuses: string[];
   rows: EvalStatusRow[];
+}
+
+export interface EvalStatusSemanticIssue {
+  path: string;
+  message: string;
 }
 
 export interface ReadEvalStatusInput {
@@ -108,7 +114,7 @@ export function readEvalStatus(input: ReadEvalStatusInput): EvalStatusSnapshot {
     if (row.id !== null) idCounts.set(row.id, (idCounts.get(row.id) ?? 0) + 1);
   }
 
-  return {
+  return parseEvalStatusSnapshot({
     schema_version: EVAL_STATUS_SCHEMA_VERSION,
     snapshot_at: now.toISOString(),
     stale_after_seconds: staleAfterSeconds,
@@ -129,7 +135,128 @@ export function readEvalStatus(input: ReadEvalStatusInput): EvalStatusSnapshot {
         staleAfterSeconds
       });
     })
-  };
+  });
+}
+
+export function parseEvalStatusSnapshot(value: unknown, source = "eval status"): EvalStatusSnapshot {
+  const canonical = validateEvalJsonSchema(EVAL_STATUS_SCHEMA_ID, value);
+  if (!canonical.ok) {
+    throw new EvalError("EVAL_STATUS_INVALID", `${source} failed canonical schema validation`, {
+      schema_id: EVAL_STATUS_SCHEMA_ID,
+      issues: canonical.issues,
+      truncated: canonical.truncated
+    });
+  }
+  const snapshot = value as EvalStatusSnapshot;
+  const semanticIssues = evalStatusSemanticIssues(snapshot);
+  if (semanticIssues.length > 0) {
+    throw new EvalError("EVAL_STATUS_INVALID", `${source} failed semantic validation`, { issues: semanticIssues });
+  }
+  return snapshot;
+}
+
+export function evalStatusSemanticIssues(snapshot: EvalStatusSnapshot): EvalStatusSemanticIssue[] {
+  const issues: EvalStatusSemanticIssue[] = [];
+  const snapshotAtMs = Date.parse(snapshot.snapshot_at);
+  const expectedCompletedStatuses = [...TERMINAL_NODE_STATE_STATUSES];
+  if (JSON.stringify(snapshot.completed_node_statuses) !== JSON.stringify(expectedCompletedStatuses)) {
+    issues.push({
+      path: "$.completed_node_statuses",
+      message: "must equal the canonical terminal node-status sequence"
+    });
+  }
+  const seenRows = new Set<string>();
+  for (const [index, row] of snapshot.rows.entries()) {
+    const root = `$.rows[${index}]`;
+    if (seenRows.has(row.row)) issues.push({ path: `${root}.row`, message: "row labels must be unique" });
+    seenRows.add(row.row);
+    const expectedLabel = `row-${String(index + 1).padStart(Math.max(2, String(snapshot.rows.length).length), "0")}`;
+    if (row.row !== expectedLabel) {
+      issues.push({ path: `${root}.row`, message: `must equal the canonical matrix position ${expectedLabel}` });
+    }
+    const terminalStatus = TERMINAL_RUN_STATUSES.has(row.status);
+    if (row.terminal !== terminalStatus) {
+      issues.push({ path: `${root}.terminal`, message: "must match the row status" });
+    }
+    const progressValues = [row.executed_nodes, row.total_nodes, row.progress_percent];
+    const progressAvailable = progressValues.every((entry) => entry !== null);
+    if (progressValues.some((entry) => entry !== null) && !progressAvailable) {
+      issues.push({ path: root, message: "progress counts and percentage must be present or null together" });
+    }
+    if (progressAvailable) {
+      const executed = row.executed_nodes!;
+      const total = row.total_nodes!;
+      if (executed > total) {
+        issues.push({ path: `${root}.executed_nodes`, message: "must not exceed total_nodes" });
+      } else {
+        const expectedProgress = total === 0 ? (row.terminal ? 100 : 0) : Number(((executed / total) * 100).toFixed(1));
+        if (!Object.is(row.progress_percent, expectedProgress)) {
+          issues.push({ path: `${root}.progress_percent`, message: `must equal ${expectedProgress}` });
+        }
+      }
+    } else if (row.eta_unavailable_reason !== "progress-unavailable") {
+      issues.push({ path: `${root}.eta_unavailable_reason`, message: "must explain unavailable progress" });
+    }
+    if ((row.checkpoint_age_seconds === null) !== (row.checkpoint_stale === null)) {
+      issues.push({ path: root, message: "checkpoint age and stale flag must be present or null together" });
+    } else if (
+      row.checkpoint_age_seconds !== null &&
+      row.checkpoint_stale !== row.checkpoint_age_seconds > snapshot.stale_after_seconds
+    ) {
+      issues.push({ path: `${root}.checkpoint_stale`, message: "must match the snapshot stale threshold" });
+    }
+    const etaAvailable = row.eta_remaining_seconds !== null || row.eta_at !== null || row.eta_basis !== null;
+    if (etaAvailable) {
+      if (
+        row.eta_remaining_seconds === null ||
+        row.eta_at === null ||
+        row.eta_basis === null ||
+        row.eta_unavailable_reason !== null
+      ) {
+        issues.push({ path: root, message: "ETA value, timestamp, basis, and reason are inconsistent" });
+      } else if (
+        row.eta_basis === "terminal" &&
+        (row.eta_remaining_seconds !== 0 || (!row.terminal && row.executed_nodes !== row.total_nodes))
+      ) {
+        issues.push({
+          path: `${root}.eta_basis`,
+          message: "terminal ETA requires zero seconds and terminal or fully executed progress"
+        });
+      } else if (row.eta_basis === EVAL_STATUS_ETA_BASIS) {
+        if (
+          row.terminal ||
+          !progressAvailable ||
+          row.executed_nodes === 0 ||
+          row.executed_nodes === row.total_nodes ||
+          row.checkpoint_stale !== false
+        ) {
+          issues.push({
+            path: `${root}.eta_basis`,
+            message: "throughput ETA requires fresh, partial, nonterminal progress"
+          });
+        }
+        if (Date.parse(row.eta_at) !== snapshotAtMs + row.eta_remaining_seconds * 1_000) {
+          issues.push({ path: `${root}.eta_at`, message: "must equal snapshot_at plus eta_remaining_seconds" });
+        }
+      } else if (row.eta_basis === "terminal" && Date.parse(row.eta_at) > snapshotAtMs) {
+        issues.push({ path: `${root}.eta_at`, message: "terminal ETA cannot be after snapshot_at" });
+      }
+    } else {
+      if (row.eta_unavailable_reason === null) {
+        issues.push({ path: `${root}.eta_unavailable_reason`, message: "is required when ETA is unavailable" });
+      } else if (row.eta_unavailable_reason === "progress-unavailable" && progressAvailable) {
+        issues.push({ path: `${root}.eta_unavailable_reason`, message: "requires unavailable progress" });
+      } else if (
+        row.eta_unavailable_reason === "no-completed-nodes" &&
+        (!progressAvailable || row.executed_nodes !== 0)
+      ) {
+        issues.push({ path: `${root}.eta_unavailable_reason`, message: "requires zero completed nodes" });
+      } else if (row.eta_unavailable_reason === "checkpoint-stale" && row.checkpoint_stale !== true) {
+        issues.push({ path: `${root}.eta_unavailable_reason`, message: "requires a stale checkpoint" });
+      }
+    }
+  }
+  return issues;
 }
 
 export function calculateEvalEta(input: CalculateEvalEtaInput): EvalEta {

@@ -2,7 +2,6 @@ import type { NodeStatus, NormalizedFinding, RunStatus } from "@ultrafuzz/artifa
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 export const EVAL_SPEC_SCHEMA_VERSION = "ultrafuzz.eval.v2" as const;
-export const EVAL_RESULT_SCHEMA_VERSION = "ultrafuzz.eval.result.v1" as const;
 export const EVAL_RUN_SCHEMA_VERSION = "ultrafuzz.eval.run.v3" as const;
 export const EVAL_RUN_SUMMARY_SCHEMA_VERSION = "ultrafuzz.eval.run-summary.v2" as const;
 export const EVAL_FINDING_SCORE_SCHEMA_VERSION = "ultrafuzz.eval.finding-score.v1" as const;
@@ -18,13 +17,6 @@ export type EvalClassificationReasonCode =
   | "weak-unmatched-finding"
   | "panel-disagreement";
 export type ReviewerStatus = "pending" | "accepted" | "rejected" | "needs-more-evidence";
-
-export interface EvalResult<T> {
-  schema_version: typeof EVAL_RESULT_SCHEMA_VERSION;
-  ok: boolean;
-  diagnostics: RuntimeDiagnostic[];
-  value?: T;
-}
 
 export interface EvalModelProfile {
   agent: string;
