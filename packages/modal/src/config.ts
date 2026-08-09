@@ -10,6 +10,9 @@ import {
   DEFAULT_MODAL_IMAGE,
   DEFAULT_NODE_TIMEOUT_SECONDS,
   MODAL_BENCHMARK_SCHEMA_VERSION,
+  MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS,
+  MODAL_PUBLIC_SANDBOX_TIMEOUT_MS,
+  MODAL_SANDBOX_TIMEOUT_MS,
   type ModalModelSpec
 } from "./defaults.js";
 
@@ -173,6 +176,14 @@ export type PrivateModalBenchmarkConfig = Extract<ModalBenchmarkConfig, { target
 
 export function isPublicModalBenchmarkConfig(config: ModalBenchmarkConfig): config is PublicModalBenchmarkConfig {
   return "public_benchmark" in config;
+}
+
+/** Timeout recorded when a new benchmark launch generation is created. */
+export function configuredModalSandboxTimeoutMs(config: ModalBenchmarkConfig): number {
+  if (!isPublicModalBenchmarkConfig(config)) return MODAL_SANDBOX_TIMEOUT_MS;
+  return config.public_benchmark.lane === "full"
+    ? MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS
+    : MODAL_PUBLIC_SANDBOX_TIMEOUT_MS;
 }
 
 export function parseModalBenchmarkConfig(value: unknown): ModalBenchmarkConfig {

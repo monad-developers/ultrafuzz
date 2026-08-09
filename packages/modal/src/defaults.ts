@@ -4,6 +4,12 @@ export const MODAL_RECOVERY_STATE_SCHEMA_VERSION = "ultrafuzz.modal.recovery-sta
 export const MODAL_WORKER_LINEAGE_SCHEMA_VERSION = "ultrafuzz.modal.worker-lineage.v1" as const;
 export const MODAL_WORKER_STATUS_SCHEMA_VERSION = "ultrafuzz.modal.worker-status.v2" as const;
 export const MODAL_MAX_SANDBOX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+export const MODAL_PUBLIC_SANDBOX_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+// A full public EVMBench pair may legitimately spend roughly 14.5 hours in
+// preparation, eight eval/score waves, cleanup, and report generation. Keep
+// that lane bounded below the historical 24-hour default without expiring a
+// worker inside its own accepted command envelope.
+export const MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS = 16 * 60 * 60 * 1000;
 export const MODAL_RECOVERY_SANDBOX_TIMEOUT_MS = MODAL_MAX_SANDBOX_TIMEOUT_MS;
 export const MODAL_OVERSEER_POLL_MS = 60 * 1000;
 // Consecutive poll ticks in which EVERY supervised job threw before the overseer gives up loudly.

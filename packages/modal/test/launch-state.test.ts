@@ -411,6 +411,7 @@ describe("Modal lineage", () => {
       generation: 1,
       generation_mode: "resume",
       image_id: "image-id-placeholder",
+      timeout_ms: 60_000,
       fingerprints: {
         config: CONFIG_FINGERPRINT,
         source: SOURCE_FINGERPRINT,

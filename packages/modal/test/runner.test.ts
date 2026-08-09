@@ -17,7 +17,12 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import { fingerprintModalModel, isPublicModalBenchmarkConfig, parseModalBenchmarkConfig } from "../src/config.js";
-import type { ModalModelSpec } from "../src/defaults.js";
+import {
+  MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS,
+  MODAL_PUBLIC_SANDBOX_TIMEOUT_MS,
+  MODAL_SANDBOX_TIMEOUT_MS,
+  type ModalModelSpec
+} from "../src/defaults.js";
 import {
   createModalLaunchState,
   latestModalWorkerStatus,
@@ -42,6 +47,7 @@ import {
   assertSanitizedModalCollectedFiles,
   classifyModalLaunchFailure,
   createModalBenchmarkSandbox,
+  createModalLaunchSandbox,
   createExactCandidateSourceArchive,
   createTrackedSourceArchive,
   finishReservedModalLaunch,
@@ -103,6 +109,33 @@ describe("Modal benchmark capacity", () => {
       memoryMiB: 32_768,
       memoryLimitMiB: 65_536
     });
+  });
+
+  it.each([
+    ["new public smoke", MODAL_PUBLIC_SANDBOX_TIMEOUT_MS],
+    ["new public full", MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS],
+    ["persisted 24-hour", MODAL_SANDBOX_TIMEOUT_MS]
+  ])("creates a %s worker with the timeout recorded in launch state", async (_label, timeoutMs) => {
+    const app = {} as App;
+    const image = {} as Image;
+    const sandbox = {} as Sandbox;
+    const sandboxes = {
+      create: vi.fn(async (_app: App, _image: Image, _params?: SandboxCreateParams) => sandbox)
+    };
+    const state = createModalLaunchState({
+      logicalRunId: "timeout-run",
+      generation: 1,
+      generationMode: "resume",
+      app: "app-placeholder",
+      image: "image-placeholder",
+      imageId: "image-id-placeholder",
+      timeoutMs,
+      sourceRevision: "revision-placeholder",
+      fingerprints: { config: "a".repeat(64), source: "b".repeat(64), image: "c".repeat(64) }
+    });
+
+    await expect(createModalLaunchSandbox(sandboxes, app, image, state, { name: "worker" })).resolves.toBe(sandbox);
+    expect(sandboxes.create).toHaveBeenCalledWith(app, image, expect.objectContaining({ name: "worker", timeoutMs }));
   });
 });
 
