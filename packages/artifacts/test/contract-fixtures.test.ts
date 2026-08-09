@@ -12,10 +12,22 @@ import {
   ARTIFACT_SCHEMA_METADATA,
   JSON_ARTIFACT_CONTRACT_IDS,
   NON_JSON_ARTIFACT_CONTRACT_IDS,
+  analysisAccountingSummarySchema,
+  analysisAttemptHistorySchema,
+  analysisBundleOmissionsSchema,
+  analysisEvaluationMetricsSchema,
   analysisBundleManifestSchema,
+  analysisRecoverySummarySchema,
+  analysisTerminalStatusSchema,
   artifactContractDefinition,
   artifactContractSchemaFile,
   artifactSchemaRegistry,
+  assertAnalysisAccountingSummary,
+  assertAnalysisAttemptHistory,
+  assertAnalysisBundleOmissions,
+  assertAnalysisEvaluationMetrics,
+  assertAnalysisRecoverySummary,
+  assertAnalysisTerminalStatus,
   createInitialRunState,
   executeSemanticGate,
   invariantLedgerSchema,
@@ -165,6 +177,276 @@ test("Ajv and every retained Zod parser agree bidirectionally on positive, negat
         assertParity(entry.id, parser!, missing, false, `${entry.filename}:missing:${key}`);
       }
     }
+  }
+});
+
+test("analysis-bundle payload schemas and retained Zod reject the same current-version and boundary mutations", () => {
+  const cases: Array<{ filename: string; parser: ZodLikeParser; label: string; value: unknown; expected: boolean }> =
+    [];
+  const add = (filename: string, parser: ZodLikeParser, label: string, value: unknown, expected = false): void => {
+    cases.push({ filename, parser, label, value, expected });
+  };
+
+  const payloadSchemas = [
+    ["analysis-bundle-terminal-status.schema.json", analysisTerminalStatusSchema],
+    ["analysis-bundle-evaluation-metrics.schema.json", analysisEvaluationMetricsSchema],
+    ["analysis-bundle-accounting-summary.schema.json", analysisAccountingSummarySchema],
+    ["analysis-bundle-attempt-history.schema.json", analysisAttemptHistorySchema],
+    ["analysis-bundle-recovery-summary.schema.json", analysisRecoverySummarySchema],
+    ["analysis-bundle-omissions.schema.json", analysisBundleOmissionsSchema]
+  ] as const;
+  for (const [filename, parser] of payloadSchemas) {
+    const historical = analysisBundleFixture(filename);
+    historical.schema_version = "ultrafuzz.analysis-bundle.v0";
+    add(filename, parser, "historical-version", historical);
+
+    const unexpected = analysisBundleFixture(filename);
+    unexpected.unexpected = true;
+    add(filename, parser, "unknown-root-field", unexpected);
+  }
+
+  const terminalUnsafeCount = analysisBundleFixture("analysis-bundle-terminal-status.schema.json");
+  terminalUnsafeCount.run_count = Number.MAX_SAFE_INTEGER + 1;
+  add(
+    "analysis-bundle-terminal-status.schema.json",
+    analysisTerminalStatusSchema,
+    "unsafe-run-count",
+    terminalUnsafeCount
+  );
+  const terminalBadTimestamp = analysisBundleFixture("analysis-bundle-terminal-status.schema.json");
+  terminalBadTimestamp.started_at = "2026-08-09T00:00Z";
+  add(
+    "analysis-bundle-terminal-status.schema.json",
+    analysisTerminalStatusSchema,
+    "timestamp-without-seconds",
+    terminalBadTimestamp
+  );
+  const terminalBadEnum = analysisBundleFixture("analysis-bundle-terminal-status.schema.json");
+  terminalBadEnum.status = "complete";
+  add("analysis-bundle-terminal-status.schema.json", analysisTerminalStatusSchema, "unknown-status", terminalBadEnum);
+  const terminalNullTimestamp = analysisBundleFixture("analysis-bundle-terminal-status.schema.json");
+  terminalNullTimestamp.finished_at = null;
+  add(
+    "analysis-bundle-terminal-status.schema.json",
+    analysisTerminalStatusSchema,
+    "null-optional-timestamp",
+    terminalNullTimestamp
+  );
+
+  const evaluationUnsafeCount = analysisBundleFixture("analysis-bundle-evaluation-metrics.schema.json");
+  evaluationUnsafeCount.row_count = Number.MAX_SAFE_INTEGER + 1;
+  add(
+    "analysis-bundle-evaluation-metrics.schema.json",
+    analysisEvaluationMetricsSchema,
+    "unsafe-row-count",
+    evaluationUnsafeCount
+  );
+  const evaluationNullMetric = analysisBundleFixture("analysis-bundle-evaluation-metrics.schema.json");
+  (evaluationNullMetric.metrics as Record<string, unknown>).precision = null;
+  add(
+    "analysis-bundle-evaluation-metrics.schema.json",
+    analysisEvaluationMetricsSchema,
+    "null-required-metric",
+    evaluationNullMetric
+  );
+  const evaluationNullableSeverity = analysisBundleFixture("analysis-bundle-evaluation-metrics.schema.json");
+  (evaluationNullableSeverity.metrics as Record<string, unknown>).severity_accuracy = null;
+  add(
+    "analysis-bundle-evaluation-metrics.schema.json",
+    analysisEvaluationMetricsSchema,
+    "nullable-severity",
+    evaluationNullableSeverity,
+    true
+  );
+  const evaluationNestedUnknown = analysisBundleFixture("analysis-bundle-evaluation-metrics.schema.json");
+  (evaluationNestedUnknown.totals as Record<string, unknown>).other = 0;
+  add(
+    "analysis-bundle-evaluation-metrics.schema.json",
+    analysisEvaluationMetricsSchema,
+    "unknown-total-field",
+    evaluationNestedUnknown
+  );
+
+  const accountingUnsafeCount = analysisBundleFixture("analysis-bundle-accounting-summary.schema.json");
+  accountingUnsafeCount.total_tokens = Number.MAX_SAFE_INTEGER + 1;
+  add(
+    "analysis-bundle-accounting-summary.schema.json",
+    analysisAccountingSummarySchema,
+    "unsafe-token-count",
+    accountingUnsafeCount
+  );
+  const accountingBadBoolean = analysisBundleFixture("analysis-bundle-accounting-summary.schema.json");
+  accountingBadBoolean.partial_pricing = "false";
+  add(
+    "analysis-bundle-accounting-summary.schema.json",
+    analysisAccountingSummarySchema,
+    "string-boolean",
+    accountingBadBoolean
+  );
+  const accountingNullableValues = analysisBundleFixture("analysis-bundle-accounting-summary.schema.json");
+  accountingNullableValues.runtime_observed_run_count = 0;
+  accountingNullableValues.runtime_seconds = null;
+  accountingNullableValues.estimated_spend_usd = null;
+  add(
+    "analysis-bundle-accounting-summary.schema.json",
+    analysisAccountingSummarySchema,
+    "nullable-runtime-and-spend",
+    accountingNullableValues,
+    true
+  );
+
+  const attemptUnsafeOrdinal = analysisBundleFixture("analysis-bundle-attempt-history.schema.json");
+  ((attemptUnsafeOrdinal.attempts as unknown[])[0] as Record<string, unknown>).ordinal = Number.MAX_SAFE_INTEGER + 1;
+  add(
+    "analysis-bundle-attempt-history.schema.json",
+    analysisAttemptHistorySchema,
+    "unsafe-ordinal",
+    attemptUnsafeOrdinal
+  );
+  const attemptBadTimestamp = analysisBundleFixture("analysis-bundle-attempt-history.schema.json");
+  ((attemptBadTimestamp.attempts as unknown[])[0] as Record<string, unknown>).finished_at = "2026-08-09T00:00Z";
+  add(
+    "analysis-bundle-attempt-history.schema.json",
+    analysisAttemptHistorySchema,
+    "timestamp-without-seconds",
+    attemptBadTimestamp
+  );
+  const attemptBadEnum = analysisBundleFixture("analysis-bundle-attempt-history.schema.json");
+  ((attemptBadEnum.attempts as unknown[])[0] as Record<string, unknown>).workflow_status = "complete";
+  add("analysis-bundle-attempt-history.schema.json", analysisAttemptHistorySchema, "unknown-status", attemptBadEnum);
+  const attemptNestedUnknown = analysisBundleFixture("analysis-bundle-attempt-history.schema.json");
+  ((attemptNestedUnknown.attempts as unknown[])[0] as Record<string, unknown>).other = true;
+  add(
+    "analysis-bundle-attempt-history.schema.json",
+    analysisAttemptHistorySchema,
+    "unknown-attempt-field",
+    attemptNestedUnknown
+  );
+
+  const recoveryUnsafeCount = analysisBundleFixture("analysis-bundle-recovery-summary.schema.json");
+  recoveryUnsafeCount.total_generations = Number.MAX_SAFE_INTEGER + 1;
+  add(
+    "analysis-bundle-recovery-summary.schema.json",
+    analysisRecoverySummarySchema,
+    "unsafe-generation-count",
+    recoveryUnsafeCount
+  );
+  const recoveryNestedUnknown = analysisBundleFixture("analysis-bundle-recovery-summary.schema.json");
+  (recoveryNestedUnknown.terminal_classes as Record<string, unknown>).other = 0;
+  add(
+    "analysis-bundle-recovery-summary.schema.json",
+    analysisRecoverySummarySchema,
+    "unknown-terminal-class",
+    recoveryNestedUnknown
+  );
+
+  const duplicateOmissionKind = analysisBundleFixture("analysis-bundle-omissions.schema.json");
+  (duplicateOmissionKind.omissions as unknown[]).push({
+    kind: "recovery-summary",
+    path: "data/recovery-summary.json",
+    reason: "data-unavailable"
+  });
+  add(
+    "analysis-bundle-omissions.schema.json",
+    analysisBundleOmissionsSchema,
+    "duplicate-kind-with-different-reason",
+    duplicateOmissionKind
+  );
+  const omissionBadReason = analysisBundleFixture("analysis-bundle-omissions.schema.json");
+  ((omissionBadReason.omissions as unknown[])[0] as Record<string, unknown>).reason = "legacy-source";
+  add("analysis-bundle-omissions.schema.json", analysisBundleOmissionsSchema, "unknown-reason", omissionBadReason);
+  const omissionNestedUnknown = analysisBundleFixture("analysis-bundle-omissions.schema.json");
+  ((omissionNestedUnknown.omissions as unknown[])[0] as Record<string, unknown>).other = true;
+  add(
+    "analysis-bundle-omissions.schema.json",
+    analysisBundleOmissionsSchema,
+    "unknown-omission-field",
+    omissionNestedUnknown
+  );
+
+  for (const fixture of cases) {
+    assertParity(
+      registeredSchemaId(fixture.filename),
+      fixture.parser,
+      fixture.value,
+      fixture.expected,
+      `${fixture.filename}:${fixture.label}`
+    );
+  }
+});
+
+test("analysis-bundle reconciliation is exclusively enforced by named gates and public assertions", () => {
+  const terminal = analysisBundleFixture("analysis-bundle-terminal-status.schema.json");
+  terminal.status = "failed";
+  const evaluation = analysisBundleFixture("analysis-bundle-evaluation-metrics.schema.json");
+  (evaluation.totals as Record<string, unknown>).finding_count = 2;
+  const accounting = analysisBundleFixture("analysis-bundle-accounting-summary.schema.json");
+  accounting.total_tokens = 14;
+  const attempts = analysisBundleFixture("analysis-bundle-attempt-history.schema.json");
+  ((attempts.attempts as unknown[])[0] as Record<string, unknown>).ordinal = 2;
+  const recovery = analysisBundleFixture("analysis-bundle-recovery-summary.schema.json");
+  recovery.total_generations = 2;
+  const omissions = analysisBundleFixture("analysis-bundle-omissions.schema.json");
+  omissions.omissions = [
+    { kind: "recovery-summary", path: "data/recovery-summary.json", reason: "source-missing" },
+    { kind: "accounting-summary", path: "data/accounting-summary.json", reason: "source-missing" }
+  ];
+
+  const cases = [
+    {
+      filename: "analysis-bundle-terminal-status.schema.json",
+      parser: analysisTerminalStatusSchema,
+      gate: "analysis-bundle-terminal-status-reconciliation" as const,
+      value: terminal,
+      assertion: assertAnalysisTerminalStatus
+    },
+    {
+      filename: "analysis-bundle-evaluation-metrics.schema.json",
+      parser: analysisEvaluationMetricsSchema,
+      gate: "analysis-bundle-evaluation-count-reconciliation" as const,
+      value: evaluation,
+      assertion: assertAnalysisEvaluationMetrics
+    },
+    {
+      filename: "analysis-bundle-accounting-summary.schema.json",
+      parser: analysisAccountingSummarySchema,
+      gate: "analysis-bundle-accounting-reconciliation" as const,
+      value: accounting,
+      assertion: assertAnalysisAccountingSummary
+    },
+    {
+      filename: "analysis-bundle-attempt-history.schema.json",
+      parser: analysisAttemptHistorySchema,
+      gate: "analysis-bundle-attempt-order" as const,
+      value: attempts,
+      assertion: assertAnalysisAttemptHistory
+    },
+    {
+      filename: "analysis-bundle-recovery-summary.schema.json",
+      parser: analysisRecoverySummarySchema,
+      gate: "analysis-bundle-recovery-reconciliation" as const,
+      value: recovery,
+      assertion: assertAnalysisRecoverySummary
+    },
+    {
+      filename: "analysis-bundle-omissions.schema.json",
+      parser: analysisBundleOmissionsSchema,
+      gate: "analysis-bundle-omission-order" as const,
+      value: omissions,
+      assertion: assertAnalysisBundleOmissions
+    }
+  ];
+
+  for (const fixture of cases) {
+    assertParity(
+      registeredSchemaId(fixture.filename),
+      fixture.parser,
+      fixture.value,
+      true,
+      `${fixture.filename}:semantic-shape`
+    );
+    assert.equal(executeSemanticGate(fixture.gate, { document: fixture.value }).status, "failed", fixture.filename);
+    assert.throws(() => fixture.assertion(fixture.value), /schema validation failed/u, fixture.filename);
   }
 });
 
@@ -1265,6 +1547,12 @@ function zodPositiveFixture(filename: string, contractIds: readonly string[]): u
 function invalidRootFixture(value: unknown): unknown {
   if (isRecord(value)) return { ...value, __unexpected_fixture_field: true };
   return null;
+}
+
+function analysisBundleFixture(filename: string): Record<string, unknown> {
+  const fixture = zodPositiveFixture(filename, []);
+  assert.ok(isRecord(fixture), `${filename}: expected an object fixture`);
+  return structuredClone(fixture);
 }
 
 function duplicateFixtureJson(value: unknown): string | undefined {

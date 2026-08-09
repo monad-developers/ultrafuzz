@@ -318,6 +318,60 @@ test("analysis bundle validation rejects duplicate manifest keys without changin
   assert.equal(fs.readFileSync(manifestPath, "utf8"), duplicated);
 });
 
+test("analysis bundle validation rejects duplicate payload keys without changing bytes", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-payload-duplicate-key-"));
+  const output = path.join(root, "bundle");
+  const { terminal } = syntheticPayloads();
+  writeAnalysisBundle({ outputDir: output, payloads: { "terminal-status": terminal } });
+
+  const relativePath = "data/terminal-status.json";
+  const original = fs.readFileSync(path.join(output, relativePath), "utf8");
+  const duplicated = original.replace(
+    '"schema_version": "ultrafuzz.analysis-bundle.v1",',
+    '"schema_version": "ultrafuzz.analysis-bundle.v1",\n  "schema_version": "ultrafuzz.analysis-bundle.v1",'
+  );
+  assert.notEqual(duplicated, original);
+  replaceBundleFileBytes(output, relativePath, Buffer.from(duplicated, "utf8"));
+
+  assert.throws(() => validateAnalysisBundle(output), /duplicate property name/u);
+  assert.equal(fs.readFileSync(path.join(output, relativePath), "utf8"), duplicated);
+});
+
+test("analysis bundle reads reject historical versions for every payload without conversion", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-payload-current-only-"));
+  const payloads = syntheticPayloads();
+  const files = [
+    "data/terminal-status.json",
+    "data/evaluation-metrics.json",
+    "data/accounting-summary.json",
+    "data/attempt-history.json",
+    "data/recovery-summary.json",
+    "omissions.json"
+  ];
+
+  for (const [index, relativePath] of files.entries()) {
+    const output = path.join(root, `bundle-${index}`);
+    writeAnalysisBundle({
+      outputDir: output,
+      payloads: {
+        "terminal-status": payloads.terminal,
+        "evaluation-metrics": payloads.metrics,
+        "accounting-summary": payloads.accounting,
+        "attempt-history": payloads.attempts,
+        "recovery-summary": payloads.recovery
+      }
+    });
+    const filePath = path.join(output, relativePath);
+    const historical = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+    historical.schema_version = "ultrafuzz.analysis-bundle.v0";
+    const historicalBytes = Buffer.from(`${JSON.stringify(historical, null, 2)}\n`, "utf8");
+    replaceBundleFileBytes(output, relativePath, historicalBytes);
+
+    assert.throws(() => validateAnalysisBundle(output), /schema validation failed/u, relativePath);
+    assert.deepEqual(fs.readFileSync(filePath), historicalBytes, relativePath);
+  }
+});
+
 test("analysis bundle validation rejects a data kind that is neither included nor explicitly omitted", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-current-only-"));
   const output = path.join(root, "bundle");
@@ -347,6 +401,39 @@ test("analysis bundle validation rejects a data kind that is neither included no
   );
 });
 
+test("analysis bundle validation rejects a data kind that is both included and explicitly omitted", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-double-coverage-"));
+  const output = path.join(root, "bundle");
+  const payloads = syntheticPayloads();
+  writeAnalysisBundle({
+    outputDir: output,
+    payloads: {
+      "terminal-status": payloads.terminal,
+      "evaluation-metrics": payloads.metrics,
+      "accounting-summary": payloads.accounting,
+      "attempt-history": payloads.attempts,
+      "recovery-summary": payloads.recovery
+    }
+  });
+
+  const omissionsPath = path.join(output, "omissions.json");
+  const omissions = JSON.parse(fs.readFileSync(omissionsPath, "utf8")) as {
+    omissions: Array<{ kind: string; path: string; reason: string }>;
+  };
+  omissions.omissions.push({
+    kind: "terminal-status",
+    path: "data/terminal-status.json",
+    reason: "data-unavailable"
+  });
+  const omissionsBytes = Buffer.from(`${JSON.stringify(omissions, null, 2)}\n`, "utf8");
+  replaceBundleFileBytes(output, "omissions.json", omissionsBytes);
+
+  assert.throws(
+    () => validateAnalysisBundle(output),
+    /analysis bundle terminal-status must be either included or omitted exactly once/u
+  );
+});
+
 test("analysis bundle validation rejects directories outside the fixed layout", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-tree-"));
   const output = path.join(root, "bundle");
@@ -366,3 +453,16 @@ test("analysis bundle replacement refuses unrelated output directories", () => {
   assert.throws(() => writeAnalysisBundle({ outputDir: output, payloads: {} }), /analysis bundle manifest/u);
   assert.equal(fs.readFileSync(path.join(output, "owned.txt"), "utf8"), "keep\n");
 });
+
+function replaceBundleFileBytes(output: string, relativePath: string, bytes: Buffer): void {
+  fs.writeFileSync(path.join(output, relativePath), bytes);
+  const manifestPath = path.join(output, ANALYSIS_BUNDLE_MANIFEST_FILE);
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+    files: Array<{ path: string; size_bytes: number; sha256: string }>;
+  };
+  const entry = manifest.files.find((candidate) => candidate.path === relativePath);
+  assert.ok(entry, `missing manifest entry for ${relativePath}`);
+  entry.size_bytes = bytes.byteLength;
+  entry.sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+}
