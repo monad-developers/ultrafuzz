@@ -190,7 +190,10 @@ function assertPinnedSubmoduleSnapshot(document: PinnedSubmoduleSnapshotDocument
     if (entry.type === "symlink") {
       const owner = document.recursive_gitlinks
         .filter((candidate) => isAtOrBelowPinnedPath(entry.path, candidate.path))
-        .sort((left, right) => pathDepth(right.path) - pathDepth(left.path) || left.path.localeCompare(right.path))[0];
+        .sort(
+          (left, right) =>
+            pinnedPathDepth(right.path) - pinnedPathDepth(left.path) || left.path.localeCompare(right.path)
+        )[0];
       if (owner === undefined) fail(gate, `snapshot entry has no owning repository: ${entry.path}`);
       assertPinnedSymlinkTarget(gate, entry.path, entry.target, [owner.path]);
     }
@@ -219,6 +222,10 @@ function assertPinnedGitlinks(gate: RuntimeSemanticGateName, values: readonly { 
     values.map((entry) => entry.path),
     label
   );
+}
+
+function pinnedPathDepth(value: string): number {
+  return value.split("/").length;
 }
 
 function assertPinnedPaths(gate: RuntimeSemanticGateName, values: readonly string[], label: string): void {

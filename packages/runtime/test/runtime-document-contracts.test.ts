@@ -100,6 +100,35 @@ test("runtime document semantic gates reject projected duplicates, noncanonical 
       ),
     /pinned-submodule-snapshot-closure-order-and-budget/u
   );
+  assert.throws(
+    () =>
+      assertRuntimeDocument(
+        PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID,
+        {
+          ...pinnedSnapshot,
+          recursive_gitlinks: [
+            ...(pinnedSnapshot.recursive_gitlinks as Array<Record<string, unknown>>),
+            {
+              path: "vendor/dependency/nested/child",
+              commit: "f".repeat(40),
+              tree: "1".repeat(40)
+            }
+          ],
+          entries: [
+            { path: "vendor/dependency", type: "directory", mode: 493 },
+            { path: "vendor/dependency/nested", type: "directory", mode: 493 },
+            { path: "vendor/dependency/nested/child", type: "directory", mode: 493 },
+            {
+              path: "vendor/dependency/nested/child/link",
+              type: "symlink",
+              target: "../../outside-child-repository"
+            }
+          ]
+        },
+        "pinned snapshot"
+      ),
+    /pinned-submodule-snapshot-closure-order-and-budget/u
+  );
 
   const pinnedExpectation = fixture("pinned-submodule-expectation.schema.json");
   assert.throws(
