@@ -828,7 +828,13 @@ function realisticMatrix(rowIds: string[]) {
       },
       variant: { id: TEST_MODEL_SLUG },
       workflow_input: {
-        target_frameworks: { [targetId]: framework }
+        benchmark_lane: "full",
+        target_frameworks: { [targetId]: framework },
+        excluded_strategy_families: [],
+        benchmark_execution: {
+          strategy_loops: 1,
+          excluded_node_ids: []
+        }
       },
       runner_model_profile: TEST_MODEL_SLUG,
       runner_model: TEST_MODEL,

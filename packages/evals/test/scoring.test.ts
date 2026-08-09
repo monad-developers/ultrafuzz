@@ -68,6 +68,19 @@ function canonicalFinding(overrides: Record<string, unknown> = {}): Record<strin
   };
 }
 
+function reviewFinding(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.finding.v2",
+    id: "finding-review",
+    title: "Finding requiring review",
+    status: "needs-review",
+    severity_guess: "Medium",
+    confidence: "medium",
+    summary: "A canonical finding used by human-review fixtures.",
+    ...overrides
+  };
+}
+
 function matchedFinding(overrides: Record<string, unknown> = {}): unknown {
   return canonicalFinding({
     title: "Reentrancy lets attackers drain the vault via withdraw",
@@ -473,12 +486,12 @@ describe("deterministic scorer math", () => {
       suite,
       row,
       findings: [
-        {
+        reviewFinding({
           id: "finding-3",
           title: "Plausible but unknown overflow",
           summary: "overflow in mint",
           evidence: ["reproduction trace"]
-        }
+        })
       ],
       bugs: BUGS
     });
@@ -512,36 +525,40 @@ describe("deterministic scorer math", () => {
       suite,
       row: testRow(suite),
       findings: [
-        {
+        reviewFinding({
           id: "finding-latest",
           title: "Uses the latest state",
           summary: "A possible issue without supporting details",
           evidence: [{ kind: "trace" }]
-        },
-        {
+        }),
+        reviewFinding({
           id: "finding-poc",
           title: "A distinct supported issue",
           summary: "An unmatched issue affecting an independent code path",
-          proof_of_concept: ["Call the operation twice", "Observe the inconsistent result"]
-        },
-        {
+          proof_of_concept: {
+            scenario: ["Call the operation twice", "Observe the inconsistent result"],
+            language: "text",
+            code: "callTwice();"
+          }
+        }),
+        reviewFinding({
           id: "finding-placeholder",
           title: "An unsupported placeholder issue",
           summary: "An unmatched issue without concrete details",
           proof_of_concept: "N/A"
-        },
-        {
+        }),
+        reviewFinding({
           id: "finding-minimal",
           title: "An unsupported minimal issue",
           summary: "An unmatched issue without substantive details",
           proof_of_concept: "yes"
-        },
-        {
+        }),
+        reviewFinding({
           id: "finding-reference",
           title: "A supported issue with a compact reference",
           summary: "An unmatched issue with a source reference",
           evidence: [{ path: "A.sol" }]
-        }
+        })
       ],
       bugs: BUGS
     });
@@ -631,7 +648,7 @@ describe("deterministic scorer math", () => {
     const scored = await scoreInMemory({
       suite,
       row: testRow(suite),
-      findings: [{ id: "finding-three-way", title: "Possible issue", summary: "A partial match" }],
+      findings: [reviewFinding({ id: "finding-three-way", title: "Possible issue", summary: "A partial match" })],
       bugs: BUGS,
       llmJudge: async (input) => {
         const member = calls++;
@@ -728,7 +745,7 @@ describe("deterministic scorer math", () => {
     const scored = await scoreInMemory({
       suite,
       row: testRow(suite),
-      findings: [{ id: "finding-panel", title: "Possible issue", summary: "A partial match" }],
+      findings: [reviewFinding({ id: "finding-panel", title: "Possible issue", summary: "A partial match" })],
       bugs: BUGS,
       llmJudge: async (input) => {
         const positive = calls++ < 2;
@@ -770,7 +787,7 @@ describe("deterministic scorer math", () => {
     const scored = await scoreInMemory({
       suite,
       row: testRow(suite),
-      findings: [{ id: "finding-panel", title: "Possible issue", summary: "A partial match" }],
+      findings: [reviewFinding({ id: "finding-panel", title: "Possible issue", summary: "A partial match" })],
       bugs: BUGS,
       llmJudge: async (input) => {
         const bugId = calls++ < 2 ? "BUG-1" : "BUG-2";
@@ -1181,12 +1198,12 @@ describe("deterministic scorer math", () => {
       suite,
       row: testRow(suite),
       findings: [
-        {
+        reviewFinding({
           id: "finding-partial",
           title: "Withdrawal callback can execute before accounting",
           summary: "A callback during withdraw can drain funds before state is updated.",
           evidence: ["A trace demonstrates the callback sequence."]
-        }
+        })
       ],
       bugs: BUGS,
       llmJudge: judge
@@ -1223,12 +1240,12 @@ describe("deterministic scorer math", () => {
       suite,
       row: testRow(suite),
       findings: [
-        {
+        reviewFinding({
           id: "finding-review",
           title: "Plausible but unknown overflow",
           summary: "overflow in mint",
           evidence: ["A reproduction trace is available."]
-        }
+        })
       ],
       bugs: BUGS,
       llmJudge: judge

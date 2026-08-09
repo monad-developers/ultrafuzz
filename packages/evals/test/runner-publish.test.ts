@@ -167,9 +167,39 @@ function initializationFixture(prefix: string): {
   const suite = testSuite(groundTruthRoot);
   suite.targets[0]!.ref = "0".repeat(40);
   const suitePath = path.join(project, "suite.yml");
-  fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");
+  writeSuiteInputFixture(suitePath, suite);
   initializeTestGitRepository(project);
   return { project, groundTruthRoot, suitePath };
+}
+
+function writeSuiteInputFixture(suitePath: string, suite: ReturnType<typeof testSuite>): void {
+  fs.writeFileSync(
+    suitePath,
+    JSON.stringify({
+      schema_version: suite.schema_version,
+      suite: suite.suite,
+      model_profiles: suite.model_profiles,
+      targets: suite.targets,
+      variants: suite.variants,
+      run: suite.run,
+      ...(suite.judge_panel === undefined ? {} : { judge_panel: suite.judge_panel }),
+      metrics: suite.metrics,
+      recovery_equivalence: suite.recovery_equivalence,
+      reporting: {
+        node_telemetry: suite.reporting.node_telemetry,
+        heartbeat_interval_seconds: suite.reporting.heartbeat_interval_seconds,
+        ...(suite.reporting.experiment_prefix === undefined
+          ? {}
+          : { experiment_prefix: suite.reporting.experiment_prefix }),
+        artifacts: {
+          mode: suite.reporting.artifacts.mode,
+          include: suite.reporting.artifacts.include,
+          max_file_bytes: suite.reporting.artifacts.max_file_bytes
+        }
+      }
+    }),
+    "utf8"
+  );
 }
 
 describe("runner", () => {
@@ -272,7 +302,7 @@ describe("runner", () => {
       ]
     });
     const suitePath = path.join(project, "suite.json");
-    fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");
+    writeSuiteInputFixture(suitePath, suite);
     let launches = 0;
 
     await expect(
@@ -384,11 +414,11 @@ describe("runner", () => {
         diagnostics: [
           {
             code: "EVAL_ROW_ENRICHMENT_INVALID",
-            severity: "error",
-            details: { source_document: invalidDocument }
+            severity: "error"
           }
         ]
       });
+      expect(record.diagnostics[0]).not.toHaveProperty("details");
       expect(record.diagnostics[0]?.message).toContain(invalidDocument);
       expect(readEvalRunRecords(path.join(evalRunRoot, "runs.jsonl"))).toEqual([record]);
     }
@@ -443,7 +473,7 @@ describe("runner", () => {
     const suite = testSuite(groundTruthRoot);
     suite.targets[0]!.ref = "0".repeat(40);
     const suitePath = path.join(project, "suite.yml");
-    fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");
+    writeSuiteInputFixture(suitePath, suite);
     initializeTestGitRepository(project);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
     terminalRunFixture(runRoot);
@@ -486,7 +516,7 @@ describe("runner", () => {
     const suite = testSuite(groundTruthRoot);
     suite.targets[0]!.ref = "0".repeat(40);
     const suitePath = path.join(project, "suite.yml");
-    fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");
+    writeSuiteInputFixture(suitePath, suite);
     initializeTestGitRepository(project);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
     writeRunFixture({
@@ -539,7 +569,7 @@ describe("runner", () => {
       const suite = testSuite(groundTruthRoot);
       suite.targets[0]!.ref = "0".repeat(40);
       const suitePath = path.join(project, "suite.yml");
-      fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");
+      writeSuiteInputFixture(suitePath, suite);
       initializeTestGitRepository(project);
       const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
       terminalRunFixture(runRoot, status);
