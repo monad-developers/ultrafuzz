@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  SMITHERS_NODE_STATES,
   SMITHERS_RUN_STATES,
   SMITHERS_RUN_STATUSES,
   assertNoSymlinkComponents,
@@ -481,7 +482,7 @@ function currentSmithersCommandData(snapshot: SmithersCommandSnapshot, command: 
   return envelope.data;
 }
 
-function validateCurrentCommandMeta(value: unknown, command: "events" | "ps"): void {
+function validateCurrentCommandMeta(value: unknown, command: "events" | "ps" | "status"): void {
   const meta = objectRecord(value);
   if (meta === undefined || !hasRequiredAndAllowedKeys(meta, ["command", "duration"], ["command", "duration", "cta"])) {
     throw new Error(`Smithers ${command} metadata must use the exact current shape`);
@@ -561,7 +562,24 @@ function stringField(value: Record<string, unknown>, key: string): string | unde
 function parseRunHealth(
   value: unknown
 ): Omit<RunHealthValue, keyof RunListEntry | "workflow_run_id" | keyof RunProgressSummary> | undefined {
-  const data = commandData(value);
+  const data = currentSmithersStatusData(value);
+  if (
+    data === undefined ||
+    !hasExactKeys(data, [
+      "status",
+      "verdict",
+      "reason",
+      "counts",
+      "modelMix",
+      "throughput",
+      "bottleneck",
+      "bottleneckOmitted",
+      "quota",
+      "generatedAtMs"
+    ])
+  ) {
+    return undefined;
+  }
   const counts = recordField(data, "counts");
   const throughput = recordField(data, "throughput");
   const verdict = stringField(data ?? {}, "verdict");
@@ -569,11 +587,24 @@ function parseRunHealth(
   const reason = stringField(data ?? {}, "reason");
   const generatedAtMs = numberField(data, "generatedAtMs");
   if (
-    data === undefined ||
     counts === undefined ||
     throughput === undefined ||
+    !hasExactKeys(counts, [
+      "finished",
+      "inProgress",
+      "pending",
+      "failed",
+      "waitingApproval",
+      "waitingEvent",
+      "waitingTimer",
+      "skipped",
+      "other",
+      "total"
+    ]) ||
+    !hasExactKeys(throughput, ["recentFinished", "windowMs", "totalFinished", "lastFinishedAtMs"]) ||
     !isRunHealthVerdict(verdict) ||
     workflowStatus === undefined ||
+    !SMITHERS_RUN_STATUSES.includes(workflowStatus as (typeof SMITHERS_RUN_STATUSES)[number]) ||
     reason === undefined ||
     generatedAtMs === undefined
   ) {
@@ -594,6 +625,7 @@ function parseRunHealth(
   if (Object.values(parsedCounts).some((entry) => entry === undefined)) {
     return undefined;
   }
+  const typedCounts = parsedCounts as RunHealthValue["counts"];
   const recentFinished = numberField(throughput, "recentFinished");
   const windowMs = numberField(throughput, "windowMs");
   const totalFinished = numberField(throughput, "totalFinished");
@@ -602,7 +634,10 @@ function parseRunHealth(
     recentFinished === undefined ||
     windowMs === undefined ||
     totalFinished === undefined ||
-    lastFinishedAtMs === undefined
+    lastFinishedAtMs === undefined ||
+    windowMs === 0 ||
+    recentFinished > totalFinished ||
+    (totalFinished === 0 ? lastFinishedAtMs !== null : lastFinishedAtMs === null)
   ) {
     return undefined;
   }
@@ -612,6 +647,7 @@ function parseRunHealth(
     return undefined;
   }
   const modelMix = modelMixRows.flatMap((entry) => {
+    if (!hasExactKeys(entry, ["engine", "model", "attempts", "quotaParked"])) return [];
     const engine = stringField(entry, "engine");
     const model = stringField(entry, "model");
     const attempts = numberField(entry, "attempts");
@@ -621,11 +657,16 @@ function parseRunHealth(
       : [{ engine, model, attempts, quota_parked: quotaParked }];
   });
   const gating = bottleneck.flatMap((entry) => {
+    if (!hasExactKeys(entry, ["nodeId", "iteration", "state", "detail"])) return [];
     const nodeId = stringField(entry, "nodeId");
     const iteration = numberField(entry, "iteration");
     const state = stringField(entry, "state");
     const detail = nullableStringField(entry, "detail");
-    return nodeId === undefined || iteration === undefined || state === undefined || detail === undefined
+    return nodeId === undefined ||
+      iteration === undefined ||
+      state === undefined ||
+      !SMITHERS_NODE_STATES.includes(state as (typeof SMITHERS_NODE_STATES)[number]) ||
+      detail === undefined
       ? []
       : [{ node_id: nodeId, iteration, state, detail }];
   });
@@ -644,9 +685,12 @@ function parseRunHealth(
     const parkedNodeIds = stringArrayField(quotaRecord, "parkedNodeIds");
     if (
       quotaRecord === undefined ||
+      !hasExactKeys(quotaRecord, ["parkedCount", "resetAtMs", "parkedNodeIds"]) ||
       parkedCount === undefined ||
       resetAtMs === undefined ||
-      parkedNodeIds === undefined
+      parkedNodeIds === undefined ||
+      parkedCount !== parkedNodeIds.length ||
+      new Set(parkedNodeIds).size !== parkedNodeIds.length
     ) {
       return undefined;
     }
@@ -659,7 +703,7 @@ function parseRunHealth(
     workflow_status: workflowStatus,
     verdict,
     reason: publicHealthReason(reason),
-    counts: parsedCounts as RunHealthValue["counts"],
+    counts: typedCounts,
     model_mix: modelMix,
     throughput: {
       recent_finished: recentFinished,
@@ -720,12 +764,16 @@ function recordArrayField(
 
 function numberField(value: Record<string, unknown> | undefined, key: string): number | undefined {
   const field = value?.[key];
-  return typeof field === "number" && Number.isFinite(field) ? field : undefined;
+  return typeof field === "number" && Number.isSafeInteger(field) && field >= 0 ? field : undefined;
 }
 
 function nullableNumberField(value: Record<string, unknown> | undefined, key: string): number | null | undefined {
   const field = value?.[key];
-  return field === null ? null : typeof field === "number" && Number.isFinite(field) ? field : undefined;
+  return field === null
+    ? null
+    : typeof field === "number" && Number.isSafeInteger(field) && field >= 0
+      ? field
+      : undefined;
 }
 
 function booleanField(value: Record<string, unknown> | undefined, key: string): boolean | undefined {
@@ -735,12 +783,14 @@ function booleanField(value: Record<string, unknown> | undefined, key: string): 
 
 function nullableStringField(value: Record<string, unknown> | undefined, key: string): string | null | undefined {
   const field = value?.[key];
-  return field === null ? null : typeof field === "string" ? field : undefined;
+  return field === null ? null : typeof field === "string" && field.length > 0 ? field : undefined;
 }
 
 function stringArrayField(value: Record<string, unknown> | undefined, key: string): string[] | undefined {
   const field = value?.[key];
-  return Array.isArray(field) && field.every((entry) => typeof entry === "string") ? field : undefined;
+  return Array.isArray(field) && field.every((entry) => typeof entry === "string" && entry.length > 0)
+    ? field
+    : undefined;
 }
 
 function diagnosticsForWorkflowSnapshot(snapshot: { ok: boolean; error?: string; stderr?: string }, code: string) {
@@ -862,14 +912,12 @@ function lstatIfPresent(filePath: string): fs.Stats | undefined {
   }
 }
 
-function commandData(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+function currentSmithersStatusData(value: unknown): Record<string, unknown> | undefined {
+  if (!hasExactKeys(value, ["ok", "data", "meta"]) || value.ok !== true) return undefined;
+  try {
+    validateCurrentCommandMeta(value.meta, "status");
+  } catch {
     return undefined;
   }
-  const record = value as Record<string, unknown>;
-  const data = record.data;
-  if (data && typeof data === "object" && !Array.isArray(data)) {
-    return data as Record<string, unknown>;
-  }
-  return record;
+  return objectRecord(value.data);
 }

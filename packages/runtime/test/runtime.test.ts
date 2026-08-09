@@ -587,7 +587,11 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "    esac",
       "    ;;",
       "  status)",
-      '    printf \'%s\\n\' \'{"ok":true,"data":{"status":"running","verdict":"running-healthy","reason":"1 running, 2 finished in last 10m","counts":{"finished":2,"inProgress":1,"pending":3,"failed":0,"waitingApproval":0,"waitingEvent":0,"waitingTimer":0,"skipped":0,"other":0,"total":6},"modelMix":[{"engine":"codex","model":"gpt-test","attempts":3,"quotaParked":false}],"throughput":{"recentFinished":2,"windowMs":600000,"totalFinished":2,"lastFinishedAtMs":1000},"bottleneck":[{"nodeId":"project-discovery","iteration":0,"state":"in-progress","detail":"running 1m"}],"bottleneckOmitted":0,"quota":null,"generatedAtMs":2000}}\'',
+      '    if [ -n "$SMITHERS_FAKE_STATUS_JSON" ]; then',
+      "      printf '%s\\n' \"$SMITHERS_FAKE_STATUS_JSON\"",
+      "    else",
+      `      printf '%s\\n' ${shellQuote(JSON.stringify(currentStatusEnvelope()))}`,
+      "    fi",
       "    ;;",
       "  *)",
       '    printf \'%s\\n\' \'{"ok":true,"smithers":"accepted"}\'',
@@ -610,6 +614,36 @@ function currentPsEnvelope(runs: unknown[]): unknown {
     ok: true,
     data: { runs },
     meta: { command: "ps", duration: "1ms" }
+  };
+}
+
+function currentStatusEnvelope(): Record<string, unknown> {
+  return {
+    ok: true,
+    data: {
+      status: "running",
+      verdict: "running-healthy",
+      reason: "1 running, 2 finished in last 10m",
+      counts: {
+        finished: 2,
+        inProgress: 1,
+        pending: 3,
+        failed: 0,
+        waitingApproval: 0,
+        waitingEvent: 0,
+        waitingTimer: 0,
+        skipped: 0,
+        other: 0,
+        total: 6
+      },
+      modelMix: [{ engine: "codex", model: "gpt-test", attempts: 3, quotaParked: false }],
+      throughput: { recentFinished: 2, windowMs: 600_000, totalFinished: 2, lastFinishedAtMs: 1_000 },
+      bottleneck: [{ nodeId: "project-discovery", iteration: 0, state: "in-progress", detail: "running 1m" }],
+      bottleneckOmitted: 0,
+      quota: null,
+      generatedAtMs: 2_000
+    },
+    meta: { command: "status", duration: "1ms" }
   };
 }
 
@@ -4927,6 +4961,46 @@ test("getRunHealth adapts the workflow health summary to the Ultrafuzz run", asy
   assert.equal(health.value?.gating[0]?.node_id, "project-discovery");
   assert.doesNotMatch(JSON.stringify(health.value), /smithers/iu);
   assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /status ultrafuzz-health-run --window 5/);
+});
+
+test("getRunHealth rejects every noncurrent status envelope without fallback or filtering", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "strict-health-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const canonical = currentStatusEnvelope();
+  const canonicalData = canonical.data as Record<string, unknown>;
+  const invalidDocuments: Array<{ label: string; value: unknown }> = [
+    { label: "bare data compatibility envelope", value: canonicalData },
+    { label: "extra envelope field", value: { ...canonical, legacy: true } },
+    { label: "extra data field", value: { ...canonical, data: { ...canonicalData, legacy: true } } },
+    { label: "wrong metadata command", value: { ...canonical, meta: { command: "inspect", duration: "1ms" } } },
+    {
+      label: "filtered model row",
+      value: {
+        ...canonical,
+        data: {
+          ...canonicalData,
+          modelMix: [{ engine: "codex", model: "gpt-test", attempts: 3, quotaParked: false, legacy: true }]
+        }
+      }
+    }
+  ];
+
+  for (const invalid of invalidDocuments) {
+    env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify(invalid.value);
+    const health = await getRunHealth({ projectRoot: project, runId: "strict-health-run", env });
+    assert.equal(health.ok, false, invalid.label);
+    assert.equal(health.value, undefined, invalid.label);
+    assert.deepEqual(
+      health.diagnostics.map((diagnostic) => diagnostic.code),
+      ["WORKFLOW_STATUS_INVALID"],
+      invalid.label
+    );
+  }
 });
 
 test("pauseRun accepts the workflow runner pause-request exit and is idempotent once paused", async () => {
