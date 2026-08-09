@@ -217,6 +217,22 @@ describe("Modal recovery lifecycle", () => {
       })
     ).toThrow(/does not reconcile/u);
     expect(() =>
+      parseModalRecoveryLifecycleDocument({
+        ...document,
+        summary: { ...document.summary, untyped_summary_field: 0 }
+      })
+    ).toThrow();
+    const missingReasonCount = structuredClone(document);
+    delete (missingReasonCount.summary.start_reasons as Partial<typeof missingReasonCount.summary.start_reasons>)
+      .unknown;
+    expect(() => parseModalRecoveryLifecycleDocument(missingReasonCount)).toThrow();
+    expect(() =>
+      parseModalRecoveryLifecycleDocument({
+        ...document,
+        summary: { ...document.summary, total_generations: -1 }
+      })
+    ).toThrow();
+    expect(() =>
       parseModalRecoveryLifecycleRecord({
         ...records[0],
         raw_private_log: "generated private fixture"

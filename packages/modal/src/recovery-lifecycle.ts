@@ -65,8 +65,9 @@ const observationBoolean = z.union([z.boolean(), z.literal("unknown")]);
 const observationTimestamp = z.union([timestamp, z.literal("unknown")]);
 const observationExitCode = z.union([z.number().int(), z.null(), z.literal("unknown")]);
 const observationDigest = z.union([fingerprint, z.literal("unknown")]);
+const nonNegativeInteger = z.number().int().nonnegative();
 const nodeCounts = z
-  .record(safeId, z.number().int().nonnegative())
+  .record(safeId, nonNegativeInteger)
   .refine((value) => Object.keys(value).length <= 64, { message: "node counts must contain at most 64 statuses" });
 const observationNodeCounts = z.union([nodeCounts, z.literal("unknown")]);
 
@@ -397,6 +398,24 @@ export interface ModalRecoveryLifecycleSummary {
   terminal_classes: CountByTerminalClass;
 }
 
+const modalRecoveryLifecycleSummarySchema = z.strictObject({
+  total_generations: nonNegativeInteger,
+  terminal_generations: nonNegativeInteger,
+  active_generations: nonNegativeInteger,
+  progress_generations: nonNegativeInteger,
+  no_progress_generations: nonNegativeInteger,
+  unknown_progress_generations: nonNegativeInteger,
+  model_work_generations: nonNegativeInteger,
+  no_model_work_generations: nonNegativeInteger,
+  unknown_model_work_generations: nonNegativeInteger,
+  genuine_failures: nonNegativeInteger,
+  rotations: nonNegativeInteger,
+  resumptions: nonNegativeInteger,
+  start_reasons: exactCountRecord(MODAL_RECOVERY_START_REASONS),
+  terminal_reasons: exactCountRecord(MODAL_RECOVERY_TERMINAL_REASONS),
+  terminal_classes: exactCountRecord(MODAL_RECOVERY_TERMINAL_CLASSES)
+});
+
 export function summarizeModalRecoveryLifecycle(
   records: readonly ModalRecoveryLifecycleRecord[]
 ): ModalRecoveryLifecycleSummary {
@@ -461,7 +480,7 @@ export function parseModalRecoveryLifecycleDocument(value: unknown): ModalRecove
   const parsed = z
     .strictObject({
       schema_version: z.literal(MODAL_RECOVERY_LIFECYCLE_SCHEMA_VERSION),
-      summary: z.record(z.string(), z.unknown()),
+      summary: modalRecoveryLifecycleSummarySchema,
       records: z.array(modalRecoveryLifecycleRecordSchema).max(100_000)
     })
     .parse(value);
@@ -487,6 +506,15 @@ export function assertModalRecoveryLifecycleContainsNoSecrets(
 
 function counts<const T extends readonly string[]>(values: T): Record<T[number], number> {
   return Object.fromEntries(values.map((value) => [value, 0])) as Record<T[number], number>;
+}
+
+function exactCountRecord<const T extends readonly [string, ...string[]]>(values: T) {
+  return z.strictObject(
+    Object.fromEntries(values.map((value) => [value, nonNegativeInteger])) as Record<
+      T[number],
+      typeof nonNegativeInteger
+    >
+  );
 }
 
 function sameModalRecoveryStart(
