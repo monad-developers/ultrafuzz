@@ -9848,6 +9848,12 @@ test("syncRun fails a successful workflow node that is missing required artifact
   assert.equal(pending.ok, true);
   assert.equal(pending.value?.status, "running");
   assert.ok(pending.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_GRACE_PENDING"));
+  const attemptLedgerPath = path.join(run.value!.run_root, "attempts.jsonl");
+  assert.equal(
+    fs.existsSync(attemptLedgerPath) ? fs.readFileSync(attemptLedgerPath, "utf8").trim() : "",
+    "",
+    "a successful executor attempt must stay pending until its output manifest is durable"
+  );
   assert.equal(
     fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8").match(/node-artifacts-missing/gu),
     null
@@ -10122,12 +10128,18 @@ test("syncRun keeps a strict node pending until a late safe mirror is reconciled
   });
   const run = await startRun({ projectRoot: project, runId: "sync-late-mirror", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const attemptLedgerPath = path.join(run.value!.run_root, "attempts.jsonl");
   const now = Date.parse("2026-07-03T00:02:00.000Z");
 
   const pending = await syncRun({ projectRoot: project, runId: "sync-late-mirror", env }, { now: () => now });
   assert.equal(pending.ok, true, JSON.stringify(pending.diagnostics));
   assert.equal(pending.value?.status, "running");
   assert.ok(pending.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_GRACE_PENDING"));
+  assert.equal(
+    fs.existsSync(attemptLedgerPath) ? fs.readFileSync(attemptLedgerPath, "utf8").trim() : "",
+    "",
+    "a successful executor attempt must stay pending until its output manifest is durable"
+  );
 
   const mirrorRoot = path.join(
     run.value!.run_root,
@@ -10147,6 +10159,22 @@ test("syncRun keeps a strict node pending until a late safe mirror is reconciled
   );
   assert.equal(completed.ok, true, JSON.stringify(completed.diagnostics));
   assert.equal(completed.value?.status, "succeeded");
+  const attemptLedger = fs
+    .readFileSync(attemptLedgerPath, "utf8")
+    .trim()
+    .split("\n")
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          outcome?: string;
+          failure_category?: string;
+          manifests?: { output_sha256?: unknown };
+        }
+    );
+  assert.equal(attemptLedger.length, 1);
+  assert.equal(attemptLedger[0]?.outcome, "succeeded");
+  assert.equal(attemptLedger[0]?.failure_category, undefined);
+  assert.match(String(attemptLedger[0]?.manifests?.output_sha256), /^[a-f0-9]{64}$/u);
   const eventsPath = path.join(run.value!.run_root, "events.jsonl");
   const beforeRepeat = fs.readFileSync(eventsPath, "utf8");
   assert.equal((beforeRepeat.match(/node-artifacts-reconciled/gu) ?? []).length, 1);
