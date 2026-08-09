@@ -49,6 +49,7 @@ export function createStrictAjv(): Ajv2020 {
     coerceTypes: false,
     useDefaults: false,
     removeAdditional: false,
+    ownProperties: true,
     allowUnionTypes: false,
     unicodeRegExp: true,
     loadSchema: undefined

@@ -14,6 +14,7 @@ import {
   parseStrictJson,
   StrictJsonError,
   validateJsonFile,
+  validateRegisteredJsonSchema,
   validateRegisteredJsonFileSync,
   VALIDATOR_BUILD_IDENTITY
 } from "../src/index.js";
@@ -26,6 +27,19 @@ test("strict JSON parsing rejects duplicate object keys", () => {
   assert.deepEqual(parseStrictJson('{"safe":[true,null,2]}'), { safe: [true, null, 2] });
   assert.throws(() => parseStrictJsonBytes(Buffer.from([0xef, 0xbb, 0xbf, 0x7b, 0x7d])), /byte-order mark/u);
   assert.throws(() => parseStrictJsonBytes(Buffer.from([0x7b, 0xff, 0x7d])), /valid UTF-8/u);
+});
+
+test("schema validation applies JSON own-property semantics", () => {
+  const inheritedOnly = Object.create({
+    schema_version: "ultrafuzz.properties.v1",
+    properties: []
+  }) as Record<string, unknown>;
+  assert.equal(validateRegisteredJsonSchema("urn:ultrafuzz:schema:artifacts:properties:1", inheritedOnly).ok, false);
+
+  const inheritedExtra = Object.create({ unexpected: true }) as Record<string, unknown>;
+  inheritedExtra.schema_version = "ultrafuzz.properties.v1";
+  inheritedExtra.properties = [];
+  assert.equal(validateRegisteredJsonSchema("urn:ultrafuzz:schema:artifacts:properties:1", inheritedExtra).ok, true);
 });
 
 test("the artifact schema registry is exhaustive, fragment-free, and strictly compilable", () => {
