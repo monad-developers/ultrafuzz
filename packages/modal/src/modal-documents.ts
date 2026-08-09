@@ -411,7 +411,7 @@ async function closeModalDocumentHandleAfterFailure(
   try {
     await handle.close();
   } catch (closeError) {
-    throw new AggregateError([failure, closeError], message, { cause: failure });
+    throw new AggregateError([failure, closeError], message, { cause: closeError });
   }
   throw failure;
 }

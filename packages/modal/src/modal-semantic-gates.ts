@@ -22,6 +22,7 @@ import {
   type StrictModalLaunchStateDocument,
   type StrictModalNodeCheckpointDocument,
   type StrictModalNodeCheckpointIndexDocument,
+  type StrictModalNodeResultDocument,
   type StrictModalPinnedSourceProofDocument,
   type StrictModalRecoveryLifecycleDocument,
   type StrictModalRecoveryLifecycleRecord,
@@ -55,6 +56,24 @@ export const IMPLEMENTED_MODAL_SEMANTIC_GATES = Object.freeze([
 ] as const);
 
 export type ModalSemanticGateName = (typeof IMPLEMENTED_MODAL_SEMANTIC_GATES)[number];
+
+export const MODAL_NODE_CHECKPOINT_RESULT_CONTEXT_GATE = "modal-node-checkpoint-result-index-context" as const;
+
+export interface ModalNodeCheckpointResultContext {
+  readonly result: StrictModalNodeResultDocument;
+  readonly checkpoint: StrictModalNodeCheckpointDocument;
+  readonly index: StrictModalNodeCheckpointIndexDocument;
+  readonly expected: {
+    readonly artifactArchive: string;
+    readonly checkpointIndex: string;
+    readonly storageLineage: string;
+    readonly workspacePath: string;
+    readonly runRoot: string;
+    readonly executionSnapshotRoot: string;
+    readonly handoffArchive: string;
+    readonly projectArchiveSha256: string;
+  };
+}
 
 /** The exact gates each document dispatch can invoke; registry metadata imports this table directly. */
 export const MODAL_SEMANTIC_GATES_BY_SCHEMA_ID = Object.freeze({
@@ -101,6 +120,61 @@ export class ModalSemanticValidationError extends Error {
     this.name = "ModalSemanticValidationError";
     this.gate = gate;
   }
+}
+
+/**
+ * Join the three independently valid node-completion documents with the
+ * trusted paths and lineage known by the host. JSON Schema cannot express
+ * these cross-file equalities or select the canonical latest checkpoint.
+ */
+export function assertModalNodeCheckpointResultContext(context: ModalNodeCheckpointResultContext): void {
+  const { result, checkpoint, index, expected } = context;
+  const latest = index.checkpoints.at(-1);
+  const checkpointRoot = path.posix.dirname(expected.checkpointIndex);
+  const canonicalManifest = path.posix.join(checkpointRoot, `${checkpoint.checkpoint_id}.json`);
+  const hasOnlyCanonicalManifests = index.checkpoints.every(
+    (entry) => entry.manifest === path.posix.join(checkpointRoot, `${entry.checkpoint_id}.json`)
+  );
+  if (
+    latest === undefined ||
+    !hasOnlyCanonicalManifests ||
+    checkpoint.stage !== "completed" ||
+    latest.stage !== "completed" ||
+    latest.checkpoint_id !== checkpoint.checkpoint_id ||
+    latest.sequence !== checkpoint.sequence ||
+    latest.created_at !== checkpoint.created_at ||
+    latest.manifest !== result.durable_checkpoint ||
+    latest.manifest !== canonicalManifest ||
+    result.durable_checkpoint_index !== expected.checkpointIndex
+  ) {
+    failContext("result must reference the canonical latest completed checkpoint and matching index entry");
+  }
+  if (
+    result.storage_lineage !== expected.storageLineage ||
+    checkpoint.storage_lineage !== expected.storageLineage ||
+    index.storage_lineage !== expected.storageLineage
+  ) {
+    failContext("result, checkpoint, and index storage lineage must match the trusted attempt lineage");
+  }
+  if (
+    result.artifact_archive !== expected.artifactArchive ||
+    checkpoint.workspace_path !== expected.workspacePath ||
+    index.workspace_path !== expected.workspacePath ||
+    checkpoint.run_root !== expected.runRoot ||
+    index.run_root !== expected.runRoot ||
+    checkpoint.execution_snapshot_root !== expected.executionSnapshotRoot ||
+    index.execution_snapshot_root !== expected.executionSnapshotRoot ||
+    checkpoint.handoff_archive !== expected.handoffArchive ||
+    index.handoff_archive !== expected.handoffArchive ||
+    checkpoint.project_archive_sha256 !== expected.projectArchiveSha256 ||
+    index.project_archive_sha256 !== expected.projectArchiveSha256
+  ) {
+    failContext("result, checkpoint, and index paths or archive digest do not match their trusted context");
+  }
+}
+
+function failContext(message: string): never {
+  throw new Error(`${MODAL_NODE_CHECKPOINT_RESULT_CONTEXT_GATE}: ${message}`);
 }
 
 export function assertModalDocumentSemantics<SchemaId extends ModalContractSchemaId>(

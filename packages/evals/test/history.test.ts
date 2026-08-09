@@ -26,7 +26,13 @@ import {
 import { PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION } from "../src/public-diagnostics.js";
 import type { EvalMatrixRow, EvalRowScore, EvalScoreSummary, EvalSuiteSpec } from "../src/types.js";
 import { safeEvalId } from "../src/utils.js";
-import { cleanRecoveryEquivalence, recoveryEquivalenceSummary, testRow, testSuite } from "./helpers.js";
+import {
+  cleanRecoveryEquivalence,
+  currentRunExpansion,
+  recoveryEquivalenceSummary,
+  testRow,
+  testSuite
+} from "./helpers.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const CANDIDATE = "1111111111111111111111111111111111111111";
@@ -204,6 +210,7 @@ function rowScore(rowId: string, overrides: Partial<EvalRowScore> = {}): EvalRow
       usage: { status: "complete", reason: null },
       cost: { status: "complete", reason: null }
     },
+    expansion: currentRunExpansion(),
     recovery_equivalence: cleanRecoveryEquivalence(),
     ...overrides
   };
@@ -211,6 +218,7 @@ function rowScore(rowId: string, overrides: Partial<EvalRowScore> = {}): EvalRow
 
 function summary(rows: EvalRowScore[]): EvalScoreSummary {
   return {
+    schema_version: "ultrafuzz.eval.score-summary.v1",
     eval_run_id: "run-1-benchmark-smoke",
     eval_run_root: "/tmp/run-1-benchmark-smoke",
     recall_threshold: 0.7,
@@ -245,6 +253,12 @@ function summary(rows: EvalRowScore[]): EvalScoreSummary {
           }
         ],
         ground_truth_sha256: { "target-a": "c".repeat(64) },
+        ground_truth_subjects: {
+          "target-a": {
+            repository: "https://example.com/target-a",
+            revision: TARGET_REVISION
+          }
+        },
         execution_policy: {
           revision: "ultrafuzz.eval.execution-policy.v1",
           fingerprint: EXECUTION_POLICY_FINGERPRINT,
@@ -263,7 +277,14 @@ function summary(rows: EvalRowScore[]): EvalScoreSummary {
         judge_mode: "deterministic",
         judge_prompt_version: "v1",
         judge_models: ["gpt-5.6-luna"],
+        judge_panel: { total: 1, quorum: 1 },
         ground_truth_sha256: { "target-a": "c".repeat(64) },
+        ground_truth_subjects: {
+          "target-a": {
+            repository: "https://example.com/target-a",
+            revision: TARGET_REVISION
+          }
+        },
         fingerprint: SCORING_FINGERPRINT
       }
     }
@@ -1084,7 +1105,7 @@ describe("longitudinal eval history", () => {
         efficiency: {
           ...base.efficiency,
           cost_usd: null,
-          cost: { status: "unavailable" as const, reason: "pricing-unavailable" as const }
+          cost: { status: "partial" as const, reason: "pricing-incomplete" as const }
         }
       };
     });
@@ -1109,7 +1130,7 @@ describe("longitudinal eval history", () => {
         cost_usd: 0.75,
         cost_completeness: {
           status: "partial",
-          reasons: ["pricing-incomplete", "pricing-unavailable"]
+          reasons: ["pricing-incomplete"]
         }
       }
     ]);
@@ -1119,13 +1140,13 @@ describe("longitudinal eval history", () => {
       efficiency: {
         ...score.efficiency,
         cost_usd: null,
-        cost: { status: "unavailable" as const, reason: "pricing-unavailable" as const }
+        cost: { status: "partial" as const, reason: "pricing-incomplete" as const }
       }
     }));
     expect(generate(unavailable)).toMatchObject([
       {
         cost_usd: null,
-        cost_completeness: { status: "unavailable", reasons: ["pricing-unavailable"] }
+        cost_completeness: { status: "unavailable", reasons: ["pricing-incomplete"] }
       }
     ]);
   });

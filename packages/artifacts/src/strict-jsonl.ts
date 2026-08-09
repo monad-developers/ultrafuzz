@@ -44,8 +44,8 @@ export function readStrictJsonlSnapshot<RecordType>(
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    throw new Error(`${codec.label} is not valid UTF-8`);
+  } catch (error) {
+    throw new Error(`${codec.label} is not valid UTF-8`, { cause: error });
   }
   const lines = text.split("\n");
   lines.pop();
@@ -73,7 +73,8 @@ export function readStrictJsonlSnapshot<RecordType>(
       });
     } catch (error) {
       throw new Error(
-        `${codec.label} record ${lineNumber} is invalid strict JSON: ${error instanceof Error ? error.message : String(error)}`
+        `${codec.label} record ${lineNumber} is invalid strict JSON: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
       );
     }
     records.push(codec.parseRecord(parsed, `$[${index}]`));

@@ -6,6 +6,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { readEvalScoreSummary } from "../src/eval-durable.js";
 import { compareEvalRuns } from "../src/scoring.js";
 import type { EvalScoreSummary, EvalSummaryProvenance } from "../src/types.js";
 import { currentRowScore, testRow, testSuite } from "./helpers.js";
@@ -191,12 +192,16 @@ describe("longitudinal eval comparison", () => {
     writeSummary(projectRoot, "baseline", 0.5, provenance("cohort-1", "policy-1", "scoring-1"));
     const historicalRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", "historical");
     fs.mkdirSync(historicalRoot, { recursive: true });
-    const historical = JSON.parse(
-      fs.readFileSync(path.join(projectRoot, ".ultrafuzz", "evals", "runs", "baseline", "summary.json"), "utf8")
-    ) as EvalScoreSummary;
-    delete historical.provenance;
-    historical.eval_run_id = "historical";
-    fs.writeFileSync(path.join(historicalRoot, "summary.json"), `${JSON.stringify(historical)}\n`, "utf8");
+    const historical = readEvalScoreSummary(
+      path.join(projectRoot, ".ultrafuzz", "evals", "runs", "baseline", "summary.json")
+    );
+    const { provenance: omittedProvenance, ...historicalWithoutProvenance } = historical;
+    expect(omittedProvenance).toBeDefined();
+    fs.writeFileSync(
+      path.join(historicalRoot, "summary.json"),
+      `${JSON.stringify({ ...historicalWithoutProvenance, eval_run_id: "historical" })}\n`,
+      "utf8"
+    );
 
     expect(() =>
       compareEvalRuns({ projectRoot, baselineEvalRunId: "historical", candidateEvalRunId: "baseline" })

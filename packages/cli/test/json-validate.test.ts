@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { artifactSchemaDirectory } from "@ultrafuzz/artifacts";
 import { EVAL_PUBLICATION_STATE_SCHEMA_ID, evalSchemaBundleDigest, evalSchemaDirectory } from "@ultrafuzz/evals";
+import { MODAL_NODE_INPUT_SCHEMA_ID, modalSchemaBundleDigest, modalSchemaDirectory } from "@ultrafuzz/modal";
 import {
   EXPANDED_GRAPH_JSON_SCHEMA_ID,
   TOPOLOGY_SCHEMA_BUNDLE_DIGEST,
@@ -172,6 +173,56 @@ test("json validate recognizes the pinned eval schema and reports the owning eva
     const tamperedSchema = path.join(temporary, "eval-publication-state.schema.json");
     fs.writeFileSync(tamperedSchema, `${fs.readFileSync(schema, "utf8")} `, "utf8");
     const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", publicationState]);
+    assert.equal(tamperedCapture.code, 2);
+    assert.match(tamperedCapture.stderr, /JSON_SCHEMA_DIGEST_MISMATCH/u);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("json validate recognizes the pinned Modal schema and reports the owning Modal bundle", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-modal-"));
+  try {
+    const schema = path.join(modalSchemaDirectory(), "modal-node-input.schema.json");
+    const nodeInput = path.join(temporary, "node-input.json");
+    fs.writeFileSync(
+      nodeInput,
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.modal.node.v1",
+        run_id: "run-1",
+        task_id: "task-1",
+        attempt_id: "attempt-1",
+        execution_generation: "base",
+        execution_snapshot_root: ".ultrafuzz/runs/run-1/smithers/execution-snapshots/generation",
+        workflow_path: ".ultrafuzz/runs/run-1/workflow.tsx",
+        run_root: ".ultrafuzz/runs/run-1",
+        artifact_dir: ".ultrafuzz/runs/run-1/artifacts/attempt-1",
+        workspace_dir: ".ultrafuzz/runs/run-1/workspaces/attempt-1",
+        dependency_artifact_dirs: [],
+        resources: { cpu: 1, memory_mib: 1_024, timeout_seconds: 60 },
+        agent_credential_env: ["OPENAI_API_KEY"]
+      })}\n`,
+      "utf8"
+    );
+
+    const validCapture = await capture(["json", "validate", "--schema", schema, "--file", nodeInput, "--json"]);
+    assert.equal(validCapture.code, 0);
+    const envelope = JSON.parse(validCapture.stdout) as {
+      ok: boolean;
+      data: {
+        status: string;
+        schema: { id: string; bundle_sha256: string; registered: boolean };
+      };
+    };
+    assert.equal(envelope.ok, true);
+    assert.equal(envelope.data.status, "valid");
+    assert.equal(envelope.data.schema.registered, true);
+    assert.equal(envelope.data.schema.id, MODAL_NODE_INPUT_SCHEMA_ID);
+    assert.equal(envelope.data.schema.bundle_sha256, modalSchemaBundleDigest());
+
+    const tamperedSchema = path.join(temporary, "modal-node-input.schema.json");
+    fs.writeFileSync(tamperedSchema, `${fs.readFileSync(schema, "utf8")} `, "utf8");
+    const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", nodeInput]);
     assert.equal(tamperedCapture.code, 2);
     assert.match(tamperedCapture.stderr, /JSON_SCHEMA_DIGEST_MISMATCH/u);
   } finally {

@@ -68,17 +68,25 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
   "eval-run-record.schema.json": {
     role: "runtime-state",
     typescriptExport: "evalRunRecordJsonSchema",
-    semanticGates: ["eval-run-record-lifecycle-coupling"]
+    semanticGates: ["eval-run-record-lifecycle-coupling", "eval-recovery-equivalence-coupling"]
   },
   "eval-run-summary.schema.json": {
     role: "runtime-state",
     typescriptExport: "evalRunSummaryJsonSchema",
-    semanticGates: ["eval-run-summary-count-coupling", "eval-run-summary-record-lineage"]
+    semanticGates: [
+      "eval-run-summary-count-coupling",
+      "eval-run-summary-record-lineage",
+      "eval-recovery-equivalence-coupling"
+    ]
   },
   "eval-score-summary.schema.json": {
     role: "runtime-state",
     typescriptExport: "evalScoreSummaryJsonSchema",
-    semanticGates: ["eval-score-summary-count-coupling", "eval-score-summary-lineage"]
+    semanticGates: [
+      "eval-score-summary-count-coupling",
+      "eval-score-summary-lineage",
+      "eval-recovery-equivalence-coupling"
+    ]
   },
   "telemetry-cursor.schema.json": {
     role: "runtime-state",

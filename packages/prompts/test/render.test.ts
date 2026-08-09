@@ -183,7 +183,6 @@ describe("prompt rendering", () => {
     tmpDirs.push(tmp);
     const specialRoot = path.join(tmp, "path with spaces, '$dollar', and `ticks`");
     const input = baseRenderInput(specialRoot);
-    const outputs = input.graph.logicalNodes[2]!.outputs!;
     const result = renderPrompt(input);
 
     expect(result.renderedMarkdown.match(/Validation command:/gu)).toHaveLength(2);

@@ -11,6 +11,7 @@ import {
 import type {
   EvalFindingScore,
   EvalMatrixRow,
+  EvalRecoveryEquivalence,
   EvalRunExpansion,
   EvalRunManifest,
   EvalRunRecord,
@@ -26,12 +27,20 @@ export interface EvalSemanticGateIssue {
   message: string;
 }
 
+export const EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE = "eval-recovery-equivalence-coupling" as const;
+
+export interface EvalRecoveryEquivalenceSemanticIssue {
+  path: readonly (string | number)[];
+  message: string;
+}
+
 type EvalSemanticGate = (value: unknown) => EvalSemanticGateIssue[];
 
 const gateHandlers: Readonly<Record<string, EvalSemanticGate>> = Object.freeze({
   "eval-finding-score-decision-coupling": findingScoreDecisionCoupling,
   "eval-matrix-identity-joins": matrixIdentityJoins,
   "eval-review-queue-decision-coupling": reviewQueueDecisionCoupling,
+  [EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE]: recoveryEquivalenceCoupling,
   "eval-run-manifest-suite-joins": runManifestSuiteJoins,
   "eval-run-record-lifecycle-coupling": runRecordLifecycleCoupling,
   "eval-run-summary-count-coupling": runSummaryCountCoupling,
@@ -45,9 +54,17 @@ const gatesBySchema: Readonly<Record<string, readonly string[]>> = Object.freeze
   [EVAL_MATRIX_SCHEMA_ID]: ["eval-matrix-identity-joins"],
   [EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID]: ["eval-review-queue-decision-coupling"],
   [EVAL_RUN_MANIFEST_SCHEMA_ID]: ["eval-run-manifest-suite-joins"],
-  [EVAL_RUN_RECORD_SCHEMA_ID]: ["eval-run-record-lifecycle-coupling"],
-  [EVAL_RUN_SUMMARY_SCHEMA_ID]: ["eval-run-summary-count-coupling", "eval-run-summary-record-lineage"],
-  [EVAL_SCORE_SUMMARY_SCHEMA_ID]: ["eval-score-summary-count-coupling", "eval-score-summary-lineage"]
+  [EVAL_RUN_RECORD_SCHEMA_ID]: ["eval-run-record-lifecycle-coupling", EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE],
+  [EVAL_RUN_SUMMARY_SCHEMA_ID]: [
+    "eval-run-summary-count-coupling",
+    "eval-run-summary-record-lineage",
+    EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE
+  ],
+  [EVAL_SCORE_SUMMARY_SCHEMA_ID]: [
+    "eval-score-summary-count-coupling",
+    "eval-score-summary-lineage",
+    EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE
+  ]
 });
 
 export function executeEvalSchemaSemanticGates(schemaId: string, value: unknown): EvalSemanticGateIssue[] {
@@ -56,28 +73,180 @@ export function executeEvalSchemaSemanticGates(schemaId: string, value: unknown)
 
 /** Fail registry initialization when metadata names a missing or incorrectly scoped executable gate. */
 export function assertEvalSemanticGateRegistry(): void {
-  const metadataGates = new Map<string, string>();
-  for (const entry of evalSchemaRegistry()) {
-    for (const gate of entry.semanticGates) {
-      const existing = metadataGates.get(gate);
-      if (existing !== undefined)
-        throw new Error(`eval semantic gate ${gate} is registered by both ${existing} and ${entry.id}`);
-      metadataGates.set(gate, entry.id);
-    }
-  }
-  const unknown = [...metadataGates.keys()].filter((gate) => gateHandlers[gate] === undefined).sort();
+  const metadataScopes = evalSchemaRegistry().flatMap((entry) =>
+    entry.semanticGates.map((gate) => ({ gate, schemaId: entry.id }))
+  );
+  const metadataGates = new Set(metadataScopes.map(({ gate }) => gate));
+  const unknown = [...metadataGates].filter((gate) => gateHandlers[gate] === undefined).sort();
   const unregistered = Object.keys(gateHandlers)
     .filter((gate) => !metadataGates.has(gate))
     .sort();
-  const scopeMismatch = [...metadataGates.entries()]
-    .filter(([gate, schemaId]) => !(gatesBySchema[schemaId] ?? []).includes(gate))
-    .map(([gate, schemaId]) => `${gate}:${schemaId}`)
-    .sort();
+  const metadataScopeKeys = new Set(metadataScopes.map(({ gate, schemaId }) => `${schemaId}\0${gate}`));
+  const declaredScopes = Object.entries(gatesBySchema).flatMap(([schemaId, gates]) =>
+    gates.map((gate) => ({ gate, schemaId }))
+  );
+  const scopeMismatch = [
+    ...metadataScopes
+      .filter(({ gate, schemaId }) => !(gatesBySchema[schemaId] ?? []).includes(gate))
+      .map(({ gate, schemaId }) => `metadata-only:${gate}:${schemaId}`),
+    ...declaredScopes
+      .filter(({ gate, schemaId }) => !metadataScopeKeys.has(`${schemaId}\0${gate}`))
+      .map(({ gate, schemaId }) => `dispatcher-only:${gate}:${schemaId}`)
+  ].sort();
   if (unknown.length > 0 || unregistered.length > 0 || scopeMismatch.length > 0) {
     throw new Error(
       `eval semantic gate registry mismatch${unknown.length === 0 ? "" : `; unknown: ${unknown.join(", ")}`}${unregistered.length === 0 ? "" : `; unregistered: ${unregistered.join(", ")}`}${scopeMismatch.length === 0 ? "" : `; scope: ${scopeMismatch.join(", ")}`}`
     );
   }
+}
+
+/**
+ * The single semantic authority for every persisted recovery-equivalence value.
+ * Callers may add an enclosing JSON path, but must not reimplement these rules.
+ */
+export function evalRecoveryEquivalenceSemanticIssues(
+  value: EvalRecoveryEquivalence
+): EvalRecoveryEquivalenceSemanticIssue[] {
+  const issues: EvalRecoveryEquivalenceSemanticIssue[] = [];
+  if (
+    value.recovery_generations !==
+    value.infrastructure_only_recovery_generations + value.model_work_recovery_generations
+  ) {
+    issues.push({
+      path: ["recovery_generations"],
+      message: "must equal infrastructure-only plus model-work recovery generations"
+    });
+  }
+  if (value.no_progress_recovery_generations > value.infrastructure_only_recovery_generations) {
+    issues.push({
+      path: ["no_progress_recovery_generations"],
+      message: "cannot exceed infrastructure-only recovery generations"
+    });
+  }
+  if (value.recovery_reexecuted_model_backed_node_executions > value.repeated_model_backed_node_executions) {
+    issues.push({
+      path: ["recovery_reexecuted_model_backed_node_executions"],
+      message: "cannot exceed all repeated model-backed node executions"
+    });
+  }
+  if (value.model_work_recovery_generations > value.recovery_reexecuted_model_backed_node_executions) {
+    issues.push({
+      path: ["model_work_recovery_generations"],
+      message: "cannot exceed recovery model re-executions"
+    });
+  }
+  if (
+    value.observed_node_attempts <
+    value.unique_model_backed_node_executions + value.repeated_model_backed_node_executions
+  ) {
+    issues.push({
+      path: ["observed_node_attempts"],
+      message: "cannot be less than accounted model-backed node executions"
+    });
+  }
+  if (
+    value.unique_model_backed_node_executions + value.repeated_model_backed_node_executions > 0 &&
+    (value.observed_workflow_executions === 0 || value.observed_controller_invocations === 0)
+  ) {
+    issues.push({
+      path: ["observed_workflow_executions"],
+      message: "model-backed executions require observed workflow and controller lineage"
+    });
+  }
+  if ((value.classification === "non-comparable") !== (value.reason !== null)) {
+    issues.push({
+      path: ["reason"],
+      message: "must be present exactly for non-comparable classifications"
+    });
+  }
+  if (
+    value.classification !== "non-comparable" &&
+    value.recovery_reexecuted_model_backed_node_executions > value.policy.max_repeated_model_executions
+  ) {
+    issues.push({
+      path: ["classification"],
+      message: "must be non-comparable when recovery model re-executions exceed the policy maximum"
+    });
+  }
+  if (
+    value.classification === "clean" &&
+    (value.recovery_generations !== 0 ||
+      value.recovery_reexecuted_model_backed_node_executions !== 0 ||
+      value.model_work_recovery_generations !== 0 ||
+      value.observed_workflow_executions > 1 ||
+      value.observed_controller_invocations > 1)
+  ) {
+    issues.push({
+      path: ["classification"],
+      message: "clean classifications cannot contain recovery generations or recovery model re-executions"
+    });
+  }
+  if (
+    value.classification === "infrastructure-recovered" &&
+    (value.recovery_generations === 0 ||
+      value.model_work_recovery_generations !== 0 ||
+      value.recovery_reexecuted_model_backed_node_executions !== 0)
+  ) {
+    issues.push({
+      path: ["classification"],
+      message: "infrastructure-recovered classifications require infrastructure-only recovery"
+    });
+  }
+  if (
+    value.classification === "model-reexecuted-within-policy" &&
+    (value.recovery_generations === 0 ||
+      value.model_work_recovery_generations === 0 ||
+      value.recovery_reexecuted_model_backed_node_executions === 0)
+  ) {
+    issues.push({
+      path: ["classification"],
+      message: "model-reexecuted classifications require recovery model re-executions"
+    });
+  }
+  return issues;
+}
+
+function recoveryEquivalenceCoupling(value: unknown): EvalSemanticGateIssue[] {
+  if (isEvalScoreSummary(value)) {
+    return value.rows.flatMap((row, index) =>
+      recoveryEquivalenceIssuesAt(row.recovery_equivalence, `$.rows[${index}].recovery_equivalence`)
+    );
+  }
+  if (isEvalRunSummary(value)) {
+    return value.records.flatMap((record, index) =>
+      record.recovery_equivalence === undefined
+        ? []
+        : recoveryEquivalenceIssuesAt(record.recovery_equivalence, `$.records[${index}].recovery_equivalence`)
+    );
+  }
+  const record = value as EvalRunRecord;
+  return record.recovery_equivalence === undefined
+    ? []
+    : recoveryEquivalenceIssuesAt(record.recovery_equivalence, "$.recovery_equivalence");
+}
+
+function recoveryEquivalenceIssuesAt(value: EvalRecoveryEquivalence, basePath: string): EvalSemanticGateIssue[] {
+  return evalRecoveryEquivalenceSemanticIssues(value).map((semanticIssue) => ({
+    gate: EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE,
+    path: appendJsonPath(basePath, semanticIssue.path),
+    message: semanticIssue.message
+  }));
+}
+
+function isEvalScoreSummary(value: unknown): value is EvalScoreSummary {
+  return typeof value === "object" && value !== null && Array.isArray((value as { rows?: unknown }).rows);
+}
+
+function isEvalRunSummary(value: unknown): value is EvalRunSummary {
+  return typeof value === "object" && value !== null && Array.isArray((value as { records?: unknown }).records);
+}
+
+function appendJsonPath(basePath: string, segments: readonly (string | number)[]): string {
+  let current = basePath;
+  for (const segment of segments) {
+    current = typeof segment === "number" ? `${current}[${segment}]` : `${current}.${segment}`;
+  }
+  return current;
 }
 
 function findingScoreDecisionCoupling(value: unknown): EvalSemanticGateIssue[] {

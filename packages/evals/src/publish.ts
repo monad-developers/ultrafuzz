@@ -121,7 +121,7 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
   }
 
   let rowsPublished = 0;
-  let rowsSkipped = 0;
+  const rowsSkipped = 0;
   let eventsPublished = 0;
   let artifactsPublished = 0;
   for (const row of matrix) {

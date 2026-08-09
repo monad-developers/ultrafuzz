@@ -1,5 +1,3 @@
-import fs from "node:fs";
-
 import { z } from "zod/v4";
 
 import { readStrictJsonDocument } from "./eval-durable.js";

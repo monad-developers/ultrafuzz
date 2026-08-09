@@ -152,7 +152,9 @@ export function readRegularFileSnapshot(filePath: string, maxBytes: number): Buf
   try {
     descriptor = fs.openSync(filePath, flags);
   } catch (error) {
-    throw new Error(`cannot open regular file ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`cannot open regular file ${filePath}: ${error instanceof Error ? error.message : String(error)}`, {
+      cause: error
+    });
   }
   try {
     const before = fs.fstatSync(descriptor, { bigint: true });

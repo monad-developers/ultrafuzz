@@ -44,11 +44,9 @@ import {
   type NodeAttemptLedgerEntry,
   type NodeAttemptOutcome,
   type NodeState,
-  type NormalizedUsage,
   type NodeStatus,
   type RunLayout,
   type RunMetadataAccounting,
-  type RunMetadataDocument,
   type RunStatus,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestTask,
@@ -2779,16 +2777,6 @@ function sourceNodeAttempts(
   return queryNodeAttempts(layoutForRunRoot(sourceRoot, safeSourceRunId), { strategyAttemptId });
 }
 
-function firstStringField(value: Record<string, unknown> | undefined, keys: readonly string[]): string | undefined {
-  for (const key of keys) {
-    const candidate = stringField(value, key);
-    if (candidate !== undefined) {
-      return candidate;
-    }
-  }
-  return undefined;
-}
-
 function tasksInDependencyOrder(tasks: StoredWorkflowTask[]): StoredWorkflowTask[] {
   const byAttempt = new Map(tasks.map((task) => [task.attemptId, task]));
   const visiting = new Set<string>();
@@ -3308,7 +3296,8 @@ function parseWorkflowEvents(stdout: string, expectedWorkflowRunId: string): Wor
       });
     } catch (error) {
       throw new Error(
-        `Smithers event record ${index + 1} is invalid strict JSON: ${error instanceof Error ? error.message : String(error)}`
+        `Smithers event record ${index + 1} is invalid strict JSON: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
       );
     }
     if (!isRecord(parsed) || !hasOnlyKeys(parsed, ["runId", "seq", "timestampMs", "type", "payload"])) {
@@ -3466,10 +3455,6 @@ async function checkedRunLayout(
       ]
     };
   }
-}
-
-function artifactManifestExists(layout: RunLayout, nodeId: string): boolean {
-  return fs.existsSync(path.join(getNodeArtifactDir(layout, nodeId, { create: true }), "artifact-manifest.json"));
 }
 
 function artifactProvenance(task: StoredWorkflowTask, workflowRunId: string): Partial<ArtifactProvenance> {

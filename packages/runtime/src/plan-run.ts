@@ -32,7 +32,6 @@ import {
 } from "@ultrafuzz/config";
 import {
   loadPromptCatalog,
-  RENDERED_PROMPT_FILE,
   renderPrompt,
   writeRenderedPrompt,
   type PromptCatalog,

@@ -15,6 +15,7 @@ import {
 } from "@ultrafuzz/artifacts";
 import { z } from "zod/v4";
 
+import { evalRecoveryEquivalenceSemanticIssues } from "./eval-semantic-gates.js";
 import { resolveRecoveryEquivalencePolicy } from "./suite.js";
 import {
   type EvalRecoveryEquivalence,
@@ -28,7 +29,7 @@ import { EvalError } from "./utils.js";
 export const RECOVERY_EQUIVALENCE_SCHEMA_VERSION = "ultrafuzz.eval.recovery-equivalence.v1" as const;
 
 const MAX_RECOVERY_SOURCE_BYTES = 16 * 1024 * 1024;
-const nonNegativeInteger = z.number().int().nonnegative();
+const nonNegativeInteger = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 
 const recoveryEquivalenceSchema = z
   .strictObject({
@@ -45,113 +46,14 @@ const recoveryEquivalenceSchema = z
     observed_workflow_executions: nonNegativeInteger,
     observed_controller_invocations: nonNegativeInteger,
     classification: z.enum(["clean", "infrastructure-recovered", "model-reexecuted-within-policy", "non-comparable"]),
-    reason: z.string().min(1).nullable()
+    reason: z.string().min(1).regex(/\S/u).nullable()
   })
   .superRefine((value, context) => {
-    if (
-      value.recovery_generations !==
-      value.infrastructure_only_recovery_generations + value.model_work_recovery_generations
-    ) {
+    for (const issue of evalRecoveryEquivalenceSemanticIssues(value)) {
       context.addIssue({
         code: "custom",
-        path: ["recovery_generations"],
-        message: "must equal infrastructure-only plus model-work recovery generations"
-      });
-    }
-    if (value.no_progress_recovery_generations > value.infrastructure_only_recovery_generations) {
-      context.addIssue({
-        code: "custom",
-        path: ["no_progress_recovery_generations"],
-        message: "cannot exceed infrastructure-only recovery generations"
-      });
-    }
-    if (value.recovery_reexecuted_model_backed_node_executions > value.repeated_model_backed_node_executions) {
-      context.addIssue({
-        code: "custom",
-        path: ["recovery_reexecuted_model_backed_node_executions"],
-        message: "cannot exceed all repeated model-backed node executions"
-      });
-    }
-    if (value.model_work_recovery_generations > value.recovery_reexecuted_model_backed_node_executions) {
-      context.addIssue({
-        code: "custom",
-        path: ["model_work_recovery_generations"],
-        message: "cannot exceed recovery model re-executions"
-      });
-    }
-    if (
-      value.observed_node_attempts <
-      value.unique_model_backed_node_executions + value.repeated_model_backed_node_executions
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["observed_node_attempts"],
-        message: "cannot be less than accounted model-backed node executions"
-      });
-    }
-    if (
-      value.unique_model_backed_node_executions + value.repeated_model_backed_node_executions > 0 &&
-      (value.observed_workflow_executions === 0 || value.observed_controller_invocations === 0)
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["observed_workflow_executions"],
-        message: "model-backed executions require observed workflow and controller lineage"
-      });
-    }
-    if ((value.classification === "non-comparable") !== (value.reason !== null)) {
-      context.addIssue({
-        code: "custom",
-        path: ["reason"],
-        message: "must be present exactly for non-comparable classifications"
-      });
-    }
-    if (
-      value.classification !== "non-comparable" &&
-      value.recovery_reexecuted_model_backed_node_executions > value.policy.max_repeated_model_executions
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["classification"],
-        message: "must be non-comparable when recovery model re-executions exceed the policy maximum"
-      });
-    }
-    if (
-      value.classification === "clean" &&
-      (value.recovery_generations !== 0 ||
-        value.recovery_reexecuted_model_backed_node_executions !== 0 ||
-        value.model_work_recovery_generations !== 0 ||
-        value.observed_workflow_executions > 1 ||
-        value.observed_controller_invocations > 1)
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["classification"],
-        message: "clean classifications cannot contain recovery generations or recovery model re-executions"
-      });
-    }
-    if (
-      value.classification === "infrastructure-recovered" &&
-      (value.recovery_generations === 0 ||
-        value.model_work_recovery_generations !== 0 ||
-        value.recovery_reexecuted_model_backed_node_executions !== 0)
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["classification"],
-        message: "infrastructure-recovered classifications require infrastructure-only recovery"
-      });
-    }
-    if (
-      value.classification === "model-reexecuted-within-policy" &&
-      (value.recovery_generations === 0 ||
-        value.model_work_recovery_generations === 0 ||
-        value.recovery_reexecuted_model_backed_node_executions === 0)
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["classification"],
-        message: "model-reexecuted classifications require recovery model re-executions"
+        path: [...issue.path],
+        message: issue.message
       });
     }
   });

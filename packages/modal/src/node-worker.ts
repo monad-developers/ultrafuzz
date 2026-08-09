@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   artifactSchemaBundleDigest,
@@ -23,6 +24,22 @@ import {
   readModalExecutionDependencyClosure,
   verifyModalExecutionSnapshotClosure
 } from "./node-provider.js";
+import {
+  MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID,
+  MODAL_NODE_CHECKPOINT_SCHEMA_ID,
+  MODAL_NODE_INPUT_SCHEMA_ID,
+  MODAL_NODE_RESTORE_SCHEMA_ID,
+  MODAL_NODE_RESULT_SCHEMA_ID,
+  MODAL_NODE_WORKER_ERROR_SCHEMA_ID,
+  type StrictModalNodeCheckpointDocument,
+  type StrictModalNodeCheckpointIndexDocument,
+  type StrictModalNodeCheckpointStage,
+  type StrictModalNodeInputDocument,
+  type StrictModalNodeResultDocument,
+  type StrictModalNodeRestoreDocument,
+  type StrictModalNodeWorkerErrorDocument
+} from "./modal-contracts.js";
+import { readModalDocument, serializeModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
 const DURABLE_WORKSPACE_DIRECTORY = "workspace";
@@ -33,50 +50,24 @@ const DURABLE_RESTORE_MARKER = "restore.json";
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 const MAX_VERIFICATION_MARKER_BYTES = 4 * 1024 * 1024;
 
-type DurableCheckpointStage = "prepared" | "running" | "failed" | "completed";
-
-interface DurableCheckpointRecord {
-  schema_version: "ultrafuzz.modal.node-checkpoint.v1";
-  checkpoint_id: string;
-  sequence: number;
-  stage: DurableCheckpointStage;
-  created_at: string;
-  storage_lineage: string;
-  workspace_path: string;
-  run_root: string;
-  execution_snapshot_root: string;
-  handoff_archive: string;
-  project_archive_sha256: string;
-  restored_from?: string;
-  error?: string;
-}
-
-interface DurableCheckpointIndex {
-  schema_version: "ultrafuzz.modal.node-checkpoint-index.v1";
-  storage_lineage: string;
-  workspace_path: string;
-  run_root: string;
-  execution_snapshot_root: string;
-  handoff_archive: string;
-  project_archive_sha256: string;
-  checkpoints: Array<
-    Pick<DurableCheckpointRecord, "checkpoint_id" | "sequence" | "stage" | "created_at"> & { manifest: string }
-  >;
-}
+type DurableCheckpointStage = StrictModalNodeCheckpointStage;
+type DurableCheckpointRecord = StrictModalNodeCheckpointDocument;
+type DurableCheckpointIndex = StrictModalNodeCheckpointIndexDocument;
 
 export interface DurableNodeWorkspace {
   projectRoot: string;
   checkpointIndex: string;
   input: ReturnType<typeof parseModalNodeWorkerInput>;
   hasCompletedCheckpoint: boolean;
-  recordCheckpoint(stage: DurableCheckpointStage, error?: unknown): DurableCheckpointRecord;
+  recordCheckpoint(stage: DurableCheckpointStage, error?: unknown): Promise<DurableCheckpointRecord>;
 }
 
 async function main(): Promise<void> {
   const requestPath = requiredOption("--request");
   const archivePath = requiredOption("--project-archive");
   const dataRoot = requiredOption("--data-root");
-  const requestedInput = parseModalNodeWorkerInput(JSON.parse(fs.readFileSync(requestPath, "utf8")) as unknown);
+  const requestedInput = readModalDocument(requestPath, MODAL_NODE_INPUT_SCHEMA_ID)
+    .value as StrictModalNodeInputDocument;
   let durableWorkspace: DurableNodeWorkspace | undefined;
   let publishing: string | undefined;
   try {
@@ -84,20 +75,20 @@ async function main(): Promise<void> {
     const input = durableWorkspace.input;
     const projectRoot = durableWorkspace.projectRoot;
     if (!durableWorkspace.hasCompletedCheckpoint) {
-      durableWorkspace.recordCheckpoint("prepared");
+      await durableWorkspace.recordCheckpoint("prepared");
     }
     syncDurableData(projectRoot);
     preflightModalJsonValidator();
     const localRunId = `${input.run_id}-${crypto.createHash("sha256").update(input.task_id).digest("hex").slice(0, 12)}`;
     if (!durableWorkspace.hasCompletedCheckpoint) {
-      durableWorkspace.recordCheckpoint("running");
+      await durableWorkspace.recordCheckpoint("running");
       syncDurableData(projectRoot);
       await runDurableWorkflow(projectRoot, localRunId, input);
     }
 
     const artifactDir = anchoredProjectPath(projectRoot, input.artifact_dir);
     const workspaceDir = anchoredProjectPath(projectRoot, input.workspace_dir);
-    const completedCheckpoint = durableWorkspace.recordCheckpoint("completed");
+    const completedCheckpoint = await durableWorkspace.recordCheckpoint("completed");
     syncDurableData(projectRoot);
     cleanupStalePublicationDirectories(dataRoot);
     publishing = path.join(dataRoot, `.result-publishing-${process.pid}-${crypto.randomBytes(8).toString("hex")}`);
@@ -125,23 +116,22 @@ async function main(): Promise<void> {
     const artifactArchive = path.join(publishing, "artifacts.tgz");
     await runChecked("archive-results", "tar", ["-czf", artifactArchive, "-C", staging, "."], projectRoot);
     const digest = crypto.createHash("sha256").update(fs.readFileSync(artifactArchive)).digest("hex");
-    fs.writeFileSync(
-      path.join(publishing, "result.json"),
-      `${JSON.stringify({
-        schema_version: "ultrafuzz.modal.node-result.v2",
-        status: "succeeded",
-        artifact_archive: path.posix.join(dataRoot, "artifacts.tgz"),
-        artifact_sha256: digest,
-        storage_lineage: `${input.run_id}/${input.attempt_id}/${input.execution_generation}`,
-        durable_checkpoint: path.posix.join(
-          dataRoot,
-          DURABLE_CHECKPOINT_DIRECTORY,
-          `${completedCheckpoint.checkpoint_id}.json`
-        ),
-        durable_checkpoint_index: durableWorkspace.checkpointIndex
-      })}\n`,
-      { mode: 0o600 }
-    );
+    const result: StrictModalNodeResultDocument = {
+      schema_version: "ultrafuzz.modal.node-result.v2",
+      status: "succeeded",
+      artifact_archive: path.posix.join(dataRoot, "artifacts.tgz"),
+      artifact_sha256: digest,
+      storage_lineage: `${input.run_id}/${input.attempt_id}/${input.execution_generation}`,
+      durable_checkpoint: path.posix.join(
+        dataRoot,
+        DURABLE_CHECKPOINT_DIRECTORY,
+        `${completedCheckpoint.checkpoint_id}.json`
+      ),
+      durable_checkpoint_index: durableWorkspace.checkpointIndex
+    };
+    await writeModalDocumentAtomic(path.join(publishing, "result.json"), MODAL_NODE_RESULT_SCHEMA_ID, result, {
+      trustedRoot: publishing
+    });
     const publicationLock = path.join(dataRoot, ".result-publishing.lock");
     let lockFd: number | undefined;
     let lockIdentity: { dev: number; ino: number } | undefined;
@@ -193,7 +183,7 @@ async function main(): Promise<void> {
   } catch (error) {
     if (durableWorkspace !== undefined) {
       try {
-        durableWorkspace.recordCheckpoint("failed", error);
+        await durableWorkspace.recordCheckpoint("failed", error);
         syncDurableData(durableWorkspace.projectRoot);
       } catch {
         // Preserve the original worker failure; the durable workspace itself remains mounted on the Volume.
@@ -725,46 +715,21 @@ export async function initializeDurableNodeWorkspace(
   archivePath: string,
   requestedInput: ReturnType<typeof parseModalNodeWorkerInput>
 ): Promise<DurableNodeWorkspace> {
-  const descriptorFreeInput = { ...requestedInput } as Record<string, unknown>;
-  delete descriptorFreeInput.execution_snapshot_source_root;
-  requestedInput = parseModalNodeWorkerInput(descriptorFreeInput);
+  requestedInput = parseModalNodeWorkerInput(requestedInput);
   const root = resolveDurableDataRoot(dataRoot);
   const projectRoot = path.join(root, DURABLE_WORKSPACE_DIRECTORY);
   const handoffDirectory = path.join(root, DURABLE_INPUT_DIRECTORY);
   const handoffArchive = path.join(handoffDirectory, "project.tgz");
-  const durableRequest = path.join(handoffDirectory, "request.json");
   const checkpointsDirectory = path.join(root, DURABLE_CHECKPOINT_DIRECTORY);
   const checkpointIndex = path.join(checkpointsDirectory, DURABLE_CHECKPOINT_INDEX);
 
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-  fs.mkdirSync(handoffDirectory, { recursive: true, mode: 0o700 });
+  assertDurableDirectory(root, "durable data root");
+  const input = await openOrCreateDurableHandoff(root, archivePath, requestedInput);
   fs.mkdirSync(checkpointsDirectory, { recursive: true, mode: 0o700 });
-  const hasDurableHandoff = fs.existsSync(handoffArchive);
-  const input = hasDurableHandoff
-    ? readDurableInput(durableRequest, requestedInput)
-    : validateFreshHandoff(archivePath, requestedInput);
+  assertDurableDirectory(checkpointsDirectory, "durable checkpoints directory");
   const projectArchiveSha256 = input.project_archive_sha256;
   const storageLineage = `${input.run_id}/${input.attempt_id}/${input.execution_generation}`;
-  if (hasDurableHandoff) {
-    if (sha256File(handoffArchive) !== projectArchiveSha256) {
-      throw new Error("durable cloud handoff archive digest mismatch");
-    }
-  } else {
-    const handoffPublishing = path.join(handoffDirectory, ".project.tgz.publishing");
-    writeJsonAtomic(durableRequest, input);
-    if (fs.existsSync(handoffPublishing)) {
-      if (sha256File(handoffPublishing) === projectArchiveSha256) {
-        fs.renameSync(handoffPublishing, handoffArchive);
-      } else {
-        fs.rmSync(handoffPublishing, { force: true });
-      }
-    }
-    if (!fs.existsSync(handoffArchive)) {
-      fs.copyFileSync(archivePath, handoffPublishing, fs.constants.COPYFILE_EXCL);
-      fs.chmodSync(handoffPublishing, 0o600);
-      fs.renameSync(handoffPublishing, handoffArchive);
-    }
-  }
 
   const hadDurableWorkspace = fs.existsSync(projectRoot);
   if (hadDurableWorkspace) {
@@ -787,7 +752,7 @@ export async function initializeDurableNodeWorkspace(
   sealCloudExecutionSnapshot(projectRoot, input);
   verifyModalExecutionSnapshotClosure(projectRoot, input, { requireSealedPermissions: true });
 
-  const index = loadDurableCheckpointIndex(
+  let index = loadDurableCheckpointIndex(
     checkpointIndex,
     storageLineage,
     projectRoot,
@@ -797,11 +762,17 @@ export async function initializeDurableNodeWorkspace(
     projectArchiveSha256
   );
   const restoreMarker = path.join(handoffDirectory, DURABLE_RESTORE_MARKER);
-  let restoredFrom = readRestoreMarker(restoreMarker, path.dirname(root));
+  let restoredFrom = readRestoreMarker(restoreMarker, root, input);
   if (restoredFrom === undefined) {
     restoredFrom = restorePriorAttemptOutputs(root, projectRoot, input);
     if (restoredFrom !== undefined) {
-      writeJsonAtomic(restoreMarker, { schema_version: "ultrafuzz.modal.node-restore.v1", source_root: restoredFrom });
+      const restoreDocument: StrictModalNodeRestoreDocument = {
+        schema_version: "ultrafuzz.modal.node-restore.v1",
+        source_root: restoredFrom
+      };
+      await writeModalDocumentAtomic(restoreMarker, MODAL_NODE_RESTORE_SCHEMA_ID, restoreDocument, {
+        trustedRoot: root
+      });
     }
   }
   const hasCompletedCheckpoint = index.checkpoints.some((checkpoint) => checkpoint.stage === "completed");
@@ -810,7 +781,8 @@ export async function initializeDurableNodeWorkspace(
     checkpointIndex,
     input,
     hasCompletedCheckpoint,
-    recordCheckpoint(stage, error) {
+    async recordCheckpoint(stage, error) {
+      assertDurableCheckpointManifestBijection(index, checkpointIndex, true);
       const sequence = index.checkpoints.length + 1;
       const checkpointId = `${String(sequence).padStart(4, "0")}-${stage}`;
       const createdAt = new Date().toISOString();
@@ -830,24 +802,114 @@ export async function initializeDurableNodeWorkspace(
         ...(restoredFrom === undefined ? {} : { restored_from: restoredFrom }),
         ...(error === undefined ? {} : { error: describeCheckpointError(error) })
       };
-      writeJsonAtomic(manifestPath, checkpoint);
-      index.checkpoints.push({
-        checkpoint_id: checkpointId,
-        sequence,
-        stage,
-        created_at: createdAt,
-        manifest: manifestPath
+      await writeModalDocumentAtomic(manifestPath, MODAL_NODE_CHECKPOINT_SCHEMA_ID, checkpoint, {
+        trustedRoot: root
       });
-      writeJsonAtomic(checkpointIndex, index);
+      const nextIndex: DurableCheckpointIndex = {
+        ...index,
+        checkpoints: [
+          ...index.checkpoints,
+          {
+            checkpoint_id: checkpointId,
+            sequence,
+            stage,
+            created_at: createdAt,
+            manifest: manifestPath
+          }
+        ]
+      };
+      await writeModalDocumentAtomic(checkpointIndex, MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID, nextIndex, {
+        trustedRoot: root
+      });
+      index = nextIndex;
       return checkpoint;
     }
   };
+}
+
+async function openOrCreateDurableHandoff(
+  root: string,
+  archivePath: string,
+  requestedInput: ReturnType<typeof parseModalNodeWorkerInput>
+): Promise<ReturnType<typeof parseModalNodeWorkerInput> & { project_archive_sha256: string }> {
+  const handoffDirectory = path.join(root, DURABLE_INPUT_DIRECTORY);
+  const publishingDirectory = path.join(root, `.${DURABLE_INPUT_DIRECTORY}.publishing`);
+  const finalState = lstatWorkerPath(handoffDirectory);
+  const publishingState = lstatWorkerPath(publishingDirectory);
+  if (finalState !== undefined) {
+    if (publishingState !== undefined) {
+      throw new Error("durable cloud handoff has conflicting committed and publishing state");
+    }
+    return readCommittedDurableHandoff(handoffDirectory, requestedInput, true);
+  }
+  if (publishingState !== undefined) {
+    const input = readCommittedDurableHandoff(publishingDirectory, requestedInput, false);
+    fs.renameSync(publishingDirectory, handoffDirectory);
+    syncDirectory(root);
+    return input;
+  }
+  if (
+    lstatWorkerPath(path.join(root, DURABLE_WORKSPACE_DIRECTORY)) !== undefined ||
+    durableCheckpointStateExists(path.join(root, DURABLE_CHECKPOINT_DIRECTORY))
+  ) {
+    throw new Error("durable cloud handoff is missing for existing worker state");
+  }
+
+  const input = validateFreshHandoff(archivePath, requestedInput);
+  fs.mkdirSync(publishingDirectory, { mode: 0o700 });
+  try {
+    const publishingArchive = path.join(publishingDirectory, "project.tgz");
+    fs.copyFileSync(archivePath, publishingArchive, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(publishingArchive, 0o600);
+    if (sha256File(publishingArchive) !== input.project_archive_sha256) {
+      throw new Error("published durable cloud handoff archive digest mismatch");
+    }
+    await writeModalDocumentAtomic(path.join(publishingDirectory, "request.json"), MODAL_NODE_INPUT_SCHEMA_ID, input, {
+      trustedRoot: publishingDirectory
+    });
+    syncDirectory(publishingDirectory);
+    fs.renameSync(publishingDirectory, handoffDirectory);
+    syncDirectory(root);
+    return input;
+  } catch (error) {
+    fs.rmSync(publishingDirectory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function readCommittedDurableHandoff(
+  directory: string,
+  requestedInput: ReturnType<typeof parseModalNodeWorkerInput>,
+  allowRestoreMarker: boolean
+): ReturnType<typeof parseModalNodeWorkerInput> & { project_archive_sha256: string } {
+  assertDurableDirectory(directory, "durable cloud handoff directory");
+  const allowed = new Set(["project.tgz", "request.json", ...(allowRestoreMarker ? [DURABLE_RESTORE_MARKER] : [])]);
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    if (!allowed.has(entry.name) || !entry.isFile() || entry.isSymbolicLink()) {
+      throw new Error("durable cloud handoff directory contains invalid present state");
+    }
+  }
+  const handoffArchive = path.join(directory, "project.tgz");
+  assertDurableRegularFile(handoffArchive, "durable cloud handoff archive");
+  const input = readDurableInput(path.join(directory, "request.json"), requestedInput);
+  if (sha256File(handoffArchive) !== input.project_archive_sha256) {
+    throw new Error("durable cloud handoff archive digest mismatch");
+  }
+  return input;
+}
+
+function durableCheckpointStateExists(checkpointsDirectory: string): boolean {
+  const state = lstatWorkerPath(checkpointsDirectory);
+  if (state === undefined) return false;
+  assertDurableDirectory(checkpointsDirectory, "durable checkpoints directory");
+  return fs.readdirSync(checkpointsDirectory).length > 0;
 }
 
 function validateFreshHandoff(
   archivePath: string,
   input: ReturnType<typeof parseModalNodeWorkerInput>
 ): ReturnType<typeof parseModalNodeWorkerInput> & { project_archive_sha256: string } {
+  assertDurableRegularFile(archivePath, "cloud handoff archive");
   if (input.project_archive_sha256 === undefined || sha256File(archivePath) !== input.project_archive_sha256) {
     throw new Error("cloud handoff archive digest mismatch");
   }
@@ -860,7 +922,8 @@ function readDurableInput(
 ): ReturnType<typeof parseModalNodeWorkerInput> & { project_archive_sha256: string } {
   let persistedInput: ReturnType<typeof parseModalNodeWorkerInput>;
   try {
-    persistedInput = parseModalNodeWorkerInput(JSON.parse(fs.readFileSync(durableRequest, "utf8")) as unknown);
+    persistedInput = readModalDocument(durableRequest, MODAL_NODE_INPUT_SCHEMA_ID)
+      .value as StrictModalNodeInputDocument;
   } catch (error) {
     throw new Error("durable cloud handoff request is unavailable", { cause: error });
   }
@@ -900,23 +963,29 @@ function sameStrings(left: readonly string[], right: readonly string[]): boolean
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function readRestoreMarker(markerPath: string, allowedParent: string): string | undefined {
-  if (!fs.existsSync(markerPath)) return undefined;
+function readRestoreMarker(
+  markerPath: string,
+  currentRoot: string,
+  input: ReturnType<typeof parseModalNodeWorkerInput>
+): string | undefined {
+  if (lstatWorkerPath(markerPath) === undefined) return undefined;
+  let marker: StrictModalNodeRestoreDocument;
   try {
-    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as unknown;
-    if (
-      isRecord(marker) &&
-      marker.schema_version === "ultrafuzz.modal.node-restore.v1" &&
-      typeof marker.source_root === "string" &&
-      path.isAbsolute(marker.source_root) &&
-      marker.source_root.startsWith(`${allowedParent}${path.sep}`)
-    ) {
-      return marker.source_root;
-    }
-  } catch {
-    // Re-run restoration when an interrupted marker cannot be parsed.
+    marker = readModalDocument(markerPath, MODAL_NODE_RESTORE_SCHEMA_ID).value as StrictModalNodeRestoreDocument;
+  } catch (error) {
+    throw new Error("durable restore marker is invalid", { cause: error });
   }
-  return undefined;
+  const sourceRoot = path.resolve(marker.source_root);
+  if (
+    !path.isAbsolute(marker.source_root) ||
+    sourceRoot !== marker.source_root ||
+    sourceRoot === currentRoot ||
+    path.dirname(sourceRoot) !== path.dirname(currentRoot) ||
+    compatiblePriorAttempt(sourceRoot, currentRoot, input, false) === undefined
+  ) {
+    throw new Error("durable restore marker is invalid");
+  }
+  return sourceRoot;
 }
 
 function restorePriorAttemptOutputs(
@@ -925,32 +994,17 @@ function restorePriorAttemptOutputs(
   input: ReturnType<typeof parseModalNodeWorkerInput>
 ): string | undefined {
   const parent = path.dirname(currentRoot);
-  const candidates: Array<{ root: string; mtimeMs: number; input: ReturnType<typeof parseModalNodeWorkerInput> }> = [];
+  const candidates: CompatiblePriorAttempt[] = [];
   for (const entry of fs.readdirSync(parent, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
     const candidateRoot = path.join(parent, entry.name);
     if (candidateRoot === currentRoot) continue;
-    const requestPath = path.join(candidateRoot, DURABLE_INPUT_DIRECTORY, "request.json");
-    try {
-      const persisted = parseModalNodeWorkerInput(JSON.parse(fs.readFileSync(requestPath, "utf8")) as unknown);
-      if (
-        persisted.project_archive_sha256 !== undefined &&
-        persisted.execution_generation !== input.execution_generation &&
-        sameResumableNodeInput(persisted, input, true) &&
-        fs.existsSync(path.join(candidateRoot, DURABLE_CHECKPOINT_DIRECTORY, DURABLE_CHECKPOINT_INDEX)) &&
-        priorAttemptHasEvidence(candidateRoot, persisted)
-      ) {
-        candidates.push({
-          root: candidateRoot,
-          mtimeMs: fs.statSync(path.join(candidateRoot, DURABLE_CHECKPOINT_DIRECTORY)).mtimeMs,
-          input: persisted
-        });
-      }
-    } catch {
-      // Ignore unrelated or incomplete generation directories; the current generation remains recoverable.
-    }
+    const candidate = compatiblePriorAttempt(candidateRoot, currentRoot, input, true);
+    if (candidate !== undefined) candidates.push(candidate);
   }
-  const prior = candidates.sort((left, right) => right.mtimeMs - left.mtimeMs)[0];
+  const prior = candidates.sort(
+    (left, right) => right.mtimeMs - left.mtimeMs || (left.root < right.root ? -1 : left.root > right.root ? 1 : 0)
+  )[0];
   if (prior === undefined) return undefined;
 
   const priorProjectRoot = path.join(prior.root, DURABLE_WORKSPACE_DIRECTORY);
@@ -959,43 +1013,125 @@ function restorePriorAttemptOutputs(
     path.join(".ultrafuzz", "recovered", path.basename(prior.root))
   );
   const sourceWorkspace = anchoredProjectPath(priorProjectRoot, input.workspace_dir);
-  if (fs.existsSync(sourceWorkspace)) {
-    copySafeTree(sourceWorkspace, path.join(recoveryBase, "workspace"));
-  }
+  copyOptionalPriorEvidence(sourceWorkspace, path.join(recoveryBase, "workspace"));
   for (const [label, relative] of [
     ["artifacts", input.artifact_dir],
     ["logs", path.join(input.run_root, "logs")]
   ] as const) {
     const source = anchoredProjectPath(priorProjectRoot, relative);
-    if (fs.existsSync(source)) copySafeTree(source, path.join(recoveryBase, label));
+    copyOptionalPriorEvidence(source, path.join(recoveryBase, label));
   }
   const priorRecovered = anchoredProjectPath(priorProjectRoot, path.join(".ultrafuzz", "recovered"));
-  if (fs.existsSync(priorRecovered)) copySafeTree(priorRecovered, path.join(recoveryBase, "previous-recovered"));
+  copyOptionalPriorEvidence(priorRecovered, path.join(recoveryBase, "previous-recovered"));
   return prior.root;
+}
+
+interface CompatiblePriorAttempt {
+  readonly root: string;
+  readonly mtimeMs: number;
+  readonly input: ReturnType<typeof parseModalNodeWorkerInput>;
+}
+
+function compatiblePriorAttempt(
+  candidateRoot: string,
+  currentRoot: string,
+  input: ReturnType<typeof parseModalNodeWorkerInput>,
+  allowMissingOrUnrelated: boolean
+): CompatiblePriorAttempt | undefined {
+  assertDurableDirectory(candidateRoot, "prior generation durable root");
+  const handoffDirectory = path.join(candidateRoot, DURABLE_INPUT_DIRECTORY);
+  const requestPath = path.join(handoffDirectory, "request.json");
+  const handoffState = lstatWorkerPath(handoffDirectory);
+  if (handoffState === undefined) {
+    if (allowMissingOrUnrelated) return undefined;
+    throw new Error("prior generation handoff directory is missing");
+  }
+  assertDurableDirectory(handoffDirectory, "prior generation handoff directory");
+  if (lstatWorkerPath(requestPath) === undefined) {
+    if (allowMissingOrUnrelated) return undefined;
+    throw new Error("prior generation cloud handoff request is missing");
+  }
+  let persisted: StrictModalNodeInputDocument;
+  try {
+    persisted = readModalDocument(requestPath, MODAL_NODE_INPUT_SCHEMA_ID).value as StrictModalNodeInputDocument;
+  } catch (error) {
+    throw new Error("prior generation cloud handoff request is invalid", { cause: error });
+  }
+  if (
+    persisted.project_archive_sha256 === undefined ||
+    persisted.execution_generation === input.execution_generation ||
+    !sameResumableNodeInput(persisted, input, true)
+  ) {
+    if (allowMissingOrUnrelated) return undefined;
+    throw new Error("durable restore marker does not reference a compatible prior generation");
+  }
+  const allowedHandoffEntries = new Set(["project.tgz", "request.json", DURABLE_RESTORE_MARKER]);
+  for (const entry of fs.readdirSync(handoffDirectory, { withFileTypes: true })) {
+    if (!allowedHandoffEntries.has(entry.name) || !entry.isFile() || entry.isSymbolicLink()) {
+      throw new Error("prior generation handoff directory contains invalid present state");
+    }
+  }
+  const priorRestoreMarker = path.join(handoffDirectory, DURABLE_RESTORE_MARKER);
+  if (lstatWorkerPath(priorRestoreMarker) !== undefined) {
+    try {
+      readModalDocument(priorRestoreMarker, MODAL_NODE_RESTORE_SCHEMA_ID);
+    } catch (error) {
+      throw new Error("prior generation restore marker is invalid", { cause: error });
+    }
+  }
+  const handoffArchive = path.join(handoffDirectory, "project.tgz");
+  assertDurableRegularFile(handoffArchive, "prior generation handoff archive");
+  if (sha256File(handoffArchive) !== persisted.project_archive_sha256) {
+    throw new Error("prior generation handoff archive digest mismatch");
+  }
+  const checkpointDirectory = path.join(candidateRoot, DURABLE_CHECKPOINT_DIRECTORY);
+  const checkpointIndex = path.join(checkpointDirectory, DURABLE_CHECKPOINT_INDEX);
+  if (lstatWorkerPath(checkpointIndex) === undefined) {
+    if (allowMissingOrUnrelated) return undefined;
+    throw new Error("durable restore marker references a generation without a checkpoint index");
+  }
+  assertDurableDirectory(checkpointDirectory, "prior generation checkpoints directory");
+  const index = loadDurableCheckpointIndex(
+    checkpointIndex,
+    `${persisted.run_id}/${persisted.attempt_id}/${persisted.execution_generation}`,
+    path.join(candidateRoot, DURABLE_WORKSPACE_DIRECTORY),
+    persisted.run_root,
+    persisted.execution_snapshot_root,
+    handoffArchive,
+    persisted.project_archive_sha256
+  );
+  if (index.checkpoints.length === 0 || !priorAttemptHasEvidence(candidateRoot, persisted)) {
+    if (allowMissingOrUnrelated) return undefined;
+    throw new Error("durable restore marker references a generation without recoverable evidence");
+  }
+  return {
+    root: candidateRoot,
+    mtimeMs: fs.statSync(checkpointDirectory).mtimeMs,
+    input: persisted
+  };
 }
 
 function priorAttemptHasEvidence(candidateRoot: string, input: ReturnType<typeof parseModalNodeWorkerInput>): boolean {
   const projectRoot = path.join(candidateRoot, DURABLE_WORKSPACE_DIRECTORY);
-  const candidates: string[] = [];
   for (const relative of [
     input.workspace_dir,
     input.artifact_dir,
     path.join(input.run_root, "logs"),
     path.join(".ultrafuzz", "recovered")
   ]) {
-    try {
-      candidates.push(anchoredProjectPath(projectRoot, relative));
-    } catch {
-      return false;
-    }
+    const candidate = anchoredProjectPath(projectRoot, relative);
+    const state = lstatWorkerPath(candidate);
+    if (state === undefined) continue;
+    assertDurableDirectory(candidate, "prior generation evidence directory");
+    if (fs.readdirSync(candidate).length > 0) return true;
   }
-  return candidates.some((candidate) => {
-    try {
-      return fs.statSync(candidate).isDirectory() && fs.readdirSync(candidate).length > 0;
-    } catch {
-      return false;
-    }
-  });
+  return false;
+}
+
+function copyOptionalPriorEvidence(source: string, destination: string): void {
+  if (lstatWorkerPath(source) === undefined) return;
+  assertDurableDirectory(source, "prior generation evidence directory");
+  copySafeTree(source, destination);
 }
 
 function resolveDurableDataRoot(dataRoot: string): string {
@@ -1011,6 +1147,15 @@ function assertDurableDirectory(directory: string, label: string): void {
   }
 }
 
+function assertDurableRegularFile(filePath: string, label: string): void {
+  const resolved = path.resolve(filePath);
+  const stat = lstatWorkerPath(resolved);
+  if (stat === undefined) throw new Error(`${label} is missing`);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || fs.realpathSync(resolved) !== resolved) {
+    throw new Error(`${label} is unsafe`);
+  }
+}
+
 function loadDurableCheckpointIndex(
   checkpointIndex: string,
   storageLineage: string,
@@ -1020,7 +1165,14 @@ function loadDurableCheckpointIndex(
   handoffArchive: string,
   archiveSha256: string
 ): DurableCheckpointIndex {
-  if (!fs.existsSync(checkpointIndex)) {
+  if (lstatWorkerPath(checkpointIndex) === undefined) {
+    const checkpointDirectory = path.dirname(checkpointIndex);
+    const hasOrphanedManifest = fs
+      .readdirSync(checkpointDirectory, { withFileTypes: true })
+      .some((entry) => entry.name !== DURABLE_CHECKPOINT_INDEX && entry.name.endsWith(".json"));
+    if (hasOrphanedManifest) {
+      throw new Error("durable checkpoint index is missing for existing checkpoint manifests");
+    }
     return {
       schema_version: "ultrafuzz.modal.node-checkpoint-index.v1",
       storage_lineage: storageLineage,
@@ -1032,36 +1184,104 @@ function loadDurableCheckpointIndex(
       checkpoints: []
     };
   }
-  const parsed = JSON.parse(fs.readFileSync(checkpointIndex, "utf8")) as unknown;
+  let parsed: StrictModalNodeCheckpointIndexDocument;
+  try {
+    parsed = readModalDocument(checkpointIndex, MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID)
+      .value as StrictModalNodeCheckpointIndexDocument;
+  } catch (error) {
+    throw new Error("durable checkpoint index is invalid", { cause: error });
+  }
   if (
-    !isRecord(parsed) ||
-    parsed.schema_version !== "ultrafuzz.modal.node-checkpoint-index.v1" ||
     parsed.storage_lineage !== storageLineage ||
     parsed.workspace_path !== projectRoot ||
     parsed.run_root !== runRoot ||
     parsed.execution_snapshot_root !== executionSnapshotRoot ||
     parsed.handoff_archive !== handoffArchive ||
-    parsed.project_archive_sha256 !== archiveSha256 ||
-    !Array.isArray(parsed.checkpoints)
+    parsed.project_archive_sha256 !== archiveSha256
   ) {
     throw new Error("durable checkpoint index is invalid");
   }
-  return parsed as unknown as DurableCheckpointIndex;
+  assertDurableCheckpointManifestBijection(parsed, checkpointIndex);
+  return parsed;
 }
 
-function writeJsonAtomic(destination: string, value: unknown): void {
-  const parent = path.dirname(destination);
-  assertDurableDirectory(parent, "durable checkpoint parent");
-  const publishing = path.join(parent, `.${path.basename(destination)}.${crypto.randomUUID()}.publishing`);
-  const descriptor = fs.openSync(publishing, "wx", 0o600);
-  try {
-    fs.writeFileSync(descriptor, `${JSON.stringify(value)}\n`, "utf8");
-    fs.fsyncSync(descriptor);
-  } finally {
-    fs.closeSync(descriptor);
+function assertDurableCheckpointManifestBijection(
+  index: StrictModalNodeCheckpointIndexDocument,
+  checkpointIndex: string,
+  verifyPersistedIndex = false
+): void {
+  if (verifyPersistedIndex) {
+    const persistedState = lstatWorkerPath(checkpointIndex);
+    if (persistedState === undefined) {
+      if (index.checkpoints.length !== 0) throw new Error("durable checkpoint index disappeared before append");
+    } else {
+      let persisted: StrictModalNodeCheckpointIndexDocument;
+      try {
+        persisted = readModalDocument(checkpointIndex, MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID)
+          .value as StrictModalNodeCheckpointIndexDocument;
+      } catch (error) {
+        throw new Error("durable checkpoint index changed to invalid present bytes before append", { cause: error });
+      }
+      if (!isDeepStrictEqual(persisted, index)) {
+        throw new Error("durable checkpoint index changed before append");
+      }
+    }
   }
-  fs.renameSync(publishing, destination);
-  syncDirectory(parent);
+  const checkpointDirectory = path.dirname(checkpointIndex);
+  const expectedNames = new Set<string>();
+  let restoredFrom: string | undefined;
+  let observedRestoreState = false;
+  for (const entry of index.checkpoints) {
+    const expectedName = `${entry.checkpoint_id}.json`;
+    const manifestPath = path.join(checkpointDirectory, expectedName);
+    if (entry.manifest !== manifestPath || expectedNames.has(expectedName)) {
+      throw new Error("durable checkpoint index has a noncanonical manifest reference");
+    }
+    expectedNames.add(expectedName);
+    let checkpoint: StrictModalNodeCheckpointDocument;
+    try {
+      checkpoint = readModalDocument(manifestPath, MODAL_NODE_CHECKPOINT_SCHEMA_ID)
+        .value as StrictModalNodeCheckpointDocument;
+    } catch (error) {
+      throw new Error("durable checkpoint manifest is invalid", { cause: error });
+    }
+    if (
+      checkpoint.checkpoint_id !== entry.checkpoint_id ||
+      checkpoint.sequence !== entry.sequence ||
+      checkpoint.stage !== entry.stage ||
+      checkpoint.created_at !== entry.created_at ||
+      checkpoint.storage_lineage !== index.storage_lineage ||
+      checkpoint.workspace_path !== index.workspace_path ||
+      checkpoint.run_root !== index.run_root ||
+      checkpoint.execution_snapshot_root !== index.execution_snapshot_root ||
+      checkpoint.handoff_archive !== index.handoff_archive ||
+      checkpoint.project_archive_sha256 !== index.project_archive_sha256
+    ) {
+      throw new Error("durable checkpoint manifest does not match its index entry or trusted context");
+    }
+    if (!observedRestoreState) {
+      restoredFrom = checkpoint.restored_from;
+      observedRestoreState = true;
+    } else if (checkpoint.restored_from !== restoredFrom) {
+      throw new Error("durable checkpoint manifests disagree on restore lineage");
+    }
+  }
+  const presentNames = new Set<string>();
+  for (const entry of fs.readdirSync(checkpointDirectory, { withFileTypes: true })) {
+    if (entry.name === DURABLE_CHECKPOINT_INDEX || !entry.name.endsWith(".json")) continue;
+    const manifestPath = path.join(checkpointDirectory, entry.name);
+    const stat = fs.lstatSync(manifestPath);
+    if (!entry.isFile() || entry.isSymbolicLink() || !stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+      throw new Error("durable checkpoint directory contains an unsafe manifest");
+    }
+    presentNames.add(entry.name);
+  }
+  if (
+    presentNames.size !== expectedNames.size ||
+    [...presentNames].some((manifestName) => !expectedNames.has(manifestName))
+  ) {
+    throw new Error("durable checkpoint manifests do not match the checkpoint index");
+  }
 }
 
 function replacePublishedFile(source: string, destination: string): void {
@@ -1146,13 +1366,13 @@ function readBoundedText(stream: Readable | null, limit = 4_096): Promise<string
   });
 }
 
-function workerErrorPayload(error: unknown): Record<string, unknown> {
+function workerErrorPayload(error: unknown): StrictModalNodeWorkerErrorDocument {
   if (error instanceof CloudWorkerCommandError) {
     return {
       schema_version: "ultrafuzz.modal.node-worker-error.v1",
-      message: error.message,
-      phase: error.phase,
-      command: error.command,
+      message: boundedWorkerErrorText(error.message, 4_096, "cloud worker command failed"),
+      phase: boundedWorkerErrorText(error.phase, 256, "unknown-phase"),
+      command: boundedWorkerErrorText(error.command, 1_024, "unknown-command"),
       exit_code: error.exitCode,
       ...(error.stdout.trim() === "" ? {} : { stdout: error.stdout.trim().slice(0, 2_000) }),
       ...(error.stderr.trim() === "" ? {} : { stderr: error.stderr.trim().slice(0, 2_000) })
@@ -1160,8 +1380,21 @@ function workerErrorPayload(error: unknown): Record<string, unknown> {
   }
   return {
     schema_version: "ultrafuzz.modal.node-worker-error.v1",
-    message: error instanceof Error ? error.message : String(error)
+    message: boundedWorkerErrorText(describeWorkerError(error), 4_096, "cloud worker failed")
   };
+}
+
+function describeWorkerError(error: unknown): string {
+  try {
+    return error instanceof Error ? String(error.message) : String(error);
+  } catch {
+    return "cloud worker failed";
+  }
+}
+
+function boundedWorkerErrorText(value: string, limit: number, fallback: string): string {
+  const bounded = value.slice(0, limit);
+  return bounded.length === 0 ? fallback : bounded;
 }
 
 export function copySafeTree(source: string, destination: string): void {
@@ -1367,10 +1600,6 @@ function anchoredProjectPath(projectRoot: string, value: string): string {
   return resolved;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function requiredOption(name: string): string {
   const index = process.argv.indexOf(name);
   const value = index < 0 ? undefined : process.argv[index + 1];
@@ -1384,7 +1613,8 @@ function isDirectExecution(): boolean {
 
 if (isDirectExecution()) {
   void main().catch((error: unknown) => {
-    process.stderr.write(`${JSON.stringify(workerErrorPayload(error))}\n`);
     process.exitCode = 1;
+    const { bytes } = serializeModalDocument(MODAL_NODE_WORKER_ERROR_SCHEMA_ID, workerErrorPayload(error));
+    process.stderr.write(bytes);
   });
 }

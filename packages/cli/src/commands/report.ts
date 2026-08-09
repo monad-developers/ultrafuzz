@@ -302,11 +302,6 @@ function hasPartialPricingSuffix(value: string): boolean {
   return value.trim().endsWith("+");
 }
 
-function booleanField(value: Record<string, unknown> | undefined, key: string): boolean | undefined {
-  const field = value?.[key];
-  return typeof field === "boolean" ? field : undefined;
-}
-
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }

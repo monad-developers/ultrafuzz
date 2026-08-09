@@ -8,6 +8,13 @@ import { createEventRecord, createNodeAttemptLedgerEntry, type AppendNodeAttempt
 import { describe, expect, it } from "vitest";
 
 import {
+  EVAL_RUN_RECORD_SCHEMA_ID,
+  EVAL_RUN_SUMMARY_SCHEMA_ID,
+  EVAL_SCORE_SUMMARY_SCHEMA_ID,
+  validateEvalJsonSchema
+} from "../src/eval-schema-registry.js";
+import { EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE, executeEvalSchemaSemanticGates } from "../src/eval-semantic-gates.js";
+import {
   classifyRecoveryEquivalence,
   parseRecoveryEquivalence,
   reconcileEvalRunRecords,
@@ -15,11 +22,20 @@ import {
   recoveryEquivalenceIsPublishable,
   withRecordedRecoveryEquivalence
 } from "../src/recovery-equivalence.js";
-import type { EvalRecoveryEquivalencePolicy, EvalRunRecord } from "../src/types.js";
+import type {
+  EvalRecoveryEquivalence,
+  EvalRecoveryEquivalenceClassification,
+  EvalRecoveryEquivalencePolicy,
+  EvalRunRecord,
+  EvalRunSummary,
+  EvalScoreSummary
+} from "../src/types.js";
 import {
+  cleanRecoveryEquivalence,
   currentEvalRunRecord,
   currentPlannedGraph,
   currentRunState,
+  currentScoreSummary,
   testRow,
   testSuite,
   writeCurrentRunEvidence
@@ -139,7 +155,234 @@ function recoveryRecord(root: string): EvalRunRecord {
   });
 }
 
+function infrastructureRecoveryEquivalence(): EvalRecoveryEquivalence {
+  return cleanRecoveryEquivalence({
+    infrastructure_only_recovery_generations: 1,
+    no_progress_recovery_generations: 1,
+    recovery_generations: 1,
+    observed_workflow_executions: 2,
+    observed_controller_invocations: 2,
+    classification: "infrastructure-recovered"
+  });
+}
+
+function modelRecoveryEquivalence(): EvalRecoveryEquivalence {
+  return cleanRecoveryEquivalence({
+    policy: { max_repeated_model_executions: 1 },
+    repeated_model_backed_node_executions: 1,
+    recovery_reexecuted_model_backed_node_executions: 1,
+    model_work_recovery_generations: 1,
+    recovery_generations: 1,
+    observed_node_attempts: 2,
+    observed_workflow_executions: 2,
+    observed_controller_invocations: 2,
+    classification: "model-reexecuted-within-policy"
+  });
+}
+
+function nonComparableRecoveryEquivalence(): EvalRecoveryEquivalence {
+  return {
+    ...modelRecoveryEquivalence(),
+    policy: { max_repeated_model_executions: 0 },
+    classification: "non-comparable",
+    reason: "recovery model re-executions exceed the policy maximum"
+  };
+}
+
+function scoreSummaryWithRecoveryEquivalence(recovery: EvalRecoveryEquivalence): EvalScoreSummary {
+  const row = testRow(testSuite("/tmp/ground-truth"));
+  const summary = currentScoreSummary({ row, evalRunRoot: "/tmp/eval-recovery-parity" });
+  const classificationCounts: Record<EvalRecoveryEquivalenceClassification, number> = {
+    clean: 0,
+    "infrastructure-recovered": 0,
+    "model-reexecuted-within-policy": 0,
+    "non-comparable": 0
+  };
+  classificationCounts[recovery.classification] = 1;
+  return {
+    ...summary,
+    rows: [{ ...summary.rows[0]!, recovery_equivalence: recovery }],
+    recovery_equivalence: {
+      ...summary.recovery_equivalence,
+      classification_counts: classificationCounts
+    }
+  };
+}
+
+function parityDocuments(recovery: EvalRecoveryEquivalence): Array<{
+  label: string;
+  schemaId: string;
+  value: EvalRunRecord | EvalRunSummary | EvalScoreSummary;
+}> {
+  const record = {
+    ...recoveryRecord("/tmp/eval-recovery-parity/run"),
+    recovery_equivalence: recovery
+  };
+  return [
+    { label: "run record", schemaId: EVAL_RUN_RECORD_SCHEMA_ID, value: record },
+    {
+      label: "run-summary record",
+      schemaId: EVAL_RUN_SUMMARY_SCHEMA_ID,
+      value: {
+        schema_version: "ultrafuzz.eval.run-summary.v1",
+        eval_run_id: record.eval_run_id,
+        launched: 1,
+        failed: 0,
+        incomplete: 0,
+        records: [record]
+      }
+    },
+    {
+      label: "score-summary row",
+      schemaId: EVAL_SCORE_SUMMARY_SCHEMA_ID,
+      value: scoreSummaryWithRecoveryEquivalence(recovery)
+    }
+  ];
+}
+
+function ajvAndGatesAccept(schemaId: string, value: unknown): boolean {
+  return validateEvalJsonSchema(schemaId, value).ok && executeEvalSchemaSemanticGates(schemaId, value).length === 0;
+}
+
 describe("recovery equivalence", () => {
+  it.each([
+    { name: "clean execution", recovery: cleanRecoveryEquivalence() },
+    { name: "infrastructure-only recovery", recovery: infrastructureRecoveryEquivalence() },
+    { name: "model re-execution within policy", recovery: modelRecoveryEquivalence() },
+    { name: "non-comparable model re-execution", recovery: nonComparableRecoveryEquivalence() }
+  ])("accepts the same positive $name fixture through Zod and every canonical document gate", ({ recovery }) => {
+    expect(parseRecoveryEquivalence(recovery)).toEqual(recovery);
+    for (const document of parityDocuments(recovery)) {
+      expect(validateEvalJsonSchema(document.schemaId, document.value), document.label).toMatchObject({ ok: true });
+      expect(executeEvalSchemaSemanticGates(document.schemaId, document.value), document.label).toEqual([]);
+      expect(ajvAndGatesAccept(document.schemaId, document.value), document.label).toBe(true);
+    }
+  });
+
+  it.each([
+    {
+      name: "recovery generation sum",
+      recovery: { ...infrastructureRecoveryEquivalence(), recovery_generations: 2 }
+    },
+    {
+      name: "no-progress infrastructure bound",
+      recovery: { ...infrastructureRecoveryEquivalence(), no_progress_recovery_generations: 2 }
+    },
+    {
+      name: "recovery re-execution bound",
+      recovery: {
+        ...modelRecoveryEquivalence(),
+        repeated_model_backed_node_executions: 0,
+        observed_node_attempts: 1
+      }
+    },
+    {
+      name: "model-work generation bound",
+      recovery: {
+        ...modelRecoveryEquivalence(),
+        model_work_recovery_generations: 2,
+        recovery_generations: 2
+      }
+    },
+    {
+      name: "observed attempt lower bound",
+      recovery: { ...cleanRecoveryEquivalence(), observed_node_attempts: 0 }
+    },
+    {
+      name: "workflow and controller lineage requirement",
+      recovery: { ...cleanRecoveryEquivalence(), observed_workflow_executions: 0 }
+    },
+    {
+      name: "reason forbidden for comparable classifications",
+      recovery: { ...cleanRecoveryEquivalence(), reason: "unexpected reason" }
+    },
+    {
+      name: "reason required for non-comparable classifications",
+      recovery: { ...nonComparableRecoveryEquivalence(), reason: null }
+    },
+    {
+      name: "repeat policy classification",
+      recovery: {
+        ...modelRecoveryEquivalence(),
+        policy: { max_repeated_model_executions: 0 }
+      }
+    },
+    {
+      name: "clean classification counters",
+      recovery: { ...cleanRecoveryEquivalence(), observed_workflow_executions: 2 }
+    },
+    {
+      name: "infrastructure-recovered classification counters",
+      recovery: { ...cleanRecoveryEquivalence(), classification: "infrastructure-recovered" as const }
+    },
+    {
+      name: "model-reexecuted classification counters",
+      recovery: { ...cleanRecoveryEquivalence(), classification: "model-reexecuted-within-policy" as const }
+    }
+  ])("rejects the same negative $name fixture through Zod and every canonical document gate", ({ recovery }) => {
+    expect(() => parseRecoveryEquivalence(recovery)).toThrow();
+    for (const document of parityDocuments(recovery)) {
+      const gateIssues = executeEvalSchemaSemanticGates(document.schemaId, document.value);
+      expect(
+        gateIssues.some((issue) => issue.gate === EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE),
+        document.label
+      ).toBe(true);
+      expect(ajvAndGatesAccept(document.schemaId, document.value), document.label).toBe(false);
+    }
+  });
+
+  it.each([
+    {
+      name: "whitespace-only reason",
+      recovery: { ...nonComparableRecoveryEquivalence(), reason: "   " }
+    },
+    {
+      name: "unsafe integer",
+      recovery: {
+        ...cleanRecoveryEquivalence(),
+        policy: { max_repeated_model_executions: Number.MAX_SAFE_INTEGER + 1 }
+      }
+    }
+  ])("keeps JSON Schema and Zod shape rejection aligned for $name", ({ recovery }) => {
+    expect(() => parseRecoveryEquivalence(recovery)).toThrow();
+    for (const document of parityDocuments(recovery)) {
+      expect(validateEvalJsonSchema(document.schemaId, document.value).ok, document.label).toBe(false);
+      expect(ajvAndGatesAccept(document.schemaId, document.value), document.label).toBe(false);
+    }
+  });
+
+  it("applies recovery-equivalence semantics to every score-summary row", () => {
+    const invalidRecovery = { ...cleanRecoveryEquivalence(), observed_workflow_executions: 2 };
+    const summary = scoreSummaryWithRecoveryEquivalence(cleanRecoveryEquivalence());
+    const secondRow = {
+      ...summary.rows[0]!,
+      row_id: "second-row",
+      trial_id: "trial-2",
+      recovery_equivalence: invalidRecovery
+    };
+    const twoRowSummary: EvalScoreSummary = {
+      ...summary,
+      rows: [summary.rows[0]!, secondRow],
+      variants: [{ ...summary.variants[0]!, row_count: 2 }],
+      recovery_equivalence: {
+        ...summary.recovery_equivalence,
+        included_row_count: 2,
+        classification_counts: {
+          ...summary.recovery_equivalence.classification_counts,
+          clean: 2
+        }
+      }
+    };
+
+    expect(validateEvalJsonSchema(EVAL_SCORE_SUMMARY_SCHEMA_ID, twoRowSummary)).toMatchObject({ ok: true });
+    expect(executeEvalSchemaSemanticGates(EVAL_SCORE_SUMMARY_SCHEMA_ID, twoRowSummary)).toContainEqual(
+      expect.objectContaining({
+        gate: EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE,
+        path: "$.rows[1].recovery_equivalence.classification"
+      })
+    );
+  });
+
   it("keeps an infrastructure restart comparable when no model task repeats", () => {
     const root = evidenceRoot({
       controllers: ["controller-1", "controller-2"],

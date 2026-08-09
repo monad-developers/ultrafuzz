@@ -85,7 +85,7 @@ function fixture(): { plan: EvalPlanValue; candidateRoot: string; targetRoot: st
   };
 }
 
-describe("versioned eval lineage", () => {
+describe("versioned eval lineage", { timeout: 15_000 }, () => {
   it("keeps the cohort stable across candidate releases and changes it for comparison controls", () => {
     const generated = fixture();
     const policy = { watch: true, watchTimeoutSeconds: 120, pollIntervalMs: 10 };

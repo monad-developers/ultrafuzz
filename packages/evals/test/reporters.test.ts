@@ -13,6 +13,7 @@ import { EvalError } from "../src/utils.js";
 import type { EvalRunProvenance, EvalScoreSummary } from "../src/types.js";
 import {
   cleanRecoveryEquivalence,
+  currentRowScore,
   recoveryEquivalenceSummary,
   testReportingPolicy,
   testRow,
@@ -238,6 +239,12 @@ describe("BraintrustReporter", () => {
         cohort_fingerprint: "cohort-generated",
         targets: [{ id: "target-a", repo: "https://example.com/generated", commit: "b".repeat(40), dirty: false }],
         ground_truth_sha256: { "target-a": "ground-truth-generated" },
+        ground_truth_subjects: {
+          "target-a": {
+            repository: "https://example.com/generated",
+            revision: "b".repeat(40)
+          }
+        },
         execution_policy: {
           revision: "ultrafuzz.eval-controller.v1",
           fingerprint: "policy-generated",
@@ -274,6 +281,7 @@ describe("BraintrustReporter", () => {
       recoveryEquivalence: cleanRecoveryEquivalence()
     });
     const summary: EvalScoreSummary = {
+      schema_version: "ultrafuzz.eval.score-summary.v1",
       eval_run_id: "eval-lineage",
       eval_run_root: "/tmp/generated-run",
       recall_threshold: 0.7,
@@ -294,12 +302,12 @@ describe("BraintrustReporter", () => {
           judge_models: ["judge-generated"],
           judge_panel: { total: 4, quorum: 3 },
           ground_truth_sha256: provenance.benchmark.ground_truth_sha256,
+          ground_truth_subjects: provenance.benchmark.ground_truth_subjects,
           fingerprint: "scoring-generated"
         }
       }
     };
-    const rowScore = {
-      row_id: row.id,
+    const rowScore = currentRowScore(row, {
       precision: 1,
       recall: 1,
       f1_score: 1,
@@ -309,7 +317,7 @@ describe("BraintrustReporter", () => {
       missed: 0,
       human_review_queue_count: 0,
       recovery_equivalence: cleanRecoveryEquivalence()
-    } as EvalScoreSummary["rows"][number];
+    });
     await reporter.onScores([rowScore], summary);
 
     const inserts = requests.filter((request) => request.url.includes("/insert"));

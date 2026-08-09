@@ -356,13 +356,21 @@ function validationCommand(schemaPath: string, artifactPath: string): string {
 }
 
 function shellSingleQuote(value: string): string {
-  if (/[\u0000-\u001f\u007f-\u009f]/u.test(value)) {
+  if (hasControlCharacter(value)) {
     throw new PromptError(
       "unsafe-validation-command-path",
       "JSON validation command paths must not contain control characters"
     );
   }
   return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit <= 0x1f || (codeUnit >= 0x7f && codeUnit <= 0x9f)) return true;
+  }
+  return false;
 }
 
 function markdownCodeSpan(value: string): string {

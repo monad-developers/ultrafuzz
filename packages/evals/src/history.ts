@@ -15,7 +15,6 @@ import {
   type EvalEfficiencyCompleteness,
   type EvalFindingScore,
   type EvalMatrixRow,
-  type EvalRunProvenance,
   type EvalScoreSummary,
   type EvalSuiteSpec
 } from "./types.js";

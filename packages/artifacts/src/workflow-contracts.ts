@@ -1,11 +1,6 @@
 import { z } from "zod/v4";
 
-import {
-  findingLifecycleSchema,
-  findingSchema,
-  findingSourceArtifactSchema,
-  findingStrategyHitSchema
-} from "./findings-schema.js";
+import { findingLifecycleSchema, findingSchema, findingStrategyHitSchema } from "./findings-schema.js";
 import { FINDING_SEVERITIES, TRIAGE_CLASSIFICATIONS } from "./findings.js";
 import { PROPERTY_PRIORITIES } from "./property-provenance.js";
 import { validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
@@ -13,7 +8,6 @@ import { validateWithZod, type SchemaValidationResult } from "./schema-validatio
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
 const positiveInteger = z.number().int().positive();
-const nonNegativeNumber = z.number().finite().nonnegative();
 const percentage = z.number().finite().min(0).max(100);
 const timestamp = z.string().datetime({ offset: true });
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/u);

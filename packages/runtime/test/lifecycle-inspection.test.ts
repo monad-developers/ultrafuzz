@@ -98,6 +98,27 @@ interface FakeInspectionFixtures {
   cancelExitCode?: number;
 }
 
+function smithersEventLine(input: {
+  seq: number;
+  timestampMs: number;
+  type: string;
+  payload?: Record<string, unknown>;
+}): string {
+  const payload = {
+    type: input.type,
+    runId: WORKFLOW_RUN_ID,
+    timestampMs: input.timestampMs,
+    ...input.payload
+  };
+  return JSON.stringify({
+    runId: WORKFLOW_RUN_ID,
+    seq: input.seq,
+    timestampMs: input.timestampMs,
+    type: input.type,
+    payload
+  });
+}
+
 /**
  * A fake workflow runner that answers the inspection and lifecycle commands
  * with the exact JSON shapes the pinned engine emits.
@@ -426,20 +447,23 @@ test("listRunSnapshots adapts the checkpoint list", async () => {
 test("queryWorkflowEvents returns a bounded lifecycle array and never asks for raw chunks", async () => {
   const { project, env } = await launchedProject({
     events: [
-      JSON.stringify({
-        runId: WORKFLOW_RUN_ID,
+      smithersEventLine({
         seq: 1,
         timestampMs: 1_700_000_000_000,
-        type: "node.started",
-        payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1, state: "in-progress" }
+        type: "NodeStarted",
+        payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }
       }),
       "not json",
-      JSON.stringify({
-        runId: WORKFLOW_RUN_ID,
+      smithersEventLine({
         seq: 2,
         timestampMs: 1_700_000_060_000,
-        type: "run.finished",
-        payload: { status: "smithers finished the run" }
+        type: "NodeCancelled",
+        payload: {
+          nodeId: "node:project-discovery",
+          iteration: 0,
+          attempt: 1,
+          reason: "smithers finished the run"
+        }
       }),
       ""
     ].join("\n")
@@ -451,7 +475,7 @@ test("queryWorkflowEvents returns a bounded lifecycle array and never asks for r
   assert.equal(events.value?.limit, 50);
   assert.equal(events.value?.truncated, false);
   assert.equal(events.value?.events.length, 2);
-  assert.equal(events.value?.events[0]?.category, "node");
+  assert.equal(events.value?.events[0]?.category, "NodeStarted");
   assert.equal(events.value?.events[0]?.node_id, "node:project-discovery");
   assert.equal(events.value?.events[0]?.attempt, 1);
   assert.equal(events.value?.events[0]?.timestamp, new Date(1_700_000_000_000).toISOString());
@@ -465,12 +489,11 @@ test("queryWorkflowEvents returns a bounded lifecycle array and never asks for r
 
 test("queryWorkflowEvents caps the limit and reports truncation", async () => {
   const lines = Array.from({ length: 5 }, (_, index) =>
-    JSON.stringify({
-      runId: WORKFLOW_RUN_ID,
+    smithersEventLine({
       seq: index,
       timestampMs: 1_700_000_000_000 + index,
-      type: "node.progress",
-      payload: { nodeId: "node:project-discovery" }
+      type: "NodePending",
+      payload: { nodeId: "node:project-discovery", iteration: 0 }
     })
   );
   const { project, env } = await launchedProject({ events: lines.join("\n") });
@@ -511,19 +534,17 @@ test("queryWorkflowEvents forwards node, type, since, and history filters", asyn
 test("watchWorkflowEvents streams each event and terminates cleanly", async () => {
   const { project, env } = await launchedProject({
     events: [
-      JSON.stringify({
-        runId: WORKFLOW_RUN_ID,
+      smithersEventLine({
         seq: 1,
         timestampMs: 1_700_000_000_000,
-        type: "node.started",
-        payload: { nodeId: "node:project-discovery" }
+        type: "NodeStarted",
+        payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }
       }),
-      JSON.stringify({
-        runId: WORKFLOW_RUN_ID,
+      smithersEventLine({
         seq: 2,
         timestampMs: 1_700_000_030_000,
-        type: "node.finished",
-        payload: { nodeId: "node:project-discovery", state: "succeeded" }
+        type: "NodeFinished",
+        payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }
       })
     ].join("\n")
   });
@@ -541,7 +562,7 @@ test("watchWorkflowEvents streams each event and terminates cleanly", async () =
 
   assert.equal(watched.ok, true, JSON.stringify(watched.diagnostics));
   assert.equal(streamed.length, 2);
-  assert.equal(streamed[1]?.detail, "succeeded");
+  assert.equal(streamed[1]?.detail, null);
   assert.match(smithersLog(project), /events ultrafuzz-inspect-run --limit 200 --watch --json --interval 1/u);
 });
 
@@ -605,12 +626,11 @@ test("event queries report a diagnostic when the engine process is killed by a s
 
 test("a truncated event stream stays successful even though the process is killed", async () => {
   const lines = Array.from({ length: 4 }, (_, index) =>
-    JSON.stringify({
-      runId: WORKFLOW_RUN_ID,
+    smithersEventLine({
       seq: index,
       timestampMs: 1_700_000_000_000 + index,
-      type: "node.progress",
-      payload: { nodeId: "node:project-discovery" }
+      type: "NodePending",
+      payload: { nodeId: "node:project-discovery", iteration: 0 }
     })
   );
   const { project, env } = await launchedProject({ events: lines.join("\n") });
@@ -636,7 +656,7 @@ test("getWorkflowNode returns focused status without attempt or tool detail by d
   assert.equal(node.value?.node_id, "node:project-discovery");
   assert.equal(node.value?.iteration, 0);
   assert.equal(node.value?.state, "finished");
-  assert.equal(node.value?.status, "succeeded");
+  assert.equal(node.value?.status, "finished");
   assert.equal(node.value?.duration_ms, 42_000);
   assert.deepEqual(node.value?.attempt_counts, { total: 2, succeeded: 1, failed: 1, cancelled: 0, waiting: 0 });
   assert.deepEqual(node.value?.models, ["gpt-test"]);
@@ -758,12 +778,11 @@ test("cancelRun still fails on an unrelated engine error exit", async () => {
 
 test("queryWorkflowEvents does not call an exact-limit result truncated", async () => {
   const lines = Array.from({ length: 2 }, (_, index) =>
-    JSON.stringify({
-      runId: WORKFLOW_RUN_ID,
+    smithersEventLine({
       seq: index,
       timestampMs: 1_700_000_000_000 + index,
-      type: "node.progress",
-      payload: { nodeId: "node:project-discovery" }
+      type: "NodePending",
+      payload: { nodeId: "node:project-discovery", iteration: 0 }
     })
   );
   const { project, env } = await launchedProject({ events: lines.join("\n") });
@@ -777,12 +796,11 @@ test("queryWorkflowEvents does not call an exact-limit result truncated", async 
 
 test("watchWorkflowEvents stops the stream when the caller aborts mid-stream", async () => {
   const lines = Array.from({ length: 200 }, (_, index) =>
-    JSON.stringify({
-      runId: WORKFLOW_RUN_ID,
+    smithersEventLine({
       seq: index,
       timestampMs: 1_700_000_000_000 + index,
-      type: "node.progress",
-      payload: { nodeId: "node:project-discovery" }
+      type: "NodePending",
+      payload: { nodeId: "node:project-discovery", iteration: 0 }
     })
   );
   const { project, env } = await launchedProject({ events: lines.join("\n") });
@@ -987,7 +1005,35 @@ function writeFakeInstalledEngine(project: string, input: { version: string; bin
   fs.symlinkSync(path.relative(path.dirname(shim), target), shim);
 }
 
+function nodeTokenUsage(inputTokens: number, outputTokens: number): Record<string, unknown> {
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    costUsd: null,
+    eventCount: 1,
+    models: ["gpt-test"],
+    agents: ["codex"]
+  };
+}
+
 function nodeDetailFixture(): unknown {
+  const firstUsage = nodeTokenUsage(10, 5);
+  const secondUsage = nodeTokenUsage(12, 6);
+  const firstToolCall = {
+    attempt: 1,
+    seq: 1,
+    name: "shell",
+    status: "ok",
+    startedAtMs: 1_700_000_001_000,
+    finishedAtMs: 1_700_000_002_000,
+    durationMs: 1_000,
+    input: { command: "forge build", token: "sk-live-secret-value" },
+    output: { note: "ok" },
+    error: null
+  };
   return {
     node: {
       runId: WORKFLOW_RUN_ID,
@@ -999,7 +1045,7 @@ function nodeDetailFixture(): unknown {
       outputTable: null,
       label: null
     },
-    status: "succeeded",
+    status: "finished",
     durationMs: 42_000,
     attemptsSummary: { total: 2, failed: 1, cancelled: 0, succeeded: 1, waiting: 0 },
     attempts: [
@@ -1014,21 +1060,8 @@ function nodeDetailFixture(): unknown {
         durationMs: 20_000,
         error: "smithers attempt failed",
         errorDetail: null,
-        tokenUsage: { models: ["gpt-test"], agents: ["codex"] },
-        toolCalls: [
-          {
-            attempt: 1,
-            seq: 1,
-            name: "shell",
-            status: "ok",
-            startedAtMs: 1_700_000_001_000,
-            finishedAtMs: 1_700_000_002_000,
-            durationMs: 1_000,
-            input: { command: "forge build", token: "sk-live-secret-value" },
-            output: { note: "ok" },
-            error: null
-          }
-        ],
+        tokenUsage: firstUsage,
+        toolCalls: [firstToolCall],
         meta: null,
         responseText: null,
         cached: false,
@@ -1046,7 +1079,7 @@ function nodeDetailFixture(): unknown {
         durationMs: 22_000,
         error: null,
         errorDetail: null,
-        tokenUsage: { models: ["gpt-test"], agents: ["codex"] },
+        tokenUsage: secondUsage,
         toolCalls: [],
         meta: null,
         responseText: null,
@@ -1055,8 +1088,22 @@ function nodeDetailFixture(): unknown {
         jjCwd: null
       }
     ],
-    toolCalls: [],
-    tokenUsage: { models: ["gpt-test"], agents: ["codex"], byAttempt: [] },
+    toolCalls: [firstToolCall],
+    tokenUsage: {
+      inputTokens: 22,
+      outputTokens: 11,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      costUsd: null,
+      eventCount: 2,
+      models: ["gpt-test"],
+      agents: ["codex"],
+      byAttempt: [
+        { attempt: 1, usage: firstUsage },
+        { attempt: 2, usage: secondUsage }
+      ]
+    },
     scorers: [],
     output: { validated: { ok: true }, raw: null, source: "cache", cacheKey: null },
     approval: null,

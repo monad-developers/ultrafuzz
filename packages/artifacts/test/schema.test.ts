@@ -66,7 +66,6 @@ import {
   type ArtifactContractId,
   type PlannedGraphDocument,
   type PlannedGraphNodeDocument,
-  type PropertyCampaignArtifact,
   trustedCliMetadataJsonSchema
 } from "../src/index.js";
 

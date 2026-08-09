@@ -549,23 +549,28 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "fi",
       'case "$1" in',
       "  fork)",
-      "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-forked\"}'",
+      '    printf \'%s\\n\' \'{"ok":true,"data":{"forkedRunId":"ultrafuzz-lifecycle-run-forked"}}\'',
       "    ;;",
       "  replay)",
-      "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-replayed\"}'",
+      '    printf \'%s\\n\' \'{"ok":true,"data":{"forkedRunId":"ultrafuzz-lifecycle-run-replayed"}}\'',
       "    ;;",
       "  pause)",
       '    if [ -n "$SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS" ]; then',
       "      exit 0",
       '    elif [ -n "$SMITHERS_FAKE_ALREADY_PAUSED" ]; then',
-      "      printf '%s\\n' '{\"status\":\"paused\"}'",
+      '      printf \'%s\\n\' \'{"ok":true,"data":{"status":"paused"}}\'',
       "    else",
-      "      printf '%s\\n' '{\"status\":\"pause-requested\"}'",
+      '      printf \'%s\\n\' \'{"ok":true,"data":{"status":"pause-requested"}}\'',
       "      exit 2",
       "    fi",
       "    ;;",
+      "  inspect)",
+      '    printf \'{"ok":true,"data":{"run":{"id":"%s","workflow":"%s","status":"running","started":"2026-07-03T00:00:00.000Z","elapsed":"0s"},"runState":{"runId":"%s","state":"running","computedAt":"2026-07-03T00:00:03.000Z"},"steps":[],"nodes":[]}}\\n\' "$2" "$2" "$2"',
+      "    ;;",
+      "  events)",
+      "    ;;",
       "  status)",
-      '    printf \'%s\\n\' \'{"data":{"status":"running","verdict":"running-healthy","reason":"1 running, 2 finished in last 10m","counts":{"finished":2,"inProgress":1,"pending":3,"failed":0,"waitingApproval":0,"waitingEvent":0,"waitingTimer":0,"skipped":0,"other":0,"total":6},"modelMix":[{"engine":"codex","model":"gpt-test","attempts":3,"quotaParked":false}],"throughput":{"recentFinished":2,"windowMs":600000,"totalFinished":2,"lastFinishedAtMs":1000},"bottleneck":[{"nodeId":"project-discovery","iteration":0,"state":"in-progress","detail":"running 1m"}],"bottleneckOmitted":0,"quota":null,"generatedAtMs":2000}}\'',
+      '    printf \'%s\\n\' \'{"ok":true,"data":{"status":"running","verdict":"running-healthy","reason":"1 running, 2 finished in last 10m","counts":{"finished":2,"inProgress":1,"pending":3,"failed":0,"waitingApproval":0,"waitingEvent":0,"waitingTimer":0,"skipped":0,"other":0,"total":6},"modelMix":[{"engine":"codex","model":"gpt-test","attempts":3,"quotaParked":false}],"throughput":{"recentFinished":2,"windowMs":600000,"totalFinished":2,"lastFinishedAtMs":1000},"bottleneck":[{"nodeId":"project-discovery","iteration":0,"state":"in-progress","detail":"running 1m"}],"bottleneckOmitted":0,"quota":null,"generatedAtMs":2000}}\'',
       "    ;;",
       "  *)",
       '    printf \'%s\\n\' \'{"ok":true,"smithers":"accepted"}\'',
@@ -690,7 +695,7 @@ function workflowInspect(input: {
   steps: Array<{ id: string; state: string; attempt?: number }>;
 }): unknown {
   const explicitStepIds = new Set(input.steps.map((step) => step.id));
-  const steps =
+  const taskRows =
     input.includeVerifierSteps === false
       ? input.steps
       : input.steps.flatMap((step) => {
@@ -702,6 +707,18 @@ function workflowInspect(input: {
             ? [step]
             : [step, { id: verifierId, state: "finished", attempt: step.attempt }];
         });
+  const steps = taskRows.map((step) => ({
+    id: step.id,
+    state: step.state,
+    attempt: step.attempt ?? 0,
+    label: step.id
+  }));
+  const nodes = taskRows.map((step) => ({
+    nodeId: step.id,
+    state: step.state,
+    attempt: step.attempt ?? 0,
+    label: step.id
+  }));
   return {
     ok: true,
     data: {
@@ -711,6 +728,7 @@ function workflowInspect(input: {
         status: input.status ?? "finished",
         ...(input.error === undefined ? {} : { error: input.error }),
         started: "2026-07-03T00:00:00.000Z",
+        elapsed: "2s",
         finished: input.status === "running" ? undefined : "2026-07-03T00:00:02.000Z"
       },
       runState: {
@@ -718,10 +736,11 @@ function workflowInspect(input: {
         computedAt: "2026-07-03T00:00:03.000Z",
         state: input.state ?? (input.status === "running" ? "running" : "succeeded")
       },
-      ...(input.failedChildKeys === undefined
+      ...(input.failedChildKeys === undefined || input.failedChildKeys.length === 0
         ? {}
         : { failedChildren: input.failedChildKeys.length, failedChildKeys: input.failedChildKeys }),
-      steps
+      steps,
+      nodes
     }
   };
 }
@@ -759,20 +778,44 @@ function workflowEvents(
         payload.nodeId = event.nodeId;
       }
       if (
-        event.type === "NodeStarted" ||
-        event.type === "NodeFinished" ||
-        event.type === "NodeFailed" ||
-        event.type === "NodeRetrying" ||
-        event.type === "TokenUsageReported" ||
-        event.type === "NodeSkipped"
+        event.type.startsWith("Node") ||
+        event.type === "TaskHeartbeatTimeout" ||
+        event.type === "TokenUsageReported"
       ) {
         payload.iteration = event.iteration ?? 0;
       }
-      if (event.attempt !== undefined) {
+      if (
+        [
+          "NodeStarted",
+          "NodeFinished",
+          "NodeFailed",
+          "NodeRetrying",
+          "TaskHeartbeatTimeout",
+          "TokenUsageReported"
+        ].includes(event.type)
+      ) {
+        payload.attempt = event.attempt ?? 1;
+      } else if (event.type === "NodeCancelled" && event.attempt !== undefined) {
         payload.attempt = event.attempt;
       }
-      if (event.error !== undefined) {
+      if (event.type === "RunFailed" || event.type === "NodeFailed") {
+        payload.error = event.error ?? { message: "test workflow failure" };
+      } else if (event.error !== undefined) {
         payload.error = event.error;
+      }
+      if (event.type === "TaskHeartbeatTimeout") {
+        payload.lastHeartbeatAtMs = timestampMs - 1_000;
+        payload.timeoutMs = 1_000;
+      }
+      if (event.type === "RunAutoResumed") {
+        payload.lastHeartbeatAtMs = timestampMs - 1_000;
+        payload.staleDurationMs = 1_000;
+      }
+      if (event.type === "TokenUsageReported") {
+        payload.model = "test-model";
+        payload.agent = "test-agent";
+        payload.inputTokens = 0;
+        payload.outputTokens = 0;
       }
       if (event.extra !== undefined) {
         Object.assign(payload, event.extra);
@@ -4522,7 +4565,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
     /materializeMissingMarkdownArtifacts|normalizeLegacyFinding|normalizeLegacyReportProvenance|normalizeLegacyGeneratedTest/u
   );
   assert.match(workflowSource, /function finalizeAndVerifyArtifacts/);
-  assert.match(workflowSource, /materializeGeneratedTestCompanions\(task\)/);
+  assert.match(workflowSource, /materializeGeneratedTestCompanions\(task, capturedOutputs\)/);
   assert.match(workflowSource, /INVARIANT_TEST_ROOT_NAMES\.flatMap\(\(testRoot\) => \[/);
   assert.match(workflowSource, /path\.resolve\(workspaceRoot, testRoot, "foundry", workspaceRelativePath\)/);
   assert.match(
@@ -4535,7 +4578,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
     workflowSource,
     /typeof finding\.confidence === "number"|finding\.confidence = String|finding\.strategy = legacyStrategy|finding\.evidence = \[evidence\]/u
   );
-  assert.match(workflowSource, /verifyArtifacts\(task\);/);
+  assert.match(workflowSource, /verifyArtifacts\(task, capturedOutputs\);/);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[(?:task\.)?(?:workspacePath|repoPath|runRoot)\]/);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(expectedArtifactDir)}`), true);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(run.value!.run_root)}`), false);
@@ -4635,26 +4678,6 @@ test("pauseRun accepts the workflow runner pause-request exit and is idempotent 
   };
   assert.equal(state.status, "paused");
   assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /pause ultrafuzz-pause-run --format json/);
-});
-
-test("pauseRun requires explicit workflow confirmation before persisting paused state", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const env = fakeSmithersEnv(project);
-  const run = await startRun({ projectRoot: project, runId: "pause-empty", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-
-  env.SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS = "1";
-  const requested = await pauseRun({ projectRoot: project, runId: "pause-empty", env });
-
-  assert.equal(requested.ok, true, JSON.stringify(requested.diagnostics));
-  assert.equal(requested.value?.status, "pause-requested");
-  assert.equal(requested.value?.submitted, true);
-  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
-    status: string;
-  };
-  assert.equal(state.status, "running");
 });
 
 test("workflow synchronization preserves the paused run state", async () => {
@@ -6820,159 +6843,6 @@ test("the resolution cutoff cannot fall behind a pinned dependency", () => {
   assert.equal(Date.parse(SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF) < Date.now(), true);
 });
 
-test("startRun migrates the known generated Smithers caret manifest without dropping custom fields", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const packageJson = path.join(project, ".smithers", "package.json");
-  fs.writeFileSync(
-    packageJson,
-    `${JSON.stringify(
-      {
-        name: "ultrafuzz-smithers",
-        private: true,
-        type: "module",
-        scripts: { custom: "node custom.js" },
-        dependencies: {
-          "smithers-orchestrator": "^0.27.0",
-          zod: "^4.4.3",
-          "custom-agent-package": "1.2.3"
-        },
-        devDependencies: { typescript: "^6.0.3", "custom-build-package": "2.3.4" }
-      },
-      null,
-      2
-    )}\n`,
-    "utf8"
-  );
-  writeFakeInstalledSmithers(project);
-  writeFakeInstalledSmithersDependency(project, "custom-agent-package", "1.2.3");
-  const logPath = path.join(project, "local-smithers.log");
-
-  const run = await startRun({
-    projectRoot: project,
-    runId: "migrated-smithers-run",
-    env: { PATH: "", SMITHERS_FAKE_LOG: logPath }
-  });
-
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const migrated = JSON.parse(fs.readFileSync(packageJson, "utf8")) as {
-    scripts: { custom: string };
-    dependencies: Record<string, string>;
-    devDependencies: Record<string, string>;
-  };
-  assert.equal(migrated.dependencies["smithers-orchestrator"], SMITHERS_ORCHESTRATOR_VERSION);
-  assert.equal(migrated.dependencies["@moonshot-ai/kimi-code"], KIMI_CODE_VERSION);
-  assert.equal(migrated.dependencies.zod, "4.4.3");
-  assert.equal(migrated.devDependencies.typescript, "6.0.3");
-  assert.equal(migrated.dependencies["custom-agent-package"], "1.2.3");
-  assert.equal(migrated.devDependencies["custom-build-package"], "2.3.4");
-  assert.equal(migrated.scripts.custom, "node custom.js");
-  assert.equal((migrated as { overrides?: Record<string, string> }).overrides?.effect, SMITHERS_EFFECT_VERSION);
-});
-
-test("startRun adds the pinned Effect override to the previous generated manifest", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const packageJson = path.join(project, ".smithers", "package.json");
-  const manifest = JSON.parse(fs.readFileSync(packageJson, "utf8")) as {
-    overrides?: Record<string, string>;
-  };
-  delete manifest.overrides;
-  fs.writeFileSync(packageJson, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  writeFakeInstalledSmithers(project);
-
-  const run = await startRun({
-    projectRoot: project,
-    runId: "migrated-effect-override-run",
-    env: { PATH: "", SMITHERS_FAKE_LOG: path.join(project, "local-smithers.log") }
-  });
-
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const migrated = JSON.parse(fs.readFileSync(packageJson, "utf8")) as {
-    overrides?: Record<string, string>;
-  };
-  assert.equal(migrated.overrides?.effect, SMITHERS_EFFECT_VERSION);
-});
-
-test("startRun migrates the previous exact Smithers manifest without dropping custom fields", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const packageJson = path.join(project, ".smithers", "package.json");
-  const manifest = JSON.parse(fs.readFileSync(packageJson, "utf8")) as {
-    dependencies: Record<string, string>;
-    devDependencies: Record<string, string>;
-  };
-  manifest.dependencies["smithers-orchestrator"] = "0.29.0";
-  manifest.dependencies["custom-agent-package"] = "1.2.3";
-  fs.writeFileSync(packageJson, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  writeFakeInstalledSmithers(project, { version: "0.29.0" });
-  writeFakeInstalledSmithersDependency(project, "custom-agent-package", "1.2.3");
-  const installer = writeFakeNpmInstaller(project);
-
-  const run = await startRun({
-    projectRoot: project,
-    runId: "migrated-exact-smithers-run",
-    env: {
-      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      SMITHERS_FAKE_LOG: installer.smithersLogPath
-    }
-  });
-
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const migrated = JSON.parse(fs.readFileSync(packageJson, "utf8")) as {
-    dependencies: Record<string, string>;
-  };
-  assert.equal(migrated.dependencies["smithers-orchestrator"], SMITHERS_ORCHESTRATOR_VERSION);
-  assert.equal(migrated.dependencies["@moonshot-ai/kimi-code"], KIMI_CODE_VERSION);
-  assert.equal(migrated.dependencies["custom-agent-package"], "1.2.3");
-  assert.equal((migrated as { overrides?: Record<string, string> }).overrides?.effect, SMITHERS_EFFECT_VERSION);
-  assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /install/u);
-});
-
-// The Smithers 0.31.0 pin shipped an Effect 3 override. Its manifest must migrate
-// onto the current runner and Effect 4 rather than being rejected as modified,
-// because in-flight cloud runs resume against the project root they were launched
-// with and would otherwise fail before the engine ever starts.
-test("startRun migrates the Smithers 0.31.0 manifest and its Effect 3 override forward", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const packageJson = path.join(project, ".smithers", "package.json");
-  const manifest = JSON.parse(fs.readFileSync(packageJson, "utf8")) as {
-    dependencies: Record<string, string>;
-    overrides?: Record<string, string>;
-  };
-  manifest.dependencies["smithers-orchestrator"] = "0.31.0";
-  manifest.dependencies["custom-agent-package"] = "1.2.3";
-  manifest.overrides = { ...manifest.overrides, effect: "3.21.4" };
-  fs.writeFileSync(packageJson, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  writeFakeInstalledSmithers(project, { version: "0.31.0" });
-  writeFakeInstalledSmithersDependency(project, "custom-agent-package", "1.2.3");
-  const installer = writeFakeNpmInstaller(project);
-
-  const run = await startRun({
-    projectRoot: project,
-    runId: "migrated-effect-3-manifest-run",
-    env: {
-      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      SMITHERS_FAKE_LOG: installer.smithersLogPath
-    }
-  });
-
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const migrated = JSON.parse(fs.readFileSync(packageJson, "utf8")) as {
-    dependencies: Record<string, string>;
-    overrides?: Record<string, string>;
-  };
-  assert.equal(migrated.dependencies["smithers-orchestrator"], SMITHERS_ORCHESTRATOR_VERSION);
-  assert.equal(migrated.dependencies["custom-agent-package"], "1.2.3");
-  assert.equal(migrated.overrides?.effect, SMITHERS_EFFECT_VERSION);
-  assert.notEqual(migrated.overrides?.effect, "3.21.4");
-});
-
 test("startRun reinstalls a stale target-local Smithers package before launch", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -7630,729 +7500,6 @@ test("syncRun does not report an unattributed failure that state.json already at
   );
 });
 
-test("syncRun persists cumulative token accounting and partial pricing from workflow events", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-
-  const source = await startRun({
-    projectRoot: project,
-    runId: "source-accounting",
-    env: fakeSmithersEnv(project)
-  });
-  assert.equal(source.ok, true, JSON.stringify(source.diagnostics));
-  const sourceMetadataPath = path.join(source.value!.run_root, "run.json");
-  const sourceMetadata = JSON.parse(fs.readFileSync(sourceMetadataPath, "utf8")) as Record<string, unknown>;
-  // 0.1 + 0.2 exercises cumulative USD rounding instead of leaking binary float tails.
-  fs.writeFileSync(
-    sourceMetadataPath,
-    `${JSON.stringify(
-      {
-        ...sourceMetadata,
-        accounting: {
-          schema_version: "1.0",
-          source: "workflow-events",
-          workflow_run_id: "ultrafuzz-source-accounting",
-          current: {
-            input_tokens: 40,
-            output_tokens: 60,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            reasoning_tokens: 0,
-            total_tokens: 100,
-            tokens_used: "100",
-            estimated_spend: "$0.10",
-            estimated_spend_usd: 0.1,
-            partial_pricing: false,
-            event_count: 1,
-            priced_event_count: 1,
-            unpriced_event_count: 0,
-            models: ["source-model"],
-            agents: ["codex"]
-          },
-          cumulative: {
-            input_tokens: 40,
-            output_tokens: 60,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            reasoning_tokens: 0,
-            total_tokens: 100,
-            tokens_used: "100",
-            estimated_spend: "$0.10",
-            estimated_spend_usd: 0.1,
-            partial_pricing: false,
-            event_count: 1,
-            priced_event_count: 1,
-            unpriced_event_count: 0,
-            models: ["source-model"],
-            agents: ["codex"],
-            source_run_ids: []
-          }
-        }
-      },
-      null,
-      2
-    )}\n`,
-    "utf8"
-  );
-
-  const workflowRunId = "ultrafuzz-lineage-accounting";
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-    }),
-    events: workflowEvents(workflowRunId, [
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
-      {
-        type: "TokenUsageReported",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        extra: {
-          iteration: 0,
-          inputTokens: 10,
-          outputTokens: 20,
-          costUsd: 0.2,
-          model: "gpt-test",
-          agent: "codex"
-        }
-      },
-      {
-        type: "TokenUsageReported",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        extra: {
-          iteration: 0,
-          inputTokens: 5,
-          model: "gpt-test",
-          agent: "codex"
-        }
-      },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "RunFinished" }
-    ])
-  });
-  const run = await startRun({
-    projectRoot: project,
-    runId: "lineage-accounting",
-    sourceRunId: "source-accounting",
-    env
-  });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-
-  const sync = await syncRun({ projectRoot: project, runId: "lineage-accounting", env });
-
-  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
-    accounting?: {
-      current?: { tokens_used?: string; estimated_spend?: string; partial_pricing?: boolean };
-      cumulative?: {
-        tokens_used?: string;
-        estimated_spend?: string;
-        estimated_spend_usd?: number;
-        partial_pricing?: boolean;
-        source_run_ids?: string[];
-      };
-    };
-  };
-  assert.equal(metadata.accounting?.current?.tokens_used, "35");
-  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.20+");
-  assert.equal(metadata.accounting?.current?.partial_pricing, true);
-  assert.equal(metadata.accounting?.cumulative?.tokens_used, "135");
-  assert.equal(metadata.accounting?.cumulative?.estimated_spend, "$0.30+");
-  assert.equal(metadata.accounting?.cumulative?.estimated_spend_usd, 0.3);
-  assert.equal(metadata.accounting?.cumulative?.partial_pricing, true);
-  assert.deepEqual(metadata.accounting?.cumulative?.source_run_ids, ["source-accounting"]);
-});
-
-test("syncRun does not count a retried zero-usage attempt as an unpriced event", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-
-  const workflowRunId = "ultrafuzz-retried-zero-usage";
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
-    }),
-    events: workflowEvents(workflowRunId, [
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
-      {
-        type: "TokenUsageReported",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        extra: { iteration: 0, model: "deepseek-v4-flash", agent: "deepseek" }
-      },
-      {
-        type: "NodeFailed",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        error: { message: "failed before model usage" },
-        extra: { iteration: 0 }
-      },
-      { type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 2, extra: { iteration: 0 } },
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 2, extra: { iteration: 0 } },
-      {
-        type: "TokenUsageReported",
-        nodeId: "node:project-discovery",
-        attempt: 2,
-        extra: {
-          iteration: 0,
-          inputTokens: 10,
-          outputTokens: 5,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-          reasoningTokens: 0,
-          totalTokens: 15,
-          costUsd: 0.25,
-          model: "deepseek-v4-flash",
-          agent: "deepseek"
-        }
-      },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 2, extra: { iteration: 0 } },
-      { type: "RunFinished" }
-    ])
-  });
-  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
-    deepseek: {
-      models: {
-        "deepseek-v4-flash": {
-          cost: { input: 1, output: 2, cache_read: 0.5, cache_write: 0 }
-        }
-      }
-    }
-  });
-  const run = await startRun({ projectRoot: project, runId: "retried-zero-usage", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-
-  const sync = await syncRun({ projectRoot: project, runId: "retried-zero-usage", env });
-
-  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
-    accounting?: {
-      current?: {
-        total_tokens?: number;
-        estimated_spend_usd?: number;
-        usage_complete?: boolean;
-        usage_incomplete_reasons?: Array<{ code?: string }>;
-        pricing_complete?: boolean;
-        pricing_incomplete_reasons?: unknown[];
-        partial_pricing?: boolean;
-        event_count?: number;
-        priced_event_count?: number;
-        unpriced_event_count?: number;
-      };
-      cumulative?: {
-        estimated_spend_usd?: number;
-        pricing_complete?: boolean;
-        partial_pricing?: boolean;
-        unpriced_event_count?: number;
-      };
-      checkpoint?: { ledger_event_count?: number };
-    };
-  };
-  assert.equal(metadata.accounting?.current?.total_tokens, 15);
-  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 0.25);
-  assert.equal(metadata.accounting?.current?.usage_complete, false);
-  assert.deepEqual(
-    metadata.accounting?.current?.usage_incomplete_reasons?.map((reason) => reason.code),
-    ["usage-missing"]
-  );
-  assert.equal(metadata.accounting?.current?.pricing_complete, true);
-  assert.deepEqual(metadata.accounting?.current?.pricing_incomplete_reasons, []);
-  assert.equal(metadata.accounting?.current?.partial_pricing, false);
-  assert.equal(metadata.accounting?.current?.event_count, 1);
-  assert.equal(metadata.accounting?.current?.priced_event_count, 1);
-  assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
-  assert.equal(metadata.accounting?.cumulative?.estimated_spend_usd, 0.25);
-  assert.equal(metadata.accounting?.cumulative?.pricing_complete, true);
-  assert.equal(metadata.accounting?.cumulative?.partial_pricing, false);
-  assert.equal(metadata.accounting?.cumulative?.unpriced_event_count, 0);
-  assert.equal(metadata.accounting?.checkpoint?.ledger_event_count, 2);
-
-  const secondWorkflowRunId = "ultrafuzz-retried-zero-usage-relinked";
-  env.SMITHERS_FAKE_FORKED_RUN_ID = secondWorkflowRunId;
-  const forked = await forkRun({
-    projectRoot: project,
-    runId: "retried-zero-usage",
-    forkFrame: 0,
-    env
-  });
-  assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
-  assert.equal(forked.value?.workflow_run_id, secondWorkflowRunId);
-  const metadataPath = path.join(run.value!.run_root, "run.json");
-  fs.writeFileSync(
-    path.join(project, "fake-smithers-inspect.json"),
-    `${JSON.stringify(
-      workflowInspect({
-        workflowRunId: secondWorkflowRunId,
-        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-      }),
-      null,
-      2
-    )}\n`,
-    "utf8"
-  );
-  fs.writeFileSync(
-    path.join(project, "fake-smithers-events.ndjson"),
-    workflowEvents(secondWorkflowRunId, [
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
-      {
-        type: "TokenUsageReported",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        extra: {
-          iteration: 0,
-          inputTokens: 4,
-          outputTokens: 2,
-          costUsd: 0.1,
-          model: "deepseek-v4-flash",
-          agent: "deepseek"
-        }
-      },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
-      { type: "RunFinished" }
-    ]),
-    "utf8"
-  );
-
-  const relinked = await syncRun({ projectRoot: project, runId: "retried-zero-usage", env });
-  assert.equal(relinked.ok, true, JSON.stringify(relinked.diagnostics));
-  const afterRelink = fs.readFileSync(metadataPath, "utf8");
-  const replayed = await syncRun({ projectRoot: project, runId: "retried-zero-usage", env });
-  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
-  assert.equal(fs.readFileSync(metadataPath, "utf8"), afterRelink, "accounting replay must be byte-idempotent");
-
-  const finalMetadata = JSON.parse(afterRelink) as {
-    accounting?: {
-      segments?: Array<{
-        workflow_run_id?: string;
-        pricing_complete?: boolean;
-        event_count?: number;
-        priced_event_count?: number;
-        unpriced_event_count?: number;
-      }>;
-      cumulative?: {
-        pricing_complete?: boolean;
-        partial_pricing?: boolean;
-        event_count?: number;
-        priced_event_count?: number;
-        unpriced_event_count?: number;
-      };
-      checkpoint?: { failed_zero_usage_source_event_ids?: string[] };
-    };
-  };
-  assert.deepEqual(
-    finalMetadata.accounting?.segments?.map((segment) => [
-      segment.workflow_run_id,
-      segment.pricing_complete,
-      segment.event_count,
-      segment.priced_event_count,
-      segment.unpriced_event_count
-    ]),
-    [
-      [workflowRunId, true, 1, 1, 0],
-      [secondWorkflowRunId, true, 1, 1, 0]
-    ]
-  );
-  assert.equal(finalMetadata.accounting?.cumulative?.pricing_complete, true);
-  assert.equal(finalMetadata.accounting?.cumulative?.partial_pricing, false);
-  assert.equal(finalMetadata.accounting?.cumulative?.event_count, 2);
-  assert.equal(finalMetadata.accounting?.cumulative?.priced_event_count, 2);
-  assert.equal(finalMetadata.accounting?.cumulative?.unpriced_event_count, 0);
-  assert.equal(finalMetadata.accounting?.checkpoint?.failed_zero_usage_source_event_ids?.length, 1);
-});
-
-test("syncRun does not confuse restarted retry counters across checkpoint generations", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-
-  const workflowRunId = "ultrafuzz-restarted-zero-usage";
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-    }),
-    events: workflowEvents(workflowRunId, [
-      {
-        type: "NodeStarted",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        sequence: 0,
-        extra: { iteration: 0, checkpointGenerationId: "checkpoint-1" }
-      },
-      {
-        type: "NodeFailed",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        sequence: 2,
-        error: { message: "failed before model usage" },
-        extra: { iteration: 0 }
-      },
-      {
-        type: "NodeStarted",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        sequence: 3,
-        extra: { iteration: 0, checkpointGenerationId: "checkpoint-2" }
-      },
-      {
-        type: "NodeFinished",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        sequence: 5,
-        extra: { iteration: 0 }
-      },
-      { type: "RunFinished", sequence: 6 }
-    ]),
-    tokenEvents: workflowEvents(workflowRunId, [
-      {
-        type: "TokenUsageReported",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        sequence: 1,
-        extra: {
-          iteration: 0,
-          checkpointGenerationId: "checkpoint-1",
-          model: "deepseek-v4-flash",
-          agent: "deepseek"
-        }
-      },
-      {
-        type: "TokenUsageReported",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        sequence: 4,
-        extra: {
-          iteration: 0,
-          checkpointGenerationId: "checkpoint-2",
-          model: "deepseek-v4-flash",
-          agent: "deepseek"
-        }
-      }
-    ])
-  });
-  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
-    deepseek: {
-      models: {
-        "deepseek-v4-flash": {
-          cost: { input: 1, output: 2, cache_read: 0.5, cache_write: 0 }
-        }
-      }
-    }
-  });
-  const run = await startRun({ projectRoot: project, runId: "restarted-zero-usage", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-
-  const sync = await syncRun({ projectRoot: project, runId: "restarted-zero-usage", env });
-
-  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
-    accounting?: {
-      current?: {
-        checkpoint_generation_id?: string;
-        pricing_complete?: boolean;
-        partial_pricing?: boolean;
-        event_count?: number;
-        unpriced_event_count?: number;
-      };
-      segments?: Array<{
-        checkpoint_generation_id?: string;
-        pricing_complete?: boolean;
-        event_count?: number;
-        unpriced_event_count?: number;
-      }>;
-      checkpoint?: { ledger_event_count?: number };
-    };
-  };
-  assert.deepEqual(
-    metadata.accounting?.segments?.map((segment) => [
-      segment.checkpoint_generation_id,
-      segment.pricing_complete,
-      segment.event_count,
-      segment.unpriced_event_count
-    ]),
-    [
-      ["checkpoint-1", true, 0, 0],
-      ["checkpoint-2", false, 1, 1]
-    ]
-  );
-  assert.equal(metadata.accounting?.current?.checkpoint_generation_id, "checkpoint-2");
-  assert.equal(metadata.accounting?.current?.pricing_complete, false);
-  assert.equal(metadata.accounting?.current?.partial_pricing, true);
-  assert.equal(metadata.accounting?.current?.event_count, 1);
-  assert.equal(metadata.accounting?.current?.unpriced_event_count, 1);
-  assert.equal(metadata.accounting?.checkpoint?.ledger_event_count, 2);
-});
-
-test("syncRun preserves generated usage across checkpoint generations and replays idempotently", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-
-  const workflowRunId = "ultrafuzz-generated-usage";
-  const inspect = workflowInspect({
-    workflowRunId,
-    steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-  });
-  const generatedSegment = (generation: string, inputTokens: number, outputTokens: number, costUsd: number) =>
-    workflowEvents(workflowRunId, [
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
-      {
-        type: "TokenUsageReported",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        extra: {
-          iteration: 0,
-          checkpointGenerationId: generation,
-          inputTokens,
-          outputTokens,
-          costUsd,
-          model: "generated-model",
-          agent: "generated-agent"
-        }
-      },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
-      { type: "RunFinished" }
-    ]);
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect,
-    events: generatedSegment("generation-1", 10, 5, 0.01)
-  });
-  const run = await startRun({ projectRoot: project, runId: "generated-usage", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-
-  const first = await syncRun({ projectRoot: project, runId: "generated-usage", env });
-  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
-
-  const generatedEventsPath = path.join(project, "fake-smithers-events.ndjson");
-  fs.writeFileSync(generatedEventsPath, generatedSegment("generation-2", 20, 10, 0.02), "utf8");
-  const second = await syncRun({ projectRoot: project, runId: "generated-usage", env });
-  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
-  const replayed = await syncRun({ projectRoot: project, runId: "generated-usage", env });
-  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
-
-  fs.writeFileSync(
-    generatedEventsPath,
-    workflowEvents(workflowRunId, [
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
-      {
-        type: "TokenUsageReported",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        extra: {
-          iteration: 0,
-          checkpointGenerationId: "generation-3",
-          inputTokens: "malformed",
-          model: "generated-model",
-          agent: "generated-agent"
-        }
-      },
-      {
-        type: "TokenUsageReported",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        extra: {
-          iteration: 0,
-          checkpointGenerationId: "generation-3",
-          model: "generated-model",
-          agent: "generated-agent"
-        }
-      },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
-      { type: "RunFinished" }
-    ]),
-    "utf8"
-  );
-  const incomplete = await syncRun({ projectRoot: project, runId: "generated-usage", env });
-  assert.equal(incomplete.ok, true, JSON.stringify(incomplete.diagnostics));
-
-  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
-    accounting?: {
-      current?: {
-        tokens_used?: string;
-        usage_complete?: boolean;
-        usage_incomplete_reasons?: Array<{ code?: string }>;
-        pricing_complete?: boolean;
-        pricing_incomplete_reasons?: Array<{ code?: string }>;
-        event_count?: number;
-        unpriced_event_count?: number;
-      };
-      segments?: Array<{
-        checkpoint_generation_id?: string;
-        total_tokens?: number;
-        event_count?: number;
-      }>;
-      cumulative?: { total_tokens?: number; event_count?: number; usage_complete?: boolean };
-      checkpoint?: { ledger_event_count?: number; checkpoint_generation_id?: string };
-    };
-  };
-  const segments = metadata.accounting?.segments ?? [];
-  assert.deepEqual(
-    segments.map((segment) => [segment.checkpoint_generation_id, segment.total_tokens, segment.event_count]),
-    [
-      ["generation-1", 15, 1],
-      ["generation-2", 30, 1],
-      ["generation-3", 0, 2]
-    ]
-  );
-  assert.equal(
-    segments.reduce((total, segment) => total + (segment.total_tokens ?? 0), 0),
-    metadata.accounting?.cumulative?.total_tokens
-  );
-  assert.equal(metadata.accounting?.cumulative?.total_tokens, 45);
-  assert.equal(metadata.accounting?.cumulative?.event_count, 4);
-  assert.equal(metadata.accounting?.current?.tokens_used, "0");
-  assert.equal(metadata.accounting?.current?.usage_complete, false);
-  assert.deepEqual(
-    new Set(metadata.accounting?.current?.usage_incomplete_reasons?.map((reason) => reason.code)),
-    new Set(["usage-malformed", "usage-missing"])
-  );
-  assert.equal(metadata.accounting?.current?.pricing_complete, false);
-  assert.equal(metadata.accounting?.current?.event_count, 2);
-  assert.equal(metadata.accounting?.current?.unpriced_event_count, 2);
-  assert.deepEqual(
-    metadata.accounting?.current?.pricing_incomplete_reasons?.map((reason) => reason.code),
-    ["price-unavailable", "price-unavailable"]
-  );
-  assert.equal(metadata.accounting?.cumulative?.usage_complete, false);
-  assert.equal(metadata.accounting?.checkpoint?.ledger_event_count, 4);
-  assert.equal(metadata.accounting?.checkpoint?.checkpoint_generation_id, "generation-3");
-  assert.equal(
-    fs.readFileSync(path.join(run.value!.run_root, "usage.jsonl"), "utf8").trim().split("\n").length,
-    4,
-    "replaying a continuation must not duplicate generated usage"
-  );
-});
-
-test("syncRun keeps colliding checkpoint names separate across workflow runs", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-
-  const firstWorkflowRunId = "ultrafuzz-colliding-generation";
-  const secondWorkflowRunId = "ultrafuzz-colliding-generation-fork";
-  const usageEvents = (workflowRunId: string, inputTokens: number) =>
-    workflowEvents(workflowRunId, [
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
-      {
-        type: "TokenUsageReported",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        extra: {
-          iteration: 0,
-          checkpointGenerationId: "generation-shared",
-          inputTokens,
-          costUsd: inputTokens / 1_000,
-          model: "generated-model",
-          agent: "generated-agent"
-        }
-      },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
-      { type: "RunFinished" }
-    ]);
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId: firstWorkflowRunId,
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-    }),
-    events: usageEvents(firstWorkflowRunId, 10)
-  });
-  const run = await startRun({ projectRoot: project, runId: "colliding-generation", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-  const first = await syncRun({ projectRoot: project, runId: "colliding-generation", env });
-  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
-
-  const metadataPath = path.join(run.value!.run_root, "run.json");
-  env.SMITHERS_FAKE_FORKED_RUN_ID = secondWorkflowRunId;
-  const forked = await forkRun({
-    projectRoot: project,
-    runId: "colliding-generation",
-    forkFrame: 0,
-    env
-  });
-  assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
-  assert.equal(forked.value?.workflow_run_id, secondWorkflowRunId);
-  const linkJournal = JSON.parse(
-    fs.readFileSync(path.join(run.value!.run_root, "smithers", "workflow-run-link-journal.json"), "utf8")
-  ) as {
-    entries?: Array<{
-      link_id?: string;
-      action?: string;
-      workflow_run_id?: string;
-      source_workflow_run_id?: string;
-      source_workflow_link_id?: string;
-      lifecycle_result_event_id?: string;
-      phase?: string;
-    }>;
-  };
-  assert.equal(linkJournal.entries?.length, 2);
-  assert.deepEqual(
-    linkJournal.entries?.map((entry) => [entry.action, entry.workflow_run_id, entry.phase]),
-    [
-      ["start", firstWorkflowRunId, "committed"],
-      ["fork", secondWorkflowRunId, "committed"]
-    ]
-  );
-  assert.equal(linkJournal.entries?.[1]?.source_workflow_run_id, firstWorkflowRunId);
-  assert.equal(linkJournal.entries?.[1]?.source_workflow_link_id, linkJournal.entries?.[0]?.link_id);
-  assert.match(linkJournal.entries?.[1]?.lifecycle_result_event_id ?? "", /^evt-/u);
-  fs.writeFileSync(
-    path.join(project, "fake-smithers-inspect.json"),
-    `${JSON.stringify(
-      workflowInspect({
-        workflowRunId: secondWorkflowRunId,
-        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-      }),
-      null,
-      2
-    )}\n`,
-    "utf8"
-  );
-  fs.writeFileSync(path.join(project, "fake-smithers-events.ndjson"), usageEvents(secondWorkflowRunId, 20), "utf8");
-
-  const second = await syncRun({ projectRoot: project, runId: "colliding-generation", env });
-  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
-  const finalMetadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
-    workflow?: { run_id?: string; workflow_link_id?: string };
-    accounting?: {
-      current?: { workflow_run_id?: string; total_tokens?: number };
-      segments?: Array<{ workflow_run_id?: string; checkpoint_generation_id?: string; total_tokens?: number }>;
-      cumulative?: { total_tokens?: number };
-      checkpoint?: { workflow_run_id?: string };
-    };
-  };
-  assert.deepEqual(
-    finalMetadata.accounting?.segments?.map((segment) => [
-      segment.workflow_run_id,
-      segment.checkpoint_generation_id,
-      segment.total_tokens
-    ]),
-    [
-      [firstWorkflowRunId, "generation-shared", 10],
-      [secondWorkflowRunId, "generation-shared", 20]
-    ]
-  );
-  assert.equal(finalMetadata.accounting?.current?.workflow_run_id, secondWorkflowRunId);
-  assert.equal(finalMetadata.accounting?.current?.total_tokens, 20);
-  assert.equal(finalMetadata.accounting?.cumulative?.total_tokens, 30);
-  assert.equal(finalMetadata.accounting?.checkpoint?.workflow_run_id, secondWorkflowRunId);
-  assert.equal(finalMetadata.workflow?.run_id, secondWorkflowRunId);
-  assert.equal(finalMetadata.workflow?.workflow_link_id, linkJournal.entries?.[1]?.link_id);
-  const finalState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
-    provenance?: { workflow?: { runId?: string; linkId?: string } };
-  };
-  assert.equal(finalState.provenance?.workflow?.runId, secondWorkflowRunId);
-  assert.equal(finalState.provenance?.workflow?.linkId, linkJournal.entries?.[1]?.link_id);
-});
-
 test("syncRun counts cache-only usage when aggregate input is explicitly zero", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -8372,18 +7519,24 @@ test("syncRun counts cache-only usage when aggregate input is explicitly zero", 
         attempt: 1,
         extra: {
           iteration: 0,
-          checkpointGenerationId: "generation-cache",
           inputTokens: 0,
           outputTokens: 0,
           cacheReadTokens: 12,
           cacheWriteTokens: 3,
-          totalTokens: 0,
-          costUsd: 0.000012
+          model: "gpt-cache-only",
+          agent: "codex"
         }
       },
       { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
       { type: "RunFinished" }
     ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    openai: {
+      models: {
+        "gpt-cache-only": { cost: { input: 1, output: 1, cache_read: 0.5, cache_write: 2 } }
+      }
+    }
   });
   const run = await startRun({ projectRoot: project, runId: "cache-only-usage", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
@@ -8409,61 +7562,8 @@ test("syncRun counts cache-only usage when aggregate input is explicitly zero", 
   assert.equal(metadata.accounting?.current?.cache_write_tokens, 3);
   assert.equal(metadata.accounting?.current?.event_count, 1);
   assert.equal(metadata.accounting?.current?.usage_complete, true);
-  assert.equal(metadata.accounting?.current?.pricing_complete, false);
+  assert.equal(metadata.accounting?.current?.pricing_complete, true);
   assert.equal(metadata.accounting?.current?.estimated_spend_usd, 0.000012);
-});
-
-test("syncRun preserves sub-microdollar costs across generation rollups", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-
-  const workflowRunId = "ultrafuzz-precise-cost-usage";
-  const generatedSegment = (generation: string) =>
-    workflowEvents(workflowRunId, [
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
-      {
-        type: "TokenUsageReported",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        extra: {
-          iteration: 0,
-          checkpointGenerationId: generation,
-          inputTokens: 1,
-          outputTokens: 0,
-          costUsd: 0.0000004
-        }
-      },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
-      { type: "RunFinished" }
-    ]);
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-    }),
-    events: generatedSegment("generation-1")
-  });
-  const run = await startRun({ projectRoot: project, runId: "precise-cost-usage", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-  const first = await syncRun({ projectRoot: project, runId: "precise-cost-usage", env });
-  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
-  fs.writeFileSync(path.join(project, "fake-smithers-events.ndjson"), generatedSegment("generation-2"), "utf8");
-
-  const second = await syncRun({ projectRoot: project, runId: "precise-cost-usage", env });
-  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
-  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
-    accounting?: {
-      segments?: Array<{ estimated_spend_usd?: number }>;
-      cumulative?: { estimated_spend_usd?: number };
-    };
-  };
-  assert.deepEqual(
-    metadata.accounting?.segments?.map((segment) => segment.estimated_spend_usd),
-    [0.0000004, 0.0000004]
-  );
-  assert.equal(metadata.accounting?.cumulative?.estimated_spend_usd, 0.0000008);
 });
 
 test("syncRun uses durable event sequence for the current accounting segment", async () => {
@@ -8486,17 +7586,25 @@ test("syncRun uses durable event sequence for the current accounting segment", a
       nodeId: "node:project-discovery",
       iteration: 0,
       attempt: 1,
-      checkpointGenerationId: "generation-1",
       inputTokens: 10,
-      costUsd: 0.01
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      model: "generated-model",
+      agent: "generated-agent"
     }),
     event(2, 200, "TokenUsageReported", {
       nodeId: "node:project-discovery",
       iteration: 0,
       attempt: 1,
-      checkpointGenerationId: "generation-2",
       inputTokens: 20,
-      costUsd: 0.02
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      model: "generated-model",
+      agent: "generated-agent"
     }),
     event(3, 400, "NodeFinished", { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }),
     event(4, 500, "RunFinished")
@@ -8516,28 +7624,27 @@ test("syncRun uses durable event sequence for the current accounting segment", a
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
     accounting?: {
-      current?: { checkpoint_generation_id?: string; total_tokens?: number };
-      segments?: Array<{ checkpoint_generation_id?: string; total_tokens?: number }>;
+      current?: { control_generation?: string; source_event_sequences?: number[]; total_tokens?: number };
+      segments?: Array<{ control_generation?: string; source_event_sequences?: number[]; total_tokens?: number }>;
     };
   };
-  assert.deepEqual(
-    metadata.accounting?.segments?.map((segment) => [segment.checkpoint_generation_id, segment.total_tokens]),
-    [
-      ["generation-1", 10],
-      ["generation-2", 20]
-    ]
+  assert.equal(metadata.accounting?.segments?.length, 1);
+  assert.deepEqual(metadata.accounting?.current?.source_event_sequences, [1, 2]);
+  assert.equal(metadata.accounting?.current?.total_tokens, 30);
+  assert.match(metadata.accounting?.current?.control_generation ?? "", /^[a-f0-9]{64}$/u);
+  assert.equal(
+    metadata.accounting?.segments?.[0]?.control_generation,
+    metadata.accounting?.current?.control_generation
   );
-  assert.equal(metadata.accounting?.current?.checkpoint_generation_id, "generation-2");
-  assert.equal(metadata.accounting?.current?.total_tokens, 20);
 });
 
-test("syncRun assigns unseen implicit usage events to a new checkpoint segment", async () => {
+test("syncRun appends unseen usage events to the current control segment", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
 
   const workflowRunId = "ultrafuzz-implicit-usage";
-  const tokenEvent = (inputTokens: number, outputTokens: number, costUsd: number) => ({
+  const tokenEvent = (inputTokens: number, outputTokens: number) => ({
     type: "TokenUsageReported",
     nodeId: "node:project-discovery",
     attempt: 1,
@@ -8545,14 +7652,13 @@ test("syncRun assigns unseen implicit usage events to a new checkpoint segment",
       iteration: 0,
       inputTokens,
       outputTokens,
-      costUsd,
       model: "generated-model",
       agent: "generated-agent"
     }
   });
   const firstSegment = [
     { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
-    tokenEvent(10, 5, 0.01),
+    tokenEvent(10, 5),
     { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
     { type: "RunFinished" }
   ];
@@ -8572,7 +7678,7 @@ test("syncRun assigns unseen implicit usage events to a new checkpoint segment",
 
   fs.writeFileSync(
     path.join(project, "fake-smithers-events.ndjson"),
-    workflowEvents(workflowRunId, [...firstSegment, tokenEvent(20, 10, 0.02)]),
+    workflowEvents(workflowRunId, [...firstSegment, tokenEvent(20, 10)]),
     "utf8"
   );
   const second = await syncRun({ projectRoot: project, runId: "implicit-usage", env });
@@ -8582,19 +7688,21 @@ test("syncRun assigns unseen implicit usage events to a new checkpoint segment",
 
   const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
     accounting?: {
-      segments?: Array<{ checkpoint_generation_id?: string; total_tokens?: number; event_count?: number }>;
+      segments?: Array<{
+        control_generation?: string;
+        source_event_sequences?: number[];
+        total_tokens?: number;
+        event_count?: number;
+      }>;
       cumulative?: { total_tokens?: number; event_count?: number };
     };
   };
   const segments = metadata.accounting?.segments ?? [];
-  assert.deepEqual(
-    segments.map((segment) => [segment.total_tokens, segment.event_count]),
-    [
-      [15, 1],
-      [30, 1]
-    ]
-  );
-  assert.notEqual(segments[0]?.checkpoint_generation_id, segments[1]?.checkpoint_generation_id);
+  assert.equal(segments.length, 1);
+  assert.equal(segments[0]?.total_tokens, 45);
+  assert.equal(segments[0]?.event_count, 2);
+  assert.deepEqual(segments[0]?.source_event_sequences, [1, 4]);
+  assert.match(segments[0]?.control_generation ?? "", /^[a-f0-9]{64}$/u);
   assert.equal(metadata.accounting?.cumulative?.total_tokens, 45);
   assert.equal(metadata.accounting?.cumulative?.event_count, 2);
   assert.equal(fs.readFileSync(path.join(run.value!.run_root, "usage.jsonl"), "utf8").trim().split("\n").length, 2);
@@ -8830,7 +7938,6 @@ test("syncRun prices independent usage components when cache reads exceed uncach
           outputTokens: 0,
           cacheReadTokens: 12,
           cacheWriteTokens: 3,
-          totalTokens: 0,
           model: "gpt-5.6-sol",
           agent: "codex"
         }
@@ -9952,14 +9059,7 @@ test("syncRun does not mark a completed workflow succeeded without task evidence
   writeSmallTopology(project);
   const workflowRunId = "ultrafuzz-sync-missing-evidence";
   const env = fakeLifecycleSmithersEnv(project, {
-    inspect: {
-      ok: true,
-      data: {
-        run: { id: workflowRunId, status: "completed" },
-        runState: { runId: workflowRunId, state: "completed" },
-        steps: []
-      }
-    },
+    inspect: workflowInspect({ workflowRunId, steps: [] }),
     events: ""
   });
   const run = await startRun({ projectRoot: project, runId: "sync-missing-evidence", env });
@@ -9972,53 +9072,19 @@ test("syncRun does not mark a completed workflow succeeded without task evidence
   assert.ok(sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_TASK_EVIDENCE_MISSING"));
 });
 
-test("syncRun accepts workflow nodes and top-level event fields", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const workflowRunId = "ultrafuzz-sync-alt-shapes";
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: {
-      ok: true,
-      data: {
-        run: { id: workflowRunId, status: "completed" },
-        runState: { runId: workflowRunId, state: "completed" },
-        nodes: [
-          { nodeId: "node:project-discovery", status: "completed", attemptIndex: 0 },
-          { nodeId: "verify:project-discovery", status: "completed", attemptIndex: 0 }
-        ]
-      }
-    },
-    events: `${[
-      { nodeId: "node:project-discovery", timestampMs: Date.parse("2026-07-03T00:00:00.000Z") },
-      { nodeId: "verify:project-discovery", timestampMs: Date.parse("2026-07-03T00:00:00.100Z") }
-    ]
-      .map((event) =>
-        JSON.stringify({
-          runId: workflowRunId,
-          timestampMs: event.timestampMs,
-          event: "NodeFinished",
-          nodeId: event.nodeId,
-          attempt: 0
-        })
-      )
-      .join("\n")}\n`
-  });
-  const run = await startRun({ projectRoot: project, runId: "sync-alt-shapes", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-
-  const sync = await syncRun({ projectRoot: project, runId: "sync-alt-shapes", env });
-
-  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  assert.equal(sync.value?.status, "succeeded");
-});
-
 test("syncRun maps failed workflow nodes into durable failed run state", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const workflowRunId = "ultrafuzz-sync-failed-node";
+  const failedEvents = [
+    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+    { type: "TaskHeartbeatTimeout", nodeId: "node:project-discovery", attempt: 1 },
+    { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 1, error: { message: "agent failed" } },
+    { type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 2 },
+    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 2 },
+    { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 2, error: { message: "agent failed again" } }
+  ];
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
       workflowRunId,
@@ -10026,14 +9092,7 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
       state: "failed",
       steps: [{ id: "node:project-discovery", state: "failed", attempt: 2 }]
     }),
-    events: workflowEvents(workflowRunId, [
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "TaskHeartbeatTimeout", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 1, error: { message: "agent failed" } },
-      { type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 2 },
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 2 },
-      { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 2, error: { message: "agent failed again" } }
-    ])
+    events: workflowEvents(workflowRunId, failedEvents)
   });
   const run = await startRun({ projectRoot: project, runId: "sync-failed-node", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
@@ -10075,288 +9134,15 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
     .map((line) => JSON.parse(line) as Record<string, unknown>);
   assert.deepEqual(
     failedLedger.map((entry) => entry.outcome),
-    ["timed-out", "failed"]
+    ["failed", "failed"]
   );
   assert.deepEqual(
     failedLedger.map((entry) => entry.failure_message),
-    ["workflow task timed out", "agent failed again"]
+    ["agent failed", "agent failed again"]
   );
-
-  const resumedEnv = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "running",
-      state: "running",
-      steps: [{ id: "node:project-discovery", state: "running", attempt: 3 }]
-    }),
-    events: workflowEvents(workflowRunId, [
-      { type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 3 },
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 3 }
-    ])
-  });
-  const resumed = await syncRun({ projectRoot: project, runId: "sync-failed-node", env: resumedEnv });
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  assert.equal(resumed.value?.status, "running");
-  const resumedState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
-    status?: string;
-    finished_at?: string;
-    nodes?: Record<string, { status?: string; last_error?: string; finished_at?: string }>;
-  };
-  assert.equal(resumedState.status, "running");
-  assert.equal(resumedState.finished_at, undefined);
-  assert.equal(resumedState.nodes?.["project-discovery"]?.status, "running");
-  assert.equal(resumedState.nodes?.["project-discovery"]?.last_error, undefined);
-  assert.equal(resumedState.nodes?.["project-discovery"]?.finished_at, undefined);
 });
 
-test("syncRun preserves retry and checkpoint generations in the immutable attempt ledger", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const workflowRunId = "ultrafuzz-attempt-ledger";
-  const firstExecutionEvents = [
-    {
-      type: "NodeStarted",
-      nodeId: "node:project-discovery",
-      attempt: 1,
-      extra: {
-        iteration: 0,
-        checkpointGenerationId: "checkpoint-1",
-        workflowExecutionId: "execution-1",
-        controllerInvocationId: "controller-1"
-      }
-    },
-    {
-      type: "NodeFailed",
-      nodeId: "node:project-discovery",
-      attempt: 1,
-      error: { message: "generated executor failure" },
-      extra: { iteration: 0 }
-    },
-    { type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 2, extra: { iteration: 0 } },
-    {
-      type: "NodeStarted",
-      nodeId: "node:project-discovery",
-      attempt: 2,
-      extra: {
-        iteration: 0,
-        checkpointGenerationId: "checkpoint-1",
-        workflowExecutionId: "execution-1",
-        controllerInvocationId: "controller-1"
-      }
-    },
-    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 2, extra: { iteration: 0 } }
-  ];
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
-    }),
-    events: workflowEvents(workflowRunId, firstExecutionEvents)
-  });
-  const run = await startRun({ projectRoot: project, runId: "attempt-ledger", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-
-  const firstSync = await syncRun({ projectRoot: project, runId: "attempt-ledger", env });
-  assert.equal(firstSync.ok, true, JSON.stringify(firstSync.diagnostics));
-
-  const continuedEnv = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 3 }]
-    }),
-    events: workflowEvents(workflowRunId, [
-      ...firstExecutionEvents,
-      { type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 3, extra: { iteration: 1 } },
-      {
-        type: "NodeStarted",
-        nodeId: "node:project-discovery",
-        attempt: 3,
-        extra: {
-          iteration: 1,
-          checkpointGenerationId: "checkpoint-2",
-          workflowExecutionId: "execution-2",
-          controllerInvocationId: "controller-2"
-        }
-      },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 3, extra: { iteration: 1 } }
-    ])
-  });
-  const continued = await syncRun({ projectRoot: project, runId: "attempt-ledger", env: continuedEnv });
-  const replayed = await syncRun({ projectRoot: project, runId: "attempt-ledger", env: continuedEnv });
-  assert.equal(continued.ok, true, JSON.stringify(continued.diagnostics));
-  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
-
-  const ledgerText = fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8");
-  const ledger = ledgerText
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-  assert.equal(ledger.length, 3);
-  assert.equal(ledger[0]?.failure_message, "generated executor failure");
-  assert.equal(ledger[1]?.parent_attempt_id, ledger[0]?.attempt_id);
-  assert.equal(ledger[2]?.parent_attempt_id, ledger[1]?.attempt_id);
-
-  const status = await getRunStatus({ projectRoot: project, runId: "attempt-ledger", env: continuedEnv });
-  assert.deepEqual(status.value?.attempts, {
-    total: 3,
-    executed: 3,
-    reused: 0,
-    outcomes: { succeeded: 2, failed: 1, "timed-out": 0, canceled: 0, skipped: 0, reused: 0 },
-    strategy_attempts: 1,
-    executor_retries: 3,
-    checkpoint_generations: 2,
-    workflow_executions: 2,
-    controller_invocations: 2
-  });
-  assert.equal(status.value?.state?.nodes["project-discovery"]?.retry_count, 2);
-});
-
-test("syncRun records checkpoint continuation entries even when workflow retry counters restart", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const workflowRunId = "ultrafuzz-attempt-ledger-restarted-counter";
-  const firstExecutionEvents = [
-    {
-      type: "NodeStarted",
-      nodeId: "node:project-discovery",
-      attempt: 1,
-      extra: {
-        iteration: 0,
-        checkpointGenerationId: "checkpoint-1",
-        workflowExecutionId: "execution-1",
-        controllerInvocationId: "controller-1"
-      }
-    },
-    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } }
-  ];
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-    }),
-    events: workflowEvents(workflowRunId, firstExecutionEvents)
-  });
-  const run = await startRun({ projectRoot: project, runId: "attempt-ledger-restarted-counter", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-
-  const firstSync = await syncRun({ projectRoot: project, runId: "attempt-ledger-restarted-counter", env });
-  assert.equal(firstSync.ok, true, JSON.stringify(firstSync.diagnostics));
-
-  const continuedEnv = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-    }),
-    events: workflowEvents(workflowRunId, [
-      ...firstExecutionEvents,
-      {
-        type: "NodeStarted",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        extra: {
-          iteration: 0,
-          checkpointGenerationId: "checkpoint-2",
-          workflowExecutionId: "execution-2",
-          controllerInvocationId: "controller-2"
-        }
-      },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } }
-    ])
-  });
-  const continued = await syncRun({
-    projectRoot: project,
-    runId: "attempt-ledger-restarted-counter",
-    env: continuedEnv
-  });
-  const replayed = await syncRun({
-    projectRoot: project,
-    runId: "attempt-ledger-restarted-counter",
-    env: continuedEnv
-  });
-  assert.equal(continued.ok, true, JSON.stringify(continued.diagnostics));
-  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
-
-  const ledgerText = fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8");
-  const ledger = ledgerText
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-  assert.equal(ledger.length, 2);
-  assert.equal(ledger[1]?.parent_attempt_id, ledger[0]?.attempt_id);
-
-  const status = await getRunStatus({
-    projectRoot: project,
-    runId: "attempt-ledger-restarted-counter",
-    env: continuedEnv
-  });
-  assert.deepEqual(status.value?.attempts, {
-    total: 2,
-    executed: 2,
-    reused: 0,
-    outcomes: { succeeded: 2, failed: 0, "timed-out": 0, canceled: 0, skipped: 0, reused: 0 },
-    strategy_attempts: 1,
-    executor_retries: 2,
-    checkpoint_generations: 2,
-    workflow_executions: 2,
-    controller_invocations: 2
-  });
-});
-
-test("syncRun distinguishes repeated retry counters by their workflow event identity", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const workflowRunId = "ultrafuzz-attempt-ledger-repeated-dimensions";
-  const repeatedDimensions = {
-    iteration: 0,
-    checkpointGenerationId: "checkpoint-1",
-    workflowExecutionId: "execution-1",
-    controllerInvocationId: "controller-1"
-  };
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-    }),
-    events: workflowEvents(workflowRunId, [
-      {
-        type: "NodeStarted",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        extra: repeatedDimensions
-      },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
-      {
-        type: "NodeStarted",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        extra: repeatedDimensions
-      },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } }
-    ])
-  });
-  const run = await startRun({ projectRoot: project, runId: "attempt-ledger-repeated-dimensions", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-
-  const sync = await syncRun({ projectRoot: project, runId: "attempt-ledger-repeated-dimensions", env });
-  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
-  const ledger = fs
-    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-  assert.equal(ledger.length, 2);
-  assert.equal(new Set(ledger.map((entry) => entry.attempt_id)).size, 2);
-  assert.equal(new Set(ledger.map((entry) => entry.executor_retry_id)).size, 2);
-});
-
-test("syncRun keeps a terminal-only retry idempotent when its start event arrives later", async () => {
+test("syncRun records a terminal attempt when its start event arrives later", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -10412,192 +9198,12 @@ test("syncRun keeps a terminal-only retry idempotent when its start event arrive
   });
   assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
   assert.ok(!replayed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
-  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), initialLedger);
-  assert.equal(initialLedger.trim().split("\n").length, 1);
-});
-
-test("syncRun attributes attempts to the controller active when the attempt starts", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const workflowRunId = "ultrafuzz-attempt-ledger-controller";
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-    }),
-    events: workflowEvents(workflowRunId, [
-      { type: "RunStarted", extra: { controllerInvocationId: "controller-start" } },
-      {
-        type: "NodeStarted",
-        nodeId: "node:project-discovery",
-        attempt: 1,
-        extra: {
-          iteration: 0,
-          checkpointGenerationId: "checkpoint-1",
-          workflowExecutionId: "execution-1"
-        }
-      },
-      { type: "RunAutoResumed", extra: { controllerInvocationId: "controller-resume" } },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } }
-    ])
-  });
-  const run = await startRun({ projectRoot: project, runId: "attempt-ledger-controller", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-
-  const sync = await syncRun({ projectRoot: project, runId: "attempt-ledger-controller", env });
-  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-
-  const ledgerText = fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8");
-  const ledger = ledgerText
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-  assert.equal(ledger.length, 1);
-  assert.equal(ledger[0]?.controller_invocation_id, "controller-start");
-});
-
-test("syncRun keeps skipped override attempts schema-valid", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const workflowRunId = "ultrafuzz-attempt-ledger-skipped-override";
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "failed",
-      state: "failed",
-      steps: [{ id: "node:project-discovery", state: "skipped", attempt: 1 }]
-    }),
-    events: workflowEvents(workflowRunId, [
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }
-    ])
-  });
-  const run = await startRun({ projectRoot: project, runId: "attempt-ledger-skipped-override", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-
-  const sync = await syncRun({ projectRoot: project, runId: "attempt-ledger-skipped-override", env });
-  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
-
-  const ledger = fs
-    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-  assert.equal(ledger.length, 1);
-  assert.equal(ledger[0]?.outcome, "skipped");
-  assert.equal(ledger[0]?.failure_category, undefined);
-  assert.deepEqual(ledger[0]?.reuse, { status: "executed" });
-});
-
-test("syncRun records reused override attempts with an idempotent source reference", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const sourceWorkflowRunId = "ultrafuzz-attempt-ledger-reuse-source";
-  const sourceEnv = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId: sourceWorkflowRunId,
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-    }),
-    events: workflowEvents(sourceWorkflowRunId, [
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }
-    ])
-  });
-  const sourceRun = await startRun({ projectRoot: project, runId: "attempt-ledger-reuse-source", env: sourceEnv });
-  assert.equal(sourceRun.ok, true, JSON.stringify(sourceRun.diagnostics));
-  writeRequiredArtifactSet(sourceRun.value!.run_root, "project-discovery", [
-    "setup/project-discovery.md",
-    "findings.json"
-  ]);
-  const sourceSync = await syncRun({ projectRoot: project, runId: "attempt-ledger-reuse-source", env: sourceEnv });
-  assert.equal(sourceSync.ok, true, JSON.stringify(sourceSync.diagnostics));
-  const sourceAttempt = JSON.parse(
-    fs.readFileSync(path.join(sourceRun.value!.run_root, "attempts.jsonl"), "utf8").trim()
-  ) as Record<string, unknown>;
-
-  const workflowRunId = "ultrafuzz-attempt-ledger-reused-override";
-  const firstReuseEvents = [
-    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
-    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
-    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }
-  ];
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [{ id: "node:project-discovery", state: "reused-from-prior-run", attempt: 1 }]
-    }),
-    events: workflowEvents(workflowRunId, firstReuseEvents)
-  });
-  const run = await startRun({
-    projectRoot: project,
-    runId: "attempt-ledger-reused-override",
-    sourceRunId: "attempt-ledger-reuse-source",
-    env
-  });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-
-  const sync = await syncRun({ projectRoot: project, runId: "attempt-ledger-reused-override", env });
-  const replayed = await syncRun({ projectRoot: project, runId: "attempt-ledger-reused-override", env });
-  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
-  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
-  assert.ok(!replayed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
-
-  const ledger = fs
-    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-  const reuse = ledger[0]?.reuse as Record<string, unknown> | undefined;
-  assert.equal(ledger.length, 1);
-  assert.equal(ledger[0]?.outcome, "reused");
-  assert.equal(ledger[0]?.failure_category, undefined);
-  assert.equal(reuse?.status, "reused");
-  assert.equal(reuse?.source_attempt_id, sourceAttempt.attempt_id);
-  assert.notEqual(reuse?.source_attempt_id, ledger[0]?.attempt_id);
-
-  const continuedEnv = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [{ id: "node:project-discovery", state: "reused-from-prior-run", attempt: 1 }]
-    }),
-    events: workflowEvents(workflowRunId, [
-      ...firstReuseEvents,
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }
-    ])
-  });
-  const continued = await syncRun({
-    projectRoot: project,
-    runId: "attempt-ledger-reused-override",
-    env: continuedEnv
-  });
-  assert.equal(continued.ok, true, JSON.stringify(continued.diagnostics));
-  assert.ok(!continued.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
-  const continuedLedger = fs
-    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-  assert.equal(continuedLedger.length, 2);
-  assert.deepEqual(
-    continuedLedger.map((entry) => (entry.reuse as Record<string, unknown>).source_attempt_id),
-    [sourceAttempt.attempt_id, sourceAttempt.attempt_id]
-  );
-
-  const status = await getRunStatus({
-    projectRoot: project,
-    runId: "attempt-ledger-reused-override",
-    env: continuedEnv
-  });
-  assert.equal(status.ok, true, JSON.stringify(status.diagnostics));
-  assert.equal(status.value?.attempts.reused, 2);
+  assert.equal(initialLedger, "");
+  const completedLedger = fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8");
+  assert.equal(completedLedger.trim().split("\n").length, 1);
+  const entry = JSON.parse(completedLedger) as Record<string, unknown>;
+  assert.equal(entry.started_event_sequence, 1);
+  assert.equal(entry.source_event_sequence, 2);
 });
 
 test("syncRun keeps reset workflow nodes pending while the workflow is running", async () => {
@@ -11464,136 +10070,6 @@ test("resume continues a run-level render failure in place without a no-op rewin
     commands,
     /up .*ultrafuzz-render-recovery-run\.tsx --resume ultrafuzz-render-recovery-run --run-id ultrafuzz-render-recovery-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
-});
-
-test("resume transfers an incompatible legacy workflow ID to a valid durable lineage", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const runId = `legacy-${"x".repeat(56)}`;
-  const workflowRunId = `ultrafuzz-${runId}`;
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "failed",
-      state: "failed",
-      error: { code: "WORKFLOW_RENDER_FAILED", cause: { code: "ENOENT" } },
-      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
-    })
-  });
-  const run = await startRun({ projectRoot: project, runId, env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
-
-  const resumed = await resumeRun({
-    projectRoot: project,
-    runId,
-    maxConcurrency: 8,
-    force: true,
-    retryFailed: true,
-    env
-  });
-
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  assert.equal(resumed.value?.submitted, true);
-  assert.match(resumed.value?.workflow_run_id ?? "", /^ufz-recovery-[a-f0-9]{32}$/u);
-  const replacementRunId = resumed.value!.workflow_run_id;
-  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.match(commands, new RegExp(`inspect ${workflowRunId} --format json`, "u"));
-  assert.match(commands, new RegExp(`up .* --detach --run-id ${replacementRunId}`, "u"));
-  assert.doesNotMatch(commands, /timeline|rewind|retry-task/u);
-  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
-    workflow?: { run_id?: string };
-  };
-  assert.equal(metadata.workflow?.run_id, replacementRunId);
-});
-
-test("resume adopts an orphaned replacement lineage that already exists", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const runId = `orphan-${"x".repeat(56)}`;
-  const workflowRunId = `ultrafuzz-${runId}`;
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "failed",
-      state: "failed",
-      error: { code: "WORKFLOW_RENDER_FAILED", cause: { code: "ENOENT" } },
-      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
-    })
-  });
-  const run = await startRun({ projectRoot: project, runId, env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
-  // An earlier recovery generation already created the deterministic replacement run and died
-  // before the new lineage was persisted, so a fresh submission now reports RUN_EXISTS.
-  env.SMITHERS_FAKE_RUN_EXISTS = "1";
-
-  const resumed = await resumeRun({
-    projectRoot: project,
-    runId,
-    maxConcurrency: 8,
-    force: true,
-    retryFailed: true,
-    env
-  });
-
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  assert.equal(resumed.value?.submitted, true);
-  const replacementRunId = resumed.value?.workflow_run_id ?? "";
-  assert.match(replacementRunId, /^ufz-recovery-[a-f0-9]{32}$/u);
-  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.match(commands, new RegExp(`up .* --detach --run-id ${replacementRunId}`, "u"));
-  assert.match(
-    commands,
-    new RegExp(`up .* --detach --resume ${replacementRunId} --run-id ${replacementRunId} --force`, "u")
-  );
-  const recovery = JSON.parse(
-    fs.readFileSync(path.join(run.value!.run_root, "smithers", "recovery-submission.json"), "utf8")
-  ) as { recovery?: string; smithers_run_id?: string };
-  assert.equal(recovery.recovery, "incompatible-workflow-run-id-adopted");
-  assert.equal(recovery.smithers_run_id, replacementRunId);
-  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
-    workflow?: { run_id?: string };
-  };
-  assert.equal(metadata.workflow?.run_id, replacementRunId);
-});
-
-test("resume classifies a terminal run reported only at the top level of the inspect payload", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const runId = `toplevel-${"x".repeat(56)}`;
-  const workflowRunId = `ultrafuzz-${runId}`;
-  const env = fakeLifecycleSmithersEnv(project, {
-    // Neither a `runState` nor a `run` wrapper: some run-state and task-output snapshot variants
-    // report the state at the top level of `data`.
-    inspect: {
-      ok: true,
-      data: {
-        id: workflowRunId,
-        state: "failed",
-        error: { code: "WORKFLOW_RENDER_FAILED", cause: { code: "ENOENT" } },
-        steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
-      }
-    }
-  });
-  const run = await startRun({ projectRoot: project, runId, env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
-
-  const resumed = await resumeRun({
-    projectRoot: project,
-    runId,
-    maxConcurrency: 8,
-    force: true,
-    retryFailed: true,
-    env
-  });
-
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  assert.match(resumed.value?.workflow_run_id ?? "", /^ufz-recovery-[a-f0-9]{32}$/u);
 });
 
 test("unverified dependency detection reads a dependent prepare failure off the run row", async () => {

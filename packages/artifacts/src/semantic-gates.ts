@@ -256,25 +256,6 @@ function uniqueCompositeGate(
   };
 }
 
-function nestedUniqueFieldGate(
-  parentPath: readonly string[],
-  childKey: string,
-  field: string,
-  label: string
-): GateHandler {
-  return (document) =>
-    arrayAt(document, parentPath).flatMap((parent, parentIndex) =>
-      projectedUniquenessIssues([
-        {
-          items: arrayAt(parent, [childKey]),
-          path: `${displayPath(parentPath)}[${parentIndex}].${childKey}`,
-          project: (row) => stringField(row, field),
-          label
-        }
-      ])
-    );
-}
-
 function stringArray(value: unknown): readonly string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }

@@ -1,7 +1,8 @@
 # Ultrafuzz Schemas
 
 Ultrafuzz checks in complete Draft 2020-12 JSON Schema documents under
-`packages/artifacts/schema/` and `packages/topology/schema/`. JSON Schema is the
+`packages/artifacts/schema/`, `packages/evals/schema/`,
+`packages/modal/schema/`, and `packages/topology/schema/`. JSON Schema is the
 canonical whole-document shape contract. TypeScript types describe consumers;
 where a Zod parser remains useful, parity tests require it to accept and reject
 the same structures without coercion, defaults, transforms, aliases, or
@@ -11,6 +12,8 @@ Schema IDs are stable, fragment-free URNs such as:
 
 - `urn:ultrafuzz:schema:artifacts:findings:2`
 - `urn:ultrafuzz:schema:artifacts:generated-tests:2`
+- `urn:ultrafuzz:schema:evals:run-record:2`
+- `urn:ultrafuzz:schema:modal:node-input:1`
 - `urn:ultrafuzz:schema:topology:expanded-graph:3`
 
 The IDs identify schemas and resolve bundled `$ref` values; they are never

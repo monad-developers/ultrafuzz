@@ -56,7 +56,6 @@ export function collectEvalAnalysisBundle(input: CollectEvalAnalysisBundleInput)
   assertAnalysisLineage(input.evalRunId, root, records, summary);
   const payloads: Partial<Record<AnalysisBundleDataKind, unknown>> = {};
   const omissions: Partial<Record<AnalysisBundleDataKind, AnalysisBundleOmissionReason>> = {};
-  let terminalPayload: AnalysisTerminalStatus | undefined;
 
   if (input.recoverySummary === undefined) {
     omissions["recovery-summary"] = "source-missing";
@@ -65,7 +64,7 @@ export function collectEvalAnalysisBundle(input: CollectEvalAnalysisBundleInput)
   }
 
   const workflowObservations = workflowObservationsForRecords(records);
-  terminalPayload = terminalStatus(records, workflowObservations);
+  const terminalPayload: AnalysisTerminalStatus = terminalStatus(records, workflowObservations);
   if (!terminalPayload.terminal) {
     throw new EvalError(
       "EVAL_ANALYSIS_SOURCE_NOT_TERMINAL",

@@ -105,7 +105,8 @@ async function scoreInMemory(
     record?: Parameters<typeof scoreFindingsAgainstGroundTruth>[0]["record"];
   }
 ) {
-  if (input.record !== undefined) return scoreFindingsAgainstGroundTruth(input);
+  const { record, ...scoreInput } = input;
+  if (record !== undefined) return scoreFindingsAgainstGroundTruth({ ...scoreInput, record });
   const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-scoring-inline-run-"));
   const runId = path.basename(runRoot).slice(0, 100);
   writeCurrentRunEvidence({
@@ -115,8 +116,8 @@ async function scoreInMemory(
     graph: currentPlannedGraph()
   });
   return scoreFindingsAgainstGroundTruth({
-    ...input,
-    record: currentEvalRunRecord({ row: input.row, runRoot, runId })
+    ...scoreInput,
+    record: currentEvalRunRecord({ row: scoreInput.row, runRoot, runId })
   });
 }
 
