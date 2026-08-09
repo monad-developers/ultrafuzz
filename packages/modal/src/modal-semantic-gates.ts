@@ -13,6 +13,7 @@ import {
   MODAL_NODE_RESULT_SCHEMA_ID,
   MODAL_NODE_WORKER_ERROR_SCHEMA_ID,
   MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
+  MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID,
   MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID,
   MODAL_RECOVERY_STATE_SCHEMA_ID,
   MODAL_SMOKE_CHECKPOINT_SCHEMA_ID,
@@ -30,6 +31,7 @@ import {
   type StrictModalNodeCheckpointIndexDocument,
   type StrictModalNodeResultDocument,
   type StrictModalPinnedSourceProofDocument,
+  type StrictModalPublicBenchmarkBundleDocument,
   type StrictModalRecoveryLifecycleDocument,
   type StrictModalRecoveryLifecycleRecord,
   type StrictModalRecoveryLifecycleSummary,
@@ -55,6 +57,8 @@ export const IMPLEMENTED_MODAL_SEMANTIC_GATES = Object.freeze([
   "modal-node-checkpoint-index-sequence",
   "modal-pinned-source-ref-object-lineage",
   "modal-pinned-source-submodule-lineage",
+  "modal-public-benchmark-bundle-uniqueness",
+  "modal-public-benchmark-bundle-publication-closure",
   "modal-recovery-lifecycle-parent-order",
   "modal-recovery-lifecycle-timestamp-order",
   "modal-recovery-lifecycle-summary-reconciliation",
@@ -126,6 +130,10 @@ export const MODAL_SEMANTIC_GATES_BY_SCHEMA_ID = Object.freeze({
   [MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID]: [
     "modal-pinned-source-ref-object-lineage",
     "modal-pinned-source-submodule-lineage"
+  ],
+  [MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID]: [
+    "modal-public-benchmark-bundle-uniqueness",
+    "modal-public-benchmark-bundle-publication-closure"
   ],
   [MODAL_SMOKE_CHECKPOINT_SCHEMA_ID]: [],
   [MODAL_SMOKE_COMPLETION_SCHEMA_ID]: [],
@@ -231,6 +239,9 @@ export function assertModalDocumentSemantics<SchemaId extends ModalContractSchem
       return;
     case MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID:
       assertPinnedSourceProofSemantics(value as StrictModalPinnedSourceProofDocument);
+      return;
+    case MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID:
+      assertPublicBenchmarkBundleSemantics(value as StrictModalPublicBenchmarkBundleDocument);
       return;
     case MODAL_SMOKE_RESULT_SCHEMA_ID:
       assertSmokeResultSemantics(value as StrictModalSmokeResultDocument);
@@ -761,6 +772,42 @@ function isStrictlyOrderedUniqueStrings(values: readonly string[]): boolean {
   return (
     new Set(values).size === values.length && values.every((value, index) => index === 0 || values[index - 1]! < value)
   );
+}
+
+function assertPublicBenchmarkBundleSemantics(bundle: StrictModalPublicBenchmarkBundleDocument): void {
+  const filePaths = new Set<string>();
+  for (const file of bundle.files) {
+    if (filePaths.has(file.path)) {
+      fail("modal-public-benchmark-bundle-uniqueness", `duplicate bundle file path ${file.path}`);
+    }
+    filePaths.add(file.path);
+  }
+
+  const targetIds = new Set<string>();
+  const declaredReportPaths = new Set<string>();
+  const publicationBundlePaths = new Set<string>();
+  for (const target of bundle.targets) {
+    if (targetIds.has(target.id)) {
+      fail("modal-public-benchmark-bundle-uniqueness", `duplicate bundle target ${target.id}`);
+    }
+    targetIds.add(target.id);
+    publicationBundlePaths.add(target.publication_location.bundle_path);
+    for (const reportPath of target.publication_location.report_paths) {
+      if (declaredReportPaths.has(reportPath)) {
+        fail("modal-public-benchmark-bundle-uniqueness", `duplicate declared report path ${reportPath}`);
+      }
+      declaredReportPaths.add(reportPath);
+      if (!filePaths.has(reportPath)) {
+        fail(
+          "modal-public-benchmark-bundle-publication-closure",
+          `public benchmark bundle is missing ${reportPath} declared by target ${target.id}`
+        );
+      }
+    }
+  }
+  if (publicationBundlePaths.size !== 1) {
+    fail("modal-public-benchmark-bundle-publication-closure", "target bundle publication paths are inconsistent");
+  }
 }
 
 function assertSmokeResultSemantics(result: StrictModalSmokeResultDocument): void {

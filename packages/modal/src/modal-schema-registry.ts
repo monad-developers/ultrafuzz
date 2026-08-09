@@ -26,6 +26,7 @@ import {
   MODAL_NODE_RESULT_SCHEMA_ID,
   MODAL_NODE_WORKER_ERROR_SCHEMA_ID,
   MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
+  MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID,
   MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID,
   MODAL_RECOVERY_STATE_SCHEMA_ID,
   MODAL_SMOKE_CHECKPOINT_SCHEMA_ID,
@@ -88,6 +89,7 @@ export const modalNodeRestoreJsonSchema = loadSchemaDocument("modal-node-restore
 export const modalNodeResultJsonSchema = loadSchemaDocument("modal-node-result.schema.json");
 export const modalNodeWorkerErrorJsonSchema = loadSchemaDocument("modal-node-worker-error.schema.json");
 export const modalPinnedSourceProofJsonSchema = loadSchemaDocument("modal-pinned-source-proof.schema.json");
+export const modalPublicBenchmarkBundleJsonSchema = loadSchemaDocument("modal-public-benchmark-bundle.schema.json");
 export const modalRecoveryLifecycleJsonSchema = loadSchemaDocument("modal-recovery-lifecycle.schema.json");
 export const modalRecoveryStateJsonSchema = loadSchemaDocument("modal-recovery-state.schema.json");
 export const modalSmokeCheckpointJsonSchema = loadSchemaDocument("modal-smoke-checkpoint.schema.json");
@@ -109,6 +111,7 @@ export const MODAL_SCHEMA_EXPORTS = Object.freeze({
   modalNodeResultJsonSchema,
   modalNodeWorkerErrorJsonSchema,
   modalPinnedSourceProofJsonSchema,
+  modalPublicBenchmarkBundleJsonSchema,
   modalRecoveryLifecycleJsonSchema,
   modalRecoveryStateJsonSchema,
   modalSmokeCheckpointJsonSchema,
@@ -192,6 +195,12 @@ export const MODAL_SCHEMA_METADATA: Readonly<Record<string, ModalSchemaMetadata>
     typescriptExport: "modalPinnedSourceProofJsonSchema",
     semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID]
   },
+  "modal-public-benchmark-bundle.schema.json": {
+    id: MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "modalPublicBenchmarkBundleJsonSchema",
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID]
+  },
   "modal-recovery-lifecycle.schema.json": {
     id: MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID,
     role: "runtime-state",
@@ -249,6 +258,7 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "modal-node-result.schema.json": modalNodeResultJsonSchema,
   "modal-node-worker-error.schema.json": modalNodeWorkerErrorJsonSchema,
   "modal-pinned-source-proof.schema.json": modalPinnedSourceProofJsonSchema,
+  "modal-public-benchmark-bundle.schema.json": modalPublicBenchmarkBundleJsonSchema,
   "modal-recovery-lifecycle.schema.json": modalRecoveryLifecycleJsonSchema,
   "modal-recovery-state.schema.json": modalRecoveryStateJsonSchema,
   "modal-smoke-checkpoint.schema.json": modalSmokeCheckpointJsonSchema,

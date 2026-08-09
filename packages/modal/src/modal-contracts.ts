@@ -19,6 +19,7 @@ export const MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID = "urn:ultrafuzz:schema:modal:p
 export const MODAL_SMOKE_CHECKPOINT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:smoke-checkpoint:1" as const;
 export const MODAL_SMOKE_COMPLETION_SCHEMA_ID = "urn:ultrafuzz:schema:modal:smoke-completion:1" as const;
 export const MODAL_SMOKE_RESULT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:smoke-result:1" as const;
+export const MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:public-benchmark-bundle:5" as const;
 
 export type StrictModalLaunchMode = "fresh" | "resume";
 export type StrictModalLaunchPhase = "reserved" | "sandbox-created" | "launched" | "failed";
@@ -542,6 +543,62 @@ export interface StrictModalSmokeResultDocument {
   };
 }
 
+export type StrictModalPublicBenchmarkBundleStatus = "succeeded" | "genuine-task-failures" | "failed";
+
+export interface StrictModalPublicBenchmarkBundleLineage {
+  logical_run_id: string;
+  generation: number;
+  attempt: number;
+  attempt_id: string;
+  config_fingerprint: string;
+  source_fingerprint: string;
+  image_fingerprint: string;
+  model_fingerprint: string;
+}
+
+export interface StrictModalPublicBenchmarkBundleFile {
+  path: string;
+  size_bytes: number;
+  sha256: string;
+  contents_base64: string;
+}
+
+export interface StrictModalPublicBenchmarkBundlePublicationLocation {
+  bundle_path: string;
+  report_paths: string[];
+}
+
+export interface StrictModalPublicBenchmarkBundleTarget {
+  id: string;
+  repository: string;
+  revision: string;
+  framework?: string;
+  status: StrictModalPublicBenchmarkBundleStatus;
+  executed_case_count: number;
+  graded_case_count: number;
+  publication_location: StrictModalPublicBenchmarkBundlePublicationLocation;
+}
+
+export interface StrictModalPublicBenchmarkBundleDocument {
+  schema_version: "ultrafuzz.modal.public-benchmark-bundle.v5";
+  benchmark: "evmbench" | "ultrafuzz-bench";
+  lane: "smoke" | "full";
+  model_slug: string;
+  model: string;
+  reasoning: string;
+  judge_model: "gpt-5.6-sol";
+  judge_reasoning: "xhigh";
+  candidate_commit: string;
+  eval_run_id: string;
+  lineage: StrictModalPublicBenchmarkBundleLineage;
+  status: StrictModalPublicBenchmarkBundleStatus;
+  executed_case_count: number;
+  graded_case_count: number;
+  created_at: string;
+  files: StrictModalPublicBenchmarkBundleFile[];
+  targets: StrictModalPublicBenchmarkBundleTarget[];
+}
+
 export type StrictModalBenchmarkMode = "smoke" | "full";
 export type StrictModalBenchmarkName = "evmbench" | "ultrafuzz-bench";
 
@@ -603,6 +660,7 @@ export interface ModalContractBySchemaId {
   [MODAL_SMOKE_CHECKPOINT_SCHEMA_ID]: StrictModalSmokeCheckpointDocument;
   [MODAL_SMOKE_COMPLETION_SCHEMA_ID]: StrictModalSmokeCompletionDocument;
   [MODAL_SMOKE_RESULT_SCHEMA_ID]: StrictModalSmokeResultDocument;
+  [MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID]: StrictModalPublicBenchmarkBundleDocument;
 }
 
 export type ModalContractSchemaId = keyof ModalContractBySchemaId;

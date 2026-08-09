@@ -7,6 +7,8 @@ import { parseEvalRunRecord, type EvalRunRecord } from "@ultrafuzz/evals";
 import { projectCanonicalFinalReport } from "@ultrafuzz/runtime";
 import { describe, expect, it } from "vitest";
 
+import { MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID } from "../src/modal-contracts.js";
+import { validateModalJsonSchema } from "../src/modal-schema-registry.js";
 import {
   MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
   PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION,
@@ -101,15 +103,52 @@ describe("public Modal benchmark bundles", () => {
     }
   });
 
+  it("uses the registered v5 schema as the first whole-document acceptance gate", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-schema-"));
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, ["target-a-runner-trial-1"])
+    });
+    expect(validateModalJsonSchema(MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID, bundle)).toMatchObject({ ok: true });
+
+    const tamperedFiles = bundle.files.map((file, index) =>
+      index === 0 ? { ...file, contents_base64: Buffer.from("tampered").toString("base64") } : file
+    );
+    expect(() => parsePublicBenchmarkBundle({ ...bundle, files: tamperedFiles, unexpected: true })).toThrow(
+      /canonical JSON Schema validation/u
+    );
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        schema_version: "ultrafuzz.modal.public-benchmark-bundle.v4"
+      })
+    ).toThrow(/canonical JSON Schema validation/u);
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        lineage: { ...bundle.lineage, unexpected: true }
+      })
+    ).toThrow(/canonical JSON Schema validation/u);
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        targets: bundle.targets.map((target) => ({ ...target, unexpected: true }))
+      })
+    ).toThrow(/canonical JSON Schema validation/u);
+  });
+
   it("rejects traversal, duplicate paths, and tampered contents", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-"));
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
     });
-    expect(() => parsePublicBenchmarkBundle({ ...bundle, files: [...bundle.files, bundle.files[0]] })).toThrow(
-      /duplicate/u
-    );
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        files: [...bundle.files, { ...bundle.files[0]!, sha256: "f".repeat(64) }]
+      })
+    ).toThrow(/duplicate/u);
     expect(() =>
       parsePublicBenchmarkBundle({
         ...bundle,
@@ -146,7 +185,7 @@ describe("public Modal benchmark bundles", () => {
           index === 0 ? { ...file, contents_base64: "A".repeat(maxFileBase64Characters + 1) } : file
         )
       })
-    ).toThrow(/too big/iu);
+    ).toThrow(/canonical JSON Schema validation/iu);
 
     const oversizedBundle = path.join(root, "oversized-public-results.json");
     const descriptor = fs.openSync(oversizedBundle, "wx", 0o600);
@@ -359,10 +398,10 @@ describe("public Modal benchmark bundles", () => {
       files: completePublicSources(root, ["target-a-runner-trial-1"])
     });
 
-    const missing = structuredClone(bundle) as Record<string, unknown>;
+    const missing = structuredClone(bundle) as unknown as Record<string, unknown>;
     delete missing.targets;
     expect(() => parsePublicBenchmarkBundle(missing)).toThrow();
-    const missingExecuted = structuredClone(bundle) as Record<string, unknown>;
+    const missingExecuted = structuredClone(bundle) as unknown as Record<string, unknown>;
     delete missingExecuted.executed_case_count;
     expect(() => parsePublicBenchmarkBundle(missingExecuted)).toThrow();
 

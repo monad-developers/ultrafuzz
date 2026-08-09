@@ -18,6 +18,7 @@ import {
   MODAL_NODE_RESULT_SCHEMA_ID,
   MODAL_NODE_WORKER_ERROR_SCHEMA_ID,
   MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
+  MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID,
   MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID,
   MODAL_RECOVERY_STATE_SCHEMA_ID,
   MODAL_SMOKE_CHECKPOINT_SCHEMA_ID,
@@ -347,6 +348,55 @@ function contractFixtures(): ContractFixtures {
         single_launch_owner: true
       },
       diagnostics: { completed_units: 1, repeated_units: 0, launch_owners: 1 }
+    },
+    [MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID]: {
+      schema_version: "ultrafuzz.modal.public-benchmark-bundle.v5",
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      model_slug: "gpt-5-6-luna",
+      model: "gpt-5.6-luna",
+      reasoning: "high",
+      judge_model: "gpt-5.6-sol",
+      judge_reasoning: "xhigh",
+      candidate_commit: gitA,
+      eval_run_id: "fixture-run-gpt-5-6-luna",
+      lineage: {
+        logical_run_id: "fixture-run",
+        generation: 1,
+        attempt: 1,
+        attempt_id: "attempt-1",
+        config_fingerprint: shaA,
+        source_fingerprint: shaB,
+        image_fingerprint: shaC,
+        model_fingerprint: shaD
+      },
+      status: "succeeded",
+      executed_case_count: 1,
+      graded_case_count: 1,
+      created_at: timestamp,
+      files: [
+        {
+          path: "reports/target-1/report.json",
+          size_bytes: 3,
+          sha256: shaA,
+          contents_base64: "e30K"
+        }
+      ],
+      targets: [
+        {
+          id: "target-1",
+          repository: "https://github.com/example/benchmark-target",
+          revision: gitB,
+          framework: "foundry",
+          status: "succeeded",
+          executed_case_count: 1,
+          graded_case_count: 1,
+          publication_location: {
+            bundle_path: "public-results.json",
+            report_paths: ["reports/target-1/report.json"]
+          }
+        }
+      ]
     }
   };
 }
@@ -358,7 +408,7 @@ function bytes(value: unknown): Buffer {
 describe("Modal strict JSON contract foundation", () => {
   it("registers and strictly compiles every schema with matching checked-in exports and gates", () => {
     const registry = modalSchemaRegistry();
-    expect(registry).toHaveLength(19);
+    expect(registry).toHaveLength(20);
     expect(registry.map((entry) => entry.filename)).toEqual(Object.keys(MODAL_SCHEMA_METADATA).sort());
     expect(modalSchemaBundleDigest()).toMatch(/^[0-9a-f]{64}$/u);
 
@@ -381,6 +431,20 @@ describe("Modal strict JSON contract foundation", () => {
       expect(validateModalJsonSchema(schemaId, value)).toMatchObject({ ok: true });
       expect(parseModalDocumentBytes(schemaId, bytes(value)).value).toEqual(value);
     }
+  });
+
+  it("pins positive and negative public benchmark bundle v5 schema fixtures", () => {
+    const valid = fs.readFileSync(new URL("./fixtures/public-benchmark-bundle-v5.valid.json", import.meta.url), "utf8");
+    const invalid = fs.readFileSync(
+      new URL("./fixtures/public-benchmark-bundle-v5.invalid.json", import.meta.url),
+      "utf8"
+    );
+    expect(parseModalDocumentBytes(MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID, Buffer.from(valid)).value).toEqual(
+      JSON.parse(valid)
+    );
+    expect(() => parseModalDocumentBytes(MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID, Buffer.from(invalid))).toThrow(
+      ModalDocumentValidationError
+    );
   });
 
   it("rejects duplicate keys, invalid UTF-8, unknown fields, old versions, and numeric coercion", () => {

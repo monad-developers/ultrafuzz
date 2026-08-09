@@ -20,8 +20,15 @@ import {
 } from "@ultrafuzz/evals";
 import { redactSecretsInText } from "@ultrafuzz/security";
 import { projectCanonicalFinalReport } from "@ultrafuzz/runtime";
-import { z } from "zod/v4";
 
+import {
+  MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID,
+  type StrictModalPublicBenchmarkBundleDocument,
+  type StrictModalPublicBenchmarkBundleFile,
+  type StrictModalPublicBenchmarkBundleTarget
+} from "./modal-contracts.js";
+import { validateModalJsonSchema } from "./modal-schema-registry.js";
+import { assertModalDocumentSemantics } from "./modal-semantic-gates.js";
 import type { ModalWorkerLineage } from "./launch-state.js";
 
 export const PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v5" as const;
@@ -29,101 +36,14 @@ export const MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES = 256 * 1024 * 1024;
 
 export const MAX_PUBLIC_BENCHMARK_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_FILE_BYTES = MAX_PUBLIC_BENCHMARK_FILE_BYTES;
-const MAX_FILE_BASE64_CHARACTERS = 4 * Math.ceil(MAX_FILE_BYTES / 3);
-const MAX_ROWS = 2_048;
 const PUBLIC_REPORT_FILES = ["report.md", "report.json"] as const;
-/**
- * Files a row may contribute: the fixed report set, plus the bounded set of
- * optional run artifacts `publicBundleSources` retains when the topology
- * produced them (`MAX_PUBLIC_OPTIONAL_ROW_ARTIFACT_FILES`).
- */
-const MAX_ROW_FILES = PUBLIC_REPORT_FILES.length + 32;
 const DEFAULT_PUBLICATION_BUNDLE_PATH = "public-results.json";
-const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
-const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
-const fullSha = z.string().regex(/^[0-9a-f]{40}$/u);
-const caseCount = z.number().int().nonnegative().max(MAX_ROWS);
-const bundleStatus = z.enum(["succeeded", "genuine-task-failures", "failed"]);
-const relativePath = z
-  .string()
-  .min(1)
-  .max(512)
-  .refine(
-    (value) =>
-      !path.posix.isAbsolute(value) &&
-      !path.win32.isAbsolute(value) &&
-      !value.includes("\\") &&
-      !value.split("/").some((part) => part === "" || part === "." || part === ".."),
-    "must be a canonical relative POSIX path"
-  );
+const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const FULL_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/u;
 
-const bundleFileSchema = z.strictObject({
-  path: relativePath,
-  size_bytes: z.number().int().nonnegative().max(MAX_FILE_BYTES),
-  sha256,
-  contents_base64: z.string().max(MAX_FILE_BASE64_CHARACTERS)
-});
-
-const targetPublicationLocationSchema = z.strictObject({
-  bundle_path: relativePath,
-  report_paths: z
-    .array(relativePath)
-    .min(1)
-    .max(MAX_ROWS * PUBLIC_REPORT_FILES.length)
-});
-
-const bundleTargetSchema = z.strictObject({
-  id: safeId,
-  repository: z.string().url().max(2_048),
-  revision: fullSha,
-  framework: safeId.optional(),
-  status: bundleStatus,
-  executed_case_count: caseCount,
-  graded_case_count: caseCount,
-  publication_location: targetPublicationLocationSchema
-});
-
-const bundleLineageSchema = z.strictObject({
-  logical_run_id: safeId,
-  generation: z.number().int().positive(),
-  attempt: z.number().int().positive(),
-  attempt_id: safeId,
-  config_fingerprint: sha256,
-  source_fingerprint: sha256,
-  image_fingerprint: sha256,
-  model_fingerprint: sha256
-});
-
-const bundleShape = {
-  benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
-  lane: z.enum(["smoke", "full"]),
-  model_slug: safeId,
-  model: z.string().min(1).max(256),
-  reasoning: z.string().min(1).max(64),
-  judge_model: z.literal("gpt-5.6-sol"),
-  judge_reasoning: z.literal("xhigh"),
-  candidate_commit: z.string().regex(/^[0-9a-f]{40}$/u),
-  eval_run_id: safeId,
-  lineage: bundleLineageSchema,
-  executed_case_count: caseCount,
-  graded_case_count: caseCount,
-  created_at: z.string().datetime({ offset: true }),
-  files: z
-    .array(bundleFileSchema)
-    .min(1)
-    .max(MAX_ROWS * MAX_ROW_FILES + 16)
-} as const;
-
-const bundleSchema = z.strictObject({
-  schema_version: z.literal(PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION),
-  ...bundleShape,
-  status: bundleStatus,
-  targets: z.array(bundleTargetSchema).min(1).max(MAX_ROWS)
-});
-
-export type PublicBenchmarkBundle = z.infer<typeof bundleSchema>;
-type PublicBenchmarkBundleFile = z.infer<typeof bundleFileSchema>;
-type PublicBenchmarkBundleTarget = PublicBenchmarkBundle["targets"][number];
+export type PublicBenchmarkBundle = StrictModalPublicBenchmarkBundleDocument;
+type PublicBenchmarkBundleFile = StrictModalPublicBenchmarkBundleFile;
+type PublicBenchmarkBundleTarget = StrictModalPublicBenchmarkBundleTarget;
 type PublicBenchmarkBundleMetadata = Pick<
   PublicBenchmarkBundle,
   "status" | "executed_case_count" | "graded_case_count" | "targets"
@@ -257,7 +177,18 @@ export function parsePublicBenchmarkBundle(
   value: unknown,
   forbiddenSecretValues: readonly string[] = []
 ): PublicBenchmarkBundle {
-  const parsed = bundleSchema.parse(value);
+  const shape = validateModalJsonSchema(MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID, value);
+  if (!shape.ok) {
+    const detail = shape.issues
+      .slice(0, 5)
+      .map((issue) => `${issue.instancePath || "/"} ${issue.message}`)
+      .join("; ");
+    throw new Error(
+      `public benchmark bundle failed canonical JSON Schema validation${detail.length === 0 ? "" : `: ${detail}`}`
+    );
+  }
+  const parsed = value as PublicBenchmarkBundle;
+  assertModalDocumentSemantics(MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID, parsed);
   const exactSecrets = [...new Set(forbiddenSecretValues)].filter((secret) => secret.length > 0);
   const paths = new Set<string>();
   const contentsByPath = new Map<string, Buffer>();
@@ -473,37 +404,37 @@ function parsePublicRunRecords(
     if (record === undefined || record.schema_version !== EVAL_RUN_SCHEMA_VERSION || record.eval_run_id !== evalRunId) {
       throw new Error(`public benchmark bundle run record ${index} has invalid version or eval identity`);
     }
-    const rowId = safeId.safeParse(record.row_id);
-    const targetId = safeId.safeParse(record.target_id);
-    const variantId = safeId.safeParse(record.variant_id);
-    const trialId = safeId.safeParse(record.trial_id);
-    if (!rowId.success || !targetId.success || !variantId.success || !trialId.success) {
+    const rowId = record.row_id;
+    const targetId = record.target_id;
+    const variantId = record.variant_id;
+    const trialId = record.trial_id;
+    if (!isSafeId(rowId) || !isSafeId(targetId) || !isSafeId(variantId) || !isSafeId(trialId)) {
       throw new Error(`public benchmark bundle run record ${index} has invalid row identity`);
     }
-    const row = matrixRows.get(rowId.data);
+    const row = matrixRows.get(rowId);
     if (
       row === undefined ||
-      row.target_id !== targetId.data ||
-      row.variant_id !== variantId.data ||
-      row.trial_id !== trialId.data ||
+      row.target_id !== targetId ||
+      row.variant_id !== variantId ||
+      row.trial_id !== trialId ||
       (record.status !== "launched" && record.status !== "failed")
     ) {
       throw new Error(`public benchmark bundle run record ${index} does not match its matrix row`);
     }
     if (record.status === "failed") {
-      records.delete(rowId.data);
+      records.delete(rowId);
       continue;
     }
-    const runId = safeId.safeParse(record.ultrafuzz_run_id);
-    if (!runId.success) {
+    const runId = record.ultrafuzz_run_id;
+    if (!isSafeId(runId)) {
       throw new Error(`public benchmark bundle launched run record ${index} has an invalid Ultrafuzz run ID`);
     }
-    records.set(rowId.data, {
-      row_id: rowId.data,
-      target_id: targetId.data,
-      variant_id: variantId.data,
-      trial_id: trialId.data,
-      ultrafuzz_run_id: runId.data
+    records.set(rowId, {
+      row_id: rowId,
+      target_id: targetId,
+      variant_id: variantId,
+      trial_id: trialId,
+      ultrafuzz_run_id: runId
     });
   }
   for (const rowId of matrixRows.keys()) {
@@ -536,22 +467,22 @@ function parseMatrixRows(contents: Buffer): Map<string, PublicBundleMatrixRow> {
       throw new Error(`public benchmark bundle matrix row ${index} must be an object`);
     }
     const input = row as Record<string, unknown>;
-    const id = safeId.safeParse(input.id);
-    if (!id.success) throw new Error(`public benchmark bundle matrix row ${index} has an invalid ID`);
-    const targetId = safeId.safeParse(input.target_id);
-    const variantId = safeId.safeParse(input.variant_id);
-    const trialId = safeId.safeParse(input.trial_id);
-    if (!targetId.success || !variantId.success || !trialId.success) {
+    const id = input.id;
+    if (!isSafeId(id)) throw new Error(`public benchmark bundle matrix row ${index} has an invalid ID`);
+    const targetId = input.target_id;
+    const variantId = input.variant_id;
+    const trialId = input.trial_id;
+    if (!isSafeId(targetId) || !isSafeId(variantId) || !isSafeId(trialId)) {
       throw new Error(`public benchmark bundle matrix row ${index} has an invalid identity`);
     }
-    const target = parseMatrixTargetIdentity(input.target, targetId.data, index);
-    const framework = parseMatrixTargetFramework(input, targetId.data, index);
-    if (rows.has(id.data)) throw new Error(`public benchmark bundle matrix repeats row ID ${id.data}`);
-    rows.set(id.data, {
-      id: id.data,
-      target_id: targetId.data,
-      variant_id: variantId.data,
-      trial_id: trialId.data,
+    const target = parseMatrixTargetIdentity(input.target, targetId, index);
+    const framework = parseMatrixTargetFramework(input, targetId, index);
+    if (rows.has(id)) throw new Error(`public benchmark bundle matrix repeats row ID ${id}`);
+    rows.set(id, {
+      id,
+      target_id: targetId,
+      variant_id: variantId,
+      trial_id: trialId,
       target,
       ...(framework === undefined ? {} : { framework })
     });
@@ -564,24 +495,24 @@ function parseMatrixTargetIdentity(value: unknown, targetId: string, index: numb
     throw new Error(`public benchmark bundle matrix row ${index} is missing target identity`);
   }
   const target = value as Record<string, unknown>;
-  const id = safeId.safeParse(target.id);
-  const repo = z.string().url().max(2_048).safeParse(target.repo);
-  const ref = fullSha.safeParse(target.ref);
-  if (!id.success || !repo.success || !ref.success || id.data !== targetId) {
+  const id = target.id;
+  const repo = target.repo;
+  const ref = target.ref;
+  if (!isSafeId(id) || !isUrl(repo, 2_048) || !isFullGitSha(ref) || id !== targetId) {
     throw new Error(`public benchmark bundle matrix row ${index} has an invalid target identity`);
   }
-  return { id: id.data, repo: repo.data, ref: ref.data };
+  return { id, repo, ref };
 }
 
 function parseMatrixTargetFramework(row: Record<string, unknown>, targetId: string, index: number): string | undefined {
   const workflowInput = recordValue(row.workflow_input);
   const frameworks = recordValue(workflowInput?.target_frameworks);
   if (frameworks === undefined || !(targetId in frameworks)) return undefined;
-  const framework = safeId.safeParse(frameworks[targetId]);
-  if (!framework.success) {
+  const framework = frameworks[targetId];
+  if (!isSafeId(framework)) {
     throw new Error(`public benchmark bundle matrix row ${index} has an invalid target framework`);
   }
-  return framework.data;
+  return framework;
 }
 
 interface PublicBundleSummaryRow {
@@ -607,28 +538,28 @@ function parseSummaryRows(contents: Buffer): Map<string, PublicBundleSummaryRow>
       throw new Error(`public benchmark bundle summary row ${index} must be an object`);
     }
     const input = row as Record<string, unknown>;
-    const rowId = safeId.safeParse(input.row_id);
-    const targetId = safeId.safeParse(input.target_id);
-    const variantId = safeId.safeParse(input.variant_id);
-    const trialId = safeId.safeParse(input.trial_id);
-    const findingCount = z.number().int().nonnegative().safeParse(input.finding_count);
+    const rowId = input.row_id;
+    const targetId = input.target_id;
+    const variantId = input.variant_id;
+    const trialId = input.trial_id;
+    const findingCount = input.finding_count;
     if (
-      !rowId.success ||
-      !targetId.success ||
-      !variantId.success ||
-      !trialId.success ||
-      !findingCount.success ||
+      !isSafeId(rowId) ||
+      !isSafeId(targetId) ||
+      !isSafeId(variantId) ||
+      !isSafeId(trialId) ||
+      !isNonnegativeSafeInteger(findingCount) ||
       input.report_schema_valid !== true
     ) {
       throw new Error(`public benchmark bundle summary row ${index} has invalid score identity`);
     }
-    if (rows.has(rowId.data)) throw new Error(`public benchmark bundle summary repeats row ID ${rowId.data}`);
-    rows.set(rowId.data, {
-      row_id: rowId.data,
-      target_id: targetId.data,
-      variant_id: variantId.data,
-      trial_id: trialId.data,
-      finding_count: findingCount.data
+    if (rows.has(rowId)) throw new Error(`public benchmark bundle summary repeats row ID ${rowId}`);
+    rows.set(rowId, {
+      row_id: rowId,
+      target_id: targetId,
+      variant_id: variantId,
+      trial_id: trialId,
+      finding_count: findingCount
     });
   }
   return rows;
@@ -1047,6 +978,22 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function isSafeId(value: unknown): value is string {
+  return typeof value === "string" && SAFE_ID_PATTERN.test(value);
+}
+
+function isFullGitSha(value: unknown): value is string {
+  return typeof value === "string" && FULL_GIT_SHA_PATTERN.test(value);
+}
+
+function isNonnegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isUrl(value: unknown, maxLength: number): value is string {
+  return typeof value === "string" && value.length <= maxLength && URL.canParse(value);
 }
 
 function parseBundleJson(contents: Buffer, label: string, maxBytes = MAX_FILE_BYTES): unknown {
