@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { access, appendFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -12,9 +12,8 @@ import {
 } from "@ultrafuzz/evals";
 
 import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig, type PrivateModalBenchmarkConfig } from "./config.js";
-import { EVAL_WATCH_TIMEOUT_SECONDS, type ModalModelSpec } from "./defaults.js";
+import { EVAL_WATCH_TIMEOUT_SECONDS } from "./defaults.js";
 import { convertAuditMarkdownGroundTruth } from "./ground-truth.js";
-import { parseModalWorkerLineage } from "./launch-state.js";
 import {
   PERSISTED_LINEAGE_FILE,
   REMOTE_CONFIG_PATH,
@@ -73,15 +72,17 @@ import {
 import {
   assertWorkerInputLineage,
   CheckpointIncompatibleError,
-  ensurePersistentWorkerLineage
+  ensurePersistentWorkerLineage,
+  modelForModalWorkerLineage,
+  readModalWorkerLineage
 } from "./worker-lineage.js";
 
 const CLI = "/opt/ultrafuzz/packages/cli/dist/index.js";
 const ULTRAFUZZ_ROOT = "/opt/ultrafuzz";
 const RUN_ID = requiredEnv("ULTRAFUZZ_MODAL_RUN_ID");
-const MODEL = JSON.parse(requiredEnv("ULTRAFUZZ_MODAL_MODEL")) as ModalModelSpec;
 const CONFIG = loadModalBenchmarkConfig(REMOTE_CONFIG_PATH);
-const LINEAGE = parseModalWorkerLineage(JSON.parse(readFileSync(REMOTE_LINEAGE_PATH, "utf8")) as unknown);
+const LINEAGE = readModalWorkerLineage(REMOTE_LINEAGE_PATH);
+const MODEL = modelForModalWorkerLineage(CONFIG, LINEAGE);
 const RESOLVED_VOLUME_ROOT = realpathSync.native("/data");
 const REMOTE_DATA_ROOT = process.env.ULTRAFUZZ_MODAL_REMOTE_ROOT ?? persistentDataRoot(RUN_ID, MODEL.slug);
 const DATA_ROOT = resolvePersistentRemoteRoot(REMOTE_DATA_ROOT, RESOLVED_VOLUME_ROOT);

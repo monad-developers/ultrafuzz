@@ -4,9 +4,15 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { MODAL_WORKER_LINEAGE_SCHEMA_VERSION } from "../src/defaults.js";
+import { fingerprintModalModel } from "../src/config.js";
+import { DEFAULT_BENCHMARK_MODELS, MODAL_WORKER_LINEAGE_SCHEMA_VERSION } from "../src/defaults.js";
 import type { ModalWorkerLineage } from "../src/launch-state.js";
-import { CheckpointIncompatibleError, ensurePersistentWorkerLineage } from "../src/worker-lineage.js";
+import {
+  CheckpointIncompatibleError,
+  ensurePersistentWorkerLineage,
+  modelForModalWorkerLineage,
+  readModalWorkerLineage
+} from "../src/worker-lineage.js";
 
 const roots: string[] = [];
 
@@ -15,6 +21,16 @@ afterEach(() => {
 });
 
 describe("persistent Modal worker lineage", () => {
+  it("derives the worker model only from the exact configured lineage fingerprint", () => {
+    const model = DEFAULT_BENCHMARK_MODELS[0]!;
+    const current = { ...lineage(), model_fingerprint: fingerprintModalModel(model) };
+
+    expect(modelForModalWorkerLineage({ models: [model] }, current)).toBe(model);
+    expect(() => modelForModalWorkerLineage({ models: [model] }, lineage())).toThrow(
+      /does not identify exactly one configured model/u
+    );
+  });
+
   it("rejects duplicate keys in persisted lineage without replacing ownership evidence", async () => {
     const fixture = lineageFixture();
     const current = lineage();
@@ -32,6 +48,7 @@ describe("persistent Modal worker lineage", () => {
     const fixture = lineageFixture();
     const first = lineage();
     await ensure(fixture, first);
+    expect(readModalWorkerLineage(fixture.lineagePath)).toEqual(first);
     fs.mkdirSync(fixture.workspace, { recursive: true });
     fs.writeFileSync(fixture.bundle, "validated bundle\n");
 

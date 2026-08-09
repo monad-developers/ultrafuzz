@@ -782,7 +782,6 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
           workdir: "/opt/ultrafuzz",
           env: {
             ULTRAFUZZ_MODAL_RUN_ID: input.state.logical_run_id,
-            ULTRAFUZZ_MODAL_MODEL: JSON.stringify(input.model),
             ULTRAFUZZ_MODAL_REMOTE_ROOT: remoteRoot,
             ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(remoteRoot)
           },
@@ -1983,7 +1982,6 @@ async function launchModalRecoveryWorker(input: {
         workdir: "/opt/ultrafuzz",
         env: {
           ULTRAFUZZ_MODAL_RUN_ID: input.launchState.logical_run_id,
-          ULTRAFUZZ_MODAL_MODEL: JSON.stringify(input.model),
           ULTRAFUZZ_MODAL_REMOTE_ROOT: record.remote_root,
           ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(record.remote_root)
         },

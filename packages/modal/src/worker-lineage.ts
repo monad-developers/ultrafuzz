@@ -11,6 +11,21 @@ export class CheckpointIncompatibleError extends Error {
   override readonly name = "CheckpointIncompatibleError";
 }
 
+export function readModalWorkerLineage(lineagePath: string): ModalWorkerLineage {
+  return parseModalWorkerLineage(readModalDocument(path.resolve(lineagePath), MODAL_WORKER_LINEAGE_SCHEMA_ID).value);
+}
+
+export function modelForModalWorkerLineage(
+  config: Pick<ModalBenchmarkConfig, "models">,
+  lineage: Pick<ModalWorkerLineage, "model_fingerprint">
+): ModalModelSpec {
+  const matches = config.models.filter((model) => fingerprintModalModel(model) === lineage.model_fingerprint);
+  if (matches.length !== 1) {
+    throw new CheckpointIncompatibleError("worker lineage does not identify exactly one configured model");
+  }
+  return matches[0]!;
+}
+
 export function assertWorkerInputLineage(input: {
   config: ModalBenchmarkConfig;
   configPath: string;
@@ -44,9 +59,7 @@ export async function ensurePersistentWorkerLineage(input: {
 }): Promise<void> {
   let persisted: ModalWorkerLineage | undefined;
   try {
-    persisted = parseModalWorkerLineage(
-      readModalDocument(path.resolve(input.lineagePath), MODAL_WORKER_LINEAGE_SCHEMA_ID).value
-    );
+    persisted = readModalWorkerLineage(input.lineagePath);
   } catch (error) {
     if (!isNodeError(error, "ENOENT")) {
       throw new CheckpointIncompatibleError("persisted lineage record is invalid", { cause: error });
