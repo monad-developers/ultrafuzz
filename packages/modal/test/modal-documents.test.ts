@@ -20,6 +20,8 @@ import {
   MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
   MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID,
   MODAL_RECOVERY_STATE_SCHEMA_ID,
+  MODAL_SMOKE_CHECKPOINT_SCHEMA_ID,
+  MODAL_SMOKE_COMPLETION_SCHEMA_ID,
   MODAL_SMOKE_RESULT_SCHEMA_ID,
   MODAL_WORKER_LINEAGE_SCHEMA_ID,
   MODAL_WORKER_RESULT_SCHEMA_ID,
@@ -314,6 +316,21 @@ function contractFixtures(): ContractFixtures {
       revision_count: 1,
       commit_object_count: 1
     },
+    [MODAL_SMOKE_CHECKPOINT_SCHEMA_ID]: {
+      schema_version: "ultrafuzz.modal.smoke-checkpoint.v1",
+      non_root: true,
+      durable_storage: true,
+      provider_auth: "openai",
+      completed_units: 1
+    },
+    [MODAL_SMOKE_COMPLETION_SCHEMA_ID]: {
+      schema_version: "ultrafuzz.modal.smoke-completion.v1",
+      non_root: true,
+      durable_storage: true,
+      provider_auth: "openai",
+      completed_units: 1,
+      repeated_units: 0
+    },
     [MODAL_SMOKE_RESULT_SCHEMA_ID]: {
       schema_version: "ultrafuzz.modal.smoke-result.v1",
       status: "passed",
@@ -340,7 +357,7 @@ function bytes(value: unknown): Buffer {
 describe("Modal strict JSON contract foundation", () => {
   it("registers and strictly compiles every schema with matching checked-in exports and gates", () => {
     const registry = modalSchemaRegistry();
-    expect(registry).toHaveLength(17);
+    expect(registry).toHaveLength(19);
     expect(registry.map((entry) => entry.filename)).toEqual(Object.keys(MODAL_SCHEMA_METADATA).sort());
     expect(modalSchemaBundleDigest()).toMatch(/^[0-9a-f]{64}$/u);
 

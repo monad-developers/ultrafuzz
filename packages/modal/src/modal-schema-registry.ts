@@ -28,6 +28,8 @@ import {
   MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
   MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID,
   MODAL_RECOVERY_STATE_SCHEMA_ID,
+  MODAL_SMOKE_CHECKPOINT_SCHEMA_ID,
+  MODAL_SMOKE_COMPLETION_SCHEMA_ID,
   MODAL_SMOKE_RESULT_SCHEMA_ID,
   MODAL_WORKER_LINEAGE_SCHEMA_ID,
   MODAL_WORKER_RESULT_SCHEMA_ID
@@ -88,6 +90,8 @@ export const modalNodeWorkerErrorJsonSchema = loadSchemaDocument("modal-node-wor
 export const modalPinnedSourceProofJsonSchema = loadSchemaDocument("modal-pinned-source-proof.schema.json");
 export const modalRecoveryLifecycleJsonSchema = loadSchemaDocument("modal-recovery-lifecycle.schema.json");
 export const modalRecoveryStateJsonSchema = loadSchemaDocument("modal-recovery-state.schema.json");
+export const modalSmokeCheckpointJsonSchema = loadSchemaDocument("modal-smoke-checkpoint.schema.json");
+export const modalSmokeCompletionJsonSchema = loadSchemaDocument("modal-smoke-completion.schema.json");
 export const modalSmokeResultJsonSchema = loadSchemaDocument("modal-smoke-result.schema.json");
 export const modalWorkerLineageJsonSchema = loadSchemaDocument("modal-worker-lineage.schema.json");
 export const modalWorkerResultJsonSchema = loadSchemaDocument("modal-worker-result.schema.json");
@@ -107,6 +111,8 @@ export const MODAL_SCHEMA_EXPORTS = Object.freeze({
   modalPinnedSourceProofJsonSchema,
   modalRecoveryLifecycleJsonSchema,
   modalRecoveryStateJsonSchema,
+  modalSmokeCheckpointJsonSchema,
+  modalSmokeCompletionJsonSchema,
   modalSmokeResultJsonSchema,
   modalWorkerLineageJsonSchema,
   modalWorkerResultJsonSchema
@@ -198,6 +204,18 @@ export const MODAL_SCHEMA_METADATA: Readonly<Record<string, ModalSchemaMetadata>
     typescriptExport: "modalRecoveryStateJsonSchema",
     semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_RECOVERY_STATE_SCHEMA_ID]
   },
+  "modal-smoke-checkpoint.schema.json": {
+    id: MODAL_SMOKE_CHECKPOINT_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "modalSmokeCheckpointJsonSchema",
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_SMOKE_CHECKPOINT_SCHEMA_ID]
+  },
+  "modal-smoke-completion.schema.json": {
+    id: MODAL_SMOKE_COMPLETION_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "modalSmokeCompletionJsonSchema",
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_SMOKE_COMPLETION_SCHEMA_ID]
+  },
   "modal-smoke-result.schema.json": {
     id: MODAL_SMOKE_RESULT_SCHEMA_ID,
     role: "runtime-state",
@@ -233,6 +251,8 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "modal-pinned-source-proof.schema.json": modalPinnedSourceProofJsonSchema,
   "modal-recovery-lifecycle.schema.json": modalRecoveryLifecycleJsonSchema,
   "modal-recovery-state.schema.json": modalRecoveryStateJsonSchema,
+  "modal-smoke-checkpoint.schema.json": modalSmokeCheckpointJsonSchema,
+  "modal-smoke-completion.schema.json": modalSmokeCompletionJsonSchema,
   "modal-smoke-result.schema.json": modalSmokeResultJsonSchema,
   "modal-worker-lineage.schema.json": modalWorkerLineageJsonSchema,
   "modal-worker-result.schema.json": modalWorkerResultJsonSchema

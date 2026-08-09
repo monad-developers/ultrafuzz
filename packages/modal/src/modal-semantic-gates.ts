@@ -15,6 +15,8 @@ import {
   MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
   MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID,
   MODAL_RECOVERY_STATE_SCHEMA_ID,
+  MODAL_SMOKE_CHECKPOINT_SCHEMA_ID,
+  MODAL_SMOKE_COMPLETION_SCHEMA_ID,
   MODAL_SMOKE_RESULT_SCHEMA_ID,
   MODAL_WORKER_LINEAGE_SCHEMA_ID,
   MODAL_WORKER_RESULT_SCHEMA_ID,
@@ -121,6 +123,8 @@ export const MODAL_SEMANTIC_GATES_BY_SCHEMA_ID = Object.freeze({
     "modal-execution-dependency-smithers-executable"
   ],
   [MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID]: ["modal-pinned-source-ref-object-lineage"],
+  [MODAL_SMOKE_CHECKPOINT_SCHEMA_ID]: [],
+  [MODAL_SMOKE_COMPLETION_SCHEMA_ID]: [],
   [MODAL_SMOKE_RESULT_SCHEMA_ID]: ["modal-smoke-status-check-reconciliation"]
 } as const satisfies Readonly<Record<ModalContractSchemaId, readonly ModalSemanticGateName[]>>);
 

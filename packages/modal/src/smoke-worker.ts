@@ -1,12 +1,12 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, mkdir, open, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
-import type { FileHandle } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { ModelProvider } from "./defaults.js";
 import { remoteAuthPath } from "./layout.js";
+import { MODAL_SMOKE_CHECKPOINT_SCHEMA_ID, MODAL_SMOKE_COMPLETION_SCHEMA_ID } from "./modal-contracts.js";
+import { readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
 
 const provider = providerOption(process.argv.slice(2));
 const phase = phaseOption(process.argv.slice(2));
@@ -28,12 +28,20 @@ async function main(): Promise<void> {
 
   if (phase === "fresh") {
     if (!performedCompletedWork) throw new Error("fresh work was already complete");
-    await writeJson(checkpointPath, {
-      non_root: nonRoot,
-      durable_storage: true,
-      provider_auth: provider,
-      completed_units: 1
-    });
+    await writeModalDocumentAtomic(
+      checkpointPath,
+      MODAL_SMOKE_CHECKPOINT_SCHEMA_ID,
+      {
+        schema_version: "ultrafuzz.modal.smoke-checkpoint.v1",
+        non_root: nonRoot,
+        durable_storage: true,
+        provider_auth: provider,
+        completed_units: 1
+      },
+      {
+        trustedRoot: dataRoot
+      }
+    );
     await flushWrites();
     for (;;) {
       try {
@@ -49,14 +57,30 @@ async function main(): Promise<void> {
 
   if (performedCompletedWork) throw new Error("resume repeated completed work");
   const completedUnits = (await readFile(completionPath, "utf8")).trim() === "complete" ? 1 : 0;
-  await access(checkpointPath, constants.R_OK);
-  await writeJson(resultPath, {
-    non_root: nonRoot,
-    durable_storage: true,
-    provider_auth: provider,
-    completed_units: completedUnits,
-    repeated_units: performedCompletedWork ? 1 : 0
-  });
+  const checkpoint = readModalDocument(checkpointPath, MODAL_SMOKE_CHECKPOINT_SCHEMA_ID).value;
+  if (
+    checkpoint.provider_auth !== provider ||
+    !checkpoint.non_root ||
+    !checkpoint.durable_storage ||
+    checkpoint.completed_units !== 1
+  ) {
+    throw new Error("smoke checkpoint does not match the resumed work");
+  }
+  await writeModalDocumentAtomic(
+    resultPath,
+    MODAL_SMOKE_COMPLETION_SCHEMA_ID,
+    {
+      schema_version: "ultrafuzz.modal.smoke-completion.v1",
+      non_root: nonRoot,
+      durable_storage: true,
+      provider_auth: provider,
+      completed_units: completedUnits,
+      repeated_units: performedCompletedWork ? 1 : 0
+    },
+    {
+      trustedRoot: dataRoot
+    }
+  );
   await flushWrites();
   await new Promise((resolve) => setTimeout(resolve, 3_000));
 }
@@ -96,28 +120,6 @@ async function completeUnitOnce(): Promise<boolean> {
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "EEXIST") return false;
     throw error;
-  }
-}
-
-async function writeJson(filePath: string, value: Record<string, unknown>): Promise<void> {
-  const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  let handle: FileHandle | undefined;
-  try {
-    handle = await open(temporary, "wx", 0o600);
-    await handle.writeFile(`${JSON.stringify(value)}\n`, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await rename(temporary, filePath);
-    const directory = await open(path.dirname(filePath), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
-  } finally {
-    await handle?.close().catch(() => undefined);
-    await unlink(temporary).catch(() => undefined);
   }
 }
 
