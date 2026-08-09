@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { parseSmithersTaskManifestBytes } from "@ultrafuzz/artifacts";
+
 import {
   capturePinnedSubmoduleSnapshot,
   hydratePinnedSubmodulesFromExecutionSnapshot,
@@ -383,7 +385,7 @@ test("Aave-shaped nine-pin task worktree is restored transactionally and verifie
   assert.throws(() => pinnedSubmoduleExpectation(nestedRepositoryEscape), /symlink escapes/u);
 });
 
-test("pinned local compilation carries the exact manifest through the product execution snapshot", async (context) => {
+test("pinned local and cloud compilation carry the exact manifest through sealed execution closures", async (context) => {
   const fixture = nestedSubmoduleFixture();
   context.after(() => {
     makeTreeWritable(fixture.root);
@@ -418,11 +420,11 @@ test("pinned local compilation carries the exact manifest through the product ex
   const executionFiles = await smithersExecutionControlFiles(compiled, plan.value!.layout, {
     SMITHERS_BIN: "/bin/true"
   });
-  const pinnedFiles = executionFiles.filter((file) =>
-    file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`)
-  );
-  assert.equal(pinnedFiles.length, 1 + snapshot.entries.filter((entry) => entry.type === "file").length);
-  assert.ok(pinnedFiles.some((file) => file.snapshotPath.endsWith("/manifest.json")));
+  const pinnedPaths = executionFiles
+    .filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`))
+    .map((file) => file.snapshotPath);
+  assert.equal(pinnedPaths.length, 1 + snapshot.entries.filter((entry) => entry.type === "file").length);
+  assert.ok(pinnedPaths.some((snapshotPath) => snapshotPath.endsWith("/manifest.json")));
 
   for (const node of plan.value!.graph.nodes) {
     const taskNodeIds = compiled.tasks
@@ -433,7 +435,6 @@ test("pinned local compilation carries the exact manifest through the product ex
     }
   }
   fs.writeFileSync(plan.value!.layout.graphPath, `${JSON.stringify(plan.value!.graph, null, 2)}\n`);
-
   sealWorkflowControlFiles({
     projectRoot: compiled.projectRoot,
     layout: plan.value!.layout,
@@ -451,8 +452,10 @@ test("pinned local compilation carries the exact manifest through the product ex
     layout: plan.value!.layout,
     snapshot: verifiedControl
   });
-  const materializedManifest = path.join(materialized.root, PINNED_SUBMODULE_EXECUTION_ROOT, "manifest.json");
-  assert.equal(sha256(fs.readFileSync(materializedManifest)), expectation.manifest_sha256);
+  assert.equal(
+    sha256(fs.readFileSync(path.join(materialized.root, PINNED_SUBMODULE_EXECUTION_ROOT, "manifest.json"))),
+    expectation.manifest_sha256
+  );
 
   const task = path.join(fixture.root, "compiled-closure-task");
   git(fixture.source, ["worktree", "add", "-B", "ultrafuzz/test/compiled-closure", task, "ultrafuzz-pinned"]);
@@ -464,22 +467,23 @@ test("pinned local compilation carries the exact manifest through the product ex
   assert.equal(fs.readFileSync(path.join(task, "vendor/dependency/dependency.txt"), "utf8"), "dependency\n");
 
   const manifestBeforeCloudCompile = fs.readFileSync(manifestPath);
-  const cloudPlan = await planRun({ projectRoot: fixture.source, runId: "pinned-cloud-only", env: {} });
+  const configPath = path.join(fixture.source, "ultrafuzz.toml");
+  const localConfig = fs.readFileSync(configPath, "utf8");
+  assert.match(localConfig, /\[execution\]\nmode = "local"\n/u);
+  fs.writeFileSync(
+    configPath,
+    `${localConfig.replace(
+      '[execution]\nmode = "local"\n',
+      '[execution]\nmode = "cloud"\nprovider = "modal"\n'
+    )}\n[execution.providers.modal]\napp = "ultrafuzz-test"\nimage = "ultrafuzz-test"\ncredential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]\n`,
+    "utf8"
+  );
+  const cloudPlan = await planRun({
+    projectRoot: fixture.source,
+    runId: "pinned-cloud-only",
+    env: { MODAL_TOKEN_ID: "test-id", MODAL_TOKEN_SECRET: "test-secret" }
+  });
   assert.equal(cloudPlan.ok, true, JSON.stringify(cloudPlan.diagnostics));
-  cloudPlan.value!.resolved_config.execution = {
-    mode: "cloud",
-    provider: "modal",
-    retentionDays: 30,
-    resources: { cpu: 4, memoryMiB: 8192, timeoutSeconds: 1800 },
-    nodes: {},
-    providers: {
-      modal: {
-        app: "ultrafuzz-test",
-        image: "ultrafuzz-test",
-        credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-      }
-    }
-  };
   const cloudCompiled = compileSmithersWorkflow({
     projectRoot: fixture.source,
     config: cloudPlan.value!.resolved_config,
@@ -488,8 +492,90 @@ test("pinned local compilation carries the exact manifest through the product ex
     workflowName: "ultrafuzz-pinned-cloud-only",
     renderedPrompts: cloudPlan.value!.rendered_prompts
   });
-  assert.equal(cloudCompiled.pinnedSubmodules, undefined);
-  assert.match(fs.readFileSync(cloudCompiled.workflowPath, "utf8"), /"pinnedSubmodules": null/u);
+  assert.deepEqual(cloudCompiled.pinnedSubmodules, expectation);
+  const cloudWorkflowSource = fs.readFileSync(cloudCompiled.workflowPath, "utf8");
+  assert.equal(cloudWorkflowSource.match(/"pinnedSubmodules": \{/gu)?.length, cloudCompiled.tasks.length);
+  const cloudTaskManifest = parseSmithersTaskManifestBytes(fs.readFileSync(cloudCompiled.tasksPath));
+  assert.deepEqual(cloudTaskManifest.pinned_submodules, expectation);
+
+  const cloudExecutionFiles = await smithersExecutionControlFiles(cloudCompiled, cloudPlan.value!.layout, {
+    SMITHERS_BIN: "/bin/true"
+  });
+  const cloudPinnedPaths = cloudExecutionFiles
+    .filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`))
+    .map((file) => file.snapshotPath);
+  assert.equal(cloudPinnedPaths.length, pinnedPaths.length);
+  assert.deepEqual(cloudPinnedPaths, pinnedPaths);
+
+  for (const node of cloudPlan.value!.graph.nodes) {
+    const taskNodeIds = cloudCompiled.tasks
+      .filter((taskSpec) => taskSpec.concreteNodeId === node.id)
+      .map((taskSpec) => taskSpec.smithersNodeId);
+    if (taskNodeIds.length > 0) node.workflow = { node_id: taskNodeIds[0]!, task_node_ids: taskNodeIds };
+  }
+  fs.writeFileSync(cloudPlan.value!.layout.graphPath, `${JSON.stringify(cloudPlan.value!.graph, null, 2)}\n`);
+  sealWorkflowControlFiles({
+    projectRoot: cloudCompiled.projectRoot,
+    layout: cloudPlan.value!.layout,
+    workflowPath: cloudCompiled.workflowPath,
+    expandedGraphPath: cloudCompiled.expandedGraphPath,
+    configPath: cloudCompiled.configPath,
+    evidenceWorkflowPath: cloudCompiled.evidenceWorkflowPath,
+    tasksPath: cloudCompiled.tasksPath,
+    inputPath: cloudCompiled.inputPath,
+    executionFiles: cloudExecutionFiles
+  });
+  const cloudVerifiedControl = verifyWorkflowControlSnapshot(cloudCompiled.projectRoot, cloudPlan.value!.layout);
+  const cloudExecutionSnapshotRoot = path.join(fixture.root, "verified-cloud-execution-snapshot");
+  fs.mkdirSync(cloudExecutionSnapshotRoot);
+  const sealedCloudPinnedFiles = cloudVerifiedControl.executionFiles.filter((file) =>
+    file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`)
+  );
+  assert.deepEqual(
+    sealedCloudPinnedFiles.map((file) => file.snapshotPath),
+    pinnedPaths
+  );
+  for (const file of sealedCloudPinnedFiles) {
+    const destination = path.join(cloudExecutionSnapshotRoot, ...file.snapshotPath.split("/"));
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, file.contents);
+  }
+  assert.equal(
+    sha256(fs.readFileSync(path.join(cloudExecutionSnapshotRoot, PINNED_SUBMODULE_EXECUTION_ROOT, "manifest.json"))),
+    expectation.manifest_sha256
+  );
+
+  const cloudTask = path.join(fixture.root, "compiled-cloud-closure-task");
+  git(fixture.source, [
+    "worktree",
+    "add",
+    "-B",
+    "ultrafuzz/test/compiled-cloud-closure",
+    cloudTask,
+    "ultrafuzz-pinned"
+  ]);
+  hydratePinnedSubmodulesFromExecutionSnapshot({
+    executionSnapshotRoot: cloudExecutionSnapshotRoot,
+    workspaceRoot: cloudTask,
+    expectation: cloudCompiled.pinnedSubmodules
+  });
+  const cloudDependency = path.join(cloudTask, "vendor/dependency/dependency.txt");
+  assert.equal(fs.readFileSync(cloudDependency, "utf8"), "dependency\n");
+  verifyPinnedSubmodulesFromExecutionSnapshot({
+    executionSnapshotRoot: cloudExecutionSnapshotRoot,
+    workspaceRoot: cloudTask,
+    expectation: cloudCompiled.pinnedSubmodules
+  });
+  fs.writeFileSync(cloudDependency, "agent mutation\n");
+  assert.throws(
+    () =>
+      verifyPinnedSubmodulesFromExecutionSnapshot({
+        executionSnapshotRoot: cloudExecutionSnapshotRoot,
+        workspaceRoot: cloudTask,
+        expectation: cloudCompiled.pinnedSubmodules
+      }),
+    /byte tree changed/u
+  );
   assert.deepEqual(fs.readFileSync(manifestPath), manifestBeforeCloudCompile);
 });
 

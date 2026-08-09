@@ -374,6 +374,7 @@ function loadPreservePinnedSourceProof(): (task: {
   attemptId: string;
   workspacePath: string;
   metadata: { artifacts: { dir: string } };
+  pinnedSubmodules?: unknown;
 }) => void {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const commandStart = source.indexOf("const unreachableCommitCountCommand");
@@ -420,7 +421,12 @@ function loadPreservePinnedSourceProof(): (task: {
     true,
     "refs/heads/ultrafuzz-pinned",
     command
-  ) as (task: { attemptId: string; workspacePath: string; metadata: { artifacts: { dir: string } } }) => void;
+  ) as (task: {
+    attemptId: string;
+    workspacePath: string;
+    metadata: { artifacts: { dir: string } };
+    pinnedSubmodules?: unknown;
+  }) => void;
 }
 
 // The generated template carries its own copy of the invariant-ledger evidence rule, and it is the
@@ -1361,6 +1367,52 @@ test("generated Smithers worktrees fail closed on any source other than the pinn
   assert.doesNotMatch(source.slice(proofStart, proofEnd), /task\.runRoot/u);
   assert.match(source, /ultrafuzz\.agent-source-proof\.v2/u);
   assert.match(source.slice(proofStart, proofEnd), /dependencies: pinnedDependencies/u);
+});
+
+test("generated Smithers cloud source proof records the sealed submodule expectation", () => {
+  const preservePinnedSourceProof = loadPreservePinnedSourceProof();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-cloud-source-proof-"));
+  const workspace = path.join(root, "workspace");
+  const artifactDir = path.join(root, "artifacts", "cloud-attempt");
+  const proofPath = path.join(root, "source-proofs", "cloud-attempt.json");
+  const git = (args: string[]): string =>
+    execFileSync("git", args, {
+      cwd: workspace,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    }).trim();
+  try {
+    fs.mkdirSync(artifactDir, { recursive: true });
+    fs.mkdirSync(workspace);
+    git(["init", "--quiet", "--initial-branch=ultrafuzz-pinned"]);
+    git(["config", "user.name", "Ultrafuzz test"]);
+    git(["config", "user.email", "test@example.invalid"]);
+    fs.writeFileSync(path.join(workspace, "source.txt"), "pinned\n");
+    git(["add", "source.txt"]);
+    git(["commit", "--quiet", "-m", "pinned"]);
+    const expectation = {
+      schema_version: "ultrafuzz.pinned-submodules-expectation.v1",
+      source_commit: git(["rev-parse", "HEAD"]),
+      source_tree: git(["rev-parse", "HEAD^{tree}"]),
+      manifest_sha256: "c".repeat(64),
+      top_level_roots: ["vendor/dependency"],
+      recursive_gitlinks: [{ path: "vendor/dependency", commit: "d".repeat(40), tree: "e".repeat(40) }],
+      entry_count: 2,
+      file_count: 1,
+      total_file_bytes: 11
+    };
+
+    preservePinnedSourceProof({
+      attemptId: "cloud-attempt",
+      workspacePath: workspace,
+      metadata: { artifacts: { dir: artifactDir } },
+      pinnedSubmodules: expectation
+    });
+    const proof = parseStrictJsonBytes(fs.readFileSync(proofPath)) as { dependencies?: unknown };
+    assert.deepEqual(proof.dependencies, expectation);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("generated Smithers pinned source proof counts hidden unreachable commits without batch object output", () => {

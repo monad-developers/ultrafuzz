@@ -721,9 +721,6 @@ export function assertSmithersTaskManifestSemantics(manifest: SmithersTaskManife
 function assertPinnedSubmoduleExpectation(manifest: SmithersTaskManifestDocument): void {
   const expectation = manifest.pinned_submodules;
   if (expectation === null) return;
-  if (!manifest.tasks.some((task) => task.execution.mode === "local")) {
-    throw new Error("Smithers pinned submodule expectation has no local task consumer");
-  }
   const roots = expectation.top_level_roots;
   const gitlinkPaths = expectation.recursive_gitlinks.map((entry) => entry.path);
   for (const value of [...roots, ...gitlinkPaths]) assertPinnedSubmodulePath(value);

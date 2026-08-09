@@ -112,6 +112,59 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     }
   });
 
+  it("preserves pinned source identity and the sealed submodule closure in cloud handoffs", async () => {
+    const fixture = createProjectFixture({ pinnedSubmodules: true });
+    const pinnedCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: fixture.root,
+      encoding: "utf8"
+    }).trim();
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-pinned-handoff-"));
+    try {
+      await extractSafeTarArchive(archive.path, extracted, { gzip: true, label: "pinned handoff test" });
+      expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: extracted, encoding: "utf8" }).trim()).toBe(
+        pinnedCommit
+      );
+      expect(execFileSync("git", ["branch", "--show-current"], { cwd: extracted, encoding: "utf8" }).trim()).toBe(
+        "ultrafuzz-pinned"
+      );
+      expect(execFileSync("git", ["rev-list", "--all", "--count"], { cwd: extracted, encoding: "utf8" }).trim()).toBe(
+        "1"
+      );
+      expect(execFileSync("git", ["remote"], { cwd: extracted, encoding: "utf8" }).trim()).toBe("");
+      expect(execFileSync("git", ["ls-files", "--stage"], { cwd: extracted, encoding: "utf8" })).toContain(
+        "vendor/dependency"
+      );
+      const sealedRoot = path.join(extracted, fixture.input.execution_snapshot_root, "controls/pinned-submodules");
+      expect(fs.readFileSync(path.join(sealedRoot, "tree/vendor/dependency/dependency.txt"), "utf8")).toBe(
+        "dependency\n"
+      );
+      const manifest = JSON.parse(fs.readFileSync(path.join(sealedRoot, "manifest.json"), "utf8")) as {
+        source_commit?: unknown;
+      };
+      expect(manifest.source_commit).toBe(pinnedCommit);
+    } finally {
+      archive.cleanup();
+      fs.rmSync(extracted, { recursive: true, force: true });
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects a cloud handoff when HEAD has drifted from the pinned source", async () => {
+    const fixture = createProjectFixture({ pinnedSubmodules: true });
+    try {
+      execFileSync("git", ["switch", "--quiet", "-c", "drifted"], { cwd: fixture.root });
+      execFileSync("git", ["update-index", "--force-remove", "vendor/dependency"], { cwd: fixture.root });
+      execFileSync("git", ["commit", "--quiet", "-m", "drift from pin"], { cwd: fixture.root });
+
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        "pinned cloud source ref does not identify HEAD"
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("creates byte-identical handoffs for same-version controller restart", async () => {
     const fixture = createProjectFixture();
     const originalAuthorDate = process.env.GIT_AUTHOR_DATE;
@@ -2062,7 +2115,7 @@ function providerOptions(client: ReturnType<typeof fakeClient>) {
   };
 }
 
-function createProjectFixture(options: { smithersCli?: string } = {}) {
+function createProjectFixture(options: { smithersCli?: string; pinnedSubmodules?: boolean } = {}) {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-provider-test-"));
   const root = path.join(temporaryRoot, "project");
   const runRoot = ".ultrafuzz/runs/run-one";
@@ -2125,6 +2178,13 @@ function createProjectFixture(options: { smithersCli?: string } = {}) {
   execFileSync("git", ["config", "user.email", "test@invalid"], { cwd: root });
   execFileSync("git", ["add", "source.txt"], { cwd: root });
   execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
+  if (options.pinnedSubmodules === true) {
+    execFileSync("git", ["update-index", "--add", "--cacheinfo", `160000,${"d".repeat(40)},vendor/dependency`], {
+      cwd: root
+    });
+    execFileSync("git", ["commit", "--quiet", "-m", "pinned dependency"], { cwd: root });
+    execFileSync("git", ["branch", "-M", "ultrafuzz-pinned"], { cwd: root });
+  }
 
   const snapshotFiles = new Map<string, string>([
     [workflowRelativePath, "export default { sealed: true };\n"],
@@ -2144,6 +2204,30 @@ function createProjectFixture(options: { smithersCli?: string } = {}) {
     ["dependencies/packages/000001/package.json", '{"name":"smithers-orchestrator","version":"1.0.0"}\n'],
     ["dependencies/packages/000001/dist/cli.js", options.smithersCli ?? "#!/usr/bin/env node\n"]
   ]);
+  if (options.pinnedSubmodules === true) {
+    const sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    const sourceTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: root, encoding: "utf8" }).trim();
+    const dependencyContents = "dependency\n";
+    const snapshot = {
+      schema_version: "ultrafuzz.pinned-submodules.v2",
+      source_commit: sourceCommit,
+      source_tree: sourceTree,
+      top_level_roots: ["vendor/dependency"],
+      recursive_gitlinks: [{ path: "vendor/dependency", commit: "d".repeat(40), tree: "e".repeat(40) }],
+      entries: [
+        { path: "vendor/dependency", type: "directory", mode: 493 },
+        {
+          path: "vendor/dependency/dependency.txt",
+          type: "file",
+          mode: 420,
+          size_bytes: Buffer.byteLength(dependencyContents),
+          sha256: sha256Hex(dependencyContents)
+        }
+      ]
+    };
+    snapshotFiles.set("controls/pinned-submodules/manifest.json", `${JSON.stringify(snapshot, null, 2)}\n`);
+    snapshotFiles.set("controls/pinned-submodules/tree/vendor/dependency/dependency.txt", dependencyContents);
+  }
   const dependencyManifest = {
     schema_version: "ultrafuzz.workflow-execution-dependencies.v1",
     modules: [

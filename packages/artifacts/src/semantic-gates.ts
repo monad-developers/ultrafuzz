@@ -1191,9 +1191,6 @@ function smithersPinnedSubmoduleIssues(document: unknown): SemanticGateIssue[] {
   if (entryCount !== undefined && fileCount !== undefined && fileCount > entryCount) {
     issues.push(issue("$.pinned_submodules.file_count", "Pinned submodule file count exceeds entry count"));
   }
-  if (!smithersTasks(document).some((task) => stringField(at(task, ["execution"]), "mode") === "local")) {
-    issues.push(issue("$.pinned_submodules", "Pinned submodule expectation has no local task consumer"));
-  }
   return issues;
 }
 

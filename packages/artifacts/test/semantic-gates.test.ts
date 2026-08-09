@@ -561,8 +561,11 @@ const fixtures = {
     }
   },
   "smithers-task-pinned-submodule-expectation": {
-    positive: { pinned_submodules: pinnedSubmoduleExpectation, tasks: [{ execution: { mode: "local" } }] },
-    negative: { pinned_submodules: pinnedSubmoduleExpectation, tasks: [{ execution: { mode: "cloud" } }] }
+    positive: { pinned_submodules: pinnedSubmoduleExpectation, tasks: [{ execution: { mode: "cloud" } }] },
+    negative: {
+      pinned_submodules: { ...pinnedSubmoduleExpectation, file_count: 2 },
+      tasks: [{ execution: { mode: "cloud" } }]
+    }
   },
   "smithers-task-dependency-join": {
     positive: {

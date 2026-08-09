@@ -1227,10 +1227,9 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const inputPath = path.join(smithersDir, "input.json");
   const tasksPath = path.join(smithersDir, "tasks.json");
   const logsDir = path.join(smithersDir, "logs");
-  const pinnedSubmodules =
-    tasks.some((task) => task.execution.mode === "local") && invariantPinnedSourceRefExists(projectRoot)
-      ? pinnedSubmoduleExpectationForProject(projectRoot)
-      : undefined;
+  const pinnedSubmodules = invariantPinnedSourceRefExists(projectRoot)
+    ? pinnedSubmoduleExpectationForProject(projectRoot)
+    : undefined;
   const compiled: CompiledSmithersWorkflow = {
     schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
     runId: input.runLayout.runId,
@@ -4023,7 +4022,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       metadata: executionMetadata(compiled.projectRoot, task),
       outputs: task.metadata.artifacts.outputs,
       execution: task.execution,
-      pinnedSubmodules: task.execution.mode === "local" ? (compiled.pinnedSubmodules ?? null) : null
+      pinnedSubmodules: compiled.pinnedSubmodules ?? null
     })),
     null,
     2

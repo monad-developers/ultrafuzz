@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   ModalClient,
@@ -13,7 +14,12 @@ import {
   type Secret,
   type Volume
 } from "modal";
-import { materializePromptSchemas } from "@ultrafuzz/artifacts";
+import {
+  INVARIANT_PINNED_SOURCE_BRANCH,
+  INVARIANT_PINNED_SOURCE_REF,
+  invariantPinnedSourceRefExists,
+  materializePromptSchemas
+} from "@ultrafuzz/artifacts";
 import { parseRuntimeDocumentBytes, WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID } from "@ultrafuzz/runtime";
 import {
   MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
@@ -378,15 +384,19 @@ export async function createModalNodeHandoffArchive(
   const archive = path.join(temporaryRoot, "project.tgz");
   fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
   try {
-    const baseArchive = path.join(temporaryRoot, "base.tar");
-    execFileSync("git", ["archive", "--format=tar", "--output", baseArchive, "HEAD"], {
-      cwd: root,
-      env: deterministicGitEnvironment()
-    });
-    await extractSafeTarArchive(baseArchive, staging, { gzip: false, label: "cloud handoff" });
-    fs.rmSync(baseArchive, { force: true });
-    assertSafeTree(staging);
-    createDeterministicGitBaseline(staging, temporaryRoot);
+    if (pinnedSourceHasGitlinks(root)) {
+      createPinnedGitBaseline(root, staging, temporaryRoot);
+    } else {
+      const baseArchive = path.join(temporaryRoot, "base.tar");
+      execFileSync("git", ["archive", "--format=tar", "--output", baseArchive, "HEAD"], {
+        cwd: root,
+        env: deterministicGitEnvironment()
+      });
+      await extractSafeTarArchive(baseArchive, staging, { gzip: false, label: "cloud handoff" });
+      fs.rmSync(baseArchive, { force: true });
+      assertSafeTree(staging);
+      createDeterministicGitBaseline(staging, temporaryRoot);
+    }
     assertSafeTree(staging);
 
     fs.mkdirSync(path.join(staging, path.relative(root, runRoot)), { recursive: true, mode: 0o700 });
@@ -419,6 +429,100 @@ export async function createModalNodeHandoffArchive(
   } catch (error) {
     removeHandoffTemporaryRoot(temporaryRoot);
     throw error;
+  }
+}
+
+function pinnedSourceHasGitlinks(projectRoot: string): boolean {
+  if (!invariantPinnedSourceRefExists(projectRoot)) return false;
+  const entries = execFileSync("git", ["ls-tree", "-r", "--full-tree", INVARIANT_PINNED_SOURCE_REF], {
+    cwd: projectRoot,
+    env: deterministicGitEnvironment(),
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  return entries.split("\n").some((entry) => entry.startsWith("160000 commit "));
+}
+
+function createPinnedGitBaseline(sourceRoot: string, projectRoot: string, scratchRoot: string): void {
+  const environment = deterministicGitEnvironment();
+  const pinnedCommit = execFileSync("git", ["rev-parse", `${INVARIANT_PINNED_SOURCE_REF}^{commit}`], {
+    cwd: sourceRoot,
+    env: environment,
+    encoding: "utf8"
+  }).trim();
+  const sourceHead = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: sourceRoot,
+    env: environment,
+    encoding: "utf8"
+  }).trim();
+  if (!/^[0-9a-f]{40}$/u.test(pinnedCommit) || sourceHead !== pinnedCommit) {
+    throw new Error("pinned cloud source ref does not identify HEAD");
+  }
+
+  const template = path.join(scratchRoot, "git-template");
+  fs.mkdirSync(template, { mode: 0o700 });
+  execFileSync(
+    "git",
+    [
+      "clone",
+      "--quiet",
+      "--no-tags",
+      "--no-recurse-submodules",
+      "--single-branch",
+      "--depth",
+      "1",
+      "--branch",
+      INVARIANT_PINNED_SOURCE_BRANCH,
+      `--template=${template}`,
+      pathToFileURL(sourceRoot).href,
+      projectRoot
+    ],
+    { env: environment, stdio: "ignore" }
+  );
+
+  const clonedCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: projectRoot,
+    env: environment,
+    encoding: "utf8"
+  }).trim();
+  if (clonedCommit !== pinnedCommit) throw new Error("pinned cloud source clone changed commit identity");
+
+  const gitRoot = path.join(projectRoot, ".git");
+  for (const entry of fs.readdirSync(gitRoot)) {
+    if (!["HEAD", "config", "index", "objects", "refs", "shallow"].includes(entry)) {
+      fs.rmSync(path.join(gitRoot, entry), { recursive: true, force: true });
+    }
+  }
+  fs.rmSync(path.join(gitRoot, "objects", "info"), { recursive: true, force: true });
+  fs.rmSync(path.join(gitRoot, "refs"), { recursive: true, force: true });
+  fs.mkdirSync(path.join(gitRoot, "refs", "heads"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(gitRoot, "config"), DETERMINISTIC_GIT_CONFIG, { mode: 0o600 });
+  fs.writeFileSync(path.join(gitRoot, "HEAD"), `ref: refs/heads/${INVARIANT_PINNED_SOURCE_BRANCH}\n`, { mode: 0o600 });
+  fs.writeFileSync(path.join(gitRoot, "refs", "heads", INVARIANT_PINNED_SOURCE_BRANCH), `${pinnedCommit}\n`, {
+    mode: 0o600
+  });
+  const publishingIndex = path.join(gitRoot, "index.publishing");
+  execFileSync("git", ["read-tree", "HEAD"], {
+    cwd: projectRoot,
+    env: { ...environment, GIT_INDEX_FILE: publishingIndex },
+    stdio: "ignore"
+  });
+  fs.chmodSync(publishingIndex, 0o600);
+  fs.renameSync(publishingIndex, path.join(gitRoot, "index"));
+
+  const revisionCount = execFileSync("git", ["rev-list", "--all", "--count"], {
+    cwd: projectRoot,
+    env: environment,
+    encoding: "utf8"
+  }).trim();
+  const remotes = execFileSync("git", ["remote"], {
+    cwd: projectRoot,
+    env: environment,
+    encoding: "utf8"
+  }).trim();
+  if (revisionCount !== "1" || remotes !== "") {
+    throw new Error("pinned cloud source clone is not isolated");
   }
 }
 
