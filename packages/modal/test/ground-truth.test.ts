@@ -31,4 +31,20 @@ describe("Modal audit Markdown conversion", () => {
       bugs: [{ id: "H-9004", title: "Example condition", severity: "high" }]
     });
   });
+
+  it("preserves the validated target subject when converting audit Markdown", () => {
+    expect(
+      convertAuditMarkdownGroundTruth("## [H-9005] - Example condition", undefined, {
+        repository: "https://github.com/example/target",
+        revision: "0123456789abcdef0123456789abcdef01234567"
+      })
+    ).toEqual({
+      schema_version: "ultrafuzz.eval-ground-truth.v1",
+      subject: {
+        repository: "https://github.com/example/target",
+        revision: "0123456789abcdef0123456789abcdef01234567"
+      },
+      bugs: [{ id: "H-9005", title: "Example condition", severity: "high" }]
+    });
+  });
 });

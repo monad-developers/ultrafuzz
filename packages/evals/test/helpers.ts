@@ -86,7 +86,6 @@ export function testSuite(groundTruthRoot: string, overrides: Partial<EvalSuiteS
         id: "target-a",
         repo: "https://example.com/target-a",
         ref: "v1.0.0",
-        sensitivity: "private",
         ground_truth: "target-a.yml"
       }
     ],

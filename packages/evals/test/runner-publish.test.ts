@@ -78,6 +78,44 @@ function terminalRunFixture(runRoot: string): void {
 }
 
 describe("runner", () => {
+  it("rejects unbound private ground truth before launching any model work", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-private-binding-"));
+    const project = path.join(base, "project");
+    const groundTruthRoot = path.join(base, "gt");
+    fs.mkdirSync(project, { recursive: true });
+    fs.mkdirSync(groundTruthRoot, { recursive: true });
+    fs.writeFileSync(path.join(groundTruthRoot, "target-a.yml"), "bugs: []\n", "utf8");
+    const suite = testSuite(groundTruthRoot, {
+      targets: [
+        {
+          id: "target-a",
+          repo: "https://example.com/target-a",
+          ref: "0123456789abcdef0123456789abcdef01234567",
+          sensitivity: "private",
+          ground_truth: "target-a.yml"
+        }
+      ]
+    });
+    const suitePath = path.join(project, "suite.json");
+    fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");
+    let launches = 0;
+
+    await expect(
+      runEvalSuite({
+        projectRoot: project,
+        suitePath,
+        evalRunId: "eval-private-binding",
+        groundTruthRoot,
+        provider: "none",
+        launcher: async () => {
+          launches += 1;
+          return { ok: false, workflowIds: [], diagnostics: [] };
+        }
+      })
+    ).rejects.toMatchObject({ code: "EVAL_GROUND_TRUTH_SUBJECT_MISSING" });
+    expect(launches).toBe(0);
+  });
+
   it("generates stable distinct bounded child run IDs for rows with the same long prefix", async () => {
     const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-runner-ids-"));
     const suite = testSuite(path.join(base, "gt"));
