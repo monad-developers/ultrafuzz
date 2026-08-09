@@ -6,16 +6,20 @@ import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import ts from "typescript";
 
-import { readRegularFileSnapshot } from "../../packages/artifacts/dist/index.js";
+import { parseStrictJsonBytes, readRegularFileSnapshot } from "../../packages/artifacts/dist/index.js";
 import {
   EVAL_HISTORY_AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION,
   EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION,
   assertEvalHistoryPublicationHandoff,
+  parseEvalMatrix,
   parseEvalHistoryAutomaticPublicationPlan,
   parseEvalHistoryPublicationGeneration,
+  parseEvalScoreSummary,
+  parsePublicEvalDiagnostics,
   readEvalHistoryAutomaticPublicationPlan,
   readEvalHistoryPublicationGeneration
 } from "../../packages/evals/dist/index.js";
+import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
 import { MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID } from "../../packages/modal/dist/modal-contracts.js";
 import { assertModalDocumentValue, parseModalDocumentBytes } from "../../packages/modal/dist/modal-documents.js";
 
@@ -24,6 +28,7 @@ export const AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION = EVAL_HISTORY_AUTOMATIC_
 const GENERATION_SCHEMA_VERSION = EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_CONFIG_BYTES = 1024 * 1024;
+const MAX_BUNDLE_JSON_BYTES = 5 * 1024 * 1024;
 const MAX_POLICY_BYTES = 16 * 1024 * 1024;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_LOWER_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/u;
@@ -710,16 +715,16 @@ export function automaticProducerPolicyDimensions(value, controlRoot) {
   const runtimes = manifest.pairs.map((value, index) => {
     const pair = strictRecord(value, `benchmark pair ${index}`, PAIR_KEYS);
     const configPath = safeBasename(pair.config_path, `benchmark pair ${index} config path`);
-    const config = looseRecord(
-      readJsonRegular(
-        regularFileInside(root, configPath, MAX_CONFIG_BYTES, `benchmark config ${configPath}`),
-        MAX_CONFIG_BYTES,
-        `benchmark config ${configPath}`
-      ),
-      `benchmark config ${configPath}`
+    const config = loadModalBenchmarkConfig(
+      regularFileInside(root, configPath, MAX_CONFIG_BYTES, `benchmark config ${configPath}`)
     );
-    const scope = looseRecord(config.public_benchmark, `benchmark config ${configPath} public scope`);
-    return positiveSafeInteger(scope.max_runtime_seconds, `benchmark config ${configPath} maximum runtime`);
+    if (!isPublicModalBenchmarkConfig(config)) {
+      throw new Error(`benchmark config ${configPath} must be a public benchmark config`);
+    }
+    return positiveSafeInteger(
+      config.public_benchmark.max_runtime_seconds,
+      `benchmark config ${configPath} maximum runtime`
+    );
   });
   if (new Set(runtimes).size !== 1) {
     throw new Error("benchmark producer pairs must use one maximum runtime policy");
@@ -817,14 +822,9 @@ export function validateAutomaticPairConfig(config, model, pair, context, usedMo
 
 export function assertPublicBenchmarkBundleMatrixScope(bundle, expected, pair) {
   const expectedRows = positiveSafeInteger(expected.matrixRowsPerPair, "benchmark bundle matrix row count");
-  const matrixFile = bundle.files.find((file) => file.path === "eval/matrix.json");
-  if (matrixFile === undefined) throw new Error(`public benchmark bundle ${pair} is missing its matrix`);
-  let matrix;
-  try {
-    matrix = JSON.parse(Buffer.from(matrixFile.contents_base64, "base64").toString("utf8"));
-  } catch (error) {
-    throw new Error(`public benchmark bundle ${pair} matrix is invalid`, { cause: error });
-  }
+  const matrix = parseBundleFileDocument(bundle, "eval/matrix.json", pair, (value, label) =>
+    parseEvalMatrix(value, label)
+  );
   if (!Array.isArray(matrix) || matrix.length === 0) {
     throw new Error(`public benchmark bundle ${pair} matrix is not a non-empty array`);
   }
@@ -889,8 +889,12 @@ export function summarizePublicBenchmarkBundlePublication(bundle, expected, pair
   }
   const bundleTargets = validatedBundleTargets(bundle.targets, pair);
   assertBundleTargetsMatchExpected(bundleTargets, expected.targets, targetIds, pair);
-  const diagnostics = bundleFileJson(bundle, PUBLIC_EVAL_DIAGNOSTICS_PATH, pair);
-  const summary = bundleFileJson(bundle, "eval/summary.json", pair);
+  const diagnostics = parseBundleFileDocument(bundle, PUBLIC_EVAL_DIAGNOSTICS_PATH, pair, (value) =>
+    parsePublicEvalDiagnostics(value)
+  );
+  const summary = parseBundleFileDocument(bundle, "eval/summary.json", pair, (value, label) =>
+    parseEvalScoreSummary(value, label)
+  );
   const expectedRows = positiveSafeInteger(expected.matrixRowsPerPair, "benchmark bundle matrix row count");
   const evalRunId = safeLowerId(expected.evalRunId, `public benchmark bundle ${pair} eval run ID`);
   const status = safeBundleStatus(bundle.status, `public benchmark bundle ${pair} status`);
@@ -1005,13 +1009,29 @@ function safeBundleStatus(value, label) {
   return value;
 }
 
-function bundleFileJson(bundle, relativePath, pair) {
+function parseBundleFileDocument(bundle, relativePath, pair, parser) {
   const file = bundle.files.find((entry) => entry.path === relativePath);
   if (file === undefined) throw new Error(`public benchmark bundle ${pair} is missing ${relativePath}`);
+  const contents = Buffer.from(file.contents_base64, "base64");
+  if (contents.toString("base64") !== file.contents_base64) {
+    throw new Error(`public benchmark bundle ${pair} ${relativePath} is not canonical base64`);
+  }
+  const label = `public benchmark bundle ${pair} ${relativePath}`;
+  let value;
   try {
-    return JSON.parse(Buffer.from(file.contents_base64, "base64").toString("utf8"));
+    value = parseStrictJsonBytes(contents, {
+      maxBytes: MAX_BUNDLE_JSON_BYTES,
+      maxDepth: 128,
+      maxItems: 1_000_000,
+      maxProperties: 1_000_000
+    });
   } catch (error) {
-    throw new Error(`public benchmark bundle ${pair} ${relativePath} is invalid`, { cause: error });
+    throw new Error(`${label} is not strict JSON`, { cause: error });
+  }
+  try {
+    return parser(value, label);
+  } catch (error) {
+    throw new Error(`${label} does not match its current eval contract`, { cause: error });
   }
 }
 
@@ -1066,23 +1086,6 @@ function formatMatrixScopeList(keys) {
   return `${shown.join(", ")}${values.length > shown.length ? `, and ${values.length - shown.length} more` : ""}`;
 }
 
-function readJsonRegular(filePath, maxBytes, label) {
-  const absolute = path.resolve(filePath);
-  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
-  const descriptor = fs.openSync(absolute, fs.constants.O_RDONLY | noFollow);
-  try {
-    const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile() || stat.size < 1 || stat.size > maxBytes) {
-      throw new Error(`${label} must be a non-empty regular file within its size limit`);
-    }
-    return JSON.parse(fs.readFileSync(descriptor, "utf8"));
-  } catch (error) {
-    throw new Error(`failed to read ${label}`, { cause: error });
-  } finally {
-    fs.closeSync(descriptor);
-  }
-}
-
 function readBenchmarkControlManifestDocument(filePath) {
   return parseModalDocumentBytes(
     MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID,
@@ -1134,13 +1137,6 @@ function strictRecord(value, label, expectedKeys) {
   const expected = [...expectedKeys].sort();
   if (JSON.stringify(keys) !== JSON.stringify(expected)) {
     throw new Error(`${label} must contain exactly ${expected.join(", ")}`);
-  }
-  return value;
-}
-
-function looseRecord(value, label) {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`);
   }
   return value;
 }
