@@ -84,7 +84,8 @@ import {
   dashboardSseEvents,
   dashboardSseCommandJobs,
   dashboardSseErrorMessage,
-  parseDashboardHttpResponse
+  parseDashboardHttpResponse,
+  throwDashboardHttpError
 } from "./wireContracts";
 import type { DashboardCommandJob, DashboardCommandName, DashboardHttpDocumentType } from "./wireContracts";
 
@@ -765,7 +766,7 @@ function App() {
         body: JSON.stringify(dashboardRequest("topology-save", { topology: nextTopology }))
       });
       if (!response.ok) {
-        throw new Error(await response.text());
+        await throwDashboardHttpError(response);
       }
       const saved = await parseDashboardHttpResponse<SaveTopologyResponse>(response, "topology-save");
       setMessage(`Saved ${saved.path}: ${saved.validation.message}`);
@@ -1161,7 +1162,7 @@ function App() {
           body: JSON.stringify(dashboardRequest("config-save", { content }))
         });
         if (!response.ok) {
-          throw new Error(await response.text());
+          await throwDashboardHttpError(response);
         }
         const saved = await parseDashboardHttpResponse<SaveConfigResponse>(response, "config-save");
         setMessage(`Saved ${saved.path}: ${saved.validation.message}`);
@@ -1449,7 +1450,7 @@ function App() {
           )
         });
         if (!response.ok) {
-          throw new Error(await response.text());
+          await throwDashboardHttpError(response);
         }
         const saved = await parseDashboardHttpResponse<SavePromptResponse>(response, "prompt-save");
         await loadTopology();
@@ -2960,7 +2961,7 @@ function diffLines(beforeLines: string[], afterLines: string[]): DiffRow[] {
 async function getJson<T>(url: string, documentType: DashboardHttpDocumentType): Promise<T> {
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(await response.text());
+    await throwDashboardHttpError(response);
   }
   return parseDashboardHttpResponse<T>(response, documentType);
 }
@@ -2980,7 +2981,7 @@ async function postCommandJson<T>(
     body: JSON.stringify(dashboardCommandRequest(command, commandArguments))
   });
   if (!response.ok) {
-    throw new Error(await response.text());
+    await throwDashboardHttpError(response);
   }
   return parseDashboardHttpResponse<T>(response, "command-job");
 }

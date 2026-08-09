@@ -12,6 +12,7 @@ export default tseslint.config(
       ".smithers/**",
       ".worktrees/**",
       ".ultrafuzz/**",
+      "packages/dashboard/frontend/.generated/**",
       "coverage/**"
     ]
   },

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { validatePromptTemplateVariables } from "./templateValidation";
 import type { TemplateValidation } from "./templateValidation";
-import { dashboardRequest, parseDashboardHttpResponse } from "./wireContracts";
+import { dashboardRequest, parseDashboardHttpResponse, throwDashboardHttpError } from "./wireContracts";
 
 export const promptAutosaveDelayMs = 1500;
 
@@ -42,7 +42,7 @@ type UseManagedPromptEditorOptions = {
 async function getPromptDetail<T>(url: string): Promise<T> {
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(await response.text());
+    await throwDashboardHttpError(response);
   }
   return parseDashboardHttpResponse<T>(response, "prompt-detail");
 }
@@ -147,7 +147,7 @@ export function useManagedPromptEditor({
           body: JSON.stringify(dashboardRequest("prompt-save", { content }))
         });
         if (!response.ok) {
-          throw new Error(await response.text());
+          await throwDashboardHttpError(response);
         }
         await parseDashboardHttpResponse(response, "prompt-save");
         const refreshed = await getPromptDetail<Omit<ManagedPromptDetail, "endpoint">>(endpoint);

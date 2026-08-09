@@ -11,5 +11,6 @@ pnpm-lock.yaml
 
 packages/*/dist
 packages/*/dist-test
+packages/dashboard/frontend/.generated
 
 prompts/**/*.md

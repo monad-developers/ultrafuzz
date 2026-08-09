@@ -5,10 +5,14 @@ import {
   DASHBOARD_FRONTEND_JSON_MAX_BYTES,
   DASHBOARD_HTTP_SCHEMA_VERSION,
   DASHBOARD_SSE_SCHEMA_VERSION,
+  dashboardCommandRequest,
+  dashboardRequest,
   dashboardSseCommandJobs,
   dashboardSseErrorMessage,
   dashboardSseEvents,
-  parseDashboardHttpResponse
+  parseDashboardHttpDocument,
+  parseDashboardHttpResponse,
+  throwDashboardHttpError
 } from "../frontend/src/wireContracts.js";
 
 test("frontend HTTP readers strictly parse bounded current dashboard bytes", async () => {
@@ -44,12 +48,68 @@ test("frontend HTTP readers strictly parse bounded current dashboard bytes", asy
     ),
     redactedError(/unsupported schema version/u, "unsupported-do-not-echo")
   );
+
+  assert.throws(
+    () =>
+      parseDashboardHttpDocument(
+        {
+          schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
+          document_type: "flow",
+          nodes: "not-an-array",
+          edges: null,
+          unexpected: true
+        },
+        "flow"
+      ),
+    /does not match its registered JSON Schema/u
+  );
+  assert.throws(
+    () => parseDashboardHttpDocument({ ...valid, unexpected: true }, "error"),
+    /does not match its registered JSON Schema/u
+  );
 });
 
 test("frontend HTTP readers stop oversized response streams at the shared byte limit", async () => {
   const oversized = new Uint8Array(DASHBOARD_FRONTEND_JSON_MAX_BYTES + 1);
   oversized.fill(0x20);
   await assert.rejects(parseDashboardHttpResponse(byteResponse(oversized), "error"), /invalid strict JSON \(limit\)/u);
+});
+
+test("frontend request builders and non-success responses use the canonical HTTP schema", async () => {
+  assert.deepEqual(
+    dashboardRequest("config-save", {
+      schema_version: "do-not-override",
+      request_type: "topology-save",
+      content: "example"
+    }),
+    {
+      schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
+      request_type: "config-save",
+      content: "example"
+    }
+  );
+  assert.throws(() => dashboardRequest("config-save", {}), /does not match its registered JSON Schema/u);
+  assert.throws(
+    () => dashboardCommandRequest("run", { maxConcurrency: 0 }),
+    /does not match its registered JSON Schema/u
+  );
+
+  await assert.rejects(
+    throwDashboardHttpError(
+      jsonResponse(
+        JSON.stringify({
+          schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
+          document_type: "error",
+          error: "canonical failure"
+        })
+      )
+    ),
+    /canonical failure/u
+  );
+  await assert.rejects(
+    throwDashboardHttpError(jsonResponse("unbounded-do-not-echo")),
+    redactedError(/invalid strict JSON \(syntax\)/u, "unbounded-do-not-echo")
+  );
 });
 
 test("frontend SSE readers accept each current envelope and reject duplicate keys at any depth", () => {
@@ -111,6 +171,12 @@ test("frontend SSE readers accept each current envelope and reject duplicate key
     '"status":"running","status":"do-not-echo"'
   );
   assert.throws(() => dashboardSseCommandJobs(duplicateJob), redactedError(/duplicate-key/u, "do-not-echo"));
+
+  const invalidEvents = JSON.stringify({
+    ...eventsEnvelope,
+    payload: { ...eventsEnvelope.payload, events: "not-an-array" }
+  });
+  assert.throws(() => dashboardSseEvents(invalidEvents), /does not match its registered JSON Schema/u);
 });
 
 test("frontend SSE failures are bounded and do not echo rejected values or fields", () => {
@@ -139,7 +205,10 @@ test("frontend SSE failures are bounded and do not echo rejected values or field
     "unknown-do-not-echo": true,
     payload: { message: "example" }
   });
-  assert.throws(() => dashboardSseErrorMessage(unknownField), redactedError(/1 unknown field/u, "unknown-do-not-echo"));
+  assert.throws(
+    () => dashboardSseErrorMessage(unknownField),
+    redactedError(/does not match its registered JSON Schema/u, "unknown-do-not-echo")
+  );
 
   const tooDeep = `${"[".repeat(130)}null${"]".repeat(130)}`;
   assert.throws(() => dashboardSseErrorMessage(tooDeep), /invalid strict JSON \(limit\)/u);

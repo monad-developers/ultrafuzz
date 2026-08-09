@@ -1,4 +1,5 @@
 import { parseStrictJson, parseStrictJsonBytes, StrictJsonError } from "@ultrafuzz/artifacts/strict-json";
+import { validateDashboardHttpSchema, validateDashboardSseSchema } from "../.generated/dashboard-wire-validators.js";
 
 export const DASHBOARD_HTTP_SCHEMA_VERSION = "ultrafuzz.dashboard.http.v1" as const;
 export const DASHBOARD_SSE_SCHEMA_VERSION = "ultrafuzz.dashboard.sse.v1" as const;
@@ -60,27 +61,37 @@ export interface DashboardCommandJob {
   exitCode?: number;
 }
 
+interface DashboardErrorDocument {
+  schema_version: typeof DASHBOARD_HTTP_SCHEMA_VERSION;
+  document_type: "error";
+  error: string;
+}
+
 export function dashboardRequest(
   requestType: DashboardRequestType,
   fields: Record<string, unknown>
 ): Record<string, unknown> {
-  return {
+  const request = {
+    ...fields,
     schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
-    request_type: requestType,
-    ...fields
+    request_type: requestType
   };
+  assertDashboardHttpSchema(request, `dashboard ${requestType} request`);
+  return request;
 }
 
 export function dashboardCommandRequest(
   command: DashboardCommandName,
   commandArguments: Record<string, unknown>
 ): Record<string, unknown> {
-  return {
+  const request = {
     schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
     request_type: "command",
     command,
     arguments: commandArguments
   };
+  assertDashboardHttpSchema(request, `dashboard ${command} command request`);
+  return request;
 }
 
 export function parseDashboardHttpDocument<T>(value: unknown, documentType: DashboardHttpDocumentType): T {
@@ -91,6 +102,7 @@ export function parseDashboardHttpDocument<T>(value: unknown, documentType: Dash
   if (document.document_type !== documentType) {
     throw new Error("dashboard HTTP document has an unexpected document type");
   }
+  assertDashboardHttpSchema(value, `dashboard ${documentType} document`);
   return document as T;
 }
 
@@ -104,142 +116,54 @@ export async function parseDashboardHttpResponse<T>(
   return parseDashboardHttpDocument<T>(value, documentType);
 }
 
+export async function throwDashboardHttpError(response: Response): Promise<never> {
+  const document = await parseDashboardHttpResponse<DashboardErrorDocument>(response, "error");
+  throw new Error(document.error);
+}
+
 export function dashboardSseEvents(serialized: string): Record<string, unknown> {
-  const value = parseDashboardJsonText(serialized, "dashboard SSE events envelope");
-  const envelope = requireRecord(value, "dashboard SSE events envelope");
-  assertSseIdentity(envelope, "ultrafuzz-event");
+  const envelope = parseDashboardSseEnvelope(serialized, "dashboard SSE events envelope", "ultrafuzz-event");
   const payload = requireRecord(envelope.payload, "dashboard SSE events payload");
-  assertOnlyKeys(payload, [
-    "schema_version",
-    "document_type",
-    "source",
-    "events",
-    "malformed_records",
-    "truncated_records"
-  ]);
-  return parseDashboardHttpDocument(payload, "events");
+  return payload;
 }
 
 export function dashboardSseErrorMessage(serialized: string): string {
-  const value = parseDashboardJsonText(serialized, "dashboard SSE error envelope");
-  const envelope = requireRecord(value, "dashboard SSE error envelope");
-  assertSseIdentity(envelope, "ultrafuzz-error");
+  const envelope = parseDashboardSseEnvelope(serialized, "dashboard SSE error envelope", "ultrafuzz-error");
   const payload = requireRecord(envelope.payload, "dashboard SSE error payload");
-  assertOnlyKeys(payload, ["message"]);
   return requireString(payload.message, "SSE error message");
 }
 
 export function dashboardSseCommandJobs(serialized: string): DashboardCommandJob[] {
-  const value = parseDashboardJsonText(serialized, "dashboard SSE command envelope");
-  const envelope = requireRecord(value, "dashboard SSE command envelope");
-  assertSseIdentity(envelope, "ultrafuzz-command-jobs");
+  const envelope = parseDashboardSseEnvelope(serialized, "dashboard SSE command envelope", "ultrafuzz-command-jobs");
   const payload = requireRecord(envelope.payload, "dashboard SSE command payload");
-  assertOnlyKeys(payload, ["jobs"]);
   const jobs = payload.jobs;
   if (!Array.isArray(jobs)) throw new Error("dashboard SSE command jobs must be an array");
-  return jobs.map((job, index) => parseCommandJob(job, index));
+  return jobs as DashboardCommandJob[];
 }
 
-function parseCommandJob(value: unknown, index: number): DashboardCommandJob {
-  const job = requireRecord(value, `dashboard command job ${index}`);
-  assertOnlyKeys(job, [
-    "schema_version",
-    "document_type",
-    "jobId",
-    "command",
-    "status",
-    "startedAtUnixSeconds",
-    "finishedAtUnixSeconds",
-    "argv",
-    "output",
-    "error",
-    "exitCode"
-  ]);
-  if (job.schema_version !== DASHBOARD_HTTP_SCHEMA_VERSION || job.document_type !== "command-job") {
-    throw new Error(`dashboard command job ${index} has unsupported identity`);
-  }
-  const jobId = requireString(job.jobId, `command job ${index} ID`);
-  if (!/^job-[a-z0-9]+-[a-f0-9]{8}$/u.test(jobId)) throw new Error(`dashboard command job ${index} has invalid ID`);
-  const command = parseCommandName(job.command, index);
-  const status = job.status;
-  if (status !== "running" && status !== "succeeded" && status !== "failed") {
-    throw new Error(`dashboard command job ${index} has invalid status`);
-  }
-  if (!Array.isArray(job.argv) || !job.argv.every((entry) => typeof entry === "string" && entry.length > 0)) {
-    throw new Error(`dashboard command job ${index} has invalid argv`);
-  }
-  const startedAtUnixSeconds = requireNonnegativeInteger(job.startedAtUnixSeconds, `command job ${index} start`);
-  const finishedAtUnixSeconds = optionalNonnegativeInteger(job.finishedAtUnixSeconds, `command job ${index} finish`);
-  const exitCode = optionalNonnegativeInteger(job.exitCode, `command job ${index} exit code`);
-  if (exitCode !== undefined && exitCode > 255) throw new Error(`dashboard command job ${index} has invalid exit code`);
-  if (
-    status === "running" &&
-    (finishedAtUnixSeconds !== undefined || exitCode !== undefined || job.error !== undefined)
-  ) {
-    throw new Error(`running dashboard command job ${index} has terminal fields`);
-  }
-  if (status !== "running" && (finishedAtUnixSeconds === undefined || exitCode === undefined)) {
-    throw new Error(`finished dashboard command job ${index} is missing terminal fields`);
-  }
-  if ((status === "succeeded" && exitCode !== 0) || (status === "failed" && (exitCode ?? 0) < 1)) {
-    throw new Error(`dashboard command job ${index} status and exit code disagree`);
-  }
-  return {
-    schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
-    document_type: "command-job",
-    jobId,
-    command,
-    status,
-    startedAtUnixSeconds,
-    ...(finishedAtUnixSeconds === undefined ? {} : { finishedAtUnixSeconds }),
-    argv: [...job.argv],
-    output: typeof job.output === "string" ? job.output : invalidString(`command job ${index} output`),
-    ...(job.error === undefined ? {} : { error: requireString(job.error, `command job ${index} error`) }),
-    ...(exitCode === undefined ? {} : { exitCode })
-  };
-}
-
-function assertSseIdentity(envelope: Record<string, unknown>, eventType: string): void {
-  assertOnlyKeys(envelope, ["schema_version", "event_type", "sequence", "generated_at", "payload"]);
+function parseDashboardSseEnvelope(
+  serialized: string,
+  label: string,
+  eventType: "ultrafuzz-event" | "ultrafuzz-error" | "ultrafuzz-command-jobs"
+): Record<string, unknown> {
+  const value = parseDashboardJsonText(serialized, label);
+  const envelope = requireRecord(value, label);
   if (envelope.schema_version !== DASHBOARD_SSE_SCHEMA_VERSION) {
     throw new Error("dashboard SSE envelope has an unsupported schema version");
   }
   if (envelope.event_type !== eventType) {
     throw new Error("dashboard SSE envelope has an unexpected event type");
   }
-  if (!Number.isSafeInteger(envelope.sequence) || Number(envelope.sequence) < 0) {
-    throw new Error("dashboard SSE sequence must be a nonnegative safe integer");
+  if (!validateDashboardSseSchema(value)) {
+    throw new Error(`${label} does not match its registered JSON Schema`);
   }
-  if (typeof envelope.generated_at !== "string" || !Number.isFinite(Date.parse(envelope.generated_at))) {
-    throw new Error("dashboard SSE generated_at must be a timestamp");
-  }
+  return envelope;
 }
 
-function parseCommandName(value: unknown, index: number): DashboardCommandName {
-  switch (value) {
-    case "validate":
-    case "run":
-    case "ps":
-    case "inspect":
-    case "resume":
-    case "replay":
-    case "fork":
-    case "report":
-    case "references-status":
-    case "references-sync":
-    case "references-update":
-    case "materialize":
-    case "clean":
-      return value;
-    default:
-      throw new Error(`dashboard command job ${index} has invalid command`);
+function assertDashboardHttpSchema(value: unknown, label: string): void {
+  if (!validateDashboardHttpSchema(value)) {
+    throw new Error(`${label} does not match its registered JSON Schema`);
   }
-}
-
-function assertOnlyKeys(record: Record<string, unknown>, allowed: readonly string[]): void {
-  const allowedKeys = new Set(allowed);
-  const unknownCount = Object.keys(record).filter((key) => !allowedKeys.has(key)).length;
-  if (unknownCount > 0) throw new Error(`dashboard document has ${unknownCount} unknown field(s)`);
 }
 
 async function readBoundedResponseBytes(response: Response, label: string): Promise<Uint8Array> {
@@ -318,17 +242,4 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
 function requireString(value: unknown, label: string): string {
   if (typeof value !== "string" || value.length === 0) throw new Error(`${label} must be a non-empty string`);
   return value;
-}
-
-function requireNonnegativeInteger(value: unknown, label: string): number {
-  if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error(`${label} must be a nonnegative safe integer`);
-  return Number(value);
-}
-
-function optionalNonnegativeInteger(value: unknown, label: string): number | undefined {
-  return value === undefined ? undefined : requireNonnegativeInteger(value, label);
-}
-
-function invalidString(label: string): never {
-  throw new Error(`${label} must be a string`);
 }
