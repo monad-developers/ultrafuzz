@@ -50,9 +50,10 @@ function baseRenderInput(tmp: string): PromptRenderInput {
             },
             {
               path: "references/expectations.json",
-              contract: "ultrafuzz/reference-expectations@1",
+              contract: "ultrafuzz/reference-expectations@2",
               primary: false,
-              description: "A typed benchmark expectation catalog."
+              description: "A typed benchmark expectation catalog.",
+              schemaFile: "reference-expectations.schema.json"
             }
           ],
           artifactDir: path.join(runArtifacts, "base-test-setup")
@@ -63,17 +64,20 @@ function baseRenderInput(tmp: string): PromptRenderInput {
           outputs: [
             {
               path: "findings.json",
-              contract: "ultrafuzz/findings@1",
+              contract: "ultrafuzz/findings@2",
               primary: true,
               description: "A findings array with severity_guess.",
-              validEmptyExample: "[]"
+              validEmptyExample: "[]",
+              schemaFile: "findings.schema.json"
             },
             {
               path: "generated-tests.json",
-              contract: "ultrafuzz/generated-tests@1",
+              contract: "ultrafuzz/generated-tests@2",
               primary: false,
               description: "A manifest containing generated_tests.",
-              validEmptyExample: '{"generated_tests":[]}'
+              validEmptyExample:
+                '{"schema_version":"ultrafuzz.generated-tests.v2","run_id":"run-1","node_id":"boundary-tests-0","generated_tests":[]}',
+              schemaFile: "generated-tests.schema.json"
             }
           ],
           artifactDir: path.join(runArtifacts, "boundary-tests")
@@ -124,9 +128,8 @@ describe("prompt rendering", () => {
     const input = baseRenderInput(tmp);
     const findingsOutput = input.graph.logicalNodes
       .flatMap((node) => node.outputs ?? [])
-      .find((output) => output.contract === "ultrafuzz/findings@1");
+      .find((output) => output.contract === "ultrafuzz/findings@2");
     expect(findingsOutput).toBeDefined();
-    findingsOutput!.schemaFile = "findings.schema.json";
     const schemaDirectory = path.join(input.node.workspacePath, ".ultrafuzz", "schemas");
 
     const result = renderPrompt(input);
@@ -153,15 +156,23 @@ describe("prompt rendering", () => {
     ]) {
       expect(result.renderedMarkdown).toContain(guidance);
     }
-    // The sibling output declares no schema file, so it must not gain a dangling path.
-    expect(result.renderedMarkdown).not.toContain("generated-tests.schema.json");
+    expect(result.renderedMarkdown).toContain("generated-tests.schema.json");
   });
 
   it("omits the schema pointer when no output ships a schema", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
 
-    const result = renderPrompt(baseRenderInput(tmp));
+    const input = baseRenderInput(tmp);
+    input.graph.logicalNodes[2]!.outputs = [
+      {
+        path: "notes.md",
+        contract: "ultrafuzz/nonempty-markdown@1",
+        primary: true,
+        description: "A non-empty Markdown document."
+      }
+    ];
+    const result = renderPrompt(input);
 
     expect(result.renderedMarkdown).not.toContain("Validate against:");
     expect(result.renderedMarkdown).not.toContain("Validation command:");
@@ -173,9 +184,6 @@ describe("prompt rendering", () => {
     const specialRoot = path.join(tmp, "path with spaces, '$dollar', and `ticks`");
     const input = baseRenderInput(specialRoot);
     const outputs = input.graph.logicalNodes[2]!.outputs!;
-    outputs[0]!.schemaFile = "findings.schema.json";
-    outputs[1]!.schemaFile = "generated-tests.schema.json";
-
     const result = renderPrompt(input);
 
     expect(result.renderedMarkdown.match(/Validation command:/gu)).toHaveLength(2);

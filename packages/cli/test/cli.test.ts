@@ -5,7 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { artifactContractDefinition, layoutForRunRoot, writeArtifactManifest } from "@ultrafuzz/artifacts";
+import {
+  FINDINGS_SCHEMA_VERSION,
+  REPORT_SCHEMA_VERSION,
+  artifactContractDefinition,
+  artifactContractSchemaBinding,
+  layoutForRunRoot,
+  writeArtifactManifest
+} from "@ultrafuzz/artifacts";
 import AdmZip from "adm-zip";
 
 import { runCli } from "../src/index.js";
@@ -212,15 +219,22 @@ function writeFinalReportAccounting(
     path.join(reportDir, "report.json"),
     `${JSON.stringify(
       {
-        schema_version: "1.0",
+        schema_version: REPORT_SCHEMA_VERSION,
         run_metadata: {
+          run_id: path.basename(runRoot),
+          source_run_id: "none",
+          repository: "unavailable",
+          elapsed_time: "unavailable",
+          models_used: [],
           tokens_used: accounting.tokensUsed,
           estimated_spend: accounting.estimatedSpend,
           partial_pricing: accounting.partialPricing,
+          strategy_loops: 1,
           source_run_ids: []
         },
         issues: [],
-        non_production_outcomes: []
+        non_production_outcomes: [],
+        property_provenance: []
       },
       null,
       2
@@ -228,6 +242,55 @@ function writeFinalReportAccounting(
     "utf8"
   );
   return reportDir;
+}
+
+function currentReport(runId: string, issues: Record<string, unknown>[] = []): Record<string, unknown> {
+  return {
+    schema_version: REPORT_SCHEMA_VERSION,
+    run_metadata: {
+      run_id: runId,
+      source_run_id: "none",
+      repository: "unavailable",
+      elapsed_time: "unavailable",
+      models_used: [],
+      tokens_used: "unavailable",
+      estimated_spend: "unavailable",
+      partial_pricing: false,
+      strategy_loops: 1
+    },
+    issues,
+    non_production_outcomes: [],
+    property_provenance: []
+  };
+}
+
+function currentReportIssue(id = "finding-1"): Record<string, unknown> {
+  return {
+    schema_version: FINDINGS_SCHEMA_VERSION,
+    id,
+    title: "[M-01] - Canonical finding",
+    status: "confirmed",
+    severity_guess: "Medium",
+    confidence: "high",
+    summary: "A bounded state transition violates the expected relationship.",
+    description: "A caller can reach a state that violates the documented relationship.",
+    severity: "Medium",
+    impact: "Medium",
+    likelihood: "Medium",
+    impact_rationale: "The affected state remains bounded.",
+    likelihood_rationale: "The transition uses ordinary preconditions.",
+    severity_rationale: "Medium impact and Medium likelihood map to Medium.",
+    proof_of_concept: {
+      scenario: ["Prepare the bounded state.", "Execute the transition and observe the mismatch."],
+      language: "solidity",
+      code: "function testCanonicalFinding() public {}"
+    },
+    lifecycle: {
+      dedupe_key: `dedupe-${id}`,
+      source_artifacts: [],
+      strategy_hits: []
+    }
+  };
 }
 
 function accountingMismatchCount(value: Record<string, unknown>): number {
@@ -551,8 +614,8 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     "utf8"
   );
   const reportDir = writeFinalReportAccounting(runData.run_root, {
-    tokensUsed: "unavailable",
-    estimatedSpend: "unavailable",
+    tokensUsed: "123",
+    estimatedSpend: "$0.46+",
     partialPricing: true
   });
 
@@ -794,7 +857,7 @@ test("report accepts populated accounting snapshots and preserves partial-pricin
   });
   const missingPlusReport = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(missingPlusReport.code, 0, missingPlusReport.stderr);
-  assert.equal(accountingMismatchCount(parseJson(missingPlusReport)), 0);
+  assert.equal(accountingMismatchCount(parseJson(missingPlusReport)), 2);
 
   writeRunAccounting(runData.run_root, {
     totalTokens: 725_905,
@@ -824,674 +887,140 @@ test("report accepts populated accounting snapshots and preserves partial-pricin
   assert.equal(accountingMismatchCount(parseJson(estimatedReport)), 0);
 });
 
-test("report regenerates canonical Markdown from structured issues and non-production outcomes", async () => {
+test("report validates current artifacts without rewriting agent-owned bytes", async () => {
   const project = tempProject();
-  assert.equal((await cli(project, ["init", "--force"])).code, 0);
-  writeSmallTopology(project);
-
-  const run = await cli(project, ["run", "--run-id", "report-reconciliation", "--json"], fakeSmithersEnv(project));
-  assert.equal(run.code, 0, run.stderr);
-  const runData = parseJson(run).data as { run_id: string; run_root: string };
-  writeRunAccounting(runData.run_root, {
-    totalTokens: 321,
-    tokensUsed: "321",
-    estimatedSpend: "$0.72",
-    partialPricing: false
-  });
-
-  const reportDir = path.join(runData.run_root, "artifacts", "final-report");
-  fs.mkdirSync(reportDir, { recursive: true });
-  const reportPath = path.join(reportDir, "report.json");
-  fs.writeFileSync(
-    reportPath,
-    `${JSON.stringify(
-      {
-        schema_version: "1.0",
-        run_metadata: {
-          source_run_id: "none",
-          repository: "https://github.com/example/report-contract",
-          elapsed_time: "1h 2m",
-          models_used: ["gpt-test xhigh"],
-          tokens_used: "unavailable",
-          estimated_spend: "unavailable",
-          strategy_loops: "8 loops per strategy",
-          internal_accounting_note: "must remain structured-only"
-        },
-        issues: [
-          {
-            schema_version: "1.0",
-            id: "finding-stable-1",
-            title: "[M-01] - Structured issue title",
-            status: "confirmed",
-            severity_guess: "Medium",
-            severity: "Medium",
-            confidence: "high",
-            summary: "Structured issue summary.",
-            description:
-              "Depositor can exercise the structured path which leads to the recorded state becoming inconsistent.",
-            impact: "Medium",
-            impact_rationale: "Structured impact rationale.",
-            likelihood: "Medium",
-            likelihood_rationale: "Structured likelihood rationale.",
-            proof_of_concept: {
-              scenario: [
-                "Depositor prepares the structured state.",
-                "Depositor runs the focused check and observes the inconsistency."
-              ],
-              language: "solidity",
-              code: "function testExample() public {}"
-            },
-            recommendation: "Apply the structured remediation.",
-            strategy: "stateful-invariant",
-            strategy_provenance: {
-              detection_rates: [{ strategy: "stateful-invariant", detections: 2, configured_loops: 8 }],
-              attempts: [{ loop_index: 1, model: "internal-test-model" }]
-            },
-            property_ids: ["property-report-contract-1"],
-            lifecycle: {
-              dedupe_key: "internal-dedupe-key",
-              source_artifacts: ["internal/artifact.json"],
-              strategy_hits: ["stateful-invariant"]
-            }
-          }
-        ],
-        non_production_outcomes: [
-          {
-            title: "Review-only outcome",
-            triage_classification: "harness-defect",
-            status: "non-production",
-            summary: "Retained for review.",
-            evidence: "Focused harness evidence.",
-            strategy_provenance: {
-              detection_rates: [{ strategy: "stateful-invariant", detections: 1, configured_loops: 8 }]
-            },
-            recommended_next_action: "Repair the focused harness.",
-            lifecycle: { dedupe_key: "internal-outcome-key", source_artifacts: ["internal/outcome.json"] }
-          }
-        ],
-        property_implementation_coverage: {
-          priority_threshold: "high",
-          priorities: ["high"],
-          selected_property_ids: ["bogus"],
-          implemented_property_ids: ["bogus"],
-          blocked_property_ids: [],
-          pending_property_ids: [],
-          deferred_property_ids: []
-        },
-        property_provenance: [
-          {
-            finding_id: "finding-stable-1",
-            title: "[M-01] - Structured issue title",
-            property_ids: ["property-report-contract-1"],
-            sources: [
-              {
-                source_node_id: "property-specification-example",
-                source_property_id: "property-specification-example-001"
-              }
-            ],
-            implementation_paths: ["src/Example.sol"],
-            test_paths: ["test/ExampleInvariant.t.sol"],
-            fuzzer_backend: "echidna"
-          }
-        ],
-        internal_adapter_note: "must not render"
-      },
-      null,
-      2
-    )}\n`,
-    "utf8"
-  );
-  fs.mkdirSync(path.join(runData.run_root, "artifacts", "property-specification-fanin"), { recursive: true });
-  fs.writeFileSync(
-    path.join(runData.run_root, "artifacts", "property-specification-fanin", "properties.json"),
-    JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
-      properties: [
-        {
-          id: "property-report-contract-1",
-          description: "Structured report property",
-          category: "accounting",
-          priority: "high",
-          reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"],
-          sources: [
-            {
-              source_node_id: "property-specification-example",
-              source_property_id: "property-specification-example-001"
-            }
-          ]
-        }
-      ]
-    }),
-    "utf8"
-  );
-  fs.mkdirSync(path.join(runData.run_root, "artifacts", "stateful-invariant-implement-properties"), {
-    recursive: true
-  });
-  fs.writeFileSync(
-    path.join(runData.run_root, "artifacts", "stateful-invariant-implement-properties", "implemented-properties.json"),
-    JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
-      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-report-contract-1"] },
-      properties: [
-        {
-          property_id: "property-report-contract-1",
-          status: "implemented",
-          implementation_paths: ["src/Example.sol"],
-          test_paths: ["test/ExampleInvariant.t.sol"]
-        }
-      ]
-    }),
-    "utf8"
-  );
-  fs.mkdirSync(path.join(runData.run_root, "artifacts", "stateful-invariant-campaign"), { recursive: true });
-  fs.writeFileSync(
-    path.join(runData.run_root, "artifacts", "stateful-invariant-campaign", "recon-fuzzer-results.json"),
-    JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
-      fuzzer_backend: "recon",
-      failures: [{ id: "finding-stable-1", status: "reproduced", property_ids: ["property-report-contract-1"] }]
-    }),
-    "utf8"
-  );
-  fs.writeFileSync(
-    path.join(runData.run_root, "artifacts", "stateful-invariant-campaign", "medusa-results.json"),
-    JSON.stringify({
-      schema_version: "ultrafuzz.property-campaign.v1",
-      fuzzer_backend: "medusa",
-      failures: [{ id: "medusa-failure-1", status: "reproduced", property_ids: ["property-report-contract-1"] }]
-    }),
-    "utf8"
-  );
-  fs.writeFileSync(
-    path.join(runData.run_root, "artifacts", "stateful-invariant-campaign", "findings.json"),
-    JSON.stringify([
-      {
-        schema_version: "1.0",
-        id: "finding-stable-1",
-        title: "Structured issue title",
-        status: "reproduced",
-        severity_guess: "Medium",
-        confidence: "high",
-        summary: "The two backend failures share one deduplicated finding.",
-        property_ids: ["property-report-contract-1"],
-        fuzzer_backends: ["medusa", "recon"]
-      }
-    ]),
-    "utf8"
-  );
-  fs.writeFileSync(path.join(reportDir, "report.md"), "# Placeholder\n\nunavailable\n", "utf8");
-
-  const repaired = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(repaired.code, 0, repaired.stderr);
-  assert.equal(accountingMismatchCount(parseJson(repaired)), 0);
-  const markdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
-  assert.match(
-    markdown,
-    /^# Ultrafuzz report\n\n\| Issue id \| Title \|\n\| --- \| --- \|\n\| M-01 \| \[\[M-01\] - Structured issue title\]\(#m-01---structured-issue-title\) \|/u
-  );
-  assert.match(
-    markdown,
-    /The report contains 1 issues, with severity distribution 0 high, 1 medium, and 0 low\.\n\nUltrafuzz is an automated smart-contract fuzzing campaign assistant\. Issues below are machine-generated findings that must be manually validated\. This report is not a security review and does not guarantee the protocol is secure\./u
-  );
-  const runSummary = /^## Run summary\n\n(?<body>[\s\S]*?)(?=\n## )/mu.exec(markdown)?.groups?.body;
-  assert.ok(runSummary);
-  const runSummaryLabels = [...runSummary.matchAll(/^- ([^:]+): `[^`\n]+`$/gmu)].map((match) => match[1]);
-  assert.deepEqual(runSummaryLabels, [
-    "Run ID",
-    "Source run ID",
-    "Repository",
-    "Elapsed time",
-    "Models used",
-    "Tokens used",
-    "Estimated spend",
-    "Strategy loops"
-  ]);
-  assert.match(
-    markdown,
-    /## \[M-01\] - Structured issue title\n\nDepositor can exercise the structured path which leads to the recorded state becoming inconsistent\./u
-  );
-  assert.match(
-    markdown,
-    /### Severity\n\n- \*\*Impact\*\*: Medium: Structured impact rationale\.\n- \*\*Likelihood\*\*: Medium: Structured likelihood rationale\./u
-  );
-  assert.match(
-    markdown,
-    /### Proof of Concept\n\n1\. Depositor prepares the structured state\.\n2\. Depositor runs the focused check and observes the inconsistency\.\n\n```solidity\nfunction testExample\(\) public \{\}\n```/u
-  );
-  assert.equal(markdown.match(/^```/gmu)?.length, 2);
-  assert.match(
-    markdown,
-    /### Strategy\n\n\| Strategy \| Detection rate \|\n\| --- \| --- \|\n\| stateful-invariant \| 2\/8 \|/u
-  );
-  assert.match(
-    markdown,
-    /## Property provenance\n\n\| Finding \| Property IDs \| Source nodes \| Source property IDs \| Implementation\/test paths \| Fuzzer backends \|\n\| --- \| --- \| --- \| --- \| --- \| --- \|\n\| \\\[M-01\\\] - Structured issue title \| property-report-contract-1 \| property-specification-example \| property-specification-example-001 \| src\/Example\.sol<br>test\/ExampleInvariant\.t\.sol \| medusa<br>recon \|/u
-  );
-  assert.match(markdown, /## Property implementation coverage\n\n- Priority threshold: `high`/u);
-  assert.match(markdown, /- Reference expectation properties: `1`/u);
-  assert.match(
-    markdown,
-    /## Non-production actionable outcomes\n\n\| Classification \| Title \| Status \| Evidence \| Strategy provenance \| Recommended next action \|\n\| --- \| --- \| --- \| --- \| --- \| --- \|\n\| harness-defect \| Review-only outcome \| non-production \| Focused harness evidence\. \| stateful-invariant \(1\/8\) \| Repair the focused harness\. \|/u
-  );
-  assert.doesNotMatch(markdown, /unavailable/iu);
-  assert.doesNotMatch(markdown, /#### Sources/u);
-  assert.doesNotMatch(markdown, /\*\*Source Node Id\*\*/u);
-  assert.doesNotMatch(markdown, /\*\*Source Property Id\*\*/u);
-  assert.doesNotMatch(markdown, /Item 1/u);
-  assert.doesNotMatch(markdown, /## Executive summary/u);
-  assert.doesNotMatch(markdown, /## Issue index/u);
-  assert.doesNotMatch(markdown, /## Additional report data/u);
-  assert.doesNotMatch(markdown, /^#{3,6} Lifecycle$/imu);
-  assert.doesNotMatch(markdown, /^#{3,6} Strategy provenance$/imu);
-  assert.doesNotMatch(
-    markdown,
-    /internal-(?:dedupe|outcome)|internal\/artifact|internal\/outcome|internal-test-model|must remain structured-only|must not render/u
-  );
-  const json = JSON.parse(fs.readFileSync(reportPath, "utf8")) as {
-    run_metadata: Record<string, unknown>;
-    issues: Array<{ id: string; title: string }>;
-    property_provenance: Array<{ finding_id: string; title: string; fuzzer_backends?: string[] }>;
-    property_implementation_coverage: Record<string, unknown>;
-  };
-  assert.equal(json.run_metadata.tokens_used, "321");
-  assert.equal(json.run_metadata.estimated_spend, "$0.72");
-  assert.deepEqual(
-    json.issues.map(({ id, title }) => ({ id, title })),
-    [{ id: "M-01", title: "[M-01] - Structured issue title" }]
-  );
-  assert.deepEqual(
-    json.property_provenance.map(({ finding_id, title }) => ({ finding_id, title })),
-    [{ finding_id: "M-01", title: "[M-01] - Structured issue title" }]
-  );
-  assert.deepEqual(json.property_provenance[0]?.fuzzer_backends, ["medusa", "recon"]);
-  assert.deepEqual(json.property_implementation_coverage, {
-    priority_threshold: "high",
-    priorities: ["high"],
-    selected_property_ids: ["property-report-contract-1"],
-    implemented_property_ids: ["property-report-contract-1"],
-    blocked_property_ids: [],
-    pending_property_ids: [],
-    deferred_property_ids: [],
-    reference_expected_property_ids: ["property-report-contract-1"],
-    reference_expectation_ids: ["scfuzzbench:aave-v4:iSpoke_supply"],
-    blocker_summaries: []
-  });
-
-  fs.writeFileSync(
-    reportPath,
-    `${JSON.stringify(
-      {
-        schema_version: "1.0",
-        run_metadata: {
-          source_run_id: "none",
-          repository: "https://github.com/example/report-contract",
-          elapsed_time: "1h 2m",
-          models_used: ["gpt-test xhigh"],
-          strategy_loops: "8 loops per strategy"
-        },
-        issues: [],
-        non_production_outcomes: [
-          {
-            title: "Bounded non-production outcome",
-            triage_classification: "incomplete-spec",
-            status: "non-production",
-            summary: "Preserved context.",
-            evidence: "Bounded review evidence.",
-            strategy_provenance: {
-              detection_rates: [{ strategy: "stateful-invariant", detections: 1, configured_loops: 8 }]
-            },
-            recommended_next_action: "Complete the bounded specification."
-          }
-        ],
-        property_provenance: []
-      },
-      null,
-      2
-    )}\n`,
-    "utf8"
-  );
-  fs.unlinkSync(path.join(reportDir, "report.md"));
-  const recoveredMissingMarkdown = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(recoveredMissingMarkdown.code, 0, recoveredMissingMarkdown.stderr);
-  const zeroIssueMarkdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
-  assert.match(
-    zeroIssueMarkdown,
-    /^# Ultrafuzz report\n\nUltrafuzz is an automated smart-contract fuzzing campaign assistant\. Issues below are machine-generated findings that must be manually validated\. This report is not a security review and does not guarantee the protocol is secure\./u
-  );
-  assert.doesNotMatch(zeroIssueMarkdown, /\| Issue id \| Title \|/u);
-  assert.doesNotMatch(zeroIssueMarkdown, /The report contains/u);
-  assert.doesNotMatch(zeroIssueMarkdown, /^No issues reported\.?$/imu);
-  const zeroIssueRunSummary = /^## Run summary\n\n(?<body>[\s\S]*?)(?=\n## )/mu.exec(zeroIssueMarkdown)?.groups?.body;
-  assert.ok(zeroIssueRunSummary);
-  assert.equal([...zeroIssueRunSummary.matchAll(/^- [^:]+: `[^`\n]+`$/gmu)].length, 8);
-  assert.ok(zeroIssueMarkdown.indexOf("## Property provenance") < zeroIssueMarkdown.indexOf("## Non-production"));
-  assert.match(zeroIssueMarkdown, /## Property provenance\n\nNo property-derived findings\./u);
-  assert.match(
-    zeroIssueMarkdown,
-    /## Non-production actionable outcomes\n\n\| Classification \| Title \| Status \| Evidence \| Strategy provenance \| Recommended next action \|\n\| --- \| --- \| --- \| --- \| --- \| --- \|\n\| incomplete-spec \| Bounded non-production outcome \| non-production \| Bounded review evidence\. \| stateful-invariant \(1\/8\) \| Complete the bounded specification\. \|/u
-  );
-  assert.doesNotMatch(zeroIssueMarkdown, /## Executive summary|## Issue index|## Additional report data/u);
-  assert.doesNotMatch(zeroIssueMarkdown, /^#{3,6} (?:Lifecycle|Strategy provenance)$/imu);
-});
-
-test("report reconciliation normalizes alternate severities, recovers source runs, and preserves unavailable provenance", async () => {
-  const project = tempProject();
-  const runData = await createReportRun(project, "report-structured-reconciliation");
-  const runMetadataPath = path.join(runData.run_root, "run.json");
-  const statePath = path.join(runData.run_root, "state.json");
-  writeJsonRecord(runMetadataPath, {
-    ...(JSON.parse(fs.readFileSync(runMetadataPath, "utf8")) as Record<string, unknown>),
-    source_run_id: "source-from-run"
-  });
-  writeJsonRecord(statePath, {
-    ...(JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>),
-    source_run_id: "source-from-state"
-  });
-
+  const runData = await createReportRun(project, "report-current-artifacts");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
   const reportPath = path.join(reportDir, "report.json");
+  const markdownPath = path.join(reportDir, "report.md");
   fs.mkdirSync(reportDir, { recursive: true });
-  writeJsonRecord(reportPath, {
-    schema_version: "1.0",
-    run_metadata: { source_run_id: "stale-source" },
-    issues: [
-      {
-        schema_version: "1.0",
-        id: "structured-severity",
-        title: "Structured severity finding",
-        status: "confirmed",
-        severity: "Critical",
-        severity_guess: "Critical",
-        final_severity: "Critical",
-        confidence: "high",
-        summary: "A structured state transition violates the expected relationship.",
-        description: "A caller can reach a state that violates the documented relationship.",
-        impact: "Medium",
-        impact_rationale: "The affected state remains bounded.",
-        likelihood: "Low",
-        likelihood_rationale: "The transition requires uncommon preconditions.",
-        proof_of_concept: {
-          scenario: ["Prepare the bounded state.", "Execute the transition and observe the mismatch."]
-        },
-        recommendation: "Enforce the relationship before committing state.",
-        strategy: "stateful-invariant",
-        strategy_provenance: {
-          detection_rates: [{ strategy: "stateful-invariant", detections: 1, configured_loops: 4 }]
-        },
-        lifecycle: {
-          severity: "Critical",
-          final_severity: "Critical",
-          canonical_severity: "Critical"
-        }
-      }
-    ],
-    non_production_outcomes: [],
-    property_provenance: "unavailable"
-  });
+  writeJsonRecord(reportPath, currentReport(runData.run_id));
+  fs.writeFileSync(markdownPath, "# Agent-authored report\n\nNo issues reported.\n", "utf8");
+  const jsonBefore = fs.readFileSync(reportPath);
+  const markdownBefore = fs.readFileSync(markdownPath);
 
-  const reconciled = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(reconciled.code, 0, reconciled.stderr);
-  let report = JSON.parse(fs.readFileSync(reportPath, "utf8")) as {
-    run_metadata: { source_run_id?: string };
-    issues: Array<{ id: string; severity?: string; severity_guess?: string }>;
-    property_provenance?: unknown;
-  };
-  assert.equal(report.run_metadata.source_run_id, "source-from-run");
-  assert.equal(report.issues[0]?.severity, "Low");
-  assert.equal(report.issues[0]?.severity_guess, "Low");
-  assert.equal(report.property_provenance, "unavailable");
-  assert.doesNotMatch(JSON.stringify(report), /Critical/u);
+  const result = await cli(project, ["report", runData.run_id, "--json"]);
 
-  const runMetadata = JSON.parse(fs.readFileSync(runMetadataPath, "utf8")) as Record<string, unknown>;
-  delete runMetadata.source_run_id;
-  writeJsonRecord(runMetadataPath, runMetadata);
-  const stateFallback = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(stateFallback.code, 0, stateFallback.stderr);
-  report = JSON.parse(fs.readFileSync(reportPath, "utf8")) as typeof report;
-  assert.equal(report.run_metadata.source_run_id, "source-from-state");
+  assert.equal(result.code, 0, result.stderr);
+  const data = parseJson(result).data as { json_path: string; markdown_path: string; source: string };
+  assert.equal(data.json_path, reportPath);
+  assert.equal(data.markdown_path, markdownPath);
+  assert.equal(data.source, "validated-agent-report");
+  assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
+  assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
 });
 
-test("canonical report Markdown neutralizes injected markup and redacts secrets and internal paths", async () => {
+test("report rejects final_severity compatibility aliases without rewriting artifacts", async () => {
   const project = tempProject();
-  const runData = await createReportRun(project, "report-public-prose");
-  const reportDir = path.join(runData.run_root, "artifacts", "final-report");
-  fs.mkdirSync(reportDir, { recursive: true });
-  writeJsonRecord(path.join(reportDir, "report.json"), {
-    schema_version: "1.0",
-    run_metadata: {},
-    issues: [
-      {
-        schema_version: "1.0",
-        id: "public-prose-finding",
-        title: "Markup <script>alert(1)</script> title",
-        status: "confirmed",
-        severity: "Medium",
-        severity_guess: "Medium",
-        confidence: "high",
-        summary: "Public summary.",
-        description:
-          "Summary with token=synthetic-report-value and /home/runner/private/reproducer.sol.\n## Injected heading\n[click](https://example.invalid) ![pixel](https://example.invalid/pixel.png) <img src=x onerror=alert(1)>",
-        impact: "Medium",
-        impact_rationale: "Bounded impact <em>must not become HTML</em>.",
-        likelihood: "Medium",
-        likelihood_rationale: "Ordinary preconditions.",
-        proof_of_concept: {
-          scenario: ["Prepare the state.", "Run the check with <iframe src=x></iframe> input."]
-        },
-        recommendation: "Validate the transition.",
-        strategy: "stateful-invariant",
-        strategy_provenance: {
-          detection_rates: [{ strategy: "stateful-invariant", detections: 2, configured_loops: 5 }]
-        }
-      }
-    ],
-    non_production_outcomes: [],
-    property_provenance: []
-  });
-
-  const rendered = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(rendered.code, 0, `${rendered.stderr}${rendered.stdout}`);
-  const markdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
-  assert.doesNotMatch(markdown, /synthetic-report-value/u);
-  assert.doesNotMatch(markdown, /\/home\/runner\/private\/reproducer\.sol/u);
-  assert.doesNotMatch(markdown, /<(?:script|img|iframe|em)\b/iu);
-  assert.doesNotMatch(markdown, /^## Injected heading$/mu);
-  assert.doesNotMatch(markdown, /(?<!\\)\[click\]\(/u);
-  assert.doesNotMatch(markdown, /(?<!\\)!\[pixel\]\(/u);
-});
-
-test("canonical production reports require an exact strategy rate but accept a prose-only proof of concept", async () => {
-  const project = tempProject();
-  const runData = await createReportRun(project, "report-evidence-requirements");
+  const runData = await createReportRun(project, "report-rejects-severity-alias");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
   const reportPath = path.join(reportDir, "report.json");
+  const markdownPath = path.join(reportDir, "report.md");
   fs.mkdirSync(reportDir, { recursive: true });
-  const report: Record<string, unknown> = {
-    schema_version: "1.0",
-    run_metadata: {},
-    issues: [
-      {
-        schema_version: "1.0",
-        id: "evidence-requirements",
-        title: "Evidence requirements",
-        status: "confirmed",
-        severity: "Medium",
-        severity_guess: "Medium",
-        confidence: "high",
-        summary: "The bounded check demonstrates a state mismatch.",
-        description: "The bounded check demonstrates a state mismatch.",
-        impact: "Medium",
-        impact_rationale: "The mismatch affects bounded state.",
-        likelihood: "Medium",
-        likelihood_rationale: "The check exercises ordinary inputs.",
-        proof_of_concept: {
-          scenario: ["Prepare the bounded state.", "Execute the check and observe the mismatch."]
-        },
-        recommendation: "Validate the state relationship.",
-        strategy: "stateful-invariant",
-        strategy_provenance: {
-          detection_rates: [{ strategy: "stateful-invariant" }]
-        }
-      }
-    ],
-    non_production_outcomes: [],
-    property_provenance: []
-  };
-  writeJsonRecord(reportPath, report);
+  writeJsonRecord(reportPath, currentReport(runData.run_id, [{ ...currentReportIssue(), final_severity: "Medium" }]));
+  fs.writeFileSync(markdownPath, "# Agent-authored report\n", "utf8");
+  const jsonBefore = fs.readFileSync(reportPath);
+  const markdownBefore = fs.readFileSync(markdownPath);
 
-  const missingRate = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(missingRate.code, 1);
-  assert.match(JSON.stringify(parseJson(missingRate).diagnostics), /strategy|detection|historical|Markdown/iu);
-  assert.equal(fs.existsSync(path.join(reportDir, "report.md")), false);
+  const result = await cli(project, ["report", runData.run_id, "--json"]);
 
-  const issue = (report.issues as Array<Record<string, unknown>>)[0]!;
-  issue.strategy_provenance = {
-    detection_rates: [{ strategy: "stateful-invariant", detections: 3, configured_loops: 6 }]
-  };
-  writeJsonRecord(reportPath, report);
-  const proseOnlyProof = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(proseOnlyProof.code, 0, proseOnlyProof.stderr);
-  const markdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
-  assert.match(markdown, /1\. Prepare the bounded state\./u);
-  assert.match(markdown, /2\. Execute the check and observe the mismatch\./u);
-  assert.equal(markdown.match(/^```/gmu)?.length ?? 0, 0);
-  assert.match(markdown, /\| stateful-invariant \| 3\/6 \|/u);
+  assert.equal(result.code, 1);
+  assert.match(JSON.stringify(parseJson(result).diagnostics), /ARTIFACT_SCHEMA_INVALID|additional propert/iu);
+  assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
+  assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
 });
 
-test("current invariant reports with malformed issues fail closed instead of preserving stale coverage", async () => {
+test("report does not synthesize missing Markdown", async () => {
+  const project = tempProject();
+  const runData = await createReportRun(project, "report-missing-markdown");
+  const reportDir = path.join(runData.run_root, "artifacts", "final-report");
+  const reportPath = path.join(reportDir, "report.json");
+  const markdownPath = path.join(reportDir, "report.md");
+  fs.mkdirSync(reportDir, { recursive: true });
+  writeJsonRecord(reportPath, currentReport(runData.run_id));
+  const jsonBefore = fs.readFileSync(reportPath);
+
+  const result = await cli(project, ["report", runData.run_id, "--json"]);
+
+  assert.equal(result.code, 1);
+  assert.match(JSON.stringify(parseJson(result).diagnostics), /report Markdown path does not exist/iu);
+  assert.equal(fs.existsSync(markdownPath), false);
+  assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
+});
+
+test("report accepts canonical severity and complete proof without rewriting either artifact", async () => {
+  const project = tempProject();
+  const runData = await createReportRun(project, "report-canonical-severity");
+  const reportDir = path.join(runData.run_root, "artifacts", "final-report");
+  const reportPath = path.join(reportDir, "report.json");
+  const markdownPath = path.join(reportDir, "report.md");
+  fs.mkdirSync(reportDir, { recursive: true });
+  writeJsonRecord(reportPath, currentReport(runData.run_id, [currentReportIssue()]));
+  fs.writeFileSync(markdownPath, "# Canonical agent-authored report\n", "utf8");
+  const jsonBefore = fs.readFileSync(reportPath);
+  const markdownBefore = fs.readFileSync(markdownPath);
+
+  const result = await cli(project, ["report", runData.run_id, "--json"]);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
+  assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
+  const report = JSON.parse(jsonBefore.toString("utf8")) as { issues: Array<Record<string, unknown>> };
+  assert.equal(report.issues[0]?.severity, "Medium");
+  assert.equal(Object.hasOwn(report.issues[0] ?? {}, "final_severity"), false);
+});
+
+test("current reports with malformed issues fail closed without preserving stale bytes", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-current-malformed");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
   const reportPath = path.join(reportDir, "report.json");
+  const markdownPath = path.join(reportDir, "report.md");
   fs.mkdirSync(reportDir, { recursive: true });
-  fs.mkdirSync(path.join(runData.run_root, "artifacts", "property-specification-fanin"), { recursive: true });
-  fs.mkdirSync(path.join(runData.run_root, "artifacts", "stateful-invariant-implement-properties"), {
-    recursive: true
-  });
-  writeJsonRecord(path.join(runData.run_root, "artifacts", "property-specification-fanin", "properties.json"), {
-    schema_version: "ultrafuzz.properties.v1",
-    properties: []
-  });
   writeJsonRecord(
-    path.join(runData.run_root, "artifacts", "stateful-invariant-implement-properties", "implemented-properties.json"),
-    {
-      schema_version: "ultrafuzz.implemented-properties.v1",
-      selection: { priority_threshold: "high", priorities: ["high"], property_ids: [] },
-      properties: []
-    }
-  );
-  writeJsonRecord(reportPath, {
-    schema_version: "1.0",
-    run_metadata: {},
-    issues: [
+    reportPath,
+    currentReport(runData.run_id, [
       {
-        schema_version: "1.0",
+        schema_version: FINDINGS_SCHEMA_VERSION,
         id: "malformed-current",
         title: "Malformed current issue",
         status: "confirmed",
         severity_guess: "Medium",
         confidence: "high",
-        summary: "Missing renderable evidence."
+        summary: "Missing required report evidence."
       }
-    ],
-    non_production_outcomes: [],
-    property_implementation_coverage: "unavailable"
-  });
-  fs.writeFileSync(path.join(reportDir, "report.md"), "# historical placeholder\n", "utf8");
+    ])
+  );
+  fs.writeFileSync(markdownPath, "# Agent-authored malformed report\n", "utf8");
+  const jsonBefore = fs.readFileSync(reportPath);
+  const markdownBefore = fs.readFileSync(markdownPath);
 
   const result = await cli(project, ["report", runData.run_id, "--json"]);
+
   assert.equal(result.code, 1);
-  assert.match(
-    JSON.stringify(parseJson(result).diagnostics),
-    /current invariant final report|historical|renderable|FINDINGS_SCHEMA_INVALID/iu
-  );
+  assert.match(JSON.stringify(parseJson(result).diagnostics), /ARTIFACT_SCHEMA_INVALID.*required/iu);
+  assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
+  assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
 });
 
-test("historical loose reports preserve conforming Markdown and reject missing or nonconforming Markdown", async () => {
+test("legacy report versions are rejected without a compatibility reader", async () => {
   const project = tempProject();
-  const runData = await createReportRun(project, "report-historical-compatibility");
+  const runData = await createReportRun(project, "report-legacy-version");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
   const reportPath = path.join(reportDir, "report.json");
   const markdownPath = path.join(reportDir, "report.md");
   fs.mkdirSync(reportDir, { recursive: true });
-  writeJsonRecord(reportPath, {
-    schema_version: "1.0",
-    run_metadata: {},
-    issues: [
-      {
-        schema_version: "1.0",
-        id: "historical-issue",
-        title: "Historical issue",
-        status: "confirmed",
-        severity: "Medium",
-        severity_guess: "Medium",
-        confidence: "high",
-        summary: "Historical public summary."
-      }
-    ],
-    non_production_outcomes: []
-  });
-  const historicalMarkdown = [
-    "# Ultrafuzz report",
-    "",
-    "| Issue id | Title |",
-    "| --- | --- |",
-    "| M-01 | [[M-01] - Historical issue](#m-01---historical-issue) |",
-    "",
-    "The report contains 1 issues, with severity distribution 0 high, 1 medium, and 0 low.",
-    "",
-    "Ultrafuzz is an automated smart-contract fuzzing campaign assistant. Issues below are machine-generated findings that must be manually validated. This report is not a security review and does not guarantee the protocol is secure.",
-    "",
-    "## Run summary",
-    "",
-    "- Run ID: `historical-run`",
-    "- Source run ID: `none`",
-    "- Repository: `unavailable`",
-    "- Elapsed time: `unavailable`",
-    "- Models used: `unavailable`",
-    "- Tokens used: `unavailable`",
-    "- Estimated spend: `unavailable`",
-    "- Strategy loops: `unavailable`",
-    "",
-    "## [M-01] - Historical issue",
-    "",
-    "Historical public summary.",
-    "",
-    "### Severity",
-    "",
-    "- **Impact**: Medium: Historical impact rationale.",
-    "- **Likelihood**: Medium: Historical likelihood rationale.",
-    "",
-    "### Proof of Concept",
-    "",
-    "1. Prepare the historical state and observe the mismatch.",
-    "",
-    "### Strategy",
-    "",
-    "| Strategy | Detection rate |",
-    "| --- | --- |",
-    "| stateful-invariant | 1/2 |",
-    "",
-    "## Property provenance",
-    "",
-    "No property-derived findings.",
-    ""
-  ].join("\n");
-  fs.writeFileSync(markdownPath, historicalMarkdown, "utf8");
+  writeJsonRecord(reportPath, { ...currentReport(runData.run_id), schema_version: "1.0" });
+  fs.writeFileSync(markdownPath, "# Legacy report\n", "utf8");
+  const jsonBefore = fs.readFileSync(reportPath);
+  const markdownBefore = fs.readFileSync(markdownPath);
 
-  const preserved = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(preserved.code, 0, `${preserved.stderr}${preserved.stdout}`);
-  assert.equal(fs.readFileSync(markdownPath, "utf8"), historicalMarkdown);
+  const result = await cli(project, ["report", runData.run_id, "--json"]);
 
-  fs.writeFileSync(markdownPath, "# Historical agent report\n", "utf8");
-  const nonconforming = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(nonconforming.code, 1);
-  assert.match(JSON.stringify(parseJson(nonconforming).diagnostics), /historical|Markdown|final-review/iu);
-
-  fs.unlinkSync(markdownPath);
-  const missing = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(missing.code, 1);
-  assert.match(JSON.stringify(parseJson(missing).diagnostics), /historical|Markdown|missing/iu);
+  assert.equal(result.code, 1);
+  assert.match(JSON.stringify(parseJson(result).diagnostics), /ARTIFACT_SCHEMA_INVALID.*constant/iu);
+  assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
+  assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
 });
 
 test("report bundle creates a portable ZIP without workspaces or stale report backups", async () => {
@@ -1513,7 +1042,8 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
     estimatedSpend: "$0.46",
     partialPricing: false
   });
-  fs.writeFileSync(path.join(reportDir, "report.md"), "# Placeholder\n\nunavailable\n", "utf8");
+  const reportSchemaBinding = artifactContractSchemaBinding("ultrafuzz/report@2");
+  assert.ok(reportSchemaBinding);
   writeArtifactManifest({
     layout: layoutForRunRoot(runData.run_root, runData.run_id),
     nodeId: "final-report",
@@ -1527,8 +1057,9 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
       },
       {
         path: "report.json",
-        contract: "ultrafuzz/report@1",
-        contract_digest: artifactContractDefinition("ultrafuzz/report@1").digest,
+        contract: "ultrafuzz/report@2",
+        contract_digest: artifactContractDefinition("ultrafuzz/report@2").digest,
+        ...reportSchemaBinding,
         primary: true
       }
     ]

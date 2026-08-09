@@ -11,7 +11,7 @@ test("eval history renders and checks deterministic public charts", async () => 
   fs.mkdirSync(path.join(project, "benchmarks"), { recursive: true });
   fs.writeFileSync(
     path.join(project, "benchmarks", "history.json"),
-    '{"schema_version":"ultrafuzz.eval.history.v1","observations":[]}\n',
+    '{"schema_version":"ultrafuzz.eval.history.v1","supersessions":[],"observations":[]}\n',
     "utf8"
   );
 

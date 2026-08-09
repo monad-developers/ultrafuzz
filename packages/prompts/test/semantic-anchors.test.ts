@@ -351,7 +351,7 @@ describe("prompt semantic anchors", () => {
     expect(campaignNode?.outputs?.map((output) => output.path)).not.toContain("echidna-results.json");
     expect(campaignNode?.outputs?.map((output) => output.path)).not.toContain("medusa-results.json");
     expect(campaignNode?.outputs?.find((output) => output.path === "campaign-summary.json")?.contract).toBe(
-      "ultrafuzz/campaign-summary@1"
+      "ultrafuzz/campaign-summary@2"
     );
     expect(topology.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).toContain(
       "stateful-invariant-campaign"
@@ -565,7 +565,8 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("| High | High | High | Medium |");
     expect(markdown.toLowerCase()).toContain("public reachability");
     expect(markdown).toContain("incomplete-spec");
-    expect(markdown).toContain("final_severity == matrix(impact, likelihood)");
+    expect(markdown).toContain("severity == matrix(impact, likelihood)");
+    expect(markdown).toContain("Never emit `final_severity` or another alias");
     expect(markdown).toContain("Do not emit `Critical`");
   });
 
@@ -576,13 +577,14 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("High impact + Low likelihood must render as Medium");
     expect(markdown).toContain("Medium impact + Low likelihood must render as Low");
     expect(markdown).toContain("Every production issue severity equals the Impact x Likelihood matrix result");
-    expect(markdown).toContain("canonical normalized finding");
+    expect(markdown).toContain("canonical finding v2");
     expect(markdown).toContain("`severity_guess`, `severity`, `impact`, and");
     expect(markdown).toContain("canonical `strategy` field a non-empty");
     expect(markdown).toContain("structured `strategy_provenance` object");
     expect(markdown).toContain("non-empty `detection_rates` or `strategies` array");
     expect(markdown).toContain("Use exactly one of\nthese array keys; never emit both");
-    expect(markdown).toContain("omit both `fuzzer_backend` and `fuzzer_backends`");
+    expect(markdown).toContain("Never emit both fields");
+    expect(markdown).toContain("When no known campaign backend produced the\nfinding, omit both");
   });
 
   it("keeps the empty findings array contract in prompt-owned templates", () => {
@@ -591,12 +593,13 @@ describe("prompt semantic anchors", () => {
     );
     const template = readFileSync(templatePath, "utf8");
     expect(template).toContain("Use `[]` when there are no findings");
-    expect(template).toContain("without anchors or line selectors");
-    // The contract accepts findings without a schema_version, so the template must not demand one.
-    expect(template).not.toContain('Use `schema_version: "1.0"`');
-    expect(template).toContain("`schema_version` is optional");
+    expect(template).toContain('Every finding must set `schema_version` to exactly `"ultrafuzz.finding.v2"`');
+    expect(template).toContain("Unknown fields are invalid");
+    expect(template).toContain("Evidence entries are either non-empty strings or closed objects");
+    expect(template).not.toContain("`schema_version` is optional");
     expect(template).toContain("exactly `High`, `Medium`, or `Low`");
-    expect(template).toContain("including findings that are or may become non-production records");
+    expect(template).toContain("later severity review owns the final `severity`");
+    expect(template).not.toContain("final_severity");
   });
 
   it("keeps Vyper target setup guidance concrete for Foundry harnesses", () => {

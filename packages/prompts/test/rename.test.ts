@@ -16,7 +16,7 @@ describe("prompt ID rename sync", () => {
             outputs: [
               {
                 path: "boundary-tests/generated-tests.json",
-                contract: "ultrafuzz/generated-tests@1",
+                contract: "ultrafuzz/generated-tests@2",
                 primary: true
               }
             ]

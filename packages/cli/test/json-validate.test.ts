@@ -22,9 +22,9 @@ test("json validate exposes the strict validator through the primary CLI", async
     const duplicate = path.join(temporary, "duplicate.json");
     const invalidUtf8 = path.join(temporary, "invalid-utf8.json");
     const missing = path.join(temporary, "missing.json");
-    fs.writeFileSync(valid, '{"schema_version":"ultrafuzz.properties.v1","properties":[]}');
-    fs.writeFileSync(invalid, '{"schema_version":"ultrafuzz.properties.v1","properties":[],"extra":true}');
-    fs.writeFileSync(duplicate, '{"schema_version":"ultrafuzz.properties.v1","properties":[],"properties":[]}');
+    fs.writeFileSync(valid, '{"schema_version":"ultrafuzz.properties.v2","properties":[]}');
+    fs.writeFileSync(invalid, '{"schema_version":"ultrafuzz.properties.v2","properties":[],"extra":true}');
+    fs.writeFileSync(duplicate, '{"schema_version":"ultrafuzz.properties.v2","properties":[],"properties":[]}');
     fs.writeFileSync(invalidUtf8, Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xff, 0x7d]));
     const schemaBefore = fs.readFileSync(schema);
     const validBefore = fs.readFileSync(valid);
@@ -85,7 +85,7 @@ test("a producer can correct an invalid draft in-session and rerun to exit zero"
   try {
     const schema = path.join(artifactSchemaDirectory(), "properties.schema.json");
     const artifact = path.join(temporary, "producer-artifact.json");
-    const invalidDraft = '{"schema_version":"ultrafuzz.properties.v1","properties":[],"extra":true}\n';
+    const invalidDraft = '{"schema_version":"ultrafuzz.properties.v2","properties":[],"extra":true}\n';
     fs.writeFileSync(artifact, invalidDraft, "utf8");
 
     const rejected = await capture(["json", "validate", "--schema", schema, "--file", artifact]);
@@ -93,7 +93,7 @@ test("a producer can correct an invalid draft in-session and rerun to exit zero"
     assert.match(rejected.stderr, /JSON_SCHEMA_VIOLATION/u);
     assert.equal(fs.readFileSync(artifact, "utf8"), invalidDraft, "the validator must not rewrite the draft");
 
-    fs.writeFileSync(artifact, '{"schema_version":"ultrafuzz.properties.v1","properties":[]}\n', "utf8");
+    fs.writeFileSync(artifact, '{"schema_version":"ultrafuzz.properties.v2","properties":[]}\n', "utf8");
     const corrected = await capture(["json", "validate", "--schema", schema, "--file", artifact]);
     assert.equal(corrected.code, 0);
     assert.match(corrected.stdout, /^valid:/u);
