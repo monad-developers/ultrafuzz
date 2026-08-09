@@ -5,17 +5,15 @@ import path from "node:path";
 import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 
-import { smithersDependencyInstallArgs, withTransientNpmRegistryRetry } from "@ultrafuzz/runtime";
-
 import {
   modalAttemptVerificationMarkerName,
   modalNodeDispatchFingerprint,
   modalNodeHandoffContentFingerprint,
-  parseModalNodeSandboxInput,
   parseModalNodeWorkerInput,
   readModalExecutionDependencyClosure,
   verifyModalExecutionSnapshotClosure
 } from "./node-provider.js";
+import type { parseModalNodeSandboxInput } from "./node-provider.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
 const DURABLE_WORKSPACE_DIRECTORY = "workspace";
