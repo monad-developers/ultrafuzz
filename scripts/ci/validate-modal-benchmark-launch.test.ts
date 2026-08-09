@@ -30,6 +30,42 @@ describe("Modal benchmark launch guardrails", () => {
     });
   });
 
+  it("accepts the exact canonical threat-model plan through the launch API and CLI", () => {
+    const fixture = preparedFixture("threat-model");
+    const expected = {
+      mode: "threat-model",
+      benchmark: "ultrafuzz-bench",
+      execution: { mode: "modal", dry_run: false },
+      target_count: 3,
+      matrix_rows_per_pair: 3,
+      pair_count: 1
+    };
+    expect(validateModalBenchmarkLaunch(fixture.input)).toEqual(expected);
+    expect(
+      JSON.parse(
+        execFileSync(
+          process.execPath,
+          [
+            path.join(path.resolve("."), "scripts/ci/validate-modal-benchmark-launch.mjs"),
+            fixture.manifestPath,
+            path.resolve("."),
+            "threat-model"
+          ],
+          { cwd: path.resolve("."), encoding: "utf8" }
+        )
+      )
+    ).toEqual(expected);
+    expect(readJson<LaunchConfig>(fixture.configPath).models).toEqual([
+      expect.objectContaining({
+        provider: "openai",
+        agent: "CodexAgent",
+        model: "gpt-5.6-luna",
+        reasoning: "high",
+        slug: "benchmark-threat-model-gpt-5-6-luna-high"
+      })
+    ]);
+  });
+
   it("rejects one-target canonical smoke manifests before dispatch", () => {
     const fixture = preparedSmokeFixture();
     const manifest = readJson<LaunchManifest>(fixture.manifestPath);
@@ -151,23 +187,21 @@ interface LaunchManifest {
 
 interface LaunchConfig {
   public_benchmark: { targets: LaunchTarget[] };
+  models: Array<Record<string, unknown>>;
 }
 
 function preparedSmokeFixture() {
+  return preparedFixture("smoke");
+}
+
+function preparedFixture(mode: "smoke" | "threat-model") {
   const workspace = path.resolve(".");
   const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-launch-"));
   roots.push(output);
   execFileSync(
     process.execPath,
-    [
-      path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
-      candidate,
-      repository,
-      "12345-1",
-      output,
-      "smoke"
-    ],
-    { cwd: workspace }
+    [path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"), candidate, repository, "12345-1", output, mode],
+    { cwd: workspace, env: { ...process.env, BENCHMARK_MODELS_JSON: "" } }
   );
   const manifestPath = path.join(output, "manifest.json");
   const manifest = readJson<LaunchManifest>(manifestPath);
@@ -177,7 +211,7 @@ function preparedSmokeFixture() {
     input: {
       manifestPath,
       policyRoot: workspace,
-      expectedMode: "smoke"
+      expectedMode: mode
     }
   };
 }

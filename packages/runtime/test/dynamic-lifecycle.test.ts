@@ -631,3 +631,51 @@ test("dynamic state materialization checks the synchronization deadline before p
   assert.equal(fs.readFileSync(statePath, "utf8"), stateBefore);
   assert.equal(fs.readFileSync(runEventsPath, "utf8"), eventsBefore);
 });
+
+test("dynamic lifecycle admission rejects graph, task, and state extensions not derived from sealed controls", async () => {
+  const fixture = await createDynamicFixture({ runId: "dynamic-control-admission" });
+  const graphPath = path.join(fixture.runRoot, "graph.json");
+  const tasksPath = path.join(fixture.runRoot, "smithers", "tasks.json");
+  const statePath = path.join(fixture.runRoot, "state.json");
+  const graphBytes = fs.readFileSync(graphPath, "utf8");
+  const taskBytes = fs.readFileSync(tasksPath, "utf8");
+  const stateBytes = fs.readFileSync(statePath, "utf8");
+
+  const rejectControlMutation = async (message: RegExp): Promise<void> => {
+    const result = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_INVALID" && message.test(diagnostic.message)
+      ),
+      JSON.stringify(result.diagnostics)
+    );
+    assert.equal(fs.readFileSync(statePath, "utf8"), stateBytes);
+  };
+
+  const graph = JSON.parse(graphBytes) as Record<string, unknown>;
+  graph.unadmitted_control = true;
+  fs.writeFileSync(graphPath, `${JSON.stringify(graph, null, 2)}\n`, "utf8");
+  await rejectControlMutation(/dynamic runtime graph does not match/u);
+  fs.writeFileSync(graphPath, graphBytes, "utf8");
+
+  const tasks = JSON.parse(taskBytes) as Record<string, unknown>;
+  tasks.unadmitted_control = true;
+  fs.writeFileSync(tasksPath, `${JSON.stringify(tasks, null, 2)}\n`, "utf8");
+  await rejectControlMutation(/dynamic runtime task plan does not match/u);
+  fs.writeFileSync(tasksPath, taskBytes, "utf8");
+
+  const state = JSON.parse(stateBytes) as RunState;
+  state.nodes["injected-control-node"] = structuredClone(state.nodes.planner!);
+  fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  const rejectedState = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+  assert.equal(rejectedState.ok, false);
+  assert.ok(
+    rejectedState.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_INVALID" &&
+        /outside the verified dynamic runtime graph/u.test(diagnostic.message)
+    ),
+    JSON.stringify(rejectedState.diagnostics)
+  );
+});

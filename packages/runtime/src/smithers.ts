@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
@@ -20,20 +21,44 @@ import { invariantPropertyPrioritySelection, resolveExecutionResources, type Res
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
+import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
 import { renderRuntimeTemplate } from "./runtime-template.js";
+import {
+  acquireSmithersExecutableAnchor,
+  bindSmithersExecutableCapability,
+  smithersExecutableCapability,
+  type SmithersExecutableAnchor
+} from "./smithers-executable-capability.js";
+import type { WorkflowExecutionControlFile } from "./workflow-integrity.js";
+import {
+  acquireWorkflowExecutionSnapshotAnchor,
+  hasWorkflowExecutionSnapshotCapability,
+  type WorkflowExecutionSnapshotAnchor
+} from "./workflow-execution-snapshot-capability.js";
 import {
   assertSmithersPackageManifest,
   migrateLegacySmithersPackageManifest,
   SMITHERS_ORCHESTRATOR_BIN_PATH,
-  SMITHERS_ORCHESTRATOR_VERSION
+  SMITHERS_ORCHESTRATOR_VERSION,
+  smithersDependencyInstallArgs
 } from "./smithers-package.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
-import { DEFERRED_PROMPT_TEMPLATE_DIR, sha256Stable } from "./utils.js";
+import { DEFERRED_PROMPT_TEMPLATE_DIR, sha256Stable, stableJson } from "./utils.js";
 
 const execFileAsync = promisify(execFile);
 const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
+const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
 const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
+const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
+const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION = "ultrafuzz.workflow-execution-dependencies.v1" as const;
+const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
+const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = [
+  "@smithers-orchestrator/tool-context",
+  "react",
+  "smithers-orchestrator",
+  "zod"
+] as const;
 const SMITHERS_CLI_DETACHED_ADMISSION_SOURCE = "export const DETACHED_ADMISSION_TIMEOUT_MS = 30_000;";
 const SMITHERS_CLI_DETACHED_ADMISSION_PATCH = "export const DETACHED_ADMISSION_TIMEOUT_MS = 300_000;";
 const SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE = `        const supervisor = spawn("bun", supervisorArgs, {
@@ -52,6 +77,210 @@ const SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH = `        const supervisorFd = openSy
         } finally {
           closeSync(supervisorFd);
         }`;
+const SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE =
+  'import { closeSync, readFileSync, existsSync, mkdirSync, openSync, statSync, writeFileSync, writeSync } from "node:fs";';
+const SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH =
+  'import { closeSync, readFileSync, existsSync, mkdirSync, openSync, realpathSync, statSync, writeFileSync, writeSync } from "node:fs";';
+const SMITHERS_CLI_WORKFLOW_PATH_SOURCE = `    const resolvedWorkflowPath = resolve(process.cwd(), workflowPath);
+    const { resume, resumeRunId } = normalizeResumeOption(options.resume);`;
+const SMITHERS_CLI_WORKFLOW_PATH_PATCH = `    const resolvedWorkflowPath = resolve(process.cwd(), workflowPath);
+    const persistedWorkflowPathValue = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
+    const persistedWorkflowPath = persistedWorkflowPathValue
+      ? resolve(process.cwd(), persistedWorkflowPathValue)
+      : resolvedWorkflowPath;
+    if (realpathSync(resolvedWorkflowPath) !== realpathSync(persistedWorkflowPath)) {
+      return fail({
+        code: "INVALID_WORKFLOW_PATH",
+        message: "Controller workflow path does not match its persisted workflow path",
+        exitCode: 4,
+      });
+    }
+    const { resume, resumeRunId } = normalizeResumeOption(options.resume);`;
+const SMITHERS_CLI_POST_FAILURE_PATH_SOURCE = `        launchPostFailureAutopsy({
+          failedRunId: result.runId,
+          workflowPath: resolvedWorkflowPath,
+          enabled: options.postFailure !== false,
+        });`;
+const SMITHERS_CLI_POST_FAILURE_PATH_PATCH = `        launchPostFailureAutopsy({
+          failedRunId: result.runId,
+          workflowPath: persistedWorkflowPath,
+          enabled: options.postFailure !== false,
+        });`;
+const SMITHERS_CLI_REPLAY_WORKFLOW_PATH_SOURCE =
+  "          const resolvedReplayWorkflowPath = resolve(c.args.workflow);";
+const SMITHERS_CLI_REPLAY_WORKFLOW_PATH_PATCH = `          const resolvedReplayWorkflowPath = resolve(c.args.workflow);
+          const persistedReplayWorkflowPathValue =
+            process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
+          const persistedReplayWorkflowPath = persistedReplayWorkflowPathValue
+            ? resolve(persistedReplayWorkflowPathValue)
+            : resolvedReplayWorkflowPath;
+          if (realpathSync(resolvedReplayWorkflowPath) !== realpathSync(persistedReplayWorkflowPath)) {
+            return fail({
+              code: "INVALID_WORKFLOW_PATH",
+              message: "Controller replay workflow path does not match its persisted workflow path",
+              exitCode: 4,
+            });
+          }`;
+const SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_SOURCE = `            workflowPath: resolvedReplayWorkflowPath,
+            workflowHash: await readWorkflowGraphHash(resolvedReplayWorkflowPath),
+            entryWorkflowHash: await readWorkflowEntryHash(resolvedReplayWorkflowPath),`;
+const SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_PATCH = `            workflowPath: persistedReplayWorkflowPath,
+            workflowHash: await readWorkflowGraphHash(
+              resolvedReplayWorkflowPath,
+              persistedReplayWorkflowPath,
+            ),
+            entryWorkflowHash: await readWorkflowEntryHash(resolvedReplayWorkflowPath),`;
+const SMITHERS_CLI_FORK_WORKFLOW_PATH_SOURCE = "          const resolvedForkWorkflowPath = resolve(c.args.workflow);";
+const SMITHERS_CLI_FORK_WORKFLOW_PATH_PATCH = `          const resolvedForkWorkflowPath = resolve(c.args.workflow);
+          const persistedForkWorkflowPathValue =
+            process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
+          const persistedForkWorkflowPath = persistedForkWorkflowPathValue
+            ? resolve(persistedForkWorkflowPathValue)
+            : resolvedForkWorkflowPath;
+          if (realpathSync(resolvedForkWorkflowPath) !== realpathSync(persistedForkWorkflowPath)) {
+            return fail({
+              code: "INVALID_WORKFLOW_PATH",
+              message: "Controller fork workflow path does not match its persisted workflow path",
+              exitCode: 4,
+            });
+          }`;
+const SMITHERS_CLI_FORK_WORKFLOW_METADATA_SOURCE = `            workflowPath: resolvedForkWorkflowPath,
+            workflowHash: await readWorkflowGraphHash(resolvedForkWorkflowPath),
+            entryWorkflowHash: await readWorkflowEntryHash(resolvedForkWorkflowPath),`;
+const SMITHERS_CLI_FORK_WORKFLOW_METADATA_PATCH = `            workflowPath: persistedForkWorkflowPath,
+            workflowHash: await readWorkflowGraphHash(
+              resolvedForkWorkflowPath,
+              persistedForkWorkflowPath,
+            ),
+            entryWorkflowHash: await readWorkflowEntryHash(resolvedForkWorkflowPath),`;
+// Smithers executes through the descriptor path but persists the stable lexical
+// generation path. Every durable path/hash sink must keep those identities
+// separate or the next lifecycle command inherits a dead /proc path.
+const SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_SOURCE = `          runConfigJson,
+          runMetadata,
+          resolvedWorkflowPath,
+        );`;
+const SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_PATCH = `          runConfigJson,
+          runMetadata,
+          persistedWorkflowPath,
+        );`;
+const SMITHERS_ENGINE_DESCRIPTOR_EXECUTION_PATH_ANCHOR = "workflowPath: resolvedWorkflowPath ?? opts.workflowPath,";
+const SMITHERS_ENGINE_DESCRIPTOR_DRIVER_PATH_ANCHOR = "workflowPath: resolvedWorkflowPath,";
+const SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE =
+  "  const resolvedWorkflowPath = opts.workflowPath ? resolve(opts.workflowPath) : null;";
+const SMITHERS_ENGINE_WORKFLOW_PATH_PATCH = `  const resolvedWorkflowPath = opts.workflowPath ? resolve(opts.workflowPath) : null;
+  const persistedWorkflowPathValue = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
+  const persistedWorkflowPath = opts.workflowPath
+    ? resolve(persistedWorkflowPathValue || opts.workflowPath)
+    : null;
+  if (
+    resolvedWorkflowPath &&
+    persistedWorkflowPath &&
+    realpathSync(resolvedWorkflowPath) !== realpathSync(persistedWorkflowPath)
+  ) {
+    throw new SmithersError(
+      "INVALID_WORKFLOW_PATH",
+      "Controller workflow path does not match its persisted workflow path",
+    );
+  }`;
+const SMITHERS_ENGINE_DURABILITY_METADATA_SOURCE = `/**
+ * @param {string | null} workflowPath
+ * @param {string} rootDir
+ * @returns {Promise<RunDurabilityMetadata>}
+ */
+async function getRunDurabilityMetadata(workflowPath, rootDir) {
+  const entryWorkflowHash = await readWorkflowEntryHash(workflowPath);
+  const workflowHash = await readWorkflowGraphHash(workflowPath);`;
+const SMITHERS_ENGINE_DURABILITY_METADATA_PATCH = `/**
+ * @param {string | null} workflowPath
+ * @param {string} rootDir
+ * @param {string | null} [identityWorkflowPath]
+ * @returns {Promise<RunDurabilityMetadata>}
+ */
+async function getRunDurabilityMetadata(workflowPath, rootDir, identityWorkflowPath = workflowPath) {
+  const entryWorkflowHash = await readWorkflowEntryHash(workflowPath);
+  const workflowHash = await readWorkflowGraphHash(workflowPath, identityWorkflowPath);`;
+const SMITHERS_ENGINE_RUN_METADATA_SOURCE =
+  "  const runMetadata = await getRunDurabilityMetadata(resolvedWorkflowPath, rootDir);";
+const SMITHERS_ENGINE_RUN_METADATA_PATCH = `  const runMetadata = await getRunDurabilityMetadata(
+    resolvedWorkflowPath,
+    rootDir,
+    persistedWorkflowPath,
+  );`;
+const SMITHERS_ENGINE_RESUME_IDENTITY_SOURCE = `          runMetadata,
+          resolvedWorkflowPath,
+          {
+            acceptWorkflowChange: "acceptWorkflowChange" in opts && opts.acceptWorkflowChange === true,`;
+const SMITHERS_ENGINE_RESUME_IDENTITY_PATCH = `          runMetadata,
+          persistedWorkflowPath,
+          {
+            acceptWorkflowChange: "acceptWorkflowChange" in opts && opts.acceptWorkflowChange === true,`;
+const SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE = `          workflowName: "workflow",
+          workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? null,
+          workflowHash: runMetadata.workflowHash,`;
+const SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH = `          workflowName: "workflow",
+          workflowPath: persistedWorkflowPath ?? opts.workflowPath ?? null,
+          workflowHash: runMetadata.workflowHash,`;
+const SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_SOURCE =
+  "          workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? existingRun.workflowPath ?? null,";
+const SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_PATCH =
+  "          workflowPath: persistedWorkflowPath ?? opts.workflowPath ?? existingRun.workflowPath ?? null,";
+const SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_SOURCE =
+  "          workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? latestRun?.workflowPath ?? null,";
+const SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_PATCH =
+  "          workflowPath: persistedWorkflowPath ?? opts.workflowPath ?? latestRun?.workflowPath ?? null,";
+const SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_SOURCE = 'import { dirname, resolve } from "node:path";';
+const SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_PATCH = 'import { dirname, relative, resolve } from "node:path";';
+const SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_SOURCE = `/**
+ * @param {string} workflowPath
+ * @returns {Promise<string[]>}
+ */
+async function collectWorkflowModuleHashEntries(workflowPath, visited = new Set()) {
+  const resolvedPath = resolve(workflowPath);`;
+const SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_PATCH = `/**
+ * @param {string} workflowPath
+ * @param {string} [identityWorkflowPath]
+ * @param {Set<string>} [visited]
+ * @returns {Promise<string[]>}
+ */
+async function collectWorkflowModuleHashEntries(
+  workflowPath,
+  identityWorkflowPath = workflowPath,
+  visited = new Set(),
+) {
+  const resolvedPath = resolve(workflowPath);
+  const resolvedIdentityPath = resolve(identityWorkflowPath);`;
+const SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_SOURCE = "  const entries = [`${resolvedPath}:${sha256Hex(source)}`];";
+const SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_PATCH = "  const entries = [`${resolvedIdentityPath}:${sha256Hex(source)}`];";
+const SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_SOURCE =
+  "    entries.push(...(await collectWorkflowModuleHashEntries(importedPath, visited)));";
+const SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_PATCH = `    const importedIdentityPath = resolve(
+      dirname(resolvedIdentityPath),
+      relative(dirname(resolvedPath), importedPath),
+    );
+    entries.push(
+      ...(await collectWorkflowModuleHashEntries(importedPath, importedIdentityPath, visited)),
+    );`;
+const SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_SOURCE = `/**
+ * @param {string | null} workflowPath
+ * @returns {Promise<string | null>}
+ */
+export async function readWorkflowGraphHash(workflowPath) {
+  if (!workflowPath) return null;
+  try {
+    const entries = await collectWorkflowModuleHashEntries(workflowPath);`;
+const SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_PATCH = `/**
+ * @param {string | null} workflowPath
+ * @param {string | null} [identityWorkflowPath]
+ * @returns {Promise<string | null>}
+ */
+export async function readWorkflowGraphHash(workflowPath, identityWorkflowPath = workflowPath) {
+  if (!workflowPath) return null;
+  try {
+    const entries = await collectWorkflowModuleHashEntries(
+      workflowPath,
+      identityWorkflowPath || workflowPath,
+    );`;
 const SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE =
   "    getTaskStates: () => Effect.sync(() => cloneTaskStateMap(state.states)),";
 const SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH = `    restoreTerminalTaskStates: (tasks) =>
@@ -103,7 +332,30 @@ const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `          resumeWorkflowNameVali
         }`;
 
 export type SmithersCompatibilityPatchId =
-  "detached_admission" | "supervisor_descriptor" | "terminal_state_restore" | "resume_hydration";
+  | "detached_admission"
+  | "supervisor_descriptor"
+  | "terminal_state_restore"
+  | "resume_hydration"
+  | "workflow_path_import"
+  | "workflow_path_persistence"
+  | "post_failure_workflow_path"
+  | "replay_workflow_path"
+  | "replay_workflow_metadata"
+  | "fork_workflow_path"
+  | "fork_workflow_metadata"
+  | "engine_workflow_path"
+  | "engine_durability_metadata"
+  | "engine_run_metadata"
+  | "engine_resume_identity"
+  | "engine_insert_workflow_path"
+  | "engine_activate_workflow_path"
+  | "engine_update_workflow_path"
+  | "engine_continuation_workflow_path"
+  | "workflow_hash_import"
+  | "workflow_hash_collect"
+  | "workflow_hash_entry"
+  | "workflow_hash_recursion"
+  | "workflow_hash_public";
 
 export interface SmithersCompatibilityPatch {
   /** Stable name this patch is reported under by `doctor`. */
@@ -165,8 +417,183 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patched: SMITHERS_ENGINE_RESUME_HYDRATION_PATCH,
     // `restoreTerminalTaskStates` would mean upstream hydrates on its own.
     upstreamAbsent: ["restoreTerminalTaskStates"]
+  },
+  {
+    id: "workflow_path_import",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE,
+    patched: SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "workflow_path_persistence",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_CLI_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "post_failure_workflow_path",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_POST_FAILURE_PATH_SOURCE,
+    patched: SMITHERS_CLI_POST_FAILURE_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "replay_workflow_path",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_REPLAY_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_CLI_REPLAY_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "replay_workflow_metadata",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_SOURCE,
+    patched: SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "fork_workflow_path",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_FORK_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_CLI_FORK_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "fork_workflow_metadata",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_FORK_WORKFLOW_METADATA_SOURCE,
+    patched: SMITHERS_CLI_FORK_WORKFLOW_METADATA_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_workflow_path",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_ENGINE_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_durability_metadata",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_DURABILITY_METADATA_SOURCE,
+    patched: SMITHERS_ENGINE_DURABILITY_METADATA_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_run_metadata",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_RUN_METADATA_SOURCE,
+    patched: SMITHERS_ENGINE_RUN_METADATA_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_resume_identity",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_RESUME_IDENTITY_SOURCE,
+    patched: SMITHERS_ENGINE_RESUME_IDENTITY_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_insert_workflow_path",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_activate_workflow_path",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_update_workflow_path",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_continuation_workflow_path",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_SOURCE,
+    patched: SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "workflow_hash_import",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/workflow-hash.js",
+    patchable: SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_SOURCE,
+    patched: SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "workflow_hash_collect",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/workflow-hash.js",
+    patchable: SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_SOURCE,
+    patched: SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "workflow_hash_entry",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/workflow-hash.js",
+    patchable: SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_SOURCE,
+    patched: SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "workflow_hash_recursion",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/workflow-hash.js",
+    patchable: SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_SOURCE,
+    patched: SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "workflow_hash_public",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/workflow-hash.js",
+    patchable: SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_SOURCE,
+    patched: SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_PATCH,
+    upstreamAbsent: []
   }
 ];
+
+export const SMITHERS_REQUIRED_ENGINE_ANCHORS = [
+  {
+    id: "engine_descriptor_execution_path",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    anchor: SMITHERS_ENGINE_DESCRIPTOR_EXECUTION_PATH_ANCHOR
+  },
+  {
+    id: "engine_descriptor_driver_path",
+    packageName: "@smithers-orchestrator/engine",
+    sourceRelativePath: "src/engine.js",
+    anchor: SMITHERS_ENGINE_DESCRIPTOR_DRIVER_PATH_ANCHOR
+  }
+] as const;
 
 /**
  * Markers that must sit between the start of the deferred run-startup closure and
@@ -221,6 +648,11 @@ const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
   "TMP",
   "TMPDIR",
   "TZ",
+  "ULTRAFUZZ_ARTIFACTS_MODULE",
+  "ULTRAFUZZ_CONFIG_PATH",
+  "ULTRAFUZZ_MODAL_MODULE",
+  "ULTRAFUZZ_RUNTIME_MODULE",
+  ULTRAFUZZ_WORKFLOW_PERSISTED_PATH,
   "USER",
   "USERPROFILE",
   "WINDIR",
@@ -475,6 +907,9 @@ export interface CompiledSmithersWorkflow {
   runRoot: string;
   workflowPath: string;
   evidenceWorkflowPath: string;
+  expandedGraphPath: string;
+  configPath: string;
+  resolvedConfigPath: string;
   inputPath: string;
   tasksPath: string;
   logsDir: string;
@@ -488,8 +923,8 @@ export interface SubmitSmithersInput {
   controllerLeaseSeconds: number;
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
-  operatorPrompt?: string;
-  operatorInput?: unknown;
+  workflowPath?: string;
+  inputJson: string;
 }
 
 export interface SmithersSubmissionResult {
@@ -539,7 +974,7 @@ export interface SmithersInstallationPosture {
   installed_bin_target: string | null;
   bin_path: string | null;
   layout_error: string | null;
-  compatibility_patches: Record<SmithersCompatibilityPatchId, SmithersPatchPosture>;
+  compatibility_patches: Record<string, SmithersPatchPosture>;
 }
 
 export interface SmithersCommandSnapshot {
@@ -640,6 +1075,9 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const smithersDir = path.join(input.runLayout.root, "smithers");
   fs.mkdirSync(smithersDir, { recursive: true });
   const evidenceWorkflowPath = path.join(smithersDir, "workflow.tsx");
+  const expandedGraphPath = path.join(smithersDir, "expanded-graph.json");
+  const configPath = path.join(smithersDir, "config.fingerprint-input");
+  const resolvedConfigPath = path.join(smithersDir, "resolved-config.json");
   const workflowPath = path.join(
     projectRoot,
     ".smithers",
@@ -661,25 +1099,479 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     runRoot: input.runLayout.root,
     workflowPath,
     evidenceWorkflowPath,
+    expandedGraphPath,
+    configPath,
+    resolvedConfigPath,
     inputPath,
     tasksPath,
     logsDir
   };
-  writeJsonDurable(tasksPath, {
-    schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
-    run_id: input.runLayout.runId,
-    smithers_run_id: smithersRunId,
-    workflow_name: workflowName,
-    tasks,
-    dynamic_groups: dynamicGroups
-  });
-  writeJsonDurable(
-    inputPath,
-    redactSecretsInValue(smithersInputDocument(compiled, input.operatorPrompt, input.operatorInput))
+  writePreparedWorkflowFile(
+    input.runLayout.root,
+    expandedGraphPath,
+    `${JSON.stringify(input.graph, null, 2)}\n`,
+    "expanded workflow graph"
   );
-  writeExecutableWorkflow(projectRoot, workflowPath, renderWorkflowSource(compiled));
-  writeFileDurable(evidenceWorkflowPath, renderEvidenceWorkflowSource(workflowPath, evidenceWorkflowPath));
+  writePreparedWorkflowFile(
+    input.runLayout.root,
+    configPath,
+    stableJson(input.config),
+    "workflow config fingerprint input"
+  );
+  writePreparedWorkflowFile(
+    input.runLayout.root,
+    resolvedConfigPath,
+    `${JSON.stringify(input.config, null, 2)}\n`,
+    "resolved workflow config"
+  );
+  writePreparedWorkflowFile(
+    input.runLayout.root,
+    tasksPath,
+    `${JSON.stringify(
+      {
+        schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
+        run_id: input.runLayout.runId,
+        smithers_run_id: smithersRunId,
+        workflow_name: workflowName,
+        tasks,
+        dynamic_groups: dynamicGroups
+      },
+      null,
+      2
+    )}\n`,
+    "workflow task manifest"
+  );
+  writePreparedWorkflowFile(
+    input.runLayout.root,
+    inputPath,
+    `${JSON.stringify(
+      redactSecretsInValue(smithersInputDocument(compiled, input.operatorPrompt, input.operatorInput)),
+      null,
+      2
+    )}\n`,
+    "workflow input"
+  );
+  writePreparedWorkflowFile(projectRoot, workflowPath, renderWorkflowSource(compiled), "generated Smithers workflow");
+  writePreparedWorkflowFile(
+    input.runLayout.root,
+    evidenceWorkflowPath,
+    renderEvidenceWorkflowSource(workflowPath, evidenceWorkflowPath),
+    "evidence workflow"
+  );
   return compiled;
+}
+
+/**
+ * Enumerates the complete package/config/prompt closure consumed by a generated
+ * workflow. The returned paths are sealed before any Smithers command and are
+ * copied into the generation snapshot rather than read from mutable project
+ * paths after verification.
+ */
+export async function smithersExecutionControlFiles(
+  compiled: CompiledSmithersWorkflow,
+  layout: RunLayout,
+  env?: Record<string, string | undefined>
+): Promise<WorkflowExecutionControlFile[]> {
+  const files = new Map<string, WorkflowExecutionControlFile>();
+  const snapshotSources = new Map<string, string>();
+  const add = (sourcePath: string, snapshotPath: string): void => {
+    const source = fs.realpathSync(path.resolve(sourcePath));
+    const normalizedSnapshotPath = snapshotPath.split(path.sep).join("/");
+    const existing = files.get(source);
+    if (existing !== undefined) {
+      if (existing.snapshotPath !== normalizedSnapshotPath) {
+        throw new Error(`workflow execution source file has multiple snapshot paths: ${source}`);
+      }
+      return;
+    }
+    if (snapshotSources.has(normalizedSnapshotPath)) {
+      throw new Error(`workflow execution snapshot path has multiple source files: ${normalizedSnapshotPath}`);
+    }
+    files.set(source, { sourcePath: source, snapshotPath: normalizedSnapshotPath });
+    snapshotSources.set(normalizedSnapshotPath, source);
+  };
+
+  const externalRunner = explicitSmithersExecutable(env) !== undefined;
+  const useExternalRunnerForExecutionClosure =
+    externalRunner && compiled.tasks.every((task) => task.execution.mode !== "cloud");
+  if (!useExternalRunnerForExecutionClosure) {
+    await ensureSmithersDependencies(compiled.projectRoot, env, {
+      timeoutMs: SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS,
+      requirePinnedRunner: true
+    });
+  }
+
+  const planPath = path.join(layout.root, "plan.json");
+  add(planPath, "controls/plan.json");
+  // Dynamic execution derives mutable graph/task publications from these immutable pre-expansion
+  // controls. Keeping the base bytes in the execution snapshot lets every later lifecycle command
+  // re-derive and verify an extension without trusting the files the workflow updated in place.
+  add(layout.graphPath, "controls/runtime-base-graph.json");
+  add(compiled.tasksPath, "controls/runtime-base-tasks.json");
+  const plan = JSON.parse(fs.readFileSync(planPath, "utf8")) as { run_id?: unknown; rendered_prompts?: unknown };
+  if (plan.run_id !== layout.runId || !Array.isArray(plan.rendered_prompts)) {
+    throw new Error("persisted run plan cannot define the workflow execution closure");
+  }
+  const plannedPrompts = new Map<string, Record<string, unknown>>();
+  for (const value of plan.rendered_prompts) {
+    if (isObjectRecord(value) && typeof value.attempt_id === "string") plannedPrompts.set(value.attempt_id, value);
+  }
+  for (const task of compiled.tasks) {
+    if (task.renderedPromptPath === undefined) continue;
+    const planned = plannedPrompts.get(task.attemptId);
+    if (
+      planned === undefined ||
+      planned.rendered_prompt_path !== task.renderedPromptPath ||
+      typeof planned.rendered_prompt_snapshot_path !== "string"
+    ) {
+      throw new Error(`persisted prompt plan does not match compiled task ${task.attemptId}`);
+    }
+    add(task.renderedPromptPath, `controls/rendered-prompts/${task.attemptId}.md`);
+    add(
+      path.resolve(layout.root, planned.rendered_prompt_snapshot_path),
+      `controls/prompt-snapshots/${task.attemptId}.md`
+    );
+  }
+
+  const projectConfigPath = path.join(compiled.projectRoot, "ultrafuzz.toml");
+  if (fs.existsSync(projectConfigPath)) add(projectConfigPath, "controls/ultrafuzz.toml");
+  add(compiled.resolvedConfigPath, "controls/resolved-config.json");
+  const agentsRoot = path.join(compiled.projectRoot, ".smithers", "agents");
+  for (const sourcePath of walkExecutionFiles(agentsRoot)) {
+    const source = fs.readFileSync(sourcePath, "utf8");
+    if (source.includes("ultrafuzz.toml") && !source.includes("ULTRAFUZZ_CONFIG_PATH")) {
+      throw new Error(
+        `workflow agent reads mutable project ultrafuzz.toml instead of process.env.ULTRAFUZZ_CONFIG_PATH: ${sourcePath}; rerun ultrafuzz init to upgrade a byte-identical stock adapter, or update this customized adapter manually and remove controller-only variables before spawning a model process`
+      );
+    }
+    add(sourcePath, path.posix.join(".smithers/agents", relativeExecutionPath(agentsRoot, sourcePath)));
+  }
+
+  const queuedModules = Object.values(workflowModuleEntryUrls(compiled)).filter(
+    (value): value is string => value.length > 0
+  );
+  const modulesByRoot = new Map<string, WorkflowExecutionModule>();
+  const modulesByName = new Map<string, WorkflowExecutionModule>();
+  while (queuedModules.length > 0) {
+    const entryPath = fileURLToPath(queuedModules.shift()!);
+    const packageRoot = workflowPackageRoot(entryPath);
+    if (modulesByRoot.has(packageRoot)) continue;
+    const packageJsonPath = path.join(packageRoot, "package.json");
+    const manifest = readWorkflowPackageManifest(packageJsonPath);
+    if (typeof manifest.name !== "string" || !manifest.name.startsWith("@ultrafuzz/")) {
+      throw new Error(`workflow module is not an Ultrafuzz runtime package: ${entryPath}`);
+    }
+    if (modulesByName.has(manifest.name)) {
+      throw new Error(`workflow execution closure resolved multiple roots for ${manifest.name}`);
+    }
+    const module: WorkflowExecutionModule = {
+      id: `module:${manifest.name}`,
+      name: manifest.name,
+      root: packageRoot,
+      snapshotPath: path.posix.join("modules", manifest.name),
+      manifest
+    };
+    modulesByRoot.set(packageRoot, module);
+    modulesByName.set(manifest.name, module);
+    add(packageJsonPath, path.posix.join(module.snapshotPath, "package.json"));
+    for (const directory of ["dist", "schema"]) {
+      const sourceRoot = path.join(packageRoot, directory);
+      if (!fs.existsSync(sourceRoot)) continue;
+      for (const sourcePath of walkExecutionFiles(sourceRoot)) {
+        add(sourcePath, path.posix.join(module.snapshotPath, relativeExecutionPath(packageRoot, sourcePath)));
+      }
+    }
+    const dockerfile = path.join(packageRoot, "Dockerfile");
+    if (fs.existsSync(dockerfile)) add(dockerfile, path.posix.join(module.snapshotPath, "Dockerfile"));
+    if (isObjectRecord(manifest.dependencies)) {
+      for (const dependency of Object.keys(manifest.dependencies).filter((name) => name.startsWith("@ultrafuzz/"))) {
+        const dependencyRoot = fs.realpathSync(path.join(packageRoot, "node_modules", ...dependency.split("/")));
+        queuedModules.push(pathToFileURL(path.join(dependencyRoot, "package.json")).href);
+      }
+    }
+  }
+
+  const dependencyMap = collectWorkflowExecutionDependencies({
+    projectRoot: compiled.projectRoot,
+    modules: [...modulesByRoot.values()],
+    externalRunner: useExternalRunnerForExecutionClosure,
+    add
+  });
+  const dependencyMapPath = path.join(layout.root, "smithers", "execution-dependencies.json");
+  writeFileDurable(dependencyMapPath, `${stableWorkflowDependencyJson(dependencyMap)}\n`);
+  add(dependencyMapPath, WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH);
+  return [...files.values()].sort((left, right) =>
+    compareWorkflowExecutionStrings(left.snapshotPath, right.snapshotPath)
+  );
+}
+
+interface WorkflowPackageManifest {
+  name?: unknown;
+  version?: unknown;
+  bin?: unknown;
+  dependencies?: unknown;
+  optionalDependencies?: unknown;
+  peerDependencies?: unknown;
+  peerDependenciesMeta?: unknown;
+}
+
+interface WorkflowExecutionModule {
+  id: string;
+  name: string;
+  root: string;
+  snapshotPath: string;
+  manifest: WorkflowPackageManifest;
+}
+
+interface WorkflowExecutionPackage extends WorkflowExecutionModule {
+  version: string;
+}
+
+interface WorkflowExecutionDependencyIssuer {
+  id: string;
+  root: string;
+  snapshotPath: string;
+  manifest: WorkflowPackageManifest;
+  rootDependencies?: readonly string[];
+}
+
+function collectWorkflowExecutionDependencies(input: {
+  projectRoot: string;
+  modules: readonly WorkflowExecutionModule[];
+  externalRunner: boolean;
+  add: (sourcePath: string, snapshotPath: string) => void;
+}): Record<string, unknown> {
+  const modules = [...input.modules].sort((left, right) => compareWorkflowExecutionStrings(left.id, right.id));
+  const modulesByName = new Map(modules.map((module) => [module.name, module]));
+  const packagesByRoot = new Map<string, WorkflowExecutionPackage>();
+  const packages: WorkflowExecutionPackage[] = [];
+  const issuers: Array<{ id: string; snapshot_path: string; dependencies: Record<string, string> }> = [];
+  const executablePaths = new Set<string>();
+  const smithersRoot = path.join(input.projectRoot, ".smithers");
+  const rootPackageJson = path.join(smithersRoot, "package.json");
+  const rootManifest = fs.existsSync(rootPackageJson) ? readWorkflowPackageManifest(rootPackageJson) : {};
+  if (fs.existsSync(rootPackageJson)) input.add(rootPackageJson, "dependencies/root-package.json");
+  const rootDependencies = input.externalRunner
+    ? []
+    : [...new Set([...requiredWorkflowDependencies(rootManifest), ...WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES])].sort();
+  const pending: WorkflowExecutionDependencyIssuer[] = [
+    { id: "root", root: smithersRoot, snapshotPath: ".", manifest: rootManifest, rootDependencies },
+    ...modules
+  ];
+
+  for (let index = 0; index < pending.length; index += 1) {
+    const issuer = pending[index]!;
+    const dependencies: Record<string, string> = {};
+    const requested =
+      issuer.rootDependencies === undefined
+        ? workflowPackageDependencies(issuer.manifest)
+        : issuer.rootDependencies.map((name) => ({ name, optional: false }));
+    for (const dependency of requested) {
+      const module = modulesByName.get(dependency.name);
+      if (module !== undefined) {
+        dependencies[dependency.name] = module.id;
+        continue;
+      }
+      if (input.externalRunner) continue;
+      const dependencyRoot = resolveWorkflowPackageDependency(issuer.root, dependency.name);
+      if (dependencyRoot === undefined) {
+        if (dependency.optional) continue;
+        throw new Error(`workflow dependency is unavailable for snapshot: ${issuer.id} -> ${dependency.name}`);
+      }
+      const internalTarget = input.modules.find((candidate) => candidate.root === dependencyRoot);
+      if (internalTarget !== undefined) {
+        dependencies[dependency.name] = internalTarget.id;
+        continue;
+      }
+      let target = packagesByRoot.get(dependencyRoot);
+      if (target === undefined) {
+        const manifest = readWorkflowPackageManifest(path.join(dependencyRoot, "package.json"));
+        if (
+          typeof manifest.name !== "string" ||
+          !isWorkflowPackageName(manifest.name) ||
+          typeof manifest.version !== "string" ||
+          manifest.version.length === 0
+        ) {
+          throw new Error(`workflow dependency has invalid package metadata: ${dependencyRoot}`);
+        }
+        const sequence = String(packages.length + 1).padStart(6, "0");
+        target = {
+          id: `package:${sequence}`,
+          name: manifest.name,
+          version: manifest.version,
+          root: dependencyRoot,
+          snapshotPath: `dependencies/packages/${sequence}`,
+          manifest
+        };
+        packagesByRoot.set(dependencyRoot, target);
+        packages.push(target);
+        for (const sourcePath of walkPackageExecutionFiles(dependencyRoot)) {
+          const snapshotPath = path.posix.join(target.snapshotPath, relativeExecutionPath(dependencyRoot, sourcePath));
+          input.add(sourcePath, snapshotPath);
+          if ((fs.statSync(sourcePath).mode & 0o111) !== 0) executablePaths.add(snapshotPath);
+        }
+        pending.push(target);
+      }
+      dependencies[dependency.name] = target.id;
+    }
+    issuers.push({ id: issuer.id, snapshot_path: issuer.snapshotPath, dependencies });
+  }
+
+  const rootIssuer = issuers.find((issuer) => issuer.id === "root");
+  const runnerId = rootIssuer?.dependencies["smithers-orchestrator"];
+  const runner = runnerId === undefined ? undefined : packages.find((candidate) => candidate.id === runnerId);
+  let smithersBin: string | null = null;
+  if (!input.externalRunner) {
+    if (runner === undefined) throw new Error("workflow dependency snapshot is missing the pinned runner package");
+    const binTarget = workflowPackageBinTarget(runner.manifest, "smithers");
+    if (binTarget !== SMITHERS_ORCHESTRATOR_BIN_PATH && binTarget !== `./${SMITHERS_ORCHESTRATOR_BIN_PATH}`) {
+      throw new Error("workflow dependency snapshot has an unexpected runner executable");
+    }
+    smithersBin = path.posix.join(runner.snapshotPath, binTarget.replace(/^\.\//u, ""));
+    executablePaths.add(smithersBin);
+  }
+  return {
+    schema_version: WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION,
+    modules: modules.map((module) => ({ id: module.id, name: module.name, snapshot_path: module.snapshotPath })),
+    packages: packages.map((entry) => ({
+      id: entry.id,
+      name: entry.name,
+      version: entry.version,
+      snapshot_path: entry.snapshotPath
+    })),
+    issuers: issuers.sort((left, right) => compareWorkflowExecutionStrings(left.id, right.id)),
+    executable_paths: [...executablePaths].sort(),
+    smithers_bin: smithersBin
+  };
+}
+
+function readWorkflowPackageManifest(packageJsonPath: string): WorkflowPackageManifest {
+  const value = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as unknown;
+  if (!isObjectRecord(value)) throw new Error(`workflow package manifest is invalid: ${packageJsonPath}`);
+  return value;
+}
+
+function requiredWorkflowDependencies(manifest: WorkflowPackageManifest): string[] {
+  return workflowPackageDependencies(manifest)
+    .filter((dependency) => !dependency.optional)
+    .map((dependency) => dependency.name);
+}
+
+function workflowPackageDependencies(manifest: WorkflowPackageManifest): Array<{ name: string; optional: boolean }> {
+  const dependencies = new Map<string, boolean>();
+  if (isObjectRecord(manifest.dependencies)) {
+    for (const name of Object.keys(manifest.dependencies)) dependencies.set(name, false);
+  }
+  if (isObjectRecord(manifest.optionalDependencies)) {
+    for (const name of Object.keys(manifest.optionalDependencies)) dependencies.set(name, true);
+  }
+  if (isObjectRecord(manifest.peerDependencies)) {
+    const metadata = isObjectRecord(manifest.peerDependenciesMeta) ? manifest.peerDependenciesMeta : {};
+    for (const name of Object.keys(manifest.peerDependencies)) {
+      const peer = metadata[name];
+      const optional = isObjectRecord(peer) && peer.optional === true;
+      if (!dependencies.has(name) || !optional) dependencies.set(name, optional);
+    }
+  }
+  return [...dependencies]
+    .map(([name, optional]) => ({ name, optional }))
+    .sort((left, right) => compareWorkflowExecutionStrings(left.name, right.name));
+}
+
+function resolveWorkflowPackageDependency(issuerRoot: string, dependency: string): string | undefined {
+  if (!isWorkflowPackageName(dependency)) throw new Error(`workflow dependency name is invalid: ${dependency}`);
+  let current = path.resolve(issuerRoot);
+  for (;;) {
+    const candidate = path.join(current, "node_modules", ...dependency.split("/"));
+    if (fs.existsSync(candidate)) return fs.realpathSync(candidate);
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+function isWorkflowPackageName(value: string): boolean {
+  return /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)$/iu.test(value);
+}
+
+function workflowPackageBinTarget(manifest: WorkflowPackageManifest, name: string): string | undefined {
+  if (typeof manifest.bin === "string") return manifest.bin;
+  return isObjectRecord(manifest.bin) && typeof manifest.bin[name] === "string" ? manifest.bin[name] : undefined;
+}
+
+function walkPackageExecutionFiles(root: string): string[] {
+  return walkExecutionFiles(root, true);
+}
+
+function compareWorkflowExecutionStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function stableWorkflowDependencyJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((entry) => stableWorkflowDependencyJson(entry)).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => compareWorkflowExecutionStrings(left, right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableWorkflowDependencyJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function workflowModuleEntryUrls(compiled: CompiledSmithersWorkflow): {
+  artifacts: string;
+  runtime: string;
+  modal: string;
+} {
+  return {
+    artifacts: import.meta.resolve("@ultrafuzz/artifacts"),
+    runtime: import.meta.resolve("@ultrafuzz/runtime"),
+    modal: compiled.tasks.some((task) => task.execution.mode === "cloud") ? import.meta.resolve("@ultrafuzz/modal") : ""
+  };
+}
+
+function workflowPackageRoot(entryPath: string): string {
+  let current = path.dirname(fs.realpathSync(entryPath));
+  for (;;) {
+    if (fs.existsSync(path.join(current, "package.json"))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) throw new Error(`cannot resolve workflow module package root for ${entryPath}`);
+    current = parent;
+  }
+}
+
+function walkExecutionFiles(root: string, skipNodeModules = false): string[] {
+  const resolvedRoot = path.resolve(root);
+  if (!fs.existsSync(resolvedRoot)) return [];
+  const rootStat = fs.lstatSync(resolvedRoot);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error(`workflow execution closure root is not a physical directory: ${resolvedRoot}`);
+  }
+  const pending = [resolvedRoot];
+  const files: string[] = [];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    for (const entry of fs
+      .readdirSync(current, { withFileTypes: true })
+      .sort((left, right) => compareWorkflowExecutionStrings(left.name, right.name))) {
+      if (skipNodeModules && entry.name === "node_modules" && entry.isDirectory()) continue;
+      const candidate = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) throw new Error(`workflow execution closure cannot contain a symlink: ${candidate}`);
+      if (entry.isDirectory()) pending.push(candidate);
+      else if (entry.isFile()) files.push(candidate);
+      else throw new Error(`workflow execution closure contains a non-regular entry: ${candidate}`);
+      if (files.length + pending.length > 50_000) throw new Error("workflow execution closure exceeds file limit");
+    }
+  }
+  return files.sort();
+}
+
+function relativeExecutionPath(root: string, filePath: string): string {
+  const relative = path.relative(path.resolve(root), path.resolve(filePath)).split(path.sep).join("/");
+  if (relative.length === 0 || relative.startsWith("../") || path.posix.isAbsolute(relative)) {
+    throw new Error(`workflow execution file escapes its package root: ${filePath}`);
+  }
+  return relative;
 }
 
 function smithersInputDocument(
@@ -701,14 +1593,9 @@ function smithersInputDocument(
 }
 
 export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promise<SmithersSubmissionResult> {
-  const inputJson = `${JSON.stringify(
-    smithersInputDocument(input.compiled, input.operatorPrompt, input.operatorInput),
-    null,
-    2
-  )}\n`;
   const command = [
     "up",
-    input.compiled.workflowPath,
+    input.workflowPath ?? input.compiled.workflowPath,
     "--detach",
     "--run-id",
     input.compiled.smithersRunId,
@@ -719,7 +1606,7 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
     "--log-dir",
     input.compiled.logsDir,
     "--input",
-    inputJson,
+    input.inputJson,
     "--format",
     "json",
     ...supervisorCommandArgs(input.controllerLeaseSeconds)
@@ -834,11 +1721,33 @@ export async function streamSmithersCommand(input: {
       stderr: ""
     };
   }
-  await ensureSmithersDependencies(input.projectRoot, input.env, { signal: input.signal });
-  const child = spawn(smithersExecutable(input.projectRoot, input.env), command, {
-    cwd: input.projectRoot,
-    env: smithersCommandEnv(input.projectRoot, input.env),
-    stdio: ["ignore", "pipe", "pipe"]
+  const commandEnvironment = await prepareSmithersExecutableEnvironment(input.projectRoot, input.env, {
+    signal: input.signal
+  });
+  const { anchored, snapshotAnchor, executableAnchor } = acquireAnchoredSmithersController(command, commandEnvironment);
+  const child = (() => {
+    try {
+      return spawn(
+        executableAnchor?.executable ?? smithersExecutable(input.projectRoot, anchored.env),
+        [...(executableAnchor?.argumentPrefix ?? []), ...anchored.args],
+        {
+          cwd: input.projectRoot,
+          env: smithersCommandEnv(input.projectRoot, anchored.env),
+          stdio: ["ignore", "pipe", "pipe"]
+        }
+      );
+    } catch (error) {
+      try {
+        assertAndCloseSmithersExecutableAnchor(executableAnchor);
+      } finally {
+        assertAndCloseWorkflowExecutionSnapshotAnchor(snapshotAnchor);
+      }
+      throw error;
+    }
+  })();
+  const childClosed = new Promise<void>((resolve) => {
+    child.once("error", () => resolve());
+    child.once("close", () => resolve());
   });
   const reader = createInterface({ input: child.stdout, crlfDelay: Number.POSITIVE_INFINITY });
   let lines = 0;
@@ -932,10 +1841,21 @@ export async function streamSmithersCommand(input: {
       stderr: redactedEvidenceText(stderr)
     };
   } finally {
-    input.signal?.removeEventListener("abort", onAbort);
-    stopStreaming();
-    if (killTimer !== undefined) {
-      clearTimeout(killTimer);
+    try {
+      input.signal?.removeEventListener("abort", onAbort);
+      stopStreaming();
+      // The descriptor paths belong to this controller process. Keep them open
+      // until a stopped or failed child can no longer resolve either path.
+      await childClosed;
+      if (killTimer !== undefined) {
+        clearTimeout(killTimer);
+      }
+    } finally {
+      try {
+        assertAndCloseSmithersExecutableAnchor(executableAnchor);
+      } finally {
+        assertAndCloseWorkflowExecutionSnapshotAnchor(snapshotAnchor);
+      }
     }
   }
 }
@@ -983,7 +1903,7 @@ function inspectSmithersCompatibilityPatches(
   projectRoot: string
 ): SmithersInstallationPosture["compatibility_patches"] {
   const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
-  const postures = {} as Record<SmithersCompatibilityPatchId, SmithersPatchPosture>;
+  const postures: Record<string, SmithersPatchPosture> = {};
   for (const patch of SMITHERS_COMPATIBILITY_PATCHES) {
     const candidateRoots = smithersDependencyRootCandidates(nodeModules, patch.packageName);
     if (candidateRoots.length === 1) {
@@ -995,6 +1915,19 @@ function inspectSmithersCompatibilityPatches(
     // so this must not read as merely unavailable. No root at all genuinely leaves
     // the posture unknown.
     postures[patch.id] = candidateRoots.length > 1 ? "incompatible" : "unknown";
+  }
+  for (const required of SMITHERS_REQUIRED_ENGINE_ANCHORS) {
+    const candidateRoots = smithersDependencyRootCandidates(nodeModules, required.packageName);
+    if (candidateRoots.length !== 1) {
+      postures[required.id] = candidateRoots.length > 1 ? "incompatible" : "unknown";
+      continue;
+    }
+    const source = path.join(candidateRoots[0]!, ...required.sourceRelativePath.split("/"));
+    try {
+      postures[required.id] = fs.readFileSync(source, "utf8").includes(required.anchor) ? "applied" : "incompatible";
+    } catch {
+      postures[required.id] = "unknown";
+    }
   }
   return postures;
 }
@@ -1049,9 +1982,10 @@ export async function runSmithersLifecycleCommand(input: {
   force?: boolean;
   retryFailed?: boolean;
   label?: string;
-  resumeRecovery?: {
+  relaunchPaths?: {
     runRoot: string;
     inputPath: string;
+    inputJson?: string;
     logsDir: string;
   };
   keepWorkspaces: boolean;
@@ -1066,19 +2000,42 @@ export async function runSmithersLifecycleCommand(input: {
   recoveredMissingRun?: boolean;
   alreadyRunning?: boolean;
 }> {
+  // Every `up` invocation has to name the run-scoped log directory. Without `--log-dir` the
+  // orchestrator falls back to `<projectRoot>/.smithers/executions/<runId>/logs`, so a relaunched
+  // run stops appending to `<runRoot>/smithers/logs/stream.ndjson` and the `NodeFailed` events for
+  // every attempt after the first — the only record carrying a node's real error payload — land
+  // outside the run directory the evidence layout owns.
+  const workflowLogDirArgs = (): readonly string[] => {
+    const paths = input.relaunchPaths;
+    if (paths === undefined) {
+      return [];
+    }
+    assertPathInside(paths.runRoot, paths.logsDir, "workflow log directory");
+    fs.mkdirSync(paths.logsDir, { recursive: true });
+    assertNoSymlinkComponents(paths.runRoot, paths.logsDir, "workflow log directory");
+    return ["--log-dir", paths.logsDir];
+  };
+  const workflowRelaunchInputJson = (): string => {
+    const paths = input.relaunchPaths;
+    if (paths === undefined) throw new Error("workflow relaunch paths are unavailable");
+    if (paths.inputJson !== undefined) return paths.inputJson;
+    if (hasWorkflowExecutionSnapshotCapability(input.env)) {
+      throw new Error("sealed workflow relaunch is missing its materialized input bytes");
+    }
+    assertRegularFileInside(paths.runRoot, paths.inputPath, "persisted workflow input");
+    return fs.readFileSync(paths.inputPath, "utf8");
+  };
+
   let preResumeStderr = "";
-  if (input.action === "resume" && input.resumeRecovery !== undefined) {
+  if (input.action === "resume" && input.relaunchPaths !== undefined) {
     const inspection = await runSmithersInspectionCommand({
       args: ["inspect", input.smithersRunId, "--format", "json"],
       projectRoot: input.projectRoot,
       env: input.env
     });
     if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND") || smithersSnapshotHasMissingRunHistory(inspection)) {
-      assertRegularFileInside(input.resumeRecovery.runRoot, input.resumeRecovery.inputPath, "persisted workflow input");
-      assertPathInside(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
-      fs.mkdirSync(input.resumeRecovery.logsDir, { recursive: true });
-      assertNoSymlinkComponents(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
-      const inputJson = fs.readFileSync(input.resumeRecovery.inputPath, "utf8");
+      const recoveryLogDirArgs = workflowLogDirArgs();
+      const inputJson = workflowRelaunchInputJson();
       const recoveryCommand = [
         "up",
         input.workflowPath,
@@ -1088,8 +2045,7 @@ export async function runSmithersLifecycleCommand(input: {
         ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
         "--root",
         input.projectRoot,
-        "--log-dir",
-        input.resumeRecovery.logsDir,
+        ...recoveryLogDirArgs,
         "--input",
         inputJson,
         "--format",
@@ -1103,7 +2059,7 @@ export async function runSmithersLifecycleCommand(input: {
         environmentVariableNames: input.environmentVariableNames,
         keepWorkspaces: input.keepWorkspaces
       });
-      writeJsonDurable(path.join(path.dirname(input.resumeRecovery.inputPath), "recovery-submission.json"), {
+      writeJsonDurable(path.join(path.dirname(input.relaunchPaths.inputPath), "recovery-submission.json"), {
         schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
         smithers_run_id: input.smithersRunId,
         recovery: "missing-workflow-run",
@@ -1172,13 +2128,10 @@ export async function runSmithersLifecycleCommand(input: {
         smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED") &&
         !isCompatibleSmithersRunId(input.smithersRunId)
       ) {
-        const resumeRecovery = input.resumeRecovery;
-        assertRegularFileInside(resumeRecovery.runRoot, resumeRecovery.inputPath, "persisted workflow input");
-        assertPathInside(resumeRecovery.runRoot, resumeRecovery.logsDir, "workflow log directory");
-        fs.mkdirSync(resumeRecovery.logsDir, { recursive: true });
-        assertNoSymlinkComponents(resumeRecovery.runRoot, resumeRecovery.logsDir, "workflow log directory");
+        const relaunchPaths = input.relaunchPaths;
+        const replacementLogDirArgs = workflowLogDirArgs();
         const replacementRunId = compatibleRecoveryRunId(input.smithersRunId);
-        const replacementInputJson = fs.readFileSync(resumeRecovery.inputPath, "utf8");
+        const replacementInputJson = workflowRelaunchInputJson();
         const replacementArgs = (adoptExisting: boolean) => [
           "up",
           input.workflowPath,
@@ -1190,8 +2143,7 @@ export async function runSmithersLifecycleCommand(input: {
           ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
           "--root",
           input.projectRoot,
-          "--log-dir",
-          resumeRecovery.logsDir,
+          ...replacementLogDirArgs,
           "--input",
           replacementInputJson,
           "--format",
@@ -1226,7 +2178,7 @@ export async function runSmithersLifecycleCommand(input: {
           });
           appliedRecovery = "incompatible-workflow-run-id-adopted";
         }
-        writeJsonDurable(path.join(path.dirname(resumeRecovery.inputPath), "recovery-submission.json"), {
+        writeJsonDurable(path.join(path.dirname(relaunchPaths.inputPath), "recovery-submission.json"), {
           schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
           smithers_run_id: replacementRunId,
           recovery: appliedRecovery,
@@ -1242,9 +2194,9 @@ export async function runSmithersLifecycleCommand(input: {
 
   if (input.action === "resume" && input.resetNode !== undefined) {
     const resetMarkerPath =
-      input.resumeRecovery === undefined
+      input.relaunchPaths === undefined
         ? undefined
-        : path.join(path.dirname(input.resumeRecovery.inputPath), "reset-node-applied.json");
+        : path.join(path.dirname(input.relaunchPaths.inputPath), "reset-node-applied.json");
     let resetStderr = "";
     if (!resetNodeMarkerMatches(resetMarkerPath, input.smithersRunId, input.resetNode)) {
       const resetResult = await execSmithersCli({
@@ -1274,7 +2226,7 @@ export async function runSmithersLifecycleCommand(input: {
           node_id: input.resetNode,
           applied_at: appliedAt
         });
-        writeJsonDurable(path.join(path.dirname(input.resumeRecovery!.inputPath), "cloud-execution-generation.json"), {
+        writeJsonDurable(path.join(path.dirname(input.relaunchPaths!.inputPath), "cloud-execution-generation.json"), {
           schema_version: "ultrafuzz.cloud.execution-generation.v1",
           generation: crypto.randomUUID(),
           reset_node: input.resetNode,
@@ -1295,6 +2247,7 @@ export async function runSmithersLifecycleCommand(input: {
           "--force",
           "--detach",
           ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+          ...workflowLogDirArgs(),
           "--format",
           "json",
           ...supervisorCommandArgs(input.controllerLeaseSeconds)
@@ -1356,6 +2309,7 @@ export async function runSmithersLifecycleCommand(input: {
       "--force",
       "--detach",
       ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+      ...workflowLogDirArgs(),
       "--format",
       "json",
       ...supervisorCommandArgs(input.controllerLeaseSeconds)
@@ -1387,6 +2341,7 @@ export async function runSmithersLifecycleCommand(input: {
           ...(input.force === true ? ["--force"] : []),
           "--detach",
           ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+          ...workflowLogDirArgs(),
           "--format",
           "json",
           ...supervisorCommandArgs(input.controllerLeaseSeconds)
@@ -1613,21 +2568,25 @@ async function execSmithersCli(input: {
 }): Promise<{ stdout: string; stderr: string; command: string[]; exitCode: number }> {
   const command = [...input.args];
   const executionDeadline = input.timeoutMs === undefined ? undefined : Date.now() + input.timeoutMs;
-  await ensureSmithersDependencies(input.projectRoot, input.env, {
+  const commandEnvironment = await prepareSmithersExecutableEnvironment(input.projectRoot, input.env, {
     signal: input.signal,
     timeoutMs: input.timeoutMs
   });
   const commandTimeoutMs =
     executionDeadline === undefined ? undefined : Math.max(1, Math.ceil(executionDeadline - Date.now()));
-  const executable = smithersExecutable(input.projectRoot, input.env);
+  const { anchored, snapshotAnchor, executableAnchor } = acquireAnchoredSmithersController(command, commandEnvironment);
   try {
-    const { stdout, stderr } = await execFileAsync(executable, command, {
-      cwd: input.projectRoot,
-      env: smithersCommandEnv(input.projectRoot, input.env, input.environmentVariableNames, input.keepWorkspaces),
-      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-      ...(commandTimeoutMs === undefined ? {} : { timeout: commandTimeoutMs })
-    });
+    const { stdout, stderr } = await execFileAsync(
+      executableAnchor?.executable ?? smithersExecutable(input.projectRoot, anchored.env),
+      [...(executableAnchor?.argumentPrefix ?? []), ...anchored.args],
+      {
+        cwd: input.projectRoot,
+        env: smithersCommandEnv(input.projectRoot, anchored.env, input.environmentVariableNames, input.keepWorkspaces),
+        maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+        ...(commandTimeoutMs === undefined ? {} : { timeout: commandTimeoutMs })
+      }
+    );
     return { stdout, stderr, command: smithersDisplayCommand(command), exitCode: 0 };
   } catch (error) {
     const record =
@@ -1640,6 +2599,55 @@ async function execSmithersCli(input: {
         exitCode: record.code
       };
     }
+    throw error;
+  } finally {
+    try {
+      assertAndCloseSmithersExecutableAnchor(executableAnchor);
+    } finally {
+      assertAndCloseWorkflowExecutionSnapshotAnchor(snapshotAnchor);
+    }
+  }
+}
+
+function anchoredSmithersControllerInput(
+  args: readonly string[],
+  env: Record<string, string | undefined> | undefined,
+  anchor: WorkflowExecutionSnapshotAnchor | undefined
+): { args: string[]; env: Record<string, string | undefined> | undefined } {
+  if (anchor === undefined) return { args: [...args], env };
+  const anchoredEnv = { ...env };
+  for (const [key, value] of Object.entries(anchoredEnv)) {
+    // Smithers persists this stable lexical path after proving it resolves to
+    // the descriptor-held workflow. Every value it consumes directly is
+    // rewritten through the held snapshot descriptor.
+    if (value !== undefined && key.toUpperCase() !== ULTRAFUZZ_WORKFLOW_PERSISTED_PATH) {
+      anchoredEnv[key] = anchor.rewriteControllerValue(value);
+    }
+  }
+  return {
+    args: args.map((argument) => anchor.rewriteControllerValue(argument)),
+    env: anchoredEnv
+  };
+}
+
+function acquireAnchoredSmithersController(
+  args: readonly string[],
+  env: Record<string, string | undefined> | undefined
+): {
+  anchored: { args: string[]; env: Record<string, string | undefined> | undefined };
+  snapshotAnchor: WorkflowExecutionSnapshotAnchor | undefined;
+  executableAnchor: SmithersExecutableAnchor | undefined;
+} {
+  const snapshotAnchor = acquireWorkflowExecutionSnapshotAnchor(env);
+  try {
+    snapshotAnchor?.assertCurrent();
+    const anchored = anchoredSmithersControllerInput(args, env, snapshotAnchor);
+    const executableAnchor = acquireSmithersExecutableAnchor(anchored.env);
+    return { anchored, snapshotAnchor, executableAnchor };
+  } catch (error) {
+    // A failed rewrite or executable acquisition must not retain the directory
+    // descriptors that make controller-only /proc paths usable.
+    assertAndCloseWorkflowExecutionSnapshotAnchor(snapshotAnchor);
     throw error;
   }
 }
@@ -1746,12 +2754,40 @@ function truncateDiagnosticText(value: string): string {
   return value.length > limit ? `${value.slice(0, limit)}\n[truncated ${value.length - limit} bytes]` : value;
 }
 
-async function ensureSmithersDependencies(
+async function prepareSmithersExecutableEnvironment(
   projectRoot: string,
   env: Record<string, string | undefined> | undefined,
   control: { signal?: AbortSignal; timeoutMs?: number } = {}
-): Promise<void> {
+): Promise<Record<string, string | undefined> | undefined> {
+  // A linked run already carries a non-forgeable capability for the executable
+  // copied into its sealed dependency closure. Do not consult, patch, or
+  // reinstall the mutable project-owned runner tree before honoring it.
+  if (smithersExecutableCapability(env) !== undefined) {
+    return env;
+  }
+  await ensureSmithersDependencies(projectRoot, env, control);
   if (explicitSmithersExecutable(env) !== undefined) {
+    return env;
+  }
+  const local = localSmithersExecutable(projectRoot);
+  if (!fs.existsSync(local)) return env;
+
+  // Dependency verification above pins the package version, validates the
+  // command shim, and applies every compatibility patch before this authority
+  // is granted. Execute the package's real script rather than attesting a
+  // platform-specific .bin shim, which also keeps the capability portable to
+  // Windows where the shim is a command file without a shebang.
+  const packageRoot = resolveInstalledSmithersPackageRoot(projectRoot);
+  const executable = path.join(packageRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
+  return bindSmithersExecutableCapability({ ...(env ?? {}) }, executable);
+}
+
+async function ensureSmithersDependencies(
+  projectRoot: string,
+  env: Record<string, string | undefined> | undefined,
+  control: { signal?: AbortSignal; timeoutMs?: number; requirePinnedRunner?: boolean } = {}
+): Promise<void> {
+  if (explicitSmithersExecutable(env) !== undefined && control.requirePinnedRunner !== true) {
     return;
   }
   const packageRoot = path.join(projectRoot, ".smithers");
@@ -1802,26 +2838,20 @@ async function ensureSmithersDependencies(
       repairCause = error;
     }
   }
-  await execFileAsync(
-    "npm",
-    [
-      "install",
-      "--prefix",
-      packageRoot,
-      "--ignore-scripts",
-      "--package-lock=false",
-      "--registry=https://registry.npmjs.org",
-      "--no-audit",
-      "--no-fund",
-      "--loglevel=error"
-    ],
-    {
-      cwd: projectRoot,
-      env: smithersCommandEnv(projectRoot, env),
-      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
-      ...(control.signal === undefined ? {} : { signal: control.signal }),
-      ...(control.timeoutMs === undefined ? {} : { timeout: control.timeoutMs })
-    }
+  await withTransientNpmRegistryRetry(
+    () =>
+      execFileAsync(
+        "npm",
+        smithersDependencyInstallArgs({ prefix: packageRoot, registry: "https://registry.npmjs.org" }),
+        {
+          cwd: projectRoot,
+          env: smithersCommandEnv(projectRoot, env),
+          maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
+          ...(control.signal === undefined ? {} : { signal: control.signal }),
+          ...(control.timeoutMs === undefined ? {} : { timeout: control.timeoutMs })
+        }
+      ),
+    control.signal === undefined ? {} : { signal: control.signal }
   );
   const validationError = installedSmithersValidationError(projectRoot);
   if (validationError !== undefined) {
@@ -1896,20 +2926,24 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
       admissionContents.replace(SMITHERS_CLI_DETACHED_ADMISSION_SOURCE, SMITHERS_CLI_DETACHED_ADMISSION_PATCH)
     );
   }
-  const cliContents = fs.readFileSync(cliSource, "utf8");
-  if (!cliContents.includes(SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH)) {
-    if (cliContents.split(SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE).length !== 2) {
-      throw new Error("pinned workflow runner detached supervisor implementation is incompatible");
-    }
-    // Smithers closes the detached-engine log descriptor before reusing it for
-    // the supervisor spawn, still true in 0.32.0. Open a dedicated descriptor so
-    // supervised public runs do not fail nondeterministically with posix_spawn
-    // EBADF.
-    writeFileDurable(
-      cliSource,
-      cliContents.replace(SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE, SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH)
-    );
+  let cliContents = fs.readFileSync(cliSource, "utf8");
+  for (const [source, patched, label] of [
+    [SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE, SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH, "detached supervisor"],
+    [SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE, SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH, "workflow path import"],
+    [SMITHERS_CLI_WORKFLOW_PATH_SOURCE, SMITHERS_CLI_WORKFLOW_PATH_PATCH, "workflow path validation"],
+    [SMITHERS_CLI_POST_FAILURE_PATH_SOURCE, SMITHERS_CLI_POST_FAILURE_PATH_PATCH, "post-failure workflow path"],
+    [SMITHERS_CLI_REPLAY_WORKFLOW_PATH_SOURCE, SMITHERS_CLI_REPLAY_WORKFLOW_PATH_PATCH, "replay workflow path"],
+    [
+      SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_SOURCE,
+      SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_PATCH,
+      "replay workflow metadata"
+    ],
+    [SMITHERS_CLI_FORK_WORKFLOW_PATH_SOURCE, SMITHERS_CLI_FORK_WORKFLOW_PATH_PATCH, "fork workflow path"],
+    [SMITHERS_CLI_FORK_WORKFLOW_METADATA_SOURCE, SMITHERS_CLI_FORK_WORKFLOW_METADATA_PATCH, "fork workflow metadata"]
+  ] as const) {
+    cliContents = applyRequiredSmithersPatch(cliContents, source, patched, label);
   }
+  writeFileDurable(cliSource, cliContents);
 
   const schedulerRoot = schedulerRoots[0]!;
   const engineRoot = engineRoots[0]!;
@@ -1917,6 +2951,7 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
   const enginePackageJson = path.join(engineRoot, "package.json");
   const schedulerSource = path.join(schedulerRoot, "src", "makeWorkflowSession.js");
   const engineSource = path.join(engineRoot, "src", "engine.js");
+  const engineWorkflowHashSource = path.join(engineRoot, "src", "workflow-hash.js");
   for (const [label, dependencyPackageJson, dependencySource] of [
     ["scheduler", schedulerPackageJson, schedulerSource],
     ["engine", enginePackageJson, engineSource]
@@ -1928,31 +2963,75 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
       throw new Error(`installed Smithers ${label} package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`);
     }
   }
+  assertRegularFileInside(nodeModules, engineWorkflowHashSource, "installed Smithers workflow hash implementation");
 
   const schedulerContents = fs.readFileSync(schedulerSource, "utf8");
-  if (!schedulerContents.includes(SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH)) {
-    if (schedulerContents.split(SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE).length !== 2) {
-      throw new Error("pinned workflow runner terminal-state restoration implementation is incompatible");
-    }
-    writeFileDurable(
-      schedulerSource,
-      schedulerContents.replace(SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE, SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH)
-    );
-  }
+  writeFileDurable(
+    schedulerSource,
+    applyRequiredSmithersPatch(
+      schedulerContents,
+      SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE,
+      SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH,
+      "terminal-state restoration"
+    )
+  );
 
-  const engineContents = fs.readFileSync(engineSource, "utf8");
-  if (!engineContents.includes(SMITHERS_ENGINE_RESUME_HYDRATION_PATCH)) {
-    if (engineContents.split(SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE).length !== 2) {
-      throw new Error("pinned workflow runner resume hydration implementation is incompatible");
-    }
-    // The scheduler session is in-memory. Restore only durable skipped tasks and
-    // finished tasks whose output row still exists; genuinely pending work then
-    // becomes runnable immediately without replaying every checkpointed task.
-    writeFileDurable(
-      engineSource,
-      engineContents.replace(SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE, SMITHERS_ENGINE_RESUME_HYDRATION_PATCH)
-    );
+  let workflowHashContents = fs.readFileSync(engineWorkflowHashSource, "utf8");
+  for (const [source, patched, label] of [
+    [SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_SOURCE, SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_PATCH, "workflow hash import"],
+    [SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_SOURCE, SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_PATCH, "workflow hash paths"],
+    [SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_SOURCE, SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_PATCH, "workflow hash identity"],
+    [
+      SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_SOURCE,
+      SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_PATCH,
+      "workflow hash recursion"
+    ],
+    [SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_SOURCE, SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_PATCH, "workflow hash API"]
+  ] as const) {
+    workflowHashContents = applyRequiredSmithersPatch(workflowHashContents, source, patched, label);
   }
+  writeFileDurable(engineWorkflowHashSource, workflowHashContents);
+
+  let engineContents = fs.readFileSync(engineSource, "utf8");
+  for (const [source, patched, label] of [
+    [SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE, SMITHERS_ENGINE_WORKFLOW_PATH_PATCH, "anchored workflow paths"],
+    [
+      SMITHERS_ENGINE_DURABILITY_METADATA_SOURCE,
+      SMITHERS_ENGINE_DURABILITY_METADATA_PATCH,
+      "workflow durability hash identity"
+    ],
+    [SMITHERS_ENGINE_RUN_METADATA_SOURCE, SMITHERS_ENGINE_RUN_METADATA_PATCH, "workflow durability metadata"],
+    [SMITHERS_ENGINE_RESUME_IDENTITY_SOURCE, SMITHERS_ENGINE_RESUME_IDENTITY_PATCH, "resume workflow identity"],
+    [SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE, SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH, "inserted workflow path"],
+    [
+      SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_SOURCE,
+      SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_PATCH,
+      "resumed workflow path"
+    ],
+    [SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_SOURCE, SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_PATCH, "updated workflow path"],
+    [
+      SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_SOURCE,
+      SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_PATCH,
+      "continued workflow path"
+    ],
+    [SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE, SMITHERS_ENGINE_RESUME_HYDRATION_PATCH, "resume hydration"]
+  ] as const) {
+    engineContents = applyRequiredSmithersPatch(engineContents, source, patched, label);
+  }
+  for (const required of SMITHERS_REQUIRED_ENGINE_ANCHORS) {
+    if (!engineContents.includes(required.anchor)) {
+      throw new Error(`pinned workflow runner ${required.id.replaceAll("_", " ")} is incompatible`);
+    }
+  }
+  writeFileDurable(engineSource, engineContents);
+}
+
+function applyRequiredSmithersPatch(contents: string, source: string, patched: string, label: string): string {
+  if (contents.includes(patched)) return contents;
+  if (contents.split(source).length !== 2) {
+    throw new Error(`pinned workflow runner ${label} implementation is incompatible`);
+  }
+  return contents.replace(source, patched);
 }
 
 function installedSmithersValidationError(projectRoot: string): string | undefined {
@@ -2032,6 +3111,24 @@ function resolveInstalledSmithersPackageRoot(projectRoot: string): string {
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertAndCloseSmithersExecutableAnchor(anchor: SmithersExecutableAnchor | undefined): void {
+  if (anchor === undefined) return;
+  try {
+    anchor.assertCurrent();
+  } finally {
+    anchor.close();
+  }
+}
+
+function assertAndCloseWorkflowExecutionSnapshotAnchor(anchor: WorkflowExecutionSnapshotAnchor | undefined): void {
+  if (anchor === undefined) return;
+  try {
+    anchor.assertCurrent();
+  } finally {
+    anchor.close();
+  }
 }
 
 function smithersExecutable(projectRoot: string, env: Record<string, string | undefined> | undefined): string {
@@ -2499,11 +3596,24 @@ function workflowFileStem(runId: string): string {
   return `ultrafuzz-${runId.replace(/[^A-Za-z0-9._-]/gu, "-")}`;
 }
 
-function writeExecutableWorkflow(projectRoot: string, workflowPath: string, source: string): void {
-  assertNoSymlinkComponents(projectRoot, workflowPath, "Smithers workflow");
-  fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
-  assertNoSymlinkComponents(projectRoot, workflowPath, "Smithers workflow");
-  writeFileDurable(workflowPath, source);
+function writePreparedWorkflowFile(root: string, filePath: string, contents: string, label: string): void {
+  const resolvedRoot = path.resolve(root);
+  const resolvedPath = path.resolve(filePath);
+  assertPathInside(resolvedRoot, resolvedPath, label);
+  fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
+  assertNoSymlinkComponents(resolvedRoot, resolvedPath, label);
+  if (fs.existsSync(resolvedPath)) {
+    assertRegularFileInside(resolvedRoot, resolvedPath, label);
+    if (!fs.readFileSync(resolvedPath).equals(Buffer.from(contents))) {
+      throw new Error(`existing ${label} conflicts with the prepared workflow start`);
+    }
+    return;
+  }
+  writeFileDurable(resolvedPath, contents);
+  assertRegularFileInside(resolvedRoot, resolvedPath, label);
+  if (!fs.readFileSync(resolvedPath).equals(Buffer.from(contents))) {
+    throw new Error(`${label} changed while the prepared workflow start was written`);
+  }
 }
 
 function renderEvidenceWorkflowSource(workflowPath: string, evidenceWorkflowPath: string): string {

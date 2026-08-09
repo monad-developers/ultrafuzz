@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 
 import { z } from "zod/v4";
+import { redactSecretsInText, SENSITIVE_REDACTION_PLACEHOLDER } from "@ultrafuzz/security";
 
 import { type RunLayout } from "./run-layout.js";
 import {
@@ -15,6 +16,7 @@ import {
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 export const NODE_ATTEMPT_LEDGER_SCHEMA_VERSION = "1.0" as const;
+export const MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES = 1_000;
 export const NODE_ATTEMPT_LEDGER_JSON_SCHEMA_ID =
   "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/node-attempt-ledger" as const;
 
@@ -75,6 +77,7 @@ export interface NodeAttemptLedgerEntry {
     output_sha256: ManifestDigest | null;
   };
   failure_category?: NodeAttemptFailureCategory;
+  failure_message?: string;
 }
 
 export interface AppendNodeAttemptInput {
@@ -93,6 +96,7 @@ export interface AppendNodeAttemptInput {
   inputManifestDigest: string;
   outputManifestDigest?: string | null;
   failureCategory?: NodeAttemptFailureCategory;
+  failureMessage?: string;
 }
 
 export interface AppendNodeAttemptResult {
@@ -139,6 +143,13 @@ const dimensionId = z
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u);
 const digest = z.string().regex(/^[a-f0-9]{64}$/u);
 const timestamp = z.string().datetime({ offset: true });
+const failureMessage = z
+  .string()
+  .min(1)
+  .max(MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES)
+  .refine((value) => Buffer.byteLength(value, "utf8") <= MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES, {
+    message: `failure message must not exceed ${MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES} bytes`
+  });
 const executedReuseSchema = z.strictObject({ status: z.literal("executed") });
 const reusedReuseSchema = z.strictObject({
   status: z.literal("reused"),
@@ -167,7 +178,8 @@ export const nodeAttemptLedgerEntrySchema = z
       input_sha256: digest,
       output_sha256: digest.nullable()
     }),
-    failure_category: z.enum(NODE_ATTEMPT_FAILURE_CATEGORIES).optional()
+    failure_category: z.enum(NODE_ATTEMPT_FAILURE_CATEGORIES).optional(),
+    failure_message: failureMessage.optional()
   })
   .superRefine((entry, ctx) => {
     if (Date.parse(entry.lifecycle.finished_at) < Date.parse(entry.lifecycle.started_at)) {
@@ -203,6 +215,13 @@ export const nodeAttemptLedgerEntrySchema = z
         code: "custom",
         path: ["failure_category"],
         message: "successful, skipped, and reused attempts cannot have a failure category"
+      });
+    }
+    if (!failed && entry.failure_message !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["failure_message"],
+        message: "successful, skipped, and reused attempts cannot have a failure message"
       });
     }
     if (entry.parent_attempt_id === entry.attempt_id) {
@@ -285,7 +304,8 @@ export const nodeAttemptLedgerJsonSchema = {
         }
       }
     },
-    failure_category: { enum: [...NODE_ATTEMPT_FAILURE_CATEGORIES] }
+    failure_category: { enum: [...NODE_ATTEMPT_FAILURE_CATEGORIES] },
+    failure_message: { type: "string", minLength: 1, maxLength: MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES }
   }
 } as const;
 
@@ -309,6 +329,37 @@ export function assertNodeAttemptLedgerEntry(value: unknown): NodeAttemptLedgerE
     throw new Error(schemaErrorMessage("node attempt ledger entry", result.issues));
   }
   return result.value;
+}
+
+export function normalizeNodeAttemptFailureMessage(
+  value: string,
+  forbiddenSecretValues: readonly string[] = []
+): string | undefined {
+  let normalized = value;
+  for (const secret of [...new Set(forbiddenSecretValues.filter(Boolean))].sort(
+    (left, right) => right.length - left.length || (left < right ? -1 : left > right ? 1 : 0)
+  )) {
+    normalized = normalized.split(secret).join(SENSITIVE_REDACTION_PLACEHOLDER);
+  }
+  normalized = [...redactSecretsInText(normalized)]
+    .map((character) => {
+      const codePoint = character.codePointAt(0)!;
+      return codePoint <= 31 || codePoint === 127 ? " " : character;
+    })
+    .join("")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (normalized === "") return undefined;
+
+  let bytes = 0;
+  let bounded = "";
+  for (const character of normalized) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES) break;
+    bounded += character;
+    bytes += characterBytes;
+  }
+  return bounded;
 }
 
 export function createNodeAttemptLedgerEntry(layout: Pick<RunLayout, "runId">, input: AppendNodeAttemptInput) {
@@ -335,6 +386,8 @@ export function createNodeAttemptLedgerEntry(layout: Pick<RunLayout, "runId">, i
           source_attempt_id: normalizeDimensionId(input.reuse.sourceAttemptId, "source attempt ID") as NodeAttemptId
         }
       : { status: "executed" as const };
+  const normalizedFailureMessage =
+    input.failureMessage === undefined ? undefined : normalizeNodeAttemptFailureMessage(input.failureMessage);
   const entry = {
     schema_version: NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
     attempt_id: attemptId,
@@ -361,7 +414,8 @@ export function createNodeAttemptLedgerEntry(layout: Pick<RunLayout, "runId">, i
           ? null
           : normalizeDigest(input.outputManifestDigest, "output manifest digest")
     },
-    ...(input.failureCategory === undefined ? {} : { failure_category: input.failureCategory })
+    ...(input.failureCategory === undefined ? {} : { failure_category: input.failureCategory }),
+    ...(normalizedFailureMessage === undefined ? {} : { failure_message: normalizedFailureMessage })
   };
   return assertNodeAttemptLedgerEntry(entry);
 }

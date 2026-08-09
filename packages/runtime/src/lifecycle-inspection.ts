@@ -13,7 +13,7 @@ import {
   type SmithersCommandSnapshot,
   type SmithersStreamResult
 } from "./smithers.js";
-import { readLinkedWorkflowEvidence } from "./start-run.js";
+import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
 import type {
   CancelRunInput,
   CancelRunValue,
@@ -53,7 +53,7 @@ export async function cancelRun(input: CancelRunInput) {
     const result = await requestSmithersCancel({
       smithersRunId: evidence.smithersRunId,
       projectRoot,
-      env: input.env
+      env: linkedWorkflowExecutionEnvironment(evidence, input.env)
     });
     const confirmed = result.status === "cancelled";
     // Read the persisted status rather than assuming `running`: `pause`d and
@@ -97,7 +97,7 @@ export async function diagnoseRun(input: WorkflowRunQueryInput) {
   const snapshot = await runSmithersInspectionCommand({
     args: ["why", evidence.smithersRunId, "--format", "json"],
     projectRoot,
-    env: input.env
+    env: linkedWorkflowExecutionEnvironment(evidence, input.env)
   });
   if (!snapshot.ok) {
     return runtimeFailure<DiagnoseRunValue>([
@@ -141,7 +141,7 @@ export async function getRunTimeline(input: WorkflowRunQueryInput & { tree?: boo
   const snapshot = await runSmithersInspectionCommand({
     args: ["timeline", evidence.smithersRunId, ...(input.tree === true ? ["--tree"] : []), "--json"],
     projectRoot,
-    env: input.env
+    env: linkedWorkflowExecutionEnvironment(evidence, input.env)
   });
   if (!snapshot.ok) {
     return runtimeFailure<RunTimelineValue>([workflowSnapshotDiagnostic(snapshot, "WORKFLOW_TIMELINE_FAILED")]);
@@ -174,7 +174,7 @@ export async function listRunSnapshots(input: WorkflowRunQueryInput) {
   const snapshot = await runSmithersInspectionCommand({
     args: ["snapshots", evidence.smithersRunId, "--json"],
     projectRoot,
-    env: input.env
+    env: linkedWorkflowExecutionEnvironment(evidence, input.env)
   });
   if (!snapshot.ok) {
     return runtimeFailure<RunSnapshotsValue>([workflowSnapshotDiagnostic(snapshot, "WORKFLOW_SNAPSHOTS_FAILED")]);
@@ -203,7 +203,7 @@ export async function queryWorkflowEvents(input: WorkflowEventsQueryInput) {
     stream = await streamSmithersCommand({
       args: workflowEventsArgs(evidence.smithersRunId, input, { watch: false, limit }),
       projectRoot,
-      env: input.env,
+      env: linkedWorkflowExecutionEnvironment(evidence, input.env),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
       // One line past the limit so an exact-limit result is not called truncated.
       maxLines: limit + 1,
@@ -253,7 +253,7 @@ export async function watchWorkflowEvents(
         ...(input.intervalSeconds === undefined ? [] : ["--interval", String(input.intervalSeconds)])
       ],
       projectRoot,
-      env: input.env,
+      env: linkedWorkflowExecutionEnvironment(evidence, input.env),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
       maxLines: MAX_WATCH_LINES,
       onLine: (line) => {
@@ -289,7 +289,7 @@ export async function getWorkflowNode(input: WorkflowNodeQueryInput) {
   const snapshot = await runSmithersInspectionCommand({
     args: workflowNodeArgs(evidence.smithersRunId, input),
     projectRoot,
-    env: input.env
+    env: linkedWorkflowExecutionEnvironment(evidence, input.env)
   });
   if (!snapshot.ok) {
     return runtimeFailure<WorkflowNodeValue>([workflowSnapshotDiagnostic(snapshot, "WORKFLOW_NODE_FAILED")]);
@@ -319,7 +319,7 @@ export async function watchWorkflowNode(
         ...(input.intervalSeconds === undefined ? [] : ["--interval", String(input.intervalSeconds)])
       ],
       projectRoot,
-      env: input.env,
+      env: linkedWorkflowExecutionEnvironment(evidence, input.env),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
       maxLines: MAX_WATCH_LINES,
       onLine: (line) => {

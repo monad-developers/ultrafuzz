@@ -49,6 +49,7 @@ export interface PromptArtifactOutput {
   primary: boolean;
   description: string;
   validEmptyExample?: string;
+  schemaFile?: string;
 }
 
 export interface PromptConcreteNode {
@@ -371,7 +372,12 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
     return rendered;
   }
 
+  const schemaDirectory = taskSchemaDirectory(input);
+  const schemaGuidance = outputs.some((output) => output.schemaFile !== undefined)
+    ? `Where an entry above names a schema to validate against, that file is a JSON Schema already present in your workspace under \`${schemaDirectory}\`. Read it and check your artifact against it before you finish. It is the authority on field names, types, and which fields are required; prefer it over any example when the two appear to disagree.\n\n`
+    : "";
   const contract = renderOutputContractTemplate("output-contract.mdx", {
+    schema_guidance: schemaGuidance,
     artifact_contracts: outputs
       .map((output) => {
         const validEmptyExample = output.validEmptyExample === "" ? "<empty file>" : output.validEmptyExample;
@@ -381,6 +387,11 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
           `- Path: \`${path.join(input.node.artifactDir, output.path)}\`${output.primary ? " (primary)" : ""}`,
           `  Contract: \`${output.contract}\``,
           `  Schema: ${output.description}`,
+          // A machine-readable schema beats prose: the producer can check the
+          // file it just wrote rather than discover a bad field from a failed node.
+          ...(output.schemaFile === undefined
+            ? []
+            : [`  Validate against: \`${path.join(schemaDirectory, output.schemaFile)}\``]),
           `  ${empty}`
         ].join("\n");
       })
@@ -809,11 +820,15 @@ function referenceForProducer(producer: ArtifactProducer, suffix: string | undef
   };
 }
 
+function taskSchemaDirectory(input: PromptRenderInput): string {
+  return path.join(input.node.workspacePath, ".ultrafuzz", "schemas");
+}
+
 function buildVariableContext(input: PromptRenderInput): Record<string, string> {
   return {
     repo_path: input.node.repoPath,
     workspace_path: input.node.workspacePath,
-    schema_path: path.join(input.node.workspacePath, ".ultrafuzz", "schemas"),
+    schema_path: taskSchemaDirectory(input),
     artifact_path: input.node.artifactDir,
     artifact_dir: input.node.artifactDir,
     run_metadata_path: input.run.metadataPath,

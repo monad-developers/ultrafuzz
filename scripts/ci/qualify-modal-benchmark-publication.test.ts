@@ -4,27 +4,22 @@ import { qualifyModalBenchmarkPublication } from "./qualify-modal-benchmark-publ
 
 const repository = "monad-developers/ultrafuzz";
 const candidate = "a".repeat(40);
-const successfulJobs = jobsForLane("smoke");
-const dispatchedFullJobs = jobsForLane("full");
-
-function jobsForLane(lane: string) {
-  return [
-    {
-      jobs: [
-        {
-          name: "launch",
-          conclusion: "success",
-          steps: [{ name: "Check out the exact benchmark candidate" }, { name: `Benchmark lane ${lane}` }]
-        },
-        { name: "collect", conclusion: "success" }
-      ]
-    }
-  ];
-}
+const runId = 123456;
+const runAttempt = 2;
+const successfulJobs = [
+  {
+    jobs: [
+      { name: "launch", conclusion: "success" },
+      { name: "collect", conclusion: "success" }
+    ]
+  }
+];
 
 describe("trusted Modal benchmark publication qualification", () => {
   it("accepts a successful default-branch push as smoke", () => {
-    expect(qualifyModalBenchmarkPublication(event({ event: "push" }), successfulJobs, repository)).toEqual({
+    expect(
+      qualifyModalBenchmarkPublication(event({ event: "push" }), successfulJobs, artifacts("smoke"), repository)
+    ).toEqual({
       eligible: true,
       candidateCommit: candidate,
       benchmarkMode: "smoke",
@@ -34,44 +29,35 @@ describe("trusted Modal benchmark publication qualification", () => {
 
   it("accepts a successful manual run as full", () => {
     expect(
-      qualifyModalBenchmarkPublication(event({ event: "workflow_dispatch" }), dispatchedFullJobs, repository)
+      qualifyModalBenchmarkPublication(
+        event({ event: "workflow_dispatch" }),
+        successfulJobs,
+        artifacts("full"),
+        repository
+      )
     ).toEqual(expect.objectContaining({ eligible: true, candidateCommit: candidate, benchmarkMode: "full" }));
   });
 
-  it("refuses to publish the threat-model release gate into the longitudinal history", () => {
-    const result = qualifyModalBenchmarkPublication(
-      event({ event: "workflow_dispatch" }),
-      jobsForLane("threat-model"),
-      repository
-    );
-    expect(result).toEqual(expect.objectContaining({ eligible: false }));
-    expect(result.reason).toContain("threat-model");
+  it("derives a dispatched smoke lane from artifacts rather than the trigger", () => {
+    expect(
+      qualifyModalBenchmarkPublication(
+        event({ event: "workflow_dispatch" }),
+        successfulJobs,
+        artifacts("smoke"),
+        repository
+      )
+    ).toEqual(expect.objectContaining({ eligible: true, candidateCommit: candidate, benchmarkMode: "smoke" }));
   });
 
-  it("refuses a producer whose declared lane does not match its trigger", () => {
-    expect(qualifyModalBenchmarkPublication(event({ event: "push" }), dispatchedFullJobs, repository)).toEqual(
-      expect.objectContaining({ eligible: false })
-    );
-    expect(qualifyModalBenchmarkPublication(event({ event: "workflow_dispatch" }), successfulJobs, repository)).toEqual(
-      expect.objectContaining({ eligible: false })
-    );
-  });
-
-  it("refuses a producer that declares no lane or more than one", () => {
-    for (const steps of [[], [{ name: "Benchmark lane smoke" }, { name: "Benchmark lane full" }]]) {
+  it("refuses threat-model artifacts from longitudinal publication", () => {
+    for (const artifactSet of [
+      artifacts("threat-model"),
+      { artifacts: [...artifacts("full").artifacts, ...artifacts("threat-model").artifacts] },
+      { artifacts: [...artifacts("full").artifacts, artifacts("threat-model").artifacts[0]] },
+      { artifacts: [...artifacts("smoke").artifacts, artifacts("threat-model").artifacts[1]] }
+    ]) {
       expect(
-        qualifyModalBenchmarkPublication(
-          event({ event: "push" }),
-          [
-            {
-              jobs: [
-                { name: "launch", conclusion: "success", steps },
-                { name: "collect", conclusion: "success" }
-              ]
-            }
-          ],
-          repository
-        )
+        qualifyModalBenchmarkPublication(event({ event: "workflow_dispatch" }), successfulJobs, artifactSet, repository)
       ).toEqual(expect.objectContaining({ eligible: false }));
     }
   });
@@ -85,9 +71,9 @@ describe("trusted Modal benchmark publication qualification", () => {
         ]
       }
     ];
-    expect(qualifyModalBenchmarkPublication(event({ event: "push" }), skippedJobs, repository)).toEqual(
-      expect.objectContaining({ eligible: false })
-    );
+    expect(
+      qualifyModalBenchmarkPublication(event({ event: "push" }), skippedJobs, artifacts("smoke"), repository)
+    ).toEqual(expect.objectContaining({ eligible: false }));
     expect(
       qualifyModalBenchmarkPublication(
         event({ event: "push" }),
@@ -99,6 +85,7 @@ describe("trusted Modal benchmark publication qualification", () => {
             ]
           }
         ],
+        artifacts("smoke"),
         repository
       )
     ).toEqual(expect.objectContaining({ eligible: false }));
@@ -116,12 +103,40 @@ describe("trusted Modal benchmark publication qualification", () => {
     ];
     for (const mutation of mutations) {
       expect(
-        qualifyModalBenchmarkPublication(event(mutation), successfulJobs, repository),
+        qualifyModalBenchmarkPublication(event(mutation), successfulJobs, artifacts("smoke"), repository),
         JSON.stringify(mutation)
       ).toEqual(expect.objectContaining({ eligible: false }));
     }
   });
+
+  it("fails closed for missing, expired, ambiguous, or wrong-attempt artifacts", () => {
+    const invalidArtifacts = [
+      { artifacts: [] },
+      artifacts("smoke", { expired: true }),
+      { artifacts: [...artifacts("smoke").artifacts, ...artifacts("full").artifacts] },
+      artifacts("smoke", { runAttempt: runAttempt + 1 })
+    ];
+    for (const artifactSet of invalidArtifacts) {
+      expect(
+        qualifyModalBenchmarkPublication(event({ event: "workflow_dispatch" }), successfulJobs, artifactSet, repository)
+      ).toEqual(expect.objectContaining({ eligible: false }));
+    }
+  });
 });
+
+function artifacts(
+  mode: "smoke" | "full" | "threat-model",
+  overrides: { expired?: boolean; runAttempt?: number } = {}
+) {
+  const attempt = overrides.runAttempt ?? runAttempt;
+  const expired = overrides.expired ?? false;
+  return {
+    artifacts: ["modal-benchmark-launch", "public-benchmark-results"].map((prefix) => ({
+      name: `${prefix}-${mode}-${runId}-${attempt}`,
+      expired
+    }))
+  };
+}
 
 function event(overrides: Record<string, unknown>) {
   return {
@@ -133,6 +148,8 @@ function event(overrides: Record<string, unknown>) {
       head_repository: { full_name: repository },
       head_branch: "main",
       head_sha: candidate,
+      id: runId,
+      run_attempt: runAttempt,
       ...overrides
     }
   };

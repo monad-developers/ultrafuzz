@@ -118,7 +118,7 @@ function runtimeEfficiency(
     wall_time_seconds: seconds(wallMilliseconds),
     active_time_seconds: seconds(active.value),
     wait_time_seconds: seconds(Math.max(0, wallMilliseconds - active.value)),
-    runtime: complete()
+    runtime: active.retriedNodeCount === 0 ? complete() : partial("node-attempt-timestamps-final-attempt-only")
   };
 }
 
@@ -169,8 +169,9 @@ function activeMilliseconds(
   nodes: Record<string, NodeState>,
   runStartedAt: number,
   runFinishedAt: number
-): { ok: true; value: number } | { ok: false; reason: EvalEfficiencyReason } {
+): { ok: true; value: number; retriedNodeCount: number } | { ok: false; reason: EvalEfficiencyReason } {
   const intervals: Array<[number, number]> = [];
+  let retriedNodeCount = 0;
   for (const node of Object.values(nodes) as unknown[]) {
     if (!isRecord(node) || typeof node.status !== "string") {
       return { ok: false, reason: "node-timestamps-invalid" };
@@ -182,9 +183,7 @@ function activeMilliseconds(
     if (retryCount === undefined) {
       return { ok: false, reason: "node-timestamps-invalid" };
     }
-    if (retryCount > 0) {
-      return { ok: false, reason: "node-attempt-timestamps-unavailable" };
-    }
+    if (retryCount > 0) retriedNodeCount += 1;
     const started = timestamp(node.started_at);
     const finished = timestamp(node.finished_at);
     if (started.kind === "missing" || finished.kind === "missing") {
@@ -218,7 +217,10 @@ function activeMilliseconds(
   if (current !== undefined) {
     total += current[1] - current[0];
   }
-  return { ok: true, value: total };
+  // Durable node timestamps describe the final attempt. For retried nodes the
+  // union is therefore a lower-bound active-time attribution, while the
+  // workflow start/finish interval remains an observed wall-clock value.
+  return { ok: true, value: total, retriedNodeCount };
 }
 
 function readRunState(runRoot: string | undefined): RunState | undefined {

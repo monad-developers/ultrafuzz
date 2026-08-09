@@ -56,6 +56,12 @@ worker published its result before the controller stopped, the replacement
 sandbox checks the durable result first and does not execute the attempt again.
 Multiple live sandboxes for one attempt are rejected instead of guessed at.
 
+Modal workers run on Linux and require procfs to remain mounted at `/proc`.
+Before invoking Smithers, the worker opens the canonical sealed execution
+generation and passes the child a `/proc/<worker-pid>/fd/<descriptor>` path.
+Custom images must preserve that procfs view; the worker fails closed when the
+cross-process descriptor anchor is unavailable.
+
 Cancellation terminates the current sandbox. Worker failures and timeouts are
 normalized to provider-scoped workflow errors, then Smithers applies the
 existing node retry policy with a fresh VM.

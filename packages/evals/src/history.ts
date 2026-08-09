@@ -30,8 +30,9 @@ import { parseRecoveryEquivalence } from "./recovery-equivalence.js";
 import { EvalError, evalRunRoot, jsonFile, readJsonLines, safeEvalId } from "./utils.js";
 
 export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v1" as const;
-export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v4" as const;
-const EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v3" as const;
+export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v5" as const;
+const EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v4" as const;
+const EVAL_HISTORY_LEGACY_PUBLICATION_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v3" as const;
 const EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v2" as const;
 const EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v1" as const;
 const EVAL_HISTORY_PUBLIC_BUNDLE_FILE = "public-results.json";
@@ -65,6 +66,7 @@ export interface EvalHistoryObservation {
   schema_version:
     | typeof EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION
     | typeof EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION
+    | typeof EVAL_HISTORY_LEGACY_PUBLICATION_OBSERVATION_SCHEMA_VERSION
     | typeof EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION
     | typeof EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION;
   id: string;
@@ -101,8 +103,16 @@ export interface EvalHistoryObservation {
   source_artifact: string;
 }
 
+export interface EvalHistorySupersession {
+  superseded_source_eval_run_id: string;
+  replacement_source_eval_run_id: string;
+  reason: string;
+  issue_url: string;
+}
+
 export interface EvalHistory {
   schema_version: typeof EVAL_HISTORY_SCHEMA_VERSION;
+  supersessions: EvalHistorySupersession[];
   observations: EvalHistoryObservation[];
 }
 
@@ -120,6 +130,10 @@ const sourceArtifactSchema = z
   .min(1)
   .max(500)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u);
+const issueUrlSchema = z
+  .string()
+  .max(1_000)
+  .regex(/^https:\/\/github\.com\/monad-developers\/ultrafuzz\/issues\/[1-9][0-9]*$/u);
 const publicationUrlSchema = z
   .string()
   .url()
@@ -223,6 +237,17 @@ const previousObservationSchema = z.strictObject({
   schema_version: z.literal(EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION),
   ...observationBaseShape,
   ground_truth_bug_count: nonNegativeInteger,
+  status: publicationStatusSchema,
+  executed_case_count: positiveInteger,
+  graded_case_count: positiveInteger,
+  publication_url: publicationUrlSchema,
+  target_publication: targetPublicationSchema
+});
+
+const legacyPublicationObservationSchema = z.strictObject({
+  schema_version: z.literal(EVAL_HISTORY_LEGACY_PUBLICATION_OBSERVATION_SCHEMA_VERSION),
+  ...observationBaseShape,
+  ground_truth_bug_count: nonNegativeInteger,
   status: legacyPublicationStatusSchema,
   executed_case_count: positiveInteger,
   graded_case_count: positiveInteger,
@@ -251,12 +276,21 @@ const legacyObservationSchema = z.strictObject({
 const observationSchema = z.union([
   currentObservationSchema,
   previousObservationSchema,
+  legacyPublicationObservationSchema,
   publishedObservationSchema,
   legacyObservationSchema
 ]);
 
+const supersessionSchema = z.strictObject({
+  superseded_source_eval_run_id: safeText,
+  replacement_source_eval_run_id: safeText,
+  reason: safeText,
+  issue_url: issueUrlSchema
+});
+
 const historySchema = z.strictObject({
   schema_version: z.literal(EVAL_HISTORY_SCHEMA_VERSION),
+  supersessions: z.array(supersessionSchema).default([]),
   observations: z.array(observationSchema)
 });
 
@@ -287,7 +321,7 @@ export const EVAL_HISTORY_PERFORMANCE_COST_MODEL_CUTOFFS: Readonly<Record<string
 type ChartMetric = (typeof EVAL_HISTORY_CHARTS)[number]["metric"];
 
 export function emptyEvalHistory(): EvalHistory {
-  return { schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations: [] };
+  return { schema_version: EVAL_HISTORY_SCHEMA_VERSION, supersessions: [], observations: [] };
 }
 
 export function parseEvalHistory(value: unknown, source = "eval history"): EvalHistory {
@@ -321,9 +355,15 @@ function assertHistoryIntegrity(history: EvalHistory): void {
     assertCompletenessValue(
       observation.wall_clock_seconds,
       observation.wall_clock_completeness,
-      `${observation.id}.wall_clock_seconds`
+      `${observation.id}.wall_clock_seconds`,
+      observation.schema_version === EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION
     );
-    assertCompletenessValue(observation.cost_usd, observation.cost_completeness, `${observation.id}.cost_usd`);
+    assertCompletenessValue(
+      observation.cost_usd,
+      observation.cost_completeness,
+      `${observation.id}.cost_usd`,
+      observation.schema_version === EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION
+    );
     const targetKeys = observation.target_revisions.map((target) => target.target);
     if (new Set(targetKeys).size !== targetKeys.length) {
       throw new EvalError("EVAL_HISTORY_INVALID", `observation ${observation.id} repeats a target revision`);
@@ -370,6 +410,113 @@ function assertHistoryIntegrity(history: EvalHistory): void {
     }
     byId.set(observation.id, canonical);
   }
+  assertSupersessionIntegrity(history);
+}
+
+interface SourceRunSupersessionSignature {
+  identity: string;
+  targetObservationCounts: Array<{ target: string; count: number }>;
+}
+
+function sourceRunSupersessionSignature(observations: EvalHistoryObservation[]): SourceRunSupersessionSignature {
+  const signatures = new Set(
+    observations.map((observation) =>
+      stableStringify({
+        benchmark: observation.benchmark,
+        lane: observation.lane,
+        variant: observation.variant,
+        model_profile: observation.model_profile,
+        model: observation.model,
+        reasoning_effort: observation.reasoning_effort,
+        cohort_fingerprint: observation.cohort_fingerprint,
+        target_revisions: [...observation.target_revisions].sort((left, right) =>
+          compareText(left.target, right.target)
+        )
+      })
+    )
+  );
+  if (signatures.size !== 1) {
+    throw new EvalError("EVAL_HISTORY_INVALID", "a supersession source run has inconsistent benchmark identity");
+  }
+  const targetCounts = new Map<string, number>();
+  for (const observation of observations) {
+    targetCounts.set(observation.target, (targetCounts.get(observation.target) ?? 0) + 1);
+  }
+  return {
+    identity: [...signatures][0]!,
+    targetObservationCounts: [...targetCounts]
+      .sort(([left], [right]) => compareText(left, right))
+      .map(([target, count]) => ({ target, count }))
+  };
+}
+
+function supersessionReplacementIsCompatible(
+  superseded: SourceRunSupersessionSignature,
+  replacement: SourceRunSupersessionSignature
+): boolean {
+  if (superseded.identity !== replacement.identity) return false;
+  const supersededCounts = new Map(
+    superseded.targetObservationCounts.map(({ target, count }) => [target, count] as const)
+  );
+  return replacement.targetObservationCounts.every(({ target, count }) => count <= (supersededCounts.get(target) ?? 0));
+}
+
+function supersessionReplacementHasParity(
+  superseded: EvalHistoryObservation[],
+  replacement: EvalHistoryObservation[]
+): boolean {
+  const supersededSignature = sourceRunSupersessionSignature(superseded);
+  const replacementSignature = sourceRunSupersessionSignature(replacement);
+  return (
+    supersessionReplacementIsCompatible(supersededSignature, replacementSignature) &&
+    stableStringify(supersededSignature.targetObservationCounts) ===
+      stableStringify(replacementSignature.targetObservationCounts)
+  );
+}
+
+function assertSupersessionIntegrity(history: EvalHistory): void {
+  const observationsBySourceRun = new Map<string, EvalHistoryObservation[]>();
+  for (const observation of history.observations) {
+    observationsBySourceRun.set(observation.source_eval_run_id, [
+      ...(observationsBySourceRun.get(observation.source_eval_run_id) ?? []),
+      observation
+    ]);
+  }
+  const supersededSourceRuns = new Set<string>();
+  for (const supersession of history.supersessions) {
+    if (supersededSourceRuns.has(supersession.superseded_source_eval_run_id)) {
+      throw new EvalError(
+        "EVAL_HISTORY_INVALID",
+        `history repeats supersession for source run ${supersession.superseded_source_eval_run_id}`
+      );
+    }
+    if (supersession.superseded_source_eval_run_id === supersession.replacement_source_eval_run_id) {
+      throw new EvalError("EVAL_HISTORY_INVALID", "a history source run cannot supersede itself");
+    }
+    if (!observationsBySourceRun.has(supersession.superseded_source_eval_run_id)) {
+      throw new EvalError(
+        "EVAL_HISTORY_INVALID",
+        `superseded source run ${supersession.superseded_source_eval_run_id} is absent from history`
+      );
+    }
+    supersededSourceRuns.add(supersession.superseded_source_eval_run_id);
+  }
+  for (const supersession of history.supersessions) {
+    if (supersededSourceRuns.has(supersession.replacement_source_eval_run_id)) {
+      throw new EvalError("EVAL_HISTORY_INVALID", "history supersession chains are not supported");
+    }
+    const superseded = observationsBySourceRun.get(supersession.superseded_source_eval_run_id)!;
+    const replacement = observationsBySourceRun.get(supersession.replacement_source_eval_run_id);
+    if (replacement === undefined) continue;
+    const supersededSignature = sourceRunSupersessionSignature(superseded);
+    const replacementSignature = sourceRunSupersessionSignature(replacement);
+    if (!supersessionReplacementIsCompatible(supersededSignature, replacementSignature)) {
+      throw new EvalError(
+        "EVAL_HISTORY_INVALID",
+        `replacement source run ${supersession.replacement_source_eval_run_id} does not match superseded source run ${supersession.superseded_source_eval_run_id}`
+      );
+    }
+  }
 }
 
 function hasPublicationMetadata(observation: EvalHistoryObservation): boolean {
@@ -383,12 +530,32 @@ function hasPublicationMetadata(observation: EvalHistoryObservation): boolean {
   );
 }
 
-function assertCompletenessValue(value: number | null, completeness: EvalHistoryCompleteness, field: string): void {
-  if (completeness.status === "complete" && (value === null || completeness.reasons.length > 0)) {
-    throw new EvalError("EVAL_HISTORY_INVALID", `${field} must have a value and no reasons when complete`);
+function assertCompletenessValue(
+  value: number | null,
+  completeness: EvalHistoryCompleteness,
+  field: string,
+  currentSemantics: boolean
+): void {
+  if (completeness.status === "complete") {
+    if (value === null || completeness.reasons.length > 0) {
+      throw new EvalError("EVAL_HISTORY_INVALID", `${field} must have a value and no reasons when complete`);
+    }
+    return;
   }
-  if (completeness.status !== "complete" && (value !== null || completeness.reasons.length === 0)) {
-    throw new EvalError("EVAL_HISTORY_INVALID", `${field} must be unavailable with at least one reason`);
+  if (!currentSemantics) {
+    if (value !== null || completeness.reasons.length === 0) {
+      throw new EvalError("EVAL_HISTORY_INVALID", `${field} must be unavailable with at least one reason`);
+    }
+    return;
+  }
+  if (completeness.status === "partial") {
+    if (value === null || completeness.reasons.length === 0) {
+      throw new EvalError("EVAL_HISTORY_INVALID", `${field} must have a value and at least one reason when partial`);
+    }
+    return;
+  }
+  if (value !== null || completeness.reasons.length === 0) {
+    throw new EvalError("EVAL_HISTORY_INVALID", `${field} must be null with at least one reason when unavailable`);
   }
 }
 
@@ -819,28 +986,83 @@ function aggregateEfficiency(entries: Array<{ value: number | null; completeness
   value: number | null;
   completeness: EvalHistoryCompleteness;
 } {
-  if (entries.every((entry) => entry.value !== null && entry.completeness.status === "complete")) {
+  const aggregate = aggregateCompletenessValues(
+    entries.map((entry) => ({
+      value: entry.value,
+      completeness: {
+        status: entry.completeness.status,
+        reasons: entry.completeness.reason === null ? [] : [entry.completeness.reason]
+      }
+    })),
+    (values) => round(values.reduce((sum, value) => sum + value, 0))
+  );
+  return { value: aggregate.value, completeness: aggregate.completeness };
+}
+
+function aggregateCompletenessValues(
+  entries: Array<{ value: number | null; completeness: EvalHistoryCompleteness }>,
+  combine: (values: number[]) => number,
+  options: { preservePartialWithoutValue?: boolean } = {}
+): {
+  value: number | null;
+  completeness: EvalHistoryCompleteness;
+  availableCount: number;
+  expectedCount: number;
+} {
+  const availableValues = entries.flatMap((entry) => (entry.value === null ? [] : [entry.value]));
+  const reasons = [
+    ...new Set(
+      entries
+        .flatMap((entry) =>
+          entry.completeness.status === "complete"
+            ? []
+            : entry.completeness.reasons.length > 0
+              ? entry.completeness.reasons
+              : [`metric-${entry.completeness.status}`]
+        )
+        .sort(compareText)
+    )
+  ];
+  const expectedCount = entries.length;
+  const availableCount = availableValues.length;
+  if (availableCount === 0) {
+    const status =
+      options.preservePartialWithoutValue === true && entries.some((entry) => entry.completeness.status === "partial")
+        ? "partial"
+        : "unavailable";
     return {
-      value: round(entries.reduce((sum, entry) => sum + (entry.value ?? 0), 0)),
-      completeness: { status: "complete", reasons: [] }
+      value: null,
+      completeness: {
+        status,
+        reasons: reasons.length > 0 ? reasons : [`metric-${status}`]
+      },
+      availableCount,
+      expectedCount
     };
   }
-  const statuses = entries.map((entry) => entry.completeness.status);
-  const reasons = [
-    ...new Set(entries.map((entry) => entry.completeness.reason ?? `metric-${entry.completeness.status}`).sort())
-  ];
+  if (
+    availableCount === expectedCount &&
+    entries.every((entry) => entry.completeness.status === "complete" && entry.completeness.reasons.length === 0)
+  ) {
+    return {
+      value: combine(availableValues),
+      completeness: { status: "complete", reasons: [] },
+      availableCount,
+      expectedCount
+    };
+  }
   return {
-    value: null,
-    completeness: {
-      status: statuses.every((status) => status === "unavailable") ? "unavailable" : "partial",
-      reasons
-    }
+    value: combine(availableValues),
+    completeness: { status: "partial", reasons: reasons.length > 0 ? reasons : ["metric-partial"] },
+    availableCount,
+    expectedCount
   };
 }
 
 export function mergeEvalHistory(history: EvalHistory, incoming: EvalHistoryObservation[]): EvalHistory {
   const validated = parseEvalHistory({
     schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+    supersessions: [],
     observations: incoming
   }).observations;
   const existing = new Map(history.observations.map((observation) => [observation.id, stableStringify(observation)]));
@@ -861,6 +1083,7 @@ export function mergeEvalHistory(history: EvalHistory, incoming: EvalHistoryObse
   }
   return parseEvalHistory({
     schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+    supersessions: history.supersessions,
     observations: [...history.observations, ...appended]
   });
 }
@@ -1185,15 +1408,23 @@ export interface EvalHistoryBenchmarkAggregate {
   cumulative_unique_true_positives: number;
   ground_truth_bug_count: number | null;
   wall_clock_seconds: number | null;
+  wall_clock_completeness: EvalHistoryCompleteness;
+  wall_clock_available_target_count: number;
   cost_usd: number | null;
+  cost_completeness: EvalHistoryCompleteness;
+  cost_available_target_count: number;
 }
 
 export interface EvalHistoryModelPerformanceCostAggregate {
   model: string;
   runCount: number;
+  expectedRunCount: number;
+  availableTargetCount: number;
+  expectedTargetCount: number;
   firstRunTimestamp: string;
   lastRunTimestamp: string;
   pricingCutoff: string | null;
+  costCompleteness: EvalHistoryCompleteness;
   costUsd: EvalHistoryQuartiles;
   f1: EvalHistoryQuartiles;
 }
@@ -1252,8 +1483,19 @@ export function aggregateEvalHistoryBenchmarkRuns(
     if (!complete) continue;
 
     const groundTruthCounts = group.map((observation) => observation.ground_truth_bug_count);
-    const wallClockValues = group.map((observation) => observation.wall_clock_seconds);
-    const costValues = group.map((observation) => observation.cost_usd);
+    const wallClock = aggregateCompletenessValues(
+      group.map((observation) => ({
+        value: observation.wall_clock_seconds,
+        completeness: observation.wall_clock_completeness
+      })),
+      (values) => round(Math.max(...values)),
+      { preservePartialWithoutValue: true }
+    );
+    const cost = aggregateCompletenessValues(
+      group.map((observation) => ({ value: observation.cost_usd, completeness: observation.cost_completeness })),
+      (values) => round(values.reduce((sum, value) => sum + value, 0)),
+      { preservePartialWithoutValue: true }
+    );
     aggregates.push({
       key,
       benchmark: first.benchmark,
@@ -1280,12 +1522,12 @@ export function aggregateEvalHistoryBenchmarkRuns(
       ground_truth_bug_count: groundTruthCounts.some((value) => value === undefined)
         ? null
         : groundTruthCounts.reduce<number>((sum, value) => sum + (value ?? 0), 0),
-      wall_clock_seconds: wallClockValues.some((value) => value === null)
-        ? null
-        : round(Math.max(...wallClockValues.map((value) => value ?? 0))),
-      cost_usd: costValues.some((value) => value === null)
-        ? null
-        : round(costValues.reduce<number>((sum, value) => sum + (value ?? 0), 0))
+      wall_clock_seconds: wallClock.value,
+      wall_clock_completeness: wallClock.completeness,
+      wall_clock_available_target_count: wallClock.availableCount,
+      cost_usd: cost.value,
+      cost_completeness: cost.completeness,
+      cost_available_target_count: cost.availableCount
     });
   }
   return aggregates.sort(
@@ -1302,27 +1544,40 @@ export function aggregateEvalHistoryModelPerformanceCost(
   const byModel = new Map<string, EvalHistoryBenchmarkAggregate[]>();
   for (const aggregate of aggregates) {
     if (!isCurrentPerformanceCostPricing(aggregate)) continue;
-    if (aggregate.cost_usd === null) continue;
     byModel.set(aggregate.model, [...(byModel.get(aggregate.model) ?? []), aggregate]);
   }
 
   return [...byModel.entries()]
-    .map(([model, modelAggregates]) => {
-      const selected = modelAggregates.sort(
+    .flatMap(([model, modelAggregates]) => {
+      const all = modelAggregates.sort(
         (left, right) =>
           compareText(left.run_timestamp, right.run_timestamp) ||
           compareText(left.candidate_commit, right.candidate_commit) ||
           compareText(left.source_eval_run_id, right.source_eval_run_id)
       );
-      return {
-        model,
-        runCount: selected.length,
-        firstRunTimestamp: selected[0]!.run_timestamp,
-        lastRunTimestamp: selected.at(-1)!.run_timestamp,
-        pricingCutoff: EVAL_HISTORY_PERFORMANCE_COST_MODEL_CUTOFFS[model] ?? null,
-        costUsd: quartiles(selected.map((aggregate) => aggregate.cost_usd ?? 0)),
-        f1: quartiles(selected.map((aggregate) => aggregate.f1))
-      };
+      const selected = all.filter(
+        (aggregate): aggregate is EvalHistoryBenchmarkAggregate & { cost_usd: number } => aggregate.cost_usd !== null
+      );
+      if (selected.length === 0) return [];
+      const completeness = aggregateCompletenessValues(
+        all.map((aggregate) => ({ value: aggregate.cost_usd, completeness: aggregate.cost_completeness })),
+        (values) => round(values.reduce((sum, value) => sum + value, 0))
+      ).completeness;
+      return [
+        {
+          model,
+          runCount: selected.length,
+          expectedRunCount: all.length,
+          availableTargetCount: all.reduce((sum, aggregate) => sum + aggregate.cost_available_target_count, 0),
+          expectedTargetCount: all.reduce((sum, aggregate) => sum + aggregate.target_count, 0),
+          firstRunTimestamp: selected[0]!.run_timestamp,
+          lastRunTimestamp: selected.at(-1)!.run_timestamp,
+          pricingCutoff: EVAL_HISTORY_PERFORMANCE_COST_MODEL_CUTOFFS[model] ?? null,
+          costCompleteness: completeness,
+          costUsd: quartiles(selected.map((aggregate) => aggregate.cost_usd)),
+          f1: quartiles(selected.map((aggregate) => aggregate.f1))
+        }
+      ];
     })
     .sort((left, right) => compareText(left.model, right.model));
 }
@@ -1371,6 +1626,42 @@ function aggregateRunKey(aggregate: EvalHistoryBenchmarkAggregate): string {
   ].join("\u0000");
 }
 
+function latestEfficiencyLabel(
+  value: number | null,
+  completeness: EvalHistoryCompleteness,
+  availableTargetCount: number,
+  expectedTargetCount: number,
+  formatValue: (value: number) => string
+): string {
+  const formatted = value === null ? "n/a" : formatValue(value);
+  return completeness.status === "complete"
+    ? formatted
+    : `${formatted} · ${completeness.status} ${availableTargetCount}/${expectedTargetCount}`;
+}
+
+function renderLatestEfficiencyCell(input: {
+  metric: "cost_usd" | "wall_clock_seconds";
+  label: string;
+  x: number;
+  y: number;
+  value: number | null;
+  completeness: EvalHistoryCompleteness;
+  availableTargetCount: number;
+  expectedTargetCount: number;
+  formatValue: (value: number) => string;
+}): string {
+  const rendered = latestEfficiencyLabel(
+    input.value,
+    input.completeness,
+    input.availableTargetCount,
+    input.expectedTargetCount,
+    input.formatValue
+  );
+  const reasons = input.completeness.reasons.length === 0 ? "" : ` (${input.completeness.reasons.join(", ")})`;
+  const fontSize = input.completeness.status === "complete" ? 14 : 12;
+  return `<text data-metric="${input.metric}" data-status="${input.completeness.status}" data-available-target-count="${input.availableTargetCount}" data-expected-target-count="${input.expectedTargetCount}" x="${input.x}" y="${input.y}" text-anchor="end" font-family="system-ui, sans-serif" font-size="${fontSize}" fill="#374151"><title>${xml(`${input.label}: ${rendered}${reasons}`)}</title>${xml(rendered)}</text>`;
+}
+
 function renderLatestEvalSummary(aggregates: EvalHistoryBenchmarkAggregate[]): string {
   const width = 960;
   const left = 40;
@@ -1406,7 +1697,21 @@ function renderLatestEvalSummary(aggregates: EvalHistoryBenchmarkAggregate[]): s
       aggregate.ground_truth_bug_count === null
         ? `${aggregate.cumulative_unique_true_positives} bugs found`
         : `${aggregate.cumulative_unique_true_positives} of ${aggregate.ground_truth_bug_count} bugs found`;
-    return `${aggregate.model} ${aggregate.reasoning_effort}: UltrafuzzBench Score ${formatOverviewPercent(aggregate.f1)}, ${bugs}`;
+    const cost = latestEfficiencyLabel(
+      aggregate.cost_usd,
+      aggregate.cost_completeness,
+      aggregate.cost_available_target_count,
+      aggregate.target_count,
+      (value) => `$${value.toFixed(2)}`
+    );
+    const wallClock = latestEfficiencyLabel(
+      aggregate.wall_clock_seconds,
+      aggregate.wall_clock_completeness,
+      aggregate.wall_clock_available_target_count,
+      aggregate.target_count,
+      formatElapsed
+    );
+    return `${aggregate.model} ${aggregate.reasoning_effort}: UltrafuzzBench Score ${formatOverviewPercent(aggregate.f1)}, ${bugs}, cost ${cost}, wall clock ${wallClock}`;
   });
   lines.push(
     `<desc id="desc">Latest complete ${xml(latestAnchor.benchmark)} ${xml(latestAnchor.lane)} run with ${latestRun.length} model ${latestRun.length === 1 ? "profile" : "profiles"}. ${xml(profileDescriptions.join("; "))}.</desc>`,
@@ -1433,8 +1738,28 @@ function renderLatestEvalSummary(aggregates: EvalHistoryBenchmarkAggregate[]): s
       `<text x="${left + 12}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#111827"><title>${xml(`${aggregate.lane} · ${aggregate.model_profile}`)}</title>${xml(`${aggregate.model} · ${aggregate.reasoning_effort}`)}</text>`,
       `<text x="400" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#0f766e">${xml(formatOverviewPercent(aggregate.f1))}</text>`,
       `<text x="600" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${xml(bugs)}</text>`,
-      `<text x="760" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${aggregate.cost_usd === null ? "n/a" : xml(`$${aggregate.cost_usd.toFixed(2)}`)}</text>`,
-      `<text x="920" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${aggregate.wall_clock_seconds === null ? "n/a" : xml(formatElapsed(aggregate.wall_clock_seconds))}</text>`
+      renderLatestEfficiencyCell({
+        metric: "cost_usd",
+        label: "Cost",
+        x: 760,
+        y: rowY,
+        value: aggregate.cost_usd,
+        completeness: aggregate.cost_completeness,
+        availableTargetCount: aggregate.cost_available_target_count,
+        expectedTargetCount: aggregate.target_count,
+        formatValue: (value) => `$${value.toFixed(2)}`
+      }),
+      renderLatestEfficiencyCell({
+        metric: "wall_clock_seconds",
+        label: "Wall clock",
+        x: 920,
+        y: rowY,
+        value: aggregate.wall_clock_seconds,
+        completeness: aggregate.wall_clock_completeness,
+        availableTargetCount: aggregate.wall_clock_available_target_count,
+        expectedTargetCount: aggregate.target_count,
+        formatValue: formatElapsed
+      })
     );
   });
   lines.push("</svg>");
@@ -1656,43 +1981,59 @@ function renderEvalPerformanceCostChart(aggregates: EvalHistoryBenchmarkAggregat
   );
   const summaries = aggregateEvalHistoryModelPerformanceCost(comparableAggregates);
   const plottedModels = new Set(summaries.map((summary) => summary.model));
-  const unavailableModels = [...new Set(comparableAggregates.map((aggregate) => aggregate.model))]
-    .filter((model) => !plottedModels.has(model))
+  const costGapModels = [
+    ...new Set(
+      comparableAggregates.filter((aggregate) => aggregate.cost_usd === null).map((aggregate) => aggregate.model)
+    )
+  ]
     .sort(compareText)
     .map((model) => {
-      const modelAggregates = comparableAggregates.filter((aggregate) => aggregate.model === model);
+      const modelAggregates = comparableAggregates.filter(
+        (aggregate) => aggregate.model === model && aggregate.cost_usd === null
+      );
       return {
         model,
         runCount: modelAggregates.length,
+        status: modelAggregates.some((aggregate) => aggregate.cost_completeness.status === "partial")
+          ? ("partial" as const)
+          : ("unavailable" as const),
+        availableTargetCount: modelAggregates.reduce(
+          (sum, aggregate) => sum + aggregate.cost_available_target_count,
+          0
+        ),
+        expectedTargetCount: modelAggregates.reduce((sum, aggregate) => sum + aggregate.target_count, 0),
         medianF1: quantile(
           modelAggregates.map((aggregate) => aggregate.f1),
           0.5
-        )
+        ),
+        reasons: [
+          ...new Set(modelAggregates.flatMap((aggregate) => aggregate.cost_completeness.reasons).sort(compareText))
+        ]
       };
     });
-  const legendRows = Math.max(1, summaries.length) + unavailableModels.length;
+  const legendRows = Math.max(1, summaries.length) + costGapModels.length;
   const height = legendTop + legendRows * 26 + 24;
   const costMaximum = niceCostMaximum(summaries.map((summary) => summary.costUsd.q3));
   const f1Maximum = niceF1Maximum(summaries.map((summary) => summary.f1.q3));
   const x = (value: number): number => left + (value / costMaximum) * plotWidth;
   const y = (value: number): number => top + plotHeight - (value / f1Maximum) * plotHeight;
   const unavailableDescription =
-    unavailableModels.length === 0
+    costGapModels.length === 0
       ? ""
-      : ` Cost is unavailable for ${unavailableModels.map(({ model }) => model).join(", ")}.`;
+      : ` Missing cost values are listed for ${costGapModels.map(({ model }) => model).join(", ")}.`;
   const lines = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
     '<title id="title">UltrafuzzBench performance versus cost</title>',
-    `<desc id="desc">Each model with complete cost is represented by the median cost and UltrafuzzBench Score (macro-F1) of its complete smoke runs in the current pricing regime. Horizontal and vertical bands show Type-7 interquartile ranges.${xml(unavailableDescription)}</desc>`,
+    `<desc id="desc">Each model with reported cost is represented by the median cost and UltrafuzzBench Score (macro-F1) of its smoke runs in the current pricing regime. Partial values use dashed rings, and every legend row reports available and expected target counts. Horizontal and vertical bands show Type-7 interquartile ranges.${xml(unavailableDescription)}</desc>`,
     `<rect width="${width}" height="${height}" fill="#ffffff"/>`,
     `<text x="${left}" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">Performance × cost</text>`,
-    `<text x="${left}" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">UltrafuzzBench smoke · complete runs in each model&apos;s current pricing regime</text>`,
-    `<text x="${left}" y="88" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Dots are medians; horizontal cost bands and vertical macro-F1 bands show the IQR.</text>`,
+    `<text x="${left}" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">UltrafuzzBench smoke · complete and marked partial costs in each model&apos;s current pricing regime</text>`,
+    `<text x="${left}" y="88" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Dots are medians; dashed rings mark partial cost coverage; legends report target denominators.</text>`,
     `<line x1="${left}" y1="${top}" x2="${left}" y2="${plotBottom}" stroke="#6b7280"/>`,
     `<line x1="${left}" y1="${plotBottom}" x2="${left + plotWidth}" y2="${plotBottom}" stroke="#6b7280"/>`,
     `<text transform="translate(22,${top + plotHeight / 2}) rotate(-90)" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#374151">UltrafuzzBench Score (macro-F1)</text>`,
-    `<text x="${left + plotWidth / 2}" y="${plotBottom + 58}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#374151">Cost per complete run (USD)</text>`
+    `<text x="${left + plotWidth / 2}" y="${plotBottom + 58}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#374151">Reported cost per benchmark cohort (USD)</text>`
   ];
 
   for (let tick = 0; tick <= 4; tick += 1) {
@@ -1712,16 +2053,16 @@ function renderEvalPerformanceCostChart(aggregates: EvalHistoryBenchmarkAggregat
 
   if (summaries.length === 0) {
     lines.push(
-      `<text x="${left + plotWidth / 2}" y="${top + plotHeight / 2}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="16" fill="#6b7280">No complete priced benchmark runs</text>`
+      `<text x="${left + plotWidth / 2}" y="${top + plotHeight / 2}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="16" fill="#6b7280">No reported benchmark costs</text>`
     );
   } else {
     summaries.forEach((summary, index) => {
       const color = OVERVIEW_PROFILE_COLORS[index % OVERVIEW_PROFILE_COLORS.length]!;
       const medianX = x(summary.costUsd.median);
       const medianY = y(summary.f1.median);
-      const attributes = `data-model="${xml(summary.model)}" data-run-count="${summary.runCount}" data-cost-q1="${summary.costUsd.q1}" data-cost-median="${summary.costUsd.median}" data-cost-q3="${summary.costUsd.q3}" data-f1-q1="${summary.f1.q1}" data-f1-median="${summary.f1.median}" data-f1-q3="${summary.f1.q3}"`;
+      const attributes = `data-model="${xml(summary.model)}" data-status="${summary.costCompleteness.status}" data-run-count="${summary.runCount}" data-expected-run-count="${summary.expectedRunCount}" data-available-target-count="${summary.availableTargetCount}" data-expected-target-count="${summary.expectedTargetCount}" data-cost-q1="${summary.costUsd.q1}" data-cost-median="${summary.costUsd.median}" data-cost-q3="${summary.costUsd.q3}" data-f1-q1="${summary.f1.q1}" data-f1-median="${summary.f1.median}" data-f1-q3="${summary.f1.q3}"`;
       lines.push(
-        `<g ${attributes}><title>${xml(`${summary.model}: median ${formatOverviewPercent(summary.f1.median)} at ${formatCost(summary.costUsd.median)}; ${summary.runCount} ${summary.runCount === 1 ? "run" : "runs"} from ${summary.firstRunTimestamp.slice(0, 10)} to ${summary.lastRunTimestamp.slice(0, 10)}${summary.pricingCutoff === null ? "" : ` (current pricing since ${summary.pricingCutoff.slice(0, 10)})`}`)}</title>`
+        `<g ${attributes}><title>${xml(`${summary.model}: median ${formatOverviewPercent(summary.f1.median)} at ${formatCost(summary.costUsd.median)}; ${summary.costCompleteness.status} cost; ${summary.availableTargetCount}/${summary.expectedTargetCount} targets available; ${summary.runCount}/${summary.expectedRunCount} cohorts priced from ${summary.firstRunTimestamp.slice(0, 10)} to ${summary.lastRunTimestamp.slice(0, 10)}${summary.costCompleteness.reasons.length === 0 ? "" : ` (${summary.costCompleteness.reasons.join(", ")})`}${summary.pricingCutoff === null ? "" : ` (current pricing since ${summary.pricingCutoff.slice(0, 10)})`}`)}</title>`
       );
       if (summary.costUsd.q1 < summary.costUsd.q3) {
         lines.push(
@@ -1733,7 +2074,13 @@ function renderEvalPerformanceCostChart(aggregates: EvalHistoryBenchmarkAggregat
           `<line data-iqr="f1" x1="${format(medianX)}" y1="${format(y(summary.f1.q1))}" x2="${format(medianX)}" y2="${format(y(summary.f1.q3))}" stroke="${color}" stroke-width="10" stroke-linecap="round" opacity="0.22"/>`
         );
       }
-      lines.push(renderProfileMarker(index, medianX, medianY, color, 8), "</g>");
+      lines.push(renderProfileMarker(index, medianX, medianY, color, 8));
+      if (summary.costCompleteness.status === "partial") {
+        lines.push(
+          `<circle data-completeness-marker="partial" cx="${format(medianX)}" cy="${format(medianY)}" r="13" fill="none" stroke="${color}" stroke-width="2" stroke-dasharray="3 3"/>`
+        );
+      }
+      lines.push("</g>");
     });
   }
 
@@ -1742,13 +2089,15 @@ function renderEvalPerformanceCostChart(aggregates: EvalHistoryBenchmarkAggregat
     const color = OVERVIEW_PROFILE_COLORS[index % OVERVIEW_PROFILE_COLORS.length]!;
     lines.push(
       renderProfileMarker(index, left + 8, rowY - 4, color, 6),
-      `<text x="${left + 24}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">${xml(summary.model)}</tspan><tspan fill="#6b7280"> · median ${formatOverviewPercent(summary.f1.median)} · ${xml(formatCost(summary.costUsd.median))} · n=${summary.runCount}</tspan></text>`
+      `<text x="${left + 24}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">${xml(summary.model)}</tspan><tspan fill="#6b7280"> · median ${formatOverviewPercent(summary.f1.median)} · ${xml(formatCost(summary.costUsd.median))} · n=${summary.runCount}${summary.runCount === summary.expectedRunCount ? "" : `/${summary.expectedRunCount} priced`} · targets ${summary.availableTargetCount}/${summary.expectedTargetCount} · ${summary.costCompleteness.status}</tspan></text>`
     );
   });
-  unavailableModels.forEach((summary, index) => {
+  costGapModels.forEach((summary, index) => {
     const rowY = legendTop + (Math.max(1, summaries.length) + index) * 26;
+    const prefix = plottedModels.has(summary.model) ? "Cost gap" : "Not plotted";
+    const status = summary.status === "partial" ? "partial (value unavailable)" : "unavailable";
     lines.push(
-      `<text x="${left}" y="${rowY}" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Not plotted · ${xml(summary.model)} · median ${formatOverviewPercent(summary.medianF1)} · n=${summary.runCount} · cost unavailable</text>`
+      `<text data-status="${summary.status}" data-model="${xml(summary.model)}" data-available-target-count="${summary.availableTargetCount}" data-expected-target-count="${summary.expectedTargetCount}" x="${left}" y="${rowY}" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280"><title>${xml(summary.reasons.join(", "))}</title>${prefix} · ${xml(summary.model)} · median ${formatOverviewPercent(summary.medianF1)} · n=${summary.runCount} · cost ${status} · targets ${summary.availableTargetCount}/${summary.expectedTargetCount}</text>`
     );
   });
   lines.push("</svg>");
@@ -1765,9 +2114,29 @@ function formatElapsed(value: number): string {
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
+function effectiveEvalHistoryObservations(history: EvalHistory): EvalHistoryObservation[] {
+  const observationsBySourceRun = new Map<string, EvalHistoryObservation[]>();
+  for (const observation of history.observations) {
+    observationsBySourceRun.set(observation.source_eval_run_id, [
+      ...(observationsBySourceRun.get(observation.source_eval_run_id) ?? []),
+      observation
+    ]);
+  }
+  const supersededSourceRuns = new Set<string>();
+  for (const supersession of history.supersessions) {
+    const superseded = observationsBySourceRun.get(supersession.superseded_source_eval_run_id)!;
+    const replacement = observationsBySourceRun.get(supersession.replacement_source_eval_run_id);
+    if (replacement !== undefined && supersessionReplacementHasParity(superseded, replacement)) {
+      supersededSourceRuns.add(supersession.superseded_source_eval_run_id);
+    }
+  }
+  return history.observations.filter((observation) => !supersededSourceRuns.has(observation.source_eval_run_id));
+}
+
 export function renderEvalHistoryCharts(history: EvalHistory): Map<string, string> {
   const validated = parseEvalHistory(history);
-  const aggregates = aggregateEvalHistoryBenchmarkRuns(validated.observations).filter(
+  const observations = effectiveEvalHistoryObservations(validated);
+  const aggregates = aggregateEvalHistoryBenchmarkRuns(observations).filter(
     (aggregate) => aggregate.benchmark === "ultrafuzz-bench"
   );
   return new Map([
@@ -1775,7 +2144,7 @@ export function renderEvalHistoryCharts(history: EvalHistory): Map<string, strin
     [EVAL_HISTORY_OVERVIEW_FILES[1], renderEvalQualityChart(aggregates)],
     [EVAL_HISTORY_OVERVIEW_FILES[2], renderEvalPerformanceCostChart(aggregates)],
     ...EVAL_HISTORY_CHARTS.map(
-      (chart) => [chart.file, renderChart(validated.observations, chart.metric, chart.title, chart.ratio)] as const
+      (chart) => [chart.file, renderChart(observations, chart.metric, chart.title, chart.ratio)] as const
     )
   ]);
 }
@@ -1835,6 +2204,9 @@ interface ChartPoint {
   commit: string;
   repositoryUrl: string;
   value: number | null;
+  completeness: EvalHistoryCompleteness;
+  availableCount: number;
+  expectedCount: number;
 }
 
 interface ChartColumn {
@@ -1878,13 +2250,14 @@ function chartPoints(observations: EvalHistoryObservation[], metric: ChartMetric
         policy: `policy-${shortFingerprint(first.execution_policy_fingerprint)}`,
         target: first.target
       };
+      const metricValue = aggregateChartMetric(group, metric);
       return {
         seriesKey: [...SERIES_CONTEXT_FIELDS.map((field) => fields[field]), fields.target].join(" "),
         fields,
         timestamp: first.run_timestamp,
         commit: first.candidate_commit,
         repositoryUrl: first.candidate_repository_url,
-        value: aggregateChartMetric(group, metric)
+        ...metricValue
       };
     })
     .sort(
@@ -1937,7 +2310,15 @@ function shortFingerprint(value: string): string {
   return value.replace(/^sha256:/u, "").slice(0, 8);
 }
 
-function aggregateChartMetric(observations: EvalHistoryObservation[], metric: ChartMetric): number | null {
+function aggregateChartMetric(
+  observations: EvalHistoryObservation[],
+  metric: ChartMetric
+): {
+  value: number | null;
+  completeness: EvalHistoryCompleteness;
+  availableCount: number;
+  expectedCount: number;
+} {
   if (metric === "cumulative_unique_true_positives") {
     const perTarget = new Map<string, number>();
     for (const observation of observations) {
@@ -1946,14 +2327,30 @@ function aggregateChartMetric(observations: EvalHistoryObservation[], metric: Ch
         Math.max(perTarget.get(observation.target) ?? 0, observation.cumulative_unique_true_positives)
       );
     }
-    return [...perTarget.values()].reduce((sum, value) => sum + value, 0);
+    return {
+      value: [...perTarget.values()].reduce((sum, value) => sum + value, 0),
+      completeness: { status: "complete", reasons: [] },
+      availableCount: observations.length,
+      expectedCount: observations.length
+    };
   }
   if (metric === "wall_clock_seconds" || metric === "cost_usd") {
-    const values = observations.map((observation) => observation[metric]);
-    if (values.some((value) => value === null)) return null;
-    return round(values.reduce<number>((sum, value) => sum + (value ?? 0), 0));
+    const completenessField = metric === "wall_clock_seconds" ? "wall_clock_completeness" : "cost_completeness";
+    return aggregateCompletenessValues(
+      observations.map((observation) => ({
+        value: observation[metric],
+        completeness: observation[completenessField]
+      })),
+      (values) => round(values.reduce((sum, value) => sum + value, 0)),
+      { preservePartialWithoutValue: true }
+    );
   }
-  return mean(observations.map((observation) => observation[metric]));
+  return {
+    value: mean(observations.map((observation) => observation[metric])),
+    completeness: { status: "complete", reasons: [] },
+    availableCount: observations.length,
+    expectedCount: observations.length
+  };
 }
 
 function renderChart(
@@ -2019,7 +2416,7 @@ function renderChart(
     '<?xml version="1.0" encoding="UTF-8"?>',
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
     `<title id="title">${xml(title)}</title>`,
-    `<desc id="desc">${xml(`${title} by candidate commit and benchmark target`)}</desc>`,
+    `<desc id="desc">${xml(`${title} by candidate commit and benchmark target${metric === "wall_clock_seconds" || metric === "cost_usd" ? "; partial values use hollow dashed markers, legacy partial values without a number use a dashed ring and partial n/a label, and unavailable values use an n/a cross" : ""}`)}</desc>`,
     `<rect width="${width}" height="${height}" fill="#ffffff"/>`,
     `<text x="${left}" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">${xml(title)}</text>`
   ];
@@ -2075,18 +2472,31 @@ function renderChart(
         const label = seriesLabel(point.fields);
         if (point.value === null) {
           const pointY = plotBottom - 8;
+          const partialWithoutValue = point.completeness.status === "partial";
+          const status = partialWithoutValue ? "partial (value unavailable)" : "unavailable";
           lines.push(
-            `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}" data-status="unavailable"><title>${xml(`${label} ${shortCommit}: unavailable`)}</title>`,
+            `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}" data-status="${point.completeness.status}" data-available-count="${point.availableCount}" data-expected-count="${point.expectedCount}"><title>${xml(`${label} ${shortCommit}: ${status}${point.completeness.reasons.length === 0 ? "" : ` (${point.completeness.reasons.join(", ")})`}`)}</title>`
+          );
+          if (partialWithoutValue) {
+            lines.push(
+              `<circle data-completeness-marker="partial-null" cx="${format(pointX)}" cy="${format(pointY)}" r="8" fill="none" stroke="${stroke}" stroke-width="2" stroke-dasharray="2 2"/>`
+            );
+          }
+          lines.push(
             `<line x1="${format(pointX - 5)}" y1="${format(pointY - 5)}" x2="${format(pointX + 5)}" y2="${format(pointY + 5)}" stroke="${stroke}"/>`,
             `<line x1="${format(pointX + 5)}" y1="${format(pointY - 5)}" x2="${format(pointX - 5)}" y2="${format(pointY + 5)}" stroke="${stroke}"/>`,
-            `<text x="${format(pointX)}" y="${format(pointY - 10)}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#6b7280">n/a ${shortCommit}</text></a>`
+            `<text x="${format(pointX)}" y="${format(pointY - 10)}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#6b7280">${partialWithoutValue ? "partial n/a" : "n/a"} ${shortCommit}</text></a>`
           );
           continue;
         }
         const pointY = y(point.value);
+        const partial = point.completeness.status === "partial";
         lines.push(
-          `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}"><title>${xml(`${label} ${shortCommit}: ${formatMetric(point.value, ratioMetric)}`)}</title>`,
-          `<circle cx="${format(pointX)}" cy="${format(pointY)}" r="5" fill="${stroke}"/></a>`
+          `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}" data-status="${point.completeness.status}" data-available-count="${point.availableCount}" data-expected-count="${point.expectedCount}"><title>${xml(`${label} ${shortCommit}: ${formatMetric(point.value, ratioMetric)}${partial ? ` partial (${point.completeness.reasons.join(", ")})` : ""}`)}</title>`,
+          partial
+            ? `<circle data-completeness-marker="partial" cx="${format(pointX)}" cy="${format(pointY)}" r="6" fill="#ffffff" stroke="${stroke}" stroke-width="3" stroke-dasharray="2 2"/>`
+            : `<circle cx="${format(pointX)}" cy="${format(pointY)}" r="5" fill="${stroke}"/>`,
+          "</a>"
         );
       }
     }

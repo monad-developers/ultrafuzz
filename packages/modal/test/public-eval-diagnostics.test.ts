@@ -104,6 +104,71 @@ describe("public post-eval diagnostics", () => {
     expect(serialized).not.toContain("details");
   });
 
+  it("reports a planned row the eval never recorded instead of refusing to build", () => {
+    const fixture = evalFixture();
+    const extraRow = {
+      id: "target-b-runner-trial-1",
+      target_id: "target-b",
+      variant_id: MODEL.slug,
+      trial_id: "trial-1"
+    };
+    const matrix = [...fixture.matrix, extraRow];
+
+    const diagnostics = createPublicEvalDiagnostics({
+      config: CONFIG,
+      model: MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix,
+      runSummary: fixture.runSummary
+    });
+
+    expect(diagnostics.rows).toHaveLength(2);
+    const missing = diagnostics.rows.find((row) => row.row_id === extraRow.id)!;
+    expect(missing.run_status).toBe("missing");
+    expect(missing.reason_codes).toContain("run-record-missing");
+    expect(missing.scoring_ready).toBe(false);
+    expect(missing.workflow_ids).toEqual([]);
+    expect(missing.failed_nodes).toEqual([]);
+    expect(diagnostics.summary.planned).toBe(2);
+    expect(diagnostics.summary.run_records_missing).toBe(1);
+    expect(diagnostics.summary.scoring_ready).toBe(false);
+  });
+
+  it("reports every planned row as missing when the eval recorded nothing at all", () => {
+    const fixture = evalFixture();
+
+    const diagnostics = createPublicEvalDiagnostics({
+      config: CONFIG,
+      model: MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: fixture.matrix,
+      runSummary: { records: [] }
+    });
+
+    expect(diagnostics.rows).toHaveLength(fixture.matrix.length);
+    expect(diagnostics.rows.every((row) => row.run_status === "missing")).toBe(true);
+    expect(diagnostics.summary.run_records_missing).toBe(fixture.matrix.length);
+    expect(diagnostics.summary.scoring_ready).toBe(false);
+  });
+
+  it("still rejects a record the matrix never planned", () => {
+    const fixture = evalFixture();
+    const stray = { ...fixture.runSummary.records[0]!, row_id: "target-z-runner-trial-1" };
+
+    expect(() =>
+      createPublicEvalDiagnostics({
+        config: CONFIG,
+        model: MODEL,
+        lineage: LINEAGE,
+        evalRunId: fixture.evalRunId,
+        matrix: fixture.matrix,
+        runSummary: { records: [...fixture.runSummary.records, stray] }
+      })
+    ).toThrow(/row set does not match the matrix/u);
+  });
+
   it("accepts the runtime-prefixed workflow ID emitted for a maximum-length eval child run", () => {
     const fixture = evalFixture();
     const workflowId = `ultrafuzz-${"r".repeat(128)}`;
@@ -337,20 +402,26 @@ describe("public post-eval diagnostics", () => {
         status: "failed",
         timed_out: false,
         failure_category: "artifact-contract",
-        failure_code: "task-output-validation-failure"
+        failure_code: "task-output-validation-failure",
+        failure_message: "private failure detail 0 <redacted>"
       },
       {
         node_id: "failed-node-01",
         status: "timed-out",
         timed_out: true,
-        failure_category: "provider-interruption"
+        failure_category: "provider-interruption",
+        failure_message: "private failure detail 1 <redacted>"
       },
-      { node_id: "failed-node-02", status: "failed", timed_out: false }
+      {
+        node_id: "failed-node-02",
+        status: "failed",
+        timed_out: false,
+        failure_message: "private failure detail 2 <redacted>"
+      }
     ]);
     expect(diagnostics.rows[0]?.failed_nodes.at(-1)?.node_id).toBe("failed-node-31");
     const serialized = JSON.stringify(diagnostics);
     for (const forbidden of [
-      "private failure detail",
       "sk-ant-secret-value",
       "private-category",
       "private-causal-category",
@@ -370,6 +441,10 @@ describe("public post-eval diagnostics", () => {
     const rawRows = withRawDetail.rows as Array<Record<string, unknown>>;
     const rawFailedNodes = rawRows[0]!.failed_nodes as Array<Record<string, unknown>>;
     rawFailedNodes[0]!.last_error = "private raw error";
+    expect(() => parsePublicEvalDiagnostics(withRawDetail)).toThrow();
+
+    rawFailedNodes[0]!.last_error = undefined;
+    rawFailedNodes[0]!.failure_message = "🙂".repeat(251);
     expect(() => parsePublicEvalDiagnostics(withRawDetail)).toThrow();
   });
 
@@ -421,7 +496,11 @@ describe("public post-eval diagnostics", () => {
     expect(() => createPublicEvalDiagnostics({ ...input, matrix: [...fixture.matrix, fixture.matrix[0]] })).toThrow(
       /duplicate rows/u
     );
-    expect(() => createPublicEvalDiagnostics({ ...input, runSummary: { records: [] } })).toThrow();
+    // A run summary with no records is no longer an inconsistency: it is an eval that
+    // stopped before recording a row, and every planned row is reported as missing.
+    // Covered by "reports every planned row as missing when the eval recorded nothing
+    // at all"; a record for a row the matrix never planned still throws, covered by
+    // "still rejects a record the matrix never planned".
 
     const diagnostics = createPublicEvalDiagnostics(input);
     const legacyV1 = structuredClone(diagnostics) as unknown as Record<string, unknown>;

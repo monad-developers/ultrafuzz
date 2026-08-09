@@ -161,8 +161,11 @@ Repository variable `BENCHMARK_SMOKE_OPENAI_MODEL` can override the
 smoke model without changing its single OpenAI/Codex provider, fixed
 high/medium reasoning split, or target and topology limits.
 
-A manual `workflow_dispatch` chooses between the two paid lanes with the
-`benchmark_lane` input. Push events can never select either one.
+A manual `workflow_dispatch` chooses `smoke`, `full`, or `threat-model` with the
+`benchmark_lane` input. Push events always select smoke with its checked-in
+OpenAI default. A dispatched smoke instead uses the requested `smoke_provider`,
+`smoke_model`, and `smoke_reasoning`; its three targets, reduced topology,
+single-runner shape, and judge remain fixed.
 
 `full` evaluates every checked-in EVMBench target with GPT-5.6 Luna at `high`,
 Claude Sonnet 5 at `high`, Kimi K3 at `max`, and DeepSeek V4 Pro at `max` by
@@ -195,9 +198,10 @@ assertions are deliberately structural and the prose has to stay reviewable.
 
 Gate results are **not** appended to `benchmarks/history.json`. Publication is a
 longitudinal claim about one comparable series, and this lane runs a different
-topology and execution policy against the same targets; the publication
-qualifier reads the dispatched lane from the producer's `Benchmark lane <name>`
-step and declines it explicitly. The v0.1.0 release owner reviews the retained
+topology and execution policy against the same targets. The publication
+qualifier derives the lane from the exact run/attempt artifact names and
+allowlists only smoke and full; threat-model artifacts are refused even when
+mixed with a publishable lane. The v0.1.0 release owner reviews the retained
 cohort directly.
 
 The gate costs real money on every dispatch. Confirm a named owner and a

@@ -120,6 +120,37 @@ describe("trusted automatic eval-history publication handoff", () => {
     }
   });
 
+  it("accepts a dispatched smoke runner from any known provider", () => {
+    // `smoke_provider` lets a dispatch point the one-runner smoke lane at a provider
+    // other than the openai control pair. The lane pinned that provider to openai, so
+    // every non-openai dispatch died in pre-flight and no such pair could ever score.
+    for (const provider of ["deepseek", "anthropic", "kimi"]) {
+      const manifest = smokeProviderManifest(provider);
+      expect(
+        validateAutomaticPublicationManifest(manifest, smokeContext()).pairs.map((pair) => pair.provider),
+        provider
+      ).toEqual([provider]);
+    }
+  });
+
+  it("still pins the smoke lane to one runner from a known provider", () => {
+    const unknownProvider = smokeProviderManifest("deepseek");
+    unknownProvider.pairs[0]!.provider = "mystery";
+    expect(() => validateAutomaticPublicationManifest(unknownProvider, smokeContext())).toThrow();
+
+    const twoRunners = smokeProviderManifest("deepseek");
+    twoRunners.pairs.push({ ...twoRunners.pairs[0]! });
+    expect(() => validateAutomaticPublicationManifest(twoRunners, smokeContext())).toThrow();
+
+    // A caller that states the provider explicitly still wins over the manifest.
+    expect(() =>
+      validateAutomaticPublicationManifest(smokeProviderManifest("deepseek"), {
+        ...smokeContext(),
+        smokeProvider: "openai"
+      })
+    ).toThrow();
+  });
+
   it("requires the exact full provider set, ordering, and unique control paths", () => {
     const fullContext = fullPublicationContext();
     expect(
@@ -404,6 +435,28 @@ describe("trusted automatic eval-history publication handoff", () => {
 
 function smokeContext() {
   return { ...context, targets: smokeTargets() };
+}
+
+function smokeProviderManifest(provider: string) {
+  const modelSlug = `benchmark-smoke-${provider}-runner-max`;
+  const pair = `ultrafuzz-bench-${modelSlug}`;
+  return {
+    ...smokeManifest(),
+    concurrency: {
+      ...smokeManifest().concurrency,
+      max_live_runner_workflows_by_provider: { [provider]: 3 }
+    },
+    pairs: [
+      {
+        ...smokeManifest().pairs[0]!,
+        pair,
+        model_slug: modelSlug,
+        provider,
+        config_path: `${pair}.json`,
+        state_path: `${pair}.state.json`
+      }
+    ]
+  };
 }
 
 function fullPublicationContext() {

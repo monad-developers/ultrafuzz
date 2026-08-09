@@ -7,7 +7,11 @@ import test from "node:test";
 
 import { initProject, materializeDynamicRuntime, planRun } from "../src/index.js";
 import { compileSmithersWorkflow, type CompiledSmithersWorkflow } from "../src/smithers.js";
-import { renderGeneratedWorkflow, type RenderedTask } from "./cloud-worker-harness.js";
+import {
+  materializeHarnessWorkflowSnapshot,
+  renderGeneratedWorkflow,
+  type RenderedTask
+} from "./cloud-worker-harness.js";
 import { writeShippedVulnerabilityDatabaseCache } from "./reference-fixtures.js";
 
 /** Controller-owned global state a cloud worker must never need. */
@@ -1001,6 +1005,7 @@ async function cloudFixture(): Promise<CloudFixture> {
     renderedPrompts: plan.value!.rendered_prompts,
     vulnerabilityDatabase
   });
+  compiled.workflowPath = materializeHarnessWorkflowSnapshot(compiled);
 
   const sourceArtifactPath = compiled.dynamicGroups[0]!.source.artifactPath;
   fs.mkdirSync(path.dirname(sourceArtifactPath), { recursive: true });
@@ -1154,6 +1159,7 @@ test("compiled threat-model and goal-plan cloud tasks hand off the reference tre
     renderedPrompts: plan.value!.rendered_prompts,
     vulnerabilityDatabase: database
   });
+  compiled.workflowPath = materializeHarnessWorkflowSnapshot(compiled);
 
   const referenceAttemptDir = path.join(runRoot, "artifacts", "reference-vulnerability-database");
   const expectedReferenceDir = path.relative(project, referenceAttemptDir).split(path.sep).join("/");

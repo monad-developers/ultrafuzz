@@ -439,7 +439,7 @@ describe("public Modal benchmark configuration", () => {
       on: {
         push: { branches: string[] };
         workflow_dispatch: {
-          inputs: Record<string, { default: string; type: string }>;
+          inputs: Record<string, { default: string; type: string; options?: string[] }>;
         };
       };
       env: { BENCHMARK_MODE: string; BENCHMARK_CANDIDATE: string };
@@ -459,8 +459,11 @@ describe("public Modal benchmark configuration", () => {
       benchmark_lane: expect.objectContaining({
         default: "full",
         type: "choice",
-        options: ["full", "threat-model"]
+        options: ["smoke", "full", "threat-model"]
       }),
+      smoke_provider: expect.objectContaining({ default: "deepseek", type: "choice" }),
+      smoke_model: expect.objectContaining({ default: "deepseek-v4-flash", type: "string" }),
+      smoke_reasoning: expect.objectContaining({ default: "max", type: "string" }),
       openai_model: expect.objectContaining({ default: "gpt-5.6-luna", type: "string" }),
       openai_reasoning: expect.objectContaining({ default: "high", type: "string" }),
       anthropic_model: expect.objectContaining({ default: "claude-sonnet-5", type: "string" }),
@@ -504,6 +507,10 @@ describe("public Modal benchmark configuration", () => {
     expect(prepare?.env?.BENCHMARK_DEEPSEEK_MODEL).toContain("'deepseek-v4-pro'");
     expect(prepare?.env?.BENCHMARK_DEEPSEEK_REASONING).toContain("inputs.deepseek_reasoning");
     expect(prepare?.env?.BENCHMARK_DEEPSEEK_REASONING).toContain("'max'");
+    expect(prepare?.env?.BENCHMARK_SMOKE_PROVIDER).toContain("inputs.benchmark_lane == 'smoke'");
+    expect(prepare?.env?.BENCHMARK_SMOKE_PROVIDER).toContain("inputs.smoke_provider");
+    expect(prepare?.env?.BENCHMARK_SMOKE_MODEL).toContain("inputs.smoke_model");
+    expect(prepare?.env?.BENCHMARK_SMOKE_REASONING).toContain("inputs.smoke_reasoning");
     expect(prepare?.run).toContain("BENCHMARK_MODELS_JSON");
     expect(prepare?.run).toContain('--arg reasoning "high"');
     expect(prepare?.run).toContain('{provider: "kimi", model: $kimi_model, reasoning: $kimi_reasoning}');
@@ -512,12 +519,28 @@ describe("public Modal benchmark configuration", () => {
     // The release gate must not be retunable from the dispatch form: it takes the
     // checked-in lane profile from benchmarks/lanes.json instead of a models matrix.
     expect(prepare?.run).toContain('if [ "$BENCHMARK_MODE" = threat-model ]; then\n  BENCHMARK_MODELS_JSON=""');
-    // The publication qualifier reads the dispatched lane from this step name.
+    const threatModelSelection = prepare!.run!.indexOf('if [ "$BENCHMARK_MODE" = threat-model ]');
+    const dispatchedSmokeSelection = prepare!.run!.indexOf(
+      'elif [ "$BENCHMARK_MODE" = smoke ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]'
+    );
+    expect(threatModelSelection).toBeGreaterThan(-1);
+    expect(dispatchedSmokeSelection).toBeGreaterThan(threatModelSelection);
+    expect(prepare?.run).toContain('--arg provider "$BENCHMARK_SMOKE_PROVIDER"');
+    expect(prepare?.run).toContain('--arg model "$BENCHMARK_SMOKE_MODEL"');
+    expect(prepare?.run).toContain('--arg reasoning "$BENCHMARK_SMOKE_REASONING"');
+    // The operator-visible lane marker must agree with the artifact-derived mode.
     const laneMarkers = (workflow.jobs.launch?.steps ?? []).filter((step) =>
       String(step.name ?? "").startsWith("Benchmark lane ")
     );
     expect(laneMarkers).toHaveLength(1);
     expect(laneMarkers[0]?.name).toContain("inputs.benchmark_lane || 'smoke'");
+    const credentialCheck = workflow.jobs.launch?.steps.find((step) => step.name === "Validate benchmark credentials");
+    for (const providerSecret of ["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "KIMI_API_KEY"] as const) {
+      expect(credentialCheck?.env?.[providerSecret]).toContain("inputs.benchmark_lane == 'smoke'");
+      expect(credentialCheck?.env?.[providerSecret]).not.toContain("threat-model");
+    }
+    expect(credentialCheck?.env?.BENCHMARK_SMOKE_PROVIDER).toContain("inputs.smoke_provider");
+    expect(credentialCheck?.run).toContain('[ "$BENCHMARK_MODE" = smoke ]');
     for (const jobName of ["launch", "collect", "cleanup_incomplete_run"]) {
       const checkout = workflow.jobs[jobName]?.steps.find((step) =>
         String(step.with?.ref ?? "").includes("BENCHMARK_CANDIDATE")
@@ -699,7 +722,7 @@ describe("public Modal benchmark configuration", () => {
       path.join(workspace, "scripts/ci/prepare-modal-benchmark-cleanup.mjs"),
       "utf8"
     );
-    expect(cleanupPreparation).toContain("readAutomaticPublicationManifest");
+    expect(cleanupPreparation).toContain("readBenchmarkControlManifest");
     expect(cleanupPreparation).toContain("validateAutomaticPairConfig");
     expect(cleanupPreparation).toContain("CONFIG_KEYS");
     expect(cleanupPreparation).toContain("MODEL_KEYS");
@@ -771,6 +794,7 @@ describe("public Modal benchmark configuration", () => {
     expect(cleanup.if).toContain("github.event.workflow_run.event == 'push'");
     expect(cleanup.if).toContain("github.event.workflow_run.event == 'workflow_dispatch'");
     expect(cleanup.env?.BENCHMARK_CANDIDATE).toBe("${{ github.event.workflow_run.head_sha }}");
+    expect(cleanup.env).not.toHaveProperty("BENCHMARK_MODE");
     expect(cleanup["timeout-minutes"]).toBeGreaterThanOrEqual(75);
 
     const checkouts = cleanup.steps.filter((step) => step.uses?.startsWith("actions/checkout@"));
@@ -787,19 +811,23 @@ describe("public Modal benchmark configuration", () => {
 
     const plan = cleanup.steps.find((step) => step.name === "Restore the incomplete run's immutable pre-compute plan")!;
     expect(plan["continue-on-error"]).toBeUndefined();
-    expect(plan.with?.name).toContain("${{ env.SOURCE_RUN_ID }}-${{ env.SOURCE_RUN_ATTEMPT }}");
+    expect(plan.with?.name).toBe("${{ steps.incomplete_plan.outputs.plan_artifact_name }}");
     expect(plan.with?.["run-id"]).toBe("${{ env.SOURCE_RUN_ID }}");
     expect(plan.with?.["github-token"]).toBe("${{ github.token }}");
     expect(plan.with?.path).toContain("${{ runner.temp }}");
     const discovery = cleanup.steps.find((step) => step.name === "Discover the exact pre-compute benchmark plan")!;
     expect(discovery.run).toContain("attempts/$SOURCE_RUN_ATTEMPT/jobs");
     expect(discovery.run).toContain("compute_may_have_started");
+    expect(discovery.run).toContain("for mode in smoke full threat-model");
+    expect(discovery.run).toContain('echo "benchmark_mode=$plan_mode"');
+    expect(discovery.run).toContain('echo "plan_artifact_name=$plan_artifact_name"');
 
     const validation = cleanup.steps.find(
       (step) => step.name === "Validate incomplete-run identity and termination scopes"
     );
     expect(validation?.run).toContain("prepare-modal-benchmark-cleanup.mjs");
     expect(validation?.run).toContain('git -C "$CANDIDATE_SOURCE" rev-parse HEAD');
+    expect(validation?.env?.BENCHMARK_MODE).toBe("${{ steps.incomplete_plan.outputs.benchmark_mode }}");
     const cleanupInvocation = validation?.run?.match(
       /node scripts\/ci\/prepare-modal-benchmark-cleanup\.mjs[\s\S]*$/u
     )?.[0];
@@ -904,8 +932,10 @@ describe("public Modal benchmark configuration", () => {
       (step) => step.name === "Qualify the exact completed producer attempt"
     )?.run;
     expect(qualification).toContain("/attempts/$PRODUCER_RUN_ATTEMPT/jobs?per_page=100");
+    expect(qualification).toContain("/actions/runs/$PRODUCER_RUN_ID/artifacts?per_page=100");
     expect(qualification).toContain("qualify-modal-benchmark-publication.mjs");
     expect(qualification).toContain('"$GITHUB_EVENT_PATH"');
+    expect(qualification).toContain('"$artifacts_path"');
     expect(qualification).toContain('"$GITHUB_OUTPUT"');
 
     const automatic = publication.jobs.publish_modal_benchmark!;
@@ -1103,6 +1133,12 @@ describe("public Modal benchmark configuration", () => {
     expect(finalGate.run).toContain('[ "$CI_EVENT_NAME" = push ]');
     expect(finalGate.run).toContain('[ "$CI_REF_NAME" != "$CI_DEFAULT_BRANCH" ]');
     expect(finalGate.run).toContain("not blocking non-default branch smoke gate");
+    expect(finalGate.run).toContain("describe-smoke-soft-fail.mjs --json");
+    expect(finalGate.run).toContain('--ref "$CI_REF_NAME"');
+    expect(finalGate.run).toContain(".blocks_gate == true");
+    expect(finalGate.run).toContain(".scoring_ready_required == true");
+    expect(finalGate.run).toContain("blocking validation-ref smoke gate because scoring readiness is required");
+    expect(finalGate.run).toContain("not blocking validation-ref smoke gate because scoring readiness was validated");
     expect(finalGate.run).toContain("exit 1");
 
     // The soft-fail rule lives in exactly one jq filter, and the gate applies

@@ -25,13 +25,17 @@ import {
 
 import {
   assertSmithersPackageManifest,
+  assertSmithersResolutionCutoff,
   KIMI_CODE_VERSION,
   renderSmithersPackageJson,
   REQUIRED_SMITHERS_OVERRIDES,
+  SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF,
   SMITHERS_EFFECT_VERSION,
   SMITHERS_ORCHESTRATOR_BIN_PATH,
-  SMITHERS_ORCHESTRATOR_VERSION
+  SMITHERS_ORCHESTRATOR_VERSION,
+  smithersDependencyInstallArgs
 } from "../src/smithers-package.js";
+import { isTransientNpmRegistryFailure } from "../src/npm-install-retry.js";
 
 import {
   ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS,
@@ -45,6 +49,7 @@ import {
   listRuns,
   planRun,
   pauseRun,
+  readLinkedWorkflowEvidence,
   replayRun,
   repairMissingRenderedPromptsForRun,
   resumeRun,
@@ -58,11 +63,44 @@ import {
   writeShippedDocumentReferenceCaches,
   writeShippedVulnerabilityDatabaseCache
 } from "./reference-fixtures.js";
+import { runSmithersInspectionCommand } from "../src/smithers.js";
+import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
+import { materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.js";
+import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
 
 const runningUnderBun = typeof process.versions.bun === "string";
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
+}
+
+function firstSymlinkUnder(root: string): string | undefined {
+  const pending = [root];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const candidate = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) return candidate;
+      if (entry.isDirectory()) pending.push(candidate);
+    }
+  }
+  return undefined;
+}
+
+function openDescriptorTargetsInside(root: string): string[] {
+  if (process.platform === "win32" || !fs.existsSync("/proc/self/fd")) return [];
+  const resolvedRoot = path.resolve(root);
+  const targets: string[] = [];
+  for (const name of fs.readdirSync("/proc/self/fd")) {
+    try {
+      const target = fs.realpathSync(path.join("/proc/self/fd", name));
+      const relative = path.relative(resolvedRoot, target);
+      if (relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`))) targets.push(target);
+    } catch {
+      // A descriptor can close between enumeration and resolution.
+    }
+  }
+  return targets.sort();
 }
 
 async function loadGeneratedKimiAgent(project: string): Promise<{
@@ -102,8 +140,14 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
   const kimiSource = fs
     .readFileSync(path.join(agentsDir, "kimi.ts"), "utf8")
     .replace('from "smithers-orchestrator"', `from ${JSON.stringify(smithersUrl)}`)
-    .replace('from "./toml"', 'from "./toml.mjs"');
+    .replace('from "./toml"', 'from "./toml.mjs"')
+    .replace('from "./environment"', 'from "./environment.mjs"');
   fs.writeFileSync(path.join(fixture, "kimi.mjs"), transpile(kimiSource), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "environment.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
+    "utf8"
+  );
   fs.writeFileSync(
     path.join(fixture, "toml.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
@@ -136,9 +180,15 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
   CompatibleCodexAgent: new (options?: Record<string, unknown>) => {
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
       args: string[];
+      env?: Record<string, string>;
       cleanup?: () => Promise<void>;
     }>;
   };
+  createCodexAgent(options?: Record<string, unknown>): unknown;
+  workflowControlChildEnvironment(
+    additions?: Record<string, string | undefined>,
+    source?: Record<string, string | undefined>
+  ): Record<string, string>;
 }> {
   const fixture = path.join(project, "codex-agent-executable-test");
   fs.mkdirSync(fixture, { recursive: true });
@@ -157,8 +207,14 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
   const codexSource = fs
     .readFileSync(path.join(agentsDir, "codex.ts"), "utf8")
     .replace('from "smithers-orchestrator"', `from ${JSON.stringify(smithersUrl)}`)
-    .replace('from "./toml"', 'from "./toml.mjs"');
+    .replace('from "./toml"', 'from "./toml.mjs"')
+    .replace('from "./environment"', 'from "./environment.mjs"');
   fs.writeFileSync(path.join(fixture, "codex.mjs"), transpile(codexSource), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "environment.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
+    "utf8"
+  );
   fs.writeFileSync(
     path.join(fixture, "toml.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
@@ -168,11 +224,23 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
     CompatibleCodexAgent: new (options?: Record<string, unknown>) => {
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
         args: string[];
+        env?: Record<string, string>;
         cleanup?: () => Promise<void>;
       }>;
     };
+    createCodexAgent(options?: Record<string, unknown>): unknown;
   };
-  return { CompatibleCodexAgent: codexModule.CompatibleCodexAgent };
+  const environmentModule = (await import(pathToFileURL(path.join(fixture, "environment.mjs")).href)) as {
+    workflowControlChildEnvironment(
+      additions?: Record<string, string | undefined>,
+      source?: Record<string, string | undefined>
+    ): Record<string, string>;
+  };
+  return {
+    CompatibleCodexAgent: codexModule.CompatibleCodexAgent,
+    createCodexAgent: codexModule.createCodexAgent,
+    workflowControlChildEnvironment: environmentModule.workflowControlChildEnvironment
+  };
 }
 
 async function loadGeneratedDeepSeekAgent(project: string): Promise<{
@@ -211,8 +279,14 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   const deepSeekSource = fs
     .readFileSync(path.join(agentsDir, "deepseek.ts"), "utf8")
     .replace('from "smithers-orchestrator"', `from ${JSON.stringify(smithersUrl)}`)
-    .replace('from "./toml"', 'from "./toml.mjs"');
+    .replace('from "./toml"', 'from "./toml.mjs"')
+    .replace('from "./environment"', 'from "./environment.mjs"');
   fs.writeFileSync(path.join(fixture, "deepseek.mjs"), transpile(deepSeekSource), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "environment.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
+    "utf8"
+  );
   fs.writeFileSync(
     path.join(fixture, "toml.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
@@ -259,6 +333,25 @@ function fakeInstalledSmithersPaths(project: string): {
   };
 }
 
+function writeFakeInstalledSmithersDependencies(project: string): void {
+  const dependencies = [
+    ["@moonshot-ai/kimi-code", KIMI_CODE_VERSION],
+    ["@smithers-orchestrator/tool-context", SMITHERS_ORCHESTRATOR_VERSION],
+    ["react", "19.2.4"],
+    ["zod", "4.4.3"]
+  ] as const;
+  for (const [name, version] of dependencies) {
+    writeFakeInstalledSmithersDependency(project, name, version);
+  }
+}
+
+function writeFakeInstalledSmithersDependency(project: string, name: string, version: string): void {
+  const packageRoot = path.join(project, ".smithers", "node_modules", ...name.split("/"));
+  fs.mkdirSync(packageRoot, { recursive: true });
+  fs.writeFileSync(path.join(packageRoot, "package.json"), `${JSON.stringify({ name, version })}\n`, "utf8");
+  fs.writeFileSync(path.join(packageRoot, "index.js"), "export {};\n", "utf8");
+}
+
 function writeFakeInstalledSmithers(
   project: string,
   input: { version?: string; shimTarget?: string; binTarget?: string } = {}
@@ -277,12 +370,13 @@ function writeFakeInstalledSmithers(
   );
   fs.writeFileSync(
     paths.target,
-    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SMITHERS_FAKE_LOG\"\nprintf '%s\\n' '{\"ok\":true}'\n",
+    '#!/bin/sh\nif [ -n "$SMITHERS_FAKE_EXECUTED_AS_LOG" ]; then printf \'%s\\n\' "$0" > "$SMITHERS_FAKE_EXECUTED_AS_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n',
     "utf8"
   );
   fs.chmodSync(paths.target, 0o755);
   fs.rmSync(paths.shim, { force: true });
   fs.symlinkSync(path.relative(path.dirname(paths.shim), input.shimTarget ?? paths.target), paths.shim);
+  writeFakeInstalledSmithersDependencies(project);
   return paths;
 }
 
@@ -320,10 +414,16 @@ function writeFakePnpmInstalledSmithers(project: string): ReturnType<typeof fake
   const linkedTarget = path.relative(path.dirname(paths.shim), paths.target).split(path.sep).join("/");
   fs.writeFileSync(paths.shim, `#!/bin/sh\nbasedir=\${0%/*}\nexec "$basedir/${linkedTarget}" "$@"\n`, "utf8");
   fs.chmodSync(paths.shim, 0o755);
+  writeFakeInstalledSmithersDependencies(project);
   return paths;
 }
 
-function writeFakeNpmInstaller(project: string): {
+// `failures` makes the fake npm exit non-zero for its first N invocations, so a test
+// can drive the install retry loop. The npm log doubles as the attempt counter.
+function writeFakeNpmInstaller(
+  project: string,
+  failures: { count: number; stderr: readonly string[] } = { count: 0, stderr: [] }
+): {
   binDir: string;
   npmLogPath: string;
   smithersLogPath: string;
@@ -333,12 +433,21 @@ function writeFakeNpmInstaller(project: string): {
   const npmLogPath = path.join(project, "npm-install.log");
   const smithersLogPath = path.join(project, "local-smithers.log");
   const paths = fakeInstalledSmithersPaths(project);
+  writeFakeInstalledSmithersDependencies(project);
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(
     npm,
     [
       "#!/bin/sh",
       `printf '%s\\n' "$*" >> ${shellQuote(npmLogPath)}`,
+      ...(failures.count > 0
+        ? [
+            `if [ "$(wc -l < ${shellQuote(npmLogPath)})" -le ${failures.count} ]; then`,
+            ...failures.stderr.map((line) => `  printf '%s\\n' ${shellQuote(line)} >&2`),
+            "  exit 1",
+            "fi"
+          ]
+        : []),
       `mkdir -p ${shellQuote(path.dirname(paths.target))} ${shellQuote(path.dirname(paths.shim))}`,
       `cat > ${shellQuote(paths.packageJson)} <<'EOS'`,
       JSON.stringify({
@@ -373,6 +482,20 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "#!/bin/sh",
       'if [ -n "$SMITHERS_FAKE_LOG" ]; then',
       '  printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
+      "fi",
+      'if [ -n "$SMITHERS_FAKE_SNAPSHOT_BYTES_LOG" ] && [ -n "$SMITHERS_FAKE_SNAPSHOT_ATTEMPT" ]; then',
+      '  case "$2" in',
+      "    */.smithers/workflows/*.tsx)",
+      '      snapshot_workflow="$2"',
+      '      snapshot_root="${snapshot_workflow%/.smithers/workflows/*}"',
+      '      snapshot_prompt="$snapshot_root/controls/rendered-prompts/$SMITHERS_FAKE_SNAPSHOT_ATTEMPT.md"',
+      '      snapshot_agent="$snapshot_root/.smithers/agents/codex.ts"',
+      "      {",
+      '        printf \'workflow=%s\\nconfig=%s\\nprompt=%s\\nagent=%s\\n\' "$snapshot_workflow" "$ULTRAFUZZ_CONFIG_PATH" "$snapshot_prompt" "$snapshot_agent"',
+      '        cat "$snapshot_workflow" "$ULTRAFUZZ_CONFIG_PATH" "$snapshot_prompt" "$snapshot_agent"',
+      '      } > "$SMITHERS_FAKE_SNAPSHOT_BYTES_LOG"',
+      "      ;;",
+      "  esac",
       "fi",
       'if [ -n "$SMITHERS_FAKE_ENV_LOG" ]; then',
       '  printf \'%s|%s|%s\\n\' "$OPENAI_API_KEY" "$AWS_SECRET_ACCESS_KEY" "$FOUNDRY_PROFILE" > "$SMITHERS_FAKE_ENV_LOG"',
@@ -433,15 +556,18 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
 
 function fakeLifecycleSmithersEnv(
   project: string,
-  input: { inspect: unknown; events?: string; inspectMarkerPath?: string; timeline?: unknown }
+  input: { inspect: unknown; events?: string; tokenEvents?: string; inspectMarkerPath?: string; timeline?: unknown }
 ): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const inspectPath = path.join(project, "fake-smithers-inspect.json");
   const eventsPath = path.join(project, "fake-smithers-events.ndjson");
+  const tokenEventsPath =
+    input.tokenEvents === undefined ? eventsPath : path.join(project, "fake-smithers-token-events.ndjson");
   const timelinePath = path.join(project, "fake-smithers-timeline.json");
   fs.writeFileSync(inspectPath, `${JSON.stringify(input.inspect, null, 2)}\n`, "utf8");
   fs.writeFileSync(eventsPath, input.events ?? "", "utf8");
+  if (input.tokenEvents !== undefined) fs.writeFileSync(tokenEventsPath, input.tokenEvents, "utf8");
   fs.writeFileSync(
     timelinePath,
     `${JSON.stringify(input.timeline ?? { timeline: { frames: [] } }, null, 2)}\n`,
@@ -465,13 +591,24 @@ function fakeLifecycleSmithersEnv(
       "    exit 2",
       "    ;;",
       "  events)",
-      '    cat "$SMITHERS_FAKE_EVENTS"',
+      '    if [ "$3" = "--type" ] && [ "$4" = "token" ]; then',
+      '      cat "$SMITHERS_FAKE_TOKEN_EVENTS"',
+      "    else",
+      '      cat "$SMITHERS_FAKE_EVENTS"',
+      "    fi",
       "    ;;",
       "  timeline)",
       '    cat "$SMITHERS_FAKE_TIMELINE"',
       "    ;;",
       "  rewind)",
       "    printf '%s\\n' '{\"ok\":true}'",
+      "    ;;",
+      "  fork)",
+      '    if [ -n "$SMITHERS_FAKE_FORKED_RUN_ID" ]; then',
+      '      printf \'{"forkedRunId":"%s"}\\n\' "$SMITHERS_FAKE_FORKED_RUN_ID"',
+      "    else",
+      "      printf '%s\\n' '{\"ok\":true}'",
+      "    fi",
       "    ;;",
       "  up)",
       '    if [ -n "$SMITHERS_FAKE_FAIL_UP" ]; then',
@@ -504,6 +641,7 @@ function fakeLifecycleSmithersEnv(
     SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
     SMITHERS_FAKE_INSPECT: inspectPath,
     SMITHERS_FAKE_EVENTS: eventsPath,
+    SMITHERS_FAKE_TOKEN_EVENTS: tokenEventsPath,
     SMITHERS_FAKE_TIMELINE: timelinePath,
     ULTRAFUZZ_PRICING_CATALOG_URL: "off"
   };
@@ -930,6 +1068,17 @@ Current findings: {{output_findings_path}}
   );
 }
 
+const V0_0_2_STOCK_CODEX_ADAPTER = [
+  'import { CodexAgent as SmithersCodexAgent } from "smithers-orchestrator";',
+  "",
+  "export const CodexAgent = new SmithersCodexAgent({",
+  '  model: "gpt-5.5",',
+  "  skipGitRepoCheck: true,",
+  "  apiKey: process.env.OPENAI_API_KEY,",
+  "});",
+  ""
+].join("\n");
+
 test("init preserves existing project-owned files and validate exposes launch posture", async () => {
   const project = tempProject();
   fs.writeFileSync(path.join(project, "ultrafuzz.toml"), "# custom\n", "utf8");
@@ -1046,6 +1195,729 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(validate.value?.resolved_config?.default_reasoning, "xhigh");
 });
 
+test("non-force init upgrades an exact historical stock agent adapter and is idempotent", () => {
+  assert.equal(
+    crypto.createHash("sha256").update(V0_0_2_STOCK_CODEX_ADAPTER).digest("hex"),
+    "26dae14e43c09dbe7901aa731cd552b282d502d86cea8cc6726e4a8579cd3236"
+  );
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+  const environmentPath = path.join(project, ".smithers", "agents", "environment.ts");
+  fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+  const historicalStats = fs.statSync(codexPath, { bigint: true });
+  fs.unlinkSync(environmentPath);
+
+  const upgraded = initProject({ projectRoot: project });
+
+  assert.equal(upgraded.ok, true, JSON.stringify(upgraded.diagnostics));
+  assert.deepEqual(
+    upgraded.diagnostics
+      .filter((diagnostic) => diagnostic.code === "INIT_STOCK_AGENT_ADAPTER_UPGRADED")
+      .map((diagnostic) => diagnostic.path),
+    [".smithers/agents/codex.ts"]
+  );
+  const upgradedSource = fs.readFileSync(codexPath, "utf8");
+  const upgradedStats = fs.statSync(codexPath, { bigint: true });
+  assert.notEqual(upgradedStats.ino, historicalStats.ino);
+  assert.equal(upgradedStats.mode, historicalStats.mode);
+  assert.equal(
+    fs.readdirSync(path.dirname(codexPath)).some((entry) => entry.includes(".ultrafuzz-init-")),
+    false
+  );
+  assert.match(upgradedSource, /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+  assert.match(upgradedSource, /workflowControlChildEnvironment/u);
+  assert.equal(fs.existsSync(environmentPath), true);
+
+  const repeated = initProject({ projectRoot: project });
+  assert.equal(repeated.ok, true, JSON.stringify(repeated.diagnostics));
+  assert.equal(
+    repeated.diagnostics.some((diagnostic) => diagnostic.code === "INIT_STOCK_AGENT_ADAPTER_UPGRADED"),
+    false
+  );
+  assert.equal(fs.readFileSync(codexPath, "utf8"), upgradedSource);
+});
+
+test("non-force init upgrades a read-only stock adapter and preserves its mode", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+  fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+  fs.chmodSync(codexPath, 0o444);
+
+  const upgraded = initProject({ projectRoot: project });
+
+  assert.equal(upgraded.ok, true, JSON.stringify(upgraded.diagnostics));
+  assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+  assert.equal(fs.statSync(codexPath).mode & 0o777, 0o444);
+});
+
+test(
+  "stock adapter migration restores a customization installed at the publication boundary",
+  { concurrency: false },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    const concurrentPath = path.join(agentsDirectory, "concurrent-codex.ts");
+    const customized = 'export const concurrentCustomization = "must survive init";\n';
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    fs.writeFileSync(concurrentPath, customized, "utf8");
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
+    const originalRenameSync = fs.renameSync;
+    let injected = false;
+
+    Object.defineProperty(fs, "renameSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        const [source, destination] = args.map(String);
+        if (
+          !injected &&
+          path.basename(source ?? "") === "codex.ts" &&
+          path.basename(destination ?? "") === ".codex.ts.ultrafuzz-init-previous"
+        ) {
+          injected = true;
+          Reflect.apply(originalRenameSync, fs, [concurrentPath, codexPath]);
+        }
+        return Reflect.apply(originalRenameSync, fs, args) as void;
+      }
+    });
+    try {
+      const failed = initProject({ projectRoot: project });
+      assert.equal(injected, true);
+      assert.equal(failed.ok, false);
+      assert.equal(failed.diagnostics[0]?.code, "INIT_PATH_UNSAFE");
+      assert.equal(fs.readFileSync(codexPath, "utf8"), customized);
+      assert.equal(
+        fs.readdirSync(agentsDirectory).some((entry) => entry.includes(".ultrafuzz-init-")),
+        false
+      );
+    } finally {
+      Object.defineProperty(fs, "renameSync", originalDescriptor);
+    }
+  }
+);
+
+test(
+  "stock adapter migration recovers after process death with the target quarantined",
+  { concurrency: false, skip: process.platform === "win32" },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const runtimeUrl = new URL("../../dist/index.js", import.meta.url).href;
+    const crashScript = String.raw`
+      import fs from "node:fs";
+      import path from "node:path";
+      const project = process.argv[1];
+      const runtimeUrl = process.argv[2];
+      const { initProject } = await import(runtimeUrl);
+      const originalRenameSync = fs.renameSync;
+      Object.defineProperty(fs, "renameSync", {
+        ...Object.getOwnPropertyDescriptor(fs, "renameSync"),
+        value: (...args) => {
+          const result = Reflect.apply(originalRenameSync, fs, args);
+          if (
+            path.basename(String(args[0])) === "codex.ts" &&
+            path.basename(String(args[1])) === ".codex.ts.ultrafuzz-init-previous"
+          ) process.exit(86);
+          return result;
+        }
+      });
+      initProject({ projectRoot: project });
+      process.exit(87);
+    `;
+
+    const crashed = spawnSync(process.execPath, ["--input-type=module", "-e", crashScript, project, runtimeUrl], {
+      encoding: "utf8"
+    });
+    assert.equal(crashed.status, 86, crashed.stderr);
+    assert.equal(fs.existsSync(codexPath), false);
+    assert.equal(fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-recovery")), true);
+
+    const recovered = initProject({ projectRoot: project });
+
+    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+    assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+    assert.equal(
+      fs.readdirSync(agentsDirectory).some((entry) => entry.includes(".ultrafuzz-init-")),
+      false
+    );
+    assert.deepEqual(openDescriptorTargetsInside(agentsDirectory), []);
+  }
+);
+
+test(
+  "stock adapter migration recovers after process death immediately after marker creation",
+  { concurrency: false, skip: process.platform === "win32" },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    const recoveryMarkerPath = path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-recovery");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const runtimeUrl = new URL("../../dist/index.js", import.meta.url).href;
+    const crashScript = String.raw`
+      import fs from "node:fs";
+      const project = process.argv[1];
+      const runtimeUrl = process.argv[2];
+      const { initProject } = await import(runtimeUrl);
+      const originalOpenSync = fs.openSync;
+      Object.defineProperty(fs, "openSync", {
+        ...Object.getOwnPropertyDescriptor(fs, "openSync"),
+        value: (...args) => {
+          const descriptor = Reflect.apply(originalOpenSync, fs, args);
+          if (String(args[0]).endsWith(".codex.ts.ultrafuzz-init-recovery")) process.exit(86);
+          return descriptor;
+        }
+      });
+      initProject({ projectRoot: project });
+      process.exit(87);
+    `;
+
+    const crashed = spawnSync(process.execPath, ["--input-type=module", "-e", crashScript, project, runtimeUrl], {
+      encoding: "utf8"
+    });
+    assert.equal(crashed.status, 86, crashed.stderr);
+    assert.equal(fs.statSync(recoveryMarkerPath).size, 0);
+    assert.equal(fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-prepared")), true);
+    assert.equal(fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-previous")), true);
+
+    const recovered = initProject({ projectRoot: project });
+
+    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+    assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+    assert.equal(
+      fs.readdirSync(agentsDirectory).some((entry) => entry.includes(".ultrafuzz-init-")),
+      false
+    );
+  }
+);
+
+test(
+  "stock adapter migration leaves the original intact when temporary publication fails",
+  { concurrency: false },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const entriesBefore = fs.readdirSync(agentsDirectory).sort();
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "writeSync")!;
+
+    Object.defineProperty(fs, "writeSync", {
+      ...originalDescriptor,
+      value: (..._args: unknown[]) => {
+        throw new Error("induced temporary publication write failure");
+      }
+    });
+    try {
+      const failed = initProject({ projectRoot: project });
+      assert.equal(failed.ok, false);
+      assert.equal(failed.diagnostics[0]?.code, "INIT_PATH_UNSAFE");
+      assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
+      assert.deepEqual(fs.readdirSync(agentsDirectory).sort(), entriesBefore);
+    } finally {
+      Object.defineProperty(fs, "writeSync", originalDescriptor);
+    }
+  }
+);
+
+test(
+  "stock adapter migration retains and recovers a deterministic path when cleanup fails",
+  { concurrency: false },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    const preparedPath = path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-prepared");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const writeDescriptor = Object.getOwnPropertyDescriptor(fs, "writeSync")!;
+    const unlinkDescriptor = Object.getOwnPropertyDescriptor(fs, "unlinkSync")!;
+    const originalUnlinkSync = fs.unlinkSync;
+
+    Object.defineProperty(fs, "writeSync", {
+      ...writeDescriptor,
+      value: (..._args: unknown[]) => {
+        throw new Error("induced publication failure before recovery marker creation");
+      }
+    });
+    Object.defineProperty(fs, "unlinkSync", {
+      ...unlinkDescriptor,
+      value: (...args: unknown[]) => {
+        if (path.basename(String(args[0])) === path.basename(preparedPath)) {
+          throw Object.assign(new Error("induced prepared-file cleanup failure"), { code: "EIO" });
+        }
+        return Reflect.apply(originalUnlinkSync, fs, args) as void;
+      }
+    });
+    try {
+      const failed = initProject({ projectRoot: project });
+      assert.equal(failed.ok, false);
+      assert.equal(fs.existsSync(preparedPath), true);
+      assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
+    } finally {
+      Object.defineProperty(fs, "writeSync", writeDescriptor);
+      Object.defineProperty(fs, "unlinkSync", unlinkDescriptor);
+    }
+
+    const recovered = initProject({ projectRoot: project });
+    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+    assert.equal(fs.existsSync(preparedPath), false);
+    assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+  }
+);
+
+test(
+  "stock adapter migration removes its temporary file when the first temporary fstat fails",
+  { concurrency: false, skip: process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "fstatSync")!;
+    const originalFstatSync = fs.fstatSync;
+    let induced = false;
+
+    Object.defineProperty(fs, "fstatSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        const descriptor = Number(args[0]);
+        let target = "";
+        try {
+          target = fs.readlinkSync(`/proc/self/fd/${descriptor}`);
+        } catch {
+          // Let the real fstat report invalid descriptors.
+        }
+        if (!induced && target.includes(".codex.ts.ultrafuzz-init-")) {
+          induced = true;
+          throw Object.assign(new Error("induced first temporary fstat failure"), { code: "EIO" });
+        }
+        return Reflect.apply(originalFstatSync, fs, args) as fs.Stats | fs.BigIntStats;
+      }
+    });
+    try {
+      const failed = initProject({ projectRoot: project });
+      assert.equal(induced, true);
+      assert.equal(failed.ok, false);
+      assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
+      assert.equal(
+        fs.readdirSync(agentsDirectory).some((entry) => entry.includes(".ultrafuzz-init-")),
+        false
+      );
+      assert.deepEqual(openDescriptorTargetsInside(agentsDirectory), []);
+    } finally {
+      Object.defineProperty(fs, "fstatSync", originalDescriptor);
+    }
+  }
+);
+
+test(
+  "stock adapter migration aggregates a failed temporary close without skipping cleanup",
+  { concurrency: false, skip: process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "closeSync")!;
+    const originalCloseSync = fs.closeSync;
+    let induced = false;
+
+    Object.defineProperty(fs, "closeSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        const descriptor = Number(args[0]);
+        let target = "";
+        try {
+          target = fs.readlinkSync(`/proc/self/fd/${descriptor}`);
+        } catch {
+          // Let the real close report invalid descriptors.
+        }
+        if (!induced && target.includes(".codex.ts.ultrafuzz-init-")) {
+          induced = true;
+          Reflect.apply(originalCloseSync, fs, args);
+          throw Object.assign(new Error("induced first temporary close failure"), { code: "EIO" });
+        }
+        return Reflect.apply(originalCloseSync, fs, args) as void;
+      }
+    });
+    try {
+      const upgraded = initProject({ projectRoot: project });
+      assert.equal(induced, true);
+      assert.equal(upgraded.ok, false, JSON.stringify(upgraded.diagnostics));
+      assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+      assert.equal(
+        fs.readdirSync(agentsDirectory).some((entry) => entry.includes(".ultrafuzz-init-")),
+        false
+      );
+      assert.deepEqual(openDescriptorTargetsInside(agentsDirectory), []);
+    } finally {
+      Object.defineProperty(fs, "closeSync", originalDescriptor);
+    }
+  }
+);
+
+test(
+  "init converts an adapter inspection failure into a preserved manual-review warning",
+  { concurrency: false },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+    const customized = 'export const customConfig = "ultrafuzz.toml"; // project-owned adapter\n';
+    fs.writeFileSync(codexPath, customized, "utf8");
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
+    const originalOpenSync = fs.openSync;
+    let codexOpenCount = 0;
+
+    Object.defineProperty(fs, "openSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        if (String(args[0]) === codexPath) {
+          codexOpenCount += 1;
+          if (codexOpenCount === 2) {
+            throw Object.assign(new Error("induced sensitive adapter inspection failure"), { code: "EACCES" });
+          }
+        }
+        return Reflect.apply(originalOpenSync, fs, args) as number;
+      }
+    });
+    try {
+      const preserved = initProject({ projectRoot: project });
+      assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+      assert.equal(codexOpenCount, 2);
+      assert.equal(fs.readFileSync(codexPath, "utf8"), customized);
+      const warning = preserved.diagnostics.find(
+        (diagnostic) =>
+          diagnostic.code === "INIT_AGENT_ADAPTER_UPDATE_REQUIRED" && diagnostic.path === ".smithers/agents/codex.ts"
+      );
+      assert.equal(warning?.severity, "warning");
+      assert.match(warning?.message ?? "", /could not be safely inspected/u);
+      assert.match(warning?.message ?? "", /verify manually/u);
+      assert.doesNotMatch(JSON.stringify(preserved.diagnostics), /induced sensitive|EACCES/u);
+    } finally {
+      Object.defineProperty(fs, "openSync", originalDescriptor);
+    }
+  }
+);
+
+test("non-force init preserves a customized stale adapter and force remains explicit", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+  const customized = [
+    'import { readFileSync } from "node:fs";',
+    'import path from "node:path";',
+    'export const customConfig = readFileSync(path.join(process.cwd(), "ultrafuzz.toml"), "utf8");',
+    "// project-owned customization",
+    ""
+  ].join("\n");
+  fs.writeFileSync(codexPath, customized, "utf8");
+
+  const preserved = initProject({ projectRoot: project });
+
+  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+  assert.equal(fs.readFileSync(codexPath, "utf8"), customized);
+  const warning = preserved.diagnostics.find(
+    (diagnostic) =>
+      diagnostic.code === "INIT_AGENT_ADAPTER_UPDATE_REQUIRED" && diagnostic.path === ".smithers/agents/codex.ts"
+  );
+  assert.equal(warning?.severity, "warning");
+  assert.match(warning?.message ?? "", /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+  assert.match(warning?.message ?? "", /workflowControlChildEnvironment/u);
+
+  const forced = initProject({ projectRoot: project, force: true });
+  assert.equal(forced.ok, true, JSON.stringify(forced.diagnostics));
+  assert.notEqual(fs.readFileSync(codexPath, "utf8"), customized);
+  assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+});
+
+test("non-force init never follows or overwrites linked stock adapter paths", () => {
+  for (const linkKind of ["symbolic", "hard"] as const) {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+    const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), `ufz-init-${linkKind}-`));
+    const outsidePath = path.join(outsideRoot, "codex.ts");
+    fs.writeFileSync(outsidePath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    fs.unlinkSync(codexPath);
+    if (linkKind === "symbolic") {
+      fs.symlinkSync(outsidePath, codexPath);
+    } else {
+      fs.linkSync(outsidePath, codexPath);
+    }
+
+    const preserved = initProject({ projectRoot: project });
+
+    assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+    assert.equal(fs.readFileSync(outsidePath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
+    assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
+    assert.equal(fs.lstatSync(codexPath).isSymbolicLink(), linkKind === "symbolic");
+    if (linkKind === "hard") assert.equal(fs.statSync(codexPath).nlink, 2);
+    const warning = preserved.diagnostics.find(
+      (diagnostic) =>
+        diagnostic.code === "INIT_AGENT_ADAPTER_UPDATE_REQUIRED" && diagnostic.path === ".smithers/agents/codex.ts"
+    );
+    assert.match(warning?.message ?? "", /preserved it without inspection/u);
+  }
+});
+
+test("startRun gives manual upgrade guidance for a customized stale adapter", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+  fs.writeFileSync(codexPath, 'export const customConfig = "ultrafuzz.toml"; // project-owned adapter\n', "utf8");
+
+  const run = await startRun({ projectRoot: project, runId: "stale-custom-agent", env: fakeSmithersEnv(project) });
+
+  assert.equal(run.ok, false);
+  assert.equal(run.diagnostics[0]?.code, "WORKFLOW_SUBMISSION_FAILED");
+  assert.match(run.diagnostics[0]?.message ?? "", /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+  assert.match(run.diagnostics[0]?.message ?? "", /rerun ultrafuzz init/u);
+  assert.match(run.diagnostics[0]?.message ?? "", /update this customized adapter manually/u);
+});
+
+test("init preserves a dangling adapter symlink without writing through it", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+  const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-init-dangling-"));
+  const outsidePath = path.join(outsideRoot, "codex.ts");
+  fs.unlinkSync(codexPath);
+  fs.symlinkSync(outsidePath, codexPath);
+
+  const result = initProject({ projectRoot: project });
+
+  assert.equal(result.ok, true);
+  assert.equal(fs.existsSync(outsidePath), false);
+  assert.equal(fs.readlinkSync(codexPath), outsidePath);
+});
+
+test("init does not modify a regular file swapped after the anchored open", { concurrency: false }, () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const environmentPath = path.join(project, ".smithers", "agents", "environment.ts");
+  const originalContents = fs.readFileSync(environmentPath, "utf8");
+  const concurrentContents = "export const concurrentEnvironmentCustomization = true;\n";
+  const originalOpenSync = fs.openSync;
+  const descriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
+  let swapped = false;
+  Object.defineProperty(fs, "openSync", {
+    ...descriptor,
+    value: (...args: unknown[]) => {
+      const opened = Reflect.apply(originalOpenSync, fs, args) as number;
+      if (!swapped && path.basename(String(args[0])) === "environment.ts") {
+        swapped = true;
+        fs.renameSync(environmentPath, `${environmentPath}.old`);
+        fs.writeFileSync(environmentPath, concurrentContents, "utf8");
+      }
+      return opened;
+    }
+  });
+  try {
+    const result = initProject({ projectRoot: project, force: true });
+    assert.equal(result.ok, false);
+  } finally {
+    Object.defineProperty(fs, "openSync", descriptor);
+  }
+  assert.equal(swapped, true);
+  assert.equal(fs.readFileSync(environmentPath, "utf8"), concurrentContents);
+  assert.equal(fs.readFileSync(`${environmentPath}.old`, "utf8"), originalContents);
+});
+
+test(
+  "stock adapter publication retains the replacement when final directory fsync fails",
+  { concurrency: false },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    const expectedReplacement = fs.readFileSync(codexPath, "utf8");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const originalFsyncSync = fs.fsyncSync;
+    const descriptor = Object.getOwnPropertyDescriptor(fs, "fsyncSync")!;
+    let directoryFsyncs = 0;
+    Object.defineProperty(fs, "fsyncSync", {
+      ...descriptor,
+      value: (fileDescriptor: number) => {
+        let target = "";
+        try {
+          target = fs.readlinkSync(`/proc/self/fd/${fileDescriptor}`);
+        } catch {
+          // Let the real fsync report invalid descriptors.
+        }
+        if (target === agentsDirectory) {
+          directoryFsyncs += 1;
+          if (directoryFsyncs === 4)
+            throw Object.assign(new Error("induced final directory fsync failure"), { code: "EIO" });
+        }
+        return originalFsyncSync(fileDescriptor);
+      }
+    });
+    try {
+      const result = initProject({ projectRoot: project });
+      assert.equal(result.ok, false);
+    } finally {
+      Object.defineProperty(fs, "fsyncSync", descriptor);
+    }
+    assert.equal(directoryFsyncs, 4);
+    assert.equal(fs.readFileSync(codexPath, "utf8"), expectedReplacement);
+    assert.deepEqual(
+      fs.readdirSync(agentsDirectory).filter((entry) => entry.includes(".ultrafuzz-init-")),
+      []
+    );
+  }
+);
+
+test(
+  "stock adapter publication retains its recovery marker when post-displacement fsync fails",
+  { concurrency: false },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    const expectedReplacement = fs.readFileSync(codexPath, "utf8");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const originalFsyncSync = fs.fsyncSync;
+    const descriptor = Object.getOwnPropertyDescriptor(fs, "fsyncSync")!;
+    let directoryFsyncs = 0;
+    Object.defineProperty(fs, "fsyncSync", {
+      ...descriptor,
+      value: (fileDescriptor: number) => {
+        let target = "";
+        try {
+          target = fs.readlinkSync(`/proc/self/fd/${fileDescriptor}`);
+        } catch {
+          // Let the real fsync report invalid descriptors.
+        }
+        if (target === agentsDirectory) {
+          directoryFsyncs += 1;
+          if (directoryFsyncs === 3)
+            throw Object.assign(new Error("induced post-displacement directory fsync failure"), { code: "EIO" });
+        }
+        return originalFsyncSync(fileDescriptor);
+      }
+    });
+    try {
+      const result = initProject({ projectRoot: project });
+      assert.equal(result.ok, false);
+    } finally {
+      Object.defineProperty(fs, "fsyncSync", descriptor);
+    }
+    assert.equal(directoryFsyncs, 3);
+    assert.equal(fs.readFileSync(codexPath, "utf8"), expectedReplacement);
+    assert.deepEqual(
+      fs.readdirSync(agentsDirectory).filter((entry) => entry.includes(".ultrafuzz-init-")),
+      [".codex.ts.ultrafuzz-init-recovery"]
+    );
+    assert.equal(initProject({ projectRoot: project }).ok, true);
+    assert.equal(fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-recovery")), false);
+  }
+);
+
+test(
+  "stock adapter publication restores the original when intermediate commit fsync fails",
+  { concurrency: false },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const originalFsyncSync = fs.fsyncSync;
+    const descriptor = Object.getOwnPropertyDescriptor(fs, "fsyncSync")!;
+    let directoryFsyncs = 0;
+    Object.defineProperty(fs, "fsyncSync", {
+      ...descriptor,
+      value: (fileDescriptor: number) => {
+        let target = "";
+        try {
+          target = fs.readlinkSync(`/proc/self/fd/${fileDescriptor}`);
+        } catch {
+          // Let the real fsync report invalid descriptors.
+        }
+        if (target === agentsDirectory) {
+          directoryFsyncs += 1;
+          if (directoryFsyncs === 2)
+            throw Object.assign(new Error("induced intermediate directory fsync failure"), { code: "EIO" });
+        }
+        return originalFsyncSync(fileDescriptor);
+      }
+    });
+    try {
+      const result = initProject({ projectRoot: project });
+      assert.equal(result.ok, false);
+    } finally {
+      Object.defineProperty(fs, "fsyncSync", descriptor);
+    }
+    assert.equal(directoryFsyncs, 2);
+    assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
+    assert.deepEqual(
+      fs.readdirSync(agentsDirectory).filter((entry) => entry.includes(".ultrafuzz-init-")),
+      []
+    );
+  }
+);
+
+test(
+  "stock adapter publication retains the replacement when final directory stability fails",
+  { concurrency: false },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const agentsDirectory = path.join(project, ".smithers", "agents");
+    const codexPath = path.join(agentsDirectory, "codex.ts");
+    const expectedReplacement = fs.readFileSync(codexPath, "utf8");
+    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+    const originalLstatSync = fs.lstatSync;
+    const descriptor = Object.getOwnPropertyDescriptor(fs, "lstatSync")!;
+    let injected = false;
+    Object.defineProperty(fs, "lstatSync", {
+      ...descriptor,
+      value: (...args: unknown[]) => {
+        const result = Reflect.apply(originalLstatSync, fs, args) as fs.BigIntStats;
+        if (
+          !injected &&
+          String(args[0]) === agentsDirectory &&
+          !fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-recovery"))
+        ) {
+          const target = fs.lstatSync(codexPath, { bigint: true });
+          if (target.size === BigInt(Buffer.byteLength(expectedReplacement))) {
+            injected = true;
+            return { ...result, ino: result.ino + 1n } as fs.BigIntStats;
+          }
+        }
+        return result;
+      }
+    });
+    try {
+      const result = initProject({ projectRoot: project });
+      assert.equal(result.ok, false);
+    } finally {
+      Object.defineProperty(fs, "lstatSync", descriptor);
+    }
+    assert.equal(injected, true);
+    assert.equal(fs.readFileSync(codexPath, "utf8"), expectedReplacement);
+    assert.deepEqual(
+      fs.readdirSync(agentsDirectory).filter((entry) => entry.includes(".ultrafuzz-init-")),
+      []
+    );
+  }
+);
+
 test(
   "generated Codex adapter repeats artifact directory flags and preserves resume argv",
   { skip: !runningUnderBun },
@@ -1074,6 +1946,65 @@ test(
     });
     assert.equal(resumed.args.includes("--add-dir"), false);
     await resumed.cleanup?.();
+  }
+);
+
+test(
+  "generated agents cannot relabel an aliased execution-snapshot path as a credential",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    fs.writeFileSync(
+      configPath,
+      fs.readFileSync(configPath, "utf8").replace('api_key_env = "OPENAI_API_KEY"', 'api_key_env = "MY_ALIAS"'),
+      "utf8"
+    );
+    const snapshotRoot = path.join(
+      project,
+      ".ultrafuzz",
+      "runs",
+      "alias-boundary",
+      "smithers",
+      "execution-snapshots",
+      "a".repeat(64)
+    );
+    const persistedWorkflow = path.join(snapshotRoot, ".smithers", "workflows", "alias-boundary.tsx");
+    const aliasedControlPath = path.join(snapshotRoot, "controls", "ultrafuzz.toml");
+    const source = {
+      ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: persistedWorkflow,
+      ULTRAFUZZ_CONFIG_PATH: configPath,
+      MY_ALIAS: aliasedControlPath
+    };
+    const { createCodexAgent, workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
+    const sanitized = workflowControlChildEnvironment(
+      { CODEX_API_KEY: aliasedControlPath, REAL_API_KEY: "real-key" },
+      source
+    );
+    assert.equal(sanitized.CODEX_API_KEY, "");
+    assert.equal(sanitized.MY_ALIAS, "");
+    assert.equal(sanitized.REAL_API_KEY, "real-key");
+
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      workflow: process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH,
+      alias: process.env.MY_ALIAS
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = persistedWorkflow;
+    process.env.MY_ALIAS = aliasedControlPath;
+    try {
+      assert.throws(() => createCodexAgent(), /credential MY_ALIAS resolves inside controller-only execution state/u);
+    } finally {
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.workflow === undefined) delete process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
+      else process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = previous.workflow;
+      if (previous.alias === undefined) delete process.env.MY_ALIAS;
+      else process.env.MY_ALIAS = previous.alias;
+    }
   }
 );
 
@@ -3555,6 +4486,74 @@ test("init reports an agent registry that does not export a generated agent", as
   );
 });
 
+test(
+  "post-init registry inspection sanitizes access failures instead of failing after mutation",
+  { concurrency: false },
+  () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const registryPath = path.join(project, ".smithers", "agents", "index.ts");
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
+    const originalOpenSync = fs.openSync;
+
+    Object.defineProperty(fs, "openSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        if (String(args[0]) === registryPath) {
+          throw Object.assign(new Error("sensitive registry access detail"), { code: "EACCES" });
+        }
+        return Reflect.apply(originalOpenSync, fs, args) as number;
+      }
+    });
+    try {
+      const inspected = initProject({ projectRoot: project });
+      assert.equal(inspected.ok, true, JSON.stringify(inspected.diagnostics));
+      const warning = inspected.diagnostics.find(
+        (diagnostic) => diagnostic.code === "INIT_AGENT_REGISTRY_REVIEW_REQUIRED"
+      );
+      assert.equal(warning?.severity, "warning");
+      assert.match(warning?.message ?? "", /could not be safely inspected/u);
+      assert.match(warning?.message ?? "", /verify manually/u);
+      assert.doesNotMatch(JSON.stringify(inspected.diagnostics), /sensitive registry|EACCES/u);
+    } finally {
+      Object.defineProperty(fs, "openSync", originalDescriptor);
+    }
+  }
+);
+
+test(
+  "post-init registry inspection rejects symlinks, FIFOs, and oversized files without reading them",
+  { skip: process.platform === "win32" },
+  () => {
+    const cases = ["symlink", "fifo", "oversized"] as const;
+    for (const kind of cases) {
+      const project = tempProject();
+      assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+      const registryPath = path.join(project, ".smithers", "agents", "index.ts");
+      fs.unlinkSync(registryPath);
+      if (kind === "symlink") {
+        const outside = path.join(tempProject(), "outside-index.ts");
+        fs.writeFileSync(outside, "outside registry must not be read\n", "utf8");
+        fs.symlinkSync(outside, registryPath);
+      } else if (kind === "fifo") {
+        execFileSync("mkfifo", [registryPath]);
+      } else {
+        fs.writeFileSync(registryPath, Buffer.alloc(256 * 1024 + 1, 0x61));
+      }
+
+      const inspected = initProject({ projectRoot: project });
+
+      assert.equal(inspected.ok, true, `${kind}: ${JSON.stringify(inspected.diagnostics)}`);
+      const warning = inspected.diagnostics.find(
+        (diagnostic) => diagnostic.code === "INIT_AGENT_REGISTRY_REVIEW_REQUIRED"
+      );
+      assert.equal(warning?.severity, "warning", kind);
+      assert.match(warning?.message ?? "", /preserved (?:it )?without inspection|too large to inspect/u, kind);
+      assert.match(warning?.message ?? "", /verify manually/u, kind);
+    }
+  }
+);
+
 test("startRun compiles normal Smithers tasks, persists provenance, and submits through Smithers CLI", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -3629,6 +4628,21 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.equal(smithersTasks.tasks[0]?.metadata?.node?.concreteNodeId, "project-discovery");
   assert.equal(smithersTasks.tasks[0]?.metadata?.model?.modelName, "gpt-runtime-override");
   assert.equal(smithersTasks.tasks[0]?.metadata?.model?.reasoningEffort, "max");
+  const localRunMetadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    workflow?: { execution_snapshot_path?: string };
+  };
+  const localExecutionSnapshot = path.join(
+    run.value!.run_root,
+    localRunMetadata.workflow?.execution_snapshot_path ?? ""
+  );
+  const localDependencyManifest = JSON.parse(
+    fs.readFileSync(path.join(localExecutionSnapshot, "dependencies", "manifest.json"), "utf8")
+  ) as { smithers_bin?: unknown };
+  assert.equal(
+    localDependencyManifest.smithers_bin,
+    null,
+    "a pure-local workflow may keep using its explicit controller runner without sealing the pinned package"
+  );
 
   const workflowSource = fs.readFileSync(
     path.join(project, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx"),
@@ -3718,7 +4732,10 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
     command?: string[];
   };
   assert.equal(submission.smithers_run_id, "ultrafuzz-smithers-run");
-  assert.ok(submission.command?.includes(path.join(project, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx")));
+  const submittedWorkflow = submission.command?.[2] ?? "";
+  assert.ok(submittedWorkflow.startsWith(path.join(run.value!.run_root, "smithers", "execution-snapshots") + path.sep));
+  assert.ok(submittedWorkflow.endsWith(path.join(".smithers", "workflows", "ultrafuzz-smithers-run.tsx")));
+  assert.notEqual(submittedWorkflow, path.join(project, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx"));
   assert.ok(submission.command?.includes("--supervise"));
   const staleThresholdIndex = submission.command?.indexOf("--supervise-stale-threshold") ?? -1;
   assert.deepEqual(submission.command?.slice(staleThresholdIndex, staleThresholdIndex + 4), [
@@ -3943,6 +4960,31 @@ test("startRun forwards configured and explicitly allowed environment variables 
   assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
 });
 
+test("startRun rejects controller-only paths as credential environment names", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs
+      .readFileSync(configPath, "utf8")
+      .replace('api_key_env = "OPENAI_API_KEY"', 'api_key_env = "ULTRAFUZZ_CONFIG_PATH"'),
+    "utf8"
+  );
+
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({
+    projectRoot: project,
+    runId: "controller-path-credential",
+    env
+  });
+
+  assert.equal(run.ok, false);
+  assert.match(run.diagnostics[0]?.message ?? "", /credential environment cannot name controller-only variable/u);
+  assert.equal(fs.existsSync(env.SMITHERS_FAKE_LOG!), false);
+});
+
 test("startRun forwards cloud provider credentials through the Smithers environment filter", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -3962,8 +5004,23 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
     "utf8"
   );
   const cloudEnvironmentLog = path.join(project, "smithers-cloud-environment.log");
+  const pinnedRunner = writeFakeInstalledSmithers(project);
+  fs.writeFileSync(
+    pinnedRunner.target,
+    [
+      "#!/bin/sh",
+      'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ] && [ "$1" = "up" ]; then',
+      '  printf \'%s|%s\\n\' "$UFZ_PROVIDER_ONE" "$UFZ_PROVIDER_TWO" >> "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
+      "fi",
+      "printf '%s\\n' '{\"ok\":true}'",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(pinnedRunner.target, 0o755);
+  const controllerEnvironment = fakeSmithersEnv(project);
   const env = {
-    ...fakeSmithersEnv(project),
+    ...controllerEnvironment,
     SMITHERS_FAKE_CLOUD_ENV_LOG: cloudEnvironmentLog,
     OPENAI_API_KEY: "configured-agent-key",
     UFZ_PROVIDER_ONE: "provider-one",
@@ -3974,6 +5031,24 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.equal(fs.readFileSync(cloudEnvironmentLog, "utf8"), "provider-one|provider-two\n");
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    workflow?: { execution_snapshot_path?: string };
+  };
+  const executionSnapshot = path.join(run.value!.run_root, metadata.workflow?.execution_snapshot_path ?? "");
+  const dependencyManifest = JSON.parse(
+    fs.readFileSync(path.join(executionSnapshot, "dependencies", "manifest.json"), "utf8")
+  ) as { smithers_bin?: unknown };
+  assert.equal(typeof dependencyManifest.smithers_bin, "string");
+  assert.notEqual(dependencyManifest.smithers_bin, "");
+  assert.notEqual(
+    path.resolve(executionSnapshot, String(dependencyManifest.smithers_bin)),
+    fs.realpathSync(controllerEnvironment.SMITHERS_BIN!),
+    "cloud execution must use the sealed pinned runner rather than a host-only controller override"
+  );
+  const sealedCloudRunner = path.join(executionSnapshot, ...String(dependencyManifest.smithers_bin).split("/"));
+  assert.equal(fs.statSync(sealedCloudRunner).isFile(), true);
+  assert.notEqual(fs.statSync(sealedCloudRunner).mode & 0o111, 0);
+  assert.deepEqual(fs.readFileSync(sealedCloudRunner), fs.readFileSync(pinnedRunner.target));
 });
 
 test("startRun forwards Kimi-specific runtime environment without exposing unrelated secrets", async () => {
@@ -4058,7 +5133,7 @@ test("startRun forwards Moonshot fallback credentials for Kimi API-key auth", as
   );
 });
 
-test("startRun keeps operational input usable while redacting durable workflow evidence", async () => {
+test("startRun submits the exact sealed redacted workflow input bytes", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -4067,11 +5142,20 @@ test("startRun keeps operational input usable while redacting durable workflow e
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
   const commandLog = path.join(project, "smithers-command.log");
+  const inputLog = path.join(project, "smithers-input.log");
   fs.writeFileSync(
     smithers,
     [
       "#!/bin/sh",
       'printf \'%s\\n\' "$*" > "$SMITHERS_FAKE_LOG"',
+      'while [ "$#" -gt 0 ]; do',
+      '  if [ "$1" = "--input" ]; then',
+      "    shift",
+      '    printf \'%s\' "$1" > "$SMITHERS_FAKE_INPUT_LOG"',
+      "    break",
+      "  fi",
+      "  shift",
+      "done",
       "printf '%s\\n' 'submission api_key=sk-successstdout'",
       "printf '%s\\n' 'submission token=sk-successstderr' >&2",
       ""
@@ -4088,18 +5172,23 @@ test("startRun keeps operational input usable while redacting durable workflow e
     env: {
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       SMITHERS_BIN: smithers,
-      SMITHERS_FAKE_LOG: commandLog
+      SMITHERS_FAKE_LOG: commandLog,
+      SMITHERS_FAKE_INPUT_LOG: inputLog
     }
   });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const operationalCommand = fs.readFileSync(commandLog, "utf8");
-  assert.match(operationalCommand, /sk-operatorsecret/);
-  assert.match(operationalCommand, /sk-nestedsecret/);
+  const sealedInputBytes = fs.readFileSync(path.join(run.value!.run_root, "smithers", "input.json"));
+  const submittedInputBytes = fs.readFileSync(inputLog);
+  assert.deepEqual(submittedInputBytes, sealedInputBytes);
+  const evidence = await readLinkedWorkflowEvidence(project, "redacted-evidence");
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  assert.equal(evidence.executionSnapshot.inputJson, sealedInputBytes.toString("utf8"));
 
-  const inputEvidence = JSON.parse(
-    fs.readFileSync(path.join(run.value!.run_root, "smithers", "input.json"), "utf8")
-  ) as {
+  const operationalCommand = fs.readFileSync(commandLog, "utf8");
+  assert.doesNotMatch(operationalCommand, /sk-(?:operator|nested)/u);
+  const inputEvidence = JSON.parse(sealedInputBytes.toString("utf8")) as {
     operator_prompt?: string;
     operator_input?: { nested?: { api_key?: string }; note?: string };
   };
@@ -4115,6 +5204,674 @@ test("startRun keeps operational input usable while redacting durable workflow e
   const inputArgumentIndex = submissionEvidence.command?.indexOf("--input") ?? -1;
   assert.equal(submissionEvidence.command?.[inputArgumentIndex + 1], "<redacted>");
   assert.doesNotMatch(JSON.stringify(submissionEvidence), /sk-(?:operator|nested|success)/);
+});
+
+test("snapshot recovery removes a nested read-only stale current-generation publication before retry", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "snapshot-stale-publication-retry";
+  const run = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+
+  const generation = evidence.verifiedControl.generation;
+  const snapshotsRoot = path.dirname(evidence.executionSnapshot.root);
+  const savedSnapshot = `${snapshotsRoot}.saved-${generation}`;
+  fs.chmodSync(evidence.executionSnapshot.root, 0o700);
+  fs.renameSync(evidence.executionSnapshot.root, savedSnapshot);
+  const staleRoot = path.join(snapshotsRoot, `.${generation}.tmp-${process.pid}-${"a".repeat(24)}`);
+  const readOnlyNested = path.join(staleRoot, "read-only", "nested");
+  fs.mkdirSync(readOnlyNested, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(readOnlyNested, "partial.txt"), "partial publication\n", { mode: 0o400 });
+  fs.chmodSync(readOnlyNested, 0o500);
+  fs.chmodSync(path.dirname(readOnlyNested), 0o500);
+  fs.chmodSync(staleRoot, 0o500);
+
+  const recovered = materializeWorkflowExecutionSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    snapshot: evidence.verifiedControl
+  });
+
+  assert.equal(recovered.root, evidence.executionSnapshot.root);
+  assert.equal(recovered.inputJson, evidence.executionSnapshot.inputJson);
+  assert.deepEqual(fs.readdirSync(snapshotsRoot), [generation]);
+  assert.equal(fs.existsSync(staleRoot), false);
+  assert.equal(fs.existsSync(savedSnapshot), true);
+});
+
+test("snapshot recovery rejects matching symlink and non-directory publications without escaping", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "snapshot-stale-publication-type";
+  const run = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+
+  const generation = evidence.verifiedControl.generation;
+  const snapshotsRoot = path.dirname(evidence.executionSnapshot.root);
+  const savedSnapshot = `${snapshotsRoot}.saved-${generation}`;
+  fs.chmodSync(evidence.executionSnapshot.root, 0o700);
+  fs.renameSync(evidence.executionSnapshot.root, savedSnapshot);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-stale-snapshot-outside-"));
+  const outsideMarker = path.join(outside, "outside.txt");
+  fs.writeFileSync(outsideMarker, "outside remains\n", "utf8");
+  const symlinkPublication = path.join(snapshotsRoot, `.${generation}.tmp-${process.pid}-${"b".repeat(24)}`);
+  fs.symlinkSync(outside, symlinkPublication, process.platform === "win32" ? "junction" : "dir");
+
+  assert.throws(
+    () =>
+      materializeWorkflowExecutionSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        snapshot: evidence.verifiedControl
+      }),
+    /stale workflow execution snapshot publication is not a physical directory/u
+  );
+  assert.equal(fs.lstatSync(symlinkPublication).isSymbolicLink(), true);
+  assert.equal(fs.readFileSync(outsideMarker, "utf8"), "outside remains\n");
+
+  fs.unlinkSync(symlinkPublication);
+  const filePublication = path.join(snapshotsRoot, `.${generation}.tmp-${process.pid + 1}-${"c".repeat(24)}`);
+  fs.writeFileSync(filePublication, "not a directory\n", "utf8");
+  assert.throws(
+    () =>
+      materializeWorkflowExecutionSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        snapshot: evidence.verifiedControl
+      }),
+    /stale workflow execution snapshot publication is not a physical directory/u
+  );
+  assert.equal(fs.readFileSync(filePublication, "utf8"), "not a directory\n");
+  assert.equal(fs.readFileSync(outsideMarker, "utf8"), "outside remains\n");
+  assert.equal(fs.existsSync(savedSnapshot), true);
+});
+
+test("snapshot recovery preserves and rejects unrelated and other-generation entries", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "snapshot-stale-publication-unrelated";
+  const run = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+
+  const generation = evidence.verifiedControl.generation;
+  const otherGeneration = `${generation[0] === "0" ? "1" : "0"}${generation.slice(1)}`;
+  const snapshotsRoot = path.dirname(evidence.executionSnapshot.root);
+  const savedSnapshot = `${snapshotsRoot}.saved-${generation}`;
+  fs.chmodSync(evidence.executionSnapshot.root, 0o700);
+  fs.renameSync(evidence.executionSnapshot.root, savedSnapshot);
+  const unrelated = path.join(snapshotsRoot, "operator-note");
+  fs.writeFileSync(unrelated, "retain\n", "utf8");
+  const otherGenerationPublication = path.join(
+    snapshotsRoot,
+    `.${otherGeneration}.tmp-${process.pid}-${"d".repeat(24)}`
+  );
+  fs.mkdirSync(otherGenerationPublication, { mode: 0o700 });
+  fs.writeFileSync(path.join(otherGenerationPublication, "retain.txt"), "retain other generation\n", "utf8");
+
+  assert.throws(
+    () =>
+      materializeWorkflowExecutionSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        snapshot: evidence.verifiedControl
+      }),
+    /workflow execution snapshots contain an unexpected generation/u
+  );
+  assert.equal(fs.readFileSync(unrelated, "utf8"), "retain\n");
+  assert.equal(
+    fs.readFileSync(path.join(otherGenerationPublication, "retain.txt"), "utf8"),
+    "retain other generation\n"
+  );
+  assert.equal(fs.existsSync(savedSnapshot), true);
+  assert.equal(fs.existsSync(evidence.executionSnapshot.root), false);
+});
+
+test(
+  "snapshot materialization resists a swapped snapshots parent without writing outside the run",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = "snapshot-parent-swap";
+    const snapshotsRoot = path.join(project, ".ultrafuzz", "runs", runId, "smithers", "execution-snapshots");
+    const displacedRoot = `${snapshotsRoot}.displaced`;
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-snapshot-parent-outside-"));
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "mkdirSync")!;
+    const originalMkdirSync = fs.mkdirSync;
+    let swapped = false;
+    Object.defineProperty(fs, "mkdirSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        const candidate = String(args[0]);
+        if (!swapped && /^\.[0-9a-f]{64}\.tmp-/u.test(path.basename(candidate))) {
+          swapped = true;
+          fs.renameSync(snapshotsRoot, displacedRoot);
+          fs.symlinkSync(outside, snapshotsRoot, process.platform === "win32" ? "junction" : "dir");
+        }
+        return Reflect.apply(originalMkdirSync, fs, args) as string | undefined;
+      }
+    });
+    try {
+      const run = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+      assert.equal(run.ok, false);
+      assert.equal(swapped, true);
+      assert.deepEqual(fs.readdirSync(outside), []);
+      assert.deepEqual(fs.readdirSync(displacedRoot), []);
+    } finally {
+      Object.defineProperty(fs, "mkdirSync", originalDescriptor);
+      if (fs.lstatSync(snapshotsRoot).isSymbolicLink()) fs.unlinkSync(snapshotsRoot);
+      if (fs.existsSync(displacedRoot)) fs.renameSync(displacedRoot, snapshotsRoot);
+    }
+  }
+);
+
+test(
+  "snapshot materialization keeps every write on the opened root after its parent is swapped",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = "snapshot-write-swap";
+    const snapshotsRoot = path.join(project, ".ultrafuzz", "runs", runId, "smithers", "execution-snapshots");
+    const displacedRoot = `${snapshotsRoot}.displaced`;
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-snapshot-write-outside-"));
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "fchmodSync")!;
+    const originalFchmodSync = fs.fchmodSync;
+    let swapped = false;
+    Object.defineProperty(fs, "fchmodSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        const result = Reflect.apply(originalFchmodSync, fs, args) as void;
+        let candidate = "";
+        try {
+          candidate = fs.realpathSync(`/proc/self/fd/${String(args[0])}`);
+        } catch {
+          // Leave the candidate empty when this descriptor cannot be resolved.
+        }
+        if (!swapped && /(?:^|\/)\.[0-9a-f]{64}\.tmp-/u.test(candidate) && fs.existsSync(snapshotsRoot)) {
+          swapped = true;
+          fs.renameSync(snapshotsRoot, displacedRoot);
+          fs.symlinkSync(outside, snapshotsRoot, process.platform === "win32" ? "junction" : "dir");
+        }
+        return result;
+      }
+    });
+    try {
+      const run = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+      assert.equal(run.ok, false);
+      assert.equal(swapped, true);
+      assert.deepEqual(fs.readdirSync(outside), []);
+      assert.deepEqual(fs.readdirSync(displacedRoot), []);
+    } finally {
+      Object.defineProperty(fs, "fchmodSync", originalDescriptor);
+      if (fs.lstatSync(snapshotsRoot).isSymbolicLink()) fs.unlinkSync(snapshotsRoot);
+      if (fs.existsSync(displacedRoot)) fs.renameSync(displacedRoot, snapshotsRoot);
+    }
+  }
+);
+
+test(
+  "snapshot materialization resists an intermediate directory swap before a file open",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = "snapshot-intermediate-write-swap";
+    const snapshotsRoot = path.join(project, ".ultrafuzz", "runs", runId, "smithers", "execution-snapshots");
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-snapshot-intermediate-outside-"));
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
+    const originalOpenSync = fs.openSync;
+    let swapped = false;
+    Object.defineProperty(fs, "openSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        const candidate = String(args[0]);
+        let controls: string | undefined;
+        if (!swapped && candidate.startsWith("/proc/self/fd/") && path.basename(candidate) === "plan.json") {
+          try {
+            const parent = fs.realpathSync(path.dirname(candidate));
+            if (
+              path.basename(parent) === "controls" &&
+              /^\.[0-9a-f]{64}\.tmp-/u.test(path.basename(path.dirname(parent))) &&
+              path.dirname(path.dirname(parent)) === snapshotsRoot
+            ) {
+              controls = parent;
+            }
+          } catch {
+            controls = undefined;
+          }
+        }
+        if (controls !== undefined) {
+          fs.renameSync(controls, `${controls}.displaced`);
+          fs.symlinkSync(outside, controls, "dir");
+          swapped = true;
+        }
+        return Reflect.apply(originalOpenSync, fs, args) as number;
+      }
+    });
+    try {
+      const run = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+      assert.equal(run.ok, false);
+      assert.equal(swapped, true);
+      assert.deepEqual(fs.readdirSync(outside), []);
+      assert.deepEqual(fs.readdirSync(snapshotsRoot), []);
+    } finally {
+      Object.defineProperty(fs, "openSync", originalDescriptor);
+    }
+  }
+);
+
+test("snapshot permission sealing cannot chmod a swapped outside leaf", { concurrency: false }, async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "snapshot-chmod-leaf-swap";
+  const snapshotsRoot = path.join(project, ".ultrafuzz", "runs", runId, "smithers", "execution-snapshots");
+  const outside = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ufz-snapshot-chmod-outside-")), "outside.txt");
+  fs.writeFileSync(outside, "outside\n", { mode: 0o600 });
+  const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "fchmodSync")!;
+  const originalFchmodSync = fs.fchmodSync;
+  let swapped = false;
+  Object.defineProperty(fs, "fchmodSync", {
+    ...originalDescriptor,
+    value: (...args: unknown[]) => {
+      let candidate = "";
+      try {
+        candidate = fs.realpathSync(`/proc/self/fd/${String(args[0])}`);
+      } catch {
+        // Leave the candidate empty when this descriptor cannot be resolved.
+      }
+      if (!swapped && candidate.endsWith("/controls/plan.json") && candidate.includes(`${path.sep}.`)) {
+        fs.renameSync(candidate, `${candidate}.displaced`);
+        fs.symlinkSync(outside, candidate);
+        swapped = true;
+      }
+      return Reflect.apply(originalFchmodSync, fs, args) as void;
+    }
+  });
+  try {
+    const run = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+    assert.equal(run.ok, false);
+    assert.equal(swapped, true);
+    assert.equal(fs.statSync(outside).mode & 0o777, 0o600);
+    assert.equal(fs.readFileSync(outside, "utf8"), "outside\n");
+    assert.deepEqual(fs.readdirSync(snapshotsRoot), []);
+  } finally {
+    Object.defineProperty(fs, "fchmodSync", originalDescriptor);
+  }
+});
+
+test(
+  "snapshot publication removes a renamed generation when its durability flush fails",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = "snapshot-post-rename-cleanup";
+    const snapshotsRoot = path.join(project, ".ultrafuzz", "runs", runId, "smithers", "execution-snapshots");
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "fsyncSync")!;
+    const originalFsyncSync = fs.fsyncSync;
+    let rejectedPublication = false;
+    Object.defineProperty(fs, "fsyncSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        if (
+          !rejectedPublication &&
+          fs.existsSync(snapshotsRoot) &&
+          fs.readdirSync(snapshotsRoot).some((entry) => /^[0-9a-f]{64}$/u.test(entry))
+        ) {
+          rejectedPublication = true;
+          throw new Error("injected post-rename durability failure");
+        }
+        return Reflect.apply(originalFsyncSync, fs, args) as void;
+      }
+    });
+    try {
+      const run = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+      assert.equal(run.ok, false);
+      assert.equal(rejectedPublication, true);
+      assert.deepEqual(fs.readdirSync(snapshotsRoot), []);
+    } finally {
+      Object.defineProperty(fs, "fsyncSync", originalDescriptor);
+    }
+  }
+);
+
+test("snapshot materialization closes ownership descriptors on pre-publication validation failures", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "snapshot-early-failure-cleanup", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, "snapshot-early-failure-cleanup");
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const snapshotsRoot = path.dirname(evidence.executionSnapshot.root);
+  const workflowRelative = path.posix.join(".smithers/workflows", path.basename(evidence.workflowPath));
+  const collision = {
+    ...evidence.verifiedControl,
+    executionFiles: [
+      ...evidence.verifiedControl.executionFiles,
+      { sourcePath: evidence.workflowPath, snapshotPath: workflowRelative, contents: Buffer.from("collision\n") }
+    ]
+  };
+  assert.throws(
+    () => materializeWorkflowExecutionSnapshot({ projectRoot: project, layout: evidence.layout, snapshot: collision }),
+    /collides with its generated workflow/u
+  );
+  assert.deepEqual(openDescriptorTargetsInside(snapshotsRoot), []);
+
+  const malformedDependencyMap = {
+    ...evidence.verifiedControl,
+    executionFiles: evidence.verifiedControl.executionFiles.map((file) =>
+      file.snapshotPath === "dependencies/manifest.json" ? { ...file, contents: Buffer.from("{}\n") } : file
+    )
+  };
+  assert.throws(
+    () =>
+      materializeWorkflowExecutionSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        snapshot: malformedDependencyMap
+      }),
+    /dependency map is invalid/u
+  );
+  assert.deepEqual(openDescriptorTargetsInside(snapshotsRoot), []);
+});
+
+test("snapshot command anchoring rejects a same-target link pathname swap", { concurrency: false }, async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "snapshot-link-swap", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, "snapshot-link-swap");
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const controllerEnvironment = linkedWorkflowExecutionEnvironment(evidence, env);
+  const anchor = acquireWorkflowExecutionSnapshotAnchor(controllerEnvironment);
+  assert.ok(anchor);
+  const link = firstSymlinkUnder(evidence.executionSnapshot.root);
+  assert.ok(link, "the sealed module graph did not contain a dependency link");
+  const displaced = `${link}.displaced`;
+  const target = fs.readlinkSync(link);
+  const parent = path.dirname(link);
+  const parentMode = fs.statSync(parent).mode & 0o777;
+  const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "readlinkSync")!;
+  const originalReadlinkSync = fs.readlinkSync;
+  let swapped = false;
+  Object.defineProperty(fs, "readlinkSync", {
+    ...originalDescriptor,
+    value: (...args: unknown[]) => {
+      const observed = Reflect.apply(originalReadlinkSync, fs, args) as string | Buffer;
+      const candidate = String(args[0]);
+      if (!swapped && candidate.endsWith(path.relative(evidence.executionSnapshot.root, link))) {
+        fs.chmodSync(parent, 0o700);
+        fs.renameSync(link, displaced);
+        fs.symlinkSync(target, link, "dir");
+        fs.chmodSync(parent, parentMode);
+        swapped = true;
+      }
+      return observed;
+    }
+  });
+  try {
+    assert.throws(
+      () => anchor.assertCurrent(),
+      /workflow execution snapshot entry changed at the controller command boundary/u
+    );
+    assert.equal(swapped, true);
+  } finally {
+    Object.defineProperty(fs, "readlinkSync", originalDescriptor);
+    fs.chmodSync(parent, 0o700);
+    if (fs.existsSync(link)) fs.unlinkSync(link);
+    if (fs.existsSync(displaced)) fs.renameSync(displaced, link);
+    fs.chmodSync(parent, parentMode);
+    anchor.close();
+  }
+});
+
+test("snapshot command anchoring rejects undeclared files and links", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "snapshot-extra-entry", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, "snapshot-extra-entry");
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const anchor = acquireWorkflowExecutionSnapshotAnchor(linkedWorkflowExecutionEnvironment(evidence, env));
+  assert.ok(anchor);
+  const extraFile = path.join(evidence.executionSnapshot.root, "undeclared-control.txt");
+  const extraLink = path.join(evidence.executionSnapshot.root, "undeclared-control-link");
+  const rootMode = fs.statSync(evidence.executionSnapshot.root).mode & 0o777;
+  fs.chmodSync(evidence.executionSnapshot.root, 0o700);
+  fs.writeFileSync(extraFile, "undeclared\n", "utf8");
+  fs.symlinkSync(".smithers", extraLink, "dir");
+  fs.chmodSync(evidence.executionSnapshot.root, rootMode);
+  try {
+    assert.throws(
+      () => anchor.assertCurrent(),
+      /workflow execution snapshot directory changed at the controller command boundary/u
+    );
+  } finally {
+    anchor.close();
+    fs.chmodSync(evidence.executionSnapshot.root, 0o700);
+    fs.unlinkSync(extraFile);
+    fs.unlinkSync(extraLink);
+    fs.chmodSync(evidence.executionSnapshot.root, rootMode);
+  }
+});
+
+test("snapshot anchoring fails closed when descriptor paths are unavailable", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "snapshot-lexical-fallback", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, "snapshot-lexical-fallback");
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  assert.throws(
+    () =>
+      acquireWorkflowExecutionSnapshotAnchor(linkedWorkflowExecutionEnvironment(evidence, env), {
+        openDirectory: () => undefined,
+        directoryDescriptorPath: () => undefined,
+        controllerDirectoryDescriptorPath: () => undefined
+      }),
+    /no descriptor anchor/u
+  );
+  assert.throws(
+    () =>
+      acquireWorkflowExecutionSnapshotAnchor(linkedWorkflowExecutionEnvironment(evidence, env), {
+        controllerDirectoryDescriptorPath: () => undefined
+      }),
+    /no cross-process descriptor path/u
+  );
+  assert.deepEqual(openDescriptorTargetsInside(evidence.executionSnapshot.root), []);
+});
+
+test("snapshot anchors close when executable acquisition rejects a replaced interpreter", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const installed = writeFakeInstalledSmithers(project);
+  const interpreter = path.join(project, "sealed-runner-interpreter");
+  fs.copyFileSync("/bin/sh", interpreter);
+  fs.chmodSync(interpreter, 0o755);
+  fs.writeFileSync(installed.target, `#!${interpreter}\nprintf '%s\\n' '{"ok":true}'\n`, "utf8");
+  fs.chmodSync(installed.target, 0o755);
+  const env = { PATH: "", SMITHERS_FAKE_LOG: path.join(project, "snapshot-anchor-cleanup.log") };
+  const run = await startRun({ projectRoot: project, runId: "snapshot-anchor-cleanup", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, "snapshot-anchor-cleanup");
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const displacedInterpreter = `${interpreter}.displaced`;
+  fs.renameSync(interpreter, displacedInterpreter);
+  fs.copyFileSync(displacedInterpreter, interpreter);
+  fs.chmodSync(interpreter, 0o755);
+
+  const inspected = await runSmithersInspectionCommand({
+    args: ["inspect", evidence.smithersRunId, "--format", "json"],
+    projectRoot: project,
+    env: linkedWorkflowExecutionEnvironment(evidence, env)
+  });
+
+  assert.equal(inspected.ok, false);
+  assert.match(inspected.error ?? "", /interpreter changed|interpreter identity/u);
+  assert.deepEqual(openDescriptorTargetsInside(evidence.executionSnapshot.root), []);
+});
+
+test("snapshot anchors close when controller environment rewriting fails", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "snapshot-rewrite-cleanup", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, "snapshot-rewrite-cleanup");
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const controllerEnv = linkedWorkflowExecutionEnvironment(evidence, env);
+  Object.defineProperty(controllerEnv, "ULTRAFUZZ_REWRITE_TRAP", {
+    enumerable: true,
+    get: () => {
+      throw new Error("controller environment rewrite trap");
+    }
+  });
+
+  const inspected = await runSmithersInspectionCommand({
+    args: ["inspect", evidence.smithersRunId, "--format", "json"],
+    projectRoot: project,
+    env: controllerEnv
+  });
+
+  assert.equal(inspected.ok, false);
+  assert.match(inspected.error ?? "", /controller environment rewrite trap/u);
+  assert.deepEqual(openDescriptorTargetsInside(evidence.executionSnapshot.root), []);
+});
+
+test("linked lifecycle commands reuse sealed bytes after mutable project sources are replaced", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "snapshot-source-replacement", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const runRoot = run.value!.run_root;
+  const metadata = JSON.parse(fs.readFileSync(path.join(runRoot, "run.json"), "utf8")) as {
+    workflow?: { path?: string };
+  };
+  const plan = JSON.parse(fs.readFileSync(path.join(runRoot, "plan.json"), "utf8")) as {
+    rendered_prompts?: Array<{ attempt_id?: string; rendered_prompt_path?: string }>;
+  };
+  const renderedPrompt = plan.rendered_prompts?.find(
+    (candidate) => typeof candidate.attempt_id === "string" && typeof candidate.rendered_prompt_path === "string"
+  );
+  assert.ok(renderedPrompt?.attempt_id);
+  assert.ok(renderedPrompt.rendered_prompt_path);
+  const mutableWorkflow = path.join(project, ...(metadata.workflow?.path ?? "").split("/"));
+  fs.writeFileSync(mutableWorkflow, "export default function HostileReplacement() {}\n", "utf8");
+  fs.writeFileSync(path.join(project, "ultrafuzz.toml"), '[project]\nname = "hostile-replacement"\n', "utf8");
+  fs.writeFileSync(path.join(project, ".smithers", "agents", "codex.ts"), "export const hostile = true;\n", "utf8");
+  fs.writeFileSync(path.join(project, ".smithers", "package.json"), "{}\n", "utf8");
+  fs.writeFileSync(renderedPrompt.rendered_prompt_path, "HOSTILE_MUTABLE_PROMPT\n", "utf8");
+
+  const evidence = await readLinkedWorkflowEvidence(project, "snapshot-source-replacement");
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  assert.doesNotMatch(fs.readFileSync(evidence.workflowPath, "utf8"), /HostileReplacement/u);
+  assert.doesNotMatch(fs.readFileSync(evidence.executionSnapshot.env.ULTRAFUZZ_CONFIG_PATH!, "utf8"), /hostile/u);
+  assert.doesNotMatch(
+    fs.readFileSync(path.join(evidence.executionSnapshot.root, ".smithers", "agents", "codex.ts"), "utf8"),
+    /hostile/u
+  );
+  assert.doesNotMatch(
+    fs.readFileSync(
+      path.join(evidence.executionSnapshot.root, "controls", "rendered-prompts", `${renderedPrompt.attempt_id}.md`),
+      "utf8"
+    ),
+    /HOSTILE_MUTABLE_PROMPT/u
+  );
+
+  const snapshotBytesLog = path.join(project, "snapshot-consumed-bytes.log");
+  env.SMITHERS_FAKE_SNAPSHOT_BYTES_LOG = snapshotBytesLog;
+  env.SMITHERS_FAKE_SNAPSHOT_ATTEMPT = renderedPrompt.attempt_id;
+  const resumed = await resumeRun({ projectRoot: project, runId: "snapshot-source-replacement", env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const consumed = fs.readFileSync(snapshotBytesLog, "utf8");
+  assert.match(consumed, /^workflow=\/proc\/(?:self|[1-9][0-9]*)\/fd\/[0-9]+\/\.smithers\/workflows\//mu);
+  assert.match(consumed, /^config=\/proc\/(?:self|[1-9][0-9]*)\/fd\/[0-9]+\/controls\/ultrafuzz\.toml$/mu);
+  assert.match(
+    consumed,
+    new RegExp(
+      `^prompt=/proc/(?:self|[1-9][0-9]*)/fd/[0-9]+/controls/rendered-prompts/${renderedPrompt.attempt_id}\\.md$`,
+      "mu"
+    )
+  );
+  assert.match(consumed, /^agent=\/proc\/(?:self|[1-9][0-9]*)\/fd\/[0-9]+\/\.smithers\/agents\/codex\.ts$/mu);
+  assert.doesNotMatch(consumed, /HostileReplacement|hostile-replacement|export const hostile|HOSTILE_MUTABLE_PROMPT/u);
+});
+
+test("linked evidence rejects extra snapshot generations and malformed control seal keys", async () => {
+  const extraProject = tempProject();
+  initProject({ projectRoot: extraProject, force: true });
+  writeSmallTopology(extraProject);
+  const extraRun = await startRun({
+    projectRoot: extraProject,
+    runId: "snapshot-extra-generation",
+    env: fakeSmithersEnv(extraProject)
+  });
+  assert.equal(extraRun.ok, true, JSON.stringify(extraRun.diagnostics));
+  const snapshotsRoot = path.join(extraRun.value!.run_root, "smithers", "execution-snapshots");
+  fs.mkdirSync(path.join(snapshotsRoot, "unexpected-generation"), { mode: 0o700 });
+  const extraEvidence = await readLinkedWorkflowEvidence(extraProject, "snapshot-extra-generation");
+  assert.equal(extraEvidence.ok, false);
+  if (!extraEvidence.ok) {
+    assert.equal(extraEvidence.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+    assert.match(extraEvidence.diagnostics[0]?.message ?? "", /unexpected generation/u);
+  }
+
+  const sealProject = tempProject();
+  initProject({ projectRoot: sealProject, force: true });
+  writeSmallTopology(sealProject);
+  const sealedRun = await startRun({
+    projectRoot: sealProject,
+    runId: "snapshot-malformed-seal",
+    env: fakeSmithersEnv(sealProject)
+  });
+  assert.equal(sealedRun.ok, true, JSON.stringify(sealedRun.diagnostics));
+  const integrityPath = path.join(sealedRun.value!.run_root, "smithers", "control-integrity.json");
+  const integrity = JSON.parse(fs.readFileSync(integrityPath, "utf8")) as Record<string, unknown>;
+  integrity.unexpected_key = true;
+  fs.writeFileSync(integrityPath, `${JSON.stringify(integrity, null, 2)}\n`, "utf8");
+  const malformedEvidence = await readLinkedWorkflowEvidence(sealProject, "snapshot-malformed-seal");
+  assert.equal(malformedEvidence.ok, false);
+  if (!malformedEvidence.ok) {
+    assert.equal(malformedEvidence.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+    assert.match(malformedEvidence.diagnostics[0]?.message ?? "", /seal is invalid/u);
+  }
 });
 
 test("startRun submits prompt paths instead of rendered prompt bodies", async () => {
@@ -4168,16 +5925,23 @@ test("startRun resolves the target-local Smithers binary when it is not on PATH"
   writeSmallTopology(project);
 
   const logPath = path.join(project, "local-smithers.log");
-  writeFakeInstalledSmithers(project);
+  const executedAsLogPath = path.join(project, "local-smithers-executed-as.log");
+  const installed = writeFakeInstalledSmithers(project);
 
   const run = await startRun({
     projectRoot: project,
     runId: "local-smithers-run",
-    env: { PATH: "", SMITHERS_FAKE_LOG: logPath }
+    env: { PATH: "", SMITHERS_FAKE_LOG: logPath, SMITHERS_FAKE_EXECUTED_AS_LOG: executedAsLogPath }
   });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-local-smithers-run\.tsx/);
+  const executedAs = fs.readFileSync(executedAsLogPath, "utf8").trim();
+  if (process.platform !== "win32" && fs.existsSync("/proc/self/fd")) {
+    assert.match(executedAs, /^\/proc\/\d+\/fd\/\d+$/u);
+  } else {
+    assert.equal(executedAs, fs.realpathSync(installed.target));
+  }
 });
 
 test("startRun patches every described runner compatibility workaround", async () => {
@@ -4211,7 +5975,20 @@ test("startRun patches every described runner compatibility workaround", async (
       "utf8"
     );
   }
+  // These anchors are intentionally verified but not rewritten. A fabricated
+  // compatibility tree must carry them so the fixture exercises the same
+  // preconditions as the pinned installation.
+  const { SMITHERS_REQUIRED_ENGINE_ANCHORS } = await import("../src/smithers.js");
+  for (const required of SMITHERS_REQUIRED_ENGINE_ANCHORS) {
+    const source = path.join(
+      nodeModules,
+      ...required.packageName.split("/"),
+      ...required.sourceRelativePath.split("/")
+    );
+    bySource.set(source, [...(bySource.get(source) ?? []), required.anchor]);
+  }
   for (const [source, anchors] of bySource) {
+    fs.mkdirSync(path.dirname(source), { recursive: true });
     fs.writeFileSync(source, `${anchors.join("\n")}\n`, "utf8");
   }
 
@@ -4393,6 +6170,156 @@ test("startRun bootstraps target-local Smithers dependencies when missing", asyn
   assert.match(fs.readFileSync(installer.smithersLogPath, "utf8"), /up .*ultrafuzz-bootstrap-smithers-run\.tsx/);
 });
 
+// R54 died 90 seconds in, before its first task node: npm resolved a transitive
+// dependency to a version published two minutes earlier and 404ed on the tarball,
+// which had not reached the registry CDN edge yet.
+test("startRun retries a workflow runner install the registry fails transiently", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const installer = writeFakeNpmInstaller(project, {
+    count: 1,
+    stderr: [
+      "npm error code E404",
+      "npm error 404 Not Found - GET https://registry.npmjs.org/@ai-sdk/provider/-/provider-4.0.7.tgz - Not found"
+    ]
+  });
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "transient-install-run",
+    env: {
+      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_FAKE_LOG: installer.smithersLogPath
+    }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(fs.readFileSync(installer.npmLogPath, "utf8").trimEnd().split("\n").length, 2);
+  assert.match(fs.readFileSync(installer.smithersLogPath, "utf8"), /up .*ultrafuzz-transient-install-run\.tsx/);
+});
+
+test("startRun does not retry a workflow runner install the registry rejects permanently", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  // A 404 on a package name, not on a tarball URL: no amount of waiting publishes it.
+  const installer = writeFakeNpmInstaller(project, {
+    count: 4,
+    stderr: [
+      "npm error code E404",
+      "npm error 404 Not Found - GET https://registry.npmjs.org/@ultrafuzz/does-not-exist - Not found"
+    ]
+  });
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "permanent-install-run",
+    env: {
+      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_FAKE_LOG: installer.smithersLogPath
+    }
+  });
+
+  assert.equal(run.ok, false);
+  assert.equal(fs.readFileSync(installer.npmLogPath, "utf8").trimEnd().split("\n").length, 1);
+});
+
+test("isTransientNpmRegistryFailure separates a waitable registry gap from a real dependency error", () => {
+  const tarball404 = {
+    code: 1,
+    killed: false,
+    stderr:
+      "npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/@ai-sdk/provider/-/provider-4.0.7.tgz - Not found\n"
+  };
+  assert.equal(isTransientNpmRegistryFailure(tarball404), true);
+  assert.equal(isTransientNpmRegistryFailure({ code: 1, stderr: "npm error network socket hang up\n" }), true);
+  assert.equal(
+    isTransientNpmRegistryFailure({ code: 1, stderr: "npm error 503 Service Unavailable - GET .../x.tgz\n" }),
+    true
+  );
+
+  assert.equal(
+    isTransientNpmRegistryFailure({
+      code: 1,
+      stderr: "npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/nope - Not found\n"
+    }),
+    false
+  );
+  assert.equal(
+    isTransientNpmRegistryFailure({
+      code: 1,
+      stderr: "npm error code ERESOLVE\nnpm error ERESOLVE could not resolve\n"
+    }),
+    false
+  );
+  // An abort or a timeout kill is not the registry's doing, and the deadline that
+  // stopped the install has already passed by the time a retry would start.
+  assert.equal(isTransientNpmRegistryFailure({ killed: true, stderr: tarball404.stderr }), false);
+  assert.equal(isTransientNpmRegistryFailure({ name: "AbortError", stderr: tarball404.stderr }), false);
+  assert.equal(isTransientNpmRegistryFailure(undefined), false);
+});
+
+test("startRun resolves the generated workspace as of a fixed instant, not the launch clock", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const installer = writeFakeNpmInstaller(project);
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "pinned-resolution-run",
+    env: {
+      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_FAKE_LOG: installer.smithersLogPath
+    }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  // Without `--before`, npm re-resolves every open range below the pins against
+  // whatever the registry holds at that instant. R54 died at workflow submission
+  // because that landed on `@ai-sdk/provider@4.0.7`, published 2m08s earlier and
+  // not yet on the CDN edge the container reached.
+  const npmLog = fs.readFileSync(installer.npmLogPath, "utf8");
+  assert.equal(npmLog.includes(`--before=${SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF} `), true, npmLog);
+});
+
+test("both installers of the generated workspace share one resolution cutoff", () => {
+  const local = smithersDependencyInstallArgs({
+    prefix: "/tmp/local/.smithers",
+    registry: "https://registry.npmjs.org"
+  });
+  const cloud = smithersDependencyInstallArgs({ prefix: "/tmp/cloud/.smithers" });
+
+  for (const args of [local, cloud]) {
+    assert.equal(args.includes(`--before=${SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF}`), true, args.join(" "));
+    // The cutoff makes resolution reproducible; it does not relax the hardening
+    // the install already carried, and it must not introduce a lockfile into the
+    // run workspace that an in-flight resume would then have to reconcile.
+    assert.equal(args.includes("--ignore-scripts"), true, args.join(" "));
+    assert.equal(args.includes("--package-lock=false"), true, args.join(" "));
+  }
+  // The cloud node worker installs against the sandbox's ambient npm
+  // configuration, so it must not be handed the local path's registry.
+  assert.equal(local.includes("--registry=https://registry.npmjs.org"), true, local.join(" "));
+  assert.equal(
+    cloud.some((arg) => arg.startsWith("--registry=")),
+    false,
+    cloud.join(" ")
+  );
+});
+
+test("the resolution cutoff cannot fall behind a pinned dependency", () => {
+  // Guards the rule rather than one more package name: a pin raised without
+  // moving the cutoff past its publish instant would leave `--before` unable to
+  // see the very version the manifest demands.
+  assertSmithersResolutionCutoff();
+  assert.equal(Date.parse(SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF) < Date.now(), true);
+});
+
 test("startRun migrates the known generated Smithers caret manifest without dropping custom fields", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -4419,6 +6346,7 @@ test("startRun migrates the known generated Smithers caret manifest without drop
     "utf8"
   );
   writeFakeInstalledSmithers(project);
+  writeFakeInstalledSmithersDependency(project, "custom-agent-package", "1.2.3");
   const logPath = path.join(project, "local-smithers.log");
 
   const run = await startRun({
@@ -4481,6 +6409,7 @@ test("startRun migrates the previous exact Smithers manifest without dropping cu
   manifest.dependencies["custom-agent-package"] = "1.2.3";
   fs.writeFileSync(packageJson, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   writeFakeInstalledSmithers(project, { version: "0.29.0" });
+  writeFakeInstalledSmithersDependency(project, "custom-agent-package", "1.2.3");
   const installer = writeFakeNpmInstaller(project);
 
   const run = await startRun({
@@ -4521,6 +6450,7 @@ test("startRun migrates the Smithers 0.31.0 manifest and its Effect 3 override f
   manifest.overrides = { ...manifest.overrides, effect: "3.21.4" };
   fs.writeFileSync(packageJson, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   writeFakeInstalledSmithers(project, { version: "0.31.0" });
+  writeFakeInstalledSmithersDependency(project, "custom-agent-package", "1.2.3");
   const installer = writeFakeNpmInstaller(project);
 
   const run = await startRun({
@@ -5435,6 +7365,330 @@ test("syncRun persists cumulative token accounting and partial pricing from work
   assert.deepEqual(metadata.accounting?.cumulative?.source_run_ids, ["source-accounting"]);
 });
 
+test("syncRun does not count a retried zero-usage attempt as an unpriced event", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-retried-zero-usage";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: { iteration: 0, model: "deepseek-v4-flash", agent: "deepseek" }
+      },
+      {
+        type: "NodeFailed",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        error: { message: "failed before model usage" },
+        extra: { iteration: 0 }
+      },
+      { type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 2, extra: { iteration: 0 } },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 2, extra: { iteration: 0 } },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 2,
+        extra: {
+          iteration: 0,
+          inputTokens: 10,
+          outputTokens: 5,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reasoningTokens: 0,
+          totalTokens: 15,
+          costUsd: 0.25,
+          model: "deepseek-v4-flash",
+          agent: "deepseek"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 2, extra: { iteration: 0 } },
+      { type: "RunFinished" }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    deepseek: {
+      models: {
+        "deepseek-v4-flash": {
+          cost: { input: 1, output: 2, cache_read: 0.5, cache_write: 0 }
+        }
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId: "retried-zero-usage", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "retried-zero-usage", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: {
+        total_tokens?: number;
+        estimated_spend_usd?: number;
+        usage_complete?: boolean;
+        usage_incomplete_reasons?: Array<{ code?: string }>;
+        pricing_complete?: boolean;
+        pricing_incomplete_reasons?: unknown[];
+        partial_pricing?: boolean;
+        event_count?: number;
+        priced_event_count?: number;
+        unpriced_event_count?: number;
+      };
+      cumulative?: {
+        estimated_spend_usd?: number;
+        pricing_complete?: boolean;
+        partial_pricing?: boolean;
+        unpriced_event_count?: number;
+      };
+      checkpoint?: { ledger_event_count?: number };
+    };
+  };
+  assert.equal(metadata.accounting?.current?.total_tokens, 15);
+  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 0.25);
+  assert.equal(metadata.accounting?.current?.usage_complete, false);
+  assert.deepEqual(
+    metadata.accounting?.current?.usage_incomplete_reasons?.map((reason) => reason.code),
+    ["usage-missing"]
+  );
+  assert.equal(metadata.accounting?.current?.pricing_complete, true);
+  assert.deepEqual(metadata.accounting?.current?.pricing_incomplete_reasons, []);
+  assert.equal(metadata.accounting?.current?.partial_pricing, false);
+  assert.equal(metadata.accounting?.current?.event_count, 1);
+  assert.equal(metadata.accounting?.current?.priced_event_count, 1);
+  assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
+  assert.equal(metadata.accounting?.cumulative?.estimated_spend_usd, 0.25);
+  assert.equal(metadata.accounting?.cumulative?.pricing_complete, true);
+  assert.equal(metadata.accounting?.cumulative?.partial_pricing, false);
+  assert.equal(metadata.accounting?.cumulative?.unpriced_event_count, 0);
+  assert.equal(metadata.accounting?.checkpoint?.ledger_event_count, 2);
+
+  const secondWorkflowRunId = "ultrafuzz-retried-zero-usage-relinked";
+  env.SMITHERS_FAKE_FORKED_RUN_ID = secondWorkflowRunId;
+  const forked = await forkRun({
+    projectRoot: project,
+    runId: "retried-zero-usage",
+    forkFrame: 0,
+    env
+  });
+  assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
+  assert.equal(forked.value?.workflow_run_id, secondWorkflowRunId);
+  const metadataPath = path.join(run.value!.run_root, "run.json");
+  fs.writeFileSync(
+    path.join(project, "fake-smithers-inspect.json"),
+    `${JSON.stringify(
+      workflowInspect({
+        workflowRunId: secondWorkflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(project, "fake-smithers-events.ndjson"),
+    workflowEvents(secondWorkflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 4,
+          outputTokens: 2,
+          costUsd: 0.1,
+          model: "deepseek-v4-flash",
+          agent: "deepseek"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      { type: "RunFinished" }
+    ]),
+    "utf8"
+  );
+
+  const relinked = await syncRun({ projectRoot: project, runId: "retried-zero-usage", env });
+  assert.equal(relinked.ok, true, JSON.stringify(relinked.diagnostics));
+  const afterRelink = fs.readFileSync(metadataPath, "utf8");
+  const replayed = await syncRun({ projectRoot: project, runId: "retried-zero-usage", env });
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.equal(fs.readFileSync(metadataPath, "utf8"), afterRelink, "accounting replay must be byte-idempotent");
+
+  const finalMetadata = JSON.parse(afterRelink) as {
+    accounting?: {
+      segments?: Array<{
+        workflow_run_id?: string;
+        pricing_complete?: boolean;
+        event_count?: number;
+        priced_event_count?: number;
+        unpriced_event_count?: number;
+      }>;
+      cumulative?: {
+        pricing_complete?: boolean;
+        partial_pricing?: boolean;
+        event_count?: number;
+        priced_event_count?: number;
+        unpriced_event_count?: number;
+      };
+      checkpoint?: { failed_zero_usage_source_event_ids?: string[] };
+    };
+  };
+  assert.deepEqual(
+    finalMetadata.accounting?.segments?.map((segment) => [
+      segment.workflow_run_id,
+      segment.pricing_complete,
+      segment.event_count,
+      segment.priced_event_count,
+      segment.unpriced_event_count
+    ]),
+    [
+      [workflowRunId, true, 1, 1, 0],
+      [secondWorkflowRunId, true, 1, 1, 0]
+    ]
+  );
+  assert.equal(finalMetadata.accounting?.cumulative?.pricing_complete, true);
+  assert.equal(finalMetadata.accounting?.cumulative?.partial_pricing, false);
+  assert.equal(finalMetadata.accounting?.cumulative?.event_count, 2);
+  assert.equal(finalMetadata.accounting?.cumulative?.priced_event_count, 2);
+  assert.equal(finalMetadata.accounting?.cumulative?.unpriced_event_count, 0);
+  assert.equal(finalMetadata.accounting?.checkpoint?.failed_zero_usage_source_event_ids?.length, 1);
+});
+
+test("syncRun does not confuse restarted retry counters across checkpoint generations", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-restarted-zero-usage";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      {
+        type: "NodeStarted",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        sequence: 0,
+        extra: { iteration: 0, checkpointGenerationId: "checkpoint-1" }
+      },
+      {
+        type: "NodeFailed",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        sequence: 2,
+        error: { message: "failed before model usage" },
+        extra: { iteration: 0 }
+      },
+      {
+        type: "NodeStarted",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        sequence: 3,
+        extra: { iteration: 0, checkpointGenerationId: "checkpoint-2" }
+      },
+      {
+        type: "NodeFinished",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        sequence: 5,
+        extra: { iteration: 0 }
+      },
+      { type: "RunFinished", sequence: 6 }
+    ]),
+    tokenEvents: workflowEvents(workflowRunId, [
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        sequence: 1,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: "checkpoint-1",
+          model: "deepseek-v4-flash",
+          agent: "deepseek"
+        }
+      },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        sequence: 4,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: "checkpoint-2",
+          model: "deepseek-v4-flash",
+          agent: "deepseek"
+        }
+      }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    deepseek: {
+      models: {
+        "deepseek-v4-flash": {
+          cost: { input: 1, output: 2, cache_read: 0.5, cache_write: 0 }
+        }
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId: "restarted-zero-usage", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "restarted-zero-usage", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: {
+        checkpoint_generation_id?: string;
+        pricing_complete?: boolean;
+        partial_pricing?: boolean;
+        event_count?: number;
+        unpriced_event_count?: number;
+      };
+      segments?: Array<{
+        checkpoint_generation_id?: string;
+        pricing_complete?: boolean;
+        event_count?: number;
+        unpriced_event_count?: number;
+      }>;
+      checkpoint?: { ledger_event_count?: number };
+    };
+  };
+  assert.deepEqual(
+    metadata.accounting?.segments?.map((segment) => [
+      segment.checkpoint_generation_id,
+      segment.pricing_complete,
+      segment.event_count,
+      segment.unpriced_event_count
+    ]),
+    [
+      ["checkpoint-1", true, 0, 0],
+      ["checkpoint-2", false, 1, 1]
+    ]
+  );
+  assert.equal(metadata.accounting?.current?.checkpoint_generation_id, "checkpoint-2");
+  assert.equal(metadata.accounting?.current?.pricing_complete, false);
+  assert.equal(metadata.accounting?.current?.partial_pricing, true);
+  assert.equal(metadata.accounting?.current?.event_count, 1);
+  assert.equal(metadata.accounting?.current?.unpriced_event_count, 1);
+  assert.equal(metadata.accounting?.checkpoint?.ledger_event_count, 2);
+});
+
 test("syncRun preserves generated usage across checkpoint generations and replays idempotently", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -5525,6 +7779,9 @@ test("syncRun preserves generated usage across checkpoint generations and replay
         usage_complete?: boolean;
         usage_incomplete_reasons?: Array<{ code?: string }>;
         pricing_complete?: boolean;
+        pricing_incomplete_reasons?: Array<{ code?: string }>;
+        event_count?: number;
+        unpriced_event_count?: number;
       };
       segments?: Array<{
         checkpoint_generation_id?: string;
@@ -5557,6 +7814,12 @@ test("syncRun preserves generated usage across checkpoint generations and replay
     new Set(["usage-malformed", "usage-missing"])
   );
   assert.equal(metadata.accounting?.current?.pricing_complete, false);
+  assert.equal(metadata.accounting?.current?.event_count, 2);
+  assert.equal(metadata.accounting?.current?.unpriced_event_count, 2);
+  assert.deepEqual(
+    metadata.accounting?.current?.pricing_incomplete_reasons?.map((reason) => reason.code),
+    ["price-unavailable", "price-unavailable"]
+  );
   assert.equal(metadata.accounting?.cumulative?.usage_complete, false);
   assert.equal(metadata.accounting?.checkpoint?.ledger_event_count, 4);
   assert.equal(metadata.accounting?.checkpoint?.checkpoint_generation_id, "generation-3");
@@ -5607,12 +7870,39 @@ test("syncRun keeps colliding checkpoint names separate across workflow runs", a
   assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
 
   const metadataPath = path.join(run.value!.run_root, "run.json");
-  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
-    workflow?: { run_id?: string };
-    [key: string]: unknown;
+  env.SMITHERS_FAKE_FORKED_RUN_ID = secondWorkflowRunId;
+  const forked = await forkRun({
+    projectRoot: project,
+    runId: "colliding-generation",
+    forkFrame: 0,
+    env
+  });
+  assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
+  assert.equal(forked.value?.workflow_run_id, secondWorkflowRunId);
+  const linkJournal = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "workflow-run-link-journal.json"), "utf8")
+  ) as {
+    entries?: Array<{
+      link_id?: string;
+      action?: string;
+      workflow_run_id?: string;
+      source_workflow_run_id?: string;
+      source_workflow_link_id?: string;
+      lifecycle_result_event_id?: string;
+      phase?: string;
+    }>;
   };
-  metadata.workflow = { ...(metadata.workflow ?? {}), run_id: secondWorkflowRunId };
-  fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+  assert.equal(linkJournal.entries?.length, 2);
+  assert.deepEqual(
+    linkJournal.entries?.map((entry) => [entry.action, entry.workflow_run_id, entry.phase]),
+    [
+      ["start", firstWorkflowRunId, "committed"],
+      ["fork", secondWorkflowRunId, "committed"]
+    ]
+  );
+  assert.equal(linkJournal.entries?.[1]?.source_workflow_run_id, firstWorkflowRunId);
+  assert.equal(linkJournal.entries?.[1]?.source_workflow_link_id, linkJournal.entries?.[0]?.link_id);
+  assert.match(linkJournal.entries?.[1]?.lifecycle_result_event_id ?? "", /^evt-/u);
   fs.writeFileSync(
     path.join(project, "fake-smithers-inspect.json"),
     `${JSON.stringify(
@@ -5630,6 +7920,7 @@ test("syncRun keeps colliding checkpoint names separate across workflow runs", a
   const second = await syncRun({ projectRoot: project, runId: "colliding-generation", env });
   assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
   const finalMetadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+    workflow?: { run_id?: string; workflow_link_id?: string };
     accounting?: {
       current?: { workflow_run_id?: string; total_tokens?: number };
       segments?: Array<{ workflow_run_id?: string; checkpoint_generation_id?: string; total_tokens?: number }>;
@@ -5652,6 +7943,13 @@ test("syncRun keeps colliding checkpoint names separate across workflow runs", a
   assert.equal(finalMetadata.accounting?.current?.total_tokens, 20);
   assert.equal(finalMetadata.accounting?.cumulative?.total_tokens, 30);
   assert.equal(finalMetadata.accounting?.checkpoint?.workflow_run_id, secondWorkflowRunId);
+  assert.equal(finalMetadata.workflow?.run_id, secondWorkflowRunId);
+  assert.equal(finalMetadata.workflow?.workflow_link_id, linkJournal.entries?.[1]?.link_id);
+  const finalState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    provenance?: { workflow?: { runId?: string; linkId?: string } };
+  };
+  assert.equal(finalState.provenance?.workflow?.runId, secondWorkflowRunId);
+  assert.equal(finalState.provenance?.workflow?.linkId, linkJournal.entries?.[1]?.link_id);
 });
 
 test("syncRun counts cache-only usage when aggregate input is explicitly zero", async () => {
@@ -7998,6 +10296,10 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
     failedLedger.map((entry) => entry.outcome),
     ["timed-out", "failed"]
   );
+  assert.deepEqual(
+    failedLedger.map((entry) => entry.failure_message),
+    ["workflow task timed out", "agent failed again"]
+  );
 
   const resumedEnv = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -8111,7 +10413,7 @@ test("syncRun preserves retry and checkpoint generations in the immutable attemp
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
   assert.equal(ledger.length, 3);
-  assert.doesNotMatch(ledgerText, /generated executor failure/u);
+  assert.equal(ledger[0]?.failure_message, "generated executor failure");
   assert.equal(ledger[1]?.parent_attempt_id, ledger[0]?.attempt_id);
   assert.equal(ledger[2]?.parent_attempt_id, ledger[1]?.attempt_id);
 
@@ -8727,9 +11029,32 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const env = fakeSmithersEnv(project);
+  const credentialLog = path.join(project, "lifecycle-credential-env.log");
+  const hostileCredential = "must-not-cross-sealed-lifecycle-boundary";
+  env.AWS_SECRET_ACCESS_KEY = hostileCredential;
+  env.SMITHERS_FAKE_ENV_LOG = credentialLog;
   const run = await startRun({ projectRoot: project, runId: "lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  fs.writeFileSync(credentialLog, "", "utf8");
+  const sealedPlan = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "plan.json"), "utf8")) as {
+    rendered_prompts: Array<{
+      rendered_prompt_path: string;
+      rendered_prompt_snapshot_path: string;
+    }>;
+  };
+  const missingPrompt = sealedPlan.rendered_prompts[0]!;
+  const expectedPrompt = fs.readFileSync(missingPrompt.rendered_prompt_path, "utf8");
+  fs.rmSync(missingPrompt.rendered_prompt_path);
+  fs.rmSync(path.join(run.value!.run_root, missingPrompt.rendered_prompt_snapshot_path));
+  const mutableConfigPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    mutableConfigPath,
+    fs
+      .readFileSync(mutableConfigPath, "utf8")
+      .replace('api_key_env = "OPENAI_API_KEY"', 'api_key_env = "AWS_SECRET_ACCESS_KEY"'),
+    "utf8"
+  );
   const staleStatePath = path.join(run.value!.run_root, "state.json");
   const staleState = JSON.parse(fs.readFileSync(staleStatePath, "utf8")) as RunState;
   staleState.workflow_deadline_at = "2000-01-01T00:00:00.000Z";
@@ -8742,6 +11067,8 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-lifecycle-run");
   assert.equal(resumed.value?.submitted, true);
+  assert.equal(fs.readFileSync(missingPrompt.rendered_prompt_path, "utf8"), expectedPrompt);
+  assert.doesNotMatch(fs.readFileSync(credentialLog, "utf8"), new RegExp(hostileCredential, "u"));
   const resumedState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;
   assert.equal(resumedState.concurrency.requested_concurrency, 8);
   assert.equal(resumedState.controller_lease.duration_ms, 30_000);
@@ -8769,6 +11096,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
   assert.equal(replayed.value?.workflow_run_id, "ultrafuzz-lifecycle-run-replayed");
   assert.equal(replayed.value?.submitted, true);
+  assert.doesNotMatch(fs.readFileSync(credentialLog, "utf8"), new RegExp(hostileCredential, "u"));
 
   const missingFrame = await forkRun({ projectRoot: project, runId: run.value!.run_id, env });
   assert.equal(missingFrame.ok, false);
@@ -8786,16 +11114,59 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
   assert.equal(forked.value?.workflow_run_id, "ultrafuzz-lifecycle-run-forked");
   assert.equal(forked.value?.submitted, true);
+  assert.doesNotMatch(fs.readFileSync(credentialLog, "utf8"), new RegExp(hostileCredential, "u"));
   const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
-    workflow?: { run_id?: string };
+    workflow?: { run_id?: string; workflow_link_id?: string };
     workflow_ids?: string[];
   };
   assert.equal(metadata.workflow?.run_id, "ultrafuzz-lifecycle-run-forked");
   assert.deepEqual(metadata.workflow_ids, ["ultrafuzz-lifecycle-run-forked"]);
+  const linkJournal = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "workflow-run-link-journal.json"), "utf8")
+  ) as {
+    entries?: Array<{
+      link_id?: string;
+      action?: string;
+      workflow_run_id?: string;
+      source_workflow_run_id?: string;
+      source_workflow_link_id?: string;
+      controller_invocation_id?: string;
+      lifecycle_result_event_id?: string;
+      phase?: string;
+    }>;
+  };
+  assert.deepEqual(
+    linkJournal.entries?.map((entry) => [entry.action, entry.workflow_run_id, entry.phase]),
+    [
+      ["start", "ultrafuzz-lifecycle-run", "committed"],
+      ["replay", "ultrafuzz-lifecycle-run-replayed", "committed"],
+      ["fork", "ultrafuzz-lifecycle-run-forked", "committed"]
+    ]
+  );
+  const linkEntries = linkJournal.entries ?? [];
+  for (let index = 1; index < linkEntries.length; index += 1) {
+    const previous = linkEntries[index - 1]!;
+    const current = linkEntries[index]!;
+    assert.equal(current?.source_workflow_run_id, previous?.workflow_run_id);
+    assert.equal(current?.source_workflow_link_id, previous?.link_id);
+    assert.match(current?.controller_invocation_id ?? "", /^evt-/u);
+    assert.match(current?.lifecycle_result_event_id ?? "", /^evt-/u);
+  }
+  assert.equal(metadata.workflow?.workflow_link_id, linkJournal.entries?.at(-1)?.link_id);
+  const freshEvidence = await readLinkedWorkflowEvidence(project, run.value!.run_id);
+  assert.equal(freshEvidence.ok, true, "diagnostics" in freshEvidence ? JSON.stringify(freshEvidence.diagnostics) : "");
+  if (freshEvidence.ok) {
+    assert.equal(freshEvidence.smithersRunId, "ultrafuzz-lifecycle-run-forked");
+    assert.equal(freshEvidence.workflowLinkId, linkJournal.entries?.at(-1)?.link_id);
+    const sealedTasks = JSON.parse(freshEvidence.verifiedControl.contents.tasks.toString("utf8")) as {
+      smithers_run_id?: string;
+    };
+    assert.equal(sealedTasks.smithers_run_id, "ultrafuzz-lifecycle-run");
+  }
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(
     commands,
-    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --detach --max-concurrency 8 --format json/
+    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
   );
   assert.match(
     commands,
@@ -8803,7 +11174,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --force --detach --max-concurrency 8 --format json/
+    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
   );
   assert.match(commands, /replay .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --format json/);
   assert.match(
@@ -8812,26 +11183,286 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --max-concurrency 8 --format json/
+    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
   );
+  const runLogsDir = path.join(run.value!.run_root, "smithers", "logs");
+  for (const relaunch of commands.split("\n").filter((line) => line.startsWith("up ") && line.includes("--resume "))) {
+    assert.ok(
+      relaunch.includes(`--log-dir ${runLogsDir} `),
+      `a relaunched workflow must keep streaming into the run's own log directory: ${relaunch}`
+    );
+  }
 });
 
-test("resume refuses to invoke Smithers when a persisted rendered prompt was modified", async () => {
+test("legacy workflow evidence gaps fail closed without reconstructing trust", async () => {
+  const cases = [
+    {
+      runId: "legacy-missing-control-seal",
+      relativePath: path.join("smithers", "control-integrity.json"),
+      code: "WORKFLOW_CONTROL_SEAL_MISSING",
+      message: /control seal.*cannot be safely upgraded in place.*new run ID/u
+    },
+    {
+      runId: "legacy-missing-link-journal",
+      relativePath: path.join("smithers", "workflow-run-link-journal.json"),
+      code: "WORKFLOW_RUN_LINK_JOURNAL_MISSING",
+      message: /workflow-link journal.*cannot be safely upgraded in place.*new run ID/u
+    }
+  ] as const;
+
+  for (const entry of cases) {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    writeSmallTopology(project);
+    const env = fakeSmithersEnv(project);
+    const run = await startRun({ projectRoot: project, runId: entry.runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    const missingPath = path.join(run.value!.run_root, entry.relativePath);
+    fs.unlinkSync(missingPath);
+    fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+    const evidence = await readLinkedWorkflowEvidence(project, entry.runId);
+
+    assert.equal(evidence.ok, false);
+    if (!evidence.ok) {
+      assert.equal(evidence.diagnostics[0]?.code, entry.code);
+      assert.equal(evidence.diagnostics[0]?.path, missingPath);
+      assert.match(evidence.diagnostics[0]?.message ?? "", entry.message);
+    }
+    const resumed = await resumeRun({ projectRoot: project, runId: entry.runId, env });
+    assert.equal(resumed.ok, false);
+    assert.equal(resumed.diagnostics[0]?.code, entry.code);
+    assert.equal(fs.existsSync(missingPath), false, "legacy evidence must never be synthesized");
+    assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
+  }
+});
+
+test("a symlinked control seal remains invalid evidence rather than being labeled legacy", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const runId = "symlinked-control-seal";
+  const run = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const sealPath = path.join(run.value!.run_root, "smithers", "control-integrity.json");
+  const retainedPath = `${sealPath}.retained`;
+  fs.renameSync(sealPath, retainedPath);
+  fs.symlinkSync(retainedPath, sealPath);
+
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+
+  assert.equal(evidence.ok, false);
+  if (!evidence.ok) {
+    assert.equal(evidence.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+    assert.notEqual(evidence.diagnostics[0]?.code, "WORKFLOW_CONTROL_SEAL_MISSING");
+  }
+});
+
+test("lifecycle commands reject a coherent metadata and state retarget before invoking Smithers", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const env = fakeSmithersEnv(project);
-  const run = await startRun({ projectRoot: project, runId: "lifecycle-prompt-integrity", env });
+  const run = await startRun({ projectRoot: project, runId: "retargeted-workflow-link", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const promptPath = path.join(run.value!.run_root, "artifacts", "project-discovery", "prompt.rendered.md");
-  fs.appendFileSync(promptPath, "\nmodified\n", "utf8");
+
+  const forgedWorkflowRunId = "ultrafuzz-retargeted-workflow-link-forged";
+  const metadataPath = path.join(run.value!.run_root, "run.json");
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+    workflow_ids?: string[];
+    workflow?: { run_id?: string };
+  };
+  assert.ok(metadata.workflow);
+  metadata.workflow.run_id = forgedWorkflowRunId;
+  metadata.workflow_ids = [forgedWorkflowRunId];
+  fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+    provenance?: { workflow?: { runId?: string; inspection?: { runId?: string } } };
+  };
+  const stateWorkflow = state.provenance?.workflow;
+  assert.ok(stateWorkflow);
+  stateWorkflow.runId = forgedWorkflowRunId;
+  stateWorkflow.inspection = { runId: forgedWorkflowRunId };
+  fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
   const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
 
   assert.equal(resumed.ok, false);
-  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED");
+  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+  assert.match(resumed.diagnostics[0]?.message ?? "", /cross-bound to its control and link journals/u);
   assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
+});
+
+test("a pending workflow link cannot forge a target from an unrelated lifecycle result", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "forged-workflow-link-target", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+
+  const journalPath = path.join(run.value!.run_root, "smithers", "workflow-run-link-journal.json");
+  const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+    entries: Array<Record<string, unknown>>;
+  };
+  const source = journal.entries.at(-1);
+  assert.ok(source);
+  const events = fs
+    .readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { event_id: string; event_type: string; timestamp: string });
+  const invocation = events.filter((event) => event.event_type === "workflow-lifecycle-invoking").at(-1);
+  const lifecycleResult = events.filter((event) => event.event_type === "workflow-lifecycle-result").at(-1);
+  assert.ok(invocation);
+  assert.ok(lifecycleResult);
+  const preparedAt = new Date().toISOString();
+  journal.entries.push({
+    link_id: crypto.randomUUID(),
+    action: "resume",
+    workflow_run_id: "ultrafuzz-forged-workflow-link-target-attacker",
+    control_generation: source.control_generation,
+    phase: "prepared",
+    prepared_at: preparedAt,
+    updated_at: preparedAt,
+    source_workflow_run_id: source.workflow_run_id,
+    source_workflow_link_id: source.link_id,
+    controller_invocation_id: invocation.event_id,
+    controller_invoked_at: invocation.timestamp,
+    lifecycle_result_event_id: lifecycleResult.event_id,
+    lifecycle_result_at: lifecycleResult.timestamp
+  });
+  fs.writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const forged = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
+
+  assert.equal(forged.ok, false);
+  assert.equal(forged.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+  assert.match(forged.diagnostics[0]?.message ?? "", /result does not authorize its journal target/u);
+  assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
+});
+
+test("a pristine initial-link projection is reconstructed only from sealed control evidence", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "initial-workflow-link-reconcile", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const journalPath = path.join(run.value!.run_root, "smithers", "workflow-run-link-journal.json");
+  const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+    entries: Array<Record<string, unknown>>;
+  };
+  const initialLink = journal.entries[0];
+  assert.ok(initialLink);
+  initialLink.phase = "prepared";
+  initialLink.updated_at = initialLink.prepared_at;
+  delete initialLink.link_event_id;
+  delete initialLink.link_event_at;
+  delete initialLink.committed_at;
+  fs.writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
+
+  const eventsPath = path.join(run.value!.run_root, "events.jsonl");
+  const retainedEvents = fs
+    .readFileSync(eventsPath, "utf8")
+    .trim()
+    .split("\n")
+    .filter((line) => (JSON.parse(line) as { event_type?: string }).event_type !== "workflow-link-recorded");
+  fs.writeFileSync(eventsPath, `${retainedEvents.join("\n")}\n`, "utf8");
+  const metadataPath = path.join(run.value!.run_root, "run.json");
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as Record<string, unknown>;
+  metadata.workflow_ids = [];
+  delete metadata.workflow;
+  fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+    provenance?: Record<string, unknown>;
+  };
+  if (state.provenance !== undefined) delete state.provenance.workflow;
+  fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+
+  const evidence = await readLinkedWorkflowEvidence(project, run.value!.run_id);
+
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (evidence.ok) assert.equal(evidence.workflowLinkId, initialLink.link_id);
+  const reconciledJournal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+    entries?: Array<{ phase?: string; link_event_id?: string }>;
+  };
+  assert.equal(reconciledJournal.entries?.[0]?.phase, "committed");
+  assert.match(reconciledJournal.entries?.[0]?.link_event_id ?? "", /^evt-/u);
+  const reconciledMetadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+    workflow?: { run_id?: string; workflow_link_id?: string };
+  };
+  assert.equal(reconciledMetadata.workflow?.run_id, "ultrafuzz-initial-workflow-link-reconcile");
+  assert.equal(reconciledMetadata.workflow?.workflow_link_id, initialLink.link_id);
+});
+
+test("a pending lifecycle link reconciles split source and target projections from its exact receipt", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const sourceWorkflowRunId = "ultrafuzz-partial-link-reconcile";
+  const targetWorkflowRunId = "ultrafuzz-partial-link-reconcile-fork";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: sourceWorkflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "partial-link-reconcile", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const sourceState = fs.readFileSync(statePath, "utf8");
+  env.SMITHERS_FAKE_FORKED_RUN_ID = targetWorkflowRunId;
+  const forked = await forkRun({ projectRoot: project, runId: run.value!.run_id, forkFrame: 0, env });
+  assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
+
+  const journalPath = path.join(run.value!.run_root, "smithers", "workflow-run-link-journal.json");
+  const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+    entries: Array<Record<string, unknown>>;
+  };
+  const pending = journal.entries.at(-1);
+  assert.ok(pending);
+  pending.phase = "prepared";
+  pending.updated_at = pending.prepared_at;
+  delete pending.link_event_id;
+  delete pending.link_event_at;
+  delete pending.committed_at;
+  fs.writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
+  fs.writeFileSync(statePath, sourceState, "utf8");
+  const eventsPath = path.join(run.value!.run_root, "events.jsonl");
+  const retainedEvents = fs
+    .readFileSync(eventsPath, "utf8")
+    .trim()
+    .split("\n")
+    .filter((line) => {
+      const event = JSON.parse(line) as { event_type?: string; payload?: { workflow_link_id?: unknown } };
+      return event.event_type !== "workflow-link-recorded" || event.payload?.workflow_link_id !== pending.link_id;
+    });
+  fs.writeFileSync(eventsPath, `${retainedEvents.join("\n")}\n`, "utf8");
+
+  const evidence = await readLinkedWorkflowEvidence(project, run.value!.run_id);
+
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (evidence.ok) {
+    assert.equal(evidence.smithersRunId, targetWorkflowRunId);
+    assert.equal(evidence.workflowLinkId, pending.link_id);
+  }
+  const reconciledState = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+    provenance?: { workflow?: { runId?: string; linkId?: string } };
+  };
+  assert.equal(reconciledState.provenance?.workflow?.runId, targetWorkflowRunId);
+  assert.equal(reconciledState.provenance?.workflow?.linkId, pending.link_id);
+  const reconciledJournal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+    entries?: Array<{ phase?: string }>;
+  };
+  assert.equal(reconciledJournal.entries?.at(-1)?.phase, "committed");
 });
 
 test("resume keeps an already-running linked workflow attached without launching a duplicate", async () => {
@@ -8872,7 +11503,7 @@ test("resume keeps an already-running linked workflow attached without launching
   const forcedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(
     forcedCommands,
-    /up .*ultrafuzz-active-lifecycle-run\.tsx --resume ultrafuzz-active-lifecycle-run --run-id ultrafuzz-active-lifecycle-run --force --detach --max-concurrency 8 --format json/u
+    /up .*ultrafuzz-active-lifecycle-run\.tsx --resume ultrafuzz-active-lifecycle-run --run-id ultrafuzz-active-lifecycle-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -8914,7 +11545,7 @@ test("resume retries one failed workflow task before continuing a terminal unfin
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-terminal-retry-run\.tsx --resume ultrafuzz-terminal-retry-run --run-id ultrafuzz-terminal-retry-run --force --detach --max-concurrency 8 --format json/u
+    /up .*ultrafuzz-terminal-retry-run\.tsx --resume ultrafuzz-terminal-retry-run --run-id ultrafuzz-terminal-retry-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -8961,7 +11592,7 @@ test("resume retries failed tasks reported inside a successful terminal workflow
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-terminal-row-retry-run\.tsx --resume ultrafuzz-terminal-row-retry-run --run-id ultrafuzz-terminal-row-retry-run --force --detach --max-concurrency 8 --format json/u
+    /up .*ultrafuzz-terminal-row-retry-run\.tsx --resume ultrafuzz-terminal-row-retry-run --run-id ultrafuzz-terminal-row-retry-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -9012,7 +11643,7 @@ test("resume retries one failed workflow task before continuing a stale unfinish
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-stale-retry-run\.tsx --resume ultrafuzz-stale-retry-run --run-id ultrafuzz-stale-retry-run --force --detach --max-concurrency 8 --format json/u
+    /up .*ultrafuzz-stale-retry-run\.tsx --resume ultrafuzz-stale-retry-run --run-id ultrafuzz-stale-retry-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -9051,7 +11682,7 @@ test("resume continues a run-level render failure in place without a no-op rewin
   assert.doesNotMatch(commands, /timeline|rewind|retry-task/u);
   assert.match(
     commands,
-    /up .*ultrafuzz-render-recovery-run\.tsx --resume ultrafuzz-render-recovery-run --run-id ultrafuzz-render-recovery-run --force --detach --max-concurrency 8 --format json/u
+    /up .*ultrafuzz-render-recovery-run\.tsx --resume ultrafuzz-render-recovery-run --run-id ultrafuzz-render-recovery-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -9331,7 +11962,7 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   assert.doesNotMatch(retriedCommands, /^timetravel /mu, "retry must not repeat the destructive reset");
   assert.match(
     retriedCommands,
-    /up .*ultrafuzz-reset-lifecycle-run\.tsx --resume ultrafuzz-reset-lifecycle-run --run-id ultrafuzz-reset-lifecycle-run --force --detach( --max-concurrency \d+)? --format json/u
+    /up .*ultrafuzz-reset-lifecycle-run\.tsx --resume ultrafuzz-reset-lifecycle-run --run-id ultrafuzz-reset-lifecycle-run --force --detach( --max-concurrency \d+)? --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -9358,6 +11989,7 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
   const logPath = path.join(project, "recovery-smithers.log");
   const cloudEnvironmentLog = path.join(project, "recovery-cloud-environment.log");
   const markerPath = path.join(project, "initial-submission-attempted");
+  const pinnedRunner = writeFakeInstalledSmithers(project);
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(
     smithers,
@@ -9381,6 +12013,8 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
     "utf8"
   );
   fs.chmodSync(smithers, 0o755);
+  fs.copyFileSync(smithers, pinnedRunner.target);
+  fs.chmodSync(pinnedRunner.target, 0o755);
   const env = {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,

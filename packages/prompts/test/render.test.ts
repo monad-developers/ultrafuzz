@@ -2,7 +2,13 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { PromptError, renderPrompt, validatePromptVariables, writeRenderedPrompt } from "../src/index.js";
+import {
+  PromptError,
+  renderPrompt,
+  validatePromptVariables,
+  writeRenderedPrompt,
+  type PromptRenderInput
+} from "../src/index.js";
 
 let tmpDirs: string[] = [];
 
@@ -13,7 +19,7 @@ afterEach(() => {
   tmpDirs = [];
 });
 
-function baseRenderInput(tmp: string) {
+function baseRenderInput(tmp: string): PromptRenderInput {
   const runArtifacts = path.join(tmp, "runs", "run-1", "artifacts");
   return {
     prompt:
@@ -175,6 +181,37 @@ describe("prompt rendering", () => {
     const input = baseRenderInput(tmp);
     input.outputs.findingsPath = path.join(tmp, "escaped-findings.json");
     expect(() => renderPrompt(input)).toThrow(/inside/);
+  });
+
+  it("points every schema-backed output at the task-local JSON Schema", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    const findingsOutput = input.graph.logicalNodes
+      .flatMap((node) => node.outputs ?? [])
+      .find((output) => output.contract === "ultrafuzz/findings@1");
+    expect(findingsOutput).toBeDefined();
+    findingsOutput!.schemaFile = "findings.schema.json";
+    const schemaDirectory = path.join(input.node.workspacePath, ".ultrafuzz", "schemas");
+
+    const result = renderPrompt(input);
+
+    expect(result.renderedMarkdown).toContain(
+      `Validate against: \`${path.join(schemaDirectory, "findings.schema.json")}\``
+    );
+    expect(result.renderedMarkdown).toContain(`already present in your workspace under \`${schemaDirectory}\``);
+    expect(result.renderedMarkdown).toContain("It is the authority on field names, types, and which fields are");
+    // The sibling output declares no schema file, so it must not gain a dangling path.
+    expect(result.renderedMarkdown).not.toContain("generated-tests.schema.json");
+  });
+
+  it("omits the schema pointer when no output ships a schema", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+
+    const result = renderPrompt(baseRenderInput(tmp));
+
+    expect(result.renderedMarkdown).not.toContain("Validate against:");
   });
 
   it("renders validated artifact handoffs and ancestor artifacts", () => {

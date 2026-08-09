@@ -17,6 +17,7 @@ import {
   writeFileSync
 } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Fragment } from "react";
 import { createSmithers, type AgentLike } from "smithers-orchestrator";
 import { z } from "zod/v4";
@@ -162,6 +163,15 @@ const dynamicGroupSpecs = __ULTRAFUZZ_DYNAMIC_GROUPS__;
 /** Resolved `run.max_dynamic_nodes`, recorded by the planner into `goal-plan.json`. */
 const maxDynamicNodes = __ULTRAFUZZ_MAX_DYNAMIC_NODES__;
 const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
+const loadedWorkflowPath = fileURLToPath(import.meta.url);
+const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
+const admittedWorkflowControls = admitWorkflowControls(loadedWorkflowPath, persistedWorkflowPath);
+const admittedWorkflowRelativePath =
+  admittedWorkflowControls.persistedWorkflowPath === undefined
+    ? __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__
+    : cloudSnapshotRelativePath(admittedWorkflowControls.persistedWorkflowPath, "persisted workflow path");
+const dynamicBaseGraphPath = sealedRuntimeControlPath("runtime-base-graph.json", admittedWorkflowControls);
+const dynamicBaseTasksPath = sealedRuntimeControlPath("runtime-base-tasks.json", admittedWorkflowControls);
 /**
  * Hydrates one serialized task spec against the current project root.
  *
@@ -169,12 +179,25 @@ const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
  * controller root and in a relocated cloud-worker root.
  */
 function hydrateTaskSpec(task: (typeof serializedTaskSpecs)[number]) {
+  const controlPaths = taskWorkflowControlPaths(task.execution.mode, admittedWorkflowControls);
+  const promptPath =
+    task.promptPath === undefined
+      ? undefined
+      : (sealedTaskPromptPath(task.attemptId, controlPaths.promptExecutionSnapshotRoot) ??
+        path.resolve(process.cwd(), task.promptPath));
   return {
     ...task,
     dependsOn: [...task.dependsOn] as string[],
     dynamicDependencies: [] as string[],
-    promptRelativePath: task.promptPath,
-    promptPath: task.promptPath === undefined ? undefined : path.resolve(process.cwd(), task.promptPath),
+    promptRelativePath:
+      promptPath === undefined
+        ? undefined
+        : task.execution.mode === "cloud" && controlPaths.executionSnapshotRoot !== undefined
+          ? cloudSnapshotRelativePath(promptPath, "rendered prompt path")
+          : task.promptPath,
+    promptPath,
+    workflowPath: controlPaths.workflowPath ?? path.resolve(process.cwd(), task.workflowPath),
+    executionSnapshotRoot: controlPaths.executionSnapshotRoot,
     workspaceRelativePath: task.workspacePath,
     workspacePath: path.resolve(process.cwd(), task.workspacePath),
     artifactRelativeDir: task.artifactDir,
@@ -182,6 +205,115 @@ function hydrateTaskSpec(task: (typeof serializedTaskSpecs)[number]) {
   };
 }
 let taskSpecs = serializedTaskSpecs.map((task) => hydrateTaskSpec(task));
+
+type AdmittedWorkflowControls = {
+  loadedWorkflowPath: string;
+  loadedExecutionSnapshotRoot: string | undefined;
+  persistedWorkflowPath: string | undefined;
+  persistedExecutionSnapshotRoot: string | undefined;
+};
+
+function admitWorkflowControls(loadedPath: string, persistedPath: string | undefined): AdmittedWorkflowControls {
+  const loadedExecutionSnapshotRoot = workflowExecutionSnapshotRoot(loadedPath);
+  const persistedExecutionSnapshotRoot =
+    persistedPath === undefined ? undefined : workflowExecutionSnapshotRoot(persistedPath);
+  if (
+    persistedPath !== undefined &&
+    (loadedExecutionSnapshotRoot === undefined ||
+      persistedExecutionSnapshotRoot === undefined ||
+      realpathSync(loadedPath) !== realpathSync(persistedPath))
+  ) {
+    throw new Error("persisted workflow path does not identify the loaded execution snapshot");
+  }
+  return {
+    loadedWorkflowPath: loadedPath,
+    loadedExecutionSnapshotRoot,
+    persistedWorkflowPath: persistedPath,
+    persistedExecutionSnapshotRoot
+  };
+}
+
+function taskWorkflowControlPaths(
+  executionMode: "local" | "cloud",
+  controls: AdmittedWorkflowControls
+): {
+  promptExecutionSnapshotRoot: string | undefined;
+  workflowPath: string | undefined;
+  executionSnapshotRoot: string | undefined;
+} {
+  const anySnapshotRoot = controls.loadedExecutionSnapshotRoot ?? controls.persistedExecutionSnapshotRoot;
+  if (anySnapshotRoot === undefined) {
+    return {
+      promptExecutionSnapshotRoot: undefined,
+      workflowPath: undefined,
+      executionSnapshotRoot: undefined
+    };
+  }
+  if (executionMode === "cloud") {
+    return controls.persistedExecutionSnapshotRoot === undefined
+      ? {
+          // Preserve direct cloud-workflow admission behavior: the loaded
+          // generation can supply sealed prompt/module bytes, but cloud handoff
+          // still requires the explicit persisted generation binding.
+          promptExecutionSnapshotRoot: controls.loadedExecutionSnapshotRoot,
+          workflowPath: controls.loadedWorkflowPath,
+          executionSnapshotRoot: undefined
+        }
+      : {
+          promptExecutionSnapshotRoot: controls.persistedExecutionSnapshotRoot,
+          workflowPath: controls.persistedWorkflowPath!,
+          executionSnapshotRoot: controls.persistedExecutionSnapshotRoot
+        };
+  }
+  const persistedSnapshotRoot = controls.persistedExecutionSnapshotRoot ?? controls.loadedExecutionSnapshotRoot;
+  return {
+    // The descriptor-rooted loaded path is an admission capability owned by
+    // the Ultrafuzz controller. Smithers may continue a detached local run
+    // after that controller closes the descriptor, so no task-spec path that
+    // survives admission may retain it when a verified persisted path exists.
+    promptExecutionSnapshotRoot: persistedSnapshotRoot,
+    workflowPath: controls.persistedWorkflowPath ?? controls.loadedWorkflowPath,
+    executionSnapshotRoot: persistedSnapshotRoot
+  };
+}
+
+function workflowExecutionSnapshotRoot(workflowPath: string): string | undefined {
+  if (!path.isAbsolute(workflowPath)) return undefined;
+  const workflows = path.dirname(workflowPath);
+  const smithers = path.dirname(workflows);
+  const candidate = path.dirname(smithers);
+  if (
+    path.basename(workflows) !== "workflows" ||
+    path.basename(smithers) !== ".smithers" ||
+    !existsSync(path.join(candidate, "dependencies", "manifest.json")) ||
+    !existsSync(path.join(candidate, "controls", "plan.json"))
+  ) {
+    return undefined;
+  }
+  return candidate;
+}
+
+function sealedTaskPromptPath(attemptId: string, snapshotRoot: string | undefined): string | undefined {
+  if (snapshotRoot === undefined) return undefined;
+  const promptPath = path.join(snapshotRoot, "controls", "rendered-prompts", `${attemptId}.md`);
+  if (!existsSync(promptPath)) throw new Error(`sealed rendered prompt is missing for ${attemptId}`);
+  return promptPath;
+}
+
+function sealedRuntimeControlPath(name: string, controls: AdmittedWorkflowControls): string | undefined {
+  const snapshotRoot = controls.persistedExecutionSnapshotRoot ?? controls.loadedExecutionSnapshotRoot;
+  if (snapshotRoot === undefined) return undefined;
+  const candidate = path.join(snapshotRoot, "controls", name);
+  return existsSync(candidate) ? candidate : undefined;
+}
+
+function cloudSnapshotRelativePath(value: string, label: string): string {
+  const relative = path.relative(process.cwd(), value);
+  if (relative === "" || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`${label} must stay inside the cloud handoff project`);
+  }
+  return relative.split(path.sep).join("/");
+}
 const usesCloudExecution = [...compiledBaseTasks, ...dynamicGroupSpecs.flatMap((group) => group.taskTemplates)].some(
   (task) => task.execution.mode === "cloud"
 );
@@ -240,64 +372,84 @@ function dynamicExecutionMetadata(task: (typeof compiledBaseTasks)[number]) {
 }
 
 function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
-  return tasks.map((task) => ({
-    id: task.smithersNodeId,
-    preparationId: `prepare:${task.attemptId}`,
-    verifierId: task.verifierSmithersNodeId,
-    attemptId: task.attemptId,
-    dependsOn: task.dependencySmithersNodeIds,
-    dynamicDependencies: task.dynamicDependencies ?? [],
-    agentRef: task.agentRef,
-    modelName: task.modelName ?? null,
-    reasoningEffort: task.reasoningEffort ?? null,
-    prompt: "",
-    promptPath:
+  return tasks.map((task) => {
+    const controlPaths = taskWorkflowControlPaths(task.execution.mode, admittedWorkflowControls);
+    const compiled = serializedTaskSpecs.find((candidate) => candidate.id === task.smithersNodeId);
+    const runtimePromptPath =
       task.renderedPromptPath === undefined
         ? undefined
-        : dynamicExecutionPath(task, task.renderedPromptPath, "rendered prompt"),
-    promptRelativePath:
-      task.renderedPromptPath === undefined
-        ? undefined
-        : projectRelativePath(task.renderedPromptPath, "rendered prompt"),
-    workspaceRelativePath: dynamicExecutionPath(task, task.workspacePath, "task workspace"),
-    workspacePath: path.resolve(process.cwd(), dynamicExecutionPath(task, task.workspacePath, "task workspace")),
-    artifactRelativeDir: dynamicExecutionPath(task, task.artifactDir, "task artifact directory"),
-    artifactDir: path.resolve(process.cwd(), dynamicExecutionPath(task, task.artifactDir, "task artifact directory")),
-    dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) =>
-      dynamicExecutionPath(task, directory, "dependency artifact directory")
-    ),
-    referenceArtifactDirs: (task.referenceArtifactDirs ?? []).map((directory) =>
-      dynamicExecutionPath(task, directory, "reference artifact directory")
-    ),
-    ...(task.vulnerabilityDatabaseCatalog === undefined
-      ? {}
-      : {
-          vulnerabilityDatabase: {
-            catalogPath: dynamicExecutionPath(
-              task,
-              task.vulnerabilityDatabaseCatalog.path,
-              "vulnerability database catalog"
-            ),
-            catalogSha256: task.vulnerabilityDatabaseCatalog.sha256
-          }
-        }),
-    runRoot: dynamicExecutionPath(task, path.resolve(task.artifactDir, "..", ".."), "run root"),
-    workflowPath: dynamicExecutionPath(
-      task,
-      path.resolve(sourceProjectRoot, __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__),
-      "workflow path"
-    ),
-    sourceProjectRoot,
-    branch: `ultrafuzz/${__ULTRAFUZZ_RUN_ID_LITERAL__}/${task.attemptId}`,
-    timeoutMs: task.timeoutMs,
-    runtimeContext: topologyRuntimeContextForTimeout(task.timeoutMs),
-    heartbeatTimeoutMs: task.heartbeatTimeoutMs,
-    retries: task.retries,
-    retryPolicy: task.retryPolicy,
-    metadata: dynamicExecutionMetadata(task),
-    outputs: task.metadata.artifacts.outputs,
-    execution: task.execution
-  }));
+        : path.resolve(process.cwd(), dynamicExecutionPath(task, task.renderedPromptPath, "rendered prompt"));
+    // A static compiled prompt exists in the initial execution seal. A deferred or generated prompt
+    // cannot exist there, so it stays in the run root and is bound by selected_task plus the handoff
+    // content digest instead.
+    const promptPath =
+      compiled?.promptPath === undefined
+        ? runtimePromptPath
+        : (sealedTaskPromptPath(task.attemptId, controlPaths.promptExecutionSnapshotRoot) ?? runtimePromptPath);
+    return {
+      id: task.smithersNodeId,
+      preparationId: `prepare:${task.attemptId}`,
+      verifierId: task.verifierSmithersNodeId,
+      attemptId: task.attemptId,
+      dependsOn: task.dependencySmithersNodeIds,
+      dynamicDependencies: task.dynamicDependencies ?? [],
+      agentRef: task.agentRef,
+      modelName: task.modelName ?? null,
+      reasoningEffort: task.reasoningEffort ?? null,
+      prompt: "",
+      promptPath,
+      promptRelativePath:
+        promptPath === undefined
+          ? undefined
+          : task.execution.mode === "cloud" && controlPaths.executionSnapshotRoot !== undefined
+            ? cloudSnapshotRelativePath(promptPath, "rendered prompt path")
+            : projectRelativePath(task.renderedPromptPath!, "rendered prompt"),
+      workspaceRelativePath: dynamicExecutionPath(task, task.workspacePath, "task workspace"),
+      workspacePath: path.resolve(process.cwd(), dynamicExecutionPath(task, task.workspacePath, "task workspace")),
+      artifactRelativeDir: dynamicExecutionPath(task, task.artifactDir, "task artifact directory"),
+      artifactDir: path.resolve(process.cwd(), dynamicExecutionPath(task, task.artifactDir, "task artifact directory")),
+      dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) =>
+        dynamicExecutionPath(task, directory, "dependency artifact directory")
+      ),
+      referenceArtifactDirs: (task.referenceArtifactDirs ?? []).map((directory) =>
+        dynamicExecutionPath(task, directory, "reference artifact directory")
+      ),
+      ...(task.vulnerabilityDatabaseCatalog === undefined
+        ? {}
+        : {
+            vulnerabilityDatabase: {
+              catalogPath: dynamicExecutionPath(
+                task,
+                task.vulnerabilityDatabaseCatalog.path,
+                "vulnerability database catalog"
+              ),
+              catalogSha256: task.vulnerabilityDatabaseCatalog.sha256
+            }
+          }),
+      runRoot: dynamicExecutionPath(task, path.resolve(task.artifactDir, "..", ".."), "run root"),
+      workflowPath:
+        controlPaths.workflowPath ??
+        path.resolve(
+          process.cwd(),
+          dynamicExecutionPath(
+            task,
+            path.resolve(sourceProjectRoot, __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__),
+            "workflow path"
+          )
+        ),
+      executionSnapshotRoot: controlPaths.executionSnapshotRoot,
+      sourceProjectRoot,
+      branch: `ultrafuzz/${__ULTRAFUZZ_RUN_ID_LITERAL__}/${task.attemptId}`,
+      timeoutMs: task.timeoutMs,
+      runtimeContext: topologyRuntimeContextForTimeout(task.timeoutMs),
+      heartbeatTimeoutMs: task.heartbeatTimeoutMs,
+      retries: task.retries,
+      retryPolicy: task.retryPolicy,
+      metadata: dynamicExecutionMetadata(task),
+      outputs: task.metadata.artifacts.outputs,
+      execution: task.execution
+    };
+  });
 }
 
 function projectRelativePath(value: string, label: string): string {
@@ -461,7 +613,7 @@ function buildCloudSelectedTaskHandoff(
     workspacePath: relative.workspacePath,
     artifactDir: relative.artifactDir,
     runRoot: task.runRoot,
-    workflowPath: task.workflowPath,
+    workflowPath: cloudSnapshotRelativePath(task.workflowPath, "workflow path"),
     sourceProjectRoot: task.sourceProjectRoot,
     dependencyArtifactDirs: [...task.dependencyArtifactDirs],
     referenceArtifactDirs: [...(task.referenceArtifactDirs ?? [])],
@@ -507,11 +659,13 @@ function cloudSelectedTaskHandoff(task: (typeof taskSpecs)[number]) {
  * own artifact directory -- the one location runtime materialization is allowed to supply.
  */
 function compiledCanonicalSelectedTask(compiled: (typeof serializedTaskSpecs)[number], executionGeneration: string) {
+  const hydrated = hydrateTaskSpec(compiled);
   return buildCloudSelectedTaskHandoff(
-    compiled,
+    hydrated,
     {
       promptPath:
-        compiled.promptPath ?? `${compiled.artifactDir}/${CLOUD_SELECTED_TASK_RUNTIME_PROMPT_BASENAME as string}`,
+        hydrated.promptRelativePath ??
+        `${compiled.artifactDir}/${CLOUD_SELECTED_TASK_RUNTIME_PROMPT_BASENAME as string}`,
       workspacePath: compiled.workspacePath,
       artifactDir: compiled.artifactDir
     },
@@ -825,7 +979,7 @@ function cloudWorkerTaskSpecs(input: Record<string, unknown>): typeof taskSpecs 
       sourceProjectRoot,
       runId: __ULTRAFUZZ_RUN_ID_LITERAL__,
       workflowName: __ULTRAFUZZ_WORKFLOW_NAME__,
-      workflowPath: __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__,
+      workflowPath: admittedWorkflowRelativePath,
       preparationId: `prepare:${attemptId}`,
       verifierId: `verify:${attemptId}`,
       branch: `ultrafuzz/${__ULTRAFUZZ_RUN_ID_LITERAL__}/${attemptId}`
@@ -5816,6 +5970,8 @@ export default smithers((ctx) => {
       runRoot: dynamicRunRoot,
       graphPath: dynamicGraphPath,
       tasksPath: dynamicTasksPath,
+      ...(dynamicBaseGraphPath === undefined ? {} : { baseGraphPath: dynamicBaseGraphPath }),
+      ...(dynamicBaseTasksPath === undefined ? {} : { baseTasksPath: dynamicBaseTasksPath }),
       baseTasks: compiledBaseTasks,
       groups: dynamicGroupSpecs,
       readyGroupIds
@@ -5838,6 +5994,9 @@ export default smithers((ctx) => {
             if (cloudProvider === undefined || task.execution.provider !== "modal") {
               throw new Error("cloud execution provider is unavailable");
             }
+            if (task.executionSnapshotRoot === undefined) {
+              throw new Error("cloud execution requires a sealed workflow execution snapshot");
+            }
             return (
               <Fragment key={task.id}>
                 <Sandbox
@@ -5849,10 +6008,14 @@ export default smithers((ctx) => {
                     task_id: task.id,
                     attempt_id: task.attemptId,
                     execution_generation: cloudExecutionGeneration,
-                    workflow_path: task.workflowPath,
-                    // Every dispatched location is project-relative so the archive, the handoff DTO,
-                    // and the relocated worker all agree on one spelling of the same path.
-                    ...(task.promptRelativePath === undefined ? {} : { prompt_path: task.promptRelativePath }),
+                    execution_snapshot_root: cloudSnapshotRelativePath(
+                      task.executionSnapshotRoot,
+                      "workflow execution snapshot"
+                    ),
+                    workflow_path: cloudSnapshotRelativePath(task.workflowPath, "workflow path"),
+                    ...(task.promptPath === undefined
+                      ? {}
+                      : { prompt_path: cloudSnapshotRelativePath(task.promptPath, "rendered prompt path") }),
                     run_root: task.runRoot,
                     artifact_dir: task.artifactRelativeDir,
                     workspace_dir: task.workspaceRelativePath,
