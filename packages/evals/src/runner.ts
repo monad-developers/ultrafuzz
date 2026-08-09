@@ -668,9 +668,7 @@ function validatedBenchmarkWorkflowInput(
       issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
     });
   }
-  return Object.hasOwn(parsed.data, "benchmark_execution")
-    ? (parsed.data as EvalBenchmarkWorkflowInput)
-    : undefined;
+  return Object.hasOwn(parsed.data, "benchmark_execution") ? (parsed.data as EvalBenchmarkWorkflowInput) : undefined;
 }
 
 function durableEvalDiagnostics(diagnostics: readonly RuntimeDiagnostic[]): EvalDurableDiagnostic[] {

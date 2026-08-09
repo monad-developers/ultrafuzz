@@ -1835,7 +1835,7 @@ function publicMatrix(suite: EvalSuiteSpec): EvalMatrixRow[] {
             ...variant,
             ...(variant.topology === undefined
               ? {}
-              : { topology_path: path.join("/tmp/modal-worker/candidate", variant.topology) }),
+              : { topology_path: path.join("/tmp/modal-worker/candidate", variant.topology) })
           },
           runner_model_profile: runnerProfileId,
           judge_model_profile: judgeProfileId,

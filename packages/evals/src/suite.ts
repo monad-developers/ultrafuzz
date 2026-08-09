@@ -78,19 +78,17 @@ const operatorJsonValueSchema: z.ZodType<EvalOperatorJsonValue> = z.lazy(() =>
   ])
 );
 
-const operatorWorkflowInputSchema = z
-  .record(nonEmptyString, operatorJsonValueSchema)
-  .superRefine((value, context) => {
-    for (const key of Object.keys(value)) {
-      if (reservedWorkflowInputKeys.has(key)) {
-        context.addIssue({
-          code: "custom",
-          path: [key],
-          message: `operator workflow input cannot use reserved key ${key}`
-        });
-      }
+const operatorWorkflowInputSchema = z.record(nonEmptyString, operatorJsonValueSchema).superRefine((value, context) => {
+  for (const key of Object.keys(value)) {
+    if (reservedWorkflowInputKeys.has(key)) {
+      context.addIssue({
+        code: "custom",
+        path: [key],
+        message: `operator workflow input cannot use reserved key ${key}`
+      });
     }
-  });
+  }
+});
 
 const benchmarkExecutionSchema = z.strictObject({
   strategy_loops: positiveInteger,

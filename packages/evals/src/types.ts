@@ -36,12 +36,7 @@ export interface EvalModelProfile {
 
 /** The only intentionally opaque JSON seam in an eval suite. */
 export type EvalOperatorJsonValue =
-  | null
-  | boolean
-  | number
-  | string
-  | EvalOperatorJsonValue[]
-  | { [key: string]: EvalOperatorJsonValue };
+  null | boolean | number | string | EvalOperatorJsonValue[] | { [key: string]: EvalOperatorJsonValue };
 
 /**
  * Operator-owned workflow values. Runtime validation forbids eval-reserved
@@ -79,15 +74,11 @@ export interface EvalPublicSmokeBenchmarkWorkflowInput {
 }
 
 export type EvalBenchmarkWorkflowInput =
-  | EvalPrivateBenchmarkWorkflowInput
-  | EvalPublicFullBenchmarkWorkflowInput
-  | EvalPublicSmokeBenchmarkWorkflowInput;
+  EvalPrivateBenchmarkWorkflowInput | EvalPublicFullBenchmarkWorkflowInput | EvalPublicSmokeBenchmarkWorkflowInput;
 
 export type EvalWorkflowInput = EvalOperatorWorkflowInput | EvalBenchmarkWorkflowInput;
 
-export function isEvalBenchmarkWorkflowInput(
-  input: EvalWorkflowInput
-): input is EvalBenchmarkWorkflowInput {
+export function isEvalBenchmarkWorkflowInput(input: EvalWorkflowInput): input is EvalBenchmarkWorkflowInput {
   return Object.hasOwn(input, "benchmark_execution");
 }
 

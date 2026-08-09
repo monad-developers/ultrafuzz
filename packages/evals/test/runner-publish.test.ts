@@ -812,10 +812,12 @@ describe("runner", () => {
     expect(syncDiagnostics).toHaveLength(1);
     expect(syncDiagnostics[0]?.message).toContain("WORKFLOW_INSPECT_FAILED");
     expect(syncDiagnostics[0]).not.toHaveProperty("details");
-    expect(watched.diagnostics.find((diagnostic) => diagnostic.code === "EVAL_ROW_SYNC_FAILED")?.details).toMatchObject({
-      failure_count: 2,
-      consecutive_failures_at_finish: 0
-    });
+    expect(watched.diagnostics.find((diagnostic) => diagnostic.code === "EVAL_ROW_SYNC_FAILED")?.details).toMatchObject(
+      {
+        failure_count: 2,
+        consecutive_failures_at_finish: 0
+      }
+    );
     expect(
       readJsonLines<{ diagnostics: Array<{ code: string }> }>(path.join(base, "eval-run", "runs.jsonl"))
         .at(-1)
