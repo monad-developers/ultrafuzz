@@ -22,6 +22,36 @@ const propertyIdsSchema = stringArray.min(1).superRefine((propertyIds, context) 
     seen.add(propertyId);
   }
 });
+const backendFailureReferenceSchema = z.union([
+  nonEmptyString,
+  z.looseObject({
+    fuzzer_backend: nonEmptyString,
+    failure_id: nonEmptyString
+  })
+]);
+const contributingBackendFailuresSchema = z
+  .array(backendFailureReferenceSchema)
+  .min(1)
+  .superRefine((references, context) => {
+    const seen = new Set<string>();
+    for (const [referenceIndex, reference] of references.entries()) {
+      const key =
+        typeof reference === "string"
+          ? JSON.stringify(["failure-id", reference])
+          : JSON.stringify(["backend-failure", reference.fuzzer_backend, reference.failure_id]);
+      if (seen.has(key)) {
+        context.addIssue({
+          code: "custom",
+          message: `Duplicate contributing backend failure ${JSON.stringify(reference)}`,
+          path: [referenceIndex]
+        });
+      }
+      seen.add(key);
+    }
+  });
+const findingDeduplicationSchema = z.looseObject({
+  pre_dedup_count: z.number().int().positive()
+});
 const evidenceEntrySchema = z.union([
   nonEmptyString,
   z.looseObject({
@@ -53,6 +83,8 @@ export const findingSchema = z.looseObject({
   affected_functions: stringArray.optional(),
   patch_refs: stringArray.optional(),
   property_ids: propertyIdsSchema.optional(),
+  contributing_backend_failures: contributingBackendFailuresSchema.optional(),
+  deduplication: findingDeduplicationSchema.optional(),
   notes: stringArray.optional(),
   evidence: z.array(evidenceEntrySchema).optional()
 });
@@ -86,6 +118,33 @@ export const findingJsonSchema = {
     affected_functions: { type: "array", items: { type: "string", minLength: 1 } },
     patch_refs: { type: "array", items: { type: "string", minLength: 1 } },
     property_ids: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1 } },
+    contributing_backend_failures: {
+      type: "array",
+      minItems: 1,
+      uniqueItems: true,
+      items: {
+        anyOf: [
+          { type: "string", minLength: 1 },
+          {
+            type: "object",
+            required: ["fuzzer_backend", "failure_id"],
+            additionalProperties: true,
+            properties: {
+              fuzzer_backend: { type: "string", minLength: 1 },
+              failure_id: { type: "string", minLength: 1 }
+            }
+          }
+        ]
+      }
+    },
+    deduplication: {
+      type: "object",
+      required: ["pre_dedup_count"],
+      additionalProperties: true,
+      properties: {
+        pre_dedup_count: { type: "integer", minimum: 1 }
+      }
+    },
     notes: { type: "array", items: { type: "string", minLength: 1 } },
     evidence: {
       type: "array",

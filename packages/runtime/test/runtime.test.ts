@@ -3562,7 +3562,13 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   const plan = await planRun({ projectRoot: project, runId: "planned-run", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.equal(fs.existsSync(path.join(plan.value!.run_root, "plan.json")), true);
-  assert.equal(fs.existsSync(path.join(plan.value!.run_root, "artifacts/project-discovery/prompt.rendered.md")), true);
+  const renderedPromptPath = path.join(plan.value!.run_root, "artifacts/project-discovery/prompt.rendered.md");
+  assert.equal(fs.existsSync(renderedPromptPath), true);
+  const renderedPrompt = fs.readFileSync(renderedPromptPath, "utf8");
+  assert.match(renderedPrompt, /severity_guess to exactly "High", "Medium", or "Low"/u);
+  assert.match(renderedPrompt, /including one that is or may become a non-production record/u);
+  assert.match(renderedPrompt, /"severity_guess":"Medium"/u);
+  assert.doesNotMatch(renderedPrompt, /"severity_guess":"medium"/u);
   const persistedPlan = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "plan.json"), "utf8")) as {
     execution?: { mode?: string; retentionDays?: number };
     rendered_prompts: Array<{ rendered_prompt_snapshot_path?: string }>;

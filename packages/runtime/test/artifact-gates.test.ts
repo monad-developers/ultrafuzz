@@ -79,9 +79,11 @@ function plannedNode(paths: string[]): PlannedGraphNode {
                   ? "ultrafuzz/invariant-ledger@1"
                   : ["echidna-results.json", "medusa-results.json", "recon-fuzzer-results.json"].includes(outputPath)
                     ? "ultrafuzz/property-campaign@1"
-                    : outputPath === "report.json"
-                      ? "ultrafuzz/report@1"
-                      : "ultrafuzz/nonempty-markdown@1",
+                    : outputPath === "campaign-summary.json"
+                      ? "ultrafuzz/json-object@1"
+                      : outputPath === "report.json"
+                        ? "ultrafuzz/report@1"
+                        : "ultrafuzz/nonempty-markdown@1",
       contract_digest: "a".repeat(64),
       primary: index === 0
     })),
@@ -4074,8 +4076,24 @@ test("final report gate rejects dangling property references while allowing hist
     JSON.stringify({
       schema_version: "ultrafuzz.property-campaign.v1",
       fuzzer_backend: "medusa",
-      failures: [{ id: "finding-property", status: "reproduced", property_ids: ["property-1"] }]
+      failures: [{ id: "medusa-property", status: "reproduced", property_ids: ["property-1"] }]
     })
+  );
+  writeArtifact(
+    currentLayout,
+    "stateful-invariant-campaign",
+    "findings.json",
+    JSON.stringify([{ ...campaignFinding("finding-property", ["property-1"]), fuzzer_backends: ["echidna", "medusa"] }])
+  );
+  const campaignNode = {
+    ...plannedNode(["echidna-results.json", "medusa-results.json", "findings.json"]),
+    id: "stateful-invariant-campaign",
+    logical_id: "stateful-invariant-campaign"
+  };
+  assert.equal(
+    verifyRequiredArtifactsForAttempt(currentLayout, campaignNode, campaignNode.id).ok,
+    true,
+    "finding-owned provenance must join a deduplicated finding to backends whose failure IDs differ"
   );
   writeArtifact(
     currentLayout,
@@ -4444,6 +4462,55 @@ function campaignFinding(id: string, propertyIds: string[]): Record<string, unkn
   return finding;
 }
 
+type CampaignFailureReferenceFixture = string | { fuzzer_backend: string; failure_id: string };
+
+function accountedCampaignFinding(
+  id: string,
+  propertyIds: string[],
+  contributions: CampaignFailureReferenceFixture[],
+  preDedupCount = contributions.length,
+  fuzzerBackends: string[] = ["recon"]
+): Record<string, unknown> {
+  return {
+    ...campaignFinding(id, propertyIds),
+    contributing_backend_failures: contributions,
+    deduplication: { pre_dedup_count: preDedupCount },
+    ...(fuzzerBackends.length === 1 ? { fuzzer_backend: fuzzerBackends[0] } : { fuzzer_backends: fuzzerBackends })
+  };
+}
+
+function currentCampaignNode(paths: string[]): PlannedGraphNode {
+  const node = plannedNode(paths);
+  return {
+    ...node,
+    outputs: node.outputs.map((output) =>
+      output.path === "campaign-summary.json"
+        ? { ...output, contract: "ultrafuzz/campaign-summary@1" as const }
+        : output
+    )
+  };
+}
+
+function writeCampaignSummary(
+  layout: ReturnType<typeof createRunLayout>,
+  campaignId: string,
+  preDeduplication: number,
+  postDeduplication: number
+): void {
+  writeArtifact(
+    layout,
+    campaignId,
+    "campaign-summary.json",
+    JSON.stringify({
+      outcome: "partial",
+      failure_counts: {
+        pre_deduplication: preDeduplication,
+        post_deduplication: postDeduplication
+      }
+    })
+  );
+}
+
 test("campaign gate accepts many counterexamples of one property deduplicated into one finding", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-dedup" });
   campaignPropertyCatalog(layout, ["property-1"]);
@@ -4477,7 +4544,7 @@ test("campaign gate accepts many counterexamples of one property deduplicated in
   assert.equal(result.ok, true);
 });
 
-test("campaign gate accepts the R55 artifact shape: 29 counterexamples over two properties, two findings", () => {
+test("current campaign gate accepts the exact R55 partition: 29 counterexamples, two findings", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-r55" });
   campaignPropertyCatalog(layout, ["property-1", "property-3"]);
   const campaignId = "stateful-invariant-campaign";
@@ -4501,10 +4568,22 @@ test("campaign gate accepts the R55 artifact shape: 29 counterexamples over two 
     layout,
     campaignId,
     "findings.json",
-    JSON.stringify([campaignFinding("failure-1", ["property-1"]), campaignFinding("failure-25", ["property-3"])])
+    JSON.stringify([
+      accountedCampaignFinding(
+        "failure-1",
+        ["property-1"],
+        failures.filter((failure) => failure.property_ids[0] === "property-1").map((failure) => failure.id)
+      ),
+      accountedCampaignFinding(
+        "failure-25",
+        ["property-3"],
+        failures.filter((failure) => failure.property_ids[0] === "property-3").map((failure) => failure.id)
+      )
+    ])
   );
+  writeCampaignSummary(layout, campaignId, 29, 2);
   const node = {
-    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
     id: campaignId,
     logical_id: campaignId
   };
@@ -4515,6 +4594,392 @@ test("campaign gate accepts the R55 artifact shape: 29 counterexamples over two 
     []
   );
   assert.equal(result.ok, true);
+});
+
+test("current campaign gate requires partition metadata while historical plans retain the coverage fallback", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partition-required" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-1"] }
+      ]
+    })
+  );
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-1", ["property-1"])]));
+  writeCampaignSummary(layout, campaignId, 2, 1);
+
+  const historicalNode = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, historicalNode, campaignId).ok, true);
+
+  const currentNode = {
+    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+  const current = verifyRequiredArtifactsForAttempt(layout, currentNode, campaignId);
+  assert.equal(current.ok, false);
+  assert.ok(current.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_REQUIRED"));
+  assert.equal(
+    current.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_UNCLAIMED").length,
+    2
+  );
+  assert.ok(
+    current.diagnostics
+      .filter((diagnostic) => diagnostic.code.startsWith("PROPERTY_CAMPAIGN_PARTITION_"))
+      .every((diagnostic) => diagnostic.severity === "error")
+  );
+
+  const volunteeredHistoricalPartition = accountedCampaignFinding(
+    "failure-1",
+    ["property-1"],
+    ["failure-1", "failure-2"]
+  );
+  delete volunteeredHistoricalPartition.fuzzer_backend;
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([volunteeredHistoricalPartition]));
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, historicalNode, campaignId).ok, true);
+});
+
+test("campaign partition rejects unknown contributions and per-finding count mismatches", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partition-unknown" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([accountedCampaignFinding("failure-1", ["property-1"], ["failure-unknown"], 2)])
+  );
+  writeCampaignSummary(layout, campaignId, 1, 1);
+  const node = {
+    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  for (const code of [
+    "PROPERTY_CAMPAIGN_PARTITION_REFERENCE_UNKNOWN",
+    "PROPERTY_CAMPAIGN_PARTITION_COUNT_MISMATCH",
+    "PROPERTY_CAMPAIGN_PARTITION_UNCLAIMED"
+  ]) {
+    assert.ok(
+      result.diagnostics.some((diagnostic) => diagnostic.code === code),
+      code
+    );
+  }
+});
+
+test("campaign partition rejects duplicate claims and property subset mismatches", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partition-duplicate" });
+  campaignPropertyCatalog(layout, ["property-1", "property-2"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-2"] }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      accountedCampaignFinding("failure-1", ["property-1"], ["failure-1", "failure-2"]),
+      accountedCampaignFinding("failure-2", ["property-2"], ["failure-2"])
+    ])
+  );
+  writeCampaignSummary(layout, campaignId, 2, 2);
+  const node = {
+    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_DUPLICATE"));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_PROPERTY_MISMATCH")
+  );
+});
+
+test("campaign partition requires each finding ID to represent one of its contributions", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partition-representative" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-1"] }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      accountedCampaignFinding("failure-1", ["property-1"], ["failure-2"]),
+      accountedCampaignFinding("failure-2", ["property-1"], ["failure-1"])
+    ])
+  );
+  writeCampaignSummary(layout, campaignId, 2, 2);
+  const node = {
+    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  assert.equal(
+    result.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_REPRESENTATIVE_MISMATCH")
+      .length,
+    2
+  );
+});
+
+test("campaign partition requires a finding's properties to equal its contribution union", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partition-property-union" });
+  campaignPropertyCatalog(layout, ["property-1", "property-2"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1"] },
+        { id: "failure-2", status: "reproduced", property_ids: ["property-2"] }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      accountedCampaignFinding("failure-1", ["property-1", "property-2"], ["failure-1"]),
+      accountedCampaignFinding("failure-2", ["property-2"], ["failure-2"])
+    ])
+  );
+  writeCampaignSummary(layout, campaignId, 2, 2);
+  const node = {
+    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  assert.equal(
+    result.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_PROPERTY_MISMATCH")
+      .length,
+    1
+  );
+});
+
+test("campaign partition binds finding backend provenance to its exact contributions", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partition-backend-set" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  for (const backend of ["echidna", "medusa"] as const) {
+    writeArtifact(
+      layout,
+      campaignId,
+      `${backend}-results.json`,
+      JSON.stringify({
+        schema_version: "ultrafuzz.property-campaign.v1",
+        fuzzer_backend: backend,
+        failures: [{ id: `failure-${backend}`, status: "reproduced", property_ids: ["property-1"] }]
+      })
+    );
+  }
+  const contributions = [
+    { fuzzer_backend: "echidna", failure_id: "failure-echidna" },
+    { fuzzer_backend: "medusa", failure_id: "failure-medusa" }
+  ];
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([accountedCampaignFinding("failure-echidna", ["property-1"], contributions, 2, ["echidna"])])
+  );
+  writeCampaignSummary(layout, campaignId, 2, 1);
+  const node = {
+    ...currentCampaignNode(["echidna-results.json", "medusa-results.json", "findings.json", "campaign-summary.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_BACKEND_MISMATCH")
+  );
+});
+
+test("campaign partition requires qualified references for colliding cross-backend failure IDs", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partition-qualified" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  for (const backend of ["echidna", "medusa"] as const) {
+    writeArtifact(
+      layout,
+      campaignId,
+      `${backend}-results.json`,
+      JSON.stringify({
+        schema_version: "ultrafuzz.property-campaign.v1",
+        fuzzer_backend: backend,
+        failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
+      })
+    );
+  }
+  const finding = {
+    ...accountedCampaignFinding("failure-1", ["property-1"], ["failure-1"], 1, ["echidna", "medusa"])
+  };
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([finding]));
+  writeCampaignSummary(layout, campaignId, 2, 1);
+  const node = {
+    ...currentCampaignNode(["echidna-results.json", "medusa-results.json", "findings.json", "campaign-summary.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const ambiguous = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(ambiguous.ok, false);
+  assert.ok(
+    ambiguous.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_REFERENCE_AMBIGUOUS")
+  );
+
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      {
+        ...finding,
+        contributing_backend_failures: [
+          { fuzzer_backend: "echidna", failure_id: "failure-1" },
+          { fuzzer_backend: "medusa", failure_id: "failure-1" }
+        ],
+        deduplication: { pre_dedup_count: 2 }
+      }
+    ])
+  );
+  const qualified = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(qualified.ok, true, JSON.stringify(qualified.diagnostics));
+});
+
+test("campaign gate conditionally reconciles the R55 summary failure counts with every backend failure and finding", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-r55-summary" });
+  campaignPropertyCatalog(layout, ["property-1", "property-3"]);
+  const campaignId = "stateful-invariant-campaign";
+  const failures = Array.from({ length: 29 }, (_value, index) => ({
+    id: `failure-${index + 1}`,
+    status: "reproduced",
+    property_ids: [index + 1 === 25 || index + 1 === 26 ? "property-3" : "property-1"]
+  }));
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([campaignFinding("failure-1", ["property-1"]), campaignFinding("failure-25", ["property-3"])])
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "campaign-summary.json",
+    JSON.stringify({
+      outcome: "partial",
+      failure_counts: { pre_deduplication: 29, post_deduplication: 2, blocked_unreproduced: 0 }
+    })
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, campaignId).ok, true);
+
+  writeArtifact(
+    layout,
+    campaignId,
+    "campaign-summary.json",
+    JSON.stringify({ failure_counts: { pre_deduplication: 0, post_deduplication: 0 } })
+  );
+  const mismatched = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(mismatched.ok, false);
+  assert.deepEqual(
+    mismatched.diagnostics
+      .filter((diagnostic) => diagnostic.code === "CAMPAIGN_SUMMARY_FAILURE_COUNT_MISMATCH")
+      .map((diagnostic) => diagnostic.path?.split(".").at(-1)),
+    ["pre_deduplication", "post_deduplication"]
+  );
+
+  // The node still declares json-object@1, so old summaries that predate the
+  // named block remain readable. Once failure_counts is present, both named
+  // integer fields are gated.
+  writeArtifact(layout, campaignId, "campaign-summary.json", JSON.stringify({ outcome: "partial" }));
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, campaignId).ok, true);
+  writeArtifact(
+    layout,
+    campaignId,
+    "campaign-summary.json",
+    JSON.stringify({ failure_counts: { pre_deduplication: 29 } })
+  );
+  const incomplete = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(incomplete.ok, false);
+  assert.ok(incomplete.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_SUMMARY_FAILURE_COUNT_INVALID"));
 });
 
 test("campaign gate still rejects a property-derived failure no finding covers", () => {
