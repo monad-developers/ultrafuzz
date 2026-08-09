@@ -18,6 +18,7 @@ import {
 
 import {
   ANALYSIS_BUNDLE_SCHEMA_VERSION,
+  parseStrictJsonBytes,
   writeAnalysisBundle,
   type AnalysisRecoverySummary
 } from "@ultrafuzz/artifacts";
@@ -95,6 +96,8 @@ import {
   type ModalSandboxState,
   type ModalWorkerStatus
 } from "./launch-state.js";
+import { MODAL_WORKER_RESULT_SCHEMA_ID } from "./modal-contracts.js";
+import { parseModalDocumentBytes } from "./modal-documents.js";
 import {
   REMOTE_CONFIG_DIR,
   REMOTE_CONFIG_PATH,
@@ -1630,10 +1633,7 @@ export async function overseeModalBenchmarkOnce(
           }
 
           const inspected = await inspectModalRecoveryVolume(modal, app, image, volume, launch.remote_root);
-          const workerStatus = latestModalWorkerStatus(
-            [parseJson(inspected.files["status.json"] ?? "{}"), parseJson(inspected.files["result.json"] ?? "{}")],
-            launch
-          );
+          const workerStatus = latestPersistedWorkerStatus(inspected.files, launch);
           const complete = isModalRecoveryResultComplete(inspected.canonical, workerStatus);
           const observedAt = new Date(now()).toISOString();
           const decision = reconcileModalRecoveryRow({
@@ -2098,7 +2098,10 @@ async function inspectModalRecoveryVolume(
     if (returnCode !== 0) {
       throw new Error(stderrText || stdoutText || `canonical recovery probe failed with exit code ${returnCode}`);
     }
-    return { files, canonical: parseCanonicalRecoveryProgress(parseJson(stdoutText)) };
+    return {
+      files,
+      canonical: parseCanonicalRecoveryProgress(parseJson(stdoutText, "canonical recovery probe output"))
+    };
   } finally {
     await inspector.terminate({ wait: true });
   }
@@ -2518,7 +2521,7 @@ export async function collectModalBenchmark(input: {
       const { state, app, image } = await requiredLaunchStateForInspection(input.statePath, modal);
       for (const launch of state.launches) {
         const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
-        const files = await readModalCollectResultFilesWithStatusRetry({
+        const files = await readModalCollectResultFiles({
           launch,
           readFiles: () =>
             readVolumeFiles(modal, app, image, volume, launch.remote_root, [
@@ -3160,54 +3163,42 @@ export async function readOptionalModalSandboxText(
   }
 }
 
-function parseJson(value: string): unknown {
+function parseJson(value: string, label: string): unknown {
   try {
-    return JSON.parse(value) as unknown;
-  } catch {
-    return {};
+    return parseStrictJsonBytes(Buffer.from(value, "utf8"), {
+      maxBytes: 16 * 1024 * 1024,
+      maxDepth: 128,
+      maxItems: 100_000,
+      maxProperties: 100_000
+    });
+  } catch (error) {
+    throw new Error(`${label} is not strict JSON`, { cause: error });
   }
 }
 
-export async function readModalCollectResultFilesWithStatusRetry(input: {
+export async function readModalCollectResultFiles(input: {
   readFiles: () => Promise<Record<string, string>>;
   launch: Pick<ModalLaunchRecord, "generation" | "attempt">;
-  maxAttempts?: number;
-  retryDelayMs?: number;
 }): Promise<Record<string, string>> {
-  const maxAttempts = input.maxAttempts ?? 3;
-  if (!Number.isSafeInteger(maxAttempts) || maxAttempts <= 0) {
-    throw new Error("Modal collection status retry attempts must be positive");
-  }
-  const retryDelayMs = input.retryDelayMs ?? 250;
-  if (!Number.isSafeInteger(retryDelayMs) || retryDelayMs < 0) {
-    throw new Error("Modal collection status retry delay must be non-negative");
-  }
-
-  let files: Record<string, string> | undefined;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    files = await input.readFiles();
-    if (!hasRetryableLiveStatusCollectionMismatch(files, input.launch)) return files;
-    if (attempt < maxAttempts && retryDelayMs > 0) await sleep(retryDelayMs);
-  }
-  return files!;
-}
-
-function hasRetryableLiveStatusCollectionMismatch(
-  files: Readonly<Record<string, string>>,
-  launch: Pick<ModalLaunchRecord, "generation" | "attempt">
-): boolean {
-  const status = files["status.json"];
-  return status !== undefined && parseModalWorkerResult(parseJson(status), launch) === undefined;
+  const files = await input.readFiles();
+  latestPersistedWorkerStatus(files, input.launch);
+  return files;
 }
 
 function latestPersistedWorkerStatus(
   files: Readonly<Record<string, string>>,
   launch: Pick<ModalLaunchRecord, "generation" | "attempt">
 ) {
-  return latestModalWorkerStatus(
-    [parseJson(files["status.json"] ?? "{}"), parseJson(files["result.json"] ?? "{}")],
-    launch
-  );
+  const values = (["status.json", "result.json"] as const).flatMap((name) => {
+    const contents = files[name];
+    if (contents === undefined) return [];
+    const value = parseModalDocumentBytes(MODAL_WORKER_RESULT_SCHEMA_ID, Buffer.from(contents, "utf8")).value;
+    if (parseModalWorkerResult(value, launch) === undefined) {
+      throw new Error(`Modal ${name} does not match the current launch attempt`);
+    }
+    return [value];
+  });
+  return latestModalWorkerStatus(values, launch);
 }
 
 /**
@@ -3246,7 +3237,13 @@ export function assertSanitizedModalCollectedFiles(
   for (const name of ["status.json", "result.json"] as const) {
     const contents = files[name];
     if (contents === undefined) continue;
-    const contract = parseModalWorkerResult(parseJson(contents), launch);
+    let contract: ReturnType<typeof parseModalWorkerResult>;
+    try {
+      const value = parseModalDocumentBytes(MODAL_WORKER_RESULT_SCHEMA_ID, Buffer.from(contents, "utf8")).value;
+      contract = parseModalWorkerResult(value, launch);
+    } catch (error) {
+      throw new Error(`refusing to collect an unsanitized Modal ${name}`, { cause: error });
+    }
     if (contract === undefined || (name === "result.json" && contract.result_type !== "terminal")) {
       throw new Error(`refusing to collect an unsanitized Modal ${name}`);
     }
