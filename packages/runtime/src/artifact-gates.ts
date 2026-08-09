@@ -3150,8 +3150,9 @@ function reportPropertyJoinDiagnostics(
       `${reportPath}#$.property_provenance[${entryIndex}].test_paths`
     );
 
-    const expectedBackends =
-      typeof entry.finding_id === "string" ? (fuzzerBackendsByFinding.get(entry.finding_id) ?? []) : [];
+    const expectedBackends = reportFindingAliases(entry).flatMap(
+      (findingId) => fuzzerBackendsByFinding.get(findingId) ?? []
+    );
     const actualBackends = Array.isArray(entry.fuzzer_backends)
       ? stringArray(entry.fuzzer_backends)
       : typeof entry.fuzzer_backend === "string"
@@ -3166,6 +3167,10 @@ function reportPropertyJoinDiagnostics(
     );
   }
   return diagnostics;
+}
+
+function reportFindingAliases(entry: Record<string, unknown>): string[] {
+  return [...new Set(stringArray([entry.finding_id, entry.upstream_id, entry.source_finding_id]))];
 }
 
 function readCampaignFuzzerBackends(layout: RunLayout): ReadonlyMap<string, readonly string[]> {

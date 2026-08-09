@@ -4026,6 +4026,89 @@ test("final report gate joins the default recon-only campaign backend", () => {
   assert.ok(mismatch.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_FUZZER_BACKEND_MISMATCH"));
 });
 
+test("final report gate joins renumbered findings through their source finding id", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-renumbered-report" });
+  const node = { ...plannedNode(["report.json"]), id: "final-report", logical_id: "final-report" };
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-1",
+          description: "Balances remain conserved",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-1" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["tests/recon/Properties.sol"],
+          test_paths: ["tests/recon/CryticToFoundry.sol"]
+        }
+      ]
+    })
+  );
+  for (const [artifactName, backend] of [
+    ["recon-fuzzer-results.json", "recon"],
+    ["medusa-results.json", "medusa"]
+  ] as const) {
+    writeArtifact(
+      layout,
+      "stateful-invariant-campaign",
+      artifactName,
+      JSON.stringify({
+        schema_version: "ultrafuzz.property-campaign.v1",
+        fuzzer_backend: backend,
+        failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
+      })
+    );
+  }
+
+  const report = (fuzzerBackends: string[]) =>
+    JSON.stringify({
+      schema_version: "1.0",
+      run_metadata: {},
+      issues: [],
+      non_production_outcomes: [],
+      property_provenance: [
+        {
+          finding_id: "NP-01",
+          source_finding_id: "failure-1",
+          title: "Renumbered non-production outcome",
+          property_ids: ["property-1"],
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-1" }],
+          implementation_paths: ["tests/recon/Properties.sol"],
+          test_paths: ["tests/recon/CryticToFoundry.sol"],
+          fuzzer_backends: fuzzerBackends
+        }
+      ]
+    });
+
+  writeArtifact(layout, node.id, "report.json", report(["medusa", "recon"]));
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
+
+  // Aliases are additive: a presentation ID cannot conceal a backend recorded
+  // against the source finding by claiming only a subset of the campaign set.
+  writeArtifact(layout, node.id, "report.json", report(["recon"]));
+  const mismatch = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(mismatch.ok, false);
+  assert.ok(mismatch.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_FUZZER_BACKEND_MISMATCH"));
+});
+
 test("final report gate rejects dangling property references while allowing historical provenance", () => {
   const historicalLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-historical-report" });
   const node = {
