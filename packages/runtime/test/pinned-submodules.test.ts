@@ -195,9 +195,7 @@ test("a failed immediate submodule restore preserves the transaction backup", (c
     fs.renameSync = originalRenameSync;
   }
 
-  const transactions = fs
-    .readdirSync(task)
-    .filter((entry) => entry.startsWith(".ultrafuzz-submodule-transaction-"));
+  const transactions = fs.readdirSync(task).filter((entry) => entry.startsWith(".ultrafuzz-submodule-transaction-"));
   assert.equal(transactions.length, 1);
   assert.equal(fs.existsSync(dependencyRoot), false);
   assert.equal(
