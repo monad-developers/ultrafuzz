@@ -3452,7 +3452,13 @@ function optionalPackageManifestBin(
   packageJsonPath: string
 ): string | Readonly<Record<string, string>> | undefined {
   const value = manifest.bin;
-  if (value === undefined || typeof value === "string") return value;
+  if (value === undefined) return undefined;
+  if (typeof value === "string") {
+    if (value.length === 0) {
+      throw new Error(`package-manager manifest bin must be a non-empty string: ${packageJsonPath}`);
+    }
+    return value;
+  }
   return packageManifestStringMap(value, "bin", packageJsonPath);
 }
 
@@ -3493,12 +3499,12 @@ function packageManifestStringMap(
   if (!isObjectRecord(value)) {
     throw new Error(`package-manager manifest ${field} must be an object: ${packageJsonPath}`);
   }
-  const projected: Record<string, string> = {};
+  const projected = nullPrototypeRecord<string>();
   for (const [key, entry] of Object.entries(value)) {
     if (typeof entry !== "string" || entry.length === 0) {
       throw new Error(`package-manager manifest ${field}.${key} must be a non-empty string: ${packageJsonPath}`);
     }
-    projected[key] = entry;
+    defineProjectedPackageManifestField(projected, key, entry);
   }
   return projected;
 }
@@ -3512,7 +3518,7 @@ function projectOptionalPackageManifestPeerMetadata(
   if (!isObjectRecord(value)) {
     throw new Error(`package-manager manifest peerDependenciesMeta must be an object: ${packageJsonPath}`);
   }
-  const projected: Record<string, Readonly<{ optional?: boolean }>> = {};
+  const projected = nullPrototypeRecord<Readonly<{ optional?: boolean }>>();
   for (const [key, entry] of Object.entries(value)) {
     if (!isObjectRecord(entry)) {
       throw new Error(`package-manager manifest peerDependenciesMeta.${key} must be an object: ${packageJsonPath}`);
@@ -3522,9 +3528,26 @@ function projectOptionalPackageManifestPeerMetadata(
         `package-manager manifest peerDependenciesMeta.${key}.optional must be a boolean: ${packageJsonPath}`
       );
     }
-    projected[key] = entry.optional === undefined ? {} : { optional: entry.optional };
+    defineProjectedPackageManifestField(
+      projected,
+      key,
+      entry.optional === undefined ? {} : { optional: entry.optional }
+    );
   }
   return { peerDependenciesMeta: projected };
+}
+
+function nullPrototypeRecord<Value>(): Record<string, Value> {
+  return Object.create(null) as Record<string, Value>;
+}
+
+function defineProjectedPackageManifestField<Value>(target: Record<string, Value>, key: string, value: Value): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    configurable: false,
+    writable: false
+  });
 }
 
 function installedSmithersPackageRoot(projectRoot: string): string {

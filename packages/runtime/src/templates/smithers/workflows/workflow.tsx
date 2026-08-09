@@ -140,17 +140,17 @@ const cloudWorkerInputSchema = z.strictObject({
 
 const inputSchema = z.union([localWorkflowInputSchema, cloudWorkerInputSchema]);
 
-const taskOutput = z.object({
+const taskOutput = z.strictObject({
   summary: z.string().min(1)
 });
 
-const preparationOutput = z.object({
+const preparationOutput = z.strictObject({
   prepared: z.literal(true)
 });
 
-const verificationOutput = z.object({
+const verificationOutput = z.strictObject({
   artifacts: z.array(
-    z.object({
+    z.strictObject({
       path: z.string().min(1),
       contract: z.string().min(1),
       contract_digest: z.string().regex(/^[0-9a-f]{64}$/u),

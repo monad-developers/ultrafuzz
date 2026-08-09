@@ -4709,6 +4709,10 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   );
   const expectedArtifactDir = path.join(run.value!.run_root, "artifacts", "project-discovery");
   assert.match(workflowSource, /smithers-orchestrator/);
+  assert.match(workflowSource, /const taskOutput = z\.strictObject\(/u);
+  assert.match(workflowSource, /const preparationOutput = z\.strictObject\(/u);
+  assert.match(workflowSource, /const verificationOutput = z\.strictObject\(/u);
+  assert.doesNotMatch(workflowSource, /z\.object\(/u);
   // Explicit index path: a sibling .smithers/agents.ts scaffolded by Smithers
   // would otherwise shadow the .smithers/agents/ directory under bun.
   assert.match(workflowSource, /import \* as projectAgents from "\.\.\/agents\/index\.ts";/);
@@ -7052,6 +7056,21 @@ test("package-manager-owned Smithers manifests use bounded strict parsing and na
   assert.equal(validPosture.bin_path, paths.shim);
   assert.equal(validPosture.layout_error, null);
 
+  fs.writeFileSync(
+    paths.packageJson,
+    `{"name":"smithers-orchestrator","version":${JSON.stringify(
+      SMITHERS_ORCHESTRATOR_VERSION
+    )},"bin":{"__proto__":"literal-package-manager-key","smithers":${JSON.stringify(
+      SMITHERS_ORCHESTRATOR_BIN_PATH
+    )}},"peerDependencies":{"__proto__":"1.0.0"},"peerDependenciesMeta":{"__proto__":{"optional":true}}}\n`,
+    "utf8"
+  );
+  const prototypeKeyPosture = inspectSmithersInstallation(project);
+  assert.equal(prototypeKeyPosture.installed_version, SMITHERS_ORCHESTRATOR_VERSION);
+  assert.equal(prototypeKeyPosture.installed_bin_target, SMITHERS_ORCHESTRATOR_BIN_PATH);
+  assert.equal(prototypeKeyPosture.layout_error, null);
+  assert.equal(({} as { optional?: unknown }).optional, undefined);
+
   const tooDeep = `${"[".repeat(34)}null${"]".repeat(34)}`;
   const malformed: Array<{ label: string; bytes: Buffer; expected: RegExp }> = [
     {
@@ -7067,6 +7086,11 @@ test("package-manager-owned Smithers manifests use bounded strict parsing and na
       label: "excessive depth",
       bytes: Buffer.from(`{"version":"${SMITHERS_ORCHESTRATOR_VERSION}","future":${tooDeep}}`),
       expected: /nesting-depth limit of 32/iu
+    },
+    {
+      label: "empty string bin",
+      bytes: Buffer.from(`{"version":"${SMITHERS_ORCHESTRATOR_VERSION}","bin":""}`),
+      expected: /bin must be a non-empty string/iu
     }
   ];
   for (const fixture of malformed) {
