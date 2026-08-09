@@ -927,7 +927,11 @@ test("finding and report v2 schemas require their current canonical shapes", () 
     },
     issues: [],
     non_production_outcomes: [],
-    property_provenance: []
+    property_provenance: [],
+    property_implementation_coverage: {
+      status: "not-planned",
+      reason: "property-implementation-track-not-declared"
+    }
   };
   assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(report)).ok, true);
   assert.equal(
@@ -937,6 +941,16 @@ test("finding and report v2 schemas require their current canonical shapes", () 
   const withoutProvenance = { ...report } as Partial<typeof report>;
   delete withoutProvenance.property_provenance;
   assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(withoutProvenance)).ok, false);
+  const withoutCoverage = { ...report } as Partial<typeof report>;
+  delete withoutCoverage.property_implementation_coverage;
+  assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(withoutCoverage)).ok, false);
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@2",
+      JSON.stringify({ ...report, property_implementation_coverage: "unavailable" })
+    ).ok,
+    false
+  );
 
   const nonProductionOutcome = {
     ...nonPropertyFinding,

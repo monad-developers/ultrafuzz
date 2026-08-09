@@ -49,9 +49,19 @@ The closed `run_metadata` object has `run_id`, `source_run_id`, `repository`,
 `elapsed_time`, `models_used`, `tokens_used`, `estimated_spend`,
 `partial_pricing`, and integer `strategy_loops`. Write canonical finding v2
 objects with matching lifecycle records in production `issues` and
-`non_production_outcomes`, and `property_provenance: []`. The `issues` array is
-the scoring source of truth and must remain non-empty whenever at least one
-deduped finding is supported as a production bug.
+`non_production_outcomes`, `property_provenance: []`, and this required typed
+coverage value because the smoke topology does not declare a property
+implementation track:
+
+```json
+"property_implementation_coverage": {
+  "status": "not-planned",
+  "reason": "property-implementation-track-not-declared"
+}
+```
+
+The `issues` array is the scoring source of truth and must remain non-empty
+whenever at least one deduped finding is supported as a production bug.
 
 Every non-production outcome also preserves the canonical finding v2 fields and
 adds required `triage_classification`, `recommended_next_action`, and
@@ -61,5 +71,12 @@ Write `{{artifact_path}}/report.md` beginning with `# Ultrafuzz report`. Include
 a concise run summary, an issue index, and for each production issue its
 severity reasoning, evidence/PoC, affected code, and strategy detections. Add a
 short non-production outcomes table when needed. State `No issues reported.`
-only when the evidence supports no production issue. Validate both
-required files against their output contracts, then stop.
+only when the evidence supports no production issue. Under
+`## Property implementation coverage`, render exactly:
+
+```markdown
+- Status: `not-planned`
+- Reason: `property-implementation-track-not-declared`
+```
+
+Validate both required files against their output contracts, then stop.

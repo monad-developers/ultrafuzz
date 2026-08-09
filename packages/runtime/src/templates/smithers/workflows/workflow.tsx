@@ -506,7 +506,12 @@ function authoritativeFinalReportCoverage(task: (typeof taskSpecs)[number]): unk
     "implemented-properties.json",
     "ultrafuzz/implemented-properties@3"
   );
-  if (implementation === undefined) return "unavailable";
+  if (implementation === undefined) {
+    return {
+      status: "not-planned",
+      reason: "property-implementation-track-not-declared"
+    };
+  }
   const catalog = verifiedCurrentAncestorJsonArtifact(
     task,
     "property-specification-fanin",

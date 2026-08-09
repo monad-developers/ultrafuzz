@@ -339,6 +339,13 @@ both representations with the implementation handoff. Missing current
 selection metadata is a contract failure, not an `"unavailable"` compatibility
 case.
 
+Topologies that do not declare the property-implementation track use the
+required typed value `{ "status": "not-planned", "reason":
+"property-implementation-track-not-declared" }`. This value describes the
+current topology; it is not a historical fallback. The Markdown projection
+renders the same two fields, and omission or the former `"unavailable"` string
+is schema-invalid.
+
 Runtime artifact gates reject unknown canonical IDs and campaign references to
 properties that were not recorded with `implemented` status. They validate each
 campaign result record independently, judge unexplained findings against the

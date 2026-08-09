@@ -144,6 +144,10 @@ function currentReport(runId: string, overrides: Record<string, unknown> = {}): 
     issues: [],
     non_production_outcomes: [],
     property_provenance: [],
+    property_implementation_coverage: {
+      status: "not-planned",
+      reason: "property-implementation-track-not-declared"
+    },
     ...overrides
   };
 }
@@ -3899,13 +3903,15 @@ test("current final reports preserve implementation coverage in JSON and Markdow
   writeArtifact(layout, node.id, reportPath, JSON.stringify(baseReport));
   writeArtifact(layout, node.id, "report.md", "# Ultrafuzz report\n\nNo coverage section yet.\n");
 
-  const missing = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(missing.ok, false);
+  const wrongCurrentVariant = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(wrongCurrentVariant.ok, false);
   assert.ok(
-    missing.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MISSING")
+    wrongCurrentVariant.diagnostics.some(
+      (diagnostic) => diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MISMATCH"
+    )
   );
   assert.ok(
-    missing.diagnostics.some(
+    wrongCurrentVariant.diagnostics.some(
       (diagnostic) => diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISSING"
     )
   );
@@ -4962,7 +4968,7 @@ test("the coverage examples in final-report.md satisfy the coverage gate", () =>
   const finalReport = loadBuiltInPromptAssets().find((asset) => asset.relativePath === "review/final-report.md");
   assert.ok(finalReport, "missing built-in prompt review/final-report.md");
   const coverageJson = JSON.parse(
-    fencedBlockAfter(finalReport.markdown, "emit `property_implementation_coverage` with", "json")
+    fencedBlockAfter(finalReport.markdown, "`property_implementation_coverage` has this", "json")
   ) as Record<string, unknown>;
   const coverageMarkdown = fencedBlockAfter(
     finalReport.markdown,

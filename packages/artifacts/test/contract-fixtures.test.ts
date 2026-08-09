@@ -435,7 +435,10 @@ test("Ajv and retained Zod parsers agree on canonical unique-array constraints",
       implemented_property_ids: [],
       blocked_property_ids: [],
       pending_property_ids: [],
-      deferred_property_ids: []
+      deferred_property_ids: [],
+      reference_expected_property_ids: [],
+      reference_expectation_ids: [],
+      blocker_summaries: []
     }
   };
 

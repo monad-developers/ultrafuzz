@@ -70,7 +70,19 @@ function renderableReport(): Record<string, unknown> {
         implementation_paths: ["test/Invariant.t.sol"],
         test_paths: ["test/Invariant.t.sol"]
       }
-    ]
+    ],
+    property_implementation_coverage: {
+      priority_threshold: "high",
+      priorities: ["high"],
+      selected_property_ids: ["property-1"],
+      implemented_property_ids: ["property-1"],
+      blocked_property_ids: [],
+      pending_property_ids: [],
+      deferred_property_ids: [],
+      reference_expected_property_ids: [],
+      reference_expectation_ids: [],
+      blocker_summaries: []
+    }
   };
 }
 
@@ -151,13 +163,19 @@ test("canonical final-report projection supports a meaningful zero-issue report"
     run_metadata: runMetadata("zero-issue"),
     issues: [],
     non_production_outcomes: [],
-    property_provenance: []
+    property_provenance: [],
+    property_implementation_coverage: {
+      status: "not-planned",
+      reason: "property-implementation-track-not-declared"
+    }
   });
 
   assert.deepEqual(projection.report.issues, []);
   assert.match(projection.markdown, /^# Ultrafuzz report\n/u);
   assert.match(projection.markdown, /^No issues reported\.$/mu);
   assert.match(projection.markdown, /^## Property implementation coverage$/mu);
+  assert.match(projection.markdown, /^- Status: `not-planned`$/mu);
+  assert.match(projection.markdown, /^- Reason: `property-implementation-track-not-declared`$/mu);
   assert.match(projection.markdown, /^## Property provenance$/mu);
   assert.doesNotMatch(projection.markdown, /\| Issue id \| Title \|/u);
 });

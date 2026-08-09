@@ -779,7 +779,11 @@
       },
       "issues": [],
       "non_production_outcomes": [],
-      "property_provenance": []
+      "property_provenance": [],
+      "property_implementation_coverage": {
+        "status": "not-planned",
+        "reason": "property-implementation-track-not-declared"
+      }
     },
     "invalid": {
       "schema_version": "ultrafuzz.report.v2",
@@ -797,6 +801,10 @@
       "issues": [],
       "non_production_outcomes": [],
       "property_provenance": [],
+      "property_implementation_coverage": {
+        "status": "not-planned",
+        "reason": "property-implementation-track-not-declared"
+      },
       "__unexpected_fixture_field": true
     }
   },

@@ -101,7 +101,11 @@ function terminalRunFixture(runRoot: string, status: "succeeded" | "timed-out" |
           },
           issues: [],
           non_production_outcomes: [],
-          property_provenance: []
+          property_provenance: [],
+          property_implementation_coverage: {
+            status: "not-planned",
+            reason: "property-implementation-track-not-declared"
+          }
         })
       }
     }

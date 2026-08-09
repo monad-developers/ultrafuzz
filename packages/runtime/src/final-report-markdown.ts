@@ -517,12 +517,12 @@ function appendPropertyProvenance(
 
 function appendPropertyImplementationCoverage(lines: string[], value: unknown): void {
   lines.push("", "## Property implementation coverage", "");
-  if (isUnavailable(value)) {
-    lines.push("unavailable");
-    return;
-  }
   if (!isRecord(value)) {
-    lines.push("unavailable");
+    throw new Error("Validated final report is missing typed property implementation coverage");
+  }
+  if (value.status === "not-planned") {
+    lines.push("- Status: `not-planned`");
+    lines.push("- Reason: `property-implementation-track-not-declared`");
     return;
   }
   const priorities = Array.isArray(value.priorities) ? value.priorities : [];

@@ -62,6 +62,10 @@ export function currentTerminalReport(overrides: Record<string, unknown> = {}): 
     issues: [],
     non_production_outcomes: [],
     property_provenance: [],
+    property_implementation_coverage: {
+      status: "not-planned",
+      reason: "property-implementation-track-not-declared"
+    },
     ...overrides
   };
 }

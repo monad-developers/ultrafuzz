@@ -439,11 +439,11 @@ human-readable Strategy section. Do not call this metric Temperature.
 ## Additional Sections
 
 Add `## Property implementation coverage` after the production issue entries
-and before `## Property provenance`. Read the implementation handoff's
-`selection` object and property records. When
-the handoff is historical or lacks `selection`, render `unavailable` instead
-of guessing. In `report.json`, emit `property_implementation_coverage` with
-this exact shape:
+and before `## Property provenance`. The runtime supplies the authoritative
+current-run value in this prompt. Copy that JSON value exactly; do not derive,
+repair, normalize, omit, or convert it. When the topology declares the
+property-implementation track, `property_implementation_coverage` has this
+exact tracked shape:
 
 ```json
 {
@@ -476,8 +476,25 @@ canonical catalog order. Copy that summary text verbatim from the handoff
 record's `blocker.summary` — do not shorten, rephrase, re-punctuate, or
 re-case it. The typed blocker's other fields stay in the handoff record; do not
 copy the blocker object into the report.
-If selection metadata is unavailable, use the string `"unavailable"` in
-`report.json` and write `unavailable` in Markdown.
+When the current topology does not declare a property-implementation track,
+the authoritative value instead has this exact typed shape:
+
+```json
+{
+  "status": "not-planned",
+  "reason": "property-implementation-track-not-declared"
+}
+```
+
+Render that variant in Markdown as exactly:
+
+```markdown
+- Status: `not-planned`
+- Reason: `property-implementation-track-not-declared`
+```
+
+Missing or invalid current selection metadata is a contract failure. It is not
+an absence case and must never be converted to the `not-planned` variant.
 
 The Markdown body of `## Property implementation coverage` is compared line by
 line against the JSON above, so write exactly these bullets, in this order, with
@@ -664,10 +681,10 @@ Before finishing, verify that:
   property-derived finding and no invented property IDs for non-property
   findings.
 - `report.md` contains `## Property implementation coverage` with counts that
-  match the implementation handoff, or the literal `unavailable` for
-  historical artifacts.
-- `report.json.property_implementation_coverage` is either the exact
-  machine-readable coverage object or the string `unavailable`.
+  match the authoritative tracked value, or the exact typed `not-planned`
+  rendering when the current topology has no property-implementation track.
+- `report.json.property_implementation_coverage` is required and is either the
+  exact authoritative tracked object or the exact typed `not-planned` object.
 - `report.json.run_metadata.tokens_used` and
   `report.json.run_metadata.estimated_spend` match the values rendered in
   `report.md`, and preserve the exact cumulative accounting values from

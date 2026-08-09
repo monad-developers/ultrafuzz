@@ -2166,8 +2166,19 @@
     "property_implementation_coverage": {
       "anyOf": [
         {
-          "type": "string",
-          "const": "unavailable"
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "const": "not-planned"
+            },
+            "reason": {
+              "type": "string",
+              "const": "property-implementation-track-not-declared"
+            }
+          },
+          "required": ["status", "reason"],
+          "additionalProperties": false
         },
         {
           "type": "object",
@@ -2263,14 +2274,24 @@
             "implemented_property_ids",
             "blocked_property_ids",
             "pending_property_ids",
-            "deferred_property_ids"
+            "deferred_property_ids",
+            "reference_expected_property_ids",
+            "reference_expectation_ids",
+            "blocker_summaries"
           ],
           "additionalProperties": false
         }
       ]
     }
   },
-  "required": ["schema_version", "run_metadata", "issues", "non_production_outcomes", "property_provenance"],
+  "required": [
+    "schema_version",
+    "run_metadata",
+    "issues",
+    "non_production_outcomes",
+    "property_provenance",
+    "property_implementation_coverage"
+  ],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:report:2",
   "title": "Ultrafuzz terminal report"

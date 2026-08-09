@@ -1790,6 +1790,8 @@ test("generated Smithers verifier treats the final-report projector only as a no
   assert.match(verifier, /agent-owned bytes were left unchanged/u);
   assert.doesNotMatch(verifier, /writeFile|writeJson|rename|unlink|rmSync/u);
   assert.doesNotMatch(source, /ultrafuzz\/implemented-properties@1|ultrafuzz\/implemented-properties@2/u);
+  assert.match(source, /status: "not-planned",\s+reason: "property-implementation-track-not-declared"/u);
+  assert.doesNotMatch(source, /return "unavailable"/u);
 });
 
 test("generated Smithers agent rejects legacy generated-test string lists without conversion", () => {

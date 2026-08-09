@@ -1115,9 +1115,14 @@ const reportCoverageSchema = z.strictObject({
   blocked_property_ids: uniqueStrings(),
   pending_property_ids: uniqueStrings(),
   deferred_property_ids: uniqueStrings(),
-  reference_expected_property_ids: uniqueStrings().optional(),
-  reference_expectation_ids: uniqueStrings().optional(),
-  blocker_summaries: stringList.optional()
+  reference_expected_property_ids: uniqueStrings(),
+  reference_expectation_ids: uniqueStrings(),
+  blocker_summaries: stringList
+});
+
+const reportCoverageNotPlannedSchema = z.strictObject({
+  status: z.literal("not-planned"),
+  reason: z.literal("property-implementation-track-not-declared")
 });
 
 const reportIssueSchema = findingSchema.safeExtend({
@@ -1160,7 +1165,7 @@ export const reportSchema = withDocumentMetadata(
     issues: z.array(reportIssueSchema),
     non_production_outcomes: z.array(reportNonProductionOutcomeSchema),
     property_provenance: z.array(reportPropertyProvenanceSchema),
-    property_implementation_coverage: z.union([z.literal("unavailable"), reportCoverageSchema]).optional()
+    property_implementation_coverage: z.union([reportCoverageNotPlannedSchema, reportCoverageSchema])
   }),
   "report",
   2,
