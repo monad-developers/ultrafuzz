@@ -136,6 +136,31 @@ export interface ImplementedPropertiesArtifact {
   selection?: ImplementedPropertySelection;
 }
 
+/**
+ * Canonical terminal-report projection of one current invariant implementation
+ * handoff. The value is derived evidence: report authors do not own any field.
+ */
+export interface PropertyImplementationCoverage {
+  priority_threshold: PropertyPriority;
+  priorities: PropertyPriority[];
+  selected_property_ids: string[];
+  implemented_property_ids: string[];
+  blocked_property_ids: string[];
+  pending_property_ids: string[];
+  deferred_property_ids: string[];
+  reference_expected_property_ids: string[];
+  reference_expectation_ids: string[];
+  blocker_summaries: string[];
+}
+
+export interface PropertyImplementationCoverageDerivationOptions {
+  configuredSelection?: Pick<ImplementedPropertySelection, "priority_threshold" | "priorities">;
+  requireConfiguredSelection?: boolean;
+  catalogPath?: string;
+  implementationPath?: string;
+  configPath?: string;
+}
+
 export interface PropertyCampaignFailure extends Record<string, unknown> {
   id: string;
   status: string;
@@ -663,4 +688,160 @@ export function validatePropertyReferences(
     }
   }
   return issues;
+}
+
+/**
+ * Reconstruct the complete current-run report coverage object from canonical
+ * property evidence. This deliberately ignores any model-authored report value.
+ * Callers must still establish artifact/path authority before passing bytes in.
+ */
+export function derivePropertyImplementationCoverage(
+  catalogInput: PropertiesArtifact,
+  implementationInput: ImplementedPropertiesArtifact,
+  options: PropertyImplementationCoverageDerivationOptions = {}
+): SchemaValidationResult<PropertyImplementationCoverage> {
+  const catalogPath = options.catalogPath ?? "properties.json";
+  const implementationPath = options.implementationPath ?? "implemented-properties.json";
+  const configPath = options.configPath ?? "config.resolved.toml";
+  const catalog = validatePropertiesSchema(catalogInput, catalogPath);
+  const implementation = validateImplementedPropertiesSchema(implementationInput, implementationPath, {
+    requireSelection: true
+  });
+  const issues: SchemaValidationIssue[] = [...catalog.issues, ...implementation.issues];
+  if (catalog.value === undefined || implementation.value === undefined) {
+    return { ok: false, issues };
+  }
+  const selection = implementation.value.selection;
+  if (selection === undefined) {
+    return { ok: false, issues };
+  }
+
+  const expectedPriorities = PROPERTY_PRIORITIES.slice(
+    0,
+    PROPERTY_PRIORITIES.indexOf(selection.priority_threshold) + 1
+  );
+  if (!sameStringSequence(selection.priorities, expectedPriorities)) {
+    issues.push({
+      code: "PROPERTY_IMPLEMENTATION_SELECTION_INVALID",
+      message: `Implementation selection priorities must include exactly the priorities at or above ${JSON.stringify(selection.priority_threshold)}`,
+      path: `${implementationPath}#$.selection.priorities`
+    });
+  }
+
+  const configuredSelection = options.configuredSelection;
+  if (configuredSelection === undefined) {
+    if (options.requireConfiguredSelection) {
+      issues.push({
+        code: "PROPERTY_IMPLEMENTATION_CONFIG_MISSING",
+        message:
+          "Current invariant implementation coverage cannot be reconstructed without resolved invariant priority configuration",
+        path: configPath
+      });
+    }
+  } else if (
+    selection.priority_threshold !== configuredSelection.priority_threshold ||
+    !sameStringSequence(selection.priorities, configuredSelection.priorities)
+  ) {
+    issues.push({
+      code: "PROPERTY_IMPLEMENTATION_SELECTION_CONFIG_MISMATCH",
+      message: "Implementation selection does not match the resolved invariant priority configuration",
+      path: `${implementationPath}#$.selection`
+    });
+  }
+
+  const expectedIds = catalog.value.properties
+    .filter(
+      (property) =>
+        selection.priorities.includes(property.priority) ||
+        (property.reference_expectations !== undefined && property.reference_expectations.length > 0)
+    )
+    .map((property) => property.id);
+  if (!sameStringSequence(selection.property_ids, expectedIds)) {
+    const selectedIds = new Set(selection.property_ids);
+    const expectedIdSet = new Set(expectedIds);
+    issues.push({
+      code: "PROPERTY_IMPLEMENTATION_SELECTION_MISMATCH",
+      message: `Implementation selection must list every canonical property matching its priority scope or an explicit reference expectation in catalog order (missing: ${JSON.stringify(expectedIds.filter((propertyId) => !selectedIds.has(propertyId)))}, extra: ${JSON.stringify(selection.property_ids.filter((propertyId) => !expectedIdSet.has(propertyId)))})`,
+      path: `${implementationPath}#$.selection.property_ids`
+    });
+  }
+
+  const recordsById = new Map(implementation.value.properties.map((record) => [record.property_id, record]));
+  const expectedIdSet = new Set(expectedIds);
+  const missingRecords = expectedIds.filter((propertyId) => !recordsById.has(propertyId));
+  const extraRecords = implementation.value.properties
+    .map((record) => record.property_id)
+    .filter((propertyId) => !expectedIdSet.has(propertyId));
+  if (recordsById.size !== expectedIds.length || missingRecords.length > 0 || extraRecords.length > 0) {
+    issues.push({
+      code: "PROPERTY_IMPLEMENTATION_COVERAGE_INCOMPLETE",
+      message: `Implementation records must cover exactly the selected canonical properties (missing: ${JSON.stringify(missingRecords)}, extra: ${JSON.stringify(extraRecords)})`,
+      path: `${implementationPath}#$.properties`
+    });
+  }
+
+  for (const [recordIndex, record] of implementation.value.properties.entries()) {
+    const canonical = catalog.value.properties.find((property) => property.id === record.property_id);
+    const expectedReferenceExpectations = canonical?.reference_expectations ?? [];
+    const actualReferenceExpectations = record.reference_expectations ?? [];
+    if (!sameStringSet(actualReferenceExpectations, expectedReferenceExpectations)) {
+      issues.push({
+        code: "PROPERTY_IMPLEMENTATION_REFERENCE_EXPECTATIONS_MISMATCH",
+        message: `Implementation record ${JSON.stringify(record.property_id)} must preserve the complete canonical reference expectation ID set`,
+        path: `${implementationPath}#$.properties[${recordIndex}].reference_expectations`
+      });
+    }
+    if (expectedIdSet.has(record.property_id) && record.status !== "implemented" && record.blocker === undefined) {
+      issues.push({
+        code: "PROPERTY_IMPLEMENTATION_BLOCKER_MISSING",
+        message: `Selected property ${JSON.stringify(record.property_id)} is ${record.status} and must carry an actionable blocker with code, summary, and next_action`,
+        path: `${implementationPath}#$.properties[${recordIndex}].blocker`
+      });
+    }
+  }
+
+  if (issues.length > 0) {
+    return { ok: false, issues };
+  }
+
+  const idsWithStatus = (status: PropertyImplementationStatus): string[] =>
+    expectedIds.filter((propertyId) => recordsById.get(propertyId)?.status === status);
+  const referenceExpectedPropertyIds = catalog.value.properties
+    .filter((property) => (property.reference_expectations?.length ?? 0) > 0)
+    .map((property) => property.id);
+  const referenceExpectationIds = [
+    ...new Set(catalog.value.properties.flatMap((property) => property.reference_expectations ?? []))
+  ];
+  const blockerSummaries = expectedIds.flatMap((propertyId) => {
+    const record = recordsById.get(propertyId);
+    return record === undefined || record.status === "implemented" || record.blocker === undefined
+      ? []
+      : [`${propertyId}: ${record.blocker.summary}`];
+  });
+
+  return {
+    ok: true,
+    issues: [],
+    value: {
+      priority_threshold: selection.priority_threshold,
+      priorities: [...selection.priorities],
+      selected_property_ids: expectedIds,
+      implemented_property_ids: idsWithStatus("implemented"),
+      blocked_property_ids: idsWithStatus("blocked"),
+      pending_property_ids: idsWithStatus("pending"),
+      deferred_property_ids: idsWithStatus("deferred"),
+      reference_expected_property_ids: referenceExpectedPropertyIds,
+      reference_expectation_ids: referenceExpectationIds,
+      blocker_summaries: blockerSummaries
+    }
+  };
+}
+
+function sameStringSequence(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  const rightSet = new Set(right);
+  return new Set(left).size === rightSet.size && left.every((value) => rightSet.has(value));
 }

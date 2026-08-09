@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   assertNoSymlinkComponents,
   assertRegularFileInside,
+  derivePropertyImplementationCoverage,
   layoutForRunRoot,
   readArtifactManifest,
   resolveCampaignFindingBackends,
@@ -58,7 +59,11 @@ export function reconcileReportArtifacts(runRoot: string): ReconciledReportArtif
   }
 
   if (!supportsCanonicalFinalReportProjection(original.value)) {
-    if (readImplementedPropertiesArtifact(root)?.selection !== undefined) {
+    if (
+      logicalArtifactContract(root, "stateful-invariant-implement-properties", "implemented-properties.json") ===
+        "ultrafuzz/implemented-properties@2" ||
+      readImplementedPropertiesArtifact(root)?.selection !== undefined
+    ) {
       throw new Error("current invariant final report is not renderable and cannot be preserved as historical");
     }
     if (!fs.existsSync(markdownPath)) {
@@ -231,73 +236,74 @@ function reconcilePropertyProvenance(runRoot: string, report: JsonRecord): JsonR
 }
 
 function reconcilePropertyImplementationCoverage(runRoot: string, report: JsonRecord): JsonRecord {
-  const catalog = readPropertiesArtifact(runRoot);
-  const implementation = readImplementedPropertiesArtifact(runRoot);
-  if (catalog === undefined || implementation?.selection === undefined) {
+  const implementationContract = logicalArtifactContract(
+    runRoot,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json"
+  );
+  if (implementationContract === "ultrafuzz/implemented-properties@1") {
+    return { ...report, property_implementation_coverage: "unavailable" };
+  }
+  if (implementationContract !== undefined && implementationContract !== "ultrafuzz/implemented-properties@2") {
+    throw new Error(
+      `current-run property implementation handoff declares unexpected contract ${JSON.stringify(implementationContract)}`
+    );
+  }
+
+  const implementationPath = logicalArtifactPath(
+    runRoot,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json"
+  );
+  if (implementationPath === undefined) {
+    if (implementationContract === "ultrafuzz/implemented-properties@2") {
+      throw new Error("current-run property implementation handoff is unavailable");
+    }
+    return { ...report, property_implementation_coverage: "unavailable" };
+  }
+  const implementationResult = validateImplementedPropertiesSchema(
+    readUnknown(runRoot, implementationPath),
+    implementationPath,
+    { requireSelection: implementationContract === "ultrafuzz/implemented-properties@2" }
+  );
+  if (!implementationResult.ok || implementationResult.value === undefined) {
+    if (implementationContract !== "ultrafuzz/implemented-properties@2") {
+      return { ...report, property_implementation_coverage: "unavailable" };
+    }
+    const detail = implementationResult.issues
+      .map((issue) => `${issue.code} at ${issue.path}: ${issue.message}`)
+      .join("; ");
+    throw new Error(`current-run property implementation handoff is invalid: ${detail}`);
+  }
+  const implementation = implementationResult.value;
+  if (implementation.selection === undefined) {
     return { ...report, property_implementation_coverage: "unavailable" };
   }
 
-  const selection = implementation.selection;
-  const priorityOrder = ["high", "medium", "low"] as const;
-  const thresholdIndex = priorityOrder.indexOf(selection.priority_threshold);
-  const expectedPriorities = priorityOrder.slice(0, thresholdIndex + 1);
-  if (!sameStringArray(selection.priorities, expectedPriorities)) {
-    throw new Error("current-run property implementation selection priorities do not match its threshold");
+  const catalogPath = logicalArtifactPath(runRoot, "property-specification-fanin", "properties.json");
+  if (catalogPath === undefined) {
+    throw new Error("current-run canonical property catalog is unavailable");
   }
+  const catalogResult = validatePropertiesSchema(readUnknown(runRoot, catalogPath), catalogPath);
+  if (!catalogResult.ok || catalogResult.value === undefined) {
+    const detail = catalogResult.issues.map((issue) => `${issue.code} at ${issue.path}: ${issue.message}`).join("; ");
+    throw new Error(`current-run canonical property catalog is invalid: ${detail}`);
+  }
+  const catalog = catalogResult.value;
+
   const configuredSelection = readConfiguredInvariantPrioritySelection(runRoot);
-  if (
-    configuredSelection !== undefined &&
-    (selection.priority_threshold !== configuredSelection.priority_threshold ||
-      !sameStringArray(selection.priorities, configuredSelection.priorities))
-  ) {
-    throw new Error("current-run property implementation selection does not match resolved invariant configuration");
-  }
-  const expectedIds = catalog.properties
-    .filter(
-      (property) =>
-        selection.priorities.includes(property.priority) ||
-        (property.reference_expectations !== undefined && property.reference_expectations.length > 0)
-    )
-    .map((property) => property.id);
-  if (!sameStringArray(selection.property_ids, expectedIds)) {
-    throw new Error("current-run property implementation selection does not match the canonical catalog");
-  }
-  const recordsById = new Map(implementation.properties.map((record) => [record.property_id, record]));
-  if (
-    recordsById.size !== expectedIds.length ||
-    expectedIds.some((propertyId) => !recordsById.has(propertyId)) ||
-    implementation.properties.some((record) => !expectedIds.includes(record.property_id))
-  ) {
-    throw new Error("current-run property implementation records do not match the canonical selection");
-  }
-  const idsWithStatus = (status: string): string[] =>
-    expectedIds.filter((propertyId) => recordsById.get(propertyId)?.status === status);
-  const blockerSummaries = expectedIds.flatMap((propertyId) => {
-    const record = recordsById.get(propertyId);
-    if (record === undefined || record.status === "implemented" || record.blocker === undefined) return [];
-    return [`${propertyId}: ${record.blocker.summary}`];
+  const derived = derivePropertyImplementationCoverage(catalog, implementation, {
+    configuredSelection,
+    requireConfiguredSelection: true,
+    catalogPath,
+    implementationPath,
+    configPath: path.join(runRoot, "config.resolved.toml")
   });
-  const referenceExpectedPropertyIds = catalog.properties
-    .filter((property) => (property.reference_expectations?.length ?? 0) > 0)
-    .map((property) => property.id);
-  const referenceExpectationIds = uniqueStrings(
-    catalog.properties.flatMap((property) => property.reference_expectations ?? [])
-  );
-  return {
-    ...report,
-    property_implementation_coverage: {
-      priority_threshold: selection.priority_threshold,
-      priorities: selection.priorities,
-      selected_property_ids: expectedIds,
-      implemented_property_ids: idsWithStatus("implemented"),
-      blocked_property_ids: idsWithStatus("blocked"),
-      pending_property_ids: idsWithStatus("pending"),
-      deferred_property_ids: idsWithStatus("deferred"),
-      reference_expected_property_ids: referenceExpectedPropertyIds,
-      reference_expectation_ids: referenceExpectationIds,
-      blocker_summaries: blockerSummaries
-    }
-  };
+  if (!derived.ok || derived.value === undefined) {
+    const detail = derived.issues.map((issue) => `${issue.code} at ${issue.path}: ${issue.message}`).join("; ");
+    throw new Error(`current-run property implementation coverage is not authoritative: ${detail}`);
+  }
+  return { ...report, property_implementation_coverage: derived.value };
 }
 
 function readConfiguredInvariantPrioritySelection(
@@ -311,10 +317,6 @@ function readConfiguredInvariantPrioritySelection(
   const priority_threshold = match[1] as "high" | "medium" | "low";
   const order = ["high", "medium", "low"] as const;
   return { priority_threshold, priorities: order.slice(0, order.indexOf(priority_threshold) + 1) };
-}
-
-function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function readPropertiesArtifact(runRoot: string): PropertiesArtifact | undefined {
@@ -374,6 +376,39 @@ function logicalArtifactPath(runRoot: string, logicalNodeId: string, fileName: s
     }
   }
   return undefined;
+}
+
+function logicalArtifactContract(runRoot: string, logicalNodeId: string, fileName: string): string | undefined {
+  const contracts = new Set<string>();
+  const collect = (node: JsonRecord, nodeId?: string): void => {
+    if (
+      nodeId !== logicalNodeId &&
+      node.id !== logicalNodeId &&
+      node.logical_id !== logicalNodeId &&
+      node.logical_node_id !== logicalNodeId
+    ) {
+      return;
+    }
+    for (const output of Array.isArray(node.outputs) ? node.outputs : []) {
+      if (isRecord(output) && output.path === fileName && typeof output.contract === "string") {
+        contracts.add(output.contract);
+      }
+    }
+  };
+
+  const state = readRecord(runRoot, path.join(runRoot, "state.json"));
+  for (const [nodeId, node] of Object.entries(recordField(state, "nodes") ?? {})) {
+    if (isRecord(node)) collect(node, nodeId);
+  }
+  const graph = readRecord(runRoot, path.join(runRoot, "graph.json"));
+  for (const node of Array.isArray(graph?.nodes) ? graph.nodes : []) {
+    if (isRecord(node)) collect(node);
+  }
+
+  if (contracts.size > 1) {
+    throw new Error(`declared contract for ${logicalNodeId}/${fileName} is ambiguous`);
+  }
+  return contracts.values().next().value as string | undefined;
 }
 
 function readBoundedText(runRoot: string, filePath: string, label: string, maximumBytes: number): string {

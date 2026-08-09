@@ -36,6 +36,7 @@ const {
   artifactContractDefinition,
   assertRegularFileInside,
   checkInvariantSourcePinned,
+  derivePropertyImplementationCoverage,
   invariantPinnedSourceRefExists,
   materializePromptSchemas,
   normalizeEvidenceLineRangeCardinality,
@@ -45,6 +46,7 @@ const {
   validateImplementedPropertiesSchema,
   validateInvariantLedgerSchema,
   validateInvariantSourceProofSchema,
+  validatePropertiesSchema,
   writeFileDurable
 } = await import(artifactsModule);
 const {
@@ -347,6 +349,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
         materializeMissingMarkdownArtifacts(task, result);
         materializeMissingDedupeArtifact(task);
         normalizeLegacyFindingFields(task);
+        reconstructAuthoritativeReportImplementationCoverage(task);
         normalizeLegacyReportProvenance(task);
         materializeMissingFinalReportArtifacts(task);
         normalizeLegacyGeneratedTestManifests(task);
@@ -2159,24 +2162,15 @@ function validatedFinalReport(
         path.resolve(candidateRoot, relativePath),
         `artifact-contract failure: output is not a regular file ${relativePath}`
       );
-      const descriptor = openSync(reportPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-      try {
-        const reportStat = fstatSync(descriptor);
-        if (!reportStat.isFile() || reportStat.size > MAX_FINAL_REPORT_JSON_BYTES) {
-          continue;
-        }
-        const contents = readFileSync(descriptor);
-        if (contents.byteLength > MAX_FINAL_REPORT_JSON_BYTES) {
-          continue;
-        }
-        const validation = validateArtifactContract("ultrafuzz/report@1", contents.toString("utf8"), relativePath);
-        if (!validation.ok || !isPlainRecord(validation.value)) {
-          continue;
-        }
-        return validation.value;
-      } finally {
-        closeSync(descriptor);
+      const validation = validateArtifactContract(
+        "ultrafuzz/report@1",
+        readBoundedFinalReportJson(reportPath),
+        relativePath
+      );
+      if (!validation.ok || !isPlainRecord(validation.value)) {
+        continue;
       }
+      return validation.value;
     } catch {
       // Try the task's other exact artifact root.
     }
@@ -2396,6 +2390,210 @@ function normalizeLegacyPathReference(value: string): { value: string; changed: 
   const colonLineSuffix = withoutHashLineSuffix.match(/^(.+?):\d+(?::\d+)?$/u);
   const normalized = colonLineSuffix?.[1] ?? withoutHashLineSuffix;
   return normalized === value ? { value, changed: false } : { value: normalized, changed: true };
+}
+
+function readBoundedFinalReportJson(reportPath: string): string {
+  const descriptor = openSync(reportPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile()) {
+      throw new Error("artifact-contract failure: final report JSON must be a regular file");
+    }
+    if (stat.size > MAX_FINAL_REPORT_JSON_BYTES) {
+      throw new Error(
+        `artifact-contract failure: final report JSON exceeds the ${MAX_FINAL_REPORT_JSON_BYTES}-byte read limit`
+      );
+    }
+    const contents = readFileSync(descriptor);
+    if (contents.byteLength > MAX_FINAL_REPORT_JSON_BYTES) {
+      throw new Error(
+        `artifact-contract failure: final report JSON exceeds the ${MAX_FINAL_REPORT_JSON_BYTES}-byte read limit`
+      );
+    }
+    return contents.toString("utf8");
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function reconstructAuthoritativeReportImplementationCoverage(task: (typeof taskSpecs)[number]): void {
+  if (task.metadata.node.logicalNodeId !== "final-report") {
+    return;
+  }
+  const reportOutput = task.outputs.find(
+    (output) => output.path === "report.json" && output.contract === "ultrafuzz/report@1"
+  );
+  if (reportOutput === undefined) {
+    return;
+  }
+
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const reportPaths = taskArtifactRoots(task, artifactDir).flatMap((artifactRoot) => {
+    try {
+      return [
+        resolveRegularArtifactFile(
+          artifactRoot,
+          path.resolve(artifactRoot, reportOutput.path),
+          `artifact-contract failure: output is not a regular file ${reportOutput.path}`
+        )
+      ];
+    } catch {
+      return [];
+    }
+  });
+  if (reportPaths.length === 0) {
+    return;
+  }
+
+  const implementationArtifact = verifiedAncestorJsonArtifact(
+    task,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    "ultrafuzz/implemented-properties@2",
+    "ultrafuzz/implemented-properties@1"
+  );
+  // Historical plans declare @1 and intentionally retain their agent-authored
+  // unavailable/no-selection behavior.
+  if (implementationArtifact === undefined) {
+    return;
+  }
+  const catalogArtifact = verifiedAncestorJsonArtifact(
+    task,
+    "property-specification-fanin",
+    "properties.json",
+    "ultrafuzz/properties@1"
+  );
+  if (catalogArtifact === undefined) {
+    throw new Error("artifact-contract failure: authoritative property catalog is unavailable for final-report");
+  }
+  const catalog = validatePropertiesSchema(catalogArtifact.value, catalogArtifact.path);
+  const implementation = validateImplementedPropertiesSchema(
+    implementationArtifact.value,
+    implementationArtifact.path,
+    { requireSelection: true }
+  );
+  if (!catalog.ok || catalog.value === undefined || !implementation.ok || implementation.value === undefined) {
+    throw new Error(
+      `artifact-contract failure: authoritative property implementation coverage is invalid: ${formatSchemaValidationIssues(
+        [...catalog.issues, ...implementation.issues]
+      )}`
+    );
+  }
+  const configured = configuredInvariantPrioritySelection(task);
+  const derived = derivePropertyImplementationCoverage(catalog.value, implementation.value, {
+    configuredSelection: configured.selection,
+    requireConfiguredSelection: true,
+    catalogPath: catalogArtifact.path,
+    implementationPath: implementationArtifact.path,
+    configPath: configured.path
+  });
+  if (!derived.ok || derived.value === undefined) {
+    throw new Error(
+      `artifact-contract failure: authoritative property implementation coverage is invalid: ${formatSchemaValidationIssues(derived.issues)}`
+    );
+  }
+
+  for (const reportPath of reportPaths) {
+    const reconstructed = replaceReportImplementationCoverage(readBoundedFinalReportJson(reportPath), derived.value);
+    if (reconstructed !== undefined) {
+      writeFileDurable(reportPath, reconstructed);
+    }
+  }
+}
+
+function verifiedAncestorJsonArtifact(
+  task: (typeof taskSpecs)[number],
+  logicalNodeId: string,
+  relativePath: string,
+  contract: string,
+  historicalContract?: string
+): { path: string; value: unknown } | undefined {
+  const candidates = task.dependencyArtifactDirs.flatMap((dependency) => {
+    const dependencyTask = taskSpecs.find((candidate) => candidate.attemptId === path.basename(dependency));
+    if (dependencyTask?.metadata.node.logicalNodeId !== logicalNodeId) {
+      return [];
+    }
+    return dependencyTask.outputs
+      .filter((output) => output.path === relativePath)
+      .map((output) => ({ dependency, dependencyTask, output }));
+  });
+  if (candidates.length === 0) {
+    throw new Error(`artifact-contract failure: authoritative ${relativePath} handoff is unavailable`);
+  }
+  if (candidates.length !== 1) {
+    throw new Error(`artifact-contract failure: authoritative ${relativePath} handoff is ambiguous`);
+  }
+  const candidate = candidates[0]!;
+  if (historicalContract !== undefined && candidate.output.contract === historicalContract) {
+    return undefined;
+  }
+  if (candidate.output.contract !== contract) {
+    throw new Error(
+      `artifact-contract failure: authoritative ${relativePath} handoff declares unexpected contract ${JSON.stringify(candidate.output.contract)}; expected ${JSON.stringify(contract)}`
+    );
+  }
+  // Re-check the runtime-owned marker and every published digest after the
+  // model returns, immediately before consuming this ancestor as authority.
+  assertVerifiedDependency(task, candidate.dependency);
+  const dependencyRoot = realpathSync(candidate.dependency);
+  const artifactPath = resolveRegularArtifactFile(
+    dependencyRoot,
+    path.resolve(dependencyRoot, relativePath),
+    `artifact-contract failure: verified dependency artifact is missing ${relativePath}`
+  );
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(artifactPath, "utf8")) as unknown;
+  } catch (error) {
+    throw new Error(`artifact-contract failure: authoritative ${relativePath} handoff is malformed`, { cause: error });
+  }
+  return { path: artifactPath, value };
+}
+
+function configuredInvariantPrioritySelection(task: (typeof taskSpecs)[number]): {
+  path: string;
+  selection?: { priority_threshold: "high" | "medium" | "low"; priorities: ("high" | "medium" | "low")[] };
+} {
+  const runRoot = realpathSync(path.resolve(process.cwd(), task.runRoot));
+  const configPath = path.join(runRoot, "config.resolved.toml");
+  let resolvedConfig: string;
+  try {
+    resolvedConfig = resolveRegularArtifactFile(
+      runRoot,
+      configPath,
+      "artifact-contract failure: resolved invariant priority configuration is unavailable"
+    );
+  } catch {
+    return { path: configPath };
+  }
+  const contents = readFileSync(resolvedConfig, "utf8");
+  const match = /^\s*property_priority_threshold\s*=\s*["'](high|medium|low)["']\s*$/mu.exec(contents);
+  if (match === null) {
+    return { path: resolvedConfig };
+  }
+  const priority_threshold = match[1] as "high" | "medium" | "low";
+  const order = ["high", "medium", "low"] as const;
+  return {
+    path: resolvedConfig,
+    selection: {
+      priority_threshold,
+      priorities: order.slice(0, order.indexOf(priority_threshold) + 1)
+    }
+  };
+}
+
+function replaceReportImplementationCoverage(contents: string, coverage: unknown): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (!isPlainRecord(parsed)) {
+    return undefined;
+  }
+  const { property_implementation_coverage: _modelAuthoredCoverage, ...report } = parsed;
+  return `${JSON.stringify({ ...report, property_implementation_coverage: coverage }, null, 2)}\n`;
 }
 
 function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void {
