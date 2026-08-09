@@ -1907,7 +1907,7 @@ export async function streamSmithersCommand(input: {
         });
       });
       reader.on("line", (line) => {
-        if (truncated || line.trim().length === 0) {
+        if (truncated) {
           return;
         }
         lines += 1;

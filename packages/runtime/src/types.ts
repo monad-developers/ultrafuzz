@@ -487,22 +487,24 @@ export type RunBlockerKind =
   | "waiting-approval"
   | "waiting-event"
   | "waiting-timer"
+  | "bound-stale"
+  | "binding-missing"
+  | "stale-task-heartbeat"
   | "retry-backoff"
   | "retries-exhausted"
   | "dependency-failed"
   | "stale-heartbeat"
   | "engine-busy"
-  | "binding"
-  | "side-effect-boundary"
-  | "other";
+  | "approval-decided-resume-required"
+  | "side-effect-boundary-crossed";
 
 export interface RunBlocker {
   kind: RunBlockerKind;
-  node_id: string | null;
+  node_id: string;
   iteration: number | null;
   reason: string;
-  unblocker: string | null;
-  waiting_since: string | null;
+  unblocker: string;
+  waiting_since: string;
   attempt: number | null;
   max_attempts: number | null;
 }
@@ -527,8 +529,8 @@ export interface RunTimelineForkPoint {
 
 export interface RunTimelineFrame {
   frame: number;
-  created_at: string | null;
-  content_hash: string | null;
+  created_at: string;
+  content_hash: string;
   forks: RunTimelineForkPoint[];
 }
 
@@ -559,8 +561,8 @@ export interface WorkflowEventsQueryInput extends WorkflowRunQueryInput {
 }
 
 export interface WorkflowLifecycleEvent {
-  sequence: number | null;
-  timestamp: string | null;
+  sequence: number;
+  timestamp: string;
   category: string;
   node_id: string | null;
   iteration: number | null;
@@ -585,10 +587,10 @@ export interface WorkflowNodeQueryInput extends WorkflowRunQueryInput {
 }
 
 export interface WorkflowNodeToolCall {
-  attempt: number | null;
-  sequence: number | null;
+  attempt: number;
+  sequence: number;
   name: string;
-  status: string | null;
+  status: string;
   duration_ms: number | null;
   error: string | null;
   input?: unknown;
@@ -596,10 +598,10 @@ export interface WorkflowNodeToolCall {
 }
 
 export interface WorkflowNodeAttempt {
-  attempt: number | null;
-  iteration: number | null;
-  state: string | null;
-  started_at: string | null;
+  attempt: number;
+  iteration: number;
+  state: string;
+  started_at: string;
   finished_at: string | null;
   duration_ms: number | null;
   error: string | null;
@@ -613,9 +615,9 @@ export interface WorkflowNodeValue {
   run_id: string;
   workflow_run_id: string;
   node_id: string;
-  iteration: number | null;
-  state: string | null;
-  status: string | null;
+  iteration: number;
+  state: string;
+  status: string;
   duration_ms: number | null;
   updated_at: string | null;
   attempt_counts: {
@@ -628,7 +630,7 @@ export interface WorkflowNodeValue {
   models: string[];
   agents: string[];
   output: {
-    source: string | null;
+    source: "cache" | "output-table" | "none";
     present: boolean;
   };
   attempts: WorkflowNodeAttempt[];
@@ -636,15 +638,15 @@ export interface WorkflowNodeValue {
 }
 
 export interface RunSnapshot {
-  sequence: number | null;
-  node_id: string | null;
-  iteration: number | null;
-  attempt: number | null;
+  sequence: number;
+  node_id: string;
+  iteration: number;
+  attempt: number;
   /** Durability tier the engine records as an integer. */
-  tier: number | null;
-  source: string | null;
+  tier: number;
+  source: string;
   label: string | null;
-  created_at: string | null;
+  created_at: string;
 }
 
 export interface RunSnapshotsValue {

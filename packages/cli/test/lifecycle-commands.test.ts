@@ -94,7 +94,73 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
   const timelinePath = path.join(project, "fake-timeline.json");
   const snapshotsPath = path.join(project, "fake-snapshots.json");
   const nodePath = path.join(project, "fake-node.json");
+  const nodeWatchPath = path.join(project, "fake-node-watch.ndjson");
   const eventsPath = path.join(project, "fake-events.ndjson");
+  const nodeUsage = {
+    inputTokens: 10,
+    outputTokens: 5,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    costUsd: null,
+    eventCount: 1,
+    models: ["gpt-test"],
+    agents: ["codex"]
+  };
+  const nodeToolCall = {
+    attempt: 1,
+    seq: 1,
+    name: "shell",
+    status: "ok",
+    startedAtMs: 1_700_000_501_000,
+    finishedAtMs: 1_700_000_502_000,
+    durationMs: 1_000,
+    input: { command: "forge build" },
+    output: { note: "ok" },
+    error: null
+  };
+  const nodeDetail = {
+    node: {
+      runId: WORKFLOW_RUN_ID,
+      nodeId: "node:project-discovery",
+      iteration: 0,
+      state: "in-progress",
+      lastAttempt: 1,
+      updatedAtMs: 1_700_000_600_000,
+      outputTable: null,
+      label: null
+    },
+    status: "in-progress",
+    durationMs: 65_000,
+    attemptsSummary: { total: 1, failed: 0, cancelled: 0, succeeded: 0, waiting: 1 },
+    attempts: [
+      {
+        runId: WORKFLOW_RUN_ID,
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        iteration: 0,
+        state: "in-progress",
+        startedAtMs: 1_700_000_500_000,
+        finishedAtMs: null,
+        durationMs: null,
+        error: null,
+        errorDetail: null,
+        tokenUsage: nodeUsage,
+        toolCalls: [nodeToolCall],
+        meta: null,
+        responseText: null,
+        cached: false,
+        jjPointer: null,
+        jjCwd: null
+      }
+    ],
+    toolCalls: [nodeToolCall],
+    tokenUsage: { ...nodeUsage, byAttempt: [{ attempt: 1, usage: nodeUsage }] },
+    scorers: [],
+    output: { validated: null, raw: null, source: "none", cacheKey: null },
+    approval: null,
+    limits: { toolPayloadBytesHuman: 1_024, validatedOutputBytesHuman: 10_240 }
+  };
 
   fs.writeFileSync(
     whyPath,
@@ -127,44 +193,37 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
   fs.writeFileSync(
     timelinePath,
     `${JSON.stringify({
-      ok: true,
-      data: {
-        timeline: {
-          runId: WORKFLOW_RUN_ID,
-          branch: "main",
-          frames: [
-            { frameNo: 2, createdAtMs: 1_700_000_000_000, contentHash: "hash-2", forks: [] },
-            { frameNo: 7, createdAtMs: 1_700_000_500_000, contentHash: "hash-7", forks: [] }
-          ],
-          children: []
-        }
-      },
-      meta: { command: "timeline", duration: "1ms" }
+      timeline: {
+        runId: WORKFLOW_RUN_ID,
+        branch: null,
+        frames: [
+          { frameNo: 2, createdAtMs: 1_700_000_000_000, contentHash: "hash-2", forks: [] },
+          { frameNo: 7, createdAtMs: 1_700_000_500_000, contentHash: "hash-7", forks: [] }
+        ],
+        children: []
+      }
     })}\n`,
     "utf8"
   );
   fs.writeFileSync(
     snapshotsPath,
     `${JSON.stringify({
-      ok: true,
-      data: {
-        snapshots: [
-          {
-            seq: 4,
-            nodeId: "node:project-discovery",
-            iteration: 0,
-            attempt: 1,
-            tier: 1,
-            source: "node-finish",
-            label: null,
-            commitId: "commit-1",
-            operationId: "op-1",
-            cwd: "/workspace",
-            createdAtMs: 1_700_000_400_000
-          }
-        ]
-      },
-      meta: { command: "snapshots", duration: "1ms" }
+      snapshots: [
+        {
+          runId: WORKFLOW_RUN_ID,
+          seq: 4,
+          nodeId: "node:project-discovery",
+          iteration: 0,
+          attempt: 1,
+          tier: 1,
+          source: "node-finish",
+          label: null,
+          commitId: "commit-1",
+          operationId: "op-1",
+          cwd: "/workspace",
+          createdAtMs: 1_700_000_400_000
+        }
+      ]
     })}\n`,
     "utf8"
   );
@@ -172,56 +231,12 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
     nodePath,
     `${JSON.stringify({
       ok: true,
-      data: {
-        node: {
-          runId: WORKFLOW_RUN_ID,
-          nodeId: "node:project-discovery",
-          iteration: 0,
-          state: "in-progress",
-          lastAttempt: 1,
-          updatedAtMs: 1_700_000_600_000,
-          outputTable: null,
-          label: null
-        },
-        status: "running",
-        durationMs: 65_000,
-        attemptsSummary: { total: 1, failed: 0, cancelled: 0, succeeded: 0, waiting: 1 },
-        attempts: [
-          {
-            attempt: 1,
-            iteration: 0,
-            state: "in-progress",
-            startedAtMs: 1_700_000_500_000,
-            finishedAtMs: null,
-            durationMs: null,
-            error: null,
-            tokenUsage: { models: ["gpt-test"], agents: ["codex"] },
-            toolCalls: [
-              {
-                attempt: 1,
-                seq: 1,
-                name: "shell",
-                status: "ok",
-                durationMs: 1_000,
-                input: { command: "forge build" },
-                output: { note: "ok" },
-                error: null
-              }
-            ],
-            cached: false
-          }
-        ],
-        toolCalls: [],
-        tokenUsage: { models: ["gpt-test"], agents: ["codex"], byAttempt: [] },
-        scorers: [],
-        output: { validated: null, raw: null, source: "none", cacheKey: null },
-        approval: null,
-        limits: { toolPayloadBytesHuman: 1, validatedOutputBytesHuman: 1 }
-      },
+      data: nodeDetail,
       meta: { command: "node", duration: "1ms" }
     })}\n`,
     "utf8"
   );
+  fs.writeFileSync(nodeWatchPath, `${JSON.stringify(nodeDetail)}\n`, "utf8");
   fs.writeFileSync(
     eventsPath,
     `${[
@@ -229,11 +244,11 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
         runId: WORKFLOW_RUN_ID,
         seq: 1,
         timestampMs: 1_700_000_000_000,
-        type: "node.started",
+        type: "NodeStarted",
         payload: {
           runId: WORKFLOW_RUN_ID,
           timestampMs: 1_700_000_000_000,
-          type: "node.started",
+          type: "NodeStarted",
           nodeId: "node:project-discovery",
           iteration: 0,
           attempt: 1,
@@ -244,11 +259,11 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
         runId: WORKFLOW_RUN_ID,
         seq: 2,
         timestampMs: 1_700_000_060_000,
-        type: "run.progress",
+        type: "RunStatusChanged",
         payload: {
           runId: WORKFLOW_RUN_ID,
           timestampMs: 1_700_000_060_000,
-          type: "run.progress",
+          type: "RunStatusChanged",
           status: "running"
         }
       })
@@ -266,7 +281,12 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
       `  why) cat ${shellQuote(whyPath)} ;;`,
       `  timeline) cat ${shellQuote(timelinePath)} ;;`,
       `  snapshots) cat ${shellQuote(snapshotsPath)} ;;`,
-      `  node) cat ${shellQuote(nodePath)} ;;`,
+      "  node)",
+      '    case "$*" in',
+      `      *"--format jsonl"*) cat ${shellQuote(nodeWatchPath)} ;;`,
+      `      *) cat ${shellQuote(nodePath)} ;;`,
+      "    esac",
+      "    ;;",
       `  events) cat ${shellQuote(eventsPath)} ;;`,
       "  inspect)",
       `    printf '{"ok":true,"data":{"run":{"id":"%s","workflow":"workflow","status":"running","started":"2026-08-09T00:00:00.000Z","elapsed":"1s"},"runState":{"runId":"%s","state":"running","computedAt":"2026-08-09T00:00:01.000Z"},"steps":[],"nodes":[]},"meta":{"command":"inspect","duration":"1ms"}}\\n' "$2" "$2"`,
@@ -397,7 +417,7 @@ test("events returns bounded lifecycle events in human and JSON output", async (
   const human = await cli(project, ["events", RUN_ID], env);
   assert.equal(human.code, 0, human.stderr);
   assert.match(human.stdout, /^Events: 2$/mu);
-  assert.match(human.stdout, /node node:project-discovery#0 attempt 1 - in-progress/u);
+  assert.match(human.stdout, /NodeStarted node:project-discovery#0 attempt 1 - in-progress/u);
 
   const json = await cli(project, ["events", RUN_ID, "--limit", "1", "--json"], env);
   assert.equal(json.code, 0, json.stderr);
@@ -414,7 +434,7 @@ test("events --watch streams one line per event and terminates", async () => {
   assert.equal(human.code, 0, human.stderr);
   const humanLines = human.stdout.split("\n").filter(Boolean);
   assert.equal(humanLines.length, 2);
-  assert.match(humanLines[0]!, /node node:project-discovery/u);
+  assert.match(humanLines[0]!, /NodeStarted node:project-discovery/u);
 
   const json = await cli(project, ["events", RUN_ID, "--watch", "--json"], env);
   assert.equal(json.code, 0, json.stderr);
@@ -435,7 +455,7 @@ test("node reports focused status and only expands tool payloads with --tools", 
   const human = await cli(project, ["node", RUN_ID, "node:project-discovery"], env);
   assert.equal(human.code, 0, human.stderr);
   assert.match(human.stdout, /^Node: node:project-discovery#0$/mu);
-  assert.match(human.stdout, /^State: in-progress \(running\)$/mu);
+  assert.match(human.stdout, /^State: in-progress \(in-progress\)$/mu);
   assert.match(human.stdout, /^Duration: 65s$/mu);
   assert.match(human.stdout, /^Attempts: 1 total, 0 succeeded, 0 failed, 0 cancelled, 1 waiting$/mu);
   assert.match(human.stdout, /^Output: not recorded$/mu);
