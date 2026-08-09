@@ -10,7 +10,6 @@ export const EVAL_JUDGE_PROMPT_VERSION = "ultrafuzz-eval-judge-v9-independent-se
 
 const SYSTEM_PROMPT = loadPrompt("adjudicator-system.mdx");
 const USER_PROMPT = loadPrompt("adjudicator-user.mdx");
-const RETRY_PROMPT = loadPrompt("adjudicator-retry.mdx");
 
 export const ADJUDICATOR_RESPONSE_FORMAT = {
   type: "json_schema",
@@ -21,7 +20,7 @@ export const ADJUDICATOR_RESPONSE_FORMAT = {
       type: "object",
       additionalProperties: false,
       properties: {
-        matched_ground_truth_bug_id: { type: ["string", "null"] },
+        matched_ground_truth_bug_id: { type: ["string", "null"], minLength: 1 },
         score: { type: "number", minimum: 0, maximum: 1 },
         signals: {
           type: "object",
@@ -67,10 +66,6 @@ export function buildAdjudicatorPrompt(input: FindingJudgeInput): AdjudicatorMes
       })
     }
   ];
-}
-
-export function buildAdjudicatorRetryPrompt(previousResponse: string): string {
-  return renderPrompt(RETRY_PROMPT, { previous_response: previousResponse.slice(0, 4000) });
 }
 
 export function canonicalBugIdForAdjudicatorAlias(alias: string, bugs: GroundTruthBug[]): string | undefined {

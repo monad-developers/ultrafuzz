@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  EVAL_JUDGE_PROMPT_VERSION,
-  buildAdjudicatorPrompt,
-  buildAdjudicatorRetryPrompt
-} from "../src/evaluator/adjudicator-prompt.js";
+import { EVAL_JUDGE_PROMPT_VERSION, buildAdjudicatorPrompt } from "../src/evaluator/adjudicator-prompt.js";
 import type { FindingJudgeInput, FindingJudgeResult } from "../src/types.js";
 import { testRow, testSuite } from "./helpers.js";
 
@@ -92,12 +88,5 @@ describe("adjudicator prompt assets", () => {
     expect(rendered).toContain("authorization-identity collision is outside a canonical accounting-conversion issue");
     expect(rendered).toContain("supported actions execute atomically");
     expect(rendered).toContain("correctly rejects an unauthorized caller");
-  });
-
-  it("renders schema-retry instructions from MDX without rewriting response text", () => {
-    const previousResponse = "literal $& and {{target}}";
-
-    expect(buildAdjudicatorRetryPrompt(previousResponse)).toContain(`Previous response: ${previousResponse}`);
-    expect(buildAdjudicatorRetryPrompt(previousResponse)).toContain("0.0 through 1.0");
   });
 });

@@ -1,7 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertRegularFileInside, validateArtifactContract } from "@ultrafuzz/artifacts";
+import {
+  assertRegularFileInside,
+  parseStrictJson,
+  readRegularFileSnapshot,
+  validateArtifactContractBytes
+} from "@ultrafuzz/artifacts";
 import { z } from "zod/v4";
 
 import { summarizeEvalTerminal } from "./efficiency.js";
@@ -18,7 +23,6 @@ import {
 import {
   ADJUDICATOR_RESPONSE_FORMAT,
   buildAdjudicatorPrompt,
-  buildAdjudicatorRetryPrompt,
   canonicalBugIdForAdjudicatorAlias,
   EVAL_JUDGE_PROMPT_VERSION
 } from "./evaluator/adjudicator-prompt.js";
@@ -62,13 +66,13 @@ import { EvalError, evalRunRoot, isRecord, mean, resolveTerminalReportPath, roun
 
 const DEFAULT_EVAL_JUDGE_ENDPOINT = "https://gateway.braintrust.dev/v1/chat/completions";
 const PRIVATE_DATA_JUDGE_ACK = "ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA";
-const LLM_JUDGE_MAX_ATTEMPTS = 3;
 const MIN_CONCRETE_EVIDENCE_TEXT_LENGTH = 8;
+const MAX_TERMINAL_REPORT_BYTES = 64 * 1024 * 1024;
 
-const llmJudgeSchema = z.looseObject({
-  matched_ground_truth_bug_id: z.string().min(1).nullable().optional(),
+const llmJudgeSchema = z.strictObject({
+  matched_ground_truth_bug_id: z.string().min(1).nullable(),
   score: z.number().min(0).max(1),
-  signals: z.looseObject({
+  signals: z.strictObject({
     root_cause: z.number().min(0).max(1),
     affected_area: z.number().min(0).max(1),
     impact: z.number().min(0).max(1),
@@ -688,6 +692,21 @@ async function scoreFindings(input: {
   let fullMatches = 0;
   let severityChecks = 0;
   let severityMatches = 0;
+  const findingIds = input.findings.map((finding, index) => {
+    const findingId = isRecord(finding) && typeof finding.id === "string" ? finding.id : undefined;
+    if (findingId === undefined || findingId.trim().length === 0) {
+      throw new EvalError("EVAL_FINDING_ID_INVALID", "every scored finding must have a nonempty string ID", {
+        finding_index: index
+      });
+    }
+    return findingId;
+  });
+  const duplicateFindingIds = findingIds.filter((findingId, index) => findingIds.indexOf(findingId) !== index);
+  if (duplicateFindingIds.length > 0) {
+    throw new EvalError("EVAL_FINDING_ID_INVALID", "scored finding IDs must be unique", {
+      finding_ids: [...new Set(duplicateFindingIds)].sort()
+    });
+  }
 
   for (const [index, finding] of input.findings.entries()) {
     const match = await bestMatch(
@@ -740,7 +759,7 @@ async function scoreFindings(input: {
     matches.push({
       schema_version: EVAL_FINDING_SCORE_SCHEMA_VERSION,
       row_id: input.row.id,
-      finding_id: stringField(finding, "id") ?? `finding-${index + 1}`,
+      finding_id: findingIds[index]!,
       ...(findingTitle !== undefined ? { finding_title: findingTitle } : {}),
       report_path: input.reportPath,
       deterministic_match: match.deterministic_match,
@@ -901,61 +920,44 @@ export function gatewayLlmJudge(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Math.max(1, profile?.timeout_seconds ?? 1800) * 1000);
     try {
-      let invalidContent: string | undefined;
-      let lastInvalid: EvalError | undefined;
-      for (let attempt = 1; attempt <= LLM_JUDGE_MAX_ATTEMPTS; attempt += 1) {
-        const response = await fetchImpl(endpoint.href, {
-          method: "POST",
-          redirect: "error",
-          headers: {
-            authorization: `Bearer ${apiKey}`,
-            "content-type": "application/json"
-          },
-          body: JSON.stringify({
-            model,
-            messages: [
-              ...buildAdjudicatorPrompt(input),
-              ...(invalidContent === undefined
-                ? []
-                : [
-                    {
-                      role: "user" as const,
-                      content: buildAdjudicatorRetryPrompt(invalidContent)
-                    }
-                  ])
-            ],
-            ...judgeReasoningParameters(model, input.row.judge_reasoning),
-            response_format: ADJUDICATOR_RESPONSE_FORMAT
-          }),
-          signal: controller.signal
+      const response = await fetchImpl(endpoint.href, {
+        method: "POST",
+        redirect: "error",
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          model,
+          messages: buildAdjudicatorPrompt(input),
+          ...judgeReasoningParameters(model, input.row.judge_reasoning),
+          response_format: ADJUDICATOR_RESPONSE_FORMAT
+        }),
+        signal: controller.signal
+      });
+      const bodyText = await boundedResponseText(response, "LLM judge", "EVAL_LLM_JUDGE_RESPONSE_TOO_LARGE");
+      if (!response.ok) {
+        throw new EvalError("EVAL_LLM_JUDGE_REQUEST_FAILED", "LLM judge gateway request failed", {
+          status: response.status,
+          body: bodyText.slice(0, 1000)
         });
-        const bodyText = await boundedResponseText(response, "LLM judge", "EVAL_LLM_JUDGE_RESPONSE_TOO_LARGE");
-        if (!response.ok) {
-          throw new EvalError("EVAL_LLM_JUDGE_REQUEST_FAILED", "LLM judge gateway request failed", {
-            status: response.status,
-            body: bodyText.slice(0, 1000)
-          });
-        }
-        let content = "";
-        try {
-          content = chatCompletionContent(bodyText);
-          const parsed = llmJudgeSchema.safeParse(parseJsonObject(content));
-          if (parsed.success) return normalizeLlmJudgeResult(parsed.data, input);
-          lastInvalid = new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
-            attempt,
-            issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message })),
-            content: content.slice(0, 1000)
-          });
-        } catch (error) {
-          lastInvalid = new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
-            attempt,
-            cause: error instanceof Error ? error.message : String(error),
-            content: content.slice(0, 1000)
-          });
-        }
-        invalidContent = content || bodyText;
       }
-      throw lastInvalid ?? new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON");
+      let content = "";
+      try {
+        content = chatCompletionContent(bodyText);
+        const parsed = llmJudgeSchema.safeParse(parseStrictJson(content));
+        if (parsed.success) return normalizeLlmJudgeResult(parsed.data, input);
+        throw new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
+          issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message })),
+          content: content.slice(0, 1000)
+        });
+      } catch (error) {
+        if (error instanceof EvalError && error.code === "EVAL_LLM_JUDGE_INVALID") throw error;
+        throw new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
+          cause: error instanceof Error ? error.message : String(error),
+          content: content.slice(0, 1000)
+        });
+      }
     } finally {
       clearTimeout(timeout);
     }
@@ -978,6 +980,11 @@ function normalizeLlmJudgeResult(
   const candidateBugId = data.matched_ground_truth_bug_id ?? undefined;
   const judgeMatchedBugId =
     candidateBugId === undefined ? undefined : canonicalBugIdForAdjudicatorAlias(candidateBugId, input.bugs);
+  if (candidateBugId !== undefined && judgeMatchedBugId === undefined) {
+    throw new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned an unknown ground-truth candidate alias", {
+      candidate_id: candidateBugId
+    });
+  }
   return applyJudgeClassificationPolicy(
     {
       ...(judgeMatchedBugId === undefined ? {} : { matched_ground_truth_bug_id: judgeMatchedBugId }),
@@ -998,6 +1005,11 @@ function normalizeFindingJudgeResult(
   const judgeMatchedBugId = input.bugs.some((bug) => bug.id === result.matched_ground_truth_bug_id)
     ? result.matched_ground_truth_bug_id
     : undefined;
+  if (result.matched_ground_truth_bug_id !== undefined && judgeMatchedBugId === undefined) {
+    throw new EvalError("EVAL_LLM_JUDGE_INVALID", "finding judge returned an unknown ground-truth bug ID", {
+      bug_id: result.matched_ground_truth_bug_id
+    });
+  }
   return applyJudgeClassificationPolicy(
     {
       ...(judgeMatchedBugId === undefined ? {} : { matched_ground_truth_bug_id: judgeMatchedBugId }),
@@ -1087,7 +1099,7 @@ function validatedJudgeEndpoint(value: string): URL {
 }
 
 function chatCompletionContent(bodyText: string): string {
-  const parsed = JSON.parse(bodyText) as unknown;
+  const parsed = parseStrictJson(bodyText);
   if (!isRecord(parsed) || !Array.isArray(parsed.choices)) {
     throw new EvalError("EVAL_LLM_JUDGE_RESPONSE_INVALID", "LLM judge response is missing choices");
   }
@@ -1096,20 +1108,6 @@ function chatCompletionContent(bodyText: string): string {
     throw new EvalError("EVAL_LLM_JUDGE_RESPONSE_INVALID", "LLM judge response is missing message content");
   }
   return first.message.content;
-}
-
-function parseJsonObject(content: string): unknown {
-  const trimmed = content.trim();
-  if (trimmed.startsWith("{")) {
-    return JSON.parse(trimmed);
-  }
-  const fenced = /```(?:json)?\s*([\s\S]*?)\s*```/u.exec(trimmed);
-  if (fenced?.[1]) {
-    return JSON.parse(fenced[1]);
-  }
-  throw new EvalError("EVAL_LLM_JUDGE_RESPONSE_INVALID", "LLM judge content did not contain JSON", {
-    content: content.slice(0, 1000)
-  });
 }
 
 export function scoreSignals(finding: unknown, bug: GroundTruthBug): FindingMatchSignalScores {
@@ -1178,14 +1176,16 @@ function loadGroundTruthDocument(
 }
 
 function readReport(filePath: string): { schemaValid: boolean; findings: unknown[] } {
-  if (!fs.existsSync(filePath) || !fs.lstatSync(filePath).isFile()) {
-    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report is missing", { path: filePath });
+  let bytes: Buffer;
+  try {
+    bytes = readRegularFileSnapshot(filePath, MAX_TERMINAL_REPORT_BYTES);
+  } catch (error) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report is not a readable regular file", {
+      path: filePath,
+      cause: error instanceof Error ? error.message : String(error)
+    });
   }
-  const validation = validateArtifactContract(
-    "ultrafuzz/report@2" as Parameters<typeof validateArtifactContract>[0],
-    fs.readFileSync(filePath, "utf8"),
-    filePath
-  );
+  const validation = validateArtifactContractBytes("ultrafuzz/report@2", bytes, filePath);
   if (!validation.ok || !isRecord(validation.value)) {
     throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report does not satisfy ultrafuzz/report@2", {
       issues: validation.issues.map((issue) => ({ code: issue.code, path: issue.path }))

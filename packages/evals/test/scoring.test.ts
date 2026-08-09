@@ -68,7 +68,7 @@ function canonicalFinding(overrides: Record<string, unknown> = {}): Record<strin
   };
 }
 
-function matchedFinding(): unknown {
+function matchedFinding(overrides: Record<string, unknown> = {}): unknown {
   return canonicalFinding({
     title: "Reentrancy lets attackers drain the vault via withdraw",
     summary: "reentrancy in withdraw allows drain",
@@ -76,7 +76,8 @@ function matchedFinding(): unknown {
     affected_files: ["src/Vault.sol"],
     evidence: ["poc test reproduces the drain"],
     description: "The withdrawal path transfers control before its balance update.",
-    lifecycle: { dedupe_key: "finding-1", source_artifacts: [], strategy_hits: [] }
+    lifecycle: { dedupe_key: "finding-1", source_artifacts: [], strategy_hits: [] },
+    ...overrides
   });
 }
 
@@ -431,7 +432,7 @@ describe("deterministic scorer math", () => {
     const scored = await scoreInMemory({
       suite,
       row,
-      findings: [matchedFinding(), matchedFinding()],
+      findings: [matchedFinding(), matchedFinding({ id: "finding-2" })],
       bugs: BUGS
     });
     expect(scored.rowScore).toMatchObject({
@@ -441,6 +442,28 @@ describe("deterministic scorer math", () => {
       precision: 1,
       recall: 0.5
     });
+  });
+
+  it("rejects missing and duplicate finding IDs instead of synthesizing replacements", async () => {
+    const suite = testSuite("/tmp/gt");
+    const row = testRow(suite);
+
+    await expect(
+      scoreInMemory({
+        suite,
+        row,
+        findings: [{ title: "Missing ID", summary: "A finding without an identity." }],
+        bugs: BUGS
+      })
+    ).rejects.toMatchObject({ code: "EVAL_FINDING_ID_INVALID" });
+    await expect(
+      scoreInMemory({
+        suite,
+        row,
+        findings: [matchedFinding(), matchedFinding()],
+        bugs: BUGS
+      })
+    ).rejects.toMatchObject({ code: "EVAL_FINDING_ID_INVALID" });
   });
 
   it("routes strong, supported unmatched findings to the human review queue", async () => {
@@ -986,6 +1009,18 @@ describe("deterministic scorer math", () => {
     });
   });
 
+  it("validates the immutable terminal-report bytes before scoring", async () => {
+    const fixture = scoreRunFixture();
+    const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
+      report_json_path: string;
+    };
+    fs.writeFileSync(record.report_json_path, Buffer.from([0x7b, 0xff, 0x7d]));
+
+    await expect(
+      scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId })
+    ).rejects.toMatchObject({ code: "EVAL_TERMINAL_REPORT_INVALID" });
+  });
+
   it("scores canonical empty terminal reports as all missed", async () => {
     const fixture = scoreRunFixture();
     const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
@@ -1225,20 +1260,11 @@ describe("deterministic scorer math", () => {
     expect(corroborated.rowScore.true_positives).toBe(1);
   });
 
-  it("retries schema-invalid judge output with the configured reasoning effort", async () => {
+  it("rejects schema-invalid judge output without starting a repair conversation", async () => {
     const requests: Array<Record<string, unknown>> = [];
     const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
       requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-      const content =
-        requests.length === 1
-          ? JSON.stringify({ score: 1 })
-          : JSON.stringify({
-              matched_ground_truth_bug_id: "candidate-1",
-              score: 1,
-              signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
-              rationale: "The finding matches the first candidate.",
-              confidence: 1
-            });
+      const content = JSON.stringify({ score: 1 });
       return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
     }) as unknown as typeof fetch;
     const judge = gatewayLlmJudge(
@@ -1250,15 +1276,17 @@ describe("deterministic scorer math", () => {
     );
     const suite = testSuite("/tmp/gt");
 
-    const scored = await scoreInMemory({
-      suite,
-      row: testRow(suite, { judge_reasoning: "xhigh" }),
-      findings: [matchedFinding()],
-      bugs: BUGS,
-      llmJudge: judge
-    });
+    await expect(
+      scoreInMemory({
+        suite,
+        row: testRow(suite, { judge_reasoning: "xhigh" }),
+        findings: [matchedFinding()],
+        bugs: BUGS,
+        llmJudge: judge
+      })
+    ).rejects.toMatchObject({ code: "EVAL_LLM_JUDGE_INVALID" });
 
-    expect(requests).toHaveLength(4);
+    expect(requests).toHaveLength(3);
     expect(requests[0]).toMatchObject({ model: "gpt-5.5", reasoning_effort: "xhigh" });
     expect(requests[0]?.response_format).toMatchObject({
       type: "json_schema",
@@ -1278,68 +1306,52 @@ describe("deterministic scorer math", () => {
         expect.objectContaining({ role: "system", content: expect.stringContaining("final classification policy") })
       ])
     );
-    const retryRequest = requests.find((request) => JSON.stringify(request.messages).includes("previous response"));
-    expect(retryRequest?.messages).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ role: "user", content: expect.stringContaining("previous response") }),
-        expect.objectContaining({ role: "user", content: expect.stringContaining("0.0 through 1.0") }),
-        expect.objectContaining({ role: "system", content: expect.stringContaining("final classification policy") })
-      ])
-    );
-    expect(scored.rowScore.true_positives).toBe(1);
+    expect(requests.every((request) => !JSON.stringify(request.messages).includes("previous response"))).toBe(true);
   });
 
-  it("keeps schema retries independent for every panel member", async () => {
-    const requests: Array<Record<string, unknown>> = [];
-    const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
-      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-      const content =
-        requests.length <= 3
-          ? JSON.stringify({ score: 1 })
-          : JSON.stringify({
-              matched_ground_truth_bug_id: "candidate-1",
-              score: 1,
-              signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
-              rationale: "The finding matches the first candidate.",
-              confidence: 1
-            });
-      return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
-    }) as unknown as typeof fetch;
-    const judge = gatewayLlmJudge(
-      {
-        ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
-        ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true"
-      },
-      fetchImpl
-    );
-    const suite = testSuite("/tmp/gt", { judge_panel: { total: 3, quorum: 2 } });
+  it("requires exact strict JSON that matches the advertised judge schema", async () => {
+    const validJudgeResult = {
+      matched_ground_truth_bug_id: "candidate-1",
+      score: 1,
+      signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
+      rationale: "The finding matches the first candidate.",
+      confidence: 1
+    };
+    const { matched_ground_truth_bug_id: _omitted, ...missingMatchedId } = validJudgeResult;
+    const validJson = JSON.stringify(validJudgeResult);
+    const invalidContents = [
+      JSON.stringify({ ...validJudgeResult, unexpected: true }),
+      `\`\`\`json\n${validJson}\n\`\`\``,
+      validJson.replace('"score":1', '"score":1,"score":0'),
+      JSON.stringify({ ...validJudgeResult, matched_ground_truth_bug_id: "candidate-999" }),
+      JSON.stringify(missingMatchedId)
+    ];
+    const suite = testSuite("/tmp/gt", { judge_panel: { total: 1, quorum: 1 } });
 
-    const scored = await scoreInMemory({
-      suite,
-      row: testRow(suite),
-      findings: [matchedFinding()],
-      bugs: BUGS,
-      llmJudge: judge
-    });
+    for (const content of invalidContents) {
+      let requests = 0;
+      const judge = gatewayLlmJudge(
+        {
+          ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
+          ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true"
+        },
+        (async () => {
+          requests += 1;
+          return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
+        }) as unknown as typeof fetch
+      );
 
-    expect(requests).toHaveLength(6);
-    expect(new Set(requests.slice(0, 3).map((request) => JSON.stringify(request.messages)))).toHaveLength(1);
-    expect(requests.slice(3).every((request) => JSON.stringify(request).includes("previous response"))).toBe(true);
-    expect(scored.findingScores[0]?.judge_result.panel).toMatchObject({
-      total: 3,
-      quorum: 2,
-      aggregate_decision: {
-        classification: "true-positive",
-        matched_ground_truth_bug_id: "BUG-1",
-        votes: 3
-      }
-    });
-    expect(scored.findingScores[0]?.judge_result.panel?.member_votes).toHaveLength(3);
-    expect(
-      scored.findingScores[0]?.judge_result.panel?.member_votes.every(
-        (vote) => vote.prompt_version === "ultrafuzz-eval-judge-v9-independent-semantic-boundary-family"
-      )
-    ).toBe(true);
+      await expect(
+        scoreInMemory({
+          suite,
+          row: testRow(suite),
+          findings: [matchedFinding()],
+          bugs: BUGS,
+          llmJudge: judge
+        })
+      ).rejects.toMatchObject({ code: "EVAL_LLM_JUDGE_INVALID" });
+      expect(requests).toBe(1);
+    }
   });
 
   it("omits optional Claude reasoning parameters in structured-output mode", async () => {
