@@ -8,7 +8,6 @@ import {
   type NormalizedFinding
 } from "@ultrafuzz/artifacts";
 import { loadVerifiedFinalReportSnapshot } from "@ultrafuzz/runtime";
-import { z } from "zod/v4";
 
 import { summarizeEvalTerminal } from "./efficiency.js";
 import {
@@ -28,6 +27,11 @@ import {
   EVAL_JUDGE_PROMPT_VERSION
 } from "./evaluator/adjudicator-prompt.js";
 import { runIndependentJudgePanel } from "./evaluator/judge-panel.js";
+import {
+  EVAL_LLM_JUDGE_RESULT_SCHEMA_ID,
+  validateEvalJsonSchema,
+  type EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION
+} from "./eval-schema-registry.js";
 import { boundedResponseText } from "./reporters/http.js";
 import { buildEvalSummaryProvenance } from "./lineage.js";
 import {
@@ -68,18 +72,16 @@ import { EvalError, evalRunRoot, isRecord, mean, resolveTerminalReportPath, roun
 const DEFAULT_EVAL_JUDGE_ENDPOINT = "https://gateway.braintrust.dev/v1/chat/completions";
 const PRIVATE_DATA_JUDGE_ACK = "ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA";
 const MIN_CONCRETE_EVIDENCE_TEXT_LENGTH = 8;
-const llmJudgeSchema = z.strictObject({
-  matched_ground_truth_bug_id: z.string().min(1).nullable(),
-  score: z.number().min(0).max(1),
-  signals: z.strictObject({
-    root_cause: z.number().min(0).max(1),
-    affected_area: z.number().min(0).max(1),
-    impact: z.number().min(0).max(1),
-    evidence: z.number().min(0).max(1)
-  }),
-  rationale: z.string().min(1),
-  confidence: z.number().min(0).max(1)
-});
+export const EVAL_LLM_JUDGE_RESULT_ALIAS_CONTEXT_GATE = "eval-llm-judge-result-alias-membership" as const;
+
+interface EvalLlmJudgeResultDocument {
+  schema_version: typeof EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION;
+  matched_ground_truth_bug_id: string | null;
+  score: number;
+  signals: FindingMatchSignalScores;
+  rationale: string;
+  confidence: number;
+}
 
 export interface ScoreEvalRunInput {
   projectRoot: string;
@@ -943,12 +945,15 @@ export function gatewayLlmJudge(
       let content = "";
       try {
         content = chatCompletionContent(bodyText);
-        const parsed = llmJudgeSchema.safeParse(parseStrictJson(content));
-        if (parsed.success) return normalizeLlmJudgeResult(parsed.data, input);
-        throw new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
-          issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message })),
-          content: content.slice(0, 1000)
-        });
+        const value = parseStrictJson(content);
+        const validation = validateEvalJsonSchema(EVAL_LLM_JUDGE_RESULT_SCHEMA_ID, value);
+        if (!validation.ok) {
+          throw new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
+            issues: validation.issues.map((issue) => ({ path: issue.instancePath, message: issue.message })),
+            content: content.slice(0, 1000)
+          });
+        }
+        return normalizeLlmJudgeResult(value as EvalLlmJudgeResultDocument, input);
       } catch (error) {
         if (error instanceof EvalError && error.code === "EVAL_LLM_JUDGE_INVALID") throw error;
         throw new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
@@ -972,16 +977,21 @@ function judgeReasoningParameters(model: string, reasoning: string | undefined):
 }
 
 function normalizeLlmJudgeResult(
-  data: z.infer<typeof llmJudgeSchema>,
+  data: EvalLlmJudgeResultDocument,
   input: Parameters<FindingJudge>[0]
 ): FindingJudgeResult {
   const candidateBugId = data.matched_ground_truth_bug_id ?? undefined;
   const judgeMatchedBugId =
     candidateBugId === undefined ? undefined : canonicalBugIdForAdjudicatorAlias(candidateBugId, input.bugs);
   if (candidateBugId !== undefined && judgeMatchedBugId === undefined) {
-    throw new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned an unknown ground-truth candidate alias", {
-      candidate_id: candidateBugId
-    });
+    throw new EvalError(
+      "EVAL_LLM_JUDGE_INVALID",
+      `${EVAL_LLM_JUDGE_RESULT_ALIAS_CONTEXT_GATE}: LLM judge returned an unknown ground-truth candidate alias`,
+      {
+        gate: EVAL_LLM_JUDGE_RESULT_ALIAS_CONTEXT_GATE,
+        candidate_id: candidateBugId
+      }
+    );
   }
   return applyJudgeClassificationPolicy(
     {

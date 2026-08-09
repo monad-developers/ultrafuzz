@@ -1,12 +1,13 @@
 import fs from "node:fs";
 
+import { evalLlmJudgeResultJsonSchema } from "../eval-schema-registry.js";
 import type { FindingJudgeInput, FindingJudgeResult, GroundTruthBug } from "../types.js";
 
 /**
  * Versioned adjudicator instructions. Bump this whenever any prompt content,
  * candidate aliasing, truncation, or structured-output contract changes.
  */
-export const EVAL_JUDGE_PROMPT_VERSION = "ultrafuzz-eval-judge-v9-independent-semantic-boundary-family";
+export const EVAL_JUDGE_PROMPT_VERSION = "ultrafuzz-eval-judge-v10-registered-result-schema";
 
 const SYSTEM_PROMPT = loadPrompt("adjudicator-system.mdx");
 const USER_PROMPT = loadPrompt("adjudicator-user.mdx");
@@ -14,32 +15,20 @@ const USER_PROMPT = loadPrompt("adjudicator-user.mdx");
 export const ADJUDICATOR_RESPONSE_FORMAT = {
   type: "json_schema",
   json_schema: {
-    name: "ultrafuzz_judge_result",
+    name: "ultrafuzz_eval_llm_judge_result_v1",
     strict: true,
-    schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        matched_ground_truth_bug_id: { type: ["string", "null"], minLength: 1 },
-        score: { type: "number", minimum: 0, maximum: 1 },
-        signals: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            root_cause: { type: "number", minimum: 0, maximum: 1 },
-            affected_area: { type: "number", minimum: 0, maximum: 1 },
-            impact: { type: "number", minimum: 0, maximum: 1 },
-            evidence: { type: "number", minimum: 0, maximum: 1 }
-          },
-          required: ["root_cause", "affected_area", "impact", "evidence"]
-        },
-        rationale: { type: "string", minLength: 1 },
-        confidence: { type: "number", minimum: 0, maximum: 1 }
-      },
-      required: ["matched_ground_truth_bug_id", "score", "signals", "rationale", "confidence"]
-    }
+    schema: providerSchema(evalLlmJudgeResultJsonSchema)
   }
 } as const;
+
+/** Project only registry identity keywords that provider structured-output APIs do not consume. */
+function providerSchema(schemaDocument: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+  const projected: Record<string, unknown> = structuredClone(schemaDocument);
+  delete projected.$schema;
+  delete projected.$id;
+  delete projected.title;
+  return Object.freeze(projected);
+}
 
 export interface AdjudicatorMessage {
   role: "system" | "user";

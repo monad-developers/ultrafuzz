@@ -4,6 +4,12 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import {
+  EVAL_LLM_JUDGE_RESULT_SCHEMA_ID,
+  EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
+  evalLlmJudgeResultJsonSchema,
+  validateEvalJsonSchema
+} from "../src/eval-schema-registry.js";
 import { gatewayLlmJudge, loadGroundTruth, scoreEvalRun, scoreFindingsAgainstGroundTruth } from "../src/scoring.js";
 import type { GroundTruthBug } from "../src/types.js";
 import {
@@ -638,7 +644,7 @@ describe("deterministic scorer math", () => {
         total: 1,
         quorum: 1,
         model: "gpt-5.5",
-        prompt_version: "ultrafuzz-eval-judge-v9-independent-semantic-boundary-family",
+        prompt_version: "ultrafuzz-eval-judge-v10-registered-result-schema",
         aggregate_decision: { votes: 1 },
         member_votes: [{ member: 1, rationale: "custom judge" }]
       }
@@ -762,7 +768,7 @@ describe("deterministic scorer math", () => {
         quorum: 3,
         model: "gpt-5.5",
         reasoning_effort: "xhigh",
-        prompt_version: "ultrafuzz-eval-judge-v9-independent-semantic-boundary-family",
+        prompt_version: "ultrafuzz-eval-judge-v10-registered-result-schema",
         vote_split: [
           { classification: "true-positive", matched_ground_truth_bug_id: "BUG-1", votes: 3 },
           { classification: "false-positive", votes: 1 }
@@ -986,7 +992,7 @@ describe("deterministic scorer math", () => {
         availability: "available",
         scoring: {
           judge_mode: "deterministic",
-          judge_prompt_version: "ultrafuzz-eval-judge-v9-independent-semantic-boundary-family",
+          judge_prompt_version: "ultrafuzz-eval-judge-v10-registered-result-schema",
           judge_models: ["gpt-5.5"],
           judge_panel: { total: 3, quorum: 2 },
           ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }
@@ -1219,6 +1225,7 @@ describe("deterministic scorer math", () => {
       redirect?: "follow" | "error" | "manual";
     }> = [];
     let responseContent = JSON.stringify({
+      schema_version: EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
       matched_ground_truth_bug_id: "candidate-1",
       score: 0.69996,
       signals: { root_cause: 1, affected_area: 0, impact: 1, evidence: 0 },
@@ -1281,6 +1288,7 @@ describe("deterministic scorer math", () => {
     expect(scored.rowScore).toMatchObject({ true_positives: 1, human_review_queue_count: 0 });
 
     responseContent = JSON.stringify({
+      schema_version: EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
       matched_ground_truth_bug_id: null,
       score: 0,
       signals: { root_cause: 0, affected_area: 0, impact: 0, evidence: 0 },
@@ -1307,6 +1315,7 @@ describe("deterministic scorer math", () => {
     expect(reviewDowngrade.rowScore).toMatchObject({ false_positives: 0, human_review_queue_count: 1 });
 
     responseContent = JSON.stringify({
+      schema_version: EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
       matched_ground_truth_bug_id: "candidate-2",
       score: 0,
       signals: { root_cause: 0, affected_area: 0, impact: 0, evidence: 0 },
@@ -1356,15 +1365,16 @@ describe("deterministic scorer math", () => {
 
     expect(requests).toHaveLength(3);
     expect(requests[0]).toMatchObject({ model: "gpt-5.5", reasoning_effort: "xhigh" });
+    const providerSchema: Record<string, unknown> = structuredClone(evalLlmJudgeResultJsonSchema);
+    delete providerSchema.$schema;
+    delete providerSchema.$id;
+    delete providerSchema.title;
     expect(requests[0]?.response_format).toMatchObject({
       type: "json_schema",
       json_schema: {
-        name: "ultrafuzz_judge_result",
+        name: "ultrafuzz_eval_llm_judge_result_v1",
         strict: true,
-        schema: {
-          additionalProperties: false,
-          required: ["matched_ground_truth_bug_id", "score", "signals", "rationale", "confidence"]
-        }
+        schema: providerSchema
       }
     });
     expect(requests[0]?.response_format).not.toHaveProperty("json_schema.schema.properties.classification");
@@ -1379,6 +1389,7 @@ describe("deterministic scorer math", () => {
 
   it("requires exact strict JSON that matches the advertised judge schema", async () => {
     const validJudgeResult = {
+      schema_version: EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
       matched_ground_truth_bug_id: "candidate-1",
       score: 1,
       signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
@@ -1386,8 +1397,13 @@ describe("deterministic scorer math", () => {
       confidence: 1
     };
     const { matched_ground_truth_bug_id: _omitted, ...missingMatchedId } = validJudgeResult;
+    const legacyJudgeResult: Partial<typeof validJudgeResult> = { ...validJudgeResult };
+    delete legacyJudgeResult.schema_version;
+    expect(validateEvalJsonSchema(EVAL_LLM_JUDGE_RESULT_SCHEMA_ID, validJudgeResult)).toMatchObject({ ok: true });
+    expect(validateEvalJsonSchema(EVAL_LLM_JUDGE_RESULT_SCHEMA_ID, legacyJudgeResult)).toMatchObject({ ok: false });
     const validJson = JSON.stringify(validJudgeResult);
     const invalidContents = [
+      JSON.stringify(legacyJudgeResult),
       JSON.stringify({ ...validJudgeResult, unexpected: true }),
       `\`\`\`json\n${validJson}\n\`\`\``,
       validJson.replace('"score":1', '"score":1,"score":0'),
@@ -1427,6 +1443,7 @@ describe("deterministic scorer math", () => {
     const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
       requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
       const content = JSON.stringify({
+        schema_version: EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
         matched_ground_truth_bug_id: "candidate-1",
         score: 1,
         signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
@@ -1459,7 +1476,10 @@ describe("deterministic scorer math", () => {
 
     expect(requestBody).toMatchObject({
       model: "claude-fable-5",
-      response_format: { type: "json_schema", json_schema: { name: "ultrafuzz_judge_result", strict: true } }
+      response_format: {
+        type: "json_schema",
+        json_schema: { name: "ultrafuzz_eval_llm_judge_result_v1", strict: true }
+      }
     });
     expect(requestBody).not.toHaveProperty("thinking");
     expect(requestBody).not.toHaveProperty("output_config");

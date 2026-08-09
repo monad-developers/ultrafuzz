@@ -40,6 +40,8 @@ export const EVAL_RUN_MANIFEST_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-manif
 export const EVAL_MATRIX_SCHEMA_ID = "urn:ultrafuzz:schema:evals:matrix:2" as const;
 export const EVAL_RUN_RECORD_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-record:3" as const;
 export const EVAL_RUN_SUMMARY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-summary:2" as const;
+export const EVAL_LLM_JUDGE_RESULT_SCHEMA_ID = "urn:ultrafuzz:schema:evals:llm-judge-result:1" as const;
+export const EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION = "ultrafuzz.eval.llm-judge-result.v1" as const;
 export const EVAL_FINDING_SCORE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:finding-score:1" as const;
 export const EVAL_SCORE_SUMMARY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:score-summary:1" as const;
 export const EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:recovery-equivalence:1" as const;
@@ -135,6 +137,11 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
     role: "runtime-state",
     typescriptExport: "evalMatrixJsonSchema",
     semanticGates: ["eval-matrix-identity-joins"]
+  },
+  "eval-llm-judge-result.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalLlmJudgeResultJsonSchema",
+    semanticGates: []
   },
   "eval-publication-state.schema.json": {
     role: "runtime-state",
@@ -267,6 +274,7 @@ export const evalHistoryJsonSchema = loadSchemaDocument("eval-history.schema.jso
 export const evalFindingManifestJsonSchema = loadSchemaDocument("finding-manifest.schema.json");
 export const evalGroundTruthCreditsJsonSchema = loadSchemaDocument("ground-truth-credits.schema.json");
 export const evalInstanceClustersJsonSchema = loadSchemaDocument("instance-clusters.schema.json");
+export const evalLlmJudgeResultJsonSchema = loadSchemaDocument("eval-llm-judge-result.schema.json");
 export const evalMatrixJsonSchema = loadSchemaDocument("eval-matrix.schema.json");
 export const evalPublicDiagnosticsJsonSchema = loadSchemaDocument("eval-public-diagnostics.schema.json");
 export const evalPublicationStateJsonSchema = loadSchemaDocument("eval-publication-state.schema.json");
@@ -297,6 +305,7 @@ export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalFindingManifestJsonSchema,
   evalGroundTruthCreditsJsonSchema,
   evalInstanceClustersJsonSchema,
+  evalLlmJudgeResultJsonSchema,
   evalMatrixJsonSchema,
   evalPublicDiagnosticsJsonSchema,
   evalPublicationStateJsonSchema,
@@ -340,6 +349,7 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "finding-manifest.schema.json": evalFindingManifestJsonSchema,
   "ground-truth-credits.schema.json": evalGroundTruthCreditsJsonSchema,
   "instance-clusters.schema.json": evalInstanceClustersJsonSchema,
+  "eval-llm-judge-result.schema.json": evalLlmJudgeResultJsonSchema,
   "telemetry-cursor.schema.json": evalTelemetryCursorJsonSchema
 });
 
