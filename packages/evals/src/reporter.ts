@@ -59,13 +59,17 @@ export type EvalNodeEvent =
   | { type: "node-artifacts"; at: string; manifest: ArtifactManifestEntry[] };
 
 export interface EvalNodeEventEnvelope {
-  eventId: string; // events.jsonl event_id — provider idempotency key
+  eventId: string; // source events.jsonl event_id
+  /** Stable, row-scoped key reporters must use to make at-least-once delivery idempotent. */
+  idempotencyKey: string;
   rowId: string;
   nodeId: string; // joins to EvalRowGraph.nodes[].id
   event: EvalNodeEvent;
 }
 
 export interface EvalArtifactUpload {
+  /** Stable key over row, node, relative path, and content digest. */
+  idempotencyKey: string;
   rowId: string;
   nodeId: string;
   relativePath: string; // e.g. "report.md", "report.json"

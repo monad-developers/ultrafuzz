@@ -97,6 +97,7 @@ describe("NodeTelemetryPump", () => {
       nodeId: "setup-1",
       event: { type: "node-started", at: T0, attempt: 1 }
     });
+    expect(envelopes[0]?.idempotencyKey).toMatch(/^ultrafuzz-event-[0-9a-f]{64}$/u);
     // manifest event announces both files (cheap, always sent) …
     const artifactsEnvelope = envelopes[1];
     expect(artifactsEnvelope?.event).toMatchObject({ type: "node-artifacts" });
@@ -113,6 +114,7 @@ describe("NodeTelemetryPump", () => {
       relativePath: "report.md",
       contentType: "text/markdown"
     });
+    expect(uploads[0]?.idempotencyKey).toMatch(/^ultrafuzz-artifact-[0-9a-f]{64}$/u);
     expect(uploads[0]?.read).toBeUndefined();
     // node-finished folds findingsCount and backdates startedAt from state.json.
     expect(envelopes[2]).toMatchObject({
@@ -267,8 +269,10 @@ describe("NodeTelemetryPump", () => {
 
     // Simulate a crash: build a fresh pump from the persisted cursor and re-drain.
     const resumed = pump();
-    expect(resumed.cursor.byteOffset).toBeGreaterThan(0);
+    // Constructors do no unlocked cursor I/O; drain reloads authoritatively under the lease.
+    expect(resumed.cursor.byteOffset).toBe(0);
     await resumed.drain();
+    expect(resumed.cursor.byteOffset).toBeGreaterThan(0);
     expect(reporter.envelopes()).toHaveLength(2);
 
     // Even replaying from offset 0 (rewritten cursor byteOffset) dedups by event_id.
@@ -277,6 +281,150 @@ describe("NodeTelemetryPump", () => {
     fs.writeFileSync(cursorPath, JSON.stringify(cursor), "utf8");
     await pump().drain();
     expect(reporter.envelopes()).toHaveLength(2);
+
+    // An explicit publish reset is performed inside the same lease and replays
+    // with identical provider idempotency keys.
+    const originalKeys = reporter.envelopes().map((envelope) => envelope.idempotencyKey);
+    await pump().drain({ resetCursor: true });
+    expect(reporter.envelopes()).toHaveLength(4);
+    expect(
+      reporter
+        .envelopes()
+        .slice(2)
+        .map((envelope) => envelope.idempotencyKey)
+    ).toEqual(originalKeys);
+  });
+
+  it("serializes concurrent drains across reload, callbacks, and durable commit", async () => {
+    const { runRoot, cursorPath, row, policy } = setup();
+    writeRunFixture({
+      runRoot,
+      events: [
+        { event_id: "evt-concurrent", event_type: "node-synced", timestamp: T0, node_id: "setup-1", status: "running" }
+      ]
+    });
+
+    let callbackEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      callbackEntered = resolve;
+    });
+    let releaseCallback!: () => void;
+    const callbackGate = new Promise<void>((resolve) => {
+      releaseCallback = resolve;
+    });
+    class BlockingReporter extends RecordingReporter {
+      override async onNodeEvent(envelope: EvalNodeEventEnvelope): Promise<void> {
+        await super.onNodeEvent(envelope);
+        callbackEntered();
+        await callbackGate;
+      }
+    }
+    const reporter = new BlockingReporter();
+    const makePump = () =>
+      new NodeTelemetryPump({ runRoot, row, reporters: [reporter], policy, cursorPath, retryDelayMs: 0 });
+
+    const firstDrain = makePump().drain();
+    await entered;
+    const secondDrain = makePump().drain();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reporter.envelopes()).toHaveLength(1);
+    releaseCallback();
+
+    const results = await Promise.all([firstDrain, secondDrain]);
+    expect(results.reduce((total, result) => total + result.deliveredEvents, 0)).toBe(1);
+    expect(reporter.envelopes()).toHaveLength(1);
+    expect(loadTelemetryCursor(cursorPath).deliveredEventIds).toEqual(["evt-concurrent"]);
+  });
+
+  it("throws on cursor persistence failure and restores the in-memory durable snapshot", async () => {
+    const { runRoot, cursorPath, row, policy } = setup();
+    writeRunFixture({
+      runRoot,
+      events: [
+        {
+          event_id: "evt-write-failure",
+          event_type: "node-synced",
+          timestamp: T0,
+          node_id: "setup-1",
+          status: "running"
+        }
+      ]
+    });
+    class CursorBlockingReporter extends RecordingReporter {
+      override async onNodeEvent(envelope: EvalNodeEventEnvelope): Promise<void> {
+        await super.onNodeEvent(envelope);
+        fs.mkdirSync(cursorPath);
+      }
+    }
+    const reporter = new CursorBlockingReporter();
+    const telemetry = new NodeTelemetryPump({
+      runRoot,
+      row,
+      reporters: [reporter],
+      policy,
+      cursorPath,
+      retryDelayMs: 0
+    });
+
+    await expect(telemetry.drain()).rejects.toMatchObject({ code: "EVAL_TELEMETRY_CURSOR_WRITE_FAILED" });
+    expect(reporter.envelopes()).toHaveLength(1);
+    expect(telemetry.cursor).toMatchObject({ byteOffset: 0, deliveredEventIds: [], lastHeartbeatAt: {} });
+    expect(fs.existsSync(`${cursorPath}.tmp`)).toBe(false);
+  });
+
+  it("atomically replaces a cursor symlink introduced during delivery without following it", async () => {
+    const { base, runRoot, cursorPath, row, policy } = setup();
+    writeRunFixture({
+      runRoot,
+      events: [
+        {
+          event_id: "evt-symlink-swap",
+          event_type: "node-synced",
+          timestamp: T0,
+          node_id: "setup-1",
+          status: "running"
+        }
+      ]
+    });
+    const victimPath = path.join(base, "victim.txt");
+    fs.writeFileSync(victimPath, "unchanged\n", "utf8");
+    class SymlinkSwapReporter extends RecordingReporter {
+      override async onNodeEvent(envelope: EvalNodeEventEnvelope): Promise<void> {
+        await super.onNodeEvent(envelope);
+        fs.symlinkSync(victimPath, cursorPath);
+      }
+    }
+    const reporter = new SymlinkSwapReporter();
+    const telemetry = new NodeTelemetryPump({
+      runRoot,
+      row,
+      reporters: [reporter],
+      policy,
+      cursorPath,
+      retryDelayMs: 0
+    });
+
+    await telemetry.drain();
+    expect(fs.lstatSync(cursorPath).isFile()).toBe(true);
+    expect(fs.lstatSync(cursorPath).isSymbolicLink()).toBe(false);
+    expect(fs.readFileSync(victimPath, "utf8")).toBe("unchanged\n");
+    expect(loadTelemetryCursor(cursorPath).deliveredEventIds).toEqual(["evt-symlink-swap"]);
+  });
+
+  it("rejects malformed and dangling-symlink cursors instead of treating them as absent", () => {
+    const { base, cursorPath } = setup();
+    fs.writeFileSync(cursorPath, '{"schemaVersion":', "utf8");
+    expect(() => loadTelemetryCursor(cursorPath)).toThrow();
+
+    fs.unlinkSync(cursorPath);
+    fs.symlinkSync(path.join(base, "missing-cursor.json"), cursorPath);
+    expect(() => loadTelemetryCursor(cursorPath)).toThrow(/cannot be a symbolic link/u);
+
+    const physicalDirectory = path.join(base, "physical-cursors");
+    const linkedDirectory = path.join(base, "linked-cursors");
+    fs.mkdirSync(physicalDirectory);
+    fs.symlinkSync(physicalDirectory, linkedDirectory);
+    expect(() => loadTelemetryCursor(path.join(linkedDirectory, "cursor.json"))).toThrow(/crosses symlink/u);
   });
 
   it("retries guarded reporter failures and leaves undelivered events for resume", async () => {

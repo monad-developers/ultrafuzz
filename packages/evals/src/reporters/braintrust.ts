@@ -165,7 +165,7 @@ export class BraintrustReporter implements EvalReporter {
         const endEpoch = epochSeconds(event.at);
         await this.insertEvents([
           {
-            id: envelope.eventId,
+            id: envelope.idempotencyKey,
             span_id: this.nodeSpanId(envelope.rowId, envelope.nodeId, event.attempt),
             root_span_id: this.rowSpanId(envelope.rowId),
             span_parents: [this.groupSpanId(envelope.rowId, this.groupForNode(envelope.rowId, envelope.nodeId))],
@@ -203,7 +203,7 @@ export class BraintrustReporter implements EvalReporter {
       case "node-artifacts": {
         await this.insertEvents([
           {
-            id: envelope.eventId,
+            id: envelope.idempotencyKey,
             span_id: this.nodeArtifactSpanId(envelope.rowId, envelope.nodeId),
             root_span_id: this.rowSpanId(envelope.rowId),
             span_parents: [this.groupSpanId(envelope.rowId, this.groupForNode(envelope.rowId, envelope.nodeId))],
@@ -234,7 +234,7 @@ export class BraintrustReporter implements EvalReporter {
         : undefined;
     await this.insertEvents([
       {
-        id: `artifact-${artifact.nodeId}-${artifact.relativePath}-${artifact.sha256}`,
+        id: artifact.idempotencyKey,
         span_id: this.nodeArtifactSpanId(artifact.rowId, artifact.nodeId),
         root_span_id: this.rowSpanId(artifact.rowId),
         _is_merge: true,

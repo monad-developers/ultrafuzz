@@ -370,6 +370,10 @@ export function readTelemetryCursor(filePath: string): TelemetryCursorState {
   return parseTelemetryCursor(readStrictJsonDocument(filePath), filePath);
 }
 
+export function writeTelemetryCursor(filePath: string, value: TelemetryCursorState): void {
+  writeJsonDurable(filePath, parseTelemetryCursor(value, filePath));
+}
+
 export function readStrictJsonDocument(filePath: string): unknown {
   let bytes: Buffer;
   try {

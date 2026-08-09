@@ -378,6 +378,7 @@ describe("BraintrustReporter", () => {
     });
     await reporter.onNodeEvent({
       eventId: "evt-4",
+      idempotencyKey: "ultrafuzz-event-stable-evt-4",
       rowId: row.id,
       nodeId: "setup-1",
       event: {
@@ -413,7 +414,7 @@ describe("BraintrustReporter", () => {
     expect(nodeInsert).toBeDefined();
     const nodeEvent = (nodeInsert?.body as { events: Array<Record<string, unknown>> }).events[0]!;
     expect(nodeEvent).toMatchObject({
-      id: "evt-4",
+      id: "ultrafuzz-event-stable-evt-4",
       span_parents: [`span-group-${row.id}-setup`],
       metrics: {
         start: Date.parse("2026-07-09T00:00:00.000Z") / 1000,

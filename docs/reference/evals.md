@@ -109,9 +109,14 @@ the workflow runner:
 - `packages/evals/src/node-telemetry.ts` is the pump: a cursor over
   `events.jsonl` + `state.json` + artifact manifests, driven from the eval
   driver's poll loop. The cursor (byte offset + `event_id` dedup ring +
-  uploaded-artifact hashes) is persisted durably after delivery, so the driver
-  can crash and resume without double-publishing, and reporter failures always
-  degrade to warnings.
+  uploaded-artifact hashes) is reloaded and persisted under a per-cursor lease.
+  Delivery is at-least-once: callbacks happen before the durable cursor commit,
+  so a crash or cursor persistence failure can replay a callback. Reporters must
+  make those callbacks idempotent with the stable `idempotencyKey` supplied on
+  every event envelope and artifact upload. Event keys are derived from the eval
+  row plus journal `event_id`; artifact keys are derived from row, node, relative
+  path, and SHA-256. Exhausted provider delivery retries degrade to warnings;
+  cursor lock, validation, and persistence failures stop the drain.
 - `packages/evals/src/reporters/braintrust.ts` maps rows to a three-level span
   tree (row root → topology group → node attempt) with backdated
   `start`/`end` metrics. The reporter speaks the provider's REST API directly

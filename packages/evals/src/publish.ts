@@ -1,14 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertPlannedGraph, readRunState, validateArtifactContract, writeJsonDurable } from "@ultrafuzz/artifacts";
+import { assertPlannedGraph, readRunState, validateArtifactContract } from "@ultrafuzz/artifacts";
 import type { EvalConfig } from "@ultrafuzz/config";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
-import { NodeTelemetryPump, createTelemetryCursor } from "./node-telemetry.js";
+import { NodeTelemetryPump } from "./node-telemetry.js";
 import {
   appendEvalRunRecord,
-  parseTelemetryCursor,
   readEvalMatrix,
   readEvalRunManifest,
   readEvalRunRecords,
@@ -135,9 +134,6 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
       await reporter.onRowStart(row, graphFromPlannedGraph(graph, row.id));
     }
     const cursorPath = path.join(root, "telemetry", "publish", resolved.provider, `${row.id}.cursor.json`);
-    if (input.resume !== true) {
-      resetCursor(cursorPath);
-    }
     const pump = new NodeTelemetryPump({
       runRoot,
       row,
@@ -145,7 +141,7 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
       policy: suite.reporting,
       cursorPath
     });
-    const drained = await pump.drain();
+    const drained = await pump.drain({ resetCursor: input.resume !== true });
     diagnostics.push(...drained.warnings);
     eventsPublished += drained.deliveredEvents;
     artifactsPublished += drained.deliveredArtifacts;
@@ -256,10 +252,6 @@ function assertPublishableTerminalReports(
     status: "publishable",
     diagnostics: []
   });
-}
-
-function resetCursor(cursorPath: string): void {
-  writeJsonDurable(cursorPath, parseTelemetryCursor(createTelemetryCursor(), cursorPath));
 }
 
 function rowResult(record: EvalRunRecord, runRoot: string): EvalRowResult {

@@ -2,8 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { TextDecoder } from "node:util";
 
+import lockfile from "proper-lockfile";
+
 import {
   ARTIFACT_MANIFEST_FILE,
+  assertNoSymlinkComponents,
   assertRegularFileInside,
   getNodeArtifactDir,
   layoutForRunRoot,
@@ -29,13 +32,18 @@ import {
   type EvalReporter
 } from "./reporter.js";
 import type { EvalMatrixRow, EvalReportingPolicy } from "./types.js";
-import { parseTelemetryCursor, readTelemetryCursor } from "./eval-durable.js";
-import { contentTypeForArtifact, isRecord, warningDiagnostic } from "./utils.js";
+import { readTelemetryCursor, writeTelemetryCursor } from "./eval-durable.js";
+import { contentTypeForArtifact, EvalError, isRecord, warningDiagnostic } from "./utils.js";
 
 export const TELEMETRY_CURSOR_SCHEMA_VERSION = "ultrafuzz.eval.telemetry-cursor.v1" as const;
 const DELIVERED_EVENT_RING_SIZE = 4096;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+const TELEMETRY_CURSOR_LOCK_STALE_MS = 300_000;
+const TELEMETRY_CURSOR_LOCK_FS = Object.assign(Object.create(fs) as typeof fs, {
+  stat: fs.lstat.bind(fs),
+  utimes: fs.lutimes.bind(fs)
+});
 
 export interface TelemetryCursorState {
   schemaVersion: typeof TELEMETRY_CURSOR_SCHEMA_VERSION;
@@ -52,6 +60,11 @@ export interface TelemetryDrainResult {
   deliveredEvents: number;
   deliveredArtifacts: number;
   warnings: RuntimeDiagnostic[];
+}
+
+export interface TelemetryDrainOptions {
+  /** Start this drain from a durably reset cursor while holding the cursor lease. */
+  resetCursor?: boolean;
 }
 
 export interface NodeTelemetryPumpInput {
@@ -79,8 +92,27 @@ export function createTelemetryCursor(): TelemetryCursorState {
 }
 
 export function loadTelemetryCursor(cursorPath: string): TelemetryCursorState {
-  if (!fs.existsSync(cursorPath)) {
-    return createTelemetryCursor();
+  const absoluteCursorPath = path.resolve(cursorPath);
+  assertNoSymlinkComponents(path.parse(absoluteCursorPath).root, absoluteCursorPath, "telemetry cursor path");
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(cursorPath);
+  } catch (error) {
+    if (isErrnoException(error, "ENOENT")) {
+      return createTelemetryCursor();
+    }
+    throw new EvalError(
+      "EVAL_TELEMETRY_CURSOR_READ_FAILED",
+      `failed to inspect telemetry cursor ${cursorPath}: ${error instanceof Error ? error.message : String(error)}`,
+      { path: cursorPath }
+    );
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new EvalError(
+      "EVAL_TELEMETRY_CURSOR_UNSAFE",
+      `telemetry cursor must be a regular file and cannot be a symbolic link: ${cursorPath}`,
+      { path: cursorPath }
+    );
   }
   return readTelemetryCursor(cursorPath);
 }
@@ -90,10 +122,10 @@ export function loadTelemetryCursor(cursorPath: string): TelemetryCursorState {
  * sync tick, translates them into reporter envelopes, synthesizes heartbeats
  * from `state.json`, and streams allowlisted artifacts from node manifests.
  *
- * At-least-once with `event_id` dedup makes delivery effectively exactly-once;
- * the cursor is persisted durably only after a delivery pass, so killing and
- * resuming the driver never double-publishes. Reporter failures degrade to
- * warnings — a provider outage must not kill a multi-hour fuzzing run.
+ * Delivery is at-least-once. The cursor is persisted durably after callbacks,
+ * so a crash or cursor-write failure can replay a callback. Reporter-facing
+ * envelopes therefore carry stable idempotency keys. Delivery exhaustion
+ * degrades to warnings, while cursor lock/read/write failures are fatal.
  */
 export class NodeTelemetryPump {
   readonly cursor: TelemetryCursorState;
@@ -107,10 +139,30 @@ export class NodeTelemetryPump {
     this.now = input.now ?? (() => new Date());
     this.maxAttempts = Math.max(1, input.maxDeliveryAttempts ?? 3);
     this.retryDelayMs = input.retryDelayMs ?? 250;
-    this.cursor = loadTelemetryCursor(input.cursorPath);
+    this.cursor = createTelemetryCursor();
   }
 
-  async drain(): Promise<TelemetryDrainResult> {
+  async drain(options: TelemetryDrainOptions = {}): Promise<TelemetryDrainResult> {
+    const release = await acquireTelemetryCursorLock(this.input.cursorPath);
+    try {
+      if (options.resetCursor === true) {
+        persistTelemetryCursor(this.input.cursorPath, createTelemetryCursor());
+      }
+      const durableCursor = loadTelemetryCursor(this.input.cursorPath);
+      this.replaceCursor(durableCursor);
+      const rollbackCursor = cloneTelemetryCursor(durableCursor);
+      try {
+        return await this.drainLocked();
+      } catch (error) {
+        this.replaceCursor(rollbackCursor);
+        throw error;
+      }
+    } finally {
+      await release();
+    }
+  }
+
+  private async drainLocked(): Promise<TelemetryDrainResult> {
     const warnings: RuntimeDiagnostic[] = [];
     const state = this.readState();
     const { records, nextOffset } = this.readNewJournalRecords(warnings);
@@ -163,7 +215,7 @@ export class NodeTelemetryPump {
     // Re-read the journal after any failed callback. Successfully delivered
     // IDs/hashes remain in the cursor, so resume retries only missing work.
     this.cursor.byteOffset = deliveryFailed ? replayOffset : nextOffset;
-    this.persistCursor(warnings);
+    this.persistCursor();
     return { deliveredEvents, deliveredArtifacts, warnings };
   }
 
@@ -394,6 +446,7 @@ export class NodeTelemetryPump {
         continue;
       }
       uploads.push({
+        idempotencyKey: telemetryIdempotencyKey("artifact", [this.input.row.id, nodeId, file.path, file.sha256]),
         rowId: this.input.row.id,
         nodeId,
         relativePath: file.path,
@@ -439,7 +492,13 @@ export class NodeTelemetryPump {
   }
 
   private envelope(eventId: string, nodeId: string, event: EvalNodeEvent): EvalNodeEventEnvelope {
-    return { eventId, rowId: this.input.row.id, nodeId, event };
+    return {
+      eventId,
+      idempotencyKey: telemetryIdempotencyKey("event", [this.input.row.id, eventId]),
+      rowId: this.input.row.id,
+      nodeId,
+      event
+    };
   }
 
   private async deliver(
@@ -485,22 +544,108 @@ export class NodeTelemetryPump {
     }
   }
 
-  private persistCursor(warnings: RuntimeDiagnostic[]): void {
-    try {
-      fs.mkdirSync(path.dirname(this.input.cursorPath), { recursive: true });
-      const tempPath = `${this.input.cursorPath}.tmp`;
-      const validated = parseTelemetryCursor(this.cursor, this.input.cursorPath);
-      fs.writeFileSync(tempPath, `${JSON.stringify(validated, null, 2)}\n`, "utf8");
-      fs.renameSync(tempPath, this.input.cursorPath);
-    } catch (error) {
-      warnings.push(
-        warningDiagnostic(
-          "EVAL_TELEMETRY_CURSOR_WRITE_FAILED",
-          `failed to persist telemetry cursor: ${error instanceof Error ? error.message : String(error)}`
-        )
+  private persistCursor(): void {
+    persistTelemetryCursor(this.input.cursorPath, this.cursor);
+  }
+
+  private replaceCursor(next: TelemetryCursorState): void {
+    const clone = cloneTelemetryCursor(next);
+    this.cursor.schemaVersion = clone.schemaVersion;
+    this.cursor.byteOffset = clone.byteOffset;
+    this.cursor.deliveredEventIds = clone.deliveredEventIds;
+    this.cursor.uploadedArtifacts = clone.uploadedArtifacts;
+    this.cursor.lastHeartbeatAt = clone.lastHeartbeatAt;
+    this.cursor.providerIds = clone.providerIds;
+    this.cursor.findingsCountByNode = clone.findingsCountByNode;
+  }
+}
+
+async function acquireTelemetryCursorLock(cursorPath: string): Promise<() => Promise<void>> {
+  const absoluteCursorPath = path.resolve(cursorPath);
+  const directory = path.dirname(absoluteCursorPath);
+  const filesystemRoot = path.parse(absoluteCursorPath).root;
+  assertNoSymlinkComponents(filesystemRoot, directory, "telemetry cursor directory");
+  fs.mkdirSync(directory, { recursive: true });
+  assertPhysicalTelemetryCursorDirectory(absoluteCursorPath);
+  const lockPath = `${absoluteCursorPath}.lock`;
+  try {
+    const lockStat = fs.lstatSync(lockPath);
+    if (lockStat.isSymbolicLink()) {
+      throw new EvalError(
+        "EVAL_TELEMETRY_CURSOR_UNSAFE",
+        `telemetry cursor lock cannot be a symbolic link: ${lockPath}`,
+        { path: lockPath }
       );
     }
+  } catch (error) {
+    if (!isErrnoException(error, "ENOENT")) {
+      throw error;
+    }
   }
+  try {
+    return await lockfile.lock(absoluteCursorPath, {
+      lockfilePath: lockPath,
+      realpath: false,
+      fs: TELEMETRY_CURSOR_LOCK_FS,
+      stale: TELEMETRY_CURSOR_LOCK_STALE_MS,
+      update: 60_000,
+      retries: { retries: 120, factor: 1, minTimeout: 25, maxTimeout: 250 }
+    });
+  } catch (error) {
+    throw new EvalError(
+      "EVAL_TELEMETRY_CURSOR_LOCK_FAILED",
+      `failed to acquire telemetry cursor lock ${lockPath}: ${error instanceof Error ? error.message : String(error)}`,
+      { path: lockPath }
+    );
+  }
+}
+
+function cloneTelemetryCursor(cursor: TelemetryCursorState): TelemetryCursorState {
+  return {
+    schemaVersion: cursor.schemaVersion,
+    byteOffset: cursor.byteOffset,
+    deliveredEventIds: [...cursor.deliveredEventIds],
+    uploadedArtifacts: { ...cursor.uploadedArtifacts },
+    lastHeartbeatAt: { ...cursor.lastHeartbeatAt },
+    providerIds: { ...cursor.providerIds },
+    findingsCountByNode: { ...cursor.findingsCountByNode }
+  };
+}
+
+function persistTelemetryCursor(cursorPath: string, cursor: TelemetryCursorState): void {
+  try {
+    assertPhysicalTelemetryCursorDirectory(cursorPath);
+    writeTelemetryCursor(cursorPath, cursor);
+  } catch (error) {
+    throw new EvalError(
+      "EVAL_TELEMETRY_CURSOR_WRITE_FAILED",
+      `failed to persist telemetry cursor ${cursorPath}: ${error instanceof Error ? error.message : String(error)}`,
+      { path: cursorPath }
+    );
+  }
+}
+
+function assertPhysicalTelemetryCursorDirectory(cursorPath: string): void {
+  const absoluteCursorPath = path.resolve(cursorPath);
+  const directory = path.dirname(absoluteCursorPath);
+  assertNoSymlinkComponents(path.parse(absoluteCursorPath).root, directory, "telemetry cursor directory");
+  const directoryStat = fs.lstatSync(directory);
+  if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
+    throw new EvalError(
+      "EVAL_TELEMETRY_CURSOR_UNSAFE",
+      `telemetry cursor directory must be a physical directory: ${directory}`,
+      { path: directory }
+    );
+  }
+}
+
+function telemetryIdempotencyKey(kind: "event" | "artifact", components: readonly string[]): string {
+  const digest = sha256Bytes(Buffer.from(JSON.stringify(components), "utf8"));
+  return `ultrafuzz-${kind}-${digest}`;
+}
+
+function isErrnoException(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
 
 function isEventRecord(value: unknown): value is EventRecord {
