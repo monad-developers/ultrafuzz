@@ -27,7 +27,7 @@ test("a torn event journal is rejected without repair or append", () => {
     nodeId: "node-a",
     status: "succeeded",
     timestamp: "2026-08-05T00:00:00.000Z",
-    payload: { sequence: 1 }
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-1", attempt: 1 }
   });
   fs.writeFileSync(layout.eventsPath, `${JSON.stringify(first)}\n{"event_id":"evt-tor`, "utf8");
   const second = createEventRecord(layout, {
@@ -35,7 +35,7 @@ test("a torn event journal is rejected without repair or append", () => {
     nodeId: "node-b",
     status: "succeeded",
     timestamp: "2026-08-05T00:00:01.000Z",
-    payload: { sequence: 2 }
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-2", attempt: 2 }
   });
 
   const before = fs.readFileSync(layout.eventsPath);
@@ -49,12 +49,16 @@ test("a complete but unterminated trailing object is rejected without repair", (
   const first = createEventRecord(layout, {
     eventType: "node-synced",
     nodeId: "node-a",
-    timestamp: "2026-08-05T00:00:00.000Z"
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-1" }
   });
   const second = createEventRecord(layout, {
     eventType: "node-synced",
     nodeId: "node-b",
-    timestamp: "2026-08-05T00:00:01.000Z"
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:01.000Z",
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-2" }
   });
   fs.writeFileSync(layout.eventsPath, JSON.stringify(first), "utf8");
 
@@ -68,7 +72,9 @@ test("a torn event index rejects the whole append before the canonical journal c
   const first = appendEvent(layout, {
     eventType: "node-synced",
     nodeId: "node-a",
-    timestamp: "2026-08-05T00:00:00.000Z"
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-1" }
   });
   const indexPath = path.join(layout.eventsIndexDir, "run", `${layout.runId}.jsonl`);
   fs.appendFileSync(indexPath, '{"event_id":"evt-tor', "utf8");
@@ -79,7 +85,9 @@ test("a torn event index rejects the whole append before the canonical journal c
       appendEvent(layout, {
         eventType: "node-synced",
         nodeId: "node-b",
-        timestamp: "2026-08-05T00:00:01.000Z"
+        status: "succeeded",
+        timestamp: "2026-08-05T00:00:01.000Z",
+        payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-2" }
       }),
     /torn or unterminated/u
   );

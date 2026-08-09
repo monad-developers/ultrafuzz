@@ -1,24 +1,1413 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:artifacts:event-record:1",
+  "$id": "urn:ultrafuzz:schema:artifacts:event-record:2",
   "title": "Ultrafuzz event record",
-  "type": "object",
-  "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "payload"],
-  "additionalProperties": false,
-  "properties": {
-    "schema_version": { "const": "ultrafuzz.event-record.v1" },
-    "event_id": { "type": "string", "pattern": "^evt-[a-f0-9]{24}$" },
-    "timestamp": { "type": "string", "format": "date-time" },
-    "run_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
-    "event_type": {
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "node_id", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "reference-materialized"
+        },
+        "node_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "status": {
+          "const": "succeeded"
+        },
+        "payload": {
+          "$ref": "#/$defs/referenceMaterializedPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-deadline-exceeded"
+        },
+        "status": {
+          "const": "timed-out"
+        },
+        "payload": {
+          "$ref": "#/$defs/workflowDeadlineExceededPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-synced"
+        },
+        "status": {
+          "enum": ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled"]
+        },
+        "payload": {
+          "$ref": "#/$defs/workflowSyncedPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-failure-unattributed"
+        },
+        "status": {
+          "enum": ["failed", "timed-out"]
+        },
+        "payload": {
+          "$ref": "#/$defs/workflowFailureUnattributedPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "node_id", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "node-synced"
+        },
+        "node_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "ready",
+            "runnable",
+            "running",
+            "succeeded",
+            "failed",
+            "skipped",
+            "timed-out",
+            "reused-from-prior-run",
+            "invalidated"
+          ]
+        },
+        "payload": {
+          "$ref": "#/$defs/nodeSyncedPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "node_id", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "node-artifacts-verified"
+        },
+        "node_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "status": {
+          "const": "succeeded"
+        },
+        "payload": {
+          "$ref": "#/$defs/nodeArtifactsPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "node_id", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "node-artifacts-missing"
+        },
+        "node_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "status": {
+          "const": "failed"
+        },
+        "payload": {
+          "$ref": "#/$defs/nodeArtifactsPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "node_id", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "findings-validated"
+        },
+        "node_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "status": {
+          "enum": ["succeeded", "failed"]
+        },
+        "payload": {
+          "$ref": "#/$defs/findingsValidatedPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "node_id", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "artifact-manifest-written"
+        },
+        "node_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "status": {
+          "const": "succeeded"
+        },
+        "payload": {
+          "$ref": "#/$defs/artifactManifestWrittenPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "materialize-selection"
+        },
+        "status": {
+          "enum": ["dry-run", "succeeded"]
+        },
+        "payload": {
+          "$ref": "#/$defs/materializeSelectionPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-link-recorded"
+        },
+        "status": {
+          "enum": ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled"]
+        },
+        "payload": {
+          "$ref": "#/$defs/workflowRunLinkPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-cancel-confirmed"
+        },
+        "status": {
+          "const": "canceled"
+        },
+        "payload": {
+          "$ref": "#/$defs/workflowCancelConfirmedPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-cancel-requested"
+        },
+        "status": {
+          "enum": ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled"]
+        },
+        "payload": {
+          "$ref": "#/$defs/workflowCancelRequestedPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-compiled"
+        },
+        "status": {
+          "const": "succeeded"
+        },
+        "payload": {
+          "$ref": "#/$defs/workflowCompiledPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-submitting"
+        },
+        "status": {
+          "const": "running"
+        },
+        "payload": {
+          "$ref": "#/$defs/workflowSubmittingPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-submitted"
+        },
+        "status": {
+          "const": "running"
+        },
+        "payload": {
+          "$ref": "#/$defs/workflowSubmittedPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-submit-failed"
+        },
+        "status": {
+          "const": "failed"
+        },
+        "payload": {
+          "$ref": "#/$defs/workflowSubmitFailedPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-lifecycle-already-paused"
+        },
+        "status": {
+          "const": "paused"
+        },
+        "payload": {
+          "$ref": "#/$defs/pausePayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-pause-requested"
+        },
+        "status": {
+          "const": "running"
+        },
+        "payload": {
+          "$ref": "#/$defs/pausePayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-lifecycle-invoking"
+        },
+        "status": {
+          "const": "running"
+        },
+        "payload": {
+          "$ref": "#/$defs/workflowLifecycleInvokingPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-lifecycle-result"
+        },
+        "status": {
+          "const": "running"
+        },
+        "payload": {
+          "$ref": "#/$defs/workflowLifecycleResultPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-lifecycle-already-running"
+        },
+        "status": {
+          "const": "running"
+        },
+        "payload": {
+          "$ref": "#/$defs/workflowLifecycleSubmittedPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "workflow-lifecycle-submitted"
+        },
+        "status": {
+          "const": "running"
+        },
+        "payload": {
+          "$ref": "#/$defs/workflowLifecycleSubmittedPayload"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "eventId": {
+      "type": "string",
+      "pattern": "^evt-[a-f0-9]{24}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "safeId": {
       "type": "string",
       "minLength": 1,
       "maxLength": 128,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
     },
-    "payload": {},
-    "node_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
-    "status": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
-    "provenance": { "type": "object" }
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "nonNegativeSafeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "workflowLinkId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "outputContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "contract", "contract_digest", "primary"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128}(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128})*$"
+        },
+        "contract": {
+          "enum": [
+            "ultrafuzz/admin-config-boundary-matrix@1",
+            "ultrafuzz/aggregation-manifest@1",
+            "ultrafuzz/audited-differential-lanes@1",
+            "ultrafuzz/boundary-recipes@1",
+            "ultrafuzz/campaign-summary@2",
+            "ultrafuzz/coverage-goal@1",
+            "ultrafuzz/dependency-scope-matrix@1",
+            "ultrafuzz/differential-gap-review@1",
+            "ultrafuzz/differential-lane-result@1",
+            "ultrafuzz/differential-plan@1",
+            "ultrafuzz/differential-red-triage@1",
+            "ultrafuzz/differential-repair-summary@1",
+            "ultrafuzz/differential-report-review@1",
+            "ultrafuzz/dynamic-enumerator-outputs@1",
+            "ultrafuzz/dynamic-strategy-plan@1",
+            "ultrafuzz/dynamic-strategy-provenance@1",
+            "ultrafuzz/externalized-state-accounting@1",
+            "ultrafuzz/finding-lifecycle-ledger@1",
+            "ultrafuzz/findings@2",
+            "ultrafuzz/generated-tests@2",
+            "ultrafuzz/harness-repairs@1",
+            "ultrafuzz/implemented-properties@3",
+            "ultrafuzz/invariant-campaign-plan@1",
+            "ultrafuzz/invariant-ledger@1",
+            "ultrafuzz/nonempty-markdown@1",
+            "ultrafuzz/properties@2",
+            "ultrafuzz/property-campaign@2",
+            "ultrafuzz/property-lens@2",
+            "ultrafuzz/reference-expectations@2",
+            "ultrafuzz/reference-harness@1",
+            "ultrafuzz/reference-manifest@1",
+            "ultrafuzz/report@2",
+            "ultrafuzz/selected-strategies@1",
+            "ultrafuzz/semantic-red-registry@1",
+            "ultrafuzz/severity-classified-findings@1",
+            "ultrafuzz/strategy-detections@1",
+            "ultrafuzz/text@1",
+            "ultrafuzz/triaged-findings@1",
+            "ultrafuzz/workspace-patch@1"
+          ]
+        },
+        "contract_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "schema_file": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$"
+        },
+        "schema_id": {
+          "type": "string",
+          "pattern": "^urn:ultrafuzz:schema:"
+        },
+        "schema_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "schema_bundle_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "validator_build": {
+          "type": "string",
+          "pattern": "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$"
+        },
+        "primary": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "contract": {
+                "enum": ["ultrafuzz/nonempty-markdown@1", "ultrafuzz/text@1"]
+              }
+            },
+            "required": ["contract"]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "properties": {
+                    "schema_file": true
+                  },
+                  "required": ["schema_file"]
+                },
+                {
+                  "properties": {
+                    "schema_id": true
+                  },
+                  "required": ["schema_id"]
+                },
+                {
+                  "properties": {
+                    "schema_sha256": true
+                  },
+                  "required": ["schema_sha256"]
+                },
+                {
+                  "properties": {
+                    "schema_bundle_sha256": true
+                  },
+                  "required": ["schema_bundle_sha256"]
+                },
+                {
+                  "properties": {
+                    "validator_build": true
+                  },
+                  "required": ["validator_build"]
+                }
+              ]
+            }
+          },
+          "else": {
+            "required": ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"]
+          }
+        }
+      ]
+    },
+    "referenceMaterializedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "artifact", "manifest"],
+      "properties": {
+        "reference": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "repo": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "commit": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "artifact": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "manifest": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "workflowDeadlineExceededPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflow_run_id", "deadline_at"],
+      "properties": {
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "deadline_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "workflowSyncedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow_run_id",
+        "workflow_status",
+        "workflow_state",
+        "synced_nodes",
+        "accounting_available",
+        "recovery_due",
+        "deadline_exceeded"
+      ],
+      "properties": {
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "workflow_status": {
+          "enum": [
+            "running",
+            "waiting-approval",
+            "waiting-event",
+            "waiting-timer",
+            "waiting-quota",
+            "paused",
+            "finished",
+            "continued",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "workflow_state": {
+          "enum": [
+            "running",
+            "waiting-approval",
+            "waiting-event",
+            "waiting-timer",
+            "waiting-quota",
+            "paused",
+            "recovering",
+            "stale",
+            "orphaned",
+            "failed",
+            "cancelled",
+            "succeeded",
+            "unknown"
+          ]
+        },
+        "synced_nodes": {
+          "$ref": "#/$defs/nonNegativeSafeInteger"
+        },
+        "accounting_available": {
+          "type": "boolean"
+        },
+        "recovery_due": {
+          "type": "boolean"
+        },
+        "deadline_exceeded": {
+          "type": "boolean"
+        }
+      }
+    },
+    "workflowFailureUnattributedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflow_run_id", "workflow_state", "failed_workflow_tasks", "durable_node_statuses"],
+      "properties": {
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "workflow_state": {
+          "const": "failed"
+        },
+        "failed_workflow_tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "durable_node_statuses": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "pending",
+              "ready",
+              "runnable",
+              "running",
+              "succeeded",
+              "failed",
+              "skipped",
+              "timed-out",
+              "reused-from-prior-run",
+              "invalidated"
+            ]
+          }
+        }
+      }
+    },
+    "nodeSyncedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflow_run_id", "workflow_task_id"],
+      "properties": {
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "workflow_task_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "previous_status": {
+          "enum": [
+            "pending",
+            "ready",
+            "runnable",
+            "running",
+            "succeeded",
+            "failed",
+            "skipped",
+            "timed-out",
+            "reused-from-prior-run",
+            "invalidated"
+          ]
+        },
+        "workflow_state": {
+          "enum": [
+            "pending",
+            "waiting-approval",
+            "waiting-event",
+            "waiting-timer",
+            "waiting-quota",
+            "waiting-bound",
+            "bound-stale",
+            "in-progress",
+            "finished",
+            "failed",
+            "cancelled",
+            "skipped"
+          ]
+        },
+        "attempt": {
+          "$ref": "#/$defs/nonNegativeSafeInteger"
+        }
+      }
+    },
+    "nodeArtifactsPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["output_contracts", "missing"],
+      "properties": {
+        "output_contracts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/outputContract"
+          }
+        },
+        "missing": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        }
+      }
+    },
+    "findingsValidatedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "count": {
+          "$ref": "#/$defs/nonNegativeSafeInteger"
+        },
+        "path": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "artifactManifestWrittenPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file_count", "path"],
+      "properties": {
+        "file_count": {
+          "$ref": "#/$defs/nonNegativeSafeInteger"
+        },
+        "path": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "materializeSelectionPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["audit_path", "mode", "unstaged", "copies", "patches"],
+      "properties": {
+        "audit_path": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "mode": {
+          "enum": ["dry-run", "unstaged-working-tree"]
+        },
+        "unstaged": {
+          "const": true
+        },
+        "copies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source", "destination", "size_bytes", "sha256"],
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/nonEmptyString"
+              },
+              "destination": {
+                "$ref": "#/$defs/nonEmptyString"
+              },
+              "size_bytes": {
+                "$ref": "#/$defs/nonNegativeSafeInteger"
+              },
+              "sha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        },
+        "patches": {
+          "type": "array",
+          "maxItems": 0,
+          "items": false
+        }
+      }
+    },
+    "workflowRunLinkPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflow_link_id", "action", "workflow_run_id", "control_generation"],
+      "properties": {
+        "workflow_link_id": {
+          "$ref": "#/$defs/workflowLinkId"
+        },
+        "action": {
+          "enum": ["start", "resume", "replay", "fork"]
+        },
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "control_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source_workflow_link_id": {
+          "$ref": "#/$defs/workflowLinkId"
+        },
+        "controller_invocation_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "controller_invoked_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "lifecycle_result_event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "lifecycle_result_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "workflowCancelConfirmedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "workflow_run_id", "confirmed"],
+      "properties": {
+        "action": {
+          "const": "cancel"
+        },
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "confirmed": {
+          "const": true
+        }
+      }
+    },
+    "workflowCancelRequestedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "workflow_run_id", "confirmed"],
+      "properties": {
+        "action": {
+          "const": "cancel"
+        },
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "confirmed": {
+          "const": false
+        }
+      }
+    },
+    "workflowCompiledPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow_run_id",
+        "workflow_name",
+        "control_generation",
+        "workflow_link_id",
+        "task_count",
+        "workflow_path"
+      ],
+      "properties": {
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "workflow_name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "control_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "workflow_link_id": {
+          "$ref": "#/$defs/workflowLinkId"
+        },
+        "task_count": {
+          "$ref": "#/$defs/nonNegativeSafeInteger"
+        },
+        "workflow_path": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "workflowSubmittingPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflow_run_id", "workflow_name", "control_generation", "workflow_link_id", "action"],
+      "properties": {
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "workflow_name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "control_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "workflow_link_id": {
+          "$ref": "#/$defs/workflowLinkId"
+        },
+        "action": {
+          "const": "start"
+        }
+      }
+    },
+    "workflowSubmittedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow_run_id",
+        "control_generation",
+        "workflow_link_id",
+        "controller_invocation_id",
+        "controller_invoked_at"
+      ],
+      "properties": {
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "control_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "workflow_link_id": {
+          "$ref": "#/$defs/workflowLinkId"
+        },
+        "controller_invocation_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "controller_invoked_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "workflowSubmitFailedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "severity", "source", "details"],
+      "properties": {
+        "code": {
+          "const": "WORKFLOW_SUBMISSION_FAILED"
+        },
+        "message": {
+          "type": "string"
+        },
+        "severity": {
+          "const": "error"
+        },
+        "source": {
+          "const": "workflow"
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "exit_code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                }
+              ]
+            },
+            "signal": {
+              "type": "string"
+            },
+            "killed": {
+              "type": "boolean"
+            },
+            "stdout": {
+              "type": "string"
+            },
+            "stderr": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "pausePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "workflow_run_id"],
+      "properties": {
+        "action": {
+          "const": "pause"
+        },
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "workflowLifecycleInvokingPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "workflow_run_id", "control_generation", "workflow_link_id"],
+      "properties": {
+        "action": {
+          "enum": ["resume", "replay", "fork"]
+        },
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "control_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "workflow_link_id": {
+          "$ref": "#/$defs/workflowLinkId"
+        }
+      }
+    },
+    "workflowLifecycleResultPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "source_workflow_run_id",
+        "source_workflow_link_id",
+        "workflow_run_id",
+        "control_generation",
+        "controller_invocation_id",
+        "controller_invoked_at"
+      ],
+      "properties": {
+        "action": {
+          "enum": ["resume", "replay", "fork"]
+        },
+        "source_workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source_workflow_link_id": {
+          "$ref": "#/$defs/workflowLinkId"
+        },
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "control_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "controller_invocation_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "controller_invoked_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "workflowLifecycleSubmittedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "workflow_run_id",
+        "workflow_link_id",
+        "control_generation",
+        "controller_invocation_id",
+        "controller_invoked_at"
+      ],
+      "properties": {
+        "action": {
+          "enum": ["resume", "replay", "fork"]
+        },
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "workflow_link_id": {
+          "$ref": "#/$defs/workflowLinkId"
+        },
+        "control_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "controller_invocation_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "controller_invoked_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "reset_node": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "recovered_missing_workflow_run": {
+          "const": true
+        }
+      }
+    }
   }
 }

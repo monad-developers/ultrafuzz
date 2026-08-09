@@ -354,12 +354,21 @@ function zodPositiveFixture(filename: string, contractIds: readonly string[]): u
       };
     case "event-record.schema.json":
       return {
-        schema_version: "ultrafuzz.event-record.v1",
+        schema_version: "ultrafuzz.event-record.v2",
         event_id: `evt-${"a".repeat(24)}`,
         timestamp: "2026-08-09T00:00:00.000Z",
         run_id: "run-1",
         event_type: "workflow-synced",
-        payload: {}
+        status: "running",
+        payload: {
+          workflow_run_id: "workflow-1",
+          workflow_status: "running",
+          workflow_state: "running",
+          synced_nodes: 1,
+          accounting_available: true,
+          recovery_due: false,
+          deadline_exceeded: false
+        }
       };
     case "invariant-source-proof.schema.json":
       return {

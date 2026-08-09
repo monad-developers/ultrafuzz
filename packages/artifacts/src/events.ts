@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import { redactSecretsInValue } from "@ultrafuzz/security";
 import { z } from "zod/v4";
 
+import { ARTIFACT_CONTRACT_IDS, NON_JSON_ARTIFACT_CONTRACT_IDS } from "./artifact-contract-ids.js";
 import { type RunLayout } from "./run-layout.js";
 import {
   SAFE_ID_PATTERN,
@@ -22,10 +23,11 @@ import {
   validateStrictJsonlHistory,
   type StrictJsonlCodec
 } from "./strict-jsonl.js";
+import { NODE_STATE_STATUSES, RUN_STATE_STATUSES } from "./state.js";
 
-export const EVENT_SCHEMA_VERSION = "ultrafuzz.event-record.v1" as const;
+export const EVENT_SCHEMA_VERSION = "ultrafuzz.event-record.v2" as const;
 export const EVENT_QUERY_FACADE_SCHEMA_VERSION = "ultrafuzz.event-query-facade.v1" as const;
-export const EVENT_RECORD_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:event-record:1" as const;
+export const EVENT_RECORD_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:event-record:2" as const;
 export const EVENT_QUERY_FACADE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:event-query-facade:1" as const;
 export const DEFAULT_EVENT_REPLAY_LIMIT = 10_000;
 const MAX_EVENT_INDEX_FILENAME_LENGTH = 128;
@@ -34,27 +36,31 @@ const EVENT_INDEX_DIRECT_MAX_ID_LENGTH = MAX_EVENT_INDEX_FILENAME_LENGTH - EVENT
 const EVENT_INDEX_LONG_DIRECTORY = "sha256";
 const EVENT_INDEX_KEY_SCHEMA_VERSION = "ultrafuzz.event-index-key.v1" as const;
 
-export interface EventRecord {
-  schema_version: typeof EVENT_SCHEMA_VERSION;
-  event_id: string;
-  timestamp: string;
-  run_id: string;
-  event_type: string;
-  payload: unknown;
-  node_id?: string;
-  status?: string;
-  provenance?: Record<string, unknown>;
-}
-
-export interface AppendEventInput {
-  eventType: string;
-  runId?: string;
-  nodeId?: string;
-  status?: string;
-  timestamp?: string;
-  payload?: unknown;
-  provenance?: Record<string, unknown>;
-}
+export const EVENT_RECORD_TYPES = [
+  "reference-materialized",
+  "workflow-deadline-exceeded",
+  "workflow-synced",
+  "workflow-failure-unattributed",
+  "node-synced",
+  "node-artifacts-verified",
+  "node-artifacts-missing",
+  "findings-validated",
+  "artifact-manifest-written",
+  "materialize-selection",
+  "workflow-link-recorded",
+  "workflow-cancel-confirmed",
+  "workflow-cancel-requested",
+  "workflow-compiled",
+  "workflow-submitting",
+  "workflow-submitted",
+  "workflow-submit-failed",
+  "workflow-lifecycle-already-paused",
+  "workflow-pause-requested",
+  "workflow-lifecycle-invoking",
+  "workflow-lifecycle-result",
+  "workflow-lifecycle-already-running",
+  "workflow-lifecycle-submitted"
+] as const;
 
 export interface EventReplay {
   records: EventRecord[];
@@ -105,19 +111,324 @@ export interface EventQueryFacade {
 const eventIdSchema = z.string().regex(/^evt-[a-f0-9]{24}$/u);
 const timestampSchema = z.string().datetime({ offset: true });
 const safeIdSchema = z.string().regex(SAFE_ID_PATTERN);
-const provenanceSchema = z.record(z.string(), z.unknown());
+const nonEmptyStringSchema = z.string().min(1);
+const nonNegativeSafeIntegerSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/u);
+const workflowLinkIdSchema = z.string().uuid();
+const workflowActionSchema = z.enum(["start", "resume", "replay", "fork"]);
+const lifecycleActionSchema = z.enum(["resume", "replay", "fork"]);
+const runStatusSchema = z.enum(RUN_STATE_STATUSES);
+const nodeStatusSchema = z.enum(NODE_STATE_STATUSES);
+export const SMITHERS_RUN_STATUSES = [
+  "running",
+  "waiting-approval",
+  "waiting-event",
+  "waiting-timer",
+  "waiting-quota",
+  "paused",
+  "finished",
+  "continued",
+  "failed",
+  "cancelled"
+] as const;
+export const SMITHERS_RUN_STATES = [
+  "running",
+  "waiting-approval",
+  "waiting-event",
+  "waiting-timer",
+  "waiting-quota",
+  "paused",
+  "recovering",
+  "stale",
+  "orphaned",
+  "failed",
+  "cancelled",
+  "succeeded",
+  "unknown"
+] as const;
+export const SMITHERS_NODE_STATES = [
+  "pending",
+  "waiting-approval",
+  "waiting-event",
+  "waiting-timer",
+  "waiting-quota",
+  "waiting-bound",
+  "bound-stale",
+  "in-progress",
+  "finished",
+  "failed",
+  "cancelled",
+  "skipped"
+] as const;
+const smithersRunStatusSchema = z.enum(SMITHERS_RUN_STATUSES);
+const smithersRunStateSchema = z.enum(SMITHERS_RUN_STATES);
+const smithersNodeStateSchema = z.enum(SMITHERS_NODE_STATES);
+const safeArtifactPathSchema = z
+  .string()
+  .regex(/^(?!\.{1,2}(?:\/|$))[A-Za-z0-9._@+-]{1,128}(?:\/(?!\.{1,2}(?:\/|$))[A-Za-z0-9._@+-]{1,128})*$/u);
+const schemaFileSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\.schema\.json$/u);
+const validatorBuildSchema = z.string().regex(/^ultrafuzz-json-validator\.v1:[0-9a-f]{64}$/u);
+const outputContractSchema = z
+  .strictObject({
+    path: safeArtifactPathSchema,
+    contract: z.enum(ARTIFACT_CONTRACT_IDS),
+    contract_digest: sha256Schema,
+    schema_file: schemaFileSchema.optional(),
+    schema_id: z
+      .string()
+      .regex(/^urn:ultrafuzz:schema:/u)
+      .optional(),
+    schema_sha256: sha256Schema.optional(),
+    schema_bundle_sha256: sha256Schema.optional(),
+    validator_build: validatorBuildSchema.optional(),
+    primary: z.boolean()
+  })
+  .superRefine((output, context) => {
+    const binding = [
+      output.schema_file,
+      output.schema_id,
+      output.schema_sha256,
+      output.schema_bundle_sha256,
+      output.validator_build
+    ];
+    const nonJson = (NON_JSON_ARTIFACT_CONTRACT_IDS as readonly string[]).includes(output.contract);
+    if (
+      (nonJson && binding.some((value) => value !== undefined)) ||
+      (!nonJson && binding.some((value) => value === undefined))
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "JSON output contracts require a complete validator binding and text contracts forbid one"
+      });
+    }
+  });
 
-export const eventRecordSchema = z.strictObject({
+const referenceMaterializedPayloadSchema = z.strictObject({
+  reference: nonEmptyStringSchema,
+  repo: nonEmptyStringSchema.optional(),
+  commit: nonEmptyStringSchema.optional(),
+  artifact: nonEmptyStringSchema,
+  manifest: nonEmptyStringSchema
+});
+const workflowDeadlineExceededPayloadSchema = z.strictObject({
+  workflow_run_id: nonEmptyStringSchema,
+  deadline_at: timestampSchema
+});
+const workflowSyncedPayloadSchema = z.strictObject({
+  workflow_run_id: nonEmptyStringSchema,
+  workflow_status: smithersRunStatusSchema,
+  workflow_state: smithersRunStateSchema,
+  synced_nodes: nonNegativeSafeIntegerSchema,
+  accounting_available: z.boolean(),
+  recovery_due: z.boolean(),
+  deadline_exceeded: z.boolean()
+});
+const workflowFailureUnattributedPayloadSchema = z.strictObject({
+  workflow_run_id: nonEmptyStringSchema,
+  workflow_state: z.literal("failed"),
+  failed_workflow_tasks: z.array(nonEmptyStringSchema),
+  durable_node_statuses: z.array(nodeStatusSchema)
+});
+const nodeSyncedPayloadSchema = z.strictObject({
+  workflow_run_id: nonEmptyStringSchema,
+  workflow_task_id: nonEmptyStringSchema,
+  previous_status: nodeStatusSchema.optional(),
+  workflow_state: smithersNodeStateSchema.optional(),
+  attempt: nonNegativeSafeIntegerSchema.optional()
+});
+const nodeArtifactsPayloadSchema = z.strictObject({
+  output_contracts: z.array(outputContractSchema).min(1),
+  missing: z.array(nonEmptyStringSchema)
+});
+const findingsValidatedPayloadSchema = z.strictObject({
+  count: nonNegativeSafeIntegerSchema.optional(),
+  path: nonEmptyStringSchema
+});
+const artifactManifestWrittenPayloadSchema = z.strictObject({
+  file_count: nonNegativeSafeIntegerSchema,
+  path: nonEmptyStringSchema
+});
+const materializeSelectionPayloadSchema = z.strictObject({
+  audit_path: nonEmptyStringSchema,
+  mode: z.enum(["dry-run", "unstaged-working-tree"]),
+  unstaged: z.literal(true),
+  copies: z.array(
+    z.strictObject({
+      source: nonEmptyStringSchema,
+      destination: nonEmptyStringSchema,
+      size_bytes: nonNegativeSafeIntegerSchema,
+      sha256: sha256Schema
+    })
+  ),
+  patches: z.tuple([])
+});
+const workflowRunLinkPayloadSchema = z.strictObject({
+  workflow_link_id: workflowLinkIdSchema,
+  action: workflowActionSchema,
+  workflow_run_id: nonEmptyStringSchema,
+  control_generation: sha256Schema,
+  source_workflow_run_id: nonEmptyStringSchema.optional(),
+  source_workflow_link_id: workflowLinkIdSchema.optional(),
+  controller_invocation_id: eventIdSchema.optional(),
+  controller_invoked_at: timestampSchema.optional(),
+  lifecycle_result_event_id: eventIdSchema.optional(),
+  lifecycle_result_at: timestampSchema.optional()
+});
+const cancelPayloadSchema = z.strictObject({
+  action: z.literal("cancel"),
+  workflow_run_id: nonEmptyStringSchema,
+  confirmed: z.boolean()
+});
+const workflowCompiledPayloadSchema = z.strictObject({
+  workflow_run_id: nonEmptyStringSchema,
+  workflow_name: nonEmptyStringSchema,
+  control_generation: sha256Schema,
+  workflow_link_id: workflowLinkIdSchema,
+  task_count: nonNegativeSafeIntegerSchema,
+  workflow_path: nonEmptyStringSchema
+});
+const workflowSubmittingPayloadSchema = z.strictObject({
+  workflow_run_id: nonEmptyStringSchema,
+  workflow_name: nonEmptyStringSchema,
+  control_generation: sha256Schema,
+  workflow_link_id: workflowLinkIdSchema,
+  action: z.literal("start")
+});
+const workflowSubmittedPayloadSchema = z.strictObject({
+  workflow_run_id: nonEmptyStringSchema,
+  control_generation: sha256Schema,
+  workflow_link_id: workflowLinkIdSchema,
+  controller_invocation_id: eventIdSchema,
+  controller_invoked_at: timestampSchema
+});
+const workflowSubmitFailedPayloadSchema = z.strictObject({
+  code: z.literal("WORKFLOW_SUBMISSION_FAILED"),
+  message: z.string(),
+  severity: z.literal("error"),
+  source: z.literal("workflow"),
+  details: z.strictObject({
+    exit_code: z.union([z.string(), z.number()]).optional(),
+    signal: z.string().optional(),
+    killed: z.boolean().optional(),
+    stdout: z.string().optional(),
+    stderr: z.string().optional()
+  })
+});
+const pausePayloadSchema = z.strictObject({
+  action: z.literal("pause"),
+  workflow_run_id: nonEmptyStringSchema
+});
+const workflowLifecycleInvokingPayloadSchema = z.strictObject({
+  action: lifecycleActionSchema,
+  workflow_run_id: nonEmptyStringSchema,
+  control_generation: sha256Schema,
+  workflow_link_id: workflowLinkIdSchema
+});
+const workflowLifecycleResultPayloadSchema = z.strictObject({
+  action: lifecycleActionSchema,
+  source_workflow_run_id: nonEmptyStringSchema,
+  source_workflow_link_id: workflowLinkIdSchema,
+  workflow_run_id: nonEmptyStringSchema,
+  control_generation: sha256Schema,
+  controller_invocation_id: eventIdSchema,
+  controller_invoked_at: timestampSchema
+});
+const workflowLifecycleSubmittedPayloadSchema = z.strictObject({
+  action: lifecycleActionSchema,
+  workflow_run_id: nonEmptyStringSchema,
+  workflow_link_id: workflowLinkIdSchema,
+  control_generation: sha256Schema,
+  controller_invocation_id: eventIdSchema,
+  controller_invoked_at: timestampSchema,
+  reset_node: nonEmptyStringSchema.optional(),
+  recovered_missing_workflow_run: z.literal(true).optional()
+});
+
+const eventRecordBaseShape = {
   schema_version: z.literal(EVENT_SCHEMA_VERSION),
   event_id: eventIdSchema,
   timestamp: timestampSchema,
-  run_id: safeIdSchema,
-  event_type: safeIdSchema,
-  payload: z.unknown(),
-  node_id: safeIdSchema.optional(),
-  status: safeIdSchema.optional(),
-  provenance: provenanceSchema.optional()
-});
+  run_id: safeIdSchema
+};
+
+function runEventVariant<const EventType extends string, Status extends z.ZodType, Payload extends z.ZodType>(
+  eventType: EventType,
+  status: Status,
+  payload: Payload
+) {
+  return z.strictObject({
+    ...eventRecordBaseShape,
+    event_type: z.literal(eventType),
+    status,
+    payload
+  });
+}
+
+function nodeEventVariant<const EventType extends string, Status extends z.ZodType, Payload extends z.ZodType>(
+  eventType: EventType,
+  status: Status,
+  payload: Payload
+) {
+  return z.strictObject({
+    ...eventRecordBaseShape,
+    event_type: z.literal(eventType),
+    node_id: safeIdSchema,
+    status,
+    payload
+  });
+}
+
+export const eventRecordSchema = z.discriminatedUnion("event_type", [
+  nodeEventVariant("reference-materialized", z.literal("succeeded"), referenceMaterializedPayloadSchema),
+  runEventVariant("workflow-deadline-exceeded", z.literal("timed-out"), workflowDeadlineExceededPayloadSchema),
+  runEventVariant("workflow-synced", runStatusSchema, workflowSyncedPayloadSchema),
+  runEventVariant(
+    "workflow-failure-unattributed",
+    z.enum(["failed", "timed-out"]),
+    workflowFailureUnattributedPayloadSchema
+  ),
+  nodeEventVariant("node-synced", nodeStatusSchema, nodeSyncedPayloadSchema),
+  nodeEventVariant("node-artifacts-verified", z.literal("succeeded"), nodeArtifactsPayloadSchema),
+  nodeEventVariant("node-artifacts-missing", z.literal("failed"), nodeArtifactsPayloadSchema),
+  nodeEventVariant("findings-validated", z.enum(["succeeded", "failed"]), findingsValidatedPayloadSchema),
+  nodeEventVariant("artifact-manifest-written", z.literal("succeeded"), artifactManifestWrittenPayloadSchema),
+  runEventVariant("materialize-selection", z.enum(["dry-run", "succeeded"]), materializeSelectionPayloadSchema),
+  runEventVariant("workflow-link-recorded", runStatusSchema, workflowRunLinkPayloadSchema),
+  runEventVariant(
+    "workflow-cancel-confirmed",
+    z.literal("canceled"),
+    cancelPayloadSchema.extend({ confirmed: z.literal(true) })
+  ),
+  runEventVariant(
+    "workflow-cancel-requested",
+    runStatusSchema,
+    cancelPayloadSchema.extend({ confirmed: z.literal(false) })
+  ),
+  runEventVariant("workflow-compiled", z.literal("succeeded"), workflowCompiledPayloadSchema),
+  runEventVariant("workflow-submitting", z.literal("running"), workflowSubmittingPayloadSchema),
+  runEventVariant("workflow-submitted", z.literal("running"), workflowSubmittedPayloadSchema),
+  runEventVariant("workflow-submit-failed", z.literal("failed"), workflowSubmitFailedPayloadSchema),
+  runEventVariant("workflow-lifecycle-already-paused", z.literal("paused"), pausePayloadSchema),
+  runEventVariant("workflow-pause-requested", z.literal("running"), pausePayloadSchema),
+  runEventVariant("workflow-lifecycle-invoking", z.literal("running"), workflowLifecycleInvokingPayloadSchema),
+  runEventVariant("workflow-lifecycle-result", z.literal("running"), workflowLifecycleResultPayloadSchema),
+  runEventVariant("workflow-lifecycle-already-running", z.literal("running"), workflowLifecycleSubmittedPayloadSchema),
+  runEventVariant("workflow-lifecycle-submitted", z.literal("running"), workflowLifecycleSubmittedPayloadSchema)
+]);
+
+export type EventRecord = z.infer<typeof eventRecordSchema>;
+
+type AppendEventInputFor<RecordType extends EventRecord> = RecordType extends EventRecord
+  ? {
+      eventType: RecordType["event_type"];
+      runId?: string;
+      status: RecordType["status"];
+      timestamp?: string;
+      payload: RecordType["payload"];
+    } & (RecordType extends { node_id: string } ? { nodeId: string } : { nodeId?: never })
+  : never;
+
+export type AppendEventInput = AppendEventInputFor<EventRecord>;
 
 const eventQuerySchema = z.strictObject({
   runId: safeIdSchema.optional(),
@@ -165,24 +476,446 @@ export const eventQueryFacadeSchema = z.strictObject({
   })
 });
 
+const eventRecordJsonSchemaDefinitions = {
+  eventId: { type: "string", pattern: "^evt-[a-f0-9]{24}$" },
+  timestamp: { type: "string", format: "date-time" },
+  safeId: { type: "string", minLength: 1, maxLength: 128, pattern: SAFE_ID_PATTERN.source },
+  nonEmptyString: { type: "string", minLength: 1 },
+  nonNegativeSafeInteger: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+  sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+  workflowLinkId: { type: "string", format: "uuid" },
+  outputContract: {
+    type: "object",
+    additionalProperties: false,
+    required: ["path", "contract", "contract_digest", "primary"],
+    properties: {
+      path: {
+        type: "string",
+        pattern: "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128}(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128})*$"
+      },
+      contract: { enum: ARTIFACT_CONTRACT_IDS },
+      contract_digest: { $ref: "#/$defs/sha256" },
+      schema_file: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$" },
+      schema_id: { type: "string", pattern: "^urn:ultrafuzz:schema:" },
+      schema_sha256: { $ref: "#/$defs/sha256" },
+      schema_bundle_sha256: { $ref: "#/$defs/sha256" },
+      validator_build: { type: "string", pattern: "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$" },
+      primary: { type: "boolean" }
+    },
+    allOf: [
+      {
+        if: { properties: { contract: { enum: NON_JSON_ARTIFACT_CONTRACT_IDS } }, required: ["contract"] },
+        then: {
+          not: {
+            anyOf: ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"].map(
+              (field) => ({ properties: { [field]: true }, required: [field] })
+            )
+          }
+        },
+        else: {
+          required: ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"]
+        }
+      }
+    ]
+  },
+  referenceMaterializedPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["reference", "artifact", "manifest"],
+    properties: {
+      reference: { $ref: "#/$defs/nonEmptyString" },
+      repo: { $ref: "#/$defs/nonEmptyString" },
+      commit: { $ref: "#/$defs/nonEmptyString" },
+      artifact: { $ref: "#/$defs/nonEmptyString" },
+      manifest: { $ref: "#/$defs/nonEmptyString" }
+    }
+  },
+  workflowDeadlineExceededPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["workflow_run_id", "deadline_at"],
+    properties: {
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      deadline_at: { $ref: "#/$defs/timestamp" }
+    }
+  },
+  workflowSyncedPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "workflow_run_id",
+      "workflow_status",
+      "workflow_state",
+      "synced_nodes",
+      "accounting_available",
+      "recovery_due",
+      "deadline_exceeded"
+    ],
+    properties: {
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      workflow_status: { enum: SMITHERS_RUN_STATUSES },
+      workflow_state: { enum: SMITHERS_RUN_STATES },
+      synced_nodes: { $ref: "#/$defs/nonNegativeSafeInteger" },
+      accounting_available: { type: "boolean" },
+      recovery_due: { type: "boolean" },
+      deadline_exceeded: { type: "boolean" }
+    }
+  },
+  workflowFailureUnattributedPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["workflow_run_id", "workflow_state", "failed_workflow_tasks", "durable_node_statuses"],
+    properties: {
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      workflow_state: { const: "failed" },
+      failed_workflow_tasks: { type: "array", items: { $ref: "#/$defs/nonEmptyString" } },
+      durable_node_statuses: { type: "array", items: { enum: NODE_STATE_STATUSES } }
+    }
+  },
+  nodeSyncedPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["workflow_run_id", "workflow_task_id"],
+    properties: {
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      workflow_task_id: { $ref: "#/$defs/nonEmptyString" },
+      previous_status: { enum: NODE_STATE_STATUSES },
+      workflow_state: { enum: SMITHERS_NODE_STATES },
+      attempt: { $ref: "#/$defs/nonNegativeSafeInteger" }
+    }
+  },
+  nodeArtifactsPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["output_contracts", "missing"],
+    properties: {
+      output_contracts: { type: "array", minItems: 1, items: { $ref: "#/$defs/outputContract" } },
+      missing: { type: "array", items: { $ref: "#/$defs/nonEmptyString" } }
+    }
+  },
+  findingsValidatedPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["path"],
+    properties: {
+      count: { $ref: "#/$defs/nonNegativeSafeInteger" },
+      path: { $ref: "#/$defs/nonEmptyString" }
+    }
+  },
+  artifactManifestWrittenPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["file_count", "path"],
+    properties: {
+      file_count: { $ref: "#/$defs/nonNegativeSafeInteger" },
+      path: { $ref: "#/$defs/nonEmptyString" }
+    }
+  },
+  materializeSelectionPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["audit_path", "mode", "unstaged", "copies", "patches"],
+    properties: {
+      audit_path: { $ref: "#/$defs/nonEmptyString" },
+      mode: { enum: ["dry-run", "unstaged-working-tree"] },
+      unstaged: { const: true },
+      copies: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["source", "destination", "size_bytes", "sha256"],
+          properties: {
+            source: { $ref: "#/$defs/nonEmptyString" },
+            destination: { $ref: "#/$defs/nonEmptyString" },
+            size_bytes: { $ref: "#/$defs/nonNegativeSafeInteger" },
+            sha256: { $ref: "#/$defs/sha256" }
+          }
+        }
+      },
+      patches: { type: "array", maxItems: 0, items: false }
+    }
+  },
+  workflowRunLinkPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["workflow_link_id", "action", "workflow_run_id", "control_generation"],
+    properties: {
+      workflow_link_id: { $ref: "#/$defs/workflowLinkId" },
+      action: { enum: ["start", "resume", "replay", "fork"] },
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      control_generation: { $ref: "#/$defs/sha256" },
+      source_workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      source_workflow_link_id: { $ref: "#/$defs/workflowLinkId" },
+      controller_invocation_id: { $ref: "#/$defs/eventId" },
+      controller_invoked_at: { $ref: "#/$defs/timestamp" },
+      lifecycle_result_event_id: { $ref: "#/$defs/eventId" },
+      lifecycle_result_at: { $ref: "#/$defs/timestamp" }
+    }
+  },
+  workflowCancelConfirmedPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["action", "workflow_run_id", "confirmed"],
+    properties: {
+      action: { const: "cancel" },
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      confirmed: { const: true }
+    }
+  },
+  workflowCancelRequestedPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["action", "workflow_run_id", "confirmed"],
+    properties: {
+      action: { const: "cancel" },
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      confirmed: { const: false }
+    }
+  },
+  workflowCompiledPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "workflow_run_id",
+      "workflow_name",
+      "control_generation",
+      "workflow_link_id",
+      "task_count",
+      "workflow_path"
+    ],
+    properties: {
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      workflow_name: { $ref: "#/$defs/nonEmptyString" },
+      control_generation: { $ref: "#/$defs/sha256" },
+      workflow_link_id: { $ref: "#/$defs/workflowLinkId" },
+      task_count: { $ref: "#/$defs/nonNegativeSafeInteger" },
+      workflow_path: { $ref: "#/$defs/nonEmptyString" }
+    }
+  },
+  workflowSubmittingPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["workflow_run_id", "workflow_name", "control_generation", "workflow_link_id", "action"],
+    properties: {
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      workflow_name: { $ref: "#/$defs/nonEmptyString" },
+      control_generation: { $ref: "#/$defs/sha256" },
+      workflow_link_id: { $ref: "#/$defs/workflowLinkId" },
+      action: { const: "start" }
+    }
+  },
+  workflowSubmittedPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "workflow_run_id",
+      "control_generation",
+      "workflow_link_id",
+      "controller_invocation_id",
+      "controller_invoked_at"
+    ],
+    properties: {
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      control_generation: { $ref: "#/$defs/sha256" },
+      workflow_link_id: { $ref: "#/$defs/workflowLinkId" },
+      controller_invocation_id: { $ref: "#/$defs/eventId" },
+      controller_invoked_at: { $ref: "#/$defs/timestamp" }
+    }
+  },
+  workflowSubmitFailedPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["code", "message", "severity", "source", "details"],
+    properties: {
+      code: { const: "WORKFLOW_SUBMISSION_FAILED" },
+      message: { type: "string" },
+      severity: { const: "error" },
+      source: { const: "workflow" },
+      details: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          exit_code: { anyOf: [{ type: "string" }, { type: "number" }] },
+          signal: { type: "string" },
+          killed: { type: "boolean" },
+          stdout: { type: "string" },
+          stderr: { type: "string" }
+        }
+      }
+    }
+  },
+  pausePayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["action", "workflow_run_id"],
+    properties: {
+      action: { const: "pause" },
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" }
+    }
+  },
+  workflowLifecycleInvokingPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["action", "workflow_run_id", "control_generation", "workflow_link_id"],
+    properties: {
+      action: { enum: ["resume", "replay", "fork"] },
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      control_generation: { $ref: "#/$defs/sha256" },
+      workflow_link_id: { $ref: "#/$defs/workflowLinkId" }
+    }
+  },
+  workflowLifecycleResultPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "action",
+      "source_workflow_run_id",
+      "source_workflow_link_id",
+      "workflow_run_id",
+      "control_generation",
+      "controller_invocation_id",
+      "controller_invoked_at"
+    ],
+    properties: {
+      action: { enum: ["resume", "replay", "fork"] },
+      source_workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      source_workflow_link_id: { $ref: "#/$defs/workflowLinkId" },
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      control_generation: { $ref: "#/$defs/sha256" },
+      controller_invocation_id: { $ref: "#/$defs/eventId" },
+      controller_invoked_at: { $ref: "#/$defs/timestamp" }
+    }
+  },
+  workflowLifecycleSubmittedPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "action",
+      "workflow_run_id",
+      "workflow_link_id",
+      "control_generation",
+      "controller_invocation_id",
+      "controller_invoked_at"
+    ],
+    properties: {
+      action: { enum: ["resume", "replay", "fork"] },
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      workflow_link_id: { $ref: "#/$defs/workflowLinkId" },
+      control_generation: { $ref: "#/$defs/sha256" },
+      controller_invocation_id: { $ref: "#/$defs/eventId" },
+      controller_invoked_at: { $ref: "#/$defs/timestamp" },
+      reset_node: { $ref: "#/$defs/nonEmptyString" },
+      recovered_missing_workflow_run: { const: true }
+    }
+  }
+} as const;
+
+function eventRecordJsonSchemaVariant(
+  eventType: (typeof EVENT_RECORD_TYPES)[number],
+  status: Readonly<Record<string, unknown>>,
+  payloadDefinition: keyof typeof eventRecordJsonSchemaDefinitions,
+  nodeScoped = false
+) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "schema_version",
+      "event_id",
+      "timestamp",
+      "run_id",
+      "event_type",
+      ...(nodeScoped ? ["node_id"] : []),
+      "status",
+      "payload"
+    ],
+    properties: {
+      schema_version: { const: EVENT_SCHEMA_VERSION },
+      event_id: { $ref: "#/$defs/eventId" },
+      timestamp: { $ref: "#/$defs/timestamp" },
+      run_id: { $ref: "#/$defs/safeId" },
+      event_type: { const: eventType },
+      ...(nodeScoped ? { node_id: { $ref: "#/$defs/safeId" } } : {}),
+      status,
+      payload: { $ref: `#/$defs/${payloadDefinition}` }
+    }
+  };
+}
+
 export const eventRecordJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: EVENT_RECORD_JSON_SCHEMA_ID,
   title: "Ultrafuzz event record",
-  type: "object",
-  required: ["schema_version", "event_id", "timestamp", "run_id", "event_type", "payload"],
-  additionalProperties: false,
-  properties: {
-    schema_version: { const: EVENT_SCHEMA_VERSION },
-    event_id: { type: "string", pattern: "^evt-[a-f0-9]{24}$" },
-    timestamp: { type: "string", format: "date-time" },
-    run_id: { type: "string", minLength: 1, maxLength: 128, pattern: SAFE_ID_PATTERN.source },
-    event_type: { type: "string", minLength: 1, maxLength: 128, pattern: SAFE_ID_PATTERN.source },
-    payload: {},
-    node_id: { type: "string", minLength: 1, maxLength: 128, pattern: SAFE_ID_PATTERN.source },
-    status: { type: "string", minLength: 1, maxLength: 128, pattern: SAFE_ID_PATTERN.source },
-    provenance: { type: "object" }
-  }
+  oneOf: [
+    eventRecordJsonSchemaVariant(
+      "reference-materialized",
+      { const: "succeeded" },
+      "referenceMaterializedPayload",
+      true
+    ),
+    eventRecordJsonSchemaVariant(
+      "workflow-deadline-exceeded",
+      { const: "timed-out" },
+      "workflowDeadlineExceededPayload"
+    ),
+    eventRecordJsonSchemaVariant("workflow-synced", { enum: RUN_STATE_STATUSES }, "workflowSyncedPayload"),
+    eventRecordJsonSchemaVariant(
+      "workflow-failure-unattributed",
+      { enum: ["failed", "timed-out"] },
+      "workflowFailureUnattributedPayload"
+    ),
+    eventRecordJsonSchemaVariant("node-synced", { enum: NODE_STATE_STATUSES }, "nodeSyncedPayload", true),
+    eventRecordJsonSchemaVariant("node-artifacts-verified", { const: "succeeded" }, "nodeArtifactsPayload", true),
+    eventRecordJsonSchemaVariant("node-artifacts-missing", { const: "failed" }, "nodeArtifactsPayload", true),
+    eventRecordJsonSchemaVariant(
+      "findings-validated",
+      { enum: ["succeeded", "failed"] },
+      "findingsValidatedPayload",
+      true
+    ),
+    eventRecordJsonSchemaVariant(
+      "artifact-manifest-written",
+      { const: "succeeded" },
+      "artifactManifestWrittenPayload",
+      true
+    ),
+    eventRecordJsonSchemaVariant(
+      "materialize-selection",
+      { enum: ["dry-run", "succeeded"] },
+      "materializeSelectionPayload"
+    ),
+    eventRecordJsonSchemaVariant("workflow-link-recorded", { enum: RUN_STATE_STATUSES }, "workflowRunLinkPayload"),
+    eventRecordJsonSchemaVariant("workflow-cancel-confirmed", { const: "canceled" }, "workflowCancelConfirmedPayload"),
+    eventRecordJsonSchemaVariant(
+      "workflow-cancel-requested",
+      { enum: RUN_STATE_STATUSES },
+      "workflowCancelRequestedPayload"
+    ),
+    eventRecordJsonSchemaVariant("workflow-compiled", { const: "succeeded" }, "workflowCompiledPayload"),
+    eventRecordJsonSchemaVariant("workflow-submitting", { const: "running" }, "workflowSubmittingPayload"),
+    eventRecordJsonSchemaVariant("workflow-submitted", { const: "running" }, "workflowSubmittedPayload"),
+    eventRecordJsonSchemaVariant("workflow-submit-failed", { const: "failed" }, "workflowSubmitFailedPayload"),
+    eventRecordJsonSchemaVariant("workflow-lifecycle-already-paused", { const: "paused" }, "pausePayload"),
+    eventRecordJsonSchemaVariant("workflow-pause-requested", { const: "running" }, "pausePayload"),
+    eventRecordJsonSchemaVariant(
+      "workflow-lifecycle-invoking",
+      { const: "running" },
+      "workflowLifecycleInvokingPayload"
+    ),
+    eventRecordJsonSchemaVariant("workflow-lifecycle-result", { const: "running" }, "workflowLifecycleResultPayload"),
+    eventRecordJsonSchemaVariant(
+      "workflow-lifecycle-already-running",
+      { const: "running" },
+      "workflowLifecycleSubmittedPayload"
+    ),
+    eventRecordJsonSchemaVariant(
+      "workflow-lifecycle-submitted",
+      { const: "running" },
+      "workflowLifecycleSubmittedPayload"
+    )
+  ],
+  $defs: eventRecordJsonSchemaDefinitions
 } as const;
 
 export const eventQueryFacadeJsonSchema = {
@@ -318,12 +1051,10 @@ export function createEventRecord(layout: Pick<RunLayout, "runId">, input: Appen
   const runId = validateSafeId(input.runId ?? layout.runId, "run ID");
   const nodeId = input.nodeId === undefined ? undefined : validateSafeId(input.nodeId, "node ID");
   const eventType = validateSafeId(input.eventType, "event type");
-  const status = input.status === undefined ? undefined : validateSafeId(input.status, "event status");
+  const status = validateSafeId(input.status, "event status");
   const timestamp = input.timestamp ?? new Date().toISOString();
-  const payload = redactValue(input.payload ?? {});
-  const provenance =
-    input.provenance === undefined ? undefined : (redactValue(input.provenance) as Record<string, unknown>);
-  const seed = JSON.stringify([runId, nodeId, eventType, status, timestamp, payload, provenance]);
+  const payload = redactValue(input.payload);
+  const seed = JSON.stringify([runId, nodeId, eventType, status, timestamp, payload]);
   return assertEventRecord({
     schema_version: EVENT_SCHEMA_VERSION,
     event_id: `evt-${crypto.createHash("sha256").update(seed).digest("hex").slice(0, 24)}`,
@@ -332,8 +1063,7 @@ export function createEventRecord(layout: Pick<RunLayout, "runId">, input: Appen
     event_type: eventType,
     payload,
     ...(nodeId === undefined ? {} : { node_id: nodeId }),
-    ...(status === undefined ? {} : { status }),
-    ...(provenance === undefined ? {} : { provenance })
+    status
   });
 }
 
@@ -343,7 +1073,7 @@ export function appendEventRecord(
   trustedRoot?: string,
   expectedRunId?: string
 ): void {
-  const canonical = assertEventRecord({ ...record, payload: redactValue(record.payload) });
+  const canonical = assertEventRecord(record);
   appendStrictJsonlRecords(eventsPath, [canonical], eventRecordCodec(expectedRunId), trustedRoot);
 }
 
@@ -370,7 +1100,7 @@ export function queryEvents(layout: RunLayout, query: EventQuery = {}): EventRec
   const limit = normalizedQuery.limit ?? DEFAULT_EVENT_REPLAY_LIMIT;
   const records = replayEvents(layout, Number.MAX_SAFE_INTEGER).records.filter((record) => {
     if (normalizedQuery.runId !== undefined && record.run_id !== normalizedQuery.runId) return false;
-    if (normalizedQuery.nodeId !== undefined && record.node_id !== normalizedQuery.nodeId) return false;
+    if (normalizedQuery.nodeId !== undefined && eventRecordNodeId(record) !== normalizedQuery.nodeId) return false;
     if (normalizedQuery.eventType !== undefined && record.event_type !== normalizedQuery.eventType) return false;
     if (normalizedQuery.status !== undefined && record.status !== normalizedQuery.status) return false;
     if (normalizedQuery.since !== undefined && record.timestamp < normalizedQuery.since) return false;
@@ -430,14 +1160,19 @@ export function redactValue(value: unknown): unknown {
 }
 
 function eventIndexPaths(layout: RunLayout, record: EventRecord): string[] {
+  const nodeId = eventRecordNodeId(record);
   const targets = [
     ["run", ...eventIndexPath(record.run_id)],
     ["type", ...eventIndexPath(record.event_type)],
     ["timestamp", ...eventIndexPath(record.timestamp.slice(0, 10))]
   ];
-  if (record.node_id !== undefined) targets.push(["node", ...eventIndexPath(record.node_id)]);
-  if (record.status !== undefined) targets.push(["status", ...eventIndexPath(record.status)]);
+  if (nodeId !== undefined) targets.push(["node", ...eventIndexPath(nodeId)]);
+  targets.push(["status", ...eventIndexPath(record.status)]);
   return targets.map((segments) => prepareSafeFilePath(layout.eventsIndexDir, segments.join("/")));
+}
+
+function eventRecordNodeId(record: EventRecord): string | undefined {
+  return "node_id" in record ? record.node_id : undefined;
 }
 
 function eventIndexPath(value: string): string[] {

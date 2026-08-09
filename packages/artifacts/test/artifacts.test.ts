@@ -516,24 +516,28 @@ test("artifact manifest reuse checks the complete prerequisite chain", () => {
   });
 });
 
-test("events append to JSONL, redact secrets, replay, and expose query indexes", () => {
+test("events append to JSONL, replay, and expose query indexes", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
   appendEvent(layout, {
-    eventType: "node-started",
+    eventType: "node-synced",
     nodeId: "node-a",
     status: "running",
-    payload: { token: "sk-secret", nested: { api_key: "abc" } }
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-1", workflow_state: "in-progress" }
   });
   appendEvent(layout, {
-    eventType: "node-finished",
+    eventType: "artifact-manifest-written",
     nodeId: "node-a",
     status: "succeeded",
-    payload: { ok: true }
+    payload: { file_count: 1, path: "artifacts/node-a/artifact-manifest.json" }
   });
 
   const replay = replayEvents(layout);
   assert.equal(replay.records.length, 2);
-  assert.deepEqual(replay.records[0]!.payload, { token: "<redacted>", nested: { api_key: "<redacted>" } });
+  assert.deepEqual(replay.records[0]!.payload, {
+    workflow_run_id: "workflow-1",
+    workflow_task_id: "task-1",
+    workflow_state: "in-progress"
+  });
   assert.equal(queryEvents(layout, { nodeId: "node-a", status: "succeeded" }).length, 1);
   assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "node", "node-a.jsonl")), true);
   assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "status", "succeeded.jsonl")), true);
@@ -543,43 +547,29 @@ test("event indexes encode long IDs in a collision-free hash namespace", () => {
   const maximumRunId = "r".repeat(128);
   const layout = createRunLayout({ projectRoot: tempProject(), runId: maximumRunId });
   const facadeBeforeAppend = readEventQueryFacade(layout);
-  const secondMaximumEventType = `${"t".repeat(127)}u`;
-  const directBoundaryEventType = "d".repeat(122);
-  const longBoundaryEventType = "e".repeat(123);
-  const maximumEventType = "t".repeat(128);
   const maximumNodeId = "n".repeat(128);
-  const maximumStatus = "s".repeat(128);
-  const legacyCollisionEventType = `${maximumEventType.slice(0, 97)}-${crypto
+  const directBoundaryNodeId = "d".repeat(122);
+  const longBoundaryNodeId = "e".repeat(123);
+  const legacyCollisionNodeId = `${maximumNodeId.slice(0, 97)}-${crypto
     .createHash("sha256")
-    .update(maximumEventType, "utf8")
+    .update(maximumNodeId, "utf8")
     .digest("hex")
     .slice(0, 24)}`;
-  assert.equal(legacyCollisionEventType.length, 122);
+  assert.equal(legacyCollisionNodeId.length, 122);
 
-  appendEvent(layout, {
-    eventType: maximumEventType,
-    nodeId: maximumNodeId,
-    status: maximumStatus,
-    payload: { id: "maximum" }
-  });
-  appendEvent(layout, {
-    eventType: longBoundaryEventType,
-    nodeId: "direct-node",
-    status: "direct-status",
-    payload: { id: "second-maximum" }
-  });
-  appendEvent(layout, {
-    eventType: secondMaximumEventType,
-    payload: { id: "second-long-id" }
-  });
-  appendEvent(layout, {
-    eventType: legacyCollisionEventType,
-    payload: { id: "legacy-collision" }
-  });
-  appendEvent(layout, {
-    eventType: directBoundaryEventType,
-    payload: { id: "direct-boundary" }
-  });
+  const appendNodeSynced = (nodeId: string, workflowTaskId: string): void => {
+    appendEvent(layout, {
+      eventType: "node-synced",
+      nodeId,
+      status: "running",
+      payload: { workflow_run_id: "workflow-1", workflow_task_id: workflowTaskId }
+    });
+  };
+
+  appendNodeSynced(maximumNodeId, "task-maximum");
+  appendNodeSynced(longBoundaryNodeId, "task-long-boundary");
+  appendNodeSynced(legacyCollisionNodeId, "task-legacy-collision");
+  appendNodeSynced(directBoundaryNodeId, "task-direct-boundary");
 
   const hashedIndexPath = (dimension: string, value: string): string =>
     path.join(
@@ -590,21 +580,17 @@ test("event indexes encode long IDs in a collision-free hash namespace", () => {
     );
   const maximumRunIndex = hashedIndexPath("run", maximumRunId);
   assert.equal(fs.existsSync(maximumRunIndex), true);
-  assert.equal(fs.existsSync(hashedIndexPath("type", secondMaximumEventType)), true);
-  assert.notEqual(hashedIndexPath("type", maximumEventType), hashedIndexPath("type", secondMaximumEventType));
-  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "type", `${legacyCollisionEventType}.jsonl`)), true);
-  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "type", `${directBoundaryEventType}.jsonl`)), true);
-  assert.equal(fs.existsSync(hashedIndexPath("type", longBoundaryEventType)), true);
-  assert.equal(fs.existsSync(hashedIndexPath("type", maximumEventType)), true);
+  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "node", `${legacyCollisionNodeId}.jsonl`)), true);
+  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "node", `${directBoundaryNodeId}.jsonl`)), true);
+  assert.equal(fs.existsSync(hashedIndexPath("node", longBoundaryNodeId)), true);
   assert.equal(fs.existsSync(hashedIndexPath("node", maximumNodeId)), true);
-  assert.equal(fs.existsSync(hashedIndexPath("status", maximumStatus)), true);
 
   const maximumRecords = fs
     .readFileSync(maximumRunIndex, "utf8")
     .trimEnd()
     .split("\n")
     .map((line) => JSON.parse(line) as { run_id: string });
-  assert.equal(maximumRecords.length, 5);
+  assert.equal(maximumRecords.length, 4);
   assert.equal(
     maximumRecords.every((record) => record.run_id === maximumRunId),
     true
@@ -643,11 +629,17 @@ test("event redaction covers token families, AWS keys, URL credentials, and priv
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-artifacts-events-"));
   const layout = createRunLayout({ outputRoot: path.join(root, "runs"), runId: "run-redaction" });
   appendEvent(layout, {
-    eventType: "workflow-result",
+    eventType: "workflow-submit-failed",
+    status: "failed",
     payload: {
-      stdout: "Bearer eyJhbGciOiJIUzI1NiJ9.abcdefghijkl.zyxwvutsrq AKIAIOSFODNN7EXAMPLE",
-      stderr: "https://user:pass@example.com xoxb-1234567890-abcdefghi",
-      keyBlock: "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----"
+      code: "WORKFLOW_SUBMISSION_FAILED",
+      message: "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+      severity: "error",
+      source: "workflow",
+      details: {
+        stdout: "Bearer eyJhbGciOiJIUzI1NiJ9.abcdefghijkl.zyxwvutsrq AKIAIOSFODNN7EXAMPLE",
+        stderr: "https://user:pass@example.com xoxb-1234567890-abcdefghi"
+      }
     }
   });
   const serialized = fs.readFileSync(layout.eventsPath, "utf8");
