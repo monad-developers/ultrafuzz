@@ -523,14 +523,45 @@ ultrafuzz eval history [eval-run-id] \
   [--json]
 ```
 
-`eval analyze` reads a finalized handoff ZIP directly and discovers its
-adjudication output through `handoff/current-state.json`. Available report
-types are `all`, `upset` (`upsert` alias), `scores`
+`eval analyze` reads a finalized handoff ZIP directly. It accepts only the
+current, closed benchmark-analysis contracts. The archive contains an exact
+`handoff/current-state.json` member, optionally below one canonical top-level
+directory. That document uses
+`ultrafuzz.eval.adjudication-handoff.v1` and declares the exact adjudication
+output path. The declared directory must contain these versioned documents:
+
+- `finding-manifest.json` — `ultrafuzz.eval.finding-manifest.v1`, with typed row
+  descriptors, explicit candidate labels/titles, explicit finding IDs and
+  severities, and declared row archive/run metadata paths;
+- `instance-to-cluster.json` — `ultrafuzz.eval.instance-clusters.v1`, with an
+  `instances` array and explicit nullable match/duplicate fields; and
+- `ground-truth-tp-credits.json` —
+  `ultrafuzz.eval.ground-truth-credits.v1`, with a typed `clusters` array.
+
+Each declared row archive and nested run metadata member is read by exact path.
+Nested `run.json` must be `ultrafuzz.run-metadata.v2`, must identify the row's
+declared `runId`, and must contain validated `accounting.cumulative` evidence.
+The CLI rejects unmatched findings, rows, candidates, clusters or credits;
+count drift; duplicate projected identities; inconsistent duplicate targets;
+and duplicate-reference cycles before analysis.
+
+Historical field names and shapes are not compatibility inputs. In particular,
+`schemaVersion`, unversioned array/map payloads, candidate `heading`, lowercase
+severity aliases, titles containing an inferred finding label, current-only
+accounting, and malformed source references are rejected. The CLI does not
+rewrite slashes, search ZIP/tar suffixes, supply metadata defaults, parse IDs
+from titles, normalize severity, filter invalid rows/references, or repair a
+document. A prior handoff must be regenerated against the current schemas.
+
+Available report types are `all`, `upset` (`upsert` alias), `scores`
 (`precision-recall-f1` alias), `provenance`, `table`, `cost`, and `pairwise`.
 The pairwise chart connects matched Ultrafuzz/no-fuzz rows across ground-truth
 TP credits, F1, and total tokens. Charts are written as PNG and editable SVG
-alongside CSV, JSON, and Markdown reports. Condition score summaries report
-the mean, median, and sample standard deviation across completed rows.
+alongside CSV, JSON, and Markdown reports. `provenance.json`,
+`source_manifest.json`, and `analysis_manifest.json` are validated against
+their current JSON Schemas and semantic joins before they are written.
+Condition score summaries report the mean, median, and sample standard
+deviation across the declared rows.
 
 The input and output paths are required to be outside `--project`. Handoff
 archives and generated reports may contain private target details,

@@ -39,6 +39,12 @@
       "type": "string",
       "pattern": "^[HML]-[0-9]+$"
     },
+    "cleanTitle": {
+      "allOf": [
+        { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonEmptyString" },
+        { "type": "string", "pattern": "^(?!\\[[HML]-[0-9]+\\]\\s*-\\s*).+$" }
+      ]
+    },
     "row": {
       "type": "object",
       "additionalProperties": false,
@@ -72,7 +78,7 @@
       "properties": {
         "candidateId": { "$ref": "#/$defs/safeId" },
         "label": { "$ref": "#/$defs/findingLabel" },
-        "title": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonEmptyString" },
+        "title": { "$ref": "#/$defs/cleanTitle" },
         "source": { "const": "canonical-ground-truth" }
       }
     },
@@ -103,7 +109,7 @@
         "findingId": { "$ref": "#/$defs/findingLabel" },
         "findingInstanceId": { "$ref": "#/$defs/safeId" },
         "stableIssueId": { "$ref": "#/$defs/safeId" },
-        "title": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonEmptyString" },
+        "title": { "$ref": "#/$defs/cleanTitle" },
         "severity": { "enum": ["High", "Medium", "Low"] },
         "sourceArtifactRefs": {
           "type": "array",

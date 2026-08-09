@@ -9,8 +9,7 @@ import { circle, element, line, polygon, rect, svgDocument, text, writeSvgAndPng
 const SEVERITY_COLORS: Record<Severity, string> = {
   H: "#111111",
   M: "#555555",
-  L: "#aaaaaa",
-  I: "#e3e3e3"
+  L: "#aaaaaa"
 };
 const METRICS = ["precision", "recall", "f1"] as const;
 const METRIC_COLORS = { precision: "#222222", recall: "#777777", f1: "#c4c4c4" } as const;

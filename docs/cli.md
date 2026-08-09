@@ -190,7 +190,16 @@ reports and execution-local data.
 
 `eval analyze all` reads an already-finalized private benchmark handoff and
 generates CSV, JSON, Markdown, PNG, and editable SVG reports. Score summaries
-include the mean, median, and sample standard deviation across completed rows.
+include the mean, median, and sample standard deviation across declared rows.
+The handoff, finding manifest, instance clusters, ground-truth credits, and
+nested run metadata must use their exact current versioned schemas. Row archive
+and nested `run.json` members are read only at their declared paths, and cost
+comes only from validated run-metadata v2 `accounting.cumulative` evidence.
+Historical field names, unversioned array/map shapes, severity aliases, title
+parsing, path rewriting, missing-field defaults, malformed-row filtering, and
+current-accounting fallback are not supported. Regenerate older handoffs; the
+command does not convert or repair them. Generated provenance and source/output
+manifests are schema- and semantics-validated before writing.
 Individual report commands are `upset`, `scores`, `provenance`, `table`, and
 `cost`, plus `pairwise` for matched Ultrafuzz/no-fuzz row comparisons;
 `upsert` and `precision-recall-f1` are compatibility aliases. Because the

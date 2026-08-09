@@ -1,10 +1,10 @@
 import type { Severity } from "../types.js";
 
-const SEVERITY_RANK: Record<Severity, number> = { H: 3, M: 2, L: 1, I: 0 };
+const SEVERITY_RANK: Record<Severity, number> = { H: 3, M: 2, L: 1 };
 
 export function bugSort(a: string, b: string): number {
-  const left = /^([HMLI])-(\d+)$/.exec(a);
-  const right = /^([HMLI])-(\d+)$/.exec(b);
+  const left = /^([HML])-(\d+)$/u.exec(a);
+  const right = /^([HML])-(\d+)$/u.exec(b);
   if (!left || !right) return a.localeCompare(b);
   const severityDelta = SEVERITY_RANK[right[1] as Severity] - SEVERITY_RANK[left[1] as Severity];
   if (severityDelta) return severityDelta;

@@ -1,7 +1,7 @@
-export const SEVERITY_ORDER = ["H", "M", "L", "I"] as const;
+export const SEVERITY_ORDER = ["H", "M", "L"] as const;
 
 export type Severity = (typeof SEVERITY_ORDER)[number];
-export type Classification = "true-positive" | "false-positive" | "needs-human-review" | string;
+export type Classification = "true-positive" | "false-positive" | "needs-human-review";
 export type AnalysisCommandName = "upset" | "scores" | "provenance" | "table" | "cost" | "pairwise" | "all";
 
 export interface BenchmarkRow {
@@ -9,7 +9,7 @@ export interface BenchmarkRow {
   label: string;
   condition: string;
   variant: string;
-  order: number | null;
+  order: number;
 }
 
 export interface Accounting {
@@ -19,7 +19,7 @@ export interface Accounting {
   cacheWriteTokens: number;
   totalTokens: number;
   totalTokensMillions: number;
-  estimatedSpendReported: string | null;
+  estimatedSpendReported: string;
   estimatedSpendUsd: number | null;
   partialPricing: boolean;
   pricedEventCount: number;
@@ -29,9 +29,9 @@ export interface Accounting {
 export interface RowStatus {
   rowId: string;
   condition: string;
-  valid: boolean;
-  status: "valid" | "invalid";
-  reason: string | null;
+  valid: true;
+  status: "valid";
+  reason: null;
 }
 
 export interface FindingRecord {
@@ -43,7 +43,7 @@ export interface FindingRecord {
   severity: Severity;
   title: string;
   classification: Classification;
-  matchedSource: string | null;
+  matchedSource: "canonical-ground-truth" | null;
   matchedCandidateId: string | null;
   matchedIdentity: string | null;
   groundTruthLabel: string | null;
@@ -70,9 +70,9 @@ export interface RowMetric extends Accounting {
   rowId: string;
   label: string;
   condition: string;
-  valid: boolean;
-  status: string;
-  invalidReason: string | null;
+  valid: true;
+  status: "valid";
+  invalidReason: null;
   findings: number | null;
   truePositives: number | null;
   falsePositives: number | null;
@@ -137,7 +137,7 @@ export interface AnalysisResult {
   sourceSizeBytes: number;
   sourceSha256: string;
   archiveRoot: string;
-  handoffSchemaVersion: string;
+  handoffSchemaVersion: AdjudicationHandoff["schema_version"];
   outputPath: string;
   rows: BenchmarkRow[];
   rowOrder: string[];
@@ -151,3 +151,4 @@ export interface AnalysisResult {
   conditionAggregate: ConditionAggregate[];
   pairComparison: PairComparison[];
 }
+import type { AdjudicationHandoff } from "@ultrafuzz/evals";
