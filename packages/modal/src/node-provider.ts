@@ -14,6 +14,7 @@ import {
   type Volume
 } from "modal";
 import { materializePromptSchemas } from "@ultrafuzz/artifacts";
+import { parseRuntimeDocumentBytes, WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID } from "@ultrafuzz/runtime";
 import {
   MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
   MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID,
@@ -997,21 +998,11 @@ function readExpectedExecutionSnapshotFiles(
   if (generation !== path.basename(snapshotRoot)) {
     throw new Error("execution snapshot generation does not match its workflow control seal");
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(sealContents.toString("utf8")) as unknown;
-  } catch (error) {
-    throw new Error("workflow control seal is invalid JSON", { cause: error });
-  }
-  if (
-    !isRecord(parsed) ||
-    parsed.schema_version !== "ultrafuzz.workflow-control-integrity.v2" ||
-    !isRecord(parsed.files) ||
-    !isRecord(parsed.files.workflow) ||
-    !Array.isArray(parsed.execution_files)
-  ) {
-    throw new Error("workflow control seal cannot define the execution snapshot closure");
-  }
+  const parsed = parseRuntimeDocumentBytes(
+    WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
+    sealContents,
+    "workflow control seal"
+  );
   const expected = new Map<string, ExpectedSnapshotFile>();
   for (const value of parsed.execution_files) {
     if (!isRecord(value) || typeof value.snapshot_path !== "string") {
@@ -1178,8 +1169,9 @@ function stableSnapshotFileDigest(filePath: string): { size: bigint; sha256: str
   }
 }
 
-function parseExpectedSnapshotFile(value: Record<string, unknown>, label: string): ExpectedSnapshotFile {
+function parseExpectedSnapshotFile(value: unknown, label: string): ExpectedSnapshotFile {
   if (
+    !isRecord(value) ||
     typeof value.sha256 !== "string" ||
     !/^[0-9a-f]{64}$/u.test(value.sha256) ||
     !Number.isSafeInteger(value.size_bytes) ||

@@ -205,6 +205,45 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     }
   });
 
+  it("rejects a schema-invalid workflow control seal before building a cloud handoff", async () => {
+    const fixture = createProjectFixture();
+    try {
+      replaceFixtureControlSeal(
+        fixture,
+        fs
+          .readFileSync(path.join(fixture.root, fixture.input.run_root, "smithers", "control-integrity.json"), "utf8")
+          .replace('"run_id":"run-one"', '"run_id":"run-one","legacy_files":{}')
+      );
+
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /workflow control seal does not match .*additionalProperties/u
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects duplicate keys in the workflow control seal before building a cloud handoff", async () => {
+    const fixture = createProjectFixture();
+    try {
+      replaceFixtureControlSeal(
+        fixture,
+        fs
+          .readFileSync(path.join(fixture.root, fixture.input.run_root, "smithers", "control-integrity.json"), "utf8")
+          .replace(
+            '"schema_version":"ultrafuzz.workflow-control-integrity.v2"',
+            '"schema_version":"ultrafuzz.workflow-control-integrity.v2","schema_version":"ultrafuzz.workflow-control-integrity.v2"'
+          )
+      );
+
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /duplicate property name/iu
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("rejects a retained snapshots-parent swap without archiving hostile replacement bytes", async () => {
     const fixture = createProjectFixture();
     const snapshotRoot = path.join(fixture.root, fixture.input.execution_snapshot_root);
@@ -2157,12 +2196,29 @@ function createProjectFixture(options: { smithersCli?: string } = {}) {
       size_bytes: Buffer.byteLength(contents)
     }));
   const workflowContents = snapshotFiles.get(workflowRelativePath)!;
+  const workflowSeal = { sha256: sha256Hex(workflowContents), size_bytes: Buffer.byteLength(workflowContents) };
   const controlSeal = `${JSON.stringify({
     schema_version: "ultrafuzz.workflow-control-integrity.v2",
+    run_id: "run-one",
     files: {
-      workflow: { sha256: sha256Hex(workflowContents), size_bytes: Buffer.byteLength(workflowContents) }
+      graph: workflowSeal,
+      expanded_graph: workflowSeal,
+      graph_fingerprint: workflowSeal,
+      config: workflowSeal,
+      tasks: workflowSeal,
+      input: workflowSeal,
+      workflow: workflowSeal,
+      evidence_workflow: workflowSeal
     },
-    execution_files: executionFiles
+    execution_files: executionFiles,
+    bindings: {
+      run_id: "run-one",
+      graph_fingerprint: "0".repeat(64),
+      config_fingerprint: "1".repeat(64),
+      expected_state_node_ids: [],
+      expected_task_attempt_ids: [],
+      expected_task_node_ids: []
+    }
   })}\n`;
   const snapshotGeneration = sha256Hex(controlSeal);
   const executionSnapshotRoot = `${runRoot}/smithers/execution-snapshots/${snapshotGeneration}`;
@@ -2202,6 +2258,19 @@ function createProjectFixture(options: { smithersCli?: string } = {}) {
       fs.rmSync(temporaryRoot, { recursive: true, force: true });
     }
   };
+}
+
+function replaceFixtureControlSeal(fixture: ReturnType<typeof createProjectFixture>, contents: string): void {
+  const previousRoot = fixture.input.execution_snapshot_root;
+  const nextGeneration = sha256Hex(contents);
+  const nextRoot = `${path.posix.dirname(previousRoot)}/${nextGeneration}`;
+  fs.renameSync(path.join(fixture.root, previousRoot), path.join(fixture.root, nextRoot));
+  fs.writeFileSync(path.join(fixture.root, fixture.input.run_root, "smithers", "control-integrity.json"), contents);
+  fixture.input.execution_snapshot_root = nextRoot;
+  fixture.input.workflow_path = fixture.input.workflow_path.replace(`${previousRoot}/`, `${nextRoot}/`);
+  if (fixture.input.prompt_path !== undefined) {
+    fixture.input.prompt_path = fixture.input.prompt_path.replace(`${previousRoot}/`, `${nextRoot}/`);
+  }
 }
 
 function sealFixtureSnapshot(root: string): void {
