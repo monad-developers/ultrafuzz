@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 import { parseStrictJsonBytes } from "./strict-json.js";
@@ -119,7 +120,7 @@ const metadataByFilename: Readonly<Record<string, SchemaMetadata>> = Object.free
   }
 });
 
-export const VALIDATOR_BUILD_IDENTITY = "ultrafuzz-json-validator.v1/ajv8-draft2020-strict" as const;
+export const VALIDATOR_BUILD_IDENTITY = validatorBuildIdentity();
 
 let cachedRegistry: readonly ArtifactSchemaRegistryEntry[] | undefined;
 
@@ -239,6 +240,31 @@ function collectReferences(value: unknown, output = new Set<string>()): Set<stri
 
 function sha256(bytes: Uint8Array): string {
   return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
+function validatorBuildIdentity(): string {
+  const directory = path.dirname(fileURLToPath(import.meta.url));
+  const modules = [
+    "json-file-validator.js",
+    "json-schema-validator.js",
+    "json-validation-worker.js",
+    "schema-registry.js",
+    "strict-json.js"
+  ];
+  const require = createRequire(import.meta.url);
+  const dependencyVersions = ["ajv", "ajv-formats"].map((name) => {
+    const packagePath = require.resolve(`${name}/package.json`);
+    const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8")) as { version?: unknown };
+    if (typeof packageJson.version !== "string") throw new Error(`validator dependency has no version: ${name}`);
+    return `${name}@${packageJson.version}`;
+  });
+  const moduleDigests = modules.map((filename) => {
+    const filePath = path.join(directory, filename);
+    if (!fs.existsSync(filePath)) throw new Error(`validator build module is unavailable: ${filePath}`);
+    return `${filename}:${sha256(fs.readFileSync(filePath))}`;
+  });
+  const digest = sha256(Buffer.from([...dependencyVersions, ...moduleDigests].join("\n"), "utf8"));
+  return `ultrafuzz-json-validator.v1:${digest}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
