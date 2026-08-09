@@ -16,6 +16,15 @@ import {
 type EvalAjv = ReturnType<typeof createStrictAjv>;
 
 export const EVAL_COMMON_SCHEMA_ID = "urn:ultrafuzz:schema:evals:common:1" as const;
+export const EVAL_ADJUDICATION_HANDOFF_SCHEMA_ID = "urn:ultrafuzz:schema:evals:adjudication-handoff:1" as const;
+export const EVAL_FINDING_MANIFEST_SCHEMA_ID = "urn:ultrafuzz:schema:evals:finding-manifest:1" as const;
+export const EVAL_INSTANCE_CLUSTERS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:instance-clusters:1" as const;
+export const EVAL_GROUND_TRUTH_CREDITS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:ground-truth-credits:1" as const;
+export const EVAL_BENCHMARK_PROVENANCE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:benchmark-provenance:1" as const;
+export const EVAL_BENCHMARK_SOURCE_MANIFEST_SCHEMA_ID =
+  "urn:ultrafuzz:schema:evals:benchmark-source-manifest:1" as const;
+export const EVAL_BENCHMARK_ANALYSIS_MANIFEST_SCHEMA_ID =
+  "urn:ultrafuzz:schema:evals:benchmark-analysis-manifest:1" as const;
 export const EVAL_RUN_MANIFEST_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-manifest:2" as const;
 export const EVAL_MATRIX_SCHEMA_ID = "urn:ultrafuzz:schema:evals:matrix:1" as const;
 export const EVAL_RUN_RECORD_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-record:2" as const;
@@ -35,6 +44,26 @@ interface EvalSchemaMetadata {
 }
 
 export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> = Object.freeze({
+  "adjudication-handoff.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalAdjudicationHandoffJsonSchema",
+    semanticGates: ["eval-adjudication-handoff-canonical-path"]
+  },
+  "benchmark-analysis-manifest.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalBenchmarkAnalysisManifestJsonSchema",
+    semanticGates: ["eval-benchmark-analysis-manifest-identity-joins"]
+  },
+  "benchmark-provenance.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalBenchmarkProvenanceJsonSchema",
+    semanticGates: ["eval-benchmark-provenance-identity-joins"]
+  },
+  "benchmark-source-manifest.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalBenchmarkSourceManifestJsonSchema",
+    semanticGates: ["eval-benchmark-source-manifest-identity-joins"]
+  },
   "eval-common.schema.json": {
     role: "subschema",
     typescriptExport: "evalCommonJsonSchema",
@@ -88,6 +117,21 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
       "eval-recovery-equivalence-coupling"
     ]
   },
+  "finding-manifest.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalFindingManifestJsonSchema",
+    semanticGates: ["eval-finding-manifest-identity-joins"]
+  },
+  "ground-truth-credits.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalGroundTruthCreditsJsonSchema",
+    semanticGates: ["eval-ground-truth-credits-identity-joins"]
+  },
+  "instance-clusters.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalInstanceClustersJsonSchema",
+    semanticGates: ["eval-instance-clusters-identity-joins"]
+  },
   "telemetry-cursor.schema.json": {
     role: "runtime-state",
     typescriptExport: "evalTelemetryCursorJsonSchema",
@@ -119,7 +163,14 @@ function loadSchemaDocument(filename: string): Readonly<Record<string, unknown>>
 }
 
 export const evalCommonJsonSchema = loadSchemaDocument("eval-common.schema.json");
+export const evalAdjudicationHandoffJsonSchema = loadSchemaDocument("adjudication-handoff.schema.json");
+export const evalBenchmarkAnalysisManifestJsonSchema = loadSchemaDocument("benchmark-analysis-manifest.schema.json");
+export const evalBenchmarkProvenanceJsonSchema = loadSchemaDocument("benchmark-provenance.schema.json");
+export const evalBenchmarkSourceManifestJsonSchema = loadSchemaDocument("benchmark-source-manifest.schema.json");
 export const evalFindingScoreJsonSchema = loadSchemaDocument("eval-finding-score.schema.json");
+export const evalFindingManifestJsonSchema = loadSchemaDocument("finding-manifest.schema.json");
+export const evalGroundTruthCreditsJsonSchema = loadSchemaDocument("ground-truth-credits.schema.json");
+export const evalInstanceClustersJsonSchema = loadSchemaDocument("instance-clusters.schema.json");
 export const evalMatrixJsonSchema = loadSchemaDocument("eval-matrix.schema.json");
 export const evalPublicationStateJsonSchema = loadSchemaDocument("eval-publication-state.schema.json");
 export const evalReviewQueueItemJsonSchema = loadSchemaDocument("eval-review-queue-item.schema.json");
@@ -130,8 +181,15 @@ export const evalScoreSummaryJsonSchema = loadSchemaDocument("eval-score-summary
 export const evalTelemetryCursorJsonSchema = loadSchemaDocument("telemetry-cursor.schema.json");
 
 export const EVAL_SCHEMA_EXPORTS = Object.freeze({
+  evalAdjudicationHandoffJsonSchema,
+  evalBenchmarkAnalysisManifestJsonSchema,
+  evalBenchmarkProvenanceJsonSchema,
+  evalBenchmarkSourceManifestJsonSchema,
   evalCommonJsonSchema,
   evalFindingScoreJsonSchema,
+  evalFindingManifestJsonSchema,
+  evalGroundTruthCreditsJsonSchema,
+  evalInstanceClustersJsonSchema,
   evalMatrixJsonSchema,
   evalPublicationStateJsonSchema,
   evalReviewQueueItemJsonSchema,
@@ -143,6 +201,10 @@ export const EVAL_SCHEMA_EXPORTS = Object.freeze({
 });
 
 const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, unknown>>>> = Object.freeze({
+  "adjudication-handoff.schema.json": evalAdjudicationHandoffJsonSchema,
+  "benchmark-analysis-manifest.schema.json": evalBenchmarkAnalysisManifestJsonSchema,
+  "benchmark-provenance.schema.json": evalBenchmarkProvenanceJsonSchema,
+  "benchmark-source-manifest.schema.json": evalBenchmarkSourceManifestJsonSchema,
   "eval-common.schema.json": evalCommonJsonSchema,
   "eval-finding-score.schema.json": evalFindingScoreJsonSchema,
   "eval-matrix.schema.json": evalMatrixJsonSchema,
@@ -152,6 +214,9 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "eval-run-record.schema.json": evalRunRecordJsonSchema,
   "eval-run-summary.schema.json": evalRunSummaryJsonSchema,
   "eval-score-summary.schema.json": evalScoreSummaryJsonSchema,
+  "finding-manifest.schema.json": evalFindingManifestJsonSchema,
+  "ground-truth-credits.schema.json": evalGroundTruthCreditsJsonSchema,
+  "instance-clusters.schema.json": evalInstanceClustersJsonSchema,
   "telemetry-cursor.schema.json": evalTelemetryCursorJsonSchema
 });
 

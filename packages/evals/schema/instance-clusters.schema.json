@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:instance-clusters:1",
+  "title": "Ultrafuzz benchmark finding-instance clusters",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "instances"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.eval.instance-clusters.v1" },
+    "instances": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/instance" }
+    }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "nullableSafeId": {
+      "oneOf": [{ "$ref": "#/$defs/safeId" }, { "type": "null" }]
+    },
+    "instance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rowId",
+        "issueIndex",
+        "findingInstanceId",
+        "stableIssueId",
+        "rootCauseClusterId",
+        "instanceClassification",
+        "matchedCandidateId",
+        "matchedSource",
+        "duplicateOfFindingInstanceId"
+      ],
+      "properties": {
+        "rowId": { "$ref": "#/$defs/safeId" },
+        "issueIndex": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonNegativeInteger" },
+        "findingInstanceId": { "$ref": "#/$defs/safeId" },
+        "stableIssueId": { "$ref": "#/$defs/safeId" },
+        "rootCauseClusterId": { "$ref": "#/$defs/safeId" },
+        "instanceClassification": { "enum": ["true-positive", "false-positive", "needs-human-review"] },
+        "matchedCandidateId": { "$ref": "#/$defs/nullableSafeId" },
+        "matchedSource": {
+          "oneOf": [{ "const": "canonical-ground-truth" }, { "type": "null" }]
+        },
+        "duplicateOfFindingInstanceId": { "$ref": "#/$defs/nullableSafeId" }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "matchedCandidateId": { "type": "null" },
+            "matchedSource": { "type": "null" }
+          }
+        },
+        {
+          "properties": {
+            "matchedCandidateId": { "$ref": "#/$defs/safeId" },
+            "matchedSource": { "const": "canonical-ground-truth" }
+          }
+        }
+      ]
+    }
+  }
+}

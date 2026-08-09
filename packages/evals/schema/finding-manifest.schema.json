@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:finding-manifest:1",
+  "title": "Ultrafuzz benchmark finding manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "rows", "candidateCatalog", "findingInstances"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.eval.finding-manifest.v1" },
+    "rows": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/row" }
+    },
+    "candidateCatalog": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/candidate" }
+    },
+    "findingInstances": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/findingInstance" }
+    }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "canonicalRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$"
+    },
+    "findingLabel": {
+      "type": "string",
+      "pattern": "^[HML]-[0-9]+$"
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rowId",
+        "label",
+        "condition",
+        "order",
+        "variant",
+        "rowArchivePath",
+        "runMetadataPath",
+        "runId",
+        "findingCount"
+      ],
+      "properties": {
+        "rowId": { "$ref": "#/$defs/safeId" },
+        "label": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonEmptyString" },
+        "condition": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonEmptyString" },
+        "order": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonNegativeInteger" },
+        "variant": { "$ref": "#/$defs/safeId" },
+        "rowArchivePath": { "$ref": "#/$defs/canonicalRelativePath" },
+        "runMetadataPath": { "$ref": "#/$defs/canonicalRelativePath" },
+        "runId": { "$ref": "#/$defs/safeId" },
+        "findingCount": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonNegativeInteger" }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidateId", "label", "title", "source"],
+      "properties": {
+        "candidateId": { "$ref": "#/$defs/safeId" },
+        "label": { "$ref": "#/$defs/findingLabel" },
+        "title": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonEmptyString" },
+        "source": { "const": "canonical-ground-truth" }
+      }
+    },
+    "sourceArtifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodeId"],
+      "properties": {
+        "nodeId": { "$ref": "#/$defs/safeId" }
+      }
+    },
+    "findingInstance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rowId",
+        "issueIndex",
+        "findingId",
+        "findingInstanceId",
+        "stableIssueId",
+        "title",
+        "severity",
+        "sourceArtifactRefs"
+      ],
+      "properties": {
+        "rowId": { "$ref": "#/$defs/safeId" },
+        "issueIndex": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonNegativeInteger" },
+        "findingId": { "$ref": "#/$defs/findingLabel" },
+        "findingInstanceId": { "$ref": "#/$defs/safeId" },
+        "stableIssueId": { "$ref": "#/$defs/safeId" },
+        "title": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonEmptyString" },
+        "severity": { "enum": ["High", "Medium", "Low"] },
+        "sourceArtifactRefs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/sourceArtifactRef" }
+        }
+      }
+    }
+  }
+}

@@ -1,5 +1,6 @@
 export * from "./analysis-bundle.js";
 export * from "./benchmark-manifest.js";
+export * from "./benchmark-analysis-contracts.js";
 export * from "./efficiency.js";
 export * from "./eval-durable.js";
 export * from "./eval-schema-registry.js";
