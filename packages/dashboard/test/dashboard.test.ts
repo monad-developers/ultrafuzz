@@ -112,6 +112,39 @@ test("creates a topology node prompt as terminal work before finish", async () =
   }
 });
 
+test("rejects prompt identity changes instead of converting them into topology renames", async () => {
+  const projectRoot = makeProject();
+  const promptPath = path.join(projectRoot, ".ultrafuzz", "prompts", "setup", "project-discovery.md");
+  const topologyPath = path.join(projectRoot, ".ultrafuzz", "topology.yml");
+  const originalPrompt = fs.readFileSync(promptPath);
+  const originalTopology = fs.readFileSync(topologyPath);
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const response = await fetch(apiUrl(handle.url, "/api/prompts/nodes/project-discovery"), {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        "x-ultrafuzz-session": handle.sessionToken
+      },
+      body: JSON.stringify(
+        dashboardRequest("prompt-save", {
+          content: "---\nid: renamed-project-discovery\ndisplay_name: Renamed\n---\n\n# Renamed\n"
+        })
+      )
+    });
+    assert.equal(response.status, 400);
+    await parseHttpResponse(response, "errorResponse");
+    assert.deepEqual(fs.readFileSync(promptPath), originalPrompt);
+    assert.deepEqual(fs.readFileSync(topologyPath), originalTopology);
+    assert.equal(
+      fs.existsSync(path.join(projectRoot, ".ultrafuzz", "prompts", "setup", "renamed-project-discovery.md")),
+      false
+    );
+  } finally {
+    await handle.close();
+  }
+});
+
 test("mutating APIs require the session token and reject invalid saves without writes", async () => {
   const projectRoot = makeProject();
   const configPath = path.join(projectRoot, "ultrafuzz.toml");

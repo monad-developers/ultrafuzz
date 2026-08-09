@@ -302,15 +302,15 @@ type NodeSummary = {
   id: string;
   label: string;
   kind: string;
-  kind_detail: unknown;
+  kind_detail: "agentic" | "meta" | "reference";
   status: Status;
   depends_on: string[];
   artifact_dir: string;
   strategy?: StrategySummary;
   model?: ModelSummary;
-  attempt_index?: number;
+  attempt_index: number;
   model_index?: number;
-  loop_index?: number;
+  loop_index: number;
   timeout_seconds?: number;
 };
 
@@ -322,9 +322,9 @@ type NodeDetail = {
   stderr?: string;
   rendered_prompt?: string;
   findings: unknown[];
-  artifacts: Array<{ path: string; kind: string; size_bytes: number; sha256?: string }>;
+  artifacts: Array<{ path: string; kind: string; size_bytes: number; sha256: string }>;
   artifactReferences: PromptArtifactReferences;
-  metadata?: unknown;
+  metadata: { expandedAttempts: unknown[] };
   transcript?: unknown;
 };
 
@@ -338,12 +338,8 @@ type PromptArtifactPreview = {
   concreteNodeId: string;
   relativePath?: string;
   path: string;
-  state: "available" | "missing" | "directory" | "unsupported" | string;
-  content?: {
-    kind: "markdown" | "json" | "text" | string;
-    text?: string;
-    json?: unknown;
-  };
+  state: "available" | "missing" | "directory" | "unsupported";
+  content?: { kind: "markdown" | "text"; text: string } | { kind: "json"; json: unknown };
 };
 
 type PromptDetail = {
@@ -363,11 +359,10 @@ type PromptDetail = {
 };
 
 type SavePromptResponse = {
-  strategyId?: string;
-  nodeId?: string;
+  strategyId: string;
+  nodeId: string;
   path: string;
   contentHash: string;
-  renamedFrom?: string;
   validation: {
     valid: boolean;
     message: string;
@@ -415,7 +410,7 @@ type TopologyNode = {
 };
 
 type ProjectTopology = {
-  version: number;
+  version: 2;
   defaults: TopologyDefaults;
   groups?: Record<string, TopologyGroup>;
   nodes: TopologyNode[];
@@ -1782,13 +1777,10 @@ function App() {
                 deleteTopologyNode={deleteTopologyNode}
                 detail={nodeDetail}
                 flow={flow}
-                loadFlow={loadFlow}
-                loadTopology={loadTopology}
                 node={selectedFlowNode ?? null}
                 nodeError={nodeError}
                 onPendingEditChange={reportPendingPromptEdit}
                 onPromptMessage={setMessage}
-                onPromptRenamed={setSelectedNodeId}
                 sessionToken={session?.sessionToken ?? null}
                 startTopologyEdgeFrom={startTopologyEdgeFrom}
                 templateVariables={templateVariables}
@@ -2422,13 +2414,10 @@ function NodePanel({
   deleteTopologyNode,
   detail,
   flow,
-  loadFlow,
-  loadTopology,
   node,
   nodeError,
   onPendingEditChange,
   onPromptMessage,
-  onPromptRenamed,
   sessionToken,
   startTopologyEdgeFrom,
   templateVariables
@@ -2437,13 +2426,10 @@ function NodePanel({
   deleteTopologyNode: (logicalNodeId: string) => void;
   detail: NodeDetail | null;
   flow: FlowData | null;
-  loadFlow: () => Promise<unknown>;
-  loadTopology: () => Promise<TopologyDetail>;
   node: DashboardFlowNode | null;
   nodeError: string;
   onPendingEditChange: (pending: boolean) => void;
   onPromptMessage: (message: string) => void;
-  onPromptRenamed: (nodeId: string) => void;
   sessionToken: string | null;
   startTopologyEdgeFrom: (sourceNodeId: string) => void;
   templateVariables: readonly string[] | undefined;
@@ -2459,10 +2445,7 @@ function NodePanel({
       isStrategyAggregate: Boolean(node && isStrategyAggregateNode(node)),
       onMessage: onPromptMessage,
       onPendingEditChange,
-      onRenamed: onPromptRenamed,
       promptEndpoint,
-      refreshFlow: loadFlow,
-      refreshTopology: loadTopology,
       sessionToken,
       templateVariables
     });

@@ -1198,6 +1198,7 @@ class DashboardApp {
     assertPathInside(this.projectRoot, topologyPath, "topology path");
     assertNoSymlinkComponents(this.projectRoot, topologyPath, "topology path");
     const previousTopology = readTextIfExists(topologyPath);
+    preflightDashboardAudit(this.projectRoot);
     try {
       writeFileDurable(topologyPath, nextContent);
       return {
@@ -1217,34 +1218,6 @@ class DashboardApp {
       }
       throw error;
     }
-  }
-
-  async renameTopologyNode(oldId: string, newId: string): Promise<void> {
-    const topology = this.loadTopologyForDisplay();
-    if (topology.nodes.some((node) => node.id === newId)) {
-      throw new HttpError(409, `topology node ${newId} already exists`);
-    }
-    const nextTopology: ProjectTopology = {
-      ...topology,
-      nodes: topology.nodes.map((node) => {
-        const next = {
-          ...node,
-          id: node.id === oldId ? newId : node.id,
-          depends_on: (node.depends_on ?? []).map((dependency) => (dependency === oldId ? newId : dependency))
-        };
-        if (node.id === oldId && node.prompt) {
-          const extension = path.extname(node.prompt) || ".md";
-          next.prompt = path.join(path.dirname(node.prompt), `${newId}${extension}`).split(path.sep).join("/");
-        }
-        return next;
-      })
-    };
-    const nextContent = stringifyYaml(nextTopology, { sortMapEntries: false });
-    const validation = await this.validateTopologyText(nextContent);
-    if (!validation.valid) {
-      throw new HttpError(400, validation.message);
-    }
-    writeFileDurable(resolveTopologyPath(this.projectRoot), nextContent);
   }
 
   async startCommand(command: string, body: JsonObject): Promise<CommandJob> {

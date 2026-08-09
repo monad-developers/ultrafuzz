@@ -50,6 +50,26 @@ test("dashboard schemas are complete, closed, and reference only current compose
     () => assertDashboardHttpDocument({ ...errorDocument, legacy: true }, "errorResponse", "legacy"),
     /additionalProperties/u
   );
+
+  const promptSave = {
+    schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
+    document_type: "prompt-save",
+    strategyId: "project-discovery",
+    nodeId: "project-discovery",
+    path: ".ultrafuzz/prompts/setup/project-discovery.md",
+    contentHash: "a".repeat(64),
+    validation: { valid: true, message: "prompt validates" }
+  };
+  assert.doesNotThrow(() => assertDashboardHttpDocument(promptSave, "promptSaveResponse", "prompt save"));
+  assert.throws(
+    () =>
+      assertDashboardHttpDocument(
+        { ...promptSave, renamedFrom: "legacy-node" },
+        "promptSaveResponse",
+        "legacy prompt save"
+      ),
+    /additionalProperties/u
+  );
 });
 
 test("dashboard HTTP and SSE serializers validate the exact bytes they return", () => {

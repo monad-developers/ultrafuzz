@@ -2,6 +2,20 @@ export const DASHBOARD_HTTP_SCHEMA_VERSION = "ultrafuzz.dashboard.http.v1" as co
 export const DASHBOARD_SSE_SCHEMA_VERSION = "ultrafuzz.dashboard.sse.v1" as const;
 
 export type DashboardRequestType = "config-save" | "topology-save" | "prompt-save" | "prompt-create";
+export type DashboardCommandName =
+  | "validate"
+  | "run"
+  | "ps"
+  | "inspect"
+  | "resume"
+  | "replay"
+  | "fork"
+  | "report"
+  | "references-status"
+  | "references-sync"
+  | "references-update"
+  | "materialize"
+  | "clean";
 export type DashboardHttpDocumentType =
   | "session"
   | "run-overview"
@@ -26,7 +40,7 @@ export interface DashboardCommandJob {
   schema_version: typeof DASHBOARD_HTTP_SCHEMA_VERSION;
   document_type: "command-job";
   jobId: string;
-  command: string;
+  command: DashboardCommandName;
   status: "running" | "succeeded" | "failed";
   startedAtUnixSeconds: number;
   finishedAtUnixSeconds?: number;
@@ -74,30 +88,59 @@ export function dashboardSseEvents(serialized: string): Record<string, unknown> 
   const value: unknown = JSON.parse(serialized);
   const envelope = requireRecord(value, "dashboard SSE events envelope");
   assertSseIdentity(envelope, "ultrafuzz-event");
-  return parseDashboardHttpDocument(requireRecord(envelope.payload, "dashboard SSE events payload"), "events");
+  const payload = requireRecord(envelope.payload, "dashboard SSE events payload");
+  assertOnlyKeys(payload, [
+    "schema_version",
+    "document_type",
+    "source",
+    "events",
+    "malformed_records",
+    "truncated_records"
+  ]);
+  return parseDashboardHttpDocument(payload, "events");
 }
 
 export function dashboardSseErrorMessage(serialized: string): string {
   const value: unknown = JSON.parse(serialized);
   const envelope = requireRecord(value, "dashboard SSE error envelope");
   assertSseIdentity(envelope, "ultrafuzz-error");
-  return requireString(requireRecord(envelope.payload, "dashboard SSE error payload").message, "SSE error message");
+  const payload = requireRecord(envelope.payload, "dashboard SSE error payload");
+  assertOnlyKeys(payload, ["message"]);
+  return requireString(payload.message, "SSE error message");
 }
 
 export function dashboardSseCommandJobs(serialized: string): DashboardCommandJob[] {
   const value: unknown = JSON.parse(serialized);
   const envelope = requireRecord(value, "dashboard SSE command envelope");
   assertSseIdentity(envelope, "ultrafuzz-command-jobs");
-  const jobs = requireRecord(envelope.payload, "dashboard SSE command payload").jobs;
+  const payload = requireRecord(envelope.payload, "dashboard SSE command payload");
+  assertOnlyKeys(payload, ["jobs"]);
+  const jobs = payload.jobs;
   if (!Array.isArray(jobs)) throw new Error("dashboard SSE command jobs must be an array");
   return jobs.map((job, index) => parseCommandJob(job, index));
 }
 
 function parseCommandJob(value: unknown, index: number): DashboardCommandJob {
   const job = requireRecord(value, `dashboard command job ${index}`);
+  assertOnlyKeys(job, [
+    "schema_version",
+    "document_type",
+    "jobId",
+    "command",
+    "status",
+    "startedAtUnixSeconds",
+    "finishedAtUnixSeconds",
+    "argv",
+    "output",
+    "error",
+    "exitCode"
+  ]);
   if (job.schema_version !== DASHBOARD_HTTP_SCHEMA_VERSION || job.document_type !== "command-job") {
     throw new Error(`dashboard command job ${index} has unsupported identity`);
   }
+  const jobId = requireString(job.jobId, `command job ${index} ID`);
+  if (!/^job-[a-z0-9]+-[a-f0-9]{8}$/u.test(jobId)) throw new Error(`dashboard command job ${index} has invalid ID`);
+  const command = parseCommandName(job.command, index);
   const status = job.status;
   if (status !== "running" && status !== "succeeded" && status !== "failed") {
     throw new Error(`dashboard command job ${index} has invalid status`);
@@ -108,11 +151,24 @@ function parseCommandJob(value: unknown, index: number): DashboardCommandJob {
   const startedAtUnixSeconds = requireNonnegativeInteger(job.startedAtUnixSeconds, `command job ${index} start`);
   const finishedAtUnixSeconds = optionalNonnegativeInteger(job.finishedAtUnixSeconds, `command job ${index} finish`);
   const exitCode = optionalNonnegativeInteger(job.exitCode, `command job ${index} exit code`);
+  if (exitCode !== undefined && exitCode > 255) throw new Error(`dashboard command job ${index} has invalid exit code`);
+  if (
+    status === "running" &&
+    (finishedAtUnixSeconds !== undefined || exitCode !== undefined || job.error !== undefined)
+  ) {
+    throw new Error(`running dashboard command job ${index} has terminal fields`);
+  }
+  if (status !== "running" && (finishedAtUnixSeconds === undefined || exitCode === undefined)) {
+    throw new Error(`finished dashboard command job ${index} is missing terminal fields`);
+  }
+  if ((status === "succeeded" && exitCode !== 0) || (status === "failed" && (exitCode ?? 0) < 1)) {
+    throw new Error(`dashboard command job ${index} status and exit code disagree`);
+  }
   return {
     schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
     document_type: "command-job",
-    jobId: requireString(job.jobId, `command job ${index} ID`),
-    command: requireString(job.command, `command job ${index} command`),
+    jobId,
+    command,
     status,
     startedAtUnixSeconds,
     ...(finishedAtUnixSeconds === undefined ? {} : { finishedAtUnixSeconds }),
@@ -124,6 +180,7 @@ function parseCommandJob(value: unknown, index: number): DashboardCommandJob {
 }
 
 function assertSseIdentity(envelope: Record<string, unknown>, eventType: string): void {
+  assertOnlyKeys(envelope, ["schema_version", "event_type", "sequence", "generated_at", "payload"]);
   if (envelope.schema_version !== DASHBOARD_SSE_SCHEMA_VERSION) {
     throw new Error(`unsupported dashboard SSE schema version: ${String(envelope.schema_version)}`);
   }
@@ -136,6 +193,33 @@ function assertSseIdentity(envelope: Record<string, unknown>, eventType: string)
   if (typeof envelope.generated_at !== "string" || !Number.isFinite(Date.parse(envelope.generated_at))) {
     throw new Error("dashboard SSE generated_at must be a timestamp");
   }
+}
+
+function parseCommandName(value: unknown, index: number): DashboardCommandName {
+  switch (value) {
+    case "validate":
+    case "run":
+    case "ps":
+    case "inspect":
+    case "resume":
+    case "replay":
+    case "fork":
+    case "report":
+    case "references-status":
+    case "references-sync":
+    case "references-update":
+    case "materialize":
+    case "clean":
+      return value;
+    default:
+      throw new Error(`dashboard command job ${index} has invalid command`);
+  }
+}
+
+function assertOnlyKeys(record: Record<string, unknown>, allowed: readonly string[]): void {
+  const allowedKeys = new Set(allowed);
+  const unknown = Object.keys(record).filter((key) => !allowedKeys.has(key));
+  if (unknown.length > 0) throw new Error(`dashboard document has unknown fields: ${unknown.join(", ")}`);
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {

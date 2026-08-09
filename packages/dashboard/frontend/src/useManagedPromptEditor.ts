@@ -23,18 +23,6 @@ export type ManagedPromptDetail = {
   endpoint: string;
 };
 
-type SavePromptResponse = {
-  strategyId?: string;
-  nodeId?: string;
-  path: string;
-  contentHash: string;
-  renamedFrom?: string;
-  validation: {
-    valid: boolean;
-    message: string;
-  };
-};
-
 type ArtifactReferenceContext = {
   knownNodeIds: string[];
   ancestorNodeIds: string[];
@@ -49,9 +37,6 @@ type UseManagedPromptEditorOptions = {
   artifactReferenceContext: ArtifactReferenceContext | undefined;
   onMessage: (message: string) => void;
   onPendingEditChange?: (pending: boolean) => void;
-  onRenamed: (nodeId: string) => void;
-  refreshFlow: () => Promise<unknown>;
-  refreshTopology: () => Promise<unknown>;
 };
 
 async function getPromptDetail<T>(url: string): Promise<T> {
@@ -76,10 +61,7 @@ export function useManagedPromptEditor({
   templateVariables,
   artifactReferenceContext,
   onMessage,
-  onPendingEditChange,
-  onRenamed,
-  refreshFlow,
-  refreshTopology
+  onPendingEditChange
 }: UseManagedPromptEditorOptions) {
   const [prompt, setPrompt] = useState<ManagedPromptDetail | null>(null);
   const [promptDraft, setPromptDraft] = useState("");
@@ -153,7 +135,7 @@ export function useManagedPromptEditor({
       if (!sessionToken) {
         return;
       }
-      let activeEndpoint = endpoint;
+      const activeEndpoint = endpoint;
       setPromptSaving(true);
       try {
         const response = await fetch(endpoint, {
@@ -167,30 +149,18 @@ export function useManagedPromptEditor({
         if (!response.ok) {
           throw new Error(await response.text());
         }
-        const saved = parseDashboardHttpDocument<SavePromptResponse>(await response.json(), "prompt-save");
-        const renamedNodeId = saved.renamedFrom && saved.nodeId ? saved.nodeId : null;
-        const nextEndpoint = renamedNodeId ? `/api/prompts/nodes/${encodeURIComponent(renamedNodeId)}` : endpoint;
-        if (renamedNodeId) {
-          activeEndpoint = nextEndpoint;
-          promptEndpointRef.current = nextEndpoint;
-          await refreshTopology();
-          await refreshFlow();
-          onRenamed(renamedNodeId);
-        }
-        const refreshed = await getPromptDetail<Omit<ManagedPromptDetail, "endpoint">>(nextEndpoint);
-        if (!renamedNodeId && promptEndpointRef.current !== nextEndpoint) {
+        parseDashboardHttpDocument(await response.json(), "prompt-save");
+        const refreshed = await getPromptDetail<Omit<ManagedPromptDetail, "endpoint">>(endpoint);
+        if (promptEndpointRef.current !== endpoint) {
           return;
         }
         const currentPrompt = promptRef.current;
         const currentDraft = promptDraftRef.current;
         const draftStillMatchesVisibleBaseline = currentPrompt?.content === currentDraft;
         const draftStillMatchesSavedContent = currentDraft === content;
-        const refreshedPrompt = { ...refreshed, endpoint: nextEndpoint };
-        if (renamedNodeId) {
-          onMessage("Saved and renamed prompt");
-        }
+        const refreshedPrompt = { ...refreshed, endpoint };
         promptRef.current = refreshedPrompt;
-        promptEndpointRef.current = nextEndpoint;
+        promptEndpointRef.current = endpoint;
         const promptBaselineChanged =
           currentPrompt?.content !== refreshed.content ||
           currentPrompt?.summary.contentHash !== refreshed.summary.contentHash;
@@ -216,7 +186,7 @@ export function useManagedPromptEditor({
         setPromptSaving(false);
       }
     },
-    [onMessage, onRenamed, refreshFlow, refreshTopology, sessionToken]
+    [onMessage, sessionToken]
   );
 
   const queuePromptSave = useCallback(
