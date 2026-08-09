@@ -11,10 +11,12 @@ import * as ts from "typescript";
 
 import {
   assertRegularFileInside,
+  executeSchemaSemanticGates,
   MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
   normalizeNodeAttemptFailureMessage,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
+  validateArtifactContract,
   writeFileDurable
 } from "@ultrafuzz/artifacts";
 
@@ -672,7 +674,10 @@ test("generated Smithers verifier rejects zero-byte generated-test companions", 
 
 type VerifyArtifactsTask = {
   attemptId: string;
-  metadata: { artifacts: { dir: string }; node: { logicalNodeId: string } };
+  runRoot: string;
+  workspacePath: string;
+  dependencyArtifactDirs: string[];
+  metadata: { artifacts: { dir: string }; node: { logicalNodeId: string; concreteNodeId: string } };
   outputs: Array<{
     path: string;
     contract: string;
@@ -701,6 +706,7 @@ function loadVerifyArtifactsHarness(): {
     }>
   ) => { artifacts: Array<{ sha256: string }>; primary_artifact: string };
   publications: Map<string, Buffer>;
+  markerWrites: unknown[];
 } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const captureStart = source.indexOf("function captureTaskOutputs");
@@ -714,6 +720,7 @@ function loadVerifyArtifactsHarness(): {
     { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
   ).outputText;
   const publications = new Map<string, Buffer>();
+  const markerWrites: unknown[] = [];
   const remember = (values: Map<string, Buffer>, relativePath: string, bytes: Buffer): void => {
     const previous = values.get(relativePath);
     if (previous !== undefined && !previous.equals(bytes)) throw new Error(`conflicting ${relativePath}`);
@@ -732,6 +739,10 @@ function loadVerifyArtifactsHarness(): {
     "parseStrictJsonSnapshot",
     "validateArtifactContract",
     "formatSchemaValidationIssues",
+    "executeSchemaSemanticGates",
+    "normalizeNodeAttemptFailureMessage",
+    "materializeGeneratedTestCompanions",
+    "materializeInvariantSuiteCompanions",
     "rememberVerifiedPublication",
     "verifyGeneratedTestFiles",
     "verifyInvariantLedgerSourceEvidence",
@@ -768,12 +779,13 @@ function loadVerifyArtifactsHarness(): {
         throw new Error(`${failureMessage}: file is not strict JSON`, { cause: error });
       }
     },
-    (contract: string, contents: string) => ({
-      ok: true,
-      issues: [],
-      value: contract === "ultrafuzz/text@1" ? contents : parseStrictJsonBytes(Buffer.from(contents, "utf8"))
-    }),
+    (contract: Parameters<typeof validateArtifactContract>[0], contents: string, artifactPath: string) =>
+      validateArtifactContract(contract, contents, artifactPath),
     () => "invalid",
+    executeSchemaSemanticGates,
+    normalizeNodeAttemptFailureMessage,
+    () => undefined,
+    () => undefined,
     remember,
     () => [],
     () => undefined,
@@ -783,18 +795,24 @@ function loadVerifyArtifactsHarness(): {
     (_artifactDir: string, values: ReadonlyMap<string, Buffer>) => {
       for (const [relativePath, bytes] of values) publications.set(relativePath, Buffer.from(bytes));
     },
-    () => undefined
+    (...args: unknown[]) => markerWrites.push(args)
   ) as {
     captureTaskOutputs: ReturnType<typeof loadVerifyArtifactsHarness>["captureTaskOutputs"];
     verifyArtifacts: ReturnType<typeof loadVerifyArtifactsHarness>["verifyArtifacts"];
   };
-  return { ...factory, publications };
+  return { ...factory, publications, markerWrites };
 }
 
 function singleOutputVerificationTask(root: string, contract: string): VerifyArtifactsTask {
   return {
     attemptId: "attempt-one",
-    metadata: { artifacts: { dir: root }, node: { logicalNodeId: "node-one" } },
+    runRoot: root,
+    workspacePath: root,
+    dependencyArtifactDirs: [],
+    metadata: {
+      artifacts: { dir: root },
+      node: { logicalNodeId: "node-one", concreteNodeId: "node-one" }
+    },
     outputs: [
       {
         path: "result.json",
@@ -843,6 +861,138 @@ test("generated Smithers hashes and publishes the captured output after its path
 
     assert.equal(result.artifacts[0]?.sha256, createHash("sha256").update(original).digest("hex"));
     assert.equal(harness.publications.get("result.json")?.equals(original), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers fails closed on schema-valid document semantic violations", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-output-")));
+  try {
+    const document = {
+      schema_version: "ultrafuzz.generated-tests.v2",
+      run_id: "run-one",
+      node_id: "node-one",
+      generated_tests: [{ path: "generated-tests/Duplicate.t.sol" }, { path: "generated-tests/Duplicate.t.sol" }]
+    };
+    const contents = `${JSON.stringify(document)}\n`;
+    assert.equal(validateArtifactContract("ultrafuzz/generated-tests@2", contents).ok, true);
+    fs.writeFileSync(path.join(root, "result.json"), contents, "utf8");
+
+    const harness = loadVerifyArtifactsHarness();
+    const task = singleOutputVerificationTask(root, "ultrafuzz/generated-tests@2");
+    task.outputs[0]!.schemaFile = "generated-tests.schema.json";
+
+    assert.throws(
+      () => harness.verifyArtifacts(task, harness.captureTaskOutputs(task)),
+      /generated-test-path-uniqueness failed/u
+    );
+    assert.equal(harness.publications.size, 0);
+    assert.equal(harness.markerWrites.length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers fails closed when same-node semantic counts disagree", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-siblings-")));
+  try {
+    const documents = new Map<string, unknown>([
+      [
+        "campaign-summary.json",
+        {
+          schema_version: "ultrafuzz.campaign-summary.v2",
+          outcome: "complete",
+          implemented_property_suite_refs: ["implemented-properties.json"],
+          campaign_plan_ref: "campaign-plan.json",
+          backend_results: [],
+          finding_refs: [],
+          reproducer_refs: [],
+          failure_counts: { pre_deduplication: 0, post_deduplication: 0 }
+        }
+      ],
+      ["campaign.json", { schema_version: "ultrafuzz.property-campaign.v2", failures: [] }],
+      [
+        "findings.json",
+        [
+          {
+            schema_version: "ultrafuzz.finding.v2",
+            id: "finding-one",
+            title: "Finding one",
+            status: "candidate",
+            severity_guess: "Medium",
+            confidence: "medium",
+            summary: "A schema-valid sibling finding."
+          }
+        ]
+      ]
+    ]);
+    for (const [relativePath, document] of documents) {
+      fs.writeFileSync(path.join(root, relativePath), `${JSON.stringify(document)}\n`, "utf8");
+    }
+    const task: VerifyArtifactsTask = {
+      attemptId: "attempt-campaign",
+      runRoot: root,
+      workspacePath: root,
+      dependencyArtifactDirs: [],
+      metadata: {
+        artifacts: { dir: root },
+        node: { logicalNodeId: "stateful-invariant-campaign", concreteNodeId: "stateful-invariant-campaign" }
+      },
+      outputs: [
+        {
+          path: "campaign-summary.json",
+          contract: "ultrafuzz/campaign-summary@2",
+          contractDigest: "a".repeat(64),
+          schemaFile: "campaign-summary.schema.json",
+          primary: true
+        },
+        {
+          path: "campaign.json",
+          contract: "ultrafuzz/property-campaign@2",
+          contractDigest: "b".repeat(64),
+          schemaFile: "property-campaign.schema.json",
+          primary: false
+        },
+        {
+          path: "findings.json",
+          contract: "ultrafuzz/findings@2",
+          contractDigest: "c".repeat(64),
+          schemaFile: "findings.schema.json",
+          primary: false
+        }
+      ]
+    };
+    const harness = loadVerifyArtifactsHarness();
+
+    assert.throws(
+      () => harness.verifyArtifacts(task, harness.captureTaskOutputs(task)),
+      /campaign-summary-count-coupling failed/u
+    );
+    assert.equal(harness.publications.size, 0);
+    assert.equal(harness.markerWrites.length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers fails closed when a contextual gate lacks verified ancestors", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-context-")));
+  try {
+    const contents = `${JSON.stringify({ schema_version: "ultrafuzz.properties.v2", properties: [] })}\n`;
+    assert.equal(validateArtifactContract("ultrafuzz/properties@2", contents).ok, true);
+    fs.writeFileSync(path.join(root, "result.json"), contents, "utf8");
+
+    const task = singleOutputVerificationTask(root, "ultrafuzz/properties@2");
+    task.outputs[0]!.schemaFile = "properties.schema.json";
+    const harness = loadVerifyArtifactsHarness();
+
+    assert.throws(
+      () => harness.verifyArtifacts(task, harness.captureTaskOutputs(task)),
+      /property-source-join requires trusted context: artifactSet\.propertyLenses/u
+    );
+    assert.equal(harness.publications.size, 0);
+    assert.equal(harness.markerWrites.length, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -2004,10 +2154,22 @@ test("generated Smithers verifier publishes the complete validated set before ta
   assert.match(source, /function captureTaskOutputs/u);
   assert.match(source, /return task\.outputs\.map/u);
   assert.match(source, /MAX_VERIFIED_ARTIFACT_BYTES/u);
-  assert.match(verifier, /rememberVerifiedPublication\(publications, output\.path, file\.bytes\)/u);
-  assert.match(verifier, /verifyGeneratedTestFiles\(artifactRoot, value\)/u);
+  assert.match(verifier, /rememberVerifiedPublication\(publications, output\.path, verified\.file\.bytes\)/u);
+  assert.match(verifier, /verifyGeneratedTestFiles\(verified\.artifactRoot, verified\.value\)/u);
   assert.match(verifier, /rememberVerifiedPublication\(publications, companion\.path, companion\.contents\)/u);
   assert.match(verifier, /publishFileDurableExclusive\(artifactDir, relativePath, contents\)/u);
+  assert.ok(
+    verifier.indexOf("validateCapturedTaskOutputs(task, capturedOutputs)") <
+      verifier.indexOf("materializeGeneratedTestCompanions(task, capturedOutputs)")
+  );
+  assert.ok(
+    verifier.indexOf("materializeGeneratedTestCompanions(task, capturedOutputs)") <
+      verifier.indexOf("verifyOutputSemanticGates(task, verifiedOutputs)")
+  );
+  assert.ok(
+    verifier.indexOf("verifyOutputSemanticGates(task, verifiedOutputs)") <
+      verifier.indexOf("const publications = new Map<string, Buffer>()")
+  );
   assert.ok(
     verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") > verifier.indexOf("primary === undefined")
   );
