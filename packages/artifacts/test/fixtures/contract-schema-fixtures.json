@@ -1,0 +1,897 @@
+{
+  "ultrafuzz/admin-config-boundary-matrix@1": {
+    "schema_file": "admin-config-boundary-matrix.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.admin-config-boundary-matrix.v1",
+      "surfaces": [],
+      "selector_mismatches": [],
+      "ambiguous_or_incomplete_specs": [],
+      "generated_tests": [],
+      "coverage_notes": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.admin-config-boundary-matrix.v1",
+      "surfaces": [],
+      "selector_mismatches": [],
+      "ambiguous_or_incomplete_specs": [],
+      "generated_tests": [],
+      "coverage_notes": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/aggregation-manifest@1": {
+    "schema_file": "aggregation-manifest.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.aggregation-manifest.v1",
+      "source_generated_tests": 0,
+      "copied_generated_tests": 0,
+      "source_support_files": 0,
+      "copied_support_files": 0,
+      "files": [],
+      "support_files": [],
+      "skipped_files": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.aggregation-manifest.v1",
+      "source_generated_tests": 0,
+      "copied_generated_tests": 0,
+      "source_support_files": 0,
+      "copied_support_files": 0,
+      "files": [],
+      "support_files": [],
+      "skipped_files": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/audited-differential-lanes@1": {
+    "schema_file": "audited-differential-lanes.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.audited-differential-lanes.v1",
+      "auditor_attempt_index": 0,
+      "source_plan_artifacts": [],
+      "source_harness_artifacts": [],
+      "surface_audits": [],
+      "ready_lanes": [],
+      "rejected_or_narrowed_lanes": [],
+      "reference_gap_work_orders": [],
+      "ambiguous_spec_work_orders": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.audited-differential-lanes.v1",
+      "auditor_attempt_index": 0,
+      "source_plan_artifacts": [],
+      "source_harness_artifacts": [],
+      "surface_audits": [],
+      "ready_lanes": [],
+      "rejected_or_narrowed_lanes": [],
+      "reference_gap_work_orders": [],
+      "ambiguous_spec_work_orders": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/boundary-recipes@1": {
+    "schema_file": "boundary-recipes.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.boundary-recipes.v1",
+      "recipes": [],
+      "deferred_or_spec_gated": [],
+      "coverage_priorities": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.boundary-recipes.v1",
+      "recipes": [],
+      "deferred_or_spec_gated": [],
+      "coverage_priorities": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/campaign-summary@2": {
+    "schema_file": "campaign-summary.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.campaign-summary.v2",
+      "outcome": "complete",
+      "implemented_property_suite_refs": ["x"],
+      "campaign_plan_ref": "x",
+      "backend_results": [],
+      "finding_refs": [],
+      "reproducer_refs": [],
+      "failure_counts": {
+        "pre_deduplication": 0,
+        "post_deduplication": 0
+      }
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.campaign-summary.v2",
+      "outcome": "complete",
+      "implemented_property_suite_refs": ["x"],
+      "campaign_plan_ref": "x",
+      "backend_results": [],
+      "finding_refs": [],
+      "reproducer_refs": [],
+      "failure_counts": {
+        "pre_deduplication": 0,
+        "post_deduplication": 0
+      },
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/coverage-goal@1": {
+    "schema_file": "coverage-goal.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.coverage-goal.v1",
+      "target": {
+        "metric": "standardized-core-line-coverage-percent",
+        "value": 0
+      },
+      "current_measurement": 0,
+      "current_status": "not-run",
+      "planned_commands": [],
+      "stop_conditions": ["x"],
+      "timeout_seconds": 1,
+      "finalization_reserve_seconds": 0,
+      "blockers": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.coverage-goal.v1",
+      "target": {
+        "metric": "standardized-core-line-coverage-percent",
+        "value": 0
+      },
+      "current_measurement": 0,
+      "current_status": "not-run",
+      "planned_commands": [],
+      "stop_conditions": ["x"],
+      "timeout_seconds": 1,
+      "finalization_reserve_seconds": 0,
+      "blockers": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/dependency-scope-matrix@1": {
+    "schema_file": "dependency-scope-matrix.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.dependency-scope-matrix.v1",
+      "dependencies": [],
+      "in_scope_test_targets": [],
+      "non_finding_rows": [],
+      "generated_tests": [],
+      "source_backed_in_scope_rationales": [],
+      "coverage_notes": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.dependency-scope-matrix.v1",
+      "dependencies": [],
+      "in_scope_test_targets": [],
+      "non_finding_rows": [],
+      "generated_tests": [],
+      "source_backed_in_scope_rationales": [],
+      "coverage_notes": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/differential-gap-review@1": {
+    "schema_file": "differential-gap-review.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.differential-gap-review.v1",
+      "ready_lanes": [],
+      "lane_results_seen": [],
+      "missing_lane_work_orders": [],
+      "incomplete_campaign_work_orders": [],
+      "green_suite_evidence": [],
+      "report_blockers": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.differential-gap-review.v1",
+      "ready_lanes": [],
+      "lane_results_seen": [],
+      "missing_lane_work_orders": [],
+      "incomplete_campaign_work_orders": [],
+      "green_suite_evidence": [],
+      "report_blockers": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/differential-lane-result@1": {
+    "schema_file": "differential-lane-result.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.differential-lane-result.v1",
+      "lane_id": "x",
+      "attempt_index": 0,
+      "auditor_attempt_index": 0,
+      "source_auditor_artifact": "x",
+      "source_plan_artifact": "x",
+      "source_harness_artifact": "x",
+      "assigned_lane_payload": {
+        "lane_id": "x",
+        "attempt_index": 0,
+        "auditor_attempt_index": 0,
+        "planner_attempt_index": 0,
+        "harness_author_attempt_index": 0,
+        "source_plan_artifact": "x",
+        "source_harness_artifact": "x",
+        "intended_t_sol_path": "x",
+        "focused_command": "x",
+        "public_evidence_paths": ["x"],
+        "exact_observable_equality_assertions": ["x"]
+      },
+      "authored_paths": [],
+      "focused_command": "x",
+      "focused_command_ran": false,
+      "matched_test_count": 0,
+      "status": "green",
+      "red_preservation_audit": {
+        "result": "no_semantic_red_observed",
+        "pre_repair_file_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "assertion_predicate": "x"
+      },
+      "red_candidates": [],
+      "compile_or_harness_defects": [],
+      "public_evidence_paths": [],
+      "notes": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.differential-lane-result.v1",
+      "lane_id": "x",
+      "attempt_index": 0,
+      "auditor_attempt_index": 0,
+      "source_auditor_artifact": "x",
+      "source_plan_artifact": "x",
+      "source_harness_artifact": "x",
+      "assigned_lane_payload": {
+        "lane_id": "x",
+        "attempt_index": 0,
+        "auditor_attempt_index": 0,
+        "planner_attempt_index": 0,
+        "harness_author_attempt_index": 0,
+        "source_plan_artifact": "x",
+        "source_harness_artifact": "x",
+        "intended_t_sol_path": "x",
+        "focused_command": "x",
+        "public_evidence_paths": ["x"],
+        "exact_observable_equality_assertions": ["x"]
+      },
+      "authored_paths": [],
+      "focused_command": "x",
+      "focused_command_ran": false,
+      "matched_test_count": 0,
+      "status": "green",
+      "red_preservation_audit": {
+        "result": "no_semantic_red_observed",
+        "pre_repair_file_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "assertion_predicate": "x"
+      },
+      "red_candidates": [],
+      "compile_or_harness_defects": [],
+      "public_evidence_paths": [],
+      "notes": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/differential-plan@1": {
+    "schema_file": "differential-plan.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.differential-plan.v1",
+      "planner_attempt_index": 0,
+      "candidate_surfaces": [],
+      "reference_model_rules": {
+        "allowed_structures": ["x"],
+        "forbidden_sources": ["x"]
+      },
+      "deployment_assumptions": [],
+      "phase_priorities": [],
+      "assigned_differential_lanes": [],
+      "deferred_lane_candidates": [],
+      "out_of_scope_surfaces": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.differential-plan.v1",
+      "planner_attempt_index": 0,
+      "candidate_surfaces": [],
+      "reference_model_rules": {
+        "allowed_structures": ["x"],
+        "forbidden_sources": ["x"]
+      },
+      "deployment_assumptions": [],
+      "phase_priorities": [],
+      "assigned_differential_lanes": [],
+      "deferred_lane_candidates": [],
+      "out_of_scope_surfaces": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/differential-red-triage@1": {
+    "schema_file": "differential-red-triage.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.differential-red-triage.v1",
+      "pass": "a",
+      "classifications": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.differential-red-triage.v1",
+      "pass": "a",
+      "classifications": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/differential-repair-summary@1": {
+    "schema_file": "differential-repair-summary.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.differential-repair-summary.v1",
+      "repairs_attempted": [],
+      "repaired_failures": [],
+      "preserved_production_or_unknown_reds": [],
+      "commands": [],
+      "semantic_red_registry_regenerated": false,
+      "notes": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.differential-repair-summary.v1",
+      "repairs_attempted": [],
+      "repaired_failures": [],
+      "preserved_production_or_unknown_reds": [],
+      "commands": [],
+      "semantic_red_registry_regenerated": false,
+      "notes": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/differential-report-review@1": {
+    "schema_file": "differential-report-review.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.differential-report-review.v1",
+      "campaign_status": "complete",
+      "production_bug_reds": [],
+      "harness_or_reference_repairs": [],
+      "missing_or_deferred_lanes": [],
+      "report_rows_ready": [],
+      "notes": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.differential-report-review.v1",
+      "campaign_status": "complete",
+      "production_bug_reds": [],
+      "harness_or_reference_repairs": [],
+      "missing_or_deferred_lanes": [],
+      "report_rows_ready": [],
+      "notes": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/dynamic-enumerator-outputs@1": {
+    "schema_file": "dynamic-enumerator-outputs.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.dynamic-enumerator-outputs.v1",
+      "enumerators": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.dynamic-enumerator-outputs.v1",
+      "enumerators": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/dynamic-strategy-plan@1": {
+    "schema_file": "dynamic-strategy-plan.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.dynamic-strategy-plan.v1",
+      "dynamic_strategies_enumerator": 0,
+      "status": "selected",
+      "selected_strategy_count": 0,
+      "selected_strategies": [],
+      "rejected_strategies": [],
+      "current_run_artifacts_considered": [],
+      "excluded_context": {
+        "sibling_runs": "excluded",
+        "previous_reports": "excluded",
+        "host_global_paths": "excluded",
+        "network_resources": "excluded",
+        "extra_target_context": "excluded"
+      },
+      "timeout_seconds": 1,
+      "finalization_reserve_seconds": 0
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.dynamic-strategy-plan.v1",
+      "dynamic_strategies_enumerator": 0,
+      "status": "selected",
+      "selected_strategy_count": 0,
+      "selected_strategies": [],
+      "rejected_strategies": [],
+      "current_run_artifacts_considered": [],
+      "excluded_context": {
+        "sibling_runs": "excluded",
+        "previous_reports": "excluded",
+        "host_global_paths": "excluded",
+        "network_resources": "excluded",
+        "extra_target_context": "excluded"
+      },
+      "timeout_seconds": 1,
+      "finalization_reserve_seconds": 0,
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/dynamic-strategy-provenance@1": {
+    "schema_file": "dynamic-strategy-provenance.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.dynamic-strategy-provenance.v1",
+      "current_run_artifacts": [],
+      "agents": [],
+      "models": [],
+      "commands": [],
+      "generated_files": [],
+      "validation": [],
+      "excluded_context": {
+        "sibling_runs": "excluded",
+        "previous_reports": "excluded",
+        "host_global_paths": "excluded",
+        "network_resources": "excluded",
+        "extra_target_context": "excluded"
+      }
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.dynamic-strategy-provenance.v1",
+      "current_run_artifacts": [],
+      "agents": [],
+      "models": [],
+      "commands": [],
+      "generated_files": [],
+      "validation": [],
+      "excluded_context": {
+        "sibling_runs": "excluded",
+        "previous_reports": "excluded",
+        "host_global_paths": "excluded",
+        "network_resources": "excluded",
+        "extra_target_context": "excluded"
+      },
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/externalized-state-accounting@1": {
+    "schema_file": "externalized-state-accounting.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.externalized-state-accounting.v1",
+      "state_components": [],
+      "scenarios": [],
+      "accounting_oracles": [],
+      "generated_tests": [],
+      "incomplete_specs": [],
+      "coverage_notes": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.externalized-state-accounting.v1",
+      "state_components": [],
+      "scenarios": [],
+      "accounting_oracles": [],
+      "generated_tests": [],
+      "incomplete_specs": [],
+      "coverage_notes": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/finding-lifecycle-ledger@1": {
+    "schema_file": "finding-lifecycle-ledger.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.finding-lifecycle-ledger.v1",
+      "records": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.finding-lifecycle-ledger.v1",
+      "records": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/findings@2": {
+    "schema_file": "findings.schema.json",
+    "valid": [
+      {
+        "schema_version": "ultrafuzz.finding.v2",
+        "id": "finding-1",
+        "title": "Canonical finding",
+        "status": "candidate",
+        "severity_guess": "Medium",
+        "confidence": "medium",
+        "summary": "A canonical typed finding fixture."
+      }
+    ],
+    "invalid": null
+  },
+  "ultrafuzz/generated-tests@2": {
+    "schema_file": "generated-tests.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.generated-tests.v2",
+      "run_id": "x",
+      "node_id": "x",
+      "generated_tests": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.generated-tests.v2",
+      "run_id": "x",
+      "node_id": "x",
+      "generated_tests": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/harness-repairs@1": {
+    "schema_file": "harness-repairs.schema.json",
+    "valid": [
+      {
+        "failure_id": "x",
+        "classification": "harness-defect",
+        "failure_summary": "x",
+        "reproducer_path": "x",
+        "repair_summary": "x",
+        "files_changed_or_proposed": [],
+        "commands": [],
+        "notes": []
+      }
+    ],
+    "invalid": null
+  },
+  "ultrafuzz/implemented-properties@3": {
+    "schema_file": "implemented-properties.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.implemented-properties.v3",
+      "properties": [],
+      "selection": {
+        "priority_threshold": "high",
+        "priorities": ["high"],
+        "property_ids": []
+      }
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.implemented-properties.v3",
+      "properties": [],
+      "selection": {
+        "priority_threshold": "high",
+        "priorities": ["high"],
+        "property_ids": []
+      },
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/invariant-campaign-plan@1": {
+    "schema_file": "invariant-campaign-plan.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.invariant-campaign-plan.v1",
+      "available_vcpus": 1,
+      "workers": 1,
+      "configured_budget_seconds": 1,
+      "deadline": "2026-08-09T00:00:00.000Z",
+      "finalization_reserve_seconds": 0,
+      "backend": {
+        "name": "recon",
+        "version": "x"
+      },
+      "command_plan": [],
+      "paths": {
+        "corpus": "x",
+        "cache": "x",
+        "log": "x",
+        "raw_results": "x",
+        "reproducers": "x"
+      }
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.invariant-campaign-plan.v1",
+      "available_vcpus": 1,
+      "workers": 1,
+      "configured_budget_seconds": 1,
+      "deadline": "2026-08-09T00:00:00.000Z",
+      "finalization_reserve_seconds": 0,
+      "backend": {
+        "name": "recon",
+        "version": "x"
+      },
+      "command_plan": [],
+      "paths": {
+        "corpus": "x",
+        "cache": "x",
+        "log": "x",
+        "raw_results": "x",
+        "reproducers": "x"
+      },
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/invariant-ledger@1": {
+    "schema_file": "invariant-evidence-ledger.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.invariant-evidence-ledger.v1",
+      "entries": [],
+      "inventory_rows": [],
+      "scan_probes": [
+        {
+          "id": "probe-source",
+          "source_path": "src/Target.sol",
+          "query": "invariant",
+          "result": "none"
+        }
+      ],
+      "no_invariants_justification": "Searched the target sources and found no invariant statements."
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.invariant-evidence-ledger.v1",
+      "entries": [],
+      "inventory_rows": [],
+      "scan_probes": [
+        {
+          "id": "probe-source",
+          "source_path": "src/Target.sol",
+          "query": "invariant",
+          "result": "none"
+        }
+      ],
+      "no_invariants_justification": "Searched the target sources and found no invariant statements.",
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/properties@2": {
+    "schema_file": "properties.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.properties.v2",
+      "properties": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.properties.v2",
+      "properties": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/property-campaign@2": {
+    "schema_file": "property-campaign.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.property-campaign.v2",
+      "failures": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.property-campaign.v2",
+      "failures": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/property-lens@2": {
+    "schema_file": "property-lens.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.property-lens.v2",
+      "properties": [
+        {
+          "id": "x",
+          "description": "x",
+          "category": "x",
+          "priority": "high"
+        }
+      ]
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.property-lens.v2",
+      "properties": [
+        {
+          "id": "x",
+          "description": "x",
+          "category": "x",
+          "priority": "high"
+        }
+      ],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/reference-expectations@2": {
+    "schema_file": "reference-expectations.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.reference-expectations.v2",
+      "expectations": [
+        {
+          "id": "x"
+        }
+      ]
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.reference-expectations.v2",
+      "expectations": [
+        {
+          "id": "x"
+        }
+      ],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/reference-harness@1": {
+    "schema_file": "reference-harness.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.reference-harness.v1",
+      "harness_author_attempt_index": 0,
+      "source_plan_artifacts": [],
+      "authored_paths": [],
+      "reference_models": [],
+      "validation": {
+        "commands": [],
+        "passed": false,
+        "compiler_errors": [],
+        "notes": []
+      },
+      "lane_readiness_notes": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.reference-harness.v1",
+      "harness_author_attempt_index": 0,
+      "source_plan_artifacts": [],
+      "authored_paths": [],
+      "reference_models": [],
+      "validation": {
+        "commands": [],
+        "passed": false,
+        "compiler_errors": [],
+        "notes": []
+      },
+      "lane_readiness_notes": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/reference-manifest@1": {
+    "schema_file": "reference-manifest.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.reference-manifest.v1",
+      "reference": "x",
+      "provider": "github",
+      "repo": "x",
+      "commit": "0000000000000000000000000000000000000000",
+      "resolved_at": "2026-08-09T00:00:00.000Z",
+      "source_files": [],
+      "artifacts": [
+        {
+          "path": "x",
+          "size_bytes": 0,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.reference-manifest.v1",
+      "reference": "x",
+      "provider": "github",
+      "repo": "x",
+      "commit": "0000000000000000000000000000000000000000",
+      "resolved_at": "2026-08-09T00:00:00.000Z",
+      "source_files": [],
+      "artifacts": [
+        {
+          "path": "x",
+          "size_bytes": 0,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/report@2": {
+    "schema_file": "report.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.report.v2",
+      "run_metadata": {
+        "run_id": "x",
+        "source_run_id": "x",
+        "repository": "x",
+        "elapsed_time": "x",
+        "models_used": [],
+        "tokens_used": "x",
+        "estimated_spend": "x",
+        "partial_pricing": false,
+        "strategy_loops": 0
+      },
+      "issues": [],
+      "non_production_outcomes": [],
+      "property_provenance": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.report.v2",
+      "run_metadata": {
+        "run_id": "x",
+        "source_run_id": "x",
+        "repository": "x",
+        "elapsed_time": "x",
+        "models_used": [],
+        "tokens_used": "x",
+        "estimated_spend": "x",
+        "partial_pricing": false,
+        "strategy_loops": 0
+      },
+      "issues": [],
+      "non_production_outcomes": [],
+      "property_provenance": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/selected-strategies@1": {
+    "schema_file": "selected-strategies.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.selected-strategies.v1",
+      "strategies": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.selected-strategies.v1",
+      "strategies": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/semantic-red-registry@1": {
+    "schema_file": "semantic-red-registry.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.semantic-red-registry.v1",
+      "semantic_reds": [],
+      "compile_or_harness_defects": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.semantic-red-registry.v1",
+      "semantic_reds": [],
+      "compile_or_harness_defects": [],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/severity-classified-findings@1": {
+    "schema_file": "severity-classified-findings.schema.json",
+    "valid": [
+      {
+        "schema_version": "ultrafuzz.finding.v2",
+        "id": "finding-1",
+        "title": "Canonical classified finding",
+        "status": "candidate",
+        "severity_guess": "Medium",
+        "confidence": "medium",
+        "summary": "A canonical typed severity fixture.",
+        "triage_classification": "false-positive"
+      }
+    ],
+    "invalid": null
+  },
+  "ultrafuzz/strategy-detections@1": {
+    "schema_file": "strategy-detections.schema.json",
+    "valid": [
+      {
+        "dedupe_key": "x",
+        "title": "x",
+        "hits": [
+          {
+            "strategy": "x"
+          }
+        ]
+      }
+    ],
+    "invalid": null
+  },
+  "ultrafuzz/triaged-findings@1": {
+    "schema_file": "triaged-findings.schema.json",
+    "valid": [
+      {
+        "schema_version": "ultrafuzz.finding.v2",
+        "id": "finding-1",
+        "title": "Canonical triaged finding",
+        "status": "candidate",
+        "severity_guess": "Medium",
+        "confidence": "medium",
+        "summary": "A canonical typed triage fixture.",
+        "triage_classification": "true-positive",
+        "notes": ["triage_reason=confirmed"]
+      }
+    ],
+    "invalid": null
+  },
+  "ultrafuzz/workspace-patch@1": {
+    "schema_file": "workspace-patch.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.workspace-patch.v1",
+      "base_commit": "0000000000000000000000000000000000000000000000000000000000000000",
+      "base_tree": "0000000000000000000000000000000000000000000000000000000000000000",
+      "result_tree": "0000000000000000000000000000000000000000000000000000000000000000",
+      "patch_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "files": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.workspace-patch.v1",
+      "base_commit": "0000000000000000000000000000000000000000000000000000000000000000",
+      "base_tree": "0000000000000000000000000000000000000000000000000000000000000000",
+      "result_tree": "0000000000000000000000000000000000000000000000000000000000000000",
+      "patch_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "files": [],
+      "__unexpected_fixture_field": true
+    }
+  }
+}

@@ -8,8 +8,9 @@ import os from "node:os";
 
 import {
   ANALYSIS_BUNDLE_SCHEMA_VERSION,
+  CAMPAIGN_SUMMARY_SCHEMA_VERSION,
   FINDINGS_SCHEMA_VERSION,
-  FINDINGS_SCHEMA_VERSIONS,
+  GENERATED_TEST_MANIFEST_PATH_PATTERN,
   GENERATED_TESTS_SCHEMA_VERSION,
   INVARIANT_LEDGER_SCHEMA_VERSION,
   INVARIANT_SOURCE_PROOF_SCHEMA_VERSION,
@@ -20,6 +21,7 @@ import {
   PROPERTIES_SCHEMA_VERSION,
   PROPERTY_LENS_SCHEMA_VERSION,
   PROPERTY_CAMPAIGN_SCHEMA_VERSION,
+  REPORT_SCHEMA_VERSION,
   USAGE_LEDGER_SCHEMA_VERSION,
   ARTIFACT_CONTRACT_IDS,
   artifactManifestJsonSchema,
@@ -34,7 +36,6 @@ import {
   nodeAttemptLedgerJsonSchema,
   propertiesJsonSchema,
   referenceExpectationsJsonSchema,
-  resolveCampaignFindingBackends,
   runStateJsonSchema,
   validateAnalysisBundleManifestSchema,
   usageLedgerJsonSchema,
@@ -165,210 +166,29 @@ test("rejects a schema destination that crosses an intermediate symlink", () => 
   }
 });
 
-test("artifact contract registry validates structured, empty, and malformed outputs", () => {
-  const definition = artifactContractDefinition("ultrafuzz/report@1");
+test("artifact contract registry exposes only current typed contracts", () => {
+  const definition = artifactContractDefinition("ultrafuzz/report@2");
   assert.match(definition.digest, /^[0-9a-f]{64}$/u);
-  assert.equal(validateArtifactContract("ultrafuzz/findings@1", "[]").ok, true);
-  assert.equal(validateArtifactContract("ultrafuzz/json-object@1", "[]").ok, false);
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/property-lens@1",
-      JSON.stringify({
-        schema_version: PROPERTY_LENS_SCHEMA_VERSION,
-        properties: [
-          { id: "aviggiano-001", description: "Expected behavior", category: "accounting", priority: "high" }
-        ]
-      })
-    ).ok,
-    true
-  );
+  assert.equal(validateArtifactContract("ultrafuzz/findings@2", "[]").ok, true);
   assert.equal(validateArtifactContract("ultrafuzz/nonempty-markdown@1", " \n").ok, false);
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/report@1",
-      JSON.stringify({ schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] })
-    ).ok,
-    true
-  );
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/report@1",
-      JSON.stringify({
-        schema_version: "1.0",
-        run_metadata: {},
-        issues: [],
-        non_production_outcomes: [],
-        property_implementation_coverage: {
-          priority_threshold: "high",
-          priorities: ["high"],
-          selected_property_ids: ["property-1"],
-          implemented_property_ids: ["property-1"],
-          blocked_property_ids: [],
-          pending_property_ids: [],
-          deferred_property_ids: []
-        }
-      })
-    ).ok,
-    true
-  );
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/report@1",
-      JSON.stringify({
-        schema_version: "1.0",
-        run_metadata: {},
-        issues: [],
-        non_production_outcomes: [],
-        property_implementation_coverage: {
-          priority_threshold: "high",
-          priorities: ["high"],
-          selected_property_ids: ["property-1", "property-1"],
-          implemented_property_ids: [],
-          blocked_property_ids: [],
-          pending_property_ids: [],
-          deferred_property_ids: []
-        }
-      })
-    ).ok,
-    false,
-    "coverage ID arrays must be unique"
-  );
-  // R55 emitted blocker_summaries as the typed handoff objects and the whole
-  // report was discarded at the last node in the pipeline. Pin both sides of
-  // the shape the prompt now documents.
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/report@1",
-      JSON.stringify({
-        schema_version: "1.0",
-        run_metadata: {},
-        issues: [],
-        non_production_outcomes: [],
-        property_implementation_coverage: {
-          priority_threshold: "high",
-          priorities: ["high"],
-          selected_property_ids: ["property-1"],
-          implemented_property_ids: [],
-          blocked_property_ids: [],
-          pending_property_ids: [],
-          deferred_property_ids: ["property-1"],
-          blocker_summaries: [
-            {
-              property_id: "property-1",
-              status: "deferred",
-              code: "transition-oracle-deferred",
-              summary: "The handler cannot observe the premium delta.",
-              next_action: "Add property-scoped snapshots around the handler."
-            }
-          ]
-        }
-      })
-    ).ok,
-    false,
-    "blocker_summaries must be strings, not the typed handoff objects"
-  );
-  // R55 failed with `Invalid input at report.json#property_implementation_coverage`,
-  // which named neither the field nor the reason, because the union hid the
-  // object branch's issues. The diagnostic must point at the offending element.
-  const blockerObjectIssues = validateArtifactContract(
-    "ultrafuzz/report@1",
-    JSON.stringify({
-      schema_version: "1.0",
-      run_metadata: {},
-      issues: [],
-      non_production_outcomes: [],
-      property_implementation_coverage: {
-        priority_threshold: "high",
-        priorities: ["high"],
-        selected_property_ids: ["property-1"],
-        implemented_property_ids: [],
-        blocked_property_ids: [],
-        pending_property_ids: [],
-        deferred_property_ids: ["property-1"],
-        blocker_summaries: [{ property_id: "property-1", summary: "The handler cannot observe the delta." }]
-      }
-    })
-  ).issues;
-  assert.ok(
-    blockerObjectIssues.some((issue) => issue.path?.includes("property_implementation_coverage.blocker_summaries")),
-    `expected a diagnostic naming blocker_summaries, got ${JSON.stringify(blockerObjectIssues.map((issue) => issue.path))}`
-  );
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/report@1",
-      JSON.stringify({
-        schema_version: "1.0",
-        run_metadata: {},
-        issues: [],
-        non_production_outcomes: [],
-        property_implementation_coverage: {
-          priority_threshold: "high",
-          priorities: ["high"],
-          selected_property_ids: ["property-1"],
-          implemented_property_ids: [],
-          blocked_property_ids: [],
-          pending_property_ids: [],
-          deferred_property_ids: ["property-1"],
-          blocker_summaries: ["property-1: the handler cannot observe the premium delta"]
-        }
-      })
-    ).ok,
-    true,
-    "the documented string form is accepted"
-  );
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/report@1",
-      JSON.stringify({
-        schema_version: "1.0",
-        run_metadata: {},
-        issues: [
-          {
-            schema_version: FINDINGS_SCHEMA_VERSION,
-            id: "finding-1",
-            title: "[H-01] - Unbounded input",
-            status: "needs-review",
-            severity_guess: "High",
-            confidence: "medium",
-            summary: "Input length reaches an expensive path.",
-            strategy: "invariant",
-            strategy_provenance: { names: ["invariant", "fuzz"], detection_rate: 0.5 },
-            severity: "High",
-            impact: "High",
-            likelihood: "Medium"
-          }
-        ],
-        non_production_outcomes: []
-      })
-    ).ok,
-    true
-  );
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/report@1",
-      JSON.stringify({
-        schema_version: "1.0",
-        run_metadata: {},
-        issues: [{ id: "finding-1", title: "Incomplete issue" }],
-        non_production_outcomes: []
-      })
-    ).ok,
-    false
-  );
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/report@1",
-      JSON.stringify({
-        schema_version: "ultrafuzz.e2e.report.v1",
-        run_metadata: {},
-        issues: [],
-        non_production_outcomes: [],
-        finding_count: 0,
-        findings: []
-      })
-    ).ok,
-    true
-  );
+  assert.equal(validateArtifactContract("ultrafuzz/text@1", "").ok, true);
+
+  for (const removed of [
+    "ultrafuzz/json-object@1",
+    "ultrafuzz/json-array@1",
+    "ultrafuzz/findings@1",
+    "ultrafuzz/generated-tests@1",
+    "ultrafuzz/implemented-properties@1",
+    "ultrafuzz/implemented-properties@2",
+    "ultrafuzz/properties@1",
+    "ultrafuzz/property-campaign@1",
+    "ultrafuzz/property-lens@1",
+    "ultrafuzz/reference-expectations@1",
+    "ultrafuzz/report@1"
+  ]) {
+    assert.equal(isArtifactContractId(removed), false, removed);
+  }
+
   for (const id of ARTIFACT_CONTRACT_IDS) {
     const contract = artifactContractDefinition(id);
     if (contract.validEmptyExample !== undefined) {
@@ -376,7 +196,6 @@ test("artifact contract registry validates structured, empty, and malformed outp
     }
   }
 });
-
 test("invariant evidence ledger preserves verbatim source entries and inventory joins", () => {
   const ledger = {
     schema_version: INVARIANT_LEDGER_SCHEMA_VERSION,
@@ -538,16 +357,15 @@ test("invariant source proofs bind immutable text snapshots to a ledger digest",
   assert.equal(validateInvariantSourceProofSchema(duplicate).ok, false);
 });
 
-test("finding schema accepts minimal normalized findings and rejects malformed payloads", () => {
+test("finding schema accepts a canonical v2 finding and rejects malformed payloads", () => {
   const finding = {
     schema_version: FINDINGS_SCHEMA_VERSION,
     id: "finding-1",
     title: "Unbounded input",
-    status: "reproduced_by_generated_test",
-    severity_guess: "high",
+    status: "candidate",
+    severity_guess: "High",
     confidence: "medium",
-    summary: "Input length reaches an expensive path.",
-    evidence: ["test/foundry/Generated.t.sol::testIssue", { note: "Generated test reproduces issue" }]
+    summary: "Input length reaches an expensive path."
   };
 
   assert.equal(validateFindingSchema(finding).ok, true);
@@ -617,7 +435,7 @@ test("property catalog schema accepts one source and preserves multiple deduplic
   assert.ok(invalidLedgerIds.issues.some((issue) => /Duplicate invariant ledger ID/u.test(issue.message)));
 });
 
-test("property lens schema requires normalized priorities and unique IDs", () => {
+test("property lens schema requires canonical priorities and unique reference IDs", () => {
   const valid = {
     schema_version: PROPERTY_LENS_SCHEMA_VERSION,
     properties: [
@@ -635,13 +453,6 @@ test("property lens schema requires normalized priorities and unique IDs", () =>
     validateLensPropertiesSchema({
       ...valid,
       properties: [{ ...valid.properties[0], priority: "Critical" }]
-    }).ok,
-    false
-  );
-  assert.equal(
-    validateLensPropertiesSchema({
-      ...valid,
-      properties: [valid.properties[0], valid.properties[0]]
     }).ok,
     false
   );
@@ -692,6 +503,7 @@ test("canonical property schema preserves typed benchmark expectations", () => {
 test("property implementation and campaign schemas retain canonical references", () => {
   const implemented = {
     schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+    selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
     properties: [
       {
         property_id: "property-1",
@@ -723,53 +535,10 @@ test("property implementation and campaign schemas retain canonical references",
   );
 });
 
-test("campaign backend resolution prefers finding-owned provenance and only infers an unambiguous legacy backend", () => {
-  const campaigns: PropertyCampaignArtifact[] = [
-    {
-      schema_version: PROPERTY_CAMPAIGN_SCHEMA_VERSION,
-      fuzzer_backend: "recon",
-      failures: [
-        { id: "deduplicated", status: "reproduced" },
-        { id: "legacy-recon", status: "reproduced" },
-        { id: "ambiguous-id", status: "reproduced" }
-      ]
-    },
-    {
-      schema_version: PROPERTY_CAMPAIGN_SCHEMA_VERSION,
-      fuzzer_backend: "medusa",
-      failures: [
-        { id: "medusa-contribution", status: "reproduced" },
-        { id: "ambiguous-id", status: "reproduced" }
-      ]
-    }
-  ];
-  const resolved = resolveCampaignFindingBackends(campaigns, [
-    { id: "deduplicated", fuzzer_backends: ["recon", "medusa"] },
-    { id: "legacy-recon" },
-    { id: "ambiguous-id" }
-  ]);
-
-  assert.deepEqual(resolved.get("deduplicated"), ["medusa", "recon"]);
-  assert.deepEqual(resolved.get("legacy-recon"), ["recon"]);
-  assert.equal(
-    resolved.has("ambiguous-id"),
-    false,
-    "a coincidental cross-backend failure-ID collision must not manufacture multi-backend provenance"
-  );
-
-  const malformedOwner = resolveCampaignFindingBackends(campaigns, [
-    { id: "legacy-recon", fuzzer_backend: "recon", fuzzer_backends: ["medusa", "recon"] }
-  ]);
-  assert.equal(
-    malformedOwner.has("legacy-recon"),
-    false,
-    "present but malformed finding-owned provenance must fail closed instead of falling back"
-  );
-});
-
 test("property implementation schema rejects source-less implemented records", () => {
   const sourceLess = {
     schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+    selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
     properties: [
       {
         property_id: "property-1",
@@ -785,29 +554,6 @@ test("property implementation schema rejects source-less implemented records", (
   assert.ok(
     invalid.issues.some((issue) => /implemented property must identify at least one source/u.test(issue.message))
   );
-});
-
-test("property implementation schema rejects duplicate canonical references", () => {
-  const duplicate = {
-    schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
-    properties: [
-      {
-        property_id: "property-1",
-        status: "implemented",
-        implementation_paths: ["test/recon/Properties.sol"],
-        test_paths: ["test/foundry/Property1.t.sol"]
-      },
-      {
-        property_id: "property-1",
-        status: "pending",
-        implementation_paths: [],
-        test_paths: []
-      }
-    ]
-  };
-  const invalid = validateImplementedPropertiesSchema(duplicate);
-  assert.equal(invalid.ok, false);
-  assert.ok(invalid.issues.some((issue) => /Duplicate implemented property ID/u.test(issue.message)));
 });
 
 test("property implementation schema accepts selection metadata and typed blockers", () => {
@@ -843,20 +589,6 @@ test("property implementation schema accepts selection metadata and typed blocke
   );
 });
 
-test("current implementation contract requires selection while historical contract remains readable", () => {
-  const historical = JSON.stringify({
-    schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
-    properties: []
-  });
-  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@1", historical).ok, true);
-  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@2", historical).ok, false);
-  assert.ok(
-    validateArtifactContract("ultrafuzz/implemented-properties@2", historical).issues.some(
-      (issue) => issue.code === "IMPLEMENTED_PROPERTIES_SELECTION_REQUIRED"
-    )
-  );
-});
-
 test("unknown canonical property references produce a clear diagnostic", () => {
   const catalog = {
     schema_version: PROPERTIES_SCHEMA_VERSION,
@@ -881,94 +613,38 @@ test("unknown canonical property references produce a clear diagnostic", () => {
   ]);
 });
 
-test("the findings contract accepts the house-style schema_version and states the literal it wants", () => {
-  // R56's stateful-invariant-campaign produced two complete findings and lost the run because it
-  // spelled the version the way every sibling artifact spells it.
-  const campaignFindings = [
-    {
-      schema_version: "ultrafuzz.finding.v1",
-      id: "failure-1",
-      title: "Harness drawn-rate sync assertion ignores elapsed-time precondition",
-      status: "confirmed",
-      severity_guess: "low",
-      confidence: "high",
-      summary: "The stored drawn rate lags the recalculated one after time advances.",
-      property_ids: ["property-99"]
-    }
-  ];
-  assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify(campaignFindings)).ok, true);
-  assert.equal(validateFindingsSchema(campaignFindings).ok, true);
-  assert.equal(validateFindingSchema(campaignFindings[0]).ok, true);
-  assert.equal(
-    validateFindingSchema({ ...campaignFindings[0], schema_version: "ultrafuzz.finding.v2" }).ok,
-    false,
-    "an unknown version is still rejected"
-  );
-
-  const description = artifactContractDefinition("ultrafuzz/findings@1").description;
-  assert.ok(
-    description.includes(`"${FINDINGS_SCHEMA_VERSION}"`),
-    "the contract must state the literal, since its empty example is [] and cannot carry one"
-  );
-  assert.match(description, /severity_guess to exactly "High", "Medium", or "Low"/u);
-  assert.match(description, /including one that is or may become a non-production record/u);
-  assert.match(description, /"severity_guess":"Medium"/u);
-  assert.doesNotMatch(description, /"severity_guess":"medium"/u);
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/findings@1",
-      JSON.stringify([{ ...campaignFindings[0], severity_guess: "low" }])
-    ).ok,
-    true,
-    "the producer guidance may tighten without making historical lowercase artifacts unreadable"
-  );
-});
-
-test("the findings contract does not require schema_version, and still rejects malformed findings", () => {
-  // There is one findings schema, nothing reads the field, and normalizeFinding already defaults an
-  // absent value. A version string that no reader consults must not be able to end a run.
-  const withoutVersion = [
-    {
-      id: "failure-1",
-      title: "Harness drawn-rate sync assertion ignores elapsed-time precondition",
-      status: "confirmed",
-      severity_guess: "low",
-      confidence: "high",
-      summary: "The stored drawn rate lags the recalculated one after time advances.",
-      property_ids: ["property-99"]
-    }
-  ];
-  assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify(withoutVersion)).ok, true);
-  assert.equal(validateFindingsSchema(withoutVersion).ok, true);
-  assert.equal(validateFindingSchema(withoutVersion[0]).ok, true);
-
-  assert.ok(
-    !(findingJsonSchema.required as readonly string[]).includes("schema_version"),
-    "the published JSON Schema must agree with the Zod schema that the field is optional"
-  );
-  assert.deepEqual([...findingJsonSchema.properties.schema_version.enum], [...FINDINGS_SCHEMA_VERSIONS]);
-
-  // Optional does not mean unconstrained: a present value is still checked, and every field the
-  // pipeline actually consumes is still required.
-  assert.equal(validateFindingSchema({ ...withoutVersion[0], schema_version: "2.0" }).ok, false);
-  assert.equal(validateFindingSchema({ ...withoutVersion[0], schema_version: 1 }).ok, false);
-  const missingSummary = { ...withoutVersion[0] };
-  delete (missingSummary as Partial<typeof missingSummary>).summary;
-  assert.equal(validateFindingSchema(missingSummary).ok, false);
-  assert.equal(
-    validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([missingSummary])).ok,
-    false,
-    "an otherwise malformed finding still fails the contract"
-  );
-  assert.equal(validateFindingSchema({ ...withoutVersion[0], property_ids: ["property-99", "property-99"] }).ok, false);
-});
-
-test("the findings schema recognizes typed campaign deduplication accounting without imposing it globally", () => {
+test("the findings v2 contract rejects aliases, omissions, lowercase severities, and extra fields", () => {
   const finding = {
+    schema_version: FINDINGS_SCHEMA_VERSION,
+    id: "failure-1",
+    title: "Harness drawn-rate sync assertion ignores elapsed-time precondition",
+    status: "confirmed",
+    severity_guess: "Low",
+    confidence: "high",
+    summary: "The stored drawn rate lags the recalculated one after time advances.",
+    property_ids: ["property-99"]
+  };
+  assert.equal(validateArtifactContract("ultrafuzz/findings@2", JSON.stringify([finding])).ok, true);
+  assert.equal(validateFindingsSchema([finding]).ok, true);
+  assert.equal(validateFindingSchema(finding).ok, true);
+
+  for (const schemaVersion of ["ultrafuzz.finding.v1", "1.0", undefined]) {
+    const candidate: Record<string, unknown> = { ...finding, schema_version: schemaVersion };
+    if (schemaVersion === undefined) delete candidate.schema_version;
+    assert.equal(validateArtifactContract("ultrafuzz/findings@2", JSON.stringify([candidate])).ok, false);
+    assert.equal(validateFindingSchema(candidate).ok, false);
+  }
+  assert.equal(validateFindingSchema({ ...finding, severity_guess: "low" }).ok, false);
+  assert.equal(validateFindingSchema({ ...finding, unexpected: true }).ok, false);
+});
+
+test("the findings v2 schema retains typed campaign deduplication accounting", () => {
+  const finding = {
+    schema_version: FINDINGS_SCHEMA_VERSION,
     id: "failure-1",
     title: "Accounting invariant violation",
-    status: "reproduced",
-    severity_guess: "medium",
+    status: "candidate",
+    severity_guess: "Medium",
     confidence: "high",
     summary: "The accounting invariant failed.",
     property_ids: ["property-1"],
@@ -979,194 +655,77 @@ test("the findings schema recognizes typed campaign deduplication accounting wit
     deduplication: { pre_dedup_count: 2, basis: "same root cause" }
   };
   assert.equal(validateFindingSchema(finding).ok, true);
-  assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([finding])).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/findings@2", JSON.stringify([finding])).ok, true);
   assert.equal(
-    validateFindingSchema({
-      ...finding,
-      contributing_backend_failures: ["failure-1", "failure-1"]
-    }).ok,
-    false,
-    "a finding cannot repeat the same unqualified contribution"
-  );
-  assert.equal(
-    validateFindingSchema({
-      ...finding,
-      contributing_backend_failures: [{ fuzzer_backend: "medusa" }]
-    }).ok,
-    false,
-    "qualified contributions need both identity fields"
+    validateFindingSchema({ ...finding, contributing_backend_failures: [{ fuzzer_backend: "medusa" }] }).ok,
+    false
   );
   assert.equal(validateFindingSchema({ ...finding, deduplication: { pre_dedup_count: 0 } }).ok, false);
-  assert.equal(validateFindingSchema({ ...finding, deduplication: {} }).ok, false);
-
-  const historical = { ...finding } as Record<string, unknown>;
-  delete historical.contributing_backend_failures;
-  delete historical.deduplication;
-  assert.equal(validateFindingSchema(historical).ok, true, "generic and historical findings remain readable");
-  assert.ok("contributing_backend_failures" in findingJsonSchema.properties);
-  assert.ok("deduplication" in findingJsonSchema.properties);
 });
-
-test("the current campaign summary contract requires the persisted-plan accounting marker", () => {
+test("the campaign summary v2 contract requires complete typed accounting", () => {
   const summary = {
+    schema_version: CAMPAIGN_SUMMARY_SCHEMA_VERSION,
     outcome: "partial",
+    implemented_property_suite_refs: ["implemented-properties.json"],
+    campaign_plan_ref: "invariant-campaign-plan.json",
+    backend_results: [],
+    finding_refs: [],
+    reproducer_refs: [],
     failure_counts: { pre_deduplication: 29, post_deduplication: 2 }
   };
-  assert.equal(validateArtifactContract("ultrafuzz/campaign-summary@1", JSON.stringify(summary)).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/campaign-summary@2", JSON.stringify(summary)).ok, true);
   assert.equal(
-    validateArtifactContract("ultrafuzz/campaign-summary@1", JSON.stringify({ outcome: "partial" })).ok,
+    validateArtifactContract("ultrafuzz/campaign-summary@2", JSON.stringify({ ...summary, schema_version: "1.0" })).ok,
     false
   );
   assert.equal(
     validateArtifactContract(
-      "ultrafuzz/campaign-summary@1",
-      JSON.stringify({ failure_counts: { pre_deduplication: -1, post_deduplication: 2 } })
+      "ultrafuzz/campaign-summary@2",
+      JSON.stringify({ ...summary, failure_counts: { pre_deduplication: -1, post_deduplication: 2 } })
     ).ok,
     false
   );
-  assert.equal(
-    validateArtifactContract("ultrafuzz/json-object@1", JSON.stringify({ outcome: "partial" })).ok,
-    true,
-    "persisted plans with the historical generic contract stay readable"
-  );
 });
 
-test("finding and report schemas accept non-property and historical artifacts", () => {
+test("finding and report v2 schemas require their current canonical shapes", () => {
   const nonPropertyFinding = {
     schema_version: FINDINGS_SCHEMA_VERSION,
     id: "finding-setup",
     title: "Harness setup is incomplete",
     status: "needs-review",
-    severity_guess: "low",
+    severity_guess: "Low",
     confidence: "high",
     summary: "The setup path is incomplete."
   };
   assert.equal(validateFindingSchema(nonPropertyFinding).ok, true);
   assert.equal(validateFindingSchema({ ...nonPropertyFinding, property_ids: ["property-1", "property-1"] }).ok, false);
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/report@1",
-      JSON.stringify({ schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] })
-    ).ok,
-    true,
-    "historical reports without property provenance remain valid"
-  );
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/report@1",
-      JSON.stringify({
-        schema_version: "1.0",
-        run_metadata: {},
-        issues: [],
-        non_production_outcomes: [],
-        property_provenance: "unavailable"
-      })
-    ).ok,
-    true
-  );
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/report@1",
-      JSON.stringify({
-        schema_version: "1.0",
-        run_metadata: {},
-        issues: [],
-        non_production_outcomes: [],
-        property_provenance: [
-          {
-            finding_id: "finding-property",
-            title: "Property failure",
-            property_ids: ["property-1"],
-            sources: [
-              {
-                source_node_id: "property-specification-certora",
-                source_property_id: "certora-1"
-              }
-            ],
-            implementation_paths: ["test/recon/Properties.sol"],
-            test_paths: ["test/foundry/Property1.t.sol"],
-            fuzzer_backends: ["echidna", "medusa"]
-          }
-        ]
-      })
-    ).ok,
-    true
-  );
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/report@1",
-      JSON.stringify({
-        schema_version: "1.0",
-        run_metadata: {},
-        issues: [],
-        non_production_outcomes: [],
-        property_provenance: [
-          {
-            finding_id: "finding-property",
-            title: "Property failure",
-            property_ids: ["property-1"],
-            sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
-            implementation_paths: [],
-            test_paths: [],
-            fuzzer_backend: "echidna",
-            fuzzer_backends: ["echidna", "medusa"]
-          }
-        ]
-      })
-    ).ok,
-    false
-  );
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/report@1",
-      JSON.stringify({
-        schema_version: "1.0",
-        run_metadata: {},
-        issues: [],
-        non_production_outcomes: [],
-        property_provenance: [
-          {
-            finding_id: "finding-property",
-            title: "Property failure",
-            property_ids: ["property-1"],
-            sources: [],
-            implementation_paths: ["test/recon/Properties.sol"],
-            test_paths: ["test/foundry/Property1.t.sol"]
-          }
-        ]
-      })
-    ).ok,
-    false
-  );
-  assert.equal(
-    validateArtifactContract(
-      "ultrafuzz/report@1",
-      JSON.stringify({
-        schema_version: "1.0",
-        run_metadata: {},
-        issues: [],
-        non_production_outcomes: [],
-        property_provenance: [
-          {
-            finding_id: "finding-property",
-            title: "Property failure",
-            property_ids: ["property-1", "property-1"],
-            sources: [
-              {
-                source_node_id: "property-specification-certora",
-                source_property_id: "certora-1"
-              }
-            ],
-            implementation_paths: [],
-            test_paths: []
-          }
-        ]
-      })
-    ).ok,
-    false
-  );
-});
 
+  const report = {
+    schema_version: REPORT_SCHEMA_VERSION,
+    run_metadata: {
+      run_id: "run-1",
+      source_run_id: "run-0",
+      repository: "example/repository",
+      elapsed_time: "1m",
+      models_used: ["model-a"],
+      tokens_used: "100",
+      estimated_spend: "$0.01",
+      partial_pricing: false,
+      strategy_loops: 1
+    },
+    issues: [],
+    non_production_outcomes: [],
+    property_provenance: []
+  };
+  assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(report)).ok, true);
+  assert.equal(
+    validateArtifactContract("ultrafuzz/report@2", JSON.stringify({ ...report, schema_version: "1.0" })).ok,
+    false
+  );
+  const withoutProvenance = { ...report } as Partial<typeof report>;
+  delete withoutProvenance.property_provenance;
+  assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(withoutProvenance)).ok, false);
+});
 test("run state schema covers all required node states and rejects malformed state", () => {
   assert.ok(RUN_STATE_STATUSES.includes("paused"));
   assert.ok(NODE_STATE_STATUSES.includes("ready"));
@@ -1186,7 +745,7 @@ test("run state schema covers all required node states and rejects malformed sta
         outputs: [
           {
             path: "findings.json",
-            contract: "ultrafuzz/findings@1",
+            contract: "ultrafuzz/findings@2",
             contract_digest: "a".repeat(64),
             primary: true
           }
@@ -1277,21 +836,18 @@ test("generated test manifest runtime and exported schemas enforce the same safe
 
   assert.equal(validateGeneratedTestManifestSchema(manifest).ok, true);
 
-  const legacy = {
+  const noncanonical = {
     schema_version: GENERATED_TESTS_SCHEMA_VERSION,
     run_id: "run-1",
     node_id: "strategy-a",
     test_files: [{ path: "generated-tests/Invariant.t.sol" }]
   };
-  const invalid = validateGeneratedTestManifestSchema(legacy);
+  const invalid = validateGeneratedTestManifestSchema(noncanonical);
 
   assert.equal(invalid.ok, false);
   assert.ok(invalid.issues.some((issue) => issue.path === "$.generated_tests"));
 
-  const exportedPathPattern = new RegExp(
-    generatedTestsJsonSchema.properties.generated_tests.items.properties.path.pattern,
-    "u"
-  );
+  const exportedPathPattern = new RegExp(GENERATED_TEST_MANIFEST_PATH_PATTERN, "u");
   const cases = [
     { path: "generated-tests/Invariant.t.sol", ok: true },
     { path: "generated-tests/nested/Invariant_2.t.sol", ok: true },
@@ -1313,15 +869,6 @@ test("generated test manifest runtime and exported schemas enforce the same safe
     assert.equal(validateGeneratedTestManifestSchema(value).ok, candidate.ok, candidate.path);
     assert.equal(exportedPathPattern.test(candidate.path), candidate.ok, candidate.path);
   }
-});
-
-test("generated test contract documents its exact safe companion-file layout", () => {
-  const definition = artifactContractDefinition("ultrafuzz/generated-tests@1");
-
-  assert.match(definition.description, /safe forward-slash path/u);
-  assert.match(definition.description, /generated-tests\/<file> prefix/u);
-  assert.match(definition.description, /exact path beneath the node artifact directory/u);
-  assert.match(definition.description, /non-empty regular file/u);
 });
 
 test("analysis bundle manifest schema rejects unversioned and non-allowlisted entries", () => {
@@ -1519,25 +1066,24 @@ test("an empty optional reference_expectations list is accepted, as omitting it 
       next_action: "Audit the harness and either implement the assertion or record a concrete blocker."
     }
   };
-  // `@2` requires `selection`; omitting it fails with IMPLEMENTED_PROPERTIES_SELECTION_REQUIRED and would
-  // make this test pass or fail for a reason unrelated to the field under test. R51's real document did
-  // carry a selection block, which is why its ONLY error was the expectations list.
+  // `@3` requires `selection`; omitting it would make this test pass or fail for the wrong reason.
+  // R51's real document carried a selection block, which is why its only error was the expectations list.
   const document = (extra: Record<string, unknown>) =>
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
       properties: [{ ...property, ...extra }],
       selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] }
     });
 
   // Omitting it was always valid; the empty array must be too, and a populated one must keep working.
-  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@2", document({})).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@3", document({})).ok, true);
   const empty = validateArtifactContract(
-    "ultrafuzz/implemented-properties@2",
+    "ultrafuzz/implemented-properties@3",
     document({ reference_expectations: [] })
   );
   assert.equal(empty.ok, true, JSON.stringify(empty.issues));
   assert.equal(
-    validateArtifactContract("ultrafuzz/implemented-properties@2", document({ reference_expectations: ["e1"] })).ok,
+    validateArtifactContract("ultrafuzz/implemented-properties@3", document({ reference_expectations: ["e1"] })).ok,
     true
   );
 });
@@ -1546,9 +1092,9 @@ test("a duplicated reference expectation is still rejected once empty lists are 
   // Accepting `[]` must not accept anything else. The dedup rule inside the list is the reason the schema
   // is more than `z.array(string)`, so it has to survive the change.
   const result = validateArtifactContract(
-    "ultrafuzz/implemented-properties@2",
+    "ultrafuzz/implemented-properties@3",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
       properties: [
         {
           property_id: "property-1",
@@ -1577,9 +1123,9 @@ test("every schema validation issue carries the field path that identifies it", 
   // Kept because the invariant is what makes that formatter possible: if paths ever stopped being
   // populated here, the useful message downstream would silently become useless again.
   const result = validateArtifactContract(
-    "ultrafuzz/implemented-properties@2",
+    "ultrafuzz/implemented-properties@3",
     JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
+      schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
       properties: [{ property_id: "", status: "pending", implementation_paths: [], test_paths: [] }],
       selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] }
     })

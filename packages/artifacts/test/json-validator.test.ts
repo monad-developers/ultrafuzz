@@ -31,15 +31,15 @@ test("strict JSON parsing rejects duplicate object keys", () => {
 
 test("schema validation applies JSON own-property semantics", () => {
   const inheritedOnly = Object.create({
-    schema_version: "ultrafuzz.properties.v1",
+    schema_version: "ultrafuzz.properties.v2",
     properties: []
   }) as Record<string, unknown>;
-  assert.equal(validateRegisteredJsonSchema("urn:ultrafuzz:schema:artifacts:properties:1", inheritedOnly).ok, false);
+  assert.equal(validateRegisteredJsonSchema("urn:ultrafuzz:schema:artifacts:properties:2", inheritedOnly).ok, false);
 
   const inheritedExtra = Object.create({ unexpected: true }) as Record<string, unknown>;
-  inheritedExtra.schema_version = "ultrafuzz.properties.v1";
+  inheritedExtra.schema_version = "ultrafuzz.properties.v2";
   inheritedExtra.properties = [];
-  assert.equal(validateRegisteredJsonSchema("urn:ultrafuzz:schema:artifacts:properties:1", inheritedExtra).ok, true);
+  assert.equal(validateRegisteredJsonSchema("urn:ultrafuzz:schema:artifacts:properties:2", inheritedExtra).ok, true);
 });
 
 test("the artifact schema registry is exhaustive, fragment-free, and strictly compilable", () => {
@@ -65,9 +65,9 @@ test("the artifact schema registry is exhaustive, fragment-free, and strictly co
   assert.throws(() => {
     (propertiesDocument?.properties as Record<string, unknown>).mutated = true;
   }, TypeError);
-  assert.deepEqual(artifactContractSchemaBinding("ultrafuzz/properties@1"), {
+  assert.deepEqual(artifactContractSchemaBinding("ultrafuzz/properties@2"), {
     schema_file: "properties.schema.json",
-    schema_id: "urn:ultrafuzz:schema:artifacts:properties:1",
+    schema_id: "urn:ultrafuzz:schema:artifacts:properties:2",
     schema_sha256: registry.find((entry) => entry.filename === "properties.schema.json")?.sha256,
     schema_bundle_sha256: artifactSchemaBundleDigest(),
     validator_build: VALIDATOR_BUILD_IDENTITY
@@ -85,9 +85,9 @@ test("file validation uses the registered schema and distinguishes instance from
     const badSchemaPath = path.join(temporary, "bad-schema.json");
     const boundedSchemaPath = path.join(temporary, "bounded-schema.json");
     const emptyObjectPath = path.join(temporary, "empty-object.json");
-    fs.writeFileSync(validPath, '{"schema_version":"ultrafuzz.properties.v1","properties":[]}\n');
-    fs.writeFileSync(invalidPath, '{"schema_version":"ultrafuzz.properties.v1","properties":[],"extra":true}\n');
-    fs.writeFileSync(duplicatePath, '{"schema_version":"ultrafuzz.properties.v1","properties":[],"properties":[]}\n');
+    fs.writeFileSync(validPath, '{"schema_version":"ultrafuzz.properties.v2","properties":[]}\n');
+    fs.writeFileSync(invalidPath, '{"schema_version":"ultrafuzz.properties.v2","properties":[],"extra":true}\n');
+    fs.writeFileSync(duplicatePath, '{"schema_version":"ultrafuzz.properties.v2","properties":[],"properties":[]}\n');
     fs.writeFileSync(
       badSchemaPath,
       '{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"urn:test#bad","type":"object"}\n'
