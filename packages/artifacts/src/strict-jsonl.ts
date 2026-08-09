@@ -33,7 +33,12 @@ export function readStrictJsonlSnapshot<RecordType>(
   filePath: string,
   codec: StrictJsonlCodec<RecordType>
 ): StrictJsonlSnapshot<RecordType> {
-  if (!fs.existsSync(filePath)) return { records: [], byteLength: 0, exists: false };
+  try {
+    fs.lstatSync(filePath);
+  } catch (error) {
+    if (isErrnoException(error, "ENOENT")) return { records: [], byteLength: 0, exists: false };
+    throw new Error(`failed to inspect ${codec.label} ${filePath}`, { cause: error });
+  }
   const maxBytes = codec.maxBytes ?? DEFAULT_STRICT_JSONL_MAX_BYTES;
   const bytes = readRegularFileSnapshot(filePath, maxBytes);
   if (bytes.byteLength === 0) return { records: [], byteLength: 0, exists: true };
@@ -81,6 +86,10 @@ export function readStrictJsonlSnapshot<RecordType>(
   }
   validateStrictJsonlHistory(records, codec);
   return { records, byteLength: bytes.byteLength, exists: true };
+}
+
+function isErrnoException(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
 
 /** Validate a candidate whole journal before any bytes are appended. */

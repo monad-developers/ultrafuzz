@@ -140,3 +140,11 @@ test("strict event journal reads refuse symlinks, FIFOs, and directories without
   fs.mkdirSync(directory);
   assert.throws(() => repairTornJsonlTail(directory), /not a regular file/u);
 });
+
+test("a dangling event-journal symlink is malformed-present rather than missing", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-dangling-event-link" });
+  fs.rmSync(layout.eventsPath, { force: true });
+  fs.symlinkSync(path.join(layout.root, "missing-events.jsonl"), layout.eventsPath);
+
+  assert.throws(() => replayEvents(layout), /cannot open regular file/u);
+});
