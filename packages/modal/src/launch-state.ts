@@ -468,6 +468,10 @@ export function parseModalLaunchState(value: unknown): ModalLaunchState {
   return launchStateSchema.parse(value) as ModalLaunchState;
 }
 
+export function isLegacyModalLaunchStateWithoutImageId(value: unknown): boolean {
+  return legacyLaunchStateSchema.safeParse(value).success;
+}
+
 export function parseCompatibleModalLaunchState(
   value: unknown,
   compatibility?: ModalLaunchStateCompatibilityContext
