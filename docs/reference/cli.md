@@ -11,6 +11,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | ----------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `ultrafuzz init`                    | Create root config plus `.ultrafuzz/**` product surfaces and workflow plumbing.                                |
 | `ultrafuzz validate`                | Validate config, topology, prompts, path guards, agent references, and trust posture without launching agents. |
+| `ultrafuzz json validate`           | Validate one JSON document against a strict local Draft 2020-12 schema without mutation.                       |
 | `ultrafuzz run`                     | Validate, render prompts, build run evidence, compile a workflow, and launch a linked workflow run.            |
 | `ultrafuzz references status`       | Report whether pinned references are present in the local digest-checked cache.                                |
 | `ultrafuzz references sync`         | Explicitly fetch pinned references into the local cache.                                                       |
@@ -102,6 +103,36 @@ ultrafuzz validate [--project <path>] [--json]
 Validation covers typed TOML config, `.ultrafuzz/topology.yml`, project prompt
 copies, safe paths, reference nodes, agent references, and trusted local
 execution posture. It does not launch agents.
+
+## JSON Validate
+
+```bash
+ultrafuzz json validate \
+  --schema <schema.json> \
+  --file <artifact.json> \
+  [--ref <local-schema.json>] \
+  [--max-errors <1-1000>] \
+  [--json]
+```
+
+This is a single-document validator, separate from project-wide `ultrafuzz
+validate`. It uses strict Draft 2020-12 Ajv validation, standard formats, strict
+UTF-8 and JSON parsing, duplicate-key rejection, offline local references, and
+bounded worker execution. `--ref` may be repeated. No stdin, YAML, JSON5,
+remote schema fetching, coercion, defaults, property removal, or repair is
+supported.
+
+The exit contract is:
+
+| Exit | Meaning                                                                                               |
+| ---: | ----------------------------------------------------------------------------------------------------- |
+|    0 | The artifact conforms to the schema.                                                                  |
+|    1 | The artifact is unreadable, malformed, has duplicate keys, or violates the schema.                    |
+|    2 | Invocation, schema/reference loading, schema compilation, resource limits, or validator setup failed. |
+
+Human-readable failures go to stderr. `--json` emits the standard
+`ultrafuzz.cli.result.v1` envelope. Neither success nor failure changes the
+schema or artifact bytes.
 
 ## Run
 

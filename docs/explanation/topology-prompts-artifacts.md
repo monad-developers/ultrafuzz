@@ -63,15 +63,20 @@ This makes handoffs explicit:
 
 - The prompt tells the agent what to write.
 - The topology declares a named, versioned contract for the file.
+- Every JSON producer runs the displayed schema-validation command after its
+  final write and before returning.
 - A deterministic workflow task validates the artifact before dependents start.
 - Ultrafuzz persists contract identities, content hashes, and prerequisite
   manifest digests.
 - Downstream prompts reference it through typed template helpers.
 
-Findings are normalized as arrays in `findings.json`. Final reports live in
-agent-written final-report artifacts such as
+Findings are strict arrays in `findings.json`; Ultrafuzz does not normalize or
+repair them after the agent returns. Final reports live in agent-written
+final-report artifacts such as
 `artifacts/final-report/report.md` and `artifacts/final-report/report.json`.
-The structured terminal report is validated before scoring or publication.
+The structured terminal report is validated without rewriting before scoring
+or publication. Missing or malformed required output is terminal for that node;
+it is not synthesized from another artifact or from the model's final message.
 
 ## Runtime Owns Product Evidence
 

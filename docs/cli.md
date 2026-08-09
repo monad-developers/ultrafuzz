@@ -7,6 +7,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `init`                    | Create project config/topology, pinned references, `.ultrafuzz/**` run surfaces, editable prompts, and workflow plumbing. |
 | `validate`                | Validate config, topology, prompts, safe paths, trust posture, and agent references.                                      |
+| `json validate`           | Validate one JSON document against a strict Draft 2020-12 schema without modifying either file.                           |
 | `run`                     | Plan, render prompts, launch a fuzzing workflow, and persist product evidence.                                            |
 | `references status`       | Show whether pinned references are present in the local digest-checked cache.                                             |
 | `references sync`         | Explicitly fetch pinned references into the local cache.                                                                  |
@@ -60,6 +61,29 @@ references, run evidence, and materialized outputs remain under root
 Model-only overrides keep the configured agent and reasoning. When `--agent`
 selects another agent, backend-specific reasoning is cleared, including when
 `--model` also pins a replacement model.
+
+## JSON Schema Validation
+
+```bash
+ultrafuzz json validate \
+  --schema /absolute/path/to/schema.json \
+  --file /absolute/path/to/artifact.json \
+  [--ref /absolute/path/to/local-ref.json] \
+  [--max-errors 50] \
+  [--json]
+```
+
+The command accepts Draft 2020-12 JSON Schema and RFC 8259 JSON only. It rejects
+invalid UTF-8, duplicate object keys, remote references, schema traversal, and
+symlinked schema or artifact files. `--ref` is repeatable for explicit local
+schema dependencies; bundled schema references resolve from Ultrafuzz's pinned
+offline registry.
+
+Exit `0` means the document conforms to the schema. Exit `1` means the artifact
+is missing, malformed, or violates the schema and should be corrected by its
+author. Exit `2` means invocation, schema, reference, resource, or validator
+setup failed. Validation never repairs, normalizes, coerces, or rewrites the
+document. `--json` uses the usual `ultrafuzz.cli.result.v1` envelope.
 
 ## Run Lifecycle
 

@@ -1,22 +1,49 @@
 # Ultrafuzz Schemas
 
-Ultrafuzz publishes JSON Schema snapshot files in the repository so generated
-artifacts and topology exports can carry stable `$id` values.
+Ultrafuzz checks in complete Draft 2020-12 JSON Schema documents under
+`packages/artifacts/schema/` and `packages/topology/schema/`. JSON Schema is the
+canonical whole-document shape contract. TypeScript types describe consumers;
+where a Zod parser remains useful, parity tests require it to accept and reject
+the same structures without coercion, defaults, transforms, aliases, or
+property stripping.
 
-The canonical schema ID namespace is the Monad Ultrafuzz blog post URL with
-schema fragments:
+Schema IDs are stable, fragment-free URNs such as:
 
-- `https://blog.monad.xyz/blog/ultrafuzz#schema/topology/expanded-graph`
-- `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/finding`
-- `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/findings`
-- `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/properties`
-- `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/run-state`
-- `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/analysis-bundle`
-- `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/usage-ledger`
-- `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/node-attempt-ledger`
+- `urn:ultrafuzz:schema:artifacts:findings:2`
+- `urn:ultrafuzz:schema:artifacts:generated-tests:2`
+- `urn:ultrafuzz:schema:topology:expanded-graph:2`
 
-These IDs are demonstrative identifiers for schema identity and `$ref` targets.
-They are not hosted schema URLs, and clients should not expect HTTP requests to
-those fragment URLs to return JSON Schema documents. Use the checked-in schema
-files under `packages/topology/schema/` and `packages/artifacts/schema/` as the
-resolvable documents.
+The IDs identify schemas and resolve bundled `$ref` values; they are never
+fetched. Package-local registries enumerate every checked-in schema, its role,
+contract IDs, TypeScript export, local references, semantic gates, SHA-256, and
+optional Zod parser. CI fails when a schema or contract is absent from those
+registries, cannot compile strictly, contains an unresolved or remote
+reference, or differs from its exported representation.
+
+## Validate a Document
+
+```bash
+ultrafuzz json validate \
+  --schema '/absolute/path/to/schema.json' \
+  --file '/absolute/path/to/artifact.json'
+```
+
+Use repeatable `--ref` flags only for explicitly supplied local dependencies.
+Bundled sibling schemas resolve offline without flags. The CLI and host use the
+same non-mutating parser, schema registry, Ajv configuration, resource limits,
+schema digest, bundle digest, and validator-build identity.
+
+Exit `0` establishes portable document-shape conformance only. Cross-file
+joins, projected-key uniqueness, filesystem and Git facts, digest relationships,
+and other contextual rules remain named host semantic gates. Exit `1` means the
+artifact author must correct the document. Exit `2` is a schema, invocation, or
+tool setup failure. The validator never repairs either file.
+
+## Breaking Contract Policy
+
+Each retained JSON handoff has one current versioned contract and one complete
+schema. Old contract IDs, version spellings, compatibility conversions, and
+historical readers are not supported across this transition. Agent-authored
+bytes are immutable after the agent session returns: validation, publication,
+reporting, dashboards, and bundles may reject them, but may not normalize,
+synthesize, reseal, or rewrite them.
