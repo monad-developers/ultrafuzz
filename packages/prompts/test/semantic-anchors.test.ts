@@ -155,6 +155,21 @@ describe("prompt semantic anchors", () => {
     // empty rendered field is tolerated, but a placeholder such as `ledger_ids: none` is rejected as
     // `INVARIANT_LEDGER_MARKDOWN_MAPPING_EXTRA`.
     expect(fanin).toContain("and, when present, render the exact ledger IDs under a `ledger_ids` field");
+
+    // `reference_expectations` is also optional. The contract accepts empty legacy arrays, but its
+    // canonical output form omits the field when there are no IDs. Only the two required path arrays
+    // use `[]` to say that a selected property produced no corresponding path (#328).
+    const implementation = flat("strategies/invariants/implement-properties.md");
+    expect(implementation).toContain(
+      "Omit `reference_expectations` from its structured record when the property has none"
+    );
+    expect(implementation).toContain(
+      "Include `implementation_paths` and `test_paths` on every record, using an empty array for either path field when no corresponding path exists"
+    );
+    expect(implementation).toContain(
+      "Omit `reference_expectations` entirely when the property has none; do not emit an empty array"
+    );
+    expect(implementation).not.toContain("both path arrays on every record");
   });
 
   it("preserves source-guided denial-of-service and liveness requirements", () => {
@@ -387,12 +402,13 @@ describe("prompt semantic anchors", () => {
 
   it("keeps the final invariant campaign backend-neutral on the single recon-fuzzer backend", () => {
     const campaign = prompt("strategies/invariants/invariant-testing-campaign.md");
+    const flatCampaign = campaign.replace(/\s+/gu, " ");
     const aggregate = prompt("review/aggregate-test-files.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
     const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
     const topologySource = readFileSync(topologyPath, "utf8");
     const topology = YAML.parse(topologySource) as {
-      nodes: { id: string; depends_on?: string[]; outputs?: Array<{ path: string }> }[];
+      nodes: { id: string; depends_on?: string[]; outputs?: Array<{ path: string; contract: string }> }[];
     };
     const campaignNode = topology.nodes.find((node) => node.id === "stateful-invariant-campaign");
 
@@ -408,6 +424,9 @@ describe("prompt semantic anchors", () => {
     );
     expect(campaignNode?.outputs?.map((output) => output.path)).not.toContain("echidna-results.json");
     expect(campaignNode?.outputs?.map((output) => output.path)).not.toContain("medusa-results.json");
+    expect(campaignNode?.outputs?.find((output) => output.path === "campaign-summary.json")?.contract).toBe(
+      "ultrafuzz/campaign-summary@1"
+    );
     expect(topology.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).toContain(
       "stateful-invariant-campaign"
     );
@@ -440,6 +459,10 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toContain("one distinct root cause, not one entry in the backend");
     expect(campaign).toMatch(/single counterexample broke several properties at once/u);
     expect(campaign).toContain("all contributing backend provenance");
+    expect(flatCampaign).toContain("Use the top-level string `fuzzer_backend` when exactly one");
+    expect(flatCampaign).toContain("unique, lexicographically sorted `fuzzer_backends` array when several");
+    expect(flatCampaign).toContain("Never emit both fields");
+    expect(flatCampaign).toContain("Nested detail such as `backend_provenance` may supplement these join fields");
     expect(campaign).toContain("A later pass must never erase");
     expect(campaign).toContain("property_ids");
     expect(campaign).toContain("deterministic Foundry reproducer for every unique failure");
@@ -450,6 +473,16 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toContain("--workers <workers>");
     expect(campaign).toContain("using the literal\nstring `recon`");
     expect(campaign).toContain("{{artifact_dir}}/recon-fuzzer-results.json");
+    expect(flatCampaign).toContain("`failure_counts.pre_deduplication` and `failure_counts.post_deduplication`");
+    expect(flatCampaign).toContain("total number of entries across every sibling backend record's `failures` array");
+    expect(flatCampaign).toContain("total number of objects in `findings.json`, including non-property findings");
+    expect(flatCampaign).toContain("do not prove that every finding is a distinct root cause");
+    expect(campaign).toContain("`contributing_backend_failures` array");
+    expect(flatCampaign).toContain("must partition every property-derived failure");
+    expect(campaign).toContain("`deduplication.pre_dedup_count`");
+    expect(flatCampaign).toContain("must be a subset of the finding's `property_ids`");
+    expect(flatCampaign).toContain("must be the exact union across those contributed failures");
+    expect(campaign).toContain('{"fuzzer_backend":"<backend>","failure_id":"<id>"}');
   });
 
   it("publishes runtime-owned workspace patches for every invariant handoff", () => {
@@ -621,6 +654,9 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("`severity_guess`, `severity`, `impact`, and");
     expect(markdown).toContain("canonical `strategy` field a non-empty");
     expect(markdown).toContain("structured `strategy_provenance` object");
+    expect(markdown).toContain("non-empty `detection_rates` or `strategies` array");
+    expect(markdown).toContain("Use exactly one of\nthese array keys; never emit both");
+    expect(markdown).toContain("omit both `fuzzer_backend` and `fuzzer_backends`");
   });
 
   it("keeps threat-model-driven additive goals and provenance in the default prompts and topology", () => {
@@ -797,6 +833,8 @@ describe("prompt semantic anchors", () => {
     // The contract accepts findings without a schema_version, so the template must not demand one.
     expect(template).not.toContain('Use `schema_version: "1.0"`');
     expect(template).toContain("`schema_version` is optional");
+    expect(template).toContain("exactly `High`, `Medium`, or `Low`");
+    expect(template).toContain("including findings that are or may become non-production records");
   });
 
   it("keeps Vyper target setup guidance concrete for Foundry harnesses", () => {

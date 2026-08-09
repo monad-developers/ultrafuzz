@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { safeResolveInside, validateSafeId } from "@ultrafuzz/artifacts";
+import { appendLineDurable, safeResolveInside, validateSafeId } from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { EVAL_RESULT_SCHEMA_VERSION, type EvalResult } from "./types.js";
@@ -298,8 +298,7 @@ export function jsonFile<T = unknown>(filePath: string): T {
 }
 
 export function appendJsonLine(filePath: string, value: unknown): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.appendFileSync(filePath, `${JSON.stringify(value)}\n`, "utf8");
+  appendLineDurable(filePath, JSON.stringify(value));
 }
 
 export function readJsonLines<T = unknown>(filePath: string): T[] {

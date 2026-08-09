@@ -39,6 +39,7 @@ import {
   nodeAttemptLedgerJsonSchema,
   propertiesJsonSchema,
   referenceExpectationsJsonSchema,
+  resolveCampaignFindingBackends,
   runStateJsonSchema,
   validateAnalysisBundleManifestSchema,
   usageLedgerJsonSchema,
@@ -61,7 +62,8 @@ import {
   ARTIFACT_CONTRACT_SCHEMA_FILES,
   artifactContractSchemaFile,
   isArtifactContractId,
-  type ArtifactContractId
+  type ArtifactContractId,
+  type PropertyCampaignArtifact
 } from "../src/index.js";
 
 const packageRoot = findPackageRoot(path.dirname(fileURLToPath(import.meta.url)));
@@ -725,6 +727,50 @@ test("property implementation and campaign schemas retain canonical references",
   );
 });
 
+test("campaign backend resolution prefers finding-owned provenance and only infers an unambiguous legacy backend", () => {
+  const campaigns: PropertyCampaignArtifact[] = [
+    {
+      schema_version: PROPERTY_CAMPAIGN_SCHEMA_VERSION,
+      fuzzer_backend: "recon",
+      failures: [
+        { id: "deduplicated", status: "reproduced" },
+        { id: "legacy-recon", status: "reproduced" },
+        { id: "ambiguous-id", status: "reproduced" }
+      ]
+    },
+    {
+      schema_version: PROPERTY_CAMPAIGN_SCHEMA_VERSION,
+      fuzzer_backend: "medusa",
+      failures: [
+        { id: "medusa-contribution", status: "reproduced" },
+        { id: "ambiguous-id", status: "reproduced" }
+      ]
+    }
+  ];
+  const resolved = resolveCampaignFindingBackends(campaigns, [
+    { id: "deduplicated", fuzzer_backends: ["recon", "medusa"] },
+    { id: "legacy-recon" },
+    { id: "ambiguous-id" }
+  ]);
+
+  assert.deepEqual(resolved.get("deduplicated"), ["medusa", "recon"]);
+  assert.deepEqual(resolved.get("legacy-recon"), ["recon"]);
+  assert.equal(
+    resolved.has("ambiguous-id"),
+    false,
+    "a coincidental cross-backend failure-ID collision must not manufacture multi-backend provenance"
+  );
+
+  const malformedOwner = resolveCampaignFindingBackends(campaigns, [
+    { id: "legacy-recon", fuzzer_backend: "recon", fuzzer_backends: ["medusa", "recon"] }
+  ]);
+  assert.equal(
+    malformedOwner.has("legacy-recon"),
+    false,
+    "present but malformed finding-owned provenance must fail closed instead of falling back"
+  );
+});
+
 test("property implementation schema rejects source-less implemented records", () => {
   const sourceLess = {
     schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
@@ -868,6 +914,18 @@ test("the findings contract accepts the house-style schema_version and states th
     description.includes(`"${FINDINGS_SCHEMA_VERSION}"`),
     "the contract must state the literal, since its empty example is [] and cannot carry one"
   );
+  assert.match(description, /severity_guess to exactly "High", "Medium", or "Low"/u);
+  assert.match(description, /including one that is or may become a non-production record/u);
+  assert.match(description, /"severity_guess":"Medium"/u);
+  assert.doesNotMatch(description, /"severity_guess":"medium"/u);
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/findings@1",
+      JSON.stringify([{ ...campaignFindings[0], severity_guess: "low" }])
+    ).ok,
+    true,
+    "the producer guidance may tighten without making historical lowercase artifacts unreadable"
+  );
 });
 
 test("the findings contract does not require schema_version, and still rejects malformed findings", () => {
@@ -907,6 +965,74 @@ test("the findings contract does not require schema_version, and still rejects m
     "an otherwise malformed finding still fails the contract"
   );
   assert.equal(validateFindingSchema({ ...withoutVersion[0], property_ids: ["property-99", "property-99"] }).ok, false);
+});
+
+test("the findings schema recognizes typed campaign deduplication accounting without imposing it globally", () => {
+  const finding = {
+    id: "failure-1",
+    title: "Accounting invariant violation",
+    status: "reproduced",
+    severity_guess: "medium",
+    confidence: "high",
+    summary: "The accounting invariant failed.",
+    property_ids: ["property-1"],
+    contributing_backend_failures: [
+      "failure-1",
+      { fuzzer_backend: "medusa", failure_id: "failure-2", raw_result_ref: "medusa-results.json" }
+    ],
+    deduplication: { pre_dedup_count: 2, basis: "same root cause" }
+  };
+  assert.equal(validateFindingSchema(finding).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([finding])).ok, true);
+  assert.equal(
+    validateFindingSchema({
+      ...finding,
+      contributing_backend_failures: ["failure-1", "failure-1"]
+    }).ok,
+    false,
+    "a finding cannot repeat the same unqualified contribution"
+  );
+  assert.equal(
+    validateFindingSchema({
+      ...finding,
+      contributing_backend_failures: [{ fuzzer_backend: "medusa" }]
+    }).ok,
+    false,
+    "qualified contributions need both identity fields"
+  );
+  assert.equal(validateFindingSchema({ ...finding, deduplication: { pre_dedup_count: 0 } }).ok, false);
+  assert.equal(validateFindingSchema({ ...finding, deduplication: {} }).ok, false);
+
+  const historical = { ...finding } as Record<string, unknown>;
+  delete historical.contributing_backend_failures;
+  delete historical.deduplication;
+  assert.equal(validateFindingSchema(historical).ok, true, "generic and historical findings remain readable");
+  assert.ok("contributing_backend_failures" in findingJsonSchema.properties);
+  assert.ok("deduplication" in findingJsonSchema.properties);
+});
+
+test("the current campaign summary contract requires the persisted-plan accounting marker", () => {
+  const summary = {
+    outcome: "partial",
+    failure_counts: { pre_deduplication: 29, post_deduplication: 2 }
+  };
+  assert.equal(validateArtifactContract("ultrafuzz/campaign-summary@1", JSON.stringify(summary)).ok, true);
+  assert.equal(
+    validateArtifactContract("ultrafuzz/campaign-summary@1", JSON.stringify({ outcome: "partial" })).ok,
+    false
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/campaign-summary@1",
+      JSON.stringify({ failure_counts: { pre_deduplication: -1, post_deduplication: 2 } })
+    ).ok,
+    false
+  );
+  assert.equal(
+    validateArtifactContract("ultrafuzz/json-object@1", JSON.stringify({ outcome: "partial" })).ok,
+    true,
+    "persisted plans with the historical generic contract stay readable"
+  );
 });
 
 test("finding and report schemas accept non-property and historical artifacts", () => {

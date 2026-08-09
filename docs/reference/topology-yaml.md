@@ -203,7 +203,8 @@ declares its machine-readable catalog as the primary output:
 
 The reference catalog entry's `kind: vulnerability-database` makes the runtime
 materialize and validate `database.yml`, `capabilities.yml`, `catalog.json`, and
-the catalog-declared `classes/**/*.md` tree instead of concatenating them.
+the catalog-declared class tree (`classes/**/*.md` for schema v1 or
+`classes/**/*.yml` for schema v3) instead of concatenating it.
 
 ## Loop Expansion
 

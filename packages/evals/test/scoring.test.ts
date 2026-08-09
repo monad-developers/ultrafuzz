@@ -46,15 +46,37 @@ function scoreRunFixture(): {
   projectRoot: string;
   evalRunId: string;
   evalRunRoot: string;
+  groundTruthPath: string;
   outputContents: Map<string, string>;
 } {
   const base = mkdtempSync(path.join(tmpdir(), "ufz-scoring-transaction-"));
   const projectRoot = path.join(base, "project");
   const groundTruthRoot = path.join(base, "ground-truth");
   fs.mkdirSync(groundTruthRoot, { recursive: true });
-  fs.writeFileSync(path.join(groundTruthRoot, "target-a.yml"), JSON.stringify(BUGS), "utf8");
+  fs.writeFileSync(
+    path.join(groundTruthRoot, "target-a.yml"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.eval-ground-truth.v1",
+      subject: {
+        repository: "https://example.com/target-a",
+        revision: "0123456789abcdef0123456789abcdef01234567"
+      },
+      bugs: BUGS
+    }),
+    "utf8"
+  );
 
-  const suite = testSuite(groundTruthRoot);
+  const suite = testSuite(groundTruthRoot, {
+    targets: [
+      {
+        id: "target-a",
+        repo: "https://example.com/target-a",
+        ref: "0123456789abcdef0123456789abcdef01234567",
+        sensitivity: "private",
+        ground_truth: "target-a.yml"
+      }
+    ]
+  });
   const row = testRow(suite);
   const runRoot = path.join(base, "generated-run");
   const reportPath = path.join(runRoot, "artifacts", "final-report", "report.json");
@@ -165,10 +187,99 @@ function scoreRunFixture(): {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, contents, "utf8");
   }
-  return { projectRoot, evalRunId, evalRunRoot, outputContents };
+  return {
+    projectRoot,
+    evalRunId,
+    evalRunRoot,
+    groundTruthPath: path.join(groundTruthRoot, "target-a.yml"),
+    outputContents
+  };
 }
 
 describe("deterministic scorer math", () => {
+  it("fails closed before emitting metrics when private subject binding mismatches", async () => {
+    const fixture = scoreRunFixture();
+    const groundTruthPath = fixture.groundTruthPath;
+    const document = JSON.parse(fs.readFileSync(groundTruthPath, "utf8")) as Record<string, unknown>;
+    document.subject = {
+      repository: "https://github.com/example/fork",
+      revision: "0123456789abcdef0123456789abcdef01234567"
+    };
+    fs.writeFileSync(groundTruthPath, JSON.stringify(document), "utf8");
+
+    await expect(
+      scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: "eval-transaction" })
+    ).rejects.toMatchObject({
+      code: "EVAL_GROUND_TRUTH_SUBJECT_REPOSITORY_MISMATCH"
+    });
+    expect(fs.existsSync(path.join(fixture.evalRunRoot, "summary.json"))).toBe(true);
+  });
+
+  it("requires a validated subject for private in-memory scoring", async () => {
+    const suite = testSuite("/tmp/gt", {
+      targets: [
+        {
+          id: "target-a",
+          repo: "https://example.com/target-a",
+          ref: "0123456789abcdef0123456789abcdef01234567",
+          sensitivity: "private",
+          ground_truth: "target-a.yml"
+        }
+      ]
+    });
+
+    await expect(
+      scoreFindingsAgainstGroundTruth({
+        suite,
+        row: testRow(suite),
+        findings: [],
+        bugs: BUGS
+      })
+    ).rejects.toMatchObject({ code: "EVAL_GROUND_TRUTH_SUBJECT_MISSING" });
+  });
+
+  it("revalidates the subject on private in-memory scoring", async () => {
+    const suite = testSuite("/tmp/gt", {
+      targets: [
+        {
+          id: "target-a",
+          repo: "https://example.com/target-a",
+          ref: "0123456789abcdef0123456789abcdef01234567",
+          sensitivity: "private",
+          ground_truth: "target-a.yml"
+        }
+      ]
+    });
+
+    await expect(
+      scoreFindingsAgainstGroundTruth({
+        suite,
+        row: testRow(suite),
+        findings: [],
+        bugs: BUGS,
+        groundTruthSubject: {
+          repository: "https://github.com/example/fork",
+          revision: "0123456789abcdef0123456789abcdef01234567"
+        }
+      })
+    ).rejects.toMatchObject({ code: "EVAL_GROUND_TRUTH_SUBJECT_REPOSITORY_MISMATCH" });
+  });
+
+  it("fails closed when the private subject names another immutable revision", async () => {
+    const fixture = scoreRunFixture();
+    const document = JSON.parse(fs.readFileSync(fixture.groundTruthPath, "utf8")) as {
+      subject: { revision: string };
+    };
+    document.subject.revision = "f".repeat(40);
+    fs.writeFileSync(fixture.groundTruthPath, JSON.stringify(document), "utf8");
+
+    await expect(
+      scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: "eval-transaction" })
+    ).rejects.toMatchObject({
+      code: "EVAL_GROUND_TRUTH_SUBJECT_REVISION_MISMATCH"
+    });
+  });
+
   it("does not persist a recovery snapshot while the workflow is running", async () => {
     const fixture = scoreRunFixture();
     const runsPath = path.join(fixture.evalRunRoot, "runs.jsonl");
@@ -929,7 +1040,17 @@ describe("deterministic scorer math", () => {
       throw new Error("unexpected request");
     }) as unknown as typeof fetch;
     const judge = gatewayLlmJudge({ ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key" }, fetchImpl);
-    const suite = testSuite("/tmp/gt");
+    const suite = testSuite("/tmp/gt", {
+      targets: [
+        {
+          id: "target-a",
+          repo: "https://example.com/target-a",
+          ref: "0123456789abcdef0123456789abcdef01234567",
+          sensitivity: "private",
+          ground_truth: "target-a.yml"
+        }
+      ]
+    });
 
     await expect(
       scoreFindingsAgainstGroundTruth({
@@ -937,6 +1058,10 @@ describe("deterministic scorer math", () => {
         row: testRow(suite),
         findings: [matchedFinding()],
         bugs: BUGS,
+        groundTruthSubject: {
+          repository: "https://example.com/target-a",
+          revision: "0123456789abcdef0123456789abcdef01234567"
+        },
         llmJudge: judge
       })
     ).rejects.toMatchObject({ code: "EVAL_LLM_JUDGE_PRIVATE_DATA_ACK_REQUIRED" });

@@ -501,9 +501,10 @@ function timestamp(value: unknown): string | undefined {
 /**
  * Records, treating an absent journal as no records.
  *
- * A malformed line still throws, deliberately. `appendJsonLine` does not fsync, so a torn final line is
- * possible on a durable volume — and a torn line may be the very line carrying the durable run link.
- * Dropping it silently would read as "never linked" and could strand a live run, so this stays loud.
+ * A malformed line still throws, deliberately. Current writers fsync, but durable journals can outlive the
+ * version that wrote them and an abrupt storage failure can still expose a torn final line. That line may be
+ * the one carrying the durable run link; dropping it silently would read as "never linked" and could strand
+ * a live run, so this stays loud.
  */
 async function readRecordsIfMissing(filePath: string): Promise<Array<Record<string, unknown>>> {
   return readRecords(filePath).catch((error: NodeJS.ErrnoException) => {

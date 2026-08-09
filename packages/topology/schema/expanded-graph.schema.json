@@ -159,6 +159,7 @@
                 },
                 "contract": {
                   "enum": [
+                    "ultrafuzz/campaign-summary@1",
                     "ultrafuzz/findings@1",
                     "ultrafuzz/generated-tests@1",
                     "ultrafuzz/goal-plan@1",

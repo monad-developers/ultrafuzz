@@ -6,6 +6,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
+import { MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS } from "../src/defaults.js";
 import {
   PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS,
   PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS,
@@ -190,6 +191,7 @@ describe("public Modal benchmark configuration", () => {
         PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS +
         5 * 60
     );
+    expect(manifest.control_timeout_seconds * 1000).toBeLessThan(MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS);
     expect(manifest.concurrency.max_parallel_eval_rows_per_sandbox).toBe(maxParallel);
     expect(manifest.concurrency.max_parallel_workflow_nodes_per_row).toBe(
       publicBenchmarkMaxParallelWorkflowNodes("full")

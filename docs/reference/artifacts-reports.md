@@ -180,8 +180,8 @@ The same path schema applies to applicability evidence copied into
 applicable database class, and the fixed
 roaming goal. Its `threat_model_sha256` binds the exact upstream JSON bytes,
 and its catalog class IDs and applicability decisions cover the planner catalog
-exactly once. Only selected vulnerability-class Markdown is snapshotted. Its
-exact path, byte size, and SHA-256 must agree across the plan, database snapshot
+exactly once. Only selected vulnerability-class source records are snapshotted.
+Their exact paths, byte sizes, and SHA-256 digests must agree across the plan, database snapshot
 manifest, artifact manifest, and bundled bytes.
 
 The plan also writes down what it expects the runtime to build.

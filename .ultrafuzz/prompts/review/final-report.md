@@ -565,7 +565,9 @@ row containing:
 - the union of `implementation_paths` and `test_paths` joined from
   `implemented-properties.json`;
 - every originating backend recorded for the same stable finding ID in
-  `recon-fuzzer-results.json`, otherwise `unavailable`.
+  `recon-fuzzer-results.json`. When no campaign backend is known, render
+  `unavailable` in the Markdown table only; omit both backend fields from the
+  JSON provenance entry.
 
 Use table columns `Finding`, `Property IDs`, `Source nodes`, `Source property
 IDs`, `Implementation/test paths`, and `Fuzzer backends`. Do not add a row for a
@@ -610,9 +612,12 @@ object per property-derived finding. Each object contains `finding_id`,
 `source_property_id`, `implementation_paths`, and `test_paths`. Use
 `fuzzer_backend` when exactly one backend produced the finding, or a unique
 sorted `fuzzer_backends` array when several backends produced the same stable
-finding ID. Never emit both fields. Use stable unions when several properties
-contribute. Use the string `"unavailable"` for historical artifacts whose
-provenance handoffs are absent. Use an empty array for a current run with no
+finding ID. Never emit both fields. When no known campaign backend produced the
+finding, omit both `fuzzer_backend` and `fuzzer_backends`; the literal
+`"unavailable"` is never a backend value. Use stable unions when several
+properties contribute. Preserve the whole `property_provenance` value as the
+string `"unavailable"` for genuinely unavailable historical provenance whose
+handoffs are absent. Use an empty array for a current run with no
 property-derived findings.
 
 Each production issue object must satisfy the canonical normalized finding
@@ -622,10 +627,33 @@ with the final rendered issue. Also include the report-specific fields
 `description`, `severity`, `likelihood`, `impact`, and `proof_of_concept`, plus
 `family_id`, `family_variants`, and `related_findings` when those fields are
 available. Keep the canonical `strategy` field a non-empty originating strategy
-name when one is available. Store multiple strategy names, detection rates, and
-loop-attempt provenance in a structured `strategy_provenance` object for
-downstream analysis. Preserve non-empty, unique `source_nodes` and the
-first-entry compatibility alias `source_node_id`. The production issue
+name when one is available. The structured `strategy_provenance` object must
+contain a non-empty `detection_rates` or `strategies` array. Use exactly one of
+these array keys; never emit both. Every array element must be an object with a
+non-empty `strategy` string and provide either:
+
+- a non-negative integer detection count under `detections`, `detected_loops`,
+  `hits`, `matches`, or `loop_attempts` (an array under one of those keys is
+  counted by its length), together with a positive-integer `configured_loops`
+  that is greater than or equal to the detection count; or
+- a `rate` or `detection_rate` string matching `^\d+/\d+$`, whose denominator
+  is greater than zero and whose numerator does not exceed its denominator.
+
+For example, this is a canonical renderable value:
+
+```json
+{
+  "strategy_provenance": {
+    "detection_rates": [
+      { "strategy": "boundary-tests", "detections": 2, "configured_loops": 8 }
+    ]
+  }
+}
+```
+
+Keep any additional loop-attempt provenance in this object for downstream
+analysis. Preserve non-empty, unique `source_nodes` and the first-entry
+compatibility alias `source_node_id`. The production issue
 `severity_guess`, `severity`, `impact`, and `likelihood` values must use the same
 High, Medium, or Low report vocabulary rendered in Markdown. Do not add
 alternate severity fields that preserve nonstandard upstream severity labels;

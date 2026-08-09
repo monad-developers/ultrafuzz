@@ -86,9 +86,9 @@ test("default catalog pins the property references and the reviewed vulnerabilit
   const database = catalog.references["vulnerability-database.web3"];
   assert.equal(database?.kind, "vulnerability-database");
   assert.equal(database?.repo, "aviggiano/web3-vulnerability-database");
-  assert.equal(database?.commit, "e46c0e472c28596f30decbb08549c9d9630f47cb");
+  assert.equal(database?.commit, "74c2a5114b7adbd208eb49e47c137daa49b4a395");
   assert.deepEqual(database?.paths, ["database.yml", "capabilities.yml", "catalog.json"]);
-  assert.equal(database?.resolved_at, "2026-08-06T23:31:09Z");
+  assert.equal(database?.resolved_at, "2026-08-09T01:15:37Z");
   assert.deepEqual(catalog.references["properties.certora-thinking"]?.paths, [
     "06.Lesson_ThinkingProperties/README.md",
     "06.Lesson_ThinkingProperties/AuctionDemonstration/README.md",
