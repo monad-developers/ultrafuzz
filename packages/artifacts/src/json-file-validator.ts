@@ -6,6 +6,8 @@ import { MessageChannel, receiveMessageOnPort, Worker, type MessagePort } from "
 
 import {
   artifactSchemaRegistry,
+  DEFAULT_MAX_JSON_INSTANCE_BYTES,
+  MAX_REGISTERED_JSON_INSTANCE_BYTES,
   readRegularFileSnapshot,
   schemaRegistryBundleDigest,
   type SchemaRegistryEntry,
@@ -15,7 +17,6 @@ import { parseStrictJsonBytes, StrictJsonError } from "./strict-json.js";
 
 const MAX_SCHEMA_BYTES = 4 * 1024 * 1024;
 const MAX_SCHEMA_BUNDLE_BYTES = 16 * 1024 * 1024;
-const MAX_INSTANCE_BYTES = 64 * 1024 * 1024;
 const MAX_EXTERNAL_SCHEMAS = 64;
 const MAX_PATTERN_COUNT = 256;
 const MAX_PATTERN_LENGTH = 1_024;
@@ -94,6 +95,7 @@ interface RegisteredSchemaSnapshot {
 
 interface WorkerRequest {
   instanceBytes: Uint8Array;
+  maxInstanceBytes: number;
   registeredSchemaId?: string;
   registeredSchemas?: RegisteredSchemaSnapshot[];
   externalRootPath?: string;
@@ -118,13 +120,6 @@ async function validateJsonFileUnchecked(options: ValidateJsonFileOptions): Prom
   const filePath = path.resolve(options.filePath);
   const maxErrors = Math.min(Math.max(options.maxErrors ?? 50, 1), 1_000);
 
-  let instanceBytes: Buffer;
-  try {
-    instanceBytes = readRegularFileSnapshot(filePath, MAX_INSTANCE_BYTES);
-  } catch (error) {
-    return failure("instance-error", "JSON_INSTANCE_UNREADABLE", errorMessage(error));
-  }
-
   let schemaBytes: Buffer;
   try {
     schemaBytes = readRegularFileSnapshot(schemaPath, MAX_SCHEMA_BYTES);
@@ -148,9 +143,7 @@ async function validateJsonFileUnchecked(options: ValidateJsonFileOptions): Prom
   const filenameRegistration = registry.find((entry) => entry.filename === path.basename(schemaPath));
   const schemaSha256 = sha256(schemaBytes);
   const digestRegistration = registry.find((entry) => entry.sha256 === schemaSha256);
-  let request: WorkerRequest;
-  let schemaId: string | null;
-  let registered = false;
+  let registration: SchemaRegistryEntry | undefined;
   if (filenameRegistration !== undefined || digestRegistration !== undefined) {
     if (filenameRegistration !== undefined && filenameRegistration.sha256 !== schemaSha256) {
       return failure(
@@ -159,16 +152,30 @@ async function validateJsonFileUnchecked(options: ValidateJsonFileOptions): Prom
         `Registered schema ${filenameRegistration.filename} does not match its pinned digest`
       );
     }
-    const registration = digestRegistration ?? filenameRegistration!;
+    registration = digestRegistration ?? filenameRegistration!;
+  }
+  const maxInstanceBytes = registration?.maxInstanceBytes ?? DEFAULT_MAX_JSON_INSTANCE_BYTES;
+  let instanceBytes: Buffer;
+  try {
+    instanceBytes = readRegularFileSnapshot(filePath, maxInstanceBytes);
+  } catch (error) {
+    return failure("instance-error", "JSON_INSTANCE_UNREADABLE", errorMessage(error));
+  }
+
+  let request: WorkerRequest;
+  let schemaId: string | null;
+  let registered = false;
+  if (registration !== undefined) {
     schemaId = registration.id;
     registered = true;
-    request = { instanceBytes, registeredSchemaId: schemaId, registeredSchemas, maxErrors };
+    request = { instanceBytes, maxInstanceBytes, registeredSchemaId: schemaId, registeredSchemas, maxErrors };
   } else {
     const prepared = prepareExternalSchemas(schemaPath, schemaBytes, options.refPaths ?? [], registry);
     if ("failure" in prepared) return prepared.failure;
     schemaId = typeof prepared.root.schema.$id === "string" ? prepared.root.schema.$id : null;
     request = {
       instanceBytes,
+      maxInstanceBytes,
       registeredSchemas,
       externalRootPath: prepared.root.filePath,
       externalSchemas: prepared.schemas,
@@ -176,7 +183,10 @@ async function validateJsonFileUnchecked(options: ValidateJsonFileOptions): Prom
     };
   }
 
-  const workerResult = await runValidationWorker(request, options.deadlineMs ?? DEFAULT_DEADLINE_MS);
+  const workerResult = await runValidationWorker(
+    request,
+    options.deadlineMs ?? defaultValidationDeadline(maxInstanceBytes)
+  );
   return boundValidationResult({
     ...workerResult,
     schema: {
@@ -204,21 +214,16 @@ export function validateRegisteredJsonFileSync(options: ValidateRegisteredJsonFi
 }
 
 function validateRegisteredJsonFileSyncUnchecked(options: ValidateRegisteredJsonFileOptions): JsonFileValidationResult {
+  const prepared = prepareRegisteredValidation(options);
+  if ("failure" in prepared) return prepared.failure;
   const filePath = path.resolve(options.filePath);
   let instanceBytes: Buffer;
   try {
-    instanceBytes = readRegularFileSnapshot(filePath, MAX_INSTANCE_BYTES);
+    instanceBytes = readRegularFileSnapshot(filePath, prepared.registration.maxInstanceBytes);
   } catch (error) {
     return failure("instance-error", "JSON_INSTANCE_UNREADABLE", errorMessage(error));
   }
-  return validateRegisteredJsonBytesSync({
-    schemaPath: options.schemaPath,
-    instanceBytes,
-    ...(options.maxErrors === undefined ? {} : { maxErrors: options.maxErrors }),
-    ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
-    ...(options.schemaRegistry === undefined ? {} : { schemaRegistry: options.schemaRegistry }),
-    ...(options.schemaBundleSha256 === undefined ? {} : { schemaBundleSha256: options.schemaBundleSha256 })
-  });
+  return validatePreparedRegisteredBytesSync(prepared, instanceBytes, options);
 }
 
 /** Validate one already-captured immutable instance snapshot with the host worker. */
@@ -233,20 +238,36 @@ export function validateRegisteredJsonBytesSync(options: ValidateRegisteredJsonB
 function validateRegisteredJsonBytesSyncUnchecked(
   options: ValidateRegisteredJsonBytesOptions
 ): JsonFileValidationResult {
-  const schemaPath = path.resolve(options.schemaPath);
+  const prepared = prepareRegisteredValidation(options);
+  if ("failure" in prepared) return prepared.failure;
   const instanceBytes = Buffer.from(options.instanceBytes);
-  if (instanceBytes.byteLength > MAX_INSTANCE_BYTES) {
+  if (instanceBytes.byteLength > prepared.registration.maxInstanceBytes) {
     return failure(
       "instance-error",
       "JSON_INSTANCE_UNREADABLE",
-      `JSON instance exceeds the ${MAX_INSTANCE_BYTES}-byte limit`
+      `JSON instance exceeds the ${prepared.registration.maxInstanceBytes}-byte limit`
     );
   }
+  return validatePreparedRegisteredBytesSync(prepared, instanceBytes, options);
+}
+
+interface PreparedRegisteredValidation {
+  registry: readonly SchemaRegistryEntry[];
+  registration: SchemaRegistryEntry;
+  schemaBundleSha256: string;
+}
+
+function prepareRegisteredValidation(options: {
+  schemaPath: string;
+  schemaRegistry?: readonly SchemaRegistryEntry[];
+  schemaBundleSha256?: string;
+}): PreparedRegisteredValidation | { failure: JsonFileValidationResult } {
+  const schemaPath = path.resolve(options.schemaPath);
   let schemaBytes: Buffer;
   try {
     schemaBytes = readRegularFileSnapshot(schemaPath, MAX_SCHEMA_BYTES);
   } catch (error) {
-    return failure("setup-error", "JSON_SCHEMA_UNREADABLE", errorMessage(error));
+    return { failure: failure("setup-error", "JSON_SCHEMA_UNREADABLE", errorMessage(error)) };
   }
   let registry: readonly SchemaRegistryEntry[];
   let schemaBundleSha256: string;
@@ -258,33 +279,47 @@ function validateRegisteredJsonBytesSyncUnchecked(
       throw new Error("schema bundle identity must be a lowercase SHA-256 digest");
     }
   } catch (error) {
-    return failure("setup-error", "JSON_SCHEMA_REGISTRY_INVALID", errorMessage(error));
+    return { failure: failure("setup-error", "JSON_SCHEMA_REGISTRY_INVALID", errorMessage(error)) };
   }
   const schemaSha256 = sha256(schemaBytes);
   const filenameRegistration = registry.find((entry) => entry.filename === path.basename(schemaPath));
   if (filenameRegistration !== undefined && filenameRegistration.sha256 !== schemaSha256) {
-    return failure(
-      "setup-error",
-      "JSON_SCHEMA_DIGEST_MISMATCH",
-      `Registered schema ${filenameRegistration.filename} does not match its pinned digest`
-    );
+    return {
+      failure: failure(
+        "setup-error",
+        "JSON_SCHEMA_DIGEST_MISMATCH",
+        `Registered schema ${filenameRegistration.filename} does not match its pinned digest`
+      )
+    };
   }
   const registration = registry.find((entry) => entry.sha256 === schemaSha256);
   if (registration === undefined) {
-    return failure(
-      "setup-error",
-      "JSON_SCHEMA_DIGEST_MISMATCH",
-      `Host schema does not match any pinned registry digest: ${path.basename(schemaPath)}`
-    );
+    return {
+      failure: failure(
+        "setup-error",
+        "JSON_SCHEMA_DIGEST_MISMATCH",
+        `Host schema does not match any pinned registry digest: ${path.basename(schemaPath)}`
+      )
+    };
   }
+  return { registry, registration, schemaBundleSha256 };
+}
+
+function validatePreparedRegisteredBytesSync(
+  prepared: PreparedRegisteredValidation,
+  instanceBytes: Buffer,
+  options: { maxErrors?: number; deadlineMs?: number }
+): JsonFileValidationResult {
+  const { registration, registry, schemaBundleSha256 } = prepared;
   const workerResult = runValidationWorkerSync(
     {
       instanceBytes,
+      maxInstanceBytes: registration.maxInstanceBytes,
       registeredSchemaId: registration.id,
       registeredSchemas: registry.map((entry) => ({ id: entry.id, schema: entry.schema })),
       maxErrors: Math.min(Math.max(options.maxErrors ?? 50, 1), 1_000)
     },
-    options.deadlineMs ?? DEFAULT_DEADLINE_MS
+    options.deadlineMs ?? defaultValidationDeadline(registration.maxInstanceBytes)
   );
   return boundValidationResult({
     ...workerResult,
@@ -405,6 +440,15 @@ function assertUnambiguousRegistry(registry: readonly SchemaRegistryEntry[]): vo
   const ids = new Set<string>();
   const digests = new Set<string>();
   for (const entry of registry) {
+    if (
+      !Number.isSafeInteger(entry.maxInstanceBytes) ||
+      entry.maxInstanceBytes < 1 ||
+      entry.maxInstanceBytes > MAX_REGISTERED_JSON_INSTANCE_BYTES
+    ) {
+      throw new Error(
+        `registered schema ${entry.filename} has an invalid maximum instance byte length: ${entry.maxInstanceBytes}`
+      );
+    }
     if (filenames.has(entry.filename)) throw new Error(`duplicate registered schema filename: ${entry.filename}`);
     if (ids.has(entry.id)) throw new Error(`duplicate registered schema $id: ${entry.id}`);
     if (digests.has(entry.sha256)) throw new Error(`duplicate registered schema digest: ${entry.sha256}`);
@@ -490,11 +534,7 @@ function runValidationWorker(request: WorkerRequest, deadlineMs: number): Promis
   return new Promise((resolve) => {
     const worker = new Worker(new URL("./json-validation-worker.js", import.meta.url), {
       workerData: request,
-      resourceLimits: {
-        maxOldGenerationSizeMb: 192,
-        maxYoungGenerationSizeMb: 32,
-        stackSizeMb: 4
-      }
+      resourceLimits: validationWorkerResourceLimits(request.maxInstanceBytes)
     });
     let settled = false;
     const settle = (result: JsonFileValidationResult): void => {
@@ -527,11 +567,7 @@ function runValidationWorkerSync(request: WorkerRequest, deadlineMs: number): Js
   const worker = new Worker(new URL("./json-validation-worker.js", import.meta.url), {
     workerData: { ...request, responsePort: port2 } satisfies SyncWorkerRequest,
     transferList: [port2],
-    resourceLimits: {
-      maxOldGenerationSizeMb: 192,
-      maxYoungGenerationSizeMb: 32,
-      stackSizeMb: 4
-    }
+    resourceLimits: validationWorkerResourceLimits(request.maxInstanceBytes)
   });
   const deadline = Date.now() + Math.max(250, Math.min(deadlineMs, 30_000));
   const sleeper = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
@@ -547,6 +583,23 @@ function runValidationWorkerSync(request: WorkerRequest, deadlineMs: number): Js
   void worker.terminate();
   port1.close();
   return failure("setup-error", "JSON_VALIDATION_TIMEOUT", "Schema compilation or validation exceeded its deadline");
+}
+
+function defaultValidationDeadline(maxInstanceBytes: number): number {
+  return maxInstanceBytes > DEFAULT_MAX_JSON_INSTANCE_BYTES ? 30_000 : DEFAULT_DEADLINE_MS;
+}
+
+function validationWorkerResourceLimits(maxInstanceBytes: number): {
+  maxOldGenerationSizeMb: number;
+  maxYoungGenerationSizeMb: number;
+  stackSizeMb: number;
+} {
+  const instanceMiB = Math.ceil(maxInstanceBytes / (1024 * 1024));
+  return {
+    maxOldGenerationSizeMb: Math.max(192, instanceMiB * 3),
+    maxYoungGenerationSizeMb: 32,
+    stackSizeMb: 4
+  };
 }
 
 function failure(

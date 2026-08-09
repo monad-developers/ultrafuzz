@@ -20,6 +20,7 @@ export const MODAL_SMOKE_CHECKPOINT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:smok
 export const MODAL_SMOKE_COMPLETION_SCHEMA_ID = "urn:ultrafuzz:schema:modal:smoke-completion:1" as const;
 export const MODAL_SMOKE_RESULT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:smoke-result:1" as const;
 export const MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:public-benchmark-bundle:5" as const;
+export const MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES = 256 * 1024 * 1024;
 
 export type StrictModalLaunchMode = "fresh" | "resume";
 export type StrictModalLaunchPhase = "reserved" | "sandbox-created" | "launched" | "failed";

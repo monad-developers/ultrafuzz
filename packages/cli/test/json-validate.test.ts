@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { artifactSchemaDirectory } from "@ultrafuzz/artifacts";
+import { artifactSchemaDirectory, DEFAULT_MAX_JSON_INSTANCE_BYTES } from "@ultrafuzz/artifacts";
 import {
   RESOLVED_CONFIG_JSON_SCHEMA_ID,
   configSchemaBundleDigest,
@@ -18,7 +18,13 @@ import {
   evmbenchSchemaDirectory
 } from "@ultrafuzz/evmbench";
 import { EVAL_PUBLICATION_STATE_SCHEMA_ID, evalSchemaBundleDigest, evalSchemaDirectory } from "@ultrafuzz/evals";
-import { MODAL_NODE_INPUT_SCHEMA_ID, modalSchemaBundleDigest, modalSchemaDirectory } from "@ultrafuzz/modal";
+import {
+  MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
+  MODAL_NODE_INPUT_SCHEMA_ID,
+  MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID,
+  modalSchemaBundleDigest,
+  modalSchemaDirectory
+} from "@ultrafuzz/modal";
 import {
   REFERENCE_CACHE_MANIFEST_JSON_SCHEMA_ID,
   REFERENCE_CACHE_SCHEMA_VERSION,
@@ -363,6 +369,47 @@ test("json validate recognizes the pinned Modal schema and reports the owning Mo
   }
 });
 
+test("json validate admits an over-64 MiB public bundle while ordinary and external schemas stay capped", async (t) => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-public-bundle-budget-"));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const publicSchema = path.join(modalSchemaDirectory(), "modal-public-benchmark-bundle.schema.json");
+  const ordinarySchema = path.join(artifactSchemaDirectory(), "properties.schema.json");
+  const externalSchema = path.join(temporary, "external.schema.json");
+  const bundlePath = path.join(temporary, "public-results.json");
+  const oversizedBundlePath = path.join(temporary, "oversized-public-results.json");
+  const instanceBytes = DEFAULT_MAX_JSON_INSTANCE_BYTES + 1;
+  assert.ok(instanceBytes < MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES);
+  writeJsonWithTrailingSpaces(bundlePath, publicBundleFixture(), instanceBytes);
+  fs.writeFileSync(oversizedBundlePath, "", { mode: 0o600 });
+  fs.truncateSync(oversizedBundlePath, MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES + 1);
+  fs.writeFileSync(
+    externalSchema,
+    JSON.stringify({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object"
+    })
+  );
+
+  const accepted = await capture(["json", "validate", "--schema", publicSchema, "--file", bundlePath, "--json"]);
+  assert.equal(accepted.code, 0, accepted.stderr || accepted.stdout);
+  const envelope = JSON.parse(accepted.stdout) as {
+    data: { status: string; schema: { id: string; registered: boolean } };
+  };
+  assert.equal(envelope.data.status, "valid");
+  assert.equal(envelope.data.schema.id, MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID);
+  assert.equal(envelope.data.schema.registered, true);
+
+  const oversized = await capture(["json", "validate", "--schema", publicSchema, "--file", oversizedBundlePath]);
+  assert.equal(oversized.code, 1);
+  assert.match(oversized.stderr, /JSON_INSTANCE_UNREADABLE.*268435456-byte limit/su);
+
+  for (const schema of [ordinarySchema, externalSchema]) {
+    const rejected = await capture(["json", "validate", "--schema", schema, "--file", bundlePath]);
+    assert.equal(rejected.code, 1);
+    assert.match(rejected.stderr, /JSON_INSTANCE_UNREADABLE.*67108864-byte limit/su);
+  }
+});
+
 test("json validate recognizes the pinned reference cache schema and its owning bundle", async () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-reference-"));
   try {
@@ -405,6 +452,76 @@ test("json validate recognizes the pinned reference cache schema and its owning 
     fs.rmSync(temporary, { recursive: true, force: true });
   }
 });
+
+function publicBundleFixture(): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.modal.public-benchmark-bundle.v5",
+    benchmark: "ultrafuzz-bench",
+    lane: "smoke",
+    model_slug: "gpt-5-6-luna",
+    model: "gpt-5.6-luna",
+    reasoning: "high",
+    judge_model: "gpt-5.6-sol",
+    judge_reasoning: "xhigh",
+    candidate_commit: "a".repeat(40),
+    eval_run_id: "public-bundle-boundary",
+    lineage: {
+      logical_run_id: "public-bundle-boundary",
+      generation: 1,
+      attempt: 1,
+      attempt_id: "attempt-1",
+      config_fingerprint: "a".repeat(64),
+      source_fingerprint: "b".repeat(64),
+      image_fingerprint: "c".repeat(64),
+      model_fingerprint: "d".repeat(64)
+    },
+    status: "succeeded",
+    executed_case_count: 1,
+    graded_case_count: 1,
+    created_at: "2026-08-09T00:00:00.000Z",
+    files: [
+      {
+        path: "reports/target-1/report.json",
+        size_bytes: 3,
+        sha256: "e".repeat(64),
+        contents_base64: "e30K"
+      }
+    ],
+    targets: [
+      {
+        id: "target-1",
+        repository: "https://github.com/example/benchmark-target",
+        revision: "f".repeat(40),
+        framework: "foundry",
+        status: "succeeded",
+        executed_case_count: 1,
+        graded_case_count: 1,
+        publication_location: {
+          bundle_path: "public-results.json",
+          report_paths: ["reports/target-1/report.json"]
+        }
+      }
+    ]
+  };
+}
+
+function writeJsonWithTrailingSpaces(filePath: string, value: unknown, targetBytes: number): void {
+  const prefix = Buffer.from(JSON.stringify(value), "utf8");
+  assert.ok(prefix.byteLength <= targetBytes);
+  fs.writeFileSync(filePath, prefix, { mode: 0o600 });
+  const descriptor = fs.openSync(filePath, "a");
+  try {
+    const chunk = Buffer.alloc(Math.min(1024 * 1024, targetBytes - prefix.byteLength), 0x20);
+    let remaining = targetBytes - prefix.byteLength;
+    while (remaining > 0) {
+      const length = Math.min(remaining, chunk.byteLength);
+      fs.writeSync(descriptor, chunk, 0, length);
+      remaining -= length;
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
 
 async function capture(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   let stdout = "";

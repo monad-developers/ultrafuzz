@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   createStrictAjv,
+  DEFAULT_MAX_JSON_INSTANCE_BYTES,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   runValidator,
@@ -89,6 +90,7 @@ export function referenceSchemaRegistry(): readonly SchemaRegistryEntry[] {
         contractIds: Object.freeze([...metadata.contractIds]),
         sha256: crypto.createHash("sha256").update(snapshot).digest("hex"),
         schema: Object.freeze(parsed),
+        maxInstanceBytes: DEFAULT_MAX_JSON_INSTANCE_BYTES,
         localReferences: Object.freeze(localReferences),
         semanticGates: Object.freeze([...metadata.semanticGates]),
         typescriptExport: metadata.typescriptExport

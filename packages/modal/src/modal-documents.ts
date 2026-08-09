@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   assertNoSymlinkComponents,
   assertPathInside,
+  DEFAULT_MAX_JSON_INSTANCE_BYTES,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   validateRegisteredJsonBytesSync,
@@ -23,7 +24,7 @@ import {
 } from "./modal-schema-registry.js";
 import { assertModalDocumentSemantics } from "./modal-semantic-gates.js";
 
-export const MAX_MODAL_DOCUMENT_BYTES = 64 * 1024 * 1024;
+export const MAX_MODAL_DOCUMENT_BYTES = DEFAULT_MAX_JSON_INSTANCE_BYTES;
 
 export interface ModalDocumentSnapshot<SchemaId extends ModalContractSchemaId> {
   readonly schema_id: SchemaId;
@@ -67,13 +68,13 @@ export function parseModalDocumentBytes<SchemaId extends ModalContractSchemaId>(
   input: Uint8Array
 ): ModalDocumentSnapshot<SchemaId> {
   const bytes = Buffer.from(input);
-  if (bytes.byteLength > MAX_MODAL_DOCUMENT_BYTES) {
+  const entry = modalSchemaEntry(schemaId);
+  if (bytes.byteLength > entry.maxInstanceBytes) {
     throw new ModalDocumentValidationError(
       schemaId,
-      `Modal JSON document exceeds the ${MAX_MODAL_DOCUMENT_BYTES}-byte limit`
+      `Modal JSON document exceeds the ${entry.maxInstanceBytes}-byte limit`
     );
   }
-  const entry = modalSchemaEntry(schemaId);
   const validation = validateRegisteredJsonBytesSync({
     schemaPath: path.join(modalSchemaDirectory(), entry.filename),
     instanceBytes: bytes,
@@ -92,7 +93,7 @@ export function parseModalDocumentBytes<SchemaId extends ModalContractSchemaId>(
   let parsed: unknown;
   try {
     parsed = parseStrictJsonBytes(bytes, {
-      maxBytes: MAX_MODAL_DOCUMENT_BYTES,
+      maxBytes: entry.maxInstanceBytes,
       maxDepth: 128,
       maxItems: 1_000_000,
       maxProperties: 1_000_000
@@ -118,7 +119,7 @@ export function readModalDocument<SchemaId extends ModalContractSchemaId>(
   filePath: string,
   schemaId: SchemaId
 ): ModalDocumentSnapshot<SchemaId> {
-  const bytes = readRegularFileSnapshot(path.resolve(filePath), MAX_MODAL_DOCUMENT_BYTES);
+  const bytes = readRegularFileSnapshot(path.resolve(filePath), modalSchemaEntry(schemaId).maxInstanceBytes);
   return parseModalDocumentBytes(schemaId, bytes);
 }
 

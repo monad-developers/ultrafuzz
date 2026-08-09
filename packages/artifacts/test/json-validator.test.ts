@@ -10,6 +10,7 @@ import {
   artifactSchemaRegistry,
   artifactContractSchemaBinding,
   compileBundledSchemas,
+  DEFAULT_MAX_JSON_INSTANCE_BYTES,
   parseStrictJsonBytes,
   parseStrictJson,
   type SchemaRegistryEntry,
@@ -223,6 +224,56 @@ test("file validation uses the registered schema and distinguishes instance from
   }
 });
 
+test("registered instance byte budgets reach strict schema validation without relaxing the 64 MiB default", async (t) => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-instance-budget-"));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const schemaPath = path.join(artifactSchemaDirectory(), "properties.schema.json");
+  const instancePath = path.join(temporary, "padded-properties.json");
+  const externalSchemaPath = path.join(temporary, "external.schema.json");
+  const elevatedLimit = DEFAULT_MAX_JSON_INSTANCE_BYTES + 1;
+  writeJsonWithTrailingSpaces(
+    instancePath,
+    { schema_version: "ultrafuzz.properties.v2", properties: [] },
+    elevatedLimit
+  );
+  fs.writeFileSync(
+    externalSchemaPath,
+    JSON.stringify({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object"
+    })
+  );
+
+  const registration = artifactSchemaRegistry().find((entry) => entry.filename === "properties.schema.json")!;
+  assert.equal(registration.maxInstanceBytes, DEFAULT_MAX_JSON_INSTANCE_BYTES);
+  const elevatedRegistry = Object.freeze([
+    Object.freeze({ ...registration, maxInstanceBytes: elevatedLimit })
+  ]) satisfies readonly SchemaRegistryEntry[];
+
+  const asynchronous = await validateJsonFile({
+    schemaPath,
+    filePath: instancePath,
+    schemaRegistry: elevatedRegistry
+  });
+  assert.equal(asynchronous.status, "valid", JSON.stringify(asynchronous.diagnostics));
+  const synchronous = validateRegisteredJsonFileSync({
+    schemaPath,
+    filePath: instancePath,
+    schemaRegistry: elevatedRegistry
+  });
+  assert.equal(synchronous.status, "valid", JSON.stringify(synchronous.diagnostics));
+
+  const ordinary = await validateJsonFile({ schemaPath, filePath: instancePath });
+  assert.equal(ordinary.status, "instance-error");
+  assert.equal(ordinary.diagnostics[0]?.code, "JSON_INSTANCE_UNREADABLE");
+  assert.match(ordinary.diagnostics[0]?.message ?? "", /67108864-byte limit/u);
+
+  const external = await validateJsonFile({ schemaPath: externalSchemaPath, filePath: instancePath });
+  assert.equal(external.status, "instance-error");
+  assert.equal(external.diagnostics[0]?.code, "JSON_INSTANCE_UNREADABLE");
+  assert.match(external.diagnostics[0]?.message ?? "", /67108864-byte limit/u);
+});
+
 test("external schemas resolve only local contained references", async () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-ref-"));
   try {
@@ -410,3 +461,21 @@ test("repeated external references reuse one bounded file snapshot", async (t) =
   assert.equal((await validateJsonFile({ schemaPath: root, filePath: artifact })).status, "valid");
   assert.equal(childOpenCount, 1);
 });
+
+function writeJsonWithTrailingSpaces(filePath: string, value: unknown, targetBytes: number): void {
+  const prefix = Buffer.from(JSON.stringify(value), "utf8");
+  assert.ok(prefix.byteLength <= targetBytes);
+  fs.writeFileSync(filePath, prefix, { mode: 0o600 });
+  const descriptor = fs.openSync(filePath, "a");
+  try {
+    const chunk = Buffer.alloc(Math.min(1024 * 1024, targetBytes - prefix.byteLength), 0x20);
+    let remaining = targetBytes - prefix.byteLength;
+    while (remaining > 0) {
+      const length = Math.min(remaining, chunk.byteLength);
+      fs.writeSync(descriptor, chunk, 0, length);
+      remaining -= length;
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}

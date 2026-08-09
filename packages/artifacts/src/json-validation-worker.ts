@@ -17,6 +17,7 @@ interface RegisteredSchemaSnapshot {
 
 interface WorkerRequest {
   instanceBytes: Uint8Array;
+  maxInstanceBytes: number;
   registeredSchemaId?: string;
   registeredSchemas?: RegisteredSchemaSnapshot[];
   externalRootPath?: string;
@@ -31,7 +32,7 @@ try {
   let instance: unknown;
   try {
     instance = parseStrictJsonBytes(request.instanceBytes, {
-      maxBytes: 64 * 1024 * 1024,
+      maxBytes: request.maxInstanceBytes,
       maxDepth: 128,
       maxItems: 1_000_000,
       maxProperties: 1_000_000

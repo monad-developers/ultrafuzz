@@ -9,6 +9,9 @@ import { parseStrictJsonBytes } from "./strict-json.js";
 
 export type SchemaRole = "artifact-contract" | "runtime-state" | "subschema" | "topology";
 
+export const DEFAULT_MAX_JSON_INSTANCE_BYTES = 64 * 1024 * 1024;
+export const MAX_REGISTERED_JSON_INSTANCE_BYTES = 256 * 1024 * 1024;
+
 const MAX_REGISTERED_SCHEMA_BYTES = 4 * 1024 * 1024;
 const MAX_REGISTERED_BUNDLE_BYTES = 16 * 1024 * 1024;
 const MAX_DEPENDENCY_PACKAGE_JSON_BYTES = 1024 * 1024;
@@ -22,6 +25,8 @@ export interface SchemaRegistryEntry {
   contractIds: readonly string[];
   sha256: string;
   schema: Readonly<Record<string, unknown>>;
+  /** Maximum byte length accepted for an instance selected by this pinned schema. */
+  maxInstanceBytes: number;
   localReferences: readonly string[];
   semanticGates: readonly string[];
   /** Name of the checked-in TypeScript export audited against this document. */
@@ -117,6 +122,7 @@ export function artifactSchemaRegistry(): readonly ArtifactSchemaRegistryEntry[]
         contractIds: Object.freeze([...(metadata.contractIds ?? [])]),
         sha256: sha256(snapshot),
         schema: deepFreezeJson(parsed),
+        maxInstanceBytes: DEFAULT_MAX_JSON_INSTANCE_BYTES,
         localReferences: Object.freeze(localReferences),
         semanticGates: Object.freeze([...(metadata.semanticGates ?? [])]),
         typescriptExport: metadata.typescriptExport,
@@ -134,7 +140,7 @@ export function artifactSchemaBundleDigest(): string {
 export function schemaRegistryBundleDigest(registry: readonly SchemaRegistryEntry[]): string {
   const manifest = [...registry]
     .sort((left, right) => left.filename.localeCompare(right.filename) || left.id.localeCompare(right.id))
-    .map((entry) => `${entry.filename}\u0000${entry.id}\u0000${entry.sha256}`)
+    .map((entry) => `${entry.filename}\u0000${entry.id}\u0000${entry.sha256}\u0000${entry.maxInstanceBytes}`)
     .join("\n");
   return sha256(Buffer.from(manifest, "utf8"));
 }

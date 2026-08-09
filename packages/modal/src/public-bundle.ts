@@ -22,6 +22,7 @@ import { redactSecretsInText } from "@ultrafuzz/security";
 import { projectCanonicalFinalReport } from "@ultrafuzz/runtime";
 
 import {
+  MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
   MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID,
   type StrictModalPublicBenchmarkBundleDocument,
   type StrictModalPublicBenchmarkBundleFile,
@@ -32,7 +33,7 @@ import { assertModalDocumentSemantics } from "./modal-semantic-gates.js";
 import type { ModalWorkerLineage } from "./launch-state.js";
 
 export const PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v5" as const;
-export const MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES = 256 * 1024 * 1024;
+export { MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES } from "./modal-contracts.js";
 
 export const MAX_PUBLIC_BENCHMARK_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_FILE_BYTES = MAX_PUBLIC_BENCHMARK_FILE_BYTES;

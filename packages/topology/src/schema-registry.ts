@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  DEFAULT_MAX_JSON_INSTANCE_BYTES,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   schemaRegistryBundleDigest,
@@ -72,6 +73,7 @@ export function topologySchemaRegistry(): readonly SchemaRegistryEntry[] {
         contractIds: Object.freeze([]),
         sha256: crypto.createHash("sha256").update(snapshot).digest("hex"),
         schema: Object.freeze(parsed),
+        maxInstanceBytes: DEFAULT_MAX_JSON_INSTANCE_BYTES,
         localReferences: Object.freeze(localReferences),
         semanticGates: Object.freeze([...metadata.semanticGates]),
         typescriptExport: metadata.typescriptExport

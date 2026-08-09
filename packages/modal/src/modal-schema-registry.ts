@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   createStrictAjv,
+  DEFAULT_MAX_JSON_INSTANCE_BYTES,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   runValidator,
@@ -25,6 +26,7 @@ import {
   MODAL_NODE_RESTORE_SCHEMA_ID,
   MODAL_NODE_RESULT_SCHEMA_ID,
   MODAL_NODE_WORKER_ERROR_SCHEMA_ID,
+  MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
   MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
   MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID,
   MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID,
@@ -48,6 +50,7 @@ export interface ModalSchemaMetadata {
   typescriptExport: keyof typeof MODAL_SCHEMA_EXPORTS;
   zodParser?: "modalBenchmarkConfigZodSchema";
   semanticGates: readonly ModalSemanticGateName[];
+  maxInstanceBytes?: number;
 }
 
 export function modalSchemaDirectory(): string {
@@ -199,6 +202,7 @@ export const MODAL_SCHEMA_METADATA: Readonly<Record<string, ModalSchemaMetadata>
     id: MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalPublicBenchmarkBundleJsonSchema",
+    maxInstanceBytes: MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
     semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID]
   },
   "modal-recovery-lifecycle.schema.json": {
@@ -317,6 +321,7 @@ export function modalSchemaRegistry(): readonly SchemaRegistryEntry[] {
         contractIds: Object.freeze([]),
         sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
         schema,
+        maxInstanceBytes: metadata.maxInstanceBytes ?? DEFAULT_MAX_JSON_INSTANCE_BYTES,
         localReferences: Object.freeze(localReferences),
         semanticGates: Object.freeze([...metadata.semanticGates]),
         typescriptExport: metadata.typescriptExport,

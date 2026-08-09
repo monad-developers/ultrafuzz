@@ -3,9 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { DEFAULT_MAX_JSON_INSTANCE_BYTES } from "@ultrafuzz/artifacts";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
   MODAL_BENCHMARK_CONFIG_SCHEMA_ID,
   MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID,
   MODAL_COMMON_SCHEMA_ID,
@@ -36,6 +38,7 @@ import {
   parseModalDocumentBytes,
   parseModalDocumentValue,
   readModalDocument,
+  serializeModalDocument,
   writeModalDocumentAtomic
 } from "../src/modal-documents.js";
 import {
@@ -406,6 +409,39 @@ function bytes(value: unknown): Buffer {
   return Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
 }
 
+function largePublicBundleFixture(): ModalContractForSchemaId<typeof MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID> {
+  const fixture = contractFixtures()[MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID];
+  const contents = "A".repeat(6_800_000);
+  return {
+    ...fixture,
+    files: Array.from({ length: 10 }, (_, index) => ({
+      path:
+        index === 0 ? "reports/target-1/report.json" : `reports/target-1/artifacts/artifact-${index}/THREAT_MODEL.md`,
+      size_bytes: 0,
+      sha256: shaA,
+      contents_base64: contents
+    }))
+  };
+}
+
+function writeJsonWithTrailingSpaces(filePath: string, value: unknown, targetBytes: number): void {
+  const prefix = Buffer.from(JSON.stringify(value), "utf8");
+  expect(prefix.byteLength).toBeLessThanOrEqual(targetBytes);
+  fs.writeFileSync(filePath, prefix, { mode: 0o600 });
+  const descriptor = fs.openSync(filePath, "a");
+  try {
+    const chunk = Buffer.alloc(Math.min(1024 * 1024, targetBytes - prefix.byteLength), 0x20);
+    let remaining = targetBytes - prefix.byteLength;
+    while (remaining > 0) {
+      const length = Math.min(remaining, chunk.byteLength);
+      fs.writeSync(descriptor, chunk, 0, length);
+      remaining -= length;
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
 describe("Modal strict JSON contract foundation", () => {
   it("registers and strictly compiles every schema with matching checked-in exports and gates", () => {
     const registry = modalSchemaRegistry();
@@ -419,6 +455,14 @@ describe("Modal strict JSON contract foundation", () => {
       for (const gate of entry.semanticGates) expect(implemented.has(gate)).toBe(true);
     }
     expect(registry.find((entry) => entry.id === MODAL_COMMON_SCHEMA_ID)?.role).toBe("subschema");
+    expect(registry.find((entry) => entry.id === MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID)?.maxInstanceBytes).toBe(
+      MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES
+    );
+    expect(
+      registry
+        .filter((entry) => entry.id !== MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID)
+        .every((entry) => entry.maxInstanceBytes === DEFAULT_MAX_JSON_INSTANCE_BYTES)
+    ).toBe(true);
     expect(registry.find((entry) => entry.id === MODAL_BENCHMARK_CONFIG_SCHEMA_ID)?.zodParser).toBe(
       "modalBenchmarkConfigZodSchema"
     );
@@ -448,6 +492,45 @@ describe("Modal strict JSON contract foundation", () => {
       ModalDocumentValidationError
     );
   });
+
+  it("parses and reads an over-64 MiB public bundle through the schema-specific boundary", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "modal-public-bundle-boundary-"));
+    try {
+      const filePath = path.join(root, "public-results.json");
+      const oversizedPath = path.join(root, "oversized-public-results.json");
+      const fixture = contractFixtures()[MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID];
+      const targetBytes = DEFAULT_MAX_JSON_INSTANCE_BYTES + 1;
+      writeJsonWithTrailingSpaces(filePath, fixture, targetBytes);
+      const padded = fs.readFileSync(filePath);
+      expect(padded.byteLength).toBe(targetBytes);
+      expect(parseModalDocumentBytes(MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID, padded).value).toEqual(fixture);
+      expect(readModalDocument(filePath, MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID).value).toEqual(fixture);
+      fs.writeFileSync(oversizedPath, "", { mode: 0o600 });
+      fs.truncateSync(oversizedPath, MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES + 1);
+      expect(() => readModalDocument(oversizedPath, MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID)).toThrow(
+        /268435456-byte limit/u
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("serializes an over-64 MiB public bundle without relaxing other Modal document limits", () => {
+    const fixture = largePublicBundleFixture();
+    const serialized = serializeModalDocument(MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID, fixture);
+    expect(serialized.bytes.byteLength).toBeGreaterThan(DEFAULT_MAX_JSON_INSTANCE_BYTES);
+    expect(serialized.bytes.byteLength).toBeLessThanOrEqual(MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES);
+    expect(serialized.snapshot.schema_id).toBe(MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID);
+
+    const ordinary = bytes(contractFixtures()[MODAL_NODE_RESTORE_SCHEMA_ID]);
+    const oversizedOrdinary = Buffer.concat([
+      ordinary,
+      Buffer.alloc(DEFAULT_MAX_JSON_INSTANCE_BYTES + 1 - ordinary.byteLength, 0x20)
+    ]);
+    expect(() => parseModalDocumentBytes(MODAL_NODE_RESTORE_SCHEMA_ID, oversizedOrdinary)).toThrow(
+      /67108864-byte limit/u
+    );
+  }, 120_000);
 
   it("rejects duplicate keys, invalid UTF-8, unknown fields, old versions, and numeric coercion", () => {
     expect(() =>
