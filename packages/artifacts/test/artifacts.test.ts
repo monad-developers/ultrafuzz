@@ -413,20 +413,20 @@ test("failed publication cleanup detects a canonical-path replacement before acc
 
 test("artifact manifests record safe paths, sizes, digests, schema version, and provenance", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
-  const artifactPath = writeArtifact(layout, "node-a", "setup/project.md", "hello artifact\n");
+  const artifactPath = writeArtifact(layout, "node-a", "setup/project.json", "hello artifact\n");
   const manifest = writeArtifactManifest({
     layout,
     nodeId: "node-a",
     outputs: [
       {
-        path: "setup/project.md",
-        contract: "ultrafuzz/nonempty-markdown@1",
+        path: "setup/project.json",
+        contract: "ultrafuzz/coverage-goal@1",
         contract_digest: "a".repeat(64),
         schema_file: "example.schema.json",
         schema_id: "urn:ultrafuzz:schema:test:example:1",
         schema_sha256: "b".repeat(64),
         schema_bundle_sha256: "c".repeat(64),
-        validator_build: "test-validator-build",
+        validator_build: `ultrafuzz-json-validator.v1:${"d".repeat(64)}`,
         primary: true
       }
     ],
@@ -441,17 +441,17 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
 
   assert.equal(manifest.schema_version, "ultrafuzz.artifact-manifest.v2");
   assert.equal(manifest.files.length, 1);
-  assert.equal(manifest.files[0]!.path, "setup/project.md");
+  assert.equal(manifest.files[0]!.path, "setup/project.json");
   assert.equal(manifest.files[0]!.size_bytes, fs.statSync(artifactPath).size);
   assert.equal(manifest.files[0]!.sha256, crypto.createHash("sha256").update("hello artifact\n").digest("hex"));
   assert.equal(manifest.files[0]!.provenance.producer_node_id, "node-a");
   assert.equal(manifest.files[0]!.provenance.agent_ref, "CodexAgent");
   assert.equal(manifest.files[0]!.provenance.workflow_task_id, "node:node-a");
-  assert.equal(manifest.output_contracts[0]!.contract, "ultrafuzz/nonempty-markdown@1");
+  assert.equal(manifest.output_contracts[0]!.contract, "ultrafuzz/coverage-goal@1");
   assert.equal(manifest.output_contracts[0]!.schema_id, "urn:ultrafuzz:schema:test:example:1");
   assert.equal(manifest.output_contracts[0]!.schema_sha256, "b".repeat(64));
   assert.equal(manifest.output_contracts[0]!.schema_bundle_sha256, "c".repeat(64));
-  assert.equal(manifest.output_contracts[0]!.validator_build, "test-validator-build");
+  assert.equal(manifest.output_contracts[0]!.validator_build, `ultrafuzz-json-validator.v1:${"d".repeat(64)}`);
   assert.deepEqual(manifest.prerequisite_manifests, []);
 });
 

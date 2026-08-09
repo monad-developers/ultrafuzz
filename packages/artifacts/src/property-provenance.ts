@@ -14,15 +14,16 @@ export const PROPERTY_CAMPAIGN_SCHEMA_VERSION = "ultrafuzz.property-campaign.v2"
 export const REFERENCE_EXPECTATIONS_SCHEMA_VERSION = "ultrafuzz.reference-expectations.v2" as const;
 export const PROPERTIES_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:properties:2" as const;
 export const PROPERTY_LENS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:property-lens:2" as const;
-export const IMPLEMENTED_PROPERTIES_JSON_SCHEMA_ID =
-  "urn:ultrafuzz:schema:artifacts:implemented-properties:3" as const;
+export const IMPLEMENTED_PROPERTIES_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:implemented-properties:3" as const;
 export const PROPERTY_CAMPAIGN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:property-campaign:2" as const;
-export const REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID =
-  "urn:ultrafuzz:schema:artifacts:reference-expectations:2" as const;
+export const REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:reference-expectations:2" as const;
 
 const nonEmptyString = z.string().min(1);
 const stableLedgerId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
 const nonEmptyStringArray = z.array(nonEmptyString);
+const uniqueNonEmptyStringArray = nonEmptyStringArray
+  .meta({ uniqueItems: true })
+  .refine((values) => new Set(values).size === values.length, { message: "Values must be unique" });
 /**
  * A list of reference-expectation ids, which must name at least one id when it says anything at all.
  *
@@ -280,13 +281,15 @@ const referenceExpectationEntrySchema = z.strictObject({
   description: nonEmptyString.optional()
 });
 
-export const referenceExpectationsSchema = z.strictObject({
-  schema_version: z.literal(REFERENCE_EXPECTATIONS_SCHEMA_VERSION),
-  expectations: z.array(referenceExpectationEntrySchema).min(1)
-}).meta({
-  $id: REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID,
-  title: "Ultrafuzz supplied reference expectation catalog"
-});
+export const referenceExpectationsSchema = z
+  .strictObject({
+    schema_version: z.literal(REFERENCE_EXPECTATIONS_SCHEMA_VERSION),
+    expectations: z.array(referenceExpectationEntrySchema).min(1)
+  })
+  .meta({
+    $id: REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID,
+    title: "Ultrafuzz supplied reference expectation catalog"
+  });
 
 const lensPropertySchema = z.strictObject({
   id: nonEmptyString,
@@ -346,8 +349,8 @@ export const propertiesSchema = z
 const implementedPropertySchema = z.strictObject({
   property_id: nonEmptyString,
   status: z.enum(["implemented", "pending", "deferred", "blocked"]),
-  implementation_paths: nonEmptyStringArray.meta({ uniqueItems: true }),
-  test_paths: nonEmptyStringArray.meta({ uniqueItems: true }),
+  implementation_paths: uniqueNonEmptyStringArray,
+  test_paths: uniqueNonEmptyStringArray,
   reference_expectations: optionalReferenceExpectationIds,
   blocker: z
     .strictObject({
@@ -447,10 +450,18 @@ export const implementedPropertiesSchema = z
         });
       }
       if (property.status === "implemented" && property.blocker !== undefined) {
-        context.addIssue({ code: "custom", message: "Implemented properties cannot have blockers", path: ["properties", propertyIndex, "blocker"] });
+        context.addIssue({
+          code: "custom",
+          message: "Implemented properties cannot have blockers",
+          path: ["properties", propertyIndex, "blocker"]
+        });
       }
       if (property.status !== "implemented" && property.blocker === undefined) {
-        context.addIssue({ code: "custom", message: "Non-implemented selected properties require blockers", path: ["properties", propertyIndex, "blocker"] });
+        context.addIssue({
+          code: "custom",
+          message: "Non-implemented selected properties require blockers",
+          path: ["properties", propertyIndex, "blocker"]
+        });
       }
     }
   });

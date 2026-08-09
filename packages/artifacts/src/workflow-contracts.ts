@@ -150,7 +150,14 @@ const triagedFindingSchema = findingSchema
         if: {
           properties: {
             triage_classification: {
-              enum: ["false-positive", "incomplete-spec", "harness-defect", "repair-candidate", "spec-gated", "defensive-hardening"]
+              enum: [
+                "false-positive",
+                "incomplete-spec",
+                "harness-defect",
+                "repair-candidate",
+                "spec-gated",
+                "defensive-hardening"
+              ]
             }
           },
           required: ["triage_classification"]
@@ -172,9 +179,14 @@ const triagedFindingSchema = findingSchema
       context.addIssue({ code: "custom", message: "Triage requires a machine-readable reason note", path: ["notes"] });
     }
     if (
-      ["false-positive", "incomplete-spec", "harness-defect", "repair-candidate", "spec-gated", "defensive-hardening"].includes(
-        finding.triage_classification
-      ) &&
+      [
+        "false-positive",
+        "incomplete-spec",
+        "harness-defect",
+        "repair-candidate",
+        "spec-gated",
+        "defensive-hardening"
+      ].includes(finding.triage_classification) &&
       !finding.notes.some((note) => note.startsWith("demotion_reason="))
     ) {
       context.addIssue({ code: "custom", message: "A demoted finding requires demotion_reason", path: ["notes"] });
@@ -237,7 +249,11 @@ const severityClassifiedFindingSchema = findingSchema
       "severity_rationale"
     ] as const) {
       if (finding[key] === undefined) {
-        context.addIssue({ code: "custom", message: "Production candidates require final classification fields", path: [key] });
+        context.addIssue({
+          code: "custom",
+          message: "Production candidates require final classification fields",
+          path: [key]
+        });
       }
     }
   });
@@ -396,7 +412,11 @@ export const dependencyScopeMatrixSchema = withDocumentMetadata(
     non_finding_rows: z.array(z.strictObject({ dependency_id: nonEmptyString, reason: nonEmptyString })),
     generated_tests: z.array(z.strictObject({ path: nonEmptyString, checks: uniqueStrings(1) })),
     source_backed_in_scope_rationales: z.array(
-      z.strictObject({ finding_candidate_id: nonEmptyString, dependency_id: nonEmptyString, evidence_paths: uniqueStrings(1) })
+      z.strictObject({
+        finding_candidate_id: nonEmptyString,
+        dependency_id: nonEmptyString,
+        evidence_paths: uniqueStrings(1)
+      })
     ),
     coverage_notes: z.array(z.strictObject({ dependency_id: nonEmptyString, reason: nonEmptyString }))
   }),
@@ -443,7 +463,9 @@ export const externalizedStateAccountingSchema = withDocumentMetadata(
       })
     ),
     generated_tests: z.array(z.strictObject({ path: nonEmptyString, scenario_ids: uniqueStrings(1) })),
-    incomplete_specs: z.array(z.strictObject({ subject: nonEmptyString, reason: nonEmptyString, evidence_paths: uniqueStrings() })),
+    incomplete_specs: z.array(
+      z.strictObject({ subject: nonEmptyString, reason: nonEmptyString, evidence_paths: uniqueStrings() })
+    ),
     coverage_notes: stringList
   }),
   "externalized-state-accounting",
@@ -689,7 +711,11 @@ export const differentialLaneResultSchema = withDocumentMetadata(
       }),
       red_candidates: z.array(differentialRedCandidateSchema),
       compile_or_harness_defects: z.array(
-        z.strictObject({ category: z.enum(["compile", "harness"]), summary: nonEmptyString, evidence_paths: uniqueStrings() })
+        z.strictObject({
+          category: z.enum(["compile", "harness"]),
+          summary: nonEmptyString,
+          evidence_paths: uniqueStrings()
+        })
       ),
       public_evidence_paths: uniqueStrings(),
       notes: stringList
@@ -791,13 +817,25 @@ export const differentialRepairSummarySchema = withDocumentMetadata(
   z.strictObject({
     schema_version: z.literal(DIFFERENTIAL_REPAIR_SUMMARY_SCHEMA_VERSION),
     repairs_attempted: z.array(
-      z.strictObject({ stable_failure_hash: sha256, repair_kind: z.enum(["harness", "reference"]), summary: nonEmptyString })
+      z.strictObject({
+        stable_failure_hash: sha256,
+        repair_kind: z.enum(["harness", "reference"]),
+        summary: nonEmptyString
+      })
     ),
     repaired_failures: z.array(
-      z.strictObject({ stable_failure_hash: sha256, result: z.enum(["repaired", "still-red"]), evidence_paths: uniqueStrings() })
+      z.strictObject({
+        stable_failure_hash: sha256,
+        result: z.enum(["repaired", "still-red"]),
+        evidence_paths: uniqueStrings()
+      })
     ),
     preserved_production_or_unknown_reds: z.array(
-      z.strictObject({ stable_failure_hash: sha256, classification: z.enum(["production_bug", "spec_mismatch", "unknown"]), reason: nonEmptyString })
+      z.strictObject({
+        stable_failure_hash: sha256,
+        classification: z.enum(["production_bug", "spec_mismatch", "unknown"]),
+        reason: nonEmptyString
+      })
     ),
     commands: uniqueStrings(),
     semantic_red_registry_regenerated: z.boolean(),
@@ -809,19 +847,29 @@ export const differentialRepairSummarySchema = withDocumentMetadata(
 );
 
 const gapLaneRowSchema = z.strictObject({ lane_id: nonEmptyString, attempt_index: nonNegativeInteger });
-const workOrderSchema = z.strictObject({ lane_id: nonEmptyString, summary: nonEmptyString, evidence_paths: uniqueStrings() });
+const workOrderSchema = z.strictObject({
+  lane_id: nonEmptyString,
+  summary: nonEmptyString,
+  evidence_paths: uniqueStrings()
+});
 
 export const differentialGapReviewSchema = withDocumentMetadata(
   z.strictObject({
     schema_version: z.literal(DIFFERENTIAL_GAP_REVIEW_SCHEMA_VERSION),
     ready_lanes: z.array(gapLaneRowSchema),
     lane_results_seen: z.array(
-      gapLaneRowSchema.extend({ status: z.enum(["green", "semantic_red_frozen", "compile_or_harness_defect", "no_assigned_lane"]) })
+      gapLaneRowSchema.extend({
+        status: z.enum(["green", "semantic_red_frozen", "compile_or_harness_defect", "no_assigned_lane"])
+      })
     ),
     missing_lane_work_orders: z.array(workOrderSchema),
     incomplete_campaign_work_orders: z.array(workOrderSchema),
-    green_suite_evidence: z.array(z.strictObject({ lane_id: nonEmptyString, command: nonEmptyString, matched_test_count: positiveInteger })),
-    report_blockers: z.array(z.strictObject({ category: nonEmptyString, summary: nonEmptyString, evidence_paths: uniqueStrings() }))
+    green_suite_evidence: z.array(
+      z.strictObject({ lane_id: nonEmptyString, command: nonEmptyString, matched_test_count: positiveInteger })
+    ),
+    report_blockers: z.array(
+      z.strictObject({ category: nonEmptyString, summary: nonEmptyString, evidence_paths: uniqueStrings() })
+    )
   }),
   "differential-gap-review",
   1,
@@ -956,13 +1004,15 @@ export const dynamicStrategyProvenanceSchema = withDocumentMetadata(
 );
 
 const lifecycleRecordSchema = findingLifecycleSchema.extend({
-  stages: z.array(
-    z.strictObject({
-      stage: z.enum(["raw", "deduped", "triaged", "severity-classified"]),
-      artifact_path: nonEmptyString,
-      finding_id: nonEmptyString.optional()
-    })
-  ).min(1)
+  stages: z
+    .array(
+      z.strictObject({
+        stage: z.enum(["raw", "deduped", "triaged", "severity-classified"]),
+        artifact_path: nonEmptyString,
+        finding_id: nonEmptyString.optional()
+      })
+    )
+    .min(1)
 });
 
 export const findingLifecycleLedgerSchema = withDocumentMetadata(
@@ -1061,7 +1111,11 @@ const reportPropertyProvenanceSchema = z
 
 const reportCoverageSchema = z.strictObject({
   priority_threshold: z.enum(PROPERTY_PRIORITIES),
-  priorities: z.array(z.enum(PROPERTY_PRIORITIES)).min(1).meta({ uniqueItems: true }),
+  priorities: z
+    .array(z.enum(PROPERTY_PRIORITIES))
+    .min(1)
+    .meta({ uniqueItems: true })
+    .refine((values) => new Set(values).size === values.length, { message: "Priorities must be unique" }),
   selected_property_ids: uniqueStrings(),
   implemented_property_ids: uniqueStrings(),
   blocked_property_ids: uniqueStrings(),
@@ -1080,7 +1134,11 @@ const reportIssueSchema = findingSchema.safeExtend({
   impact_rationale: nonEmptyString,
   likelihood_rationale: nonEmptyString,
   severity_rationale: nonEmptyString,
-  proof_of_concept: z.strictObject({ scenario: z.array(nonEmptyString).min(1), language: nonEmptyString, code: nonEmptyString }),
+  proof_of_concept: z.strictObject({
+    scenario: z.array(nonEmptyString).min(1),
+    language: nonEmptyString,
+    code: nonEmptyString
+  }),
   lifecycle: findingLifecycleSchema
 });
 
@@ -1161,41 +1219,29 @@ export const referenceManifestJsonSchema = workflowContractJsonSchemas["ultrafuz
 export const boundaryRecipesJsonSchema = workflowContractJsonSchemas["ultrafuzz/boundary-recipes@1"];
 export const adminConfigBoundaryMatrixJsonSchema =
   workflowContractJsonSchemas["ultrafuzz/admin-config-boundary-matrix@1"];
-export const dependencyScopeMatrixJsonSchema =
-  workflowContractJsonSchemas["ultrafuzz/dependency-scope-matrix@1"];
+export const dependencyScopeMatrixJsonSchema = workflowContractJsonSchemas["ultrafuzz/dependency-scope-matrix@1"];
 export const externalizedStateAccountingJsonSchema =
   workflowContractJsonSchemas["ultrafuzz/externalized-state-accounting@1"];
 export const coverageGoalJsonSchema = workflowContractJsonSchemas["ultrafuzz/coverage-goal@1"];
-export const invariantCampaignPlanJsonSchema =
-  workflowContractJsonSchemas["ultrafuzz/invariant-campaign-plan@1"];
+export const invariantCampaignPlanJsonSchema = workflowContractJsonSchemas["ultrafuzz/invariant-campaign-plan@1"];
 export const campaignSummaryJsonSchema = workflowContractJsonSchemas["ultrafuzz/campaign-summary@2"];
 export const differentialPlanJsonSchema = workflowContractJsonSchemas["ultrafuzz/differential-plan@1"];
 export const referenceHarnessJsonSchema = workflowContractJsonSchemas["ultrafuzz/reference-harness@1"];
-export const auditedDifferentialLanesJsonSchema =
-  workflowContractJsonSchemas["ultrafuzz/audited-differential-lanes@1"];
-export const differentialLaneResultJsonSchema =
-  workflowContractJsonSchemas["ultrafuzz/differential-lane-result@1"];
-export const semanticRedRegistryJsonSchema =
-  workflowContractJsonSchemas["ultrafuzz/semantic-red-registry@1"];
-export const differentialRedTriageJsonSchema =
-  workflowContractJsonSchemas["ultrafuzz/differential-red-triage@1"];
+export const auditedDifferentialLanesJsonSchema = workflowContractJsonSchemas["ultrafuzz/audited-differential-lanes@1"];
+export const differentialLaneResultJsonSchema = workflowContractJsonSchemas["ultrafuzz/differential-lane-result@1"];
+export const semanticRedRegistryJsonSchema = workflowContractJsonSchemas["ultrafuzz/semantic-red-registry@1"];
+export const differentialRedTriageJsonSchema = workflowContractJsonSchemas["ultrafuzz/differential-red-triage@1"];
 export const differentialRepairSummaryJsonSchema =
   workflowContractJsonSchemas["ultrafuzz/differential-repair-summary@1"];
-export const differentialGapReviewJsonSchema =
-  workflowContractJsonSchemas["ultrafuzz/differential-gap-review@1"];
-export const differentialReportReviewJsonSchema =
-  workflowContractJsonSchemas["ultrafuzz/differential-report-review@1"];
-export const dynamicStrategyPlanJsonSchema =
-  workflowContractJsonSchemas["ultrafuzz/dynamic-strategy-plan@1"];
-export const dynamicEnumeratorOutputsJsonSchema =
-  workflowContractJsonSchemas["ultrafuzz/dynamic-enumerator-outputs@1"];
+export const differentialGapReviewJsonSchema = workflowContractJsonSchemas["ultrafuzz/differential-gap-review@1"];
+export const differentialReportReviewJsonSchema = workflowContractJsonSchemas["ultrafuzz/differential-report-review@1"];
+export const dynamicStrategyPlanJsonSchema = workflowContractJsonSchemas["ultrafuzz/dynamic-strategy-plan@1"];
+export const dynamicEnumeratorOutputsJsonSchema = workflowContractJsonSchemas["ultrafuzz/dynamic-enumerator-outputs@1"];
 export const selectedStrategiesJsonSchema = workflowContractJsonSchemas["ultrafuzz/selected-strategies@1"];
 export const dynamicStrategyProvenanceJsonSchema =
   workflowContractJsonSchemas["ultrafuzz/dynamic-strategy-provenance@1"];
-export const findingLifecycleLedgerJsonSchema =
-  workflowContractJsonSchemas["ultrafuzz/finding-lifecycle-ledger@1"];
-export const aggregationManifestJsonSchema =
-  workflowContractJsonSchemas["ultrafuzz/aggregation-manifest@1"];
+export const findingLifecycleLedgerJsonSchema = workflowContractJsonSchemas["ultrafuzz/finding-lifecycle-ledger@1"];
+export const aggregationManifestJsonSchema = workflowContractJsonSchemas["ultrafuzz/aggregation-manifest@1"];
 export const reportJsonSchema = workflowContractJsonSchemas["ultrafuzz/report@2"];
 
 export function validateWorkflowContract(
@@ -1273,7 +1319,8 @@ export const WORKFLOW_CONTRACT_DESCRIPTIONS: Record<WorkflowContractId, string> 
   "ultrafuzz/harness-repairs@1": "Strict harness-defect repair records.",
   "ultrafuzz/strategy-detections@1": "Strategy hits grouped by a stable dedupe key.",
   "ultrafuzz/triaged-findings@1": "Canonical findings enriched with required triage decisions.",
-  "ultrafuzz/severity-classified-findings@1": "Triaged findings with canonical final severity fields for production candidates.",
+  "ultrafuzz/severity-classified-findings@1":
+    "Triaged findings with canonical final severity fields for production candidates.",
   "ultrafuzz/reference-manifest@1": "A pinned materialized reference and its exact file digests.",
   "ultrafuzz/boundary-recipes@1": "Source-backed boundary and negative test recipes.",
   "ultrafuzz/admin-config-boundary-matrix@1": "Typed admin/config surface and selector audit rows.",
@@ -1292,9 +1339,11 @@ export const WORKFLOW_CONTRACT_DESCRIPTIONS: Record<WorkflowContractId, string> 
   "ultrafuzz/differential-gap-review@1": "Lane coverage, missing work orders, and report blockers.",
   "ultrafuzz/differential-report-review@1": "Final differential campaign status and report rows.",
   "ultrafuzz/dynamic-strategy-plan@1": "Selected/rejected dynamic strategies and context boundary.",
-  "ultrafuzz/dynamic-enumerator-outputs@1": "Typed enumerator identities, status, recommendations, and scoped payloads.",
+  "ultrafuzz/dynamic-enumerator-outputs@1":
+    "Typed enumerator identities, status, recommendations, and scoped payloads.",
   "ultrafuzz/selected-strategies@1": "Complete selected strategy payloads consumed downstream.",
-  "ultrafuzz/dynamic-strategy-provenance@1": "Dynamic agents, models, commands, files, validation, and excluded context.",
+  "ultrafuzz/dynamic-strategy-provenance@1":
+    "Dynamic agents, models, commands, files, validation, and excluded context.",
   "ultrafuzz/finding-lifecycle-ledger@1": "The typed evolving lifecycle keyed by dedupe key.",
   "ultrafuzz/aggregation-manifest@1": "Typed generated-test aggregation counts, files, support files, and skips.",
   "ultrafuzz/report@2": "A strict terminal report with canonical production and non-production findings."

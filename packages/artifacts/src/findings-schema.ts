@@ -160,7 +160,14 @@ export const findingSchema = z
     property_ids: uniqueNonEmptyStrings.min(1).optional(),
     fuzzer_backend: nonEmptyString.optional(),
     fuzzer_backends: uniqueNonEmptyStrings.min(1).optional(),
-    contributing_backend_failures: z.array(backendFailureReferenceSchema).min(1).meta({ uniqueItems: true }).optional(),
+    contributing_backend_failures: z
+      .array(backendFailureReferenceSchema)
+      .min(1)
+      .meta({ uniqueItems: true })
+      .refine((values) => new Set(values.map((value) => JSON.stringify(value))).size === values.length, {
+        message: "Backend failure references must be unique"
+      })
+      .optional(),
     deduplication: z
       .strictObject({
         pre_dedup_count: z.number().int().positive(),
@@ -225,14 +232,14 @@ export const findingsJsonSchema = {
   items: { $ref: FINDING_JSON_SCHEMA_ID }
 } as const;
 
-export function validateFindingSchema(value: unknown, path = "$" ): SchemaValidationResult<NormalizedFinding> {
+export function validateFindingSchema(value: unknown, path = "$"): SchemaValidationResult<NormalizedFinding> {
   return validateWithZod(findingSchema as z.ZodType<NormalizedFinding>, value, {
     path,
     code: "FINDING_SCHEMA_INVALID"
   });
 }
 
-export function validateFindingsSchema(value: unknown, path = "$" ): SchemaValidationResult<NormalizedFinding[]> {
+export function validateFindingsSchema(value: unknown, path = "$"): SchemaValidationResult<NormalizedFinding[]> {
   return validateWithZod(findingsSchema as z.ZodType<NormalizedFinding[]>, value, {
     path,
     code: "FINDINGS_SCHEMA_INVALID"
