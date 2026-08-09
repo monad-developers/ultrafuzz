@@ -2635,7 +2635,8 @@ function replaceReportImplementationCoverage(contents: string, coverage: unknown
   if (!isPlainRecord(parsed)) {
     return undefined;
   }
-  const { property_implementation_coverage: _modelAuthoredCoverage, ...report } = parsed;
+  const report = { ...parsed };
+  delete report.property_implementation_coverage;
   return `${JSON.stringify({ ...report, property_implementation_coverage: coverage }, null, 2)}\n`;
 }
 
