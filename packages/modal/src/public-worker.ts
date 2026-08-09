@@ -742,7 +742,7 @@ async function preparePublicBenchmark(
   });
   if (scope.benchmark === "evmbench") {
     await materializeEvmbenchGroundTruth(
-      controlRoot,
+      cohort,
       suite.targets.map((target) => target.id),
       groundTruthRoot,
       logPath,
@@ -870,18 +870,18 @@ export function preparePublicEvalSuite(baseSuite: EvalSuiteSpec, lane: "smoke" |
 }
 
 async function materializeEvmbenchGroundTruth(
-  controlRoot: string,
+  cohort: BenchmarkCohortManifest,
   targetIds: string[],
   destination: string,
   logPath: string,
   signal: AbortSignal
 ): Promise<void> {
   throwIfAborted(signal);
-  const manifest = JSON.parse(await readFile(path.join(controlRoot, "benchmarks/evmbench-detect.json"), "utf8")) as {
-    upstream: { dataset_repository: string; dataset_revision: string };
-  };
+  if (cohort.schema_version !== "ultrafuzz.evmbench.cohort.v1") {
+    throw new Error("EVMbench ground truth requires the validated EVMbench cohort contract");
+  }
   const dataset = path.join(path.dirname(destination), "frontier-evals");
-  await cloneAtCommit(manifest.upstream.dataset_repository, manifest.upstream.dataset_revision, dataset, logPath, {
+  await cloneAtCommit(cohort.upstream.dataset_repository, cohort.upstream.dataset_revision, dataset, logPath, {
     signal
   });
   for (const targetId of targetIds) {
