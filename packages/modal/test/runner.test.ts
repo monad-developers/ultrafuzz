@@ -1209,7 +1209,64 @@ function publicCollectionLineage(): Parameters<typeof assertPublicBenchmarkBundl
   };
 }
 
+function writeCanonicalRecoveryPlan(runRoot: string, runId: string, logicalNodes: number): void {
+  fs.writeFileSync(
+    path.join(runRoot, "plan.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.run-plan.v2",
+      run_id: runId,
+      mode: "run",
+      graph_fingerprint: "a".repeat(64),
+      config_fingerprint: "b".repeat(64),
+      redacted_config_fingerprint: "c".repeat(64),
+      execution: {
+        mode: "local",
+        retentionDays: 30,
+        resources: { cpu: 1, memoryMiB: 512, timeoutSeconds: 300 },
+        nodes: {},
+        providers: {}
+      },
+      topology: { path: "topology.json", logical_nodes: logicalNodes, expanded_nodes: logicalNodes },
+      rendered_prompts: [],
+      policy_posture: {
+        config: "pass",
+        topology: "pass",
+        prompts: "pass",
+        paths: "pass",
+        agents: "pass",
+        trust: "pass"
+      }
+    })
+  );
+}
+
+function writeRecoveryProbeArtifactsModule(root: string): string {
+  const modulePath = path.join(root, "recovery-probe-artifacts.mjs");
+  fs.writeFileSync(
+    modulePath,
+    `import fs from "node:fs";
+export function readRunState(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+export function readRunPlanDocument(filePath, expectedRunId) {
+  const plan = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  if (plan.run_id !== expectedRunId) throw new Error("run plan identity mismatch");
+  return plan;
+}
+`
+  );
+  return modulePath;
+}
+
 describe("Modal canonical recovery probe", () => {
+  it("uses the pinned current artifact readers in the worker image", () => {
+    const command = modalCanonicalRecoveryProbeCommand("/data/logical-run/model-one");
+
+    expect(command.at(-1)).toBe("/opt/ultrafuzz/packages/artifacts/dist/index.js");
+    expect(command[2]).toContain("artifacts.readRunState(statePath)");
+    expect(command[2]).toContain("artifacts.readRunPlanDocument");
+  });
+
   it("reads durable transitions and completions independently of a stale mirrored status", () => {
     const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-"));
     const remoteRoot = "/data/logical-run/model-one";
@@ -1251,8 +1308,8 @@ describe("Modal canonical recovery probe", () => {
         )
       )
     );
-    fs.writeFileSync(path.join(runRoot, "plan.json"), JSON.stringify({ topology: { logical_nodes: 3 } }));
-    const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount);
+    writeCanonicalRecoveryPlan(runRoot, "durable-run", 3);
+    const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount, writeRecoveryProbeArtifactsModule(mount));
 
     expect(JSON.parse(execFileSync(command[0]!, command.slice(1), { encoding: "utf8" }))).toEqual({
       status: "running",
@@ -1264,7 +1321,7 @@ describe("Modal canonical recovery probe", () => {
     });
   });
 
-  it("treats a transient partial durable state read as unavailable canonical progress", () => {
+  it("rejects malformed present durable state instead of reporting unavailable canonical progress", () => {
     const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-partial-"));
     const remoteRoot = "/data/logical-run/model-one";
     const runRoot = path.join(
@@ -1279,10 +1336,56 @@ describe("Modal canonical recovery probe", () => {
     );
     fs.mkdirSync(runRoot, { recursive: true });
     fs.writeFileSync(path.join(runRoot, "state.json"), "\0".repeat(16));
-    fs.writeFileSync(path.join(runRoot, "plan.json"), JSON.stringify({ topology: { logical_nodes: 3 } }));
-    const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount);
+    writeCanonicalRecoveryPlan(runRoot, "durable-run", 3);
+    const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount, writeRecoveryProbeArtifactsModule(mount));
+
+    expect(() => execFileSync(command[0]!, command.slice(1), { encoding: "utf8" })).toThrow();
+  });
+
+  it("rejects malformed present durable plan instead of reporting unavailable canonical progress", () => {
+    const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-plan-"));
+    const remoteRoot = "/data/logical-run/model-one";
+    const runRoot = path.join(
+      mount,
+      "logical-run",
+      "model-one",
+      "workspace",
+      "target",
+      ".ultrafuzz",
+      "runs",
+      "durable-run"
+    );
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(runRoot, "state.json"),
+      JSON.stringify(currentRunState({}, { run_id: "durable-run", status: "running" }))
+    );
+    fs.writeFileSync(path.join(runRoot, "plan.json"), "{not-json");
+    const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount, writeRecoveryProbeArtifactsModule(mount));
+
+    expect(() => execFileSync(command[0]!, command.slice(1), { encoding: "utf8" })).toThrow();
+  });
+
+  it("reports unavailable canonical progress only when the durable run directory is absent", () => {
+    const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-absent-"));
+    const command = modalCanonicalRecoveryProbeCommand(
+      "/data/logical-run/model-one",
+      mount,
+      writeRecoveryProbeArtifactsModule(mount)
+    );
 
     expect(JSON.parse(execFileSync(command[0]!, command.slice(1), { encoding: "utf8" }))).toEqual({});
+  });
+
+  it("rejects non-ENOENT durable run discovery errors", () => {
+    const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-discovery-"));
+    const remoteRoot = "/data/logical-run/model-one";
+    const runsRoot = path.join(mount, "logical-run", "model-one", "workspace", "target", ".ultrafuzz", "runs");
+    fs.mkdirSync(path.dirname(runsRoot), { recursive: true });
+    fs.writeFileSync(runsRoot, "not-a-directory");
+    const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount, writeRecoveryProbeArtifactsModule(mount));
+
+    expect(() => execFileSync(command[0]!, command.slice(1), { encoding: "utf8" })).toThrow();
   });
 
   it("uses durable worker rows instead of topology-only nodes for strict completion", () => {

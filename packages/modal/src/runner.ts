@@ -168,6 +168,16 @@ const MODAL_GENERATION_TAG = /^[1-9][0-9]*$/u;
 const MODAL_ATTEMPT_ID_TAG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MODAL_BUILD_SCOPE_TAG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MODAL_FINGERPRINT_TAG = /^[a-f0-9]{64}$/u;
+const MODAL_ARTIFACTS_MODULE_PATH = "/opt/ultrafuzz/packages/artifacts/dist/index.js";
+const CANONICAL_RUN_STATUSES = new Set([
+  "pending",
+  "running",
+  "paused",
+  "succeeded",
+  "failed",
+  "timed-out",
+  "canceled"
+]);
 const KIMI_SHARED_CREDENTIAL_SOURCE_SHA256_SUFFIX = ".ultrafuzz-source-refresh-token.sha256";
 export const KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT = `
 const fs = require("node:fs");
@@ -2107,74 +2117,96 @@ async function inspectModalRecoveryVolume(
   }
 }
 
-export function modalCanonicalRecoveryProbeCommand(remoteRoot: string, resolvedMountRoot = "/data"): string[] {
+export function modalCanonicalRecoveryProbeCommand(
+  remoteRoot: string,
+  resolvedMountRoot = "/data",
+  artifactsModulePath = MODAL_ARTIFACTS_MODULE_PATH
+): string[] {
   const source = String.raw`
 const fs = require("node:fs");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 const root = process.argv[1];
+const artifactsModulePath = process.argv[2];
 const runsRoot = path.join(root, "workspace", "target", ".ultrafuzz", "runs");
 function unavailable() {
   process.stdout.write("{}");
   process.exit(0);
 }
-function readJson(file) {
+function isNotFound(error) {
+  let current = error;
+  for (let depth = 0; depth < 8 && current !== null && typeof current === "object"; depth += 1) {
+    if (current.code === "ENOENT") return true;
+    current = current.cause;
+  }
+  return false;
+}
+function readRequired(reader) {
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    unavailable();
+    return reader();
+  } catch (error) {
+    if (isNotFound(error)) unavailable();
+    throw error;
   }
 }
-let candidates = [];
-try {
-  for (const name of fs.readdirSync(runsRoot)) {
-    const statePath = path.join(runsRoot, name, "state.json");
-    try {
-      candidates.push({ statePath, modified: fs.statSync(statePath).mtimeMs });
-    } catch {}
+async function main() {
+  let candidates = [];
+  try {
+    for (const name of fs.readdirSync(runsRoot)) {
+      const statePath = path.join(runsRoot, name, "state.json");
+      try {
+        candidates.push({ statePath, modified: fs.statSync(statePath).mtimeMs });
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+      }
+    }
+  } catch (error) {
+    if (isNotFound(error)) unavailable();
+    throw error;
   }
-} catch {}
-if (candidates.length === 0) {
-  process.stdout.write("{}");
-  process.exit(0);
+  if (candidates.length === 0) unavailable();
+  candidates.sort((left, right) => right.modified - left.modified);
+  const statePath = candidates[0].statePath;
+  const artifacts = await import(pathToFileURL(artifactsModulePath).href);
+  if (typeof artifacts.readRunState !== "function" || typeof artifacts.readRunPlanDocument !== "function") {
+    throw new Error("canonical artifact readers are unavailable");
+  }
+  const state = readRequired(() => artifacts.readRunState(statePath));
+  const plan = readRequired(() => artifacts.readRunPlanDocument(path.join(path.dirname(statePath), "plan.json"), state.run_id));
+  const successful = new Set(["succeeded", "reused-from-prior-run"]);
+  const logical = new Map();
+  for (const node of Object.values(state.nodes)) {
+    const logicalId = node.logical_node_id === undefined ? node.node_id : node.logical_node_id;
+    const group = logical.get(logicalId) || [];
+    group.push(node);
+    logical.set(logicalId, group);
+  }
+  const successfulNodes = Array.from(logical.values()).filter((group) =>
+    group.every((node) => successful.has(node.status))
+  );
+  const lastSuccessAt = successfulNodes
+    .flat()
+    .map((node) => node.finished_at)
+    .filter((value) => value !== undefined)
+    .sort((left, right) => Date.parse(left) - Date.parse(right))
+    .at(-1);
+  process.stdout.write(JSON.stringify({
+    status: state.status,
+    successful_nodes: successfulNodes.length,
+    total_nodes: logical.size,
+    planned_nodes: plan.topology.logical_nodes,
+    last_transition_at: state.last_transition_at,
+    ...(lastSuccessAt === undefined ? {} : { last_success_at: lastSuccessAt })
+  }));
 }
-candidates.sort((left, right) => right.modified - left.modified);
-const statePath = candidates[0].statePath;
-const state = readJson(statePath);
-const plan = readJson(path.join(path.dirname(statePath), "plan.json"));
-const nodes = state && typeof state.nodes === "object" && state.nodes !== null ? Object.values(state.nodes) : [];
-const successful = new Set(["succeeded", "reused-from-prior-run"]);
-const logical = new Map();
-for (const node of nodes) {
-  if (!node || typeof node !== "object" || typeof node.status !== "string") continue;
-  const logicalId =
-    typeof node.logical_id === "string" && node.logical_id.trim()
-      ? node.logical_id
-      : typeof node.logical_node_id === "string" && node.logical_node_id.trim()
-        ? node.logical_node_id
-        : typeof node.node_id === "string" && node.node_id.trim()
-          ? node.node_id
-          : undefined;
-  if (logicalId === undefined) continue;
-  const group = logical.get(logicalId) || [];
-  group.push(node);
-  logical.set(logicalId, group);
-}
-const successfulNodes = Array.from(logical.values()).filter((group) => group.every((node) => successful.has(node.status)));
-const lastSuccessAt = successfulNodes
-  .flat()
-  .map((node) => node.finished_at)
-  .filter((value) => typeof value === "string" && Number.isFinite(Date.parse(value)))
-  .sort()
-  .at(-1);
-process.stdout.write(JSON.stringify({
-  status: typeof state.status === "string" ? state.status : "unknown",
-  successful_nodes: successfulNodes.length,
-  total_nodes: logical.size,
-  planned_nodes: Number.isSafeInteger(plan?.topology?.logical_nodes) ? plan.topology.logical_nodes : -1,
-  last_transition_at: typeof state.last_transition_at === "string" ? state.last_transition_at : state.created_at,
-  ...(lastSuccessAt === undefined ? {} : { last_success_at: lastSuccessAt })
-}));`;
-  return ["node", "-e", source, resolvePersistentRemoteRoot(remoteRoot, resolvedMountRoot)];
+void main();`;
+  return [
+    "node",
+    "-e",
+    source,
+    resolvePersistentRemoteRoot(remoteRoot, resolvedMountRoot),
+    path.resolve(artifactsModulePath)
+  ];
 }
 
 export function isModalRecoveryResultComplete(
@@ -2190,14 +2222,29 @@ export function isModalRecoveryResultComplete(
 
 function parseCanonicalRecoveryProgress(value: unknown): ModalRecoveryCanonicalProgress | undefined {
   const record = recoveryRecord(value);
+  if (record !== undefined && Object.keys(record).length === 0) return undefined;
+  const allowedKeys = new Set([
+    "status",
+    "successful_nodes",
+    "total_nodes",
+    "planned_nodes",
+    "last_transition_at",
+    "last_success_at"
+  ]);
+  const keys = record === undefined ? [] : Object.keys(record);
   const status = recoveryString(record, "status");
   const successfulNodes = recoveryCount(record, "successful_nodes");
   const totalNodes = recoveryCount(record, "total_nodes");
   const plannedNodes = recoveryCount(record, "planned_nodes");
   const lastTransitionAt = recoveryString(record, "last_transition_at");
   const lastSuccessAt = recoveryString(record, "last_success_at");
+  const hasLastSuccessAt = record !== undefined && Object.prototype.hasOwnProperty.call(record, "last_success_at");
   if (
+    record === undefined ||
+    keys.some((key) => !allowedKeys.has(key)) ||
+    keys.length !== (hasLastSuccessAt ? 6 : 5) ||
     status === undefined ||
+    !CANONICAL_RUN_STATUSES.has(status) ||
     successfulNodes === undefined ||
     totalNodes === undefined ||
     plannedNodes === undefined ||
@@ -2206,9 +2253,9 @@ function parseCanonicalRecoveryProgress(value: unknown): ModalRecoveryCanonicalP
     totalNodes > plannedNodes ||
     lastTransitionAt === undefined ||
     !Number.isFinite(Date.parse(lastTransitionAt)) ||
-    (lastSuccessAt !== undefined && !Number.isFinite(Date.parse(lastSuccessAt)))
+    (hasLastSuccessAt && (lastSuccessAt === undefined || !Number.isFinite(Date.parse(lastSuccessAt))))
   ) {
-    return undefined;
+    throw new Error("canonical recovery probe returned invalid progress evidence");
   }
   return {
     status,
