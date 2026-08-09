@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  artifactSchemaRegistry,
   createStrictAjv,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
@@ -15,7 +16,8 @@ import {
 
 type EvalAjv = ReturnType<typeof createStrictAjv>;
 
-export const EVAL_COMMON_SCHEMA_ID = "urn:ultrafuzz:schema:evals:common:1" as const;
+export const EVAL_COMMON_SCHEMA_ID = "urn:ultrafuzz:schema:evals:common:2" as const;
+export const EVAL_SUITE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:suite:2" as const;
 export const EVAL_ADJUDICATION_HANDOFF_SCHEMA_ID = "urn:ultrafuzz:schema:evals:adjudication-handoff:1" as const;
 export const EVAL_FINDING_MANIFEST_SCHEMA_ID = "urn:ultrafuzz:schema:evals:finding-manifest:1" as const;
 export const EVAL_INSTANCE_CLUSTERS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:instance-clusters:1" as const;
@@ -25,13 +27,13 @@ export const EVAL_BENCHMARK_SOURCE_MANIFEST_SCHEMA_ID =
   "urn:ultrafuzz:schema:evals:benchmark-source-manifest:1" as const;
 export const EVAL_BENCHMARK_ANALYSIS_MANIFEST_SCHEMA_ID =
   "urn:ultrafuzz:schema:evals:benchmark-analysis-manifest:1" as const;
-export const EVAL_RUN_MANIFEST_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-manifest:2" as const;
-export const EVAL_MATRIX_SCHEMA_ID = "urn:ultrafuzz:schema:evals:matrix:1" as const;
-export const EVAL_RUN_RECORD_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-record:2" as const;
-export const EVAL_RUN_SUMMARY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-summary:1" as const;
+export const EVAL_RUN_MANIFEST_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-manifest:3" as const;
+export const EVAL_MATRIX_SCHEMA_ID = "urn:ultrafuzz:schema:evals:matrix:2" as const;
+export const EVAL_RUN_RECORD_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-record:3" as const;
+export const EVAL_RUN_SUMMARY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-summary:2" as const;
 export const EVAL_FINDING_SCORE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:finding-score:1" as const;
 export const EVAL_SCORE_SUMMARY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:score-summary:1" as const;
-export const EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID = "urn:ultrafuzz:schema:evals:review-queue-item:1" as const;
+export const EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID = "urn:ultrafuzz:schema:evals:review-queue-item:2" as const;
 export const EVAL_PUBLICATION_STATE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:publication-state:1" as const;
 export const EVAL_TELEMETRY_CURSOR_SCHEMA_ID = "urn:ultrafuzz:schema:evals:telemetry-cursor:1" as const;
 
@@ -117,6 +119,11 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
       "eval-recovery-equivalence-coupling"
     ]
   },
+  "eval-suite.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalSuiteJsonSchema",
+    semanticGates: []
+  },
   "finding-manifest.schema.json": {
     role: "runtime-state",
     typescriptExport: "evalFindingManifestJsonSchema",
@@ -178,6 +185,7 @@ export const evalRunManifestJsonSchema = loadSchemaDocument("eval-run-manifest.s
 export const evalRunRecordJsonSchema = loadSchemaDocument("eval-run-record.schema.json");
 export const evalRunSummaryJsonSchema = loadSchemaDocument("eval-run-summary.schema.json");
 export const evalScoreSummaryJsonSchema = loadSchemaDocument("eval-score-summary.schema.json");
+export const evalSuiteJsonSchema = loadSchemaDocument("eval-suite.schema.json");
 export const evalTelemetryCursorJsonSchema = loadSchemaDocument("telemetry-cursor.schema.json");
 
 export const EVAL_SCHEMA_EXPORTS = Object.freeze({
@@ -197,6 +205,7 @@ export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalRunRecordJsonSchema,
   evalRunSummaryJsonSchema,
   evalScoreSummaryJsonSchema,
+  evalSuiteJsonSchema,
   evalTelemetryCursorJsonSchema
 });
 
@@ -214,6 +223,7 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "eval-run-record.schema.json": evalRunRecordJsonSchema,
   "eval-run-summary.schema.json": evalRunSummaryJsonSchema,
   "eval-score-summary.schema.json": evalScoreSummaryJsonSchema,
+  "eval-suite.schema.json": evalSuiteJsonSchema,
   "finding-manifest.schema.json": evalFindingManifestJsonSchema,
   "ground-truth-credits.schema.json": evalGroundTruthCreditsJsonSchema,
   "instance-clusters.schema.json": evalInstanceClustersJsonSchema,
@@ -304,6 +314,11 @@ function evalValidator(): EvalAjv {
 
 function compileRegistry(registry: readonly SchemaRegistryEntry[]): EvalAjv {
   const validator = createStrictAjv();
+  const findingDependency = artifactSchemaRegistry().find(
+    (entry) => entry.id === "urn:ultrafuzz:schema:artifacts:finding:2"
+  );
+  if (findingDependency === undefined) throw new Error("canonical finding schema dependency is unavailable");
+  validator.addSchema(structuredClone(findingDependency.schema), findingDependency.id);
   for (const entry of registry) validator.addSchema(structuredClone(entry.schema), entry.id);
   for (const entry of registry) {
     if (validator.getSchema(entry.id) === undefined) throw new Error(`failed to compile eval schema ${entry.id}`);

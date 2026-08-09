@@ -5,7 +5,9 @@ import {
   assertRegularFileInside,
   parseStrictJson,
   readRegularFileSnapshot,
-  validateArtifactContractBytes
+  validateArtifactContractBytes,
+  validateFindingSchema,
+  type NormalizedFinding
 } from "@ultrafuzz/artifacts";
 import { z } from "zod/v4";
 
@@ -739,6 +741,7 @@ async function scoreFindings(input: {
         }
       }
     } else if (match.judge_result.classification === "needs-human-review") {
+      const reviewFinding = validatedReviewFinding(finding, index);
       reviewQueue.push({
         schema_version: EVAL_REVIEW_QUEUE_ITEM_SCHEMA_VERSION,
         target_id: input.row.target_id,
@@ -746,7 +749,7 @@ async function scoreFindings(input: {
         trial_id: input.row.trial_id,
         ...(input.record.ultrafuzz_run_id !== undefined ? { ultrafuzz_run_id: input.record.ultrafuzz_run_id } : {}),
         workflow_ids: input.record.workflow_ids,
-        finding,
+        finding: reviewFinding,
         report_path: input.reportPath,
         deterministic_match: match.deterministic_match,
         judge_result: match.judge_result,
@@ -1192,6 +1195,17 @@ function readReport(filePath: string): { schemaValid: boolean; findings: unknown
     });
   }
   return { schemaValid: true, findings: validation.value.issues as unknown[] };
+}
+
+function validatedReviewFinding(value: unknown, index: number): NormalizedFinding {
+  const validation = validateFindingSchema(value, `$[${index}]`);
+  if (!validation.ok || validation.value === undefined) {
+    throw new EvalError("EVAL_REVIEW_FINDING_INVALID", "human-review findings must satisfy ultrafuzz.finding.v2", {
+      finding_index: index,
+      issues: validation.issues.map((issue) => ({ code: issue.code, path: issue.path }))
+    });
+  }
+  return validation.value;
 }
 
 function summarizeVariants(rows: EvalRowScore[]): EvalVariantScoreSummary[] {

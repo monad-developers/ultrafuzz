@@ -5,10 +5,12 @@ import { assertRegularFileInside } from "@ultrafuzz/artifacts";
 import { parse } from "yaml";
 import { z } from "zod/v4";
 
+import { EVAL_SUITE_SCHEMA_ID, validateEvalJsonSchema } from "./eval-schema-registry.js";
 import {
   EVAL_SPEC_SCHEMA_VERSION,
   type EvalJudgePanelConfig,
   type EvalMatrixRow,
+  type EvalOperatorJsonValue,
   type EvalPlanValue,
   type EvalRecoveryEquivalencePolicy,
   type EvalReportingPolicy,
@@ -18,7 +20,6 @@ import {
 } from "./types.js";
 import {
   EvalError,
-  assertExistingDirectory,
   assertExistingFile,
   assertExternalPath,
   assertSafeEvalId,
@@ -30,107 +31,175 @@ import {
 export const DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60;
 export const DEFAULT_ARTIFACT_INCLUDE = ["report.md", "report.json"];
 export const DEFAULT_ARTIFACT_MAX_FILE_BYTES = 5_000_000;
+export const DEFAULT_RECALL_THRESHOLD = 0.7;
 
-const nonEmptyString = z.string().min(1);
+export const EVAL_WORKFLOW_INPUT_RESERVED_KEYS = [
+  "benchmark_execution",
+  "benchmark_lane",
+  "excluded_strategy_families",
+  "target_frameworks",
+  "ultrafuzz_eval"
+] as const;
 
-const modelProfileSchema = z.looseObject({
+const reservedWorkflowInputKeys = new Set<string>(EVAL_WORKFLOW_INPUT_RESERVED_KEYS);
+const nonEmptyString = z.string().min(1).regex(/\S/u);
+const positiveInteger = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
+const nonNegativeInteger = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+const unitMetric = z.number().min(0).max(1);
+const uniqueNonEmptyStrings = z.array(nonEmptyString).refine((values) => new Set(values).size === values.length, {
+  message: "values must be unique"
+});
+
+const modelProfileSchema = z.strictObject({
   agent: nonEmptyString,
   model: nonEmptyString.optional(),
   reasoning: nonEmptyString.optional(),
-  timeout_seconds: z.number().int().positive().optional(),
-  config: z.union([z.array(nonEmptyString), z.record(nonEmptyString, z.unknown())]).optional()
+  timeout_seconds: positiveInteger.optional()
 });
 
-const targetSchema = z.looseObject({
+const targetSchema = z.strictObject({
   id: nonEmptyString,
   repo: nonEmptyString,
   ref: nonEmptyString,
   path: nonEmptyString.optional(),
   signal_profile: nonEmptyString.optional(),
   ground_truth: nonEmptyString,
-  sensitivity: nonEmptyString.optional()
+  sensitivity: z.enum(["public", "private"]).optional()
 });
 
-const variantSchema = z.looseObject({
+const operatorJsonValueSchema: z.ZodType<EvalOperatorJsonValue> = z.lazy(() =>
+  z.union([
+    z.null(),
+    z.boolean(),
+    z.number(),
+    z.string(),
+    z.array(operatorJsonValueSchema),
+    z.record(nonEmptyString, operatorJsonValueSchema)
+  ])
+);
+
+const operatorWorkflowInputSchema = z
+  .record(nonEmptyString, operatorJsonValueSchema)
+  .superRefine((value, context) => {
+    for (const key of Object.keys(value)) {
+      if (reservedWorkflowInputKeys.has(key)) {
+        context.addIssue({
+          code: "custom",
+          path: [key],
+          message: `operator workflow input cannot use reserved key ${key}`
+        });
+      }
+    }
+  });
+
+const benchmarkExecutionSchema = z.strictObject({
+  strategy_loops: positiveInteger,
+  excluded_node_ids: uniqueNonEmptyStrings
+});
+
+const benchmarkStrategyFamily = z.enum(["stateful-invariant", "differential", "dynamic-strategy"]);
+const benchmarkStrategyId = z.enum([
+  "time-warp-sequences",
+  "external-dependency-boundaries",
+  "externalized-state-accounting",
+  "lifecycle-view-boundaries"
+]);
+const targetFrameworksSchema = z
+  .record(nonEmptyString, nonEmptyString)
+  .refine((value) => Object.keys(value).length > 0, { message: "target frameworks cannot be empty" });
+
+const privateBenchmarkWorkflowInputSchema = z.strictObject({
+  benchmark_execution: benchmarkExecutionSchema
+});
+
+const publicFullBenchmarkWorkflowInputSchema = z.strictObject({
+  benchmark_lane: z.literal("full"),
+  target_frameworks: targetFrameworksSchema,
+  excluded_strategy_families: z.array(benchmarkStrategyFamily).max(0),
+  benchmark_execution: z.strictObject({
+    strategy_loops: z.literal(1),
+    excluded_node_ids: uniqueNonEmptyStrings.max(0)
+  })
+});
+
+const publicSmokeBenchmarkWorkflowInputSchema = z.strictObject({
+  benchmark_lane: z.literal("smoke"),
+  target_frameworks: targetFrameworksSchema,
+  excluded_strategy_families: z
+    .array(benchmarkStrategyFamily)
+    .length(3)
+    .refine((values) => new Set(values).size === values.length, { message: "strategy families must be unique" }),
+  benchmark_execution: z.strictObject({
+    workflow_profile: z.literal("smoke-benchmark-v1"),
+    selected_strategy_ids: z
+      .array(benchmarkStrategyId)
+      .length(4)
+      .refine((values) => new Set(values).size === values.length, { message: "strategy IDs must be unique" }),
+    strategy_loops: z.literal(1),
+    excluded_node_ids: uniqueNonEmptyStrings.max(0)
+  })
+});
+
+export const evalWorkflowInputSchema = z.union([
+  privateBenchmarkWorkflowInputSchema,
+  publicFullBenchmarkWorkflowInputSchema,
+  publicSmokeBenchmarkWorkflowInputSchema,
+  operatorWorkflowInputSchema
+]);
+
+const variantSchema = z.strictObject({
   id: nonEmptyString,
   topology: nonEmptyString.optional(),
-  prompts: nonEmptyString.optional(),
-  prompt_overlays: z.array(nonEmptyString).optional(),
-  model_profiles: z.array(nonEmptyString).optional(),
-  workflow_input: z.unknown().optional(),
+  workflow_input: evalWorkflowInputSchema.optional(),
   runner_model_profile: nonEmptyString.optional(),
   judge_model_profile: nonEmptyString.optional()
 });
 
-const judgePanelSchema = z
-  .looseObject({
-    total: z.number().int().positive(),
-    quorum: z.number().int().positive()
-  })
-  .superRefine((panel, context) => {
-    if (panel.quorum > panel.total) {
-      context.addIssue({
-        code: "custom",
-        path: ["quorum"],
-        message: "judge panel quorum must be at most total"
-      });
-    }
-    if (panel.quorum * 2 <= panel.total) {
-      context.addIssue({
-        code: "custom",
-        path: ["quorum"],
-        message: "judge panel quorum must be a strict majority"
-      });
-    }
-  });
-
-const reportingSchema = z.looseObject({
-  node_telemetry: z.boolean().default(true),
-  heartbeat_interval_seconds: z.number().int().positive().default(DEFAULT_HEARTBEAT_INTERVAL_SECONDS),
-  experiment_prefix: nonEmptyString.optional(),
-  artifacts: z
-    .looseObject({
-      mode: z.enum(["manifest-only", "upload"]).optional(),
-      include: z.array(nonEmptyString).default(DEFAULT_ARTIFACT_INCLUDE),
-      max_file_bytes: z.number().int().positive().default(DEFAULT_ARTIFACT_MAX_FILE_BYTES)
-    })
-    .default({ include: DEFAULT_ARTIFACT_INCLUDE, max_file_bytes: DEFAULT_ARTIFACT_MAX_FILE_BYTES })
+const judgePanelSchema = z.strictObject({
+  total: positiveInteger,
+  quorum: positiveInteger
 });
 
-const recoveryEquivalenceSchema = z
-  .strictObject({
-    max_repeated_model_executions: z.number().int().nonnegative().default(0),
-    aggregate_non_comparable: z.enum(["include", "exclude", "separate"]).default("include"),
-    publication: z.enum(["clean", "comparable"]).default("comparable")
-  })
-  .default({
-    max_repeated_model_executions: 0,
-    aggregate_non_comparable: "include",
-    publication: "comparable"
-  });
+const reportingInputSchema = z.strictObject({
+  node_telemetry: z.boolean().optional(),
+  heartbeat_interval_seconds: positiveInteger.optional(),
+  experiment_prefix: nonEmptyString.optional(),
+  artifacts: z
+    .strictObject({
+      mode: z.enum(["manifest-only", "upload"]).optional(),
+      include: uniqueNonEmptyStrings.optional(),
+      max_file_bytes: positiveInteger.optional()
+    })
+    .optional()
+});
 
-const suiteSchema = z.looseObject({
+const recoveryEquivalenceInputSchema = z.strictObject({
+  max_repeated_model_executions: nonNegativeInteger.optional(),
+  aggregate_non_comparable: z.enum(["include", "exclude", "separate"]).optional(),
+  publication: z.enum(["clean", "comparable"]).optional()
+});
+
+export const evalSuiteInputSchema = z.strictObject({
   schema_version: z.literal(EVAL_SPEC_SCHEMA_VERSION),
   suite: nonEmptyString,
-  ground_truth_root: nonEmptyString.optional(),
-  model_profiles: z.record(nonEmptyString, modelProfileSchema),
+  model_profiles: z
+    .record(nonEmptyString, modelProfileSchema)
+    .refine((value) => Object.keys(value).length > 0, { message: "model profiles cannot be empty" }),
   targets: z.array(targetSchema).min(1),
   variants: z.array(variantSchema).min(1),
-  run: z.looseObject({
+  run: z.strictObject({
     runner_model_profile: nonEmptyString,
     judge_model_profile: nonEmptyString,
-    trials_per_variant: z.number().int().positive(),
-    max_parallel_targets: z.number().int().positive().optional(),
-    max_parallel_runs: z.number().int().positive().optional()
+    trials_per_variant: positiveInteger,
+    max_parallel_targets: positiveInteger.optional(),
+    max_parallel_runs: positiveInteger.optional()
   }),
   judge_panel: judgePanelSchema.optional(),
-  metrics: z.looseObject({
-    primary: z.array(nonEmptyString).default(["precision", "recall", "f1_score"]),
-    recall_threshold: z.number().min(0).max(1).default(0.7),
-    secondary: z.array(nonEmptyString).default([])
+  metrics: z.strictObject({
+    recall_threshold: unitMetric.optional()
   }),
-  recovery_equivalence: recoveryEquivalenceSchema,
-  reporting: reportingSchema.optional()
+  recovery_equivalence: recoveryEquivalenceInputSchema.optional(),
+  reporting: reportingInputSchema.optional()
 });
 
 export const DEFAULT_EVAL_JUDGE_PANEL = { total: 3, quorum: 2 } as const satisfies EvalJudgePanelConfig;
@@ -205,26 +274,70 @@ export function loadEvalSuite(input: Pick<PlanEvalSuiteInput, "projectRoot" | "s
       reason: error instanceof Error ? error.message : String(error)
     });
   }
-  const result = suiteSchema.safeParse(parsed);
-  if (!result.success) {
+  const canonical = validateEvalJsonSchema(EVAL_SUITE_SCHEMA_ID, parsed);
+  if (!canonical.ok) {
     throw new EvalError("EVAL_SUITE_INVALID", `eval suite ${suitePath} failed schema validation`, {
       path: suitePath,
-      issues: result.error.issues.map((issue) => ({
+      issues: canonical.issues.map((issue) => ({ path: issue.instancePath, message: issue.message }))
+    });
+  }
+  const parsedWithZod = evalSuiteInputSchema.safeParse(parsed);
+  if (!parsedWithZod.success) {
+    throw new EvalError("EVAL_SUITE_SCHEMA_PARITY", "canonical eval suite schema and retained Zod parser disagree", {
+      path: suitePath,
+      issues: parsedWithZod.error.issues.map((issue) => ({
         path: issue.path.join("."),
         message: issue.message
       }))
     });
   }
-  const data = result.data;
-  const suite: EvalSuiteSpec = {
-    ...(data as unknown as Omit<EvalSuiteSpec, "reporting">),
+  validateSuiteInputSemantics(parsedWithZod.data, suitePath);
+  return { suitePath, suite: normalizeSuiteInput(parsedWithZod.data) };
+}
+
+type EvalSuiteInput = z.infer<typeof evalSuiteInputSchema>;
+
+function validateSuiteInputSemantics(data: EvalSuiteInput, suitePath: string): void {
+  if (data.judge_panel === undefined) return;
+  const panel = data.judge_panel;
+  if (panel.quorum > panel.total || panel.quorum * 2 <= panel.total) {
+    throw new EvalError("EVAL_SUITE_INVALID", `eval suite ${suitePath} failed semantic validation`, {
+      path: suitePath,
+      issues: [
+        {
+          path: "$.judge_panel.quorum",
+          message:
+            panel.quorum > panel.total
+              ? "judge panel quorum must be at most total"
+              : "judge panel quorum must be a strict majority"
+        }
+      ]
+    });
+  }
+}
+
+function normalizeSuiteInput(data: EvalSuiteInput): EvalSuiteSpec {
+  const recovery = data.recovery_equivalence;
+  return {
+    schema_version: data.schema_version,
+    suite: data.suite,
+    model_profiles: data.model_profiles,
+    targets: data.targets,
+    variants: data.variants,
+    run: data.run,
+    ...(data.judge_panel === undefined ? {} : { judge_panel: data.judge_panel }),
+    metrics: { recall_threshold: data.metrics.recall_threshold ?? DEFAULT_RECALL_THRESHOLD },
+    recovery_equivalence: {
+      max_repeated_model_executions: recovery?.max_repeated_model_executions ?? 0,
+      aggregate_non_comparable: recovery?.aggregate_non_comparable ?? "include",
+      publication: recovery?.publication ?? "comparable"
+    },
     reporting: normalizeReporting(data.reporting, data.targets)
   };
-  return { suitePath, suite };
 }
 
 function normalizeReporting(
-  reporting: z.infer<typeof reportingSchema> | undefined,
+  reporting: z.infer<typeof reportingInputSchema> | undefined,
   targets: Array<{ sensitivity?: string }>
 ): EvalReportingPolicy {
   const artifacts = reporting?.artifacts;
@@ -265,12 +378,6 @@ export function planEvalSuite(input: PlanEvalSuiteInput): EvalPlanValue {
   for (const variant of variants) {
     if (variant.topology_path !== undefined) {
       assertExistingFile(variant.topology_path, `variant ${variant.id} topology`);
-    }
-    if (variant.prompts_path !== undefined) {
-      assertExistingDirectory(variant.prompts_path, `variant ${variant.id} prompts`);
-    }
-    for (const overlay of variant.prompt_overlay_paths) {
-      assertExistingDirectory(overlay, `variant ${variant.id} prompt overlay`);
     }
   }
 
@@ -363,7 +470,6 @@ function validateModelProfiles(suite: EvalSuiteSpec): void {
   }
   for (const variant of suite.variants) {
     for (const id of [
-      ...(variant.model_profiles ?? []),
       ...(variant.runner_model_profile ? [variant.runner_model_profile] : []),
       ...(variant.judge_model_profile ? [variant.judge_model_profile] : [])
     ]) {
@@ -397,9 +503,7 @@ function resolveTarget(
 function resolveVariant(projectRoot: string, variant: EvalSuiteSpec["variants"][number]): ResolvedEvalVariant {
   return {
     ...variant,
-    ...(variant.topology ? { topology_path: resolveProjectPath(projectRoot, variant.topology) } : {}),
-    ...(variant.prompts ? { prompts_path: resolveProjectPath(projectRoot, variant.prompts) } : {}),
-    prompt_overlay_paths: (variant.prompt_overlays ?? []).map((overlay) => resolveProjectPath(projectRoot, overlay))
+    ...(variant.topology ? { topology_path: resolveProjectPath(projectRoot, variant.topology) } : {})
   };
 }
 

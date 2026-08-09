@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { schemaRegistryBundleDigest } from "@ultrafuzz/artifacts";
+import { artifactSchemaRegistry, schemaRegistryBundleDigest } from "@ultrafuzz/artifacts";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sourceSchemaRoot = path.join(packageRoot, "schema");
@@ -43,7 +43,10 @@ assert.deepStrictEqual(
   "eval schema metadata must name every TypeScript schema export exactly once"
 );
 
-const registryIds = new Set(registry.map((entry) => entry.id));
+const registryIds = new Set([
+  ...registry.map((entry) => entry.id),
+  ...artifactSchemaRegistry().map((entry) => entry.id)
+]);
 assert.strictEqual(registryIds.size, registry.length, "eval schema IDs must be unique");
 
 for (const entry of registry) {

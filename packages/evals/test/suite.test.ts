@@ -9,7 +9,7 @@ import { DEFAULT_EVAL_JUDGE_PANEL, loadEvalSuite, planEvalSuite, resolveJudgePan
 import { EvalError } from "../src/utils.js";
 
 const SUITE_YAML = `
-schema_version: ultrafuzz.eval.v1
+schema_version: ultrafuzz.eval.v2
 suite: bug-finding-regression
 
 model_profiles:
@@ -39,7 +39,6 @@ run:
   max_parallel_runs: 8
 
 metrics:
-  primary: [precision, recall, f1_score]
   recall_threshold: 0.7
 
 recovery_equivalence:

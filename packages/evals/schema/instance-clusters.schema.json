@@ -37,7 +37,7 @@
       ],
       "properties": {
         "rowId": { "$ref": "#/$defs/safeId" },
-        "issueIndex": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonNegativeInteger" },
+        "issueIndex": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonNegativeInteger" },
         "findingInstanceId": { "$ref": "#/$defs/safeId" },
         "stableIssueId": { "$ref": "#/$defs/safeId" },
         "rootCauseClusterId": { "$ref": "#/$defs/safeId" },

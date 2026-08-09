@@ -17,7 +17,7 @@
     "schema_version": { "const": "ultrafuzz.eval.benchmark-analysis-manifest.v1" },
     "privacy": { "const": "private-analysis-output-do-not-commit" },
     "command": { "enum": ["upset", "scores", "provenance", "table", "cost", "pairwise", "all"] },
-    "source_archive": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonEmptyString" },
+    "source_archive": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonEmptyString" },
     "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "handoff_schema_version": { "const": "ultrafuzz.eval.adjudication-handoff.v1" },
     "artifacts": {
@@ -38,7 +38,7 @@
           "minLength": 1,
           "pattern": "^[^/\\\\\\u0000]+$"
         },
-        "size_bytes": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonNegativeInteger" },
+        "size_bytes": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonNegativeInteger" },
         "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
       }
     }

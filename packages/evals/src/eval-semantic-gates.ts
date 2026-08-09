@@ -740,17 +740,6 @@ function runManifestSuiteJoins(value: unknown): EvalSemanticGateIssue[] {
         );
       }
     }
-    for (const [profileIndex, profile] of (variant.model_profiles ?? []).entries()) {
-      if (!profiles.has(profile)) {
-        issues.push(
-          issue(
-            "eval-run-manifest-suite-joins",
-            `$.suite.variants[${index}].model_profiles[${profileIndex}]`,
-            `unknown model profile ${JSON.stringify(profile)}`
-          )
-        );
-      }
-    }
   });
   if (
     suite.judge_panel !== undefined &&

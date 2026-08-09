@@ -861,7 +861,7 @@ function runSummary(launched: number): EvalRunSummary {
 
 function runSummaryFromRecords(records: EvalRunRecord[]): EvalRunSummary {
   return {
-    schema_version: "ultrafuzz.eval.run-summary.v1",
+    schema_version: "ultrafuzz.eval.run-summary.v2",
     eval_run_id: "eval-public-evidence",
     launched: records.filter((record) => record.status === "launched").length,
     failed: records.filter((record) => record.status === "failed").length,
@@ -922,7 +922,7 @@ function runRecordBase(
   rowId: string
 ): Pick<EvalRunRecord, "schema_version" | "eval_run_id" | "row_id" | "target_id" | "variant_id" | "trial_id"> {
   return {
-    schema_version: "ultrafuzz.eval.run.v2",
+    schema_version: "ultrafuzz.eval.run.v3",
     eval_run_id: "eval-public-evidence",
     row_id: rowId,
     target_id: rowId,

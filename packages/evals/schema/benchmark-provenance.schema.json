@@ -34,9 +34,9 @@
     }
   },
   "$defs": {
-    "nonEmptyString": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonEmptyString" },
+    "nonEmptyString": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonEmptyString" },
     "nonNegativeInteger": {
-      "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonNegativeInteger"
+      "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonNegativeInteger"
     },
     "severity": { "enum": ["H", "M", "L"] },
     "classification": { "enum": ["true-positive", "false-positive", "needs-human-review"] },

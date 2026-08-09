@@ -432,7 +432,7 @@ function record(rowId: string, runId: string, runRoot: string): Record<string, u
 function failedRecord(rowId: string): Record<string, unknown> {
   const row = privateRow(rowId);
   return {
-    schema_version: "ultrafuzz.eval.run.v2",
+    schema_version: "ultrafuzz.eval.run.v3",
     eval_run_id: EVAL_RUN_ID,
     row_id: row.id,
     target_id: row.target_id,

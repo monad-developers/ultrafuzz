@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:evals:common:1",
+  "$id": "urn:ultrafuzz:schema:evals:common:2",
   "$defs": {
     "nonEmptyString": {
       "type": "string",
@@ -34,7 +34,8 @@
       "type": "string",
       "pattern": "^(?:sha256:)?[0-9a-f]{64}$"
     },
-    "jsonValue": {
+    "operatorJsonValue": {
+      "$comment": "Intentionally opaque operator-owned JSON. This recursive seam is used only below `operatorWorkflowInput`; eval-owned keys and all other eval contracts remain closed.",
       "oneOf": [
         { "type": "null" },
         { "type": "boolean" },
@@ -42,12 +43,12 @@
         { "type": "string" },
         {
           "type": "array",
-          "items": { "$ref": "#/$defs/jsonValue" }
+          "items": { "$ref": "#/$defs/operatorJsonValue" }
         },
         {
           "type": "object",
           "propertyNames": { "minLength": 1 },
-          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+          "additionalProperties": { "$ref": "#/$defs/operatorJsonValue" }
         }
       ]
     },
@@ -70,12 +71,7 @@
         "message": { "$ref": "#/$defs/nonEmptyString" },
         "severity": { "enum": ["error", "warning", "info"] },
         "source": { "$ref": "#/$defs/nonEmptyString" },
-        "path": { "$ref": "#/$defs/nonEmptyString" },
-        "details": {
-          "type": "object",
-          "propertyNames": { "minLength": 1 },
-          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
-        }
+        "path": { "$ref": "#/$defs/nonEmptyString" }
       }
     },
     "modelProfile": {
@@ -86,20 +82,7 @@
         "agent": { "$ref": "#/$defs/nonEmptyString" },
         "model": { "$ref": "#/$defs/nonEmptyString" },
         "reasoning": { "$ref": "#/$defs/nonEmptyString" },
-        "timeout_seconds": { "$ref": "#/$defs/positiveInteger" },
-        "config": {
-          "oneOf": [
-            {
-              "type": "array",
-              "items": { "$ref": "#/$defs/nonEmptyString" }
-            },
-            {
-              "type": "object",
-              "propertyNames": { "minLength": 1 },
-              "additionalProperties": { "$ref": "#/$defs/jsonValue" }
-            }
-          ]
-        }
+        "timeout_seconds": { "$ref": "#/$defs/positiveInteger" }
       }
     },
     "target": {
@@ -113,7 +96,7 @@
         "path": { "$ref": "#/$defs/nonEmptyString" },
         "signal_profile": { "$ref": "#/$defs/nonEmptyString" },
         "ground_truth": { "$ref": "#/$defs/nonEmptyString" },
-        "sensitivity": { "$ref": "#/$defs/nonEmptyString" }
+        "sensitivity": { "enum": ["public", "private"] }
       }
     },
     "resolvedTarget": {
@@ -127,9 +110,153 @@
         "path": { "$ref": "#/$defs/nonEmptyString" },
         "signal_profile": { "$ref": "#/$defs/nonEmptyString" },
         "ground_truth": { "$ref": "#/$defs/nonEmptyString" },
-        "sensitivity": { "$ref": "#/$defs/nonEmptyString" },
+        "sensitivity": { "enum": ["public", "private"] },
         "ground_truth_path": { "$ref": "#/$defs/nonEmptyString" }
       }
+    },
+    "operatorWorkflowInput": {
+      "$comment": "Operator-defined workflow input is intentionally open, but it must be an object and cannot shadow eval-owned benchmark controls or the runner's ultrafuzz_eval envelope.",
+      "type": "object",
+      "propertyNames": {
+        "allOf": [
+          { "$ref": "#/$defs/nonEmptyString" },
+          {
+            "not": {
+              "enum": [
+                "benchmark_execution",
+                "benchmark_lane",
+                "excluded_strategy_families",
+                "target_frameworks",
+                "ultrafuzz_eval"
+              ]
+            }
+          }
+        ]
+      },
+      "additionalProperties": { "$ref": "#/$defs/operatorJsonValue" }
+    },
+    "benchmarkExecution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy_loops", "excluded_node_ids"],
+      "properties": {
+        "strategy_loops": { "$ref": "#/$defs/positiveInteger" },
+        "excluded_node_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "privateBenchmarkWorkflowInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["benchmark_execution"],
+      "properties": {
+        "benchmark_execution": { "$ref": "#/$defs/benchmarkExecution" }
+      }
+    },
+    "publicFullBenchmarkWorkflowInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "benchmark_lane",
+        "target_frameworks",
+        "excluded_strategy_families",
+        "benchmark_execution"
+      ],
+      "properties": {
+        "benchmark_lane": { "const": "full" },
+        "target_frameworks": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/nonEmptyString" },
+          "additionalProperties": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "excluded_strategy_families": {
+          "type": "array",
+          "items": { "enum": ["stateful-invariant", "differential", "dynamic-strategy"] },
+          "maxItems": 0,
+          "uniqueItems": true
+        },
+        "benchmark_execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["strategy_loops", "excluded_node_ids"],
+          "properties": {
+            "strategy_loops": { "const": 1 },
+            "excluded_node_ids": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/nonEmptyString" },
+              "maxItems": 0,
+              "uniqueItems": true
+            }
+          }
+        }
+      }
+    },
+    "publicSmokeBenchmarkWorkflowInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "benchmark_lane",
+        "target_frameworks",
+        "excluded_strategy_families",
+        "benchmark_execution"
+      ],
+      "properties": {
+        "benchmark_lane": { "const": "smoke" },
+        "target_frameworks": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/nonEmptyString" },
+          "additionalProperties": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "excluded_strategy_families": {
+          "type": "array",
+          "items": { "enum": ["stateful-invariant", "differential", "dynamic-strategy"] },
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true
+        },
+        "benchmark_execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["workflow_profile", "selected_strategy_ids", "strategy_loops", "excluded_node_ids"],
+          "properties": {
+            "workflow_profile": { "const": "smoke-benchmark-v1" },
+            "selected_strategy_ids": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "time-warp-sequences",
+                  "external-dependency-boundaries",
+                  "externalized-state-accounting",
+                  "lifecycle-view-boundaries"
+                ]
+              },
+              "minItems": 4,
+              "maxItems": 4,
+              "uniqueItems": true
+            },
+            "strategy_loops": { "const": 1 },
+            "excluded_node_ids": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/nonEmptyString" },
+              "maxItems": 0,
+              "uniqueItems": true
+            }
+          }
+        }
+      }
+    },
+    "workflowInput": {
+      "oneOf": [
+        { "$ref": "#/$defs/privateBenchmarkWorkflowInput" },
+        { "$ref": "#/$defs/publicFullBenchmarkWorkflowInput" },
+        { "$ref": "#/$defs/publicSmokeBenchmarkWorkflowInput" },
+        { "$ref": "#/$defs/operatorWorkflowInput" }
+      ]
     },
     "variant": {
       "type": "object",
@@ -138,16 +265,7 @@
       "properties": {
         "id": { "$ref": "#/$defs/nonEmptyString" },
         "topology": { "$ref": "#/$defs/nonEmptyString" },
-        "prompts": { "$ref": "#/$defs/nonEmptyString" },
-        "prompt_overlays": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/nonEmptyString" }
-        },
-        "model_profiles": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/nonEmptyString" }
-        },
-        "workflow_input": { "$ref": "#/$defs/jsonValue" },
+        "workflow_input": { "$ref": "#/$defs/workflowInput" },
         "runner_model_profile": { "$ref": "#/$defs/nonEmptyString" },
         "judge_model_profile": { "$ref": "#/$defs/nonEmptyString" }
       }
@@ -155,28 +273,14 @@
     "resolvedVariant": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "prompt_overlay_paths"],
+      "required": ["id"],
       "properties": {
         "id": { "$ref": "#/$defs/nonEmptyString" },
         "topology": { "$ref": "#/$defs/nonEmptyString" },
-        "prompts": { "$ref": "#/$defs/nonEmptyString" },
-        "prompt_overlays": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/nonEmptyString" }
-        },
-        "model_profiles": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/nonEmptyString" }
-        },
-        "workflow_input": { "$ref": "#/$defs/jsonValue" },
+        "workflow_input": { "$ref": "#/$defs/workflowInput" },
         "runner_model_profile": { "$ref": "#/$defs/nonEmptyString" },
         "judge_model_profile": { "$ref": "#/$defs/nonEmptyString" },
-        "topology_path": { "$ref": "#/$defs/nonEmptyString" },
-        "prompts_path": { "$ref": "#/$defs/nonEmptyString" },
-        "prompt_overlay_paths": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/nonEmptyString" }
-        }
+        "topology_path": { "$ref": "#/$defs/nonEmptyString" }
       }
     },
     "judgePanel": {
@@ -224,6 +328,87 @@
         "artifacts": { "$ref": "#/$defs/artifactPolicy" }
       }
     },
+    "recoveryPolicyInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_repeated_model_executions": { "$ref": "#/$defs/nonNegativeInteger" },
+        "aggregate_non_comparable": { "enum": ["include", "exclude", "separate"] },
+        "publication": { "enum": ["clean", "comparable"] }
+      }
+    },
+    "artifactPolicyInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "enum": ["manifest-only", "upload"] },
+        "include": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "uniqueItems": true
+        },
+        "max_file_bytes": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "reportingPolicyInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "node_telemetry": { "type": "boolean" },
+        "heartbeat_interval_seconds": { "$ref": "#/$defs/positiveInteger" },
+        "experiment_prefix": { "$ref": "#/$defs/nonEmptyString" },
+        "artifacts": { "$ref": "#/$defs/artifactPolicyInput" }
+      }
+    },
+    "metricsInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "recall_threshold": { "$ref": "#/$defs/unitMetric" }
+      }
+    },
+    "evalSuiteInput": {
+      "$comment": "Canonical current-only operator-authored eval suite input. Defaults are applied only after this closed schema succeeds; the retained Zod parser is non-transforming and parity-tested against this definition.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "suite", "model_profiles", "targets", "variants", "run", "metrics"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.eval.v2" },
+        "suite": { "$ref": "#/$defs/nonEmptyString" },
+        "model_profiles": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/nonEmptyString" },
+          "additionalProperties": { "$ref": "#/$defs/modelProfile" }
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/target" }
+        },
+        "variants": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/variant" }
+        },
+        "run": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["runner_model_profile", "judge_model_profile", "trials_per_variant"],
+          "properties": {
+            "runner_model_profile": { "$ref": "#/$defs/nonEmptyString" },
+            "judge_model_profile": { "$ref": "#/$defs/nonEmptyString" },
+            "trials_per_variant": { "$ref": "#/$defs/positiveInteger" },
+            "max_parallel_targets": { "$ref": "#/$defs/positiveInteger" },
+            "max_parallel_runs": { "$ref": "#/$defs/positiveInteger" }
+          }
+        },
+        "judge_panel": { "$ref": "#/$defs/judgePanel" },
+        "metrics": { "$ref": "#/$defs/metricsInput" },
+        "recovery_equivalence": { "$ref": "#/$defs/recoveryPolicyInput" },
+        "reporting": { "$ref": "#/$defs/reportingPolicyInput" }
+      }
+    },
     "evalSuite": {
       "type": "object",
       "additionalProperties": false,
@@ -239,13 +424,13 @@
         "reporting"
       ],
       "properties": {
-        "schema_version": { "const": "ultrafuzz.eval.v1" },
+        "schema_version": { "const": "ultrafuzz.eval.v2" },
         "suite": { "$ref": "#/$defs/nonEmptyString" },
         "ground_truth_root": { "$ref": "#/$defs/nonEmptyString" },
         "model_profiles": {
           "type": "object",
           "minProperties": 1,
-          "propertyNames": { "minLength": 1 },
+          "propertyNames": { "$ref": "#/$defs/nonEmptyString" },
           "additionalProperties": { "$ref": "#/$defs/modelProfile" }
         },
         "targets": {
@@ -274,19 +459,9 @@
         "metrics": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["primary", "recall_threshold", "secondary"],
+          "required": ["recall_threshold"],
           "properties": {
-            "primary": {
-              "type": "array",
-              "items": { "$ref": "#/$defs/nonEmptyString" },
-              "uniqueItems": true
-            },
-            "recall_threshold": { "$ref": "#/$defs/unitMetric" },
-            "secondary": {
-              "type": "array",
-              "items": { "$ref": "#/$defs/nonEmptyString" },
-              "uniqueItems": true
-            }
+            "recall_threshold": { "$ref": "#/$defs/unitMetric" }
           }
         },
         "recovery_equivalence": { "$ref": "#/$defs/recoveryPolicy" },
@@ -453,7 +628,7 @@
       "additionalProperties": false,
       "required": ["schema_version", "eval_run_id", "suite_path", "project_root", "created_at", "suite", "provenance"],
       "properties": {
-        "schema_version": { "const": "ultrafuzz.eval.run.v2" },
+        "schema_version": { "const": "ultrafuzz.eval.run.v3" },
         "eval_run_id": { "$ref": "#/$defs/nonEmptyString" },
         "suite_path": { "$ref": "#/$defs/nonEmptyString" },
         "project_root": { "$ref": "#/$defs/nonEmptyString" },
@@ -490,7 +665,7 @@
         "judge_model": { "$ref": "#/$defs/nonEmptyString" },
         "runner_reasoning": { "$ref": "#/$defs/nonEmptyString" },
         "judge_reasoning": { "$ref": "#/$defs/nonEmptyString" },
-        "workflow_input": { "$ref": "#/$defs/jsonValue" }
+        "workflow_input": { "$ref": "#/$defs/workflowInput" }
       }
     },
     "evalMatrix": {
@@ -741,7 +916,7 @@
         "diagnostics"
       ],
       "properties": {
-        "schema_version": { "const": "ultrafuzz.eval.run.v2" },
+        "schema_version": { "const": "ultrafuzz.eval.run.v3" },
         "eval_run_id": { "$ref": "#/$defs/nonEmptyString" },
         "row_id": { "$ref": "#/$defs/nonEmptyString" },
         "target_id": { "$ref": "#/$defs/nonEmptyString" },
@@ -806,7 +981,7 @@
       "additionalProperties": false,
       "required": ["schema_version", "eval_run_id", "launched", "failed", "incomplete", "records"],
       "properties": {
-        "schema_version": { "const": "ultrafuzz.eval.run-summary.v1" },
+        "schema_version": { "const": "ultrafuzz.eval.run-summary.v2" },
         "eval_run_id": { "$ref": "#/$defs/nonEmptyString" },
         "launched": { "$ref": "#/$defs/nonNegativeInteger" },
         "failed": { "$ref": "#/$defs/nonNegativeInteger" },
@@ -966,7 +1141,7 @@
         "reviewer_status"
       ],
       "properties": {
-        "schema_version": { "const": "ultrafuzz.eval.review-queue-item.v1" },
+        "schema_version": { "const": "ultrafuzz.eval.review-queue-item.v2" },
         "target_id": { "$ref": "#/$defs/nonEmptyString" },
         "variant_id": { "$ref": "#/$defs/nonEmptyString" },
         "trial_id": { "$ref": "#/$defs/nonEmptyString" },
@@ -976,7 +1151,7 @@
           "items": { "$ref": "#/$defs/nonEmptyString" },
           "uniqueItems": true
         },
-        "finding": { "$ref": "#/$defs/jsonValue" },
+        "finding": { "$ref": "urn:ultrafuzz:schema:artifacts:finding:2" },
         "report_path": { "$ref": "#/$defs/nonEmptyString" },
         "deterministic_match": { "$ref": "#/$defs/judgeResult" },
         "judge_result": { "$ref": "#/$defs/judgeResult" },

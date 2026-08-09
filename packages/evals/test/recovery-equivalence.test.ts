@@ -242,7 +242,7 @@ function parityDocuments(recovery: EvalRecoveryEquivalence): Array<{
       label: "run-summary record",
       schemaId: EVAL_RUN_SUMMARY_SCHEMA_ID,
       value: {
-        schema_version: "ultrafuzz.eval.run-summary.v1",
+        schema_version: "ultrafuzz.eval.run-summary.v2",
         eval_run_id: record.eval_run_id,
         launched: 1,
         failed: 0,

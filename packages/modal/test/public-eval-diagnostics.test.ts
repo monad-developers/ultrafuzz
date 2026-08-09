@@ -471,7 +471,7 @@ describe("public post-eval diagnostics", () => {
       })
     ).toThrow(/unterminated final record/u);
 
-    fs.writeFileSync(path.join(evalRoot, "runs.jsonl"), '{"schema_version":"ultrafuzz.eval.run.v2"}\n');
+    fs.writeFileSync(path.join(evalRoot, "runs.jsonl"), '{"schema_version":"ultrafuzz.eval.run.v3"}\n');
     expect(() =>
       createPublicEvalDiagnosticsFromRun({
         config: CONFIG,
@@ -854,7 +854,7 @@ function evalMatrixRow(overrides: Partial<EvalMatrixRow> = {}): EvalMatrixRow {
       ground_truth: "target-a.json",
       ground_truth_path: "/private/ground-truth/target-a.json"
     },
-    variant: { id: variantId, prompt_overlay_paths: [] },
+    variant: { id: variantId },
     runner_model_profile: MODEL.slug,
     judge_model_profile: "judge-profile",
     runner_model: MODEL.model,

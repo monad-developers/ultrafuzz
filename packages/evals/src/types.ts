@@ -1,13 +1,13 @@
-import type { NodeStatus, RunStatus } from "@ultrafuzz/artifacts";
+import type { NodeStatus, NormalizedFinding, RunStatus } from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
-export const EVAL_SPEC_SCHEMA_VERSION = "ultrafuzz.eval.v1" as const;
+export const EVAL_SPEC_SCHEMA_VERSION = "ultrafuzz.eval.v2" as const;
 export const EVAL_RESULT_SCHEMA_VERSION = "ultrafuzz.eval.result.v1" as const;
-export const EVAL_RUN_SCHEMA_VERSION = "ultrafuzz.eval.run.v2" as const;
-export const EVAL_RUN_SUMMARY_SCHEMA_VERSION = "ultrafuzz.eval.run-summary.v1" as const;
+export const EVAL_RUN_SCHEMA_VERSION = "ultrafuzz.eval.run.v3" as const;
+export const EVAL_RUN_SUMMARY_SCHEMA_VERSION = "ultrafuzz.eval.run-summary.v2" as const;
 export const EVAL_FINDING_SCORE_SCHEMA_VERSION = "ultrafuzz.eval.finding-score.v1" as const;
 export const EVAL_SCORE_SUMMARY_SCHEMA_VERSION = "ultrafuzz.eval.score-summary.v1" as const;
-export const EVAL_REVIEW_QUEUE_ITEM_SCHEMA_VERSION = "ultrafuzz.eval.review-queue-item.v1" as const;
+export const EVAL_REVIEW_QUEUE_ITEM_SCHEMA_VERSION = "ultrafuzz.eval.review-queue-item.v2" as const;
 export const EVAL_PUBLICATION_STATE_SCHEMA_VERSION = "ultrafuzz.eval.publication.v1" as const;
 
 export type EvalClassification = "true-positive" | "false-positive" | "needs-human-review" | "missed";
@@ -30,8 +30,71 @@ export interface EvalModelProfile {
   agent: string;
   model?: string;
   reasoning?: string;
+  /** Optional LLM-judge request timeout for this profile. */
   timeout_seconds?: number;
-  config?: string[] | Record<string, unknown>;
+}
+
+/** The only intentionally opaque JSON seam in an eval suite. */
+export type EvalOperatorJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | EvalOperatorJsonValue[]
+  | { [key: string]: EvalOperatorJsonValue };
+
+/**
+ * Operator-owned workflow values. Runtime validation forbids eval-reserved
+ * keys so this open extension point cannot shadow typed benchmark controls or
+ * the `ultrafuzz_eval` envelope added by the runner.
+ */
+export type EvalOperatorWorkflowInput = Record<string, EvalOperatorJsonValue>;
+
+export interface EvalBenchmarkExecutionInput {
+  strategy_loops: number;
+  excluded_node_ids: string[];
+}
+
+export interface EvalSmokeBenchmarkExecutionInput extends EvalBenchmarkExecutionInput {
+  workflow_profile: "smoke-benchmark-v1";
+  selected_strategy_ids: string[];
+}
+
+export interface EvalPrivateBenchmarkWorkflowInput {
+  benchmark_execution: EvalBenchmarkExecutionInput;
+}
+
+export interface EvalPublicFullBenchmarkWorkflowInput {
+  benchmark_lane: "full";
+  target_frameworks: Record<string, string>;
+  excluded_strategy_families: string[];
+  benchmark_execution: EvalBenchmarkExecutionInput;
+}
+
+export interface EvalPublicSmokeBenchmarkWorkflowInput {
+  benchmark_lane: "smoke";
+  target_frameworks: Record<string, string>;
+  excluded_strategy_families: string[];
+  benchmark_execution: EvalSmokeBenchmarkExecutionInput;
+}
+
+export type EvalBenchmarkWorkflowInput =
+  | EvalPrivateBenchmarkWorkflowInput
+  | EvalPublicFullBenchmarkWorkflowInput
+  | EvalPublicSmokeBenchmarkWorkflowInput;
+
+export type EvalWorkflowInput = EvalOperatorWorkflowInput | EvalBenchmarkWorkflowInput;
+
+export function isEvalBenchmarkWorkflowInput(
+  input: EvalWorkflowInput
+): input is EvalBenchmarkWorkflowInput {
+  return Object.hasOwn(input, "benchmark_execution");
+}
+
+export function isEvalPublicBenchmarkWorkflowInput(
+  input: EvalWorkflowInput
+): input is EvalPublicFullBenchmarkWorkflowInput | EvalPublicSmokeBenchmarkWorkflowInput {
+  return Object.hasOwn(input, "benchmark_lane");
 }
 
 export interface EvalTarget {
@@ -44,17 +107,14 @@ export interface EvalTarget {
   /** Relative ground-truth file resolved strictly under the operator-supplied `[eval].ground_truth_root`. */
   ground_truth: string;
   /** `private` forces manifest-only artifact reporting unless the suite explicitly opts into `upload`. */
-  sensitivity?: string;
+  sensitivity?: "public" | "private";
 }
 
 export interface EvalVariant {
   id: string;
   /** Optional topology override; when omitted the target project's CI topology is used unmodified. */
   topology?: string;
-  prompts?: string;
-  prompt_overlays?: string[];
-  model_profiles?: string[];
-  workflow_input?: unknown;
+  workflow_input?: EvalWorkflowInput;
   runner_model_profile?: string;
   judge_model_profile?: string;
 }
@@ -73,9 +133,7 @@ export interface EvalJudgePanelConfig {
 }
 
 export interface EvalMetricsConfig {
-  primary: string[];
   recall_threshold: number;
-  secondary: string[];
 }
 
 export type EvalRecoveryEquivalenceClassification =
@@ -146,8 +204,8 @@ export interface EvalSuiteSpec {
   /** Optional independent adjudicator panel; omitted suites use three judges with quorum two. */
   judge_panel?: EvalJudgePanelConfig;
   metrics: EvalMetricsConfig;
-  /** Recovery-exposure and aggregation policy; omitted suites use a zero-repeat, comparable-publication policy. */
-  recovery_equivalence?: EvalRecoveryEquivalencePolicy;
+  /** Effective recovery-exposure and aggregation policy after suite-input normalization. */
+  recovery_equivalence: EvalRecoveryEquivalencePolicy;
   /** Telemetry/artifact policy only — provider selection and credentials live in ultrafuzz.toml. */
   reporting: EvalReportingPolicy;
 }
@@ -159,8 +217,6 @@ export interface ResolvedEvalTarget extends EvalTarget {
 
 export interface ResolvedEvalVariant extends EvalVariant {
   topology_path?: string;
-  prompts_path?: string;
-  prompt_overlay_paths: string[];
 }
 
 export interface EvalMatrixRow {
@@ -177,7 +233,16 @@ export interface EvalMatrixRow {
   judge_model?: string;
   runner_reasoning?: string;
   judge_reasoning?: string;
-  workflow_input?: unknown;
+  workflow_input?: EvalWorkflowInput;
+}
+
+/** Closed projection persisted in eval journals and summaries. */
+export interface EvalDurableDiagnostic {
+  code: string;
+  message: string;
+  severity: "error" | "warning" | "info";
+  source: string;
+  path?: string;
 }
 
 export interface EvalCandidateProvenance {
@@ -380,7 +445,7 @@ export interface EvalRunRecord {
   expansion?: EvalRunExpansion;
   /** Immutable execution-exposure classification captured from append-only run evidence. */
   recovery_equivalence?: EvalRecoveryEquivalence;
-  diagnostics: RuntimeDiagnostic[];
+  diagnostics: EvalDurableDiagnostic[];
 }
 
 /** Current-only durable `run-summary.json` document. */
@@ -506,7 +571,7 @@ export interface HumanReviewQueueItem {
   trial_id: string;
   ultrafuzz_run_id?: string;
   workflow_ids: string[];
-  finding: unknown;
+  finding: NormalizedFinding;
   report_path: string;
   deterministic_match: FindingJudgeResult;
   judge_result: FindingJudgeResult;

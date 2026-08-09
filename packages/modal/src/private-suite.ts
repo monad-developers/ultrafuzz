@@ -19,7 +19,7 @@ export function privateBenchmarkExecutionControls(config: PrivateModalBenchmarkC
 
 export function renderPrivateEvalSuite(input: RenderPrivateEvalSuiteInput): string {
   const execution = privateBenchmarkExecutionControls(input.config);
-  return `schema_version: ultrafuzz.eval.v1
+  return `schema_version: ultrafuzz.eval.v2
 suite: ${yamlString(`modal-${input.model.slug}`)}
 
 model_profiles:
@@ -53,7 +53,6 @@ run:
   max_parallel_runs: 1
 
 metrics:
-  primary: [precision, recall, f1_score]
   recall_threshold: 0.7
 
 reporting:

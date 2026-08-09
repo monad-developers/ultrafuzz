@@ -24,10 +24,12 @@ import {
 import { classifyRecoveryEquivalence } from "./recovery-equivalence.js";
 import { graphFromPlannedGraph, type EvalReporter, type EvalRowResult } from "./reporter.js";
 import { createEvalReporters } from "./reporters/index.js";
-import { planEvalSuite, type PlanEvalSuiteInput } from "./suite.js";
+import { evalWorkflowInputSchema, planEvalSuite, type PlanEvalSuiteInput } from "./suite.js";
 import {
   EVAL_RUN_SCHEMA_VERSION,
   EVAL_RUN_SUMMARY_SCHEMA_VERSION,
+  type EvalBenchmarkWorkflowInput,
+  type EvalDurableDiagnostic,
   type EvalMatrixRow,
   type EvalCandidateProvenance,
   type EvalModelProfile,
@@ -291,14 +293,14 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
           ...(executionArtifactId !== undefined ? { execution_artifact_id: executionArtifactId } : {}),
           workflow_ids: launch.workflowIds,
           launcher: { status: "succeeded", started_at: startedAt, finished_at: finishedAt },
-          diagnostics: [...launch.diagnostics, ...enrichmentDiagnostics]
+          diagnostics: durableEvalDiagnostics([...launch.diagnostics, ...enrichmentDiagnostics])
         }
       : {
           ...recordBase,
           status: "failed",
           workflow_ids: launch.workflowIds,
           launcher: { status: "failed", started_at: startedAt, finished_at: finishedAt },
-          diagnostics: launch.diagnostics
+          diagnostics: durableEvalDiagnostics(launch.diagnostics)
         };
 
   if (input.appendRecord === true) {
@@ -350,27 +352,13 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
 export function benchmarkTopologyTransform(row: Pick<EvalMatrixRow, "workflow_input">): {
   topologyTransform?: { strategyLoops?: number; excludedNodeIds?: string[] };
 } {
-  if (!isRecordValue(row.workflow_input)) return {};
-  const execution = row.workflow_input.benchmark_execution;
-  if (execution === undefined) return {};
-  if (!isRecordValue(execution)) {
-    throw new EvalError("EVAL_BENCHMARK_EXECUTION_INVALID", "benchmark execution controls must be an object");
-  }
-  const strategyLoops = execution.strategy_loops;
-  const excludedNodeIds = execution.excluded_node_ids;
-  if (strategyLoops !== undefined && (!Number.isInteger(strategyLoops) || Number(strategyLoops) < 1)) {
-    throw new EvalError("EVAL_BENCHMARK_EXECUTION_INVALID", "benchmark strategy loops must be a positive integer");
-  }
-  if (
-    excludedNodeIds !== undefined &&
-    (!Array.isArray(excludedNodeIds) || excludedNodeIds.some((id) => typeof id !== "string" || id.length === 0))
-  ) {
-    throw new EvalError("EVAL_BENCHMARK_EXECUTION_INVALID", "excluded benchmark node IDs must be non-empty strings");
-  }
+  const input = validatedBenchmarkWorkflowInput(row.workflow_input);
+  if (input === undefined) return {};
+  const execution = input.benchmark_execution;
   return {
     topologyTransform: {
-      ...(strategyLoops === undefined ? {} : { strategyLoops: Number(strategyLoops) }),
-      ...(excludedNodeIds === undefined ? {} : { excludedNodeIds: [...excludedNodeIds] as string[] })
+      strategyLoops: execution.strategy_loops,
+      excludedNodeIds: [...execution.excluded_node_ids]
     }
   };
 }
@@ -379,9 +367,10 @@ export function benchmarkModelProfileOverrides(
   row: Pick<EvalMatrixRow, "workflow_input">,
   runnerProfile: EvalModelProfile | undefined
 ): { runtimeOverrides?: RuntimeConfigOverrides } {
-  if (!isRecordValue(row.workflow_input)) return {};
-  const execution = row.workflow_input.benchmark_execution;
-  if (!isRecordValue(execution) || execution.workflow_profile !== BENCHMARK_SMOKE_WORKFLOW_PROFILE) return {};
+  const input = validatedBenchmarkWorkflowInput(row.workflow_input);
+  if (input === undefined) return {};
+  const execution = input.benchmark_execution;
+  if (!("workflow_profile" in execution) || execution.workflow_profile !== BENCHMARK_SMOKE_WORKFLOW_PROFILE) return {};
   if (runnerProfile === undefined) {
     throw new EvalError("EVAL_MODEL_PROFILE_UNKNOWN", "smoke benchmark runner profile is missing");
   }
@@ -566,8 +555,10 @@ export async function watchEvalRow(
       : {
           diagnostics: [
             ...input.record.diagnostics,
-            ...(syncFailureDiagnostic === undefined ? [] : [syncFailureDiagnostic]),
-            ...(timeoutDiagnostic === undefined ? [] : [timeoutDiagnostic])
+            ...durableEvalDiagnostics([
+              ...(syncFailureDiagnostic === undefined ? [] : [syncFailureDiagnostic]),
+              ...(timeoutDiagnostic === undefined ? [] : [timeoutDiagnostic])
+            ])
           ]
         })
   };
@@ -652,7 +643,7 @@ function rowStatus(state: RunState | undefined): EvalRowResult["status"] {
 
 function buildWorkflowInput(row: EvalMatrixRow): unknown {
   return {
-    ...(isRecordValue(row.workflow_input) ? row.workflow_input : {}),
+    ...(row.workflow_input ?? {}),
     ultrafuzz_eval: {
       row_id: row.id,
       target_id: row.target_id,
@@ -665,6 +656,31 @@ function buildWorkflowInput(row: EvalMatrixRow): unknown {
       judge_model_profile: row.judge_model_profile
     }
   };
+}
+
+function validatedBenchmarkWorkflowInput(
+  input: EvalMatrixRow["workflow_input"]
+): EvalBenchmarkWorkflowInput | undefined {
+  if (input === undefined) return undefined;
+  const parsed = evalWorkflowInputSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new EvalError("EVAL_BENCHMARK_EXECUTION_INVALID", "workflow input does not satisfy its current contract", {
+      issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
+    });
+  }
+  return Object.hasOwn(parsed.data, "benchmark_execution")
+    ? (parsed.data as EvalBenchmarkWorkflowInput)
+    : undefined;
+}
+
+function durableEvalDiagnostics(diagnostics: readonly RuntimeDiagnostic[]): EvalDurableDiagnostic[] {
+  return diagnostics.map(({ code, message, severity, source, path: diagnosticPath }) => ({
+    code,
+    message,
+    severity,
+    source,
+    ...(diagnosticPath === undefined ? {} : { path: diagnosticPath })
+  }));
 }
 
 function selectRows(rows: EvalMatrixRow[], rowIds: string[] | undefined): EvalMatrixRow[] {
@@ -697,10 +713,6 @@ async function mapLimit<T, U>(values: T[], limit: number, worker: (value: T) => 
   });
   await Promise.all(workers);
   return results;
-}
-
-function isRecordValue(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function sleep(ms: number): Promise<void> {

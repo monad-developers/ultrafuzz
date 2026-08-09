@@ -142,7 +142,7 @@ export function currentRunManifest(input: {
   overrides?: Partial<EvalRunManifest>;
 }): EvalRunManifest {
   return {
-    schema_version: "ultrafuzz.eval.run.v2",
+    schema_version: "ultrafuzz.eval.run.v3",
     eval_run_id: input.evalRunId ?? "eval-test",
     suite_path: path.join(input.projectRoot, "eval.yml"),
     project_root: input.projectRoot,
@@ -187,7 +187,7 @@ export function testReportingPolicy(overrides: Partial<EvalReportingPolicy> = {}
 
 export function testSuite(groundTruthRoot: string, overrides: Partial<EvalSuiteSpec> = {}): EvalSuiteSpec {
   return {
-    schema_version: "ultrafuzz.eval.v1",
+    schema_version: "ultrafuzz.eval.v2",
     suite: "bug-finding-regression",
     ground_truth_root: groundTruthRoot,
     model_profiles: {
@@ -208,7 +208,7 @@ export function testSuite(groundTruthRoot: string, overrides: Partial<EvalSuiteS
       judge_model_profile: "eval-judge",
       trials_per_variant: 1
     },
-    metrics: { primary: ["precision", "recall", "f1_score"], recall_threshold: 0.7, secondary: [] },
+    metrics: { recall_threshold: 0.7 },
     recovery_equivalence: {
       max_repeated_model_executions: 0,
       aggregate_non_comparable: "include",
@@ -228,7 +228,7 @@ export function testRow(suite: EvalSuiteSpec, overrides: Partial<EvalMatrixRow> 
     trial_id: "trial-1",
     run_id: "bug-finding-regression-target-a-baseline-trial-1",
     target: { ...target, ground_truth_path: path.join(suite.ground_truth_root ?? "/", target.ground_truth) },
-    variant: { id: "baseline", prompt_overlay_paths: [] },
+    variant: { id: "baseline" },
     runner_model_profile: suite.run.runner_model_profile,
     judge_model_profile: suite.run.judge_model_profile,
     judge_model: "gpt-5.5",
@@ -347,7 +347,7 @@ export function currentEvalRunRecord(input: {
 }): EvalRunRecord {
   const runId = input.runId ?? "run-1";
   return {
-    schema_version: "ultrafuzz.eval.run.v2",
+    schema_version: "ultrafuzz.eval.run.v3",
     eval_run_id: input.evalRunId ?? "eval-test",
     row_id: input.row.id,
     target_id: input.row.target_id,

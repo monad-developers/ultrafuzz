@@ -779,7 +779,7 @@ function canonicalEvalRunRecord(
   const runRoot = path.join(root, "runs", row.run_id);
   return parseEvalRunRecord(
     {
-      schema_version: "ultrafuzz.eval.run.v2",
+      schema_version: "ultrafuzz.eval.run.v3",
       eval_run_id: TEST_EVAL_RUN_ID,
       row_id: row.id,
       target_id: row.target_id,
@@ -826,7 +826,7 @@ function realisticMatrix(rowIds: string[]) {
         ground_truth: `${targetId}.yml`,
         ground_truth_path: `/ground-truth/${targetId}.yml`
       },
-      variant: { id: TEST_MODEL_SLUG, prompt_overlay_paths: [] },
+      variant: { id: TEST_MODEL_SLUG },
       workflow_input: {
         target_frameworks: { [targetId]: framework }
       },

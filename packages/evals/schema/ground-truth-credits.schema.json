@@ -25,7 +25,7 @@
       "properties": {
         "rootCauseClusterId": { "$ref": "#/$defs/safeId" },
         "groundTruthTpCredits": {
-          "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/nonNegativeInteger"
+          "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonNegativeInteger"
         }
       }
     }

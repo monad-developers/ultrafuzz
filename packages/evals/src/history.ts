@@ -12,6 +12,7 @@ import {
   type BenchmarkModelProfileManifest
 } from "./benchmark-manifest.js";
 import {
+  isEvalPublicBenchmarkWorkflowInput,
   type EvalEfficiencyCompleteness,
   type EvalFindingScore,
   type EvalMatrixRow,
@@ -832,11 +833,11 @@ function targetPublicationForRows(
 }
 
 function matrixRowTargetFramework(row: EvalMatrixRow): string | undefined {
-  const workflowInput = recordValue(row.workflow_input);
-  const frameworks = recordValue(workflowInput?.target_frameworks);
-  if (frameworks === undefined || !(row.target_id in frameworks)) return undefined;
-  const value = frameworks?.[row.target_id];
-  if (typeof value !== "string" || value.length === 0) {
+  const workflowInput = row.workflow_input;
+  if (workflowInput === undefined || !isEvalPublicBenchmarkWorkflowInput(workflowInput)) return undefined;
+  const value = workflowInput.target_frameworks[row.target_id];
+  if (value === undefined) return undefined;
+  if (value.length === 0) {
     throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPLETE", `target framework is invalid for ${row.target_id}`);
   }
   return value;
@@ -1216,7 +1217,7 @@ export function assertPublicBenchmarkGeneration(
       row.id !== expectedId ||
       row.run_id !== expectedRunId ||
       stableStringify(publicTargetScope(row.target)) !== stableStringify(target) ||
-      stableStringify(publicVariantScope(row.variant)) !== stableStringify({ ...variant, prompt_overlay_paths: [] }) ||
+      stableStringify(publicVariantScope(row.variant)) !== stableStringify(variant) ||
       stableStringify(row.workflow_input) !== stableStringify(variant.workflow_input) ||
       row.runner_model_profile !== runnerProfileId ||
       row.runner_model !== runnerProfile.model ||

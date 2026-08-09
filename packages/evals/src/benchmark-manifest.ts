@@ -446,9 +446,7 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
       ...benchmarkLaneConcurrency(input.lane)
     },
     metrics: {
-      primary: ["precision", "recall", "f1_score"],
-      recall_threshold: 0.7,
-      secondary: ["cumulative_unique_true_positives", "wall_clock_seconds", "cost_usd"]
+      recall_threshold: 0.7
     },
     recovery_equivalence: {
       max_repeated_model_executions: 0,

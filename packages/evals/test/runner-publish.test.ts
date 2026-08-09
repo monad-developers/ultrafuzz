@@ -781,7 +781,8 @@ describe("runner", () => {
     );
     expect(syncDiagnostics).toHaveLength(1);
     expect(syncDiagnostics[0]?.message).toContain("WORKFLOW_INSPECT_FAILED");
-    expect(syncDiagnostics[0]?.details).toMatchObject({
+    expect(syncDiagnostics[0]).not.toHaveProperty("details");
+    expect(watched.diagnostics.find((diagnostic) => diagnostic.code === "EVAL_ROW_SYNC_FAILED")?.details).toMatchObject({
       failure_count: 2,
       consecutive_failures_at_finish: 0
     });

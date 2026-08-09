@@ -1,5 +1,5 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ultrafuzz:schema:evals:score-summary:1",
-  "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/evalScoreSummary"
+  "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/evalScoreSummary"
 }

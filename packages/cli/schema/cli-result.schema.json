@@ -1423,8 +1423,8 @@
         "suite_path": { "type": "string" },
         "suite": { "type": "string" },
         "provider": { "enum": ["braintrust", "none"] },
-        "reporting": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/reportingPolicy" },
-        "matrix": { "$ref": "urn:ultrafuzz:schema:evals:matrix:1" }
+        "reporting": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/reportingPolicy" },
+        "matrix": { "$ref": "urn:ultrafuzz:schema:evals:matrix:2" }
       }
     },
     "evalRunData": {

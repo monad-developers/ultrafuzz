@@ -5,14 +5,16 @@ import fs from "node:fs";
 import { EVAL_JUDGE_PROMPT_VERSION } from "./evaluator/adjudicator-prompt.js";
 import { assertGroundTruthSubject, readGroundTruthDocument, type GroundTruthSubject } from "./ground-truth.js";
 import { resolveJudgePanelConfig, resolveRecoveryEquivalencePolicy } from "./suite.js";
-import type {
-  EvalCandidateProvenance,
-  EvalMatrixRow,
-  EvalPlanValue,
-  EvalRunProvenance,
-  EvalScoringProvenance,
-  EvalSuiteSpec,
-  EvalSummaryProvenance
+import {
+  isEvalBenchmarkWorkflowInput,
+  type EvalBenchmarkExecutionInput,
+  type EvalCandidateProvenance,
+  type EvalMatrixRow,
+  type EvalPlanValue,
+  type EvalRunProvenance,
+  type EvalScoringProvenance,
+  type EvalSuiteSpec,
+  type EvalSummaryProvenance
 } from "./types.js";
 import { EvalError } from "./utils.js";
 
@@ -81,15 +83,12 @@ export function buildEvalRunProvenance(plan: EvalPlanValue, controller: EvalCont
   };
 }
 
-function benchmarkExecutionControls(matrix: EvalMatrixRow[]): unknown[] {
-  const controls = new Map<string, unknown>();
+function benchmarkExecutionControls(matrix: EvalMatrixRow[]): EvalBenchmarkExecutionInput[] {
+  const controls = new Map<string, EvalBenchmarkExecutionInput>();
   for (const row of matrix) {
-    const workflowInput =
-      typeof row.workflow_input === "object" && row.workflow_input !== null && !Array.isArray(row.workflow_input)
-        ? (row.workflow_input as Record<string, unknown>)
-        : {};
+    const workflowInput = row.workflow_input;
+    if (workflowInput === undefined || !isEvalBenchmarkWorkflowInput(workflowInput)) continue;
     const value = workflowInput.benchmark_execution;
-    if (value === undefined) continue;
     controls.set(stableJson(value), value);
   }
   return [...controls.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, value]) => value);

@@ -88,7 +88,7 @@ function currentEvalRunRecord(
   const rowId = options.rowId ?? "row-one";
   const runId = options.runId;
   return {
-    schema_version: "ultrafuzz.eval.run.v2",
+    schema_version: "ultrafuzz.eval.run.v3",
     eval_run_id: evalRunId,
     row_id: rowId,
     target_id: "target-one",
@@ -118,13 +118,13 @@ function currentEvalRunManifest(control: string, evalRunId: string): EvalRunMani
   const sha256 = "b".repeat(64);
   const repository = "https://example.invalid/target-one.git";
   return {
-    schema_version: "ultrafuzz.eval.run.v2",
+    schema_version: "ultrafuzz.eval.run.v3",
     eval_run_id: evalRunId,
     suite_path: path.join(control, "modal-suite.yml"),
     project_root: control,
     created_at: T0,
     suite: {
-      schema_version: "ultrafuzz.eval.v1",
+      schema_version: "ultrafuzz.eval.v2",
       suite: "modal-resume-test",
       model_profiles: {
         runner: { agent: "CodexAgent", model: "runner-model" },
@@ -145,7 +145,7 @@ function currentEvalRunManifest(control: string, evalRunId: string): EvalRunMani
         trials_per_variant: 1,
         max_parallel_runs: 1
       },
-      metrics: { primary: ["recall"], recall_threshold: 1, secondary: [] },
+      metrics: { recall_threshold: 1 },
       recovery_equivalence: {
         max_repeated_model_executions: 0,
         aggregate_non_comparable: "include",
@@ -335,8 +335,8 @@ describe("Modal durable evaluation resume", () => {
     fs.writeFileSync(
       manifestPath,
       current.replace(
-        '"schema_version": "ultrafuzz.eval.run.v2"',
-        '"schema_version": "ultrafuzz.eval.run.v2",\n  "schema_version": "ultrafuzz.eval.run.v2"'
+        '"schema_version": "ultrafuzz.eval.run.v3"',
+        '"schema_version": "ultrafuzz.eval.run.v3",\n  "schema_version": "ultrafuzz.eval.run.v3"'
       )
     );
     await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow(/durable JSON is invalid/u);
@@ -652,7 +652,7 @@ describe("Modal durable evaluation resume", () => {
       undefined
     );
     let summary = readEvalRunSummary(path.join(value.evalDir, "run-summary.json"));
-    expect(summary.schema_version).toBe("ultrafuzz.eval.run-summary.v1");
+    expect(summary.schema_version).toBe("ultrafuzz.eval.run-summary.v2");
     expect(summary.records[0]?.final_status).toBe("succeeded");
     expect(summary.records[0]?.workflow).toEqual({
       status: "succeeded",

@@ -254,7 +254,7 @@ function privateMatrixRow(input: {
       ground_truth: input.groundTruth,
       ground_truth_path: path.join("/private", input.groundTruth)
     },
-    variant: { id: input.variantId, prompt_overlay_paths: [] },
+    variant: { id: input.variantId },
     runner_model_profile: "eval-runner",
     judge_model_profile: "eval-judge"
   };
@@ -269,7 +269,7 @@ function launchedRecord(input: {
 }): EvalRunRecord {
   const timestamp = "2026-08-09T12:00:00.000Z";
   return {
-    schema_version: "ultrafuzz.eval.run.v2",
+    schema_version: "ultrafuzz.eval.run.v3",
     eval_run_id: input.evalRunId,
     row_id: input.row.id,
     target_id: input.row.target_id,

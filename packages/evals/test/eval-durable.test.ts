@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { schemaRegistryBundleDigest } from "@ultrafuzz/artifacts";
+import { FINDING_JSON_SCHEMA_ID, schemaRegistryBundleDigest } from "@ultrafuzz/artifacts";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -97,12 +97,20 @@ function reviewItem(): HumanReviewQueueItem {
     reason_code: "strong-novel-finding"
   });
   return {
-    schema_version: "ultrafuzz.eval.review-queue-item.v1",
+    schema_version: "ultrafuzz.eval.review-queue-item.v2",
     target_id: "target-a",
     variant_id: "baseline",
     trial_id: "trial-1",
     workflow_ids: ["workflow-1"],
-    finding: { id: "finding-1", title: "Novel finding" },
+    finding: {
+      schema_version: "ultrafuzz.finding.v2",
+      id: "finding-1",
+      title: "Novel finding",
+      status: "needs-review",
+      severity_guess: "Medium",
+      confidence: "medium",
+      summary: "A novel finding requiring review."
+    },
     report_path: "/tmp/report.json",
     deterministic_match: decision,
     judge_result: decision,
@@ -117,7 +125,7 @@ function canonicalFixtures() {
   const record = currentEvalRunRecord({ row, runRoot: path.join(root, "run") });
   const manifest = currentRunManifest({ suite, projectRoot: root });
   const runSummary = {
-    schema_version: "ultrafuzz.eval.run-summary.v1" as const,
+    schema_version: "ultrafuzz.eval.run-summary.v2" as const,
     eval_run_id: "eval-test",
     launched: 1,
     failed: 0,
@@ -190,7 +198,7 @@ describe("eval durable schema registry", () => {
       .map((metadata) => metadata.typescriptExport)
       .sort();
     expect(exportNames).toEqual(Object.keys(EVAL_SCHEMA_EXPORTS).sort());
-    const ids = new Set(registry.map((entry) => entry.id));
+    const ids = new Set([...registry.map((entry) => entry.id), FINDING_JSON_SCHEMA_ID]);
     for (const entry of registry) {
       const metadata = EVAL_SCHEMA_METADATA[entry.filename]!;
       const checkedIn = JSON.parse(fs.readFileSync(path.join(evalSchemaDirectory(), entry.filename), "utf8"));
