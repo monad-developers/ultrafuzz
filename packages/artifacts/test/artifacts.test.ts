@@ -1366,10 +1366,7 @@ test("findings normalize source evidence line suffixes", () => {
       { line: "105", end_line: 107 },
       { line: 154, end_line: 185 }
     ],
-    [
-      { line: Number.MAX_SAFE_INTEGER + 1 },
-      { line: 154, end_line: 185 }
-    ]
+    [{ line: Number.MAX_SAFE_INTEGER + 1 }, { line: 154, end_line: 185 }]
   ]) {
     fs.writeFileSync(
       path.join(nodeDir, "findings.json"),
