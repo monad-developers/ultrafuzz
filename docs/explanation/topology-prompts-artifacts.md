@@ -86,7 +86,7 @@ The structured terminal report is validated without rewriting before scoring
 or publication. Missing or malformed required output is terminal for that node;
 it is not synthesized from another artifact or from the model's final message.
 
-Runtime-owned `ultrafuzz.artifact-manifest.v2` files and
+Runtime-owned `ultrafuzz.artifact-manifest.v3` files and
 `ultrafuzz.artifact-verification.v2` markers record the exact output contract,
 schema binding, content digest, and prerequisite digests. They can describe or
 reject agent bytes, but they do not authorize rewriting those bytes. Old

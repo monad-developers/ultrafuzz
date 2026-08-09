@@ -3961,6 +3961,20 @@ test("plan materializes pinned reference nodes before rendering dependent prompt
     };
     assert.equal(state.nodes?.["reference-properties-example"]?.status, "succeeded");
     assert.equal(state.nodes?.["reference-properties-example"]?.provenance?.reference, "properties.example");
+    const artifactManifest = JSON.parse(
+      fs.readFileSync(
+        path.join(plan.value!.run_root, "artifacts", "reference-properties-example", "artifact-manifest.json"),
+        "utf8"
+      )
+    ) as { schema_version?: string; provenance?: { metadata?: unknown } };
+    assert.equal(artifactManifest.schema_version, "ultrafuzz.artifact-manifest.v3");
+    assert.deepEqual(artifactManifest.provenance?.metadata, {
+      reference: "properties.example",
+      repo: "example/repo",
+      commit: "a".repeat(40),
+      reference_artifact: referenceArtifact,
+      manifest_artifact: referenceManifest
+    });
   } finally {
     if (previousXdgCacheHome === undefined) {
       delete process.env.XDG_CACHE_HOME;
@@ -7434,8 +7448,12 @@ test("syncRun accepts canonical findings without rewriting them and writes manif
   const manifest = JSON.parse(
     fs.readFileSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json"), "utf8")
   ) as {
+    schema_version?: string;
     files?: Array<{ path?: string }>;
+    provenance?: { metadata?: unknown };
   };
+  assert.equal(manifest.schema_version, "ultrafuzz.artifact-manifest.v3");
+  assert.deepEqual(manifest.provenance?.metadata, { concrete_node_id: "project-discovery" });
   assert.deepEqual(manifest.files?.map((entry) => entry.path).sort(), [
     "findings.json",
     "prompt.rendered.md",

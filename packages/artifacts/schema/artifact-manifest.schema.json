@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:artifacts:artifact-manifest:2",
+  "$id": "urn:ultrafuzz:schema:artifacts:artifact-manifest:3",
   "title": "Ultrafuzz artifact manifest",
   "type": "object",
   "additionalProperties": false,
@@ -17,7 +17,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "ultrafuzz.artifact-manifest.v2"
+      "const": "ultrafuzz.artifact-manifest.v3"
     },
     "run_id": {
       "type": "string",
@@ -267,40 +267,81 @@
           "minLength": 1
         },
         "metadata": {
+          "$ref": "#/$defs/provenanceMetadata"
+        }
+      }
+    },
+    "provenanceMetadata": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/referenceProvenanceMetadata"
+        },
+        {
+          "$ref": "#/$defs/smithersTaskProvenanceMetadata"
+        }
+      ]
+    },
+    "referenceProvenanceMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "reference_artifact", "manifest_artifact"],
+      "dependentRequired": {
+        "repo": ["commit"],
+        "commit": ["repo"]
+      },
+      "properties": {
+        "reference": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "repo": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "reference_artifact": {
+          "$ref": "#/$defs/nonNulString"
+        },
+        "manifest_artifact": {
+          "$ref": "#/$defs/nonNulString"
+        },
+        "reference_expectations": {
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/jsonValue"
+          "additionalProperties": false,
+          "required": ["source", "path", "sha256"],
+          "properties": {
+            "source": {
+              "const": "operator-supplied"
+            },
+            "path": {
+              "$ref": "#/$defs/nonNulString"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
           }
         }
       }
     },
-    "jsonValue": {
-      "anyOf": [
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "number"
-        },
-        {
-          "type": "string"
-        },
-        {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/jsonValue"
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/jsonValue"
-          }
+    "smithersTaskProvenanceMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["concrete_node_id"],
+      "properties": {
+        "concrete_node_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
         }
-      ]
+      }
+    },
+    "nonNulString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000]+$"
     }
   }
 }

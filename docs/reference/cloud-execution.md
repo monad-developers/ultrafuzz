@@ -110,7 +110,7 @@ Publication requires the current `ultrafuzz.artifact-verification.v2` marker and
 copies only the exact digest-bound files it names. There is no markerless legacy
 mode, manifest-v1 upgrade, artifact normalization, or fallback to a complete
 directory copy. The controller then validates the corresponding
-`ultrafuzz.artifact-manifest.v2` and its persisted schema bindings.
+`ultrafuzz.artifact-manifest.v3` and its persisted schema bindings.
 
 ## Retention and Cleanup
 

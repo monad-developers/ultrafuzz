@@ -673,7 +673,7 @@ export function writeRunFixture(input: {
       path.join(nodeDir, "artifact-manifest.json"),
       JSON.stringify(
         {
-          schema_version: "ultrafuzz.artifact-manifest.v2",
+          schema_version: "ultrafuzz.artifact-manifest.v3",
           run_id: runId,
           node_id: nodeId,
           producer_node_id: nodeId,

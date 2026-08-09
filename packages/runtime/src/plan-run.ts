@@ -24,6 +24,7 @@ import {
   PLANNED_GRAPH_SCHEMA_VERSION,
   type ArtifactContractId,
   type NodeStateInput,
+  type ReferenceArtifactProvenanceMetadata,
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import {
@@ -505,6 +506,28 @@ function materializeReferenceNodesForPlan(input: {
       outputs: node.outputs
     });
     const finishedAt = new Date().toISOString();
+    const referenceMetadataBase = {
+      reference: node.reference,
+      reference_artifact: materialized.referenceArtifact,
+      manifest_artifact: materialized.manifestArtifact,
+      ...(input.provision === undefined
+        ? {}
+        : {
+            reference_expectations: {
+              source: "operator-supplied" as const,
+              path: input.provision.sourceRelativePath,
+              sha256: input.provision.sourceDigest
+            }
+          })
+    };
+    const referenceMetadata: ReferenceArtifactProvenanceMetadata =
+      node.reference_revision === undefined
+        ? referenceMetadataBase
+        : {
+            ...referenceMetadataBase,
+            repo: node.reference_revision.repo,
+            commit: node.reference_revision.commit
+          };
     writeArtifactManifest({
       layout: input.layout,
       nodeId: node.id,
@@ -512,23 +535,7 @@ function materializeReferenceNodesForPlan(input: {
       provenance: {
         logical_node_id: node.logical_id,
         origin: "pinned-reference",
-        metadata: {
-          reference: node.reference,
-          ...(node.reference_revision === undefined
-            ? {}
-            : { repo: node.reference_revision.repo, commit: node.reference_revision.commit }),
-          reference_artifact: materialized.referenceArtifact,
-          manifest_artifact: materialized.manifestArtifact,
-          ...(input.provision === undefined
-            ? {}
-            : {
-                reference_expectations: {
-                  source: "operator-supplied",
-                  path: input.provision.sourceRelativePath,
-                  sha256: input.provision.sourceDigest
-                }
-              })
-        }
+        metadata: referenceMetadata
       }
     });
     updateNodeState(input.layout, node.id, {

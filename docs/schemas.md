@@ -43,7 +43,7 @@ schema digest, bundle digest, and validator-build identity.
 Every planned JSON output persists the registered schema filename, `$id`,
 schema SHA-256, owning package's schema-bundle SHA-256, and validator build.
 The expanded graph, run state, `ultrafuzz.artifact-verification.v2` marker, and
-`ultrafuzz.artifact-manifest.v2` repeat that binding. A missing, partial, stale,
+`ultrafuzz.artifact-manifest.v3` repeat that binding. A missing, partial, stale,
 or mismatched identity is a host setup/verification failure even when the JSON
 would match a different schema with the same general shape.
 

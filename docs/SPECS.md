@@ -413,17 +413,19 @@ Node artifacts are the durable message-passing and evidence system. Required
 artifacts MUST match topology declarations. Artifact paths MUST be safe,
 project-local relative paths under the node artifact directory.
 
-Artifact manifests MUST use `ultrafuzz.artifact-manifest.v2` and record run,
+Artifact manifests MUST use `ultrafuzz.artifact-manifest.v3` and record run,
 node, and producer identity; relative file paths, sizes, SHA-256 digests, and
 provenance; output contract IDs and digests; exact prerequisite manifest
 digests; and the primary marker. Every JSON output entry MUST also record the
 complete `schema_file`, `schema_id`, `schema_sha256`,
 `schema_bundle_sha256`, and `validator_build` binding. Non-JSON entries MUST
 omit those fields. Runtime-owned manifests and verification markers MUST be
-generated canonically as `ultrafuzz.artifact-manifest.v2` and
+generated canonically as `ultrafuzz.artifact-manifest.v3` and
 `ultrafuzz.artifact-verification.v2` documents and strictly validated against
-their registered schemas. The host MUST NOT upgrade an old manifest or marker
-in place.
+their registered schemas. Manifest provenance metadata, when present, MUST be
+exactly either pinned-reference materialization metadata or Smithers task
+identity metadata; arbitrary JSON metadata bags are forbidden. The host MUST
+NOT upgrade an old manifest or marker in place.
 
 Each retained agent-authored JSON handoff MUST have exactly one current named
 contract, one complete Draft 2020-12 whole-document schema, and one canonical

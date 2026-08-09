@@ -185,16 +185,20 @@ generic JSON object/array contracts and historical contract aliases are not
 available.
 
 `artifact-manifest.json` is runtime-owned and uses the exact schema version
-`ultrafuzz.artifact-manifest.v2`. It records run and producer identity, creation
+`ultrafuzz.artifact-manifest.v3`. It records run and producer identity, creation
 time, artifact paths, sizes, SHA-256 digests, output contract IDs and digests,
 and provenance such as logical node, attempt index, loop index, model profile,
 model name, workflow task, and source run when available. Every JSON output
 entry carries the complete `schema_file`, `schema_id`, `schema_sha256`,
 `schema_bundle_sha256`, and `validator_build` binding; non-JSON entries omit
-those fields. It also records the exact prerequisite manifest digests consumed
-by the attempt so reuse can reject causally stale descendants. The host strictly
-validates this v2 manifest before writing, reading, reuse, or publication; it
-does not upgrade a v1 manifest.
+those fields. Optional provenance metadata is a closed union: either the exact
+pinned-reference materialization record (including its optional revision and
+operator-supplied expectation source) or the exact Smithers task concrete-node
+identity. Generic or mixed metadata objects are invalid. The manifest also
+records the exact prerequisite manifest digests consumed by the attempt so
+reuse can reject causally stale descendants. The host strictly validates this
+v3 manifest before writing, reading, reuse, or publication. It rejects every
+earlier manifest version without upgrading or converting it.
 
 The producer's rendered prompt includes one safely quoted `ultrafuzz json
 validate --schema ... --file ...` command per JSON output. The producer runs it

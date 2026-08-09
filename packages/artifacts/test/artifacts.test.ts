@@ -21,6 +21,7 @@ import {
   publishFileDurableExclusive,
   queryNodeAttempts,
   queryEvents,
+  readArtifactManifest,
   readEventQueryFacade,
   readRunState,
   replayEvents,
@@ -28,6 +29,7 @@ import {
   safeResolveInside,
   summarizeNodeAttempts,
   updateNodeState,
+  validateArtifactManifest,
   verifyArtifactManifestPrerequisites,
   writeArtifact,
   writeArtifactManifest,
@@ -444,7 +446,7 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
     }
   });
 
-  assert.equal(manifest.schema_version, "ultrafuzz.artifact-manifest.v2");
+  assert.equal(manifest.schema_version, "ultrafuzz.artifact-manifest.v3");
   assert.equal(manifest.files.length, 1);
   assert.equal(manifest.files[0]!.path, "setup/project.json");
   assert.equal(manifest.files[0]!.size_bytes, fs.statSync(artifactPath).size);
@@ -458,6 +460,79 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
   assert.equal(manifest.output_contracts[0]!.schema_bundle_sha256, "c".repeat(64));
   assert.equal(manifest.output_contracts[0]!.validator_build, `ultrafuzz-json-validator.v1:${"d".repeat(64)}`);
   assert.deepEqual(manifest.prerequisite_manifests, []);
+});
+
+test("artifact manifest v3 accepts only exact reference and Smithers task provenance metadata", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-metadata" });
+  writeArtifact(layout, "node-a", "result.md", "result\n");
+  const manifest = writeArtifactManifest({
+    layout,
+    nodeId: "node-a",
+    createdAt: "2026-08-09T00:00:00.000Z"
+  });
+  const referenceMetadata = {
+    reference: "properties.example",
+    repo: "example/reference",
+    commit: "a".repeat(40),
+    reference_artifact: "/runs/run-metadata/artifacts/node-a/references/example.md",
+    manifest_artifact: "/runs/run-metadata/artifacts/node-a/references/manifest.json",
+    reference_expectations: {
+      source: "operator-supplied" as const,
+      path: "references/expectations.json",
+      sha256: "b".repeat(64)
+    }
+  };
+  const smithersTaskMetadata = { concrete_node_id: "node-a" };
+
+  const withMetadata = (metadata: unknown, location: "manifest" | "file"): unknown => {
+    const candidate = structuredClone(manifest) as unknown as {
+      provenance: { metadata?: unknown };
+      files: Array<{ provenance: { metadata?: unknown } }>;
+    };
+    if (location === "manifest") candidate.provenance.metadata = metadata;
+    else candidate.files[0]!.provenance.metadata = metadata;
+    return candidate;
+  };
+
+  for (const location of ["manifest", "file"] as const) {
+    assert.equal(validateArtifactManifest(withMetadata(referenceMetadata, location)).ok, true, location);
+    assert.equal(validateArtifactManifest(withMetadata(smithersTaskMetadata, location)).ok, true, location);
+
+    for (const invalidMetadata of [
+      { arbitrary: { nested: true } },
+      { ...referenceMetadata, concrete_node_id: "node-a" },
+      { ...referenceMetadata, extra: "not-declared" },
+      { ...referenceMetadata, commit: undefined }
+    ]) {
+      assert.equal(validateArtifactManifest(withMetadata(invalidMetadata, location)).ok, false, location);
+    }
+  }
+
+  assert.equal(validateArtifactManifest({ ...manifest, schema_version: "ultrafuzz.artifact-manifest.v2" }).ok, false);
+});
+
+test("artifact manifest reads reject v2 and generic metadata without conversion", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-current-manifest-only" });
+  const manifest = writeArtifactManifest({
+    layout,
+    nodeId: "node-a",
+    createdAt: "2026-08-09T00:00:00.000Z"
+  });
+  const manifestPath = path.join(getNodeArtifactDir(layout, "node-a"), "artifact-manifest.json");
+  const invalidManifests = [
+    { ...manifest, schema_version: "ultrafuzz.artifact-manifest.v2" },
+    {
+      ...manifest,
+      provenance: { ...manifest.provenance, metadata: { arbitrary: { nested: true } } }
+    }
+  ];
+
+  for (const invalid of invalidManifests) {
+    const bytes = `${JSON.stringify(invalid)}\n`;
+    fs.writeFileSync(manifestPath, bytes, "utf8");
+    assert.throws(() => readArtifactManifest(layout, "node-a"), /artifact manifest is schema-invalid/u);
+    assert.equal(fs.readFileSync(manifestPath, "utf8"), bytes);
+  }
 });
 
 test("artifact manifests preserve causal prerequisite digests for safe reuse", () => {

@@ -27,20 +27,22 @@ export const GENERATED_TESTS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:ge
 export const GENERATED_TEST_MANIFEST_PATH_PATTERN =
   "^generated-tests/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127})*(?![\\s\\S])" as const;
 
+export type GeneratedTestProvenance = Partial<Omit<ArtifactProvenance, "metadata">>;
+
 export interface GeneratedTestInput {
   path: string;
   content?: string | Uint8Array;
   language?: string;
   framework?: string;
   description?: string;
-  provenance?: Partial<ArtifactProvenance>;
+  provenance?: GeneratedTestProvenance;
 }
 
 export interface GeneratedTestEntry {
   path: string;
   size_bytes?: number;
   sha256?: string;
-  provenance?: ArtifactProvenance;
+  provenance?: GeneratedTestProvenance;
   language?: string;
   framework?: string;
   description?: string;
@@ -51,7 +53,7 @@ export interface GeneratedTestManifest {
   run_id: string;
   node_id: string;
   generated_tests: GeneratedTestEntry[];
-  provenance?: ArtifactProvenance;
+  provenance?: GeneratedTestProvenance;
 }
 
 const nonEmptyString = z.string().min(1);
@@ -144,7 +146,7 @@ export function writeGeneratedTestManifest(input: {
   layout: RunLayout;
   nodeId: string;
   tests: GeneratedTestInput[];
-  provenance?: Partial<ArtifactProvenance>;
+  provenance?: GeneratedTestProvenance;
 }): GeneratedTestManifest {
   const nodeDir = getNodeArtifactDir(input.layout, input.nodeId, { create: true });
   ensureSafeDirectory(nodeDir, GENERATED_TESTS_DIR);
@@ -176,7 +178,7 @@ function isSafeGeneratedTestManifestPath(value: string): boolean {
 function writeGeneratedTestEntry(
   nodeDir: string,
   input: GeneratedTestInput,
-  manifestProvenance: ArtifactProvenance
+  manifestProvenance: GeneratedTestProvenance & Pick<ArtifactProvenance, "producer_node_id">
 ): GeneratedTestEntry {
   const safeRelativeTestPath = normalizeSafeRelativePath(stripGeneratedTestsPrefix(input.path), "generated test path");
   const generatedTestsRoot = path.join(nodeDir, GENERATED_TESTS_DIR);

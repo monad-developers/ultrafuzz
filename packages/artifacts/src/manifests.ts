@@ -21,11 +21,28 @@ import {
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
-export const ARTIFACT_MANIFEST_SCHEMA_VERSION = "ultrafuzz.artifact-manifest.v2" as const;
-export const ARTIFACT_MANIFEST_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:artifact-manifest:2" as const;
+export const ARTIFACT_MANIFEST_SCHEMA_VERSION = "ultrafuzz.artifact-manifest.v3" as const;
+export const ARTIFACT_MANIFEST_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:artifact-manifest:3" as const;
 export const ARTIFACT_MANIFEST_FILE = "artifact-manifest.json";
 
-export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+export interface ReferenceExpectationArtifactProvenance {
+  source: "operator-supplied";
+  path: string;
+  sha256: string;
+}
+
+export type ReferenceArtifactProvenanceMetadata = {
+  reference: string;
+  reference_artifact: string;
+  manifest_artifact: string;
+  reference_expectations?: ReferenceExpectationArtifactProvenance;
+} & ({ repo: string; commit: string } | { repo?: never; commit?: never });
+
+export interface SmithersTaskArtifactProvenanceMetadata {
+  concrete_node_id: string;
+}
+
+export type ArtifactProvenanceMetadata = ReferenceArtifactProvenanceMetadata | SmithersTaskArtifactProvenanceMetadata;
 
 export interface ArtifactProvenance {
   producer_node_id: string;
@@ -41,7 +58,7 @@ export interface ArtifactProvenance {
   workflow_task_id?: string;
   source_run_id?: string;
   origin?: string;
-  metadata?: Record<string, JsonValue>;
+  metadata?: ArtifactProvenanceMetadata;
 }
 
 export interface ArtifactManifestEntry {
@@ -206,18 +223,48 @@ export const artifactManifestJsonSchema = {
         workflow_task_id: { type: "string", minLength: 1 },
         source_run_id: { type: "string", minLength: 1 },
         origin: { type: "string", minLength: 1 },
-        metadata: { type: "object", additionalProperties: { $ref: "#/$defs/jsonValue" } }
+        metadata: { $ref: "#/$defs/provenanceMetadata" }
       }
     },
-    jsonValue: {
-      anyOf: [
-        { type: "null" },
-        { type: "boolean" },
-        { type: "number" },
-        { type: "string" },
-        { type: "array", items: { $ref: "#/$defs/jsonValue" } },
-        { type: "object", additionalProperties: { $ref: "#/$defs/jsonValue" } }
-      ]
+    provenanceMetadata: {
+      oneOf: [{ $ref: "#/$defs/referenceProvenanceMetadata" }, { $ref: "#/$defs/smithersTaskProvenanceMetadata" }]
+    },
+    referenceProvenanceMetadata: {
+      type: "object",
+      additionalProperties: false,
+      required: ["reference", "reference_artifact", "manifest_artifact"],
+      dependentRequired: { repo: ["commit"], commit: ["repo"] },
+      properties: {
+        reference: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]*$" },
+        repo: { type: "string", pattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+        commit: { type: "string", pattern: "^[0-9a-f]{40}$" },
+        reference_artifact: { $ref: "#/$defs/nonNulString" },
+        manifest_artifact: { $ref: "#/$defs/nonNulString" },
+        reference_expectations: {
+          type: "object",
+          additionalProperties: false,
+          required: ["source", "path", "sha256"],
+          properties: {
+            source: { const: "operator-supplied" },
+            path: { $ref: "#/$defs/nonNulString" },
+            sha256: { $ref: "#/$defs/sha256" }
+          }
+        }
+      }
+    },
+    smithersTaskProvenanceMetadata: {
+      type: "object",
+      additionalProperties: false,
+      required: ["concrete_node_id"],
+      properties: {
+        concrete_node_id: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" }
+      }
+    },
+    nonNulString: {
+      type: "string",
+      minLength: 1,
+      maxLength: 4_096,
+      pattern: "^[^\\u0000]+$"
     }
   }
 } as const;
