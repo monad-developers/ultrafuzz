@@ -894,6 +894,13 @@ describe("Modal result collection", () => {
     const files = { "recovery-lifecycle.json": `${JSON.stringify(document)}\n` };
 
     expect(() => assertSanitizedModalCollectedFiles(files, context)).not.toThrow();
+    const serialized = files["recovery-lifecycle.json"];
+    const field = '"schema_version":"ultrafuzz.modal.recovery-lifecycle.v1"';
+    const duplicate = serialized.replace(field, `${field},"schema_version":"shadow-version"`);
+    expect(duplicate).not.toBe(serialized);
+    expect(() => assertSanitizedModalCollectedFiles({ "recovery-lifecycle.json": duplicate }, context)).toThrow(
+      /unsanitized Modal recovery lifecycle/u
+    );
     expect(() =>
       assertSanitizedModalCollectedFiles(
         {

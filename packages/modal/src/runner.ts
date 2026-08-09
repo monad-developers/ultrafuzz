@@ -96,8 +96,8 @@ import {
   type ModalSandboxState,
   type ModalWorkerStatus
 } from "./launch-state.js";
-import { MODAL_WORKER_RESULT_SCHEMA_ID } from "./modal-contracts.js";
-import { parseModalDocumentBytes } from "./modal-documents.js";
+import { MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID, MODAL_WORKER_RESULT_SCHEMA_ID } from "./modal-contracts.js";
+import { parseModalDocumentBytes, serializeModalDocument } from "./modal-documents.js";
 import {
   REMOTE_CONFIG_DIR,
   REMOTE_CONFIG_PATH,
@@ -2647,7 +2647,10 @@ export async function collectModalBenchmark(input: {
         const selectedEvidence: { files: Readonly<Record<string, string>>; forbiddenSecretValues: string[] } = {
           files: {
             ...selectedWorkerEvidence.files,
-            [MODAL_RECOVERY_LIFECYCLE_FILE]: `${JSON.stringify(recoveryLifecycle, null, 2)}\n`
+            [MODAL_RECOVERY_LIFECYCLE_FILE]: serializeModalDocument(
+              MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID,
+              recoveryLifecycle
+            ).bytes.toString("utf8")
           },
           forbiddenSecretValues: selectedWorkerEvidence.forbiddenSecretValues
         };
@@ -3310,7 +3313,9 @@ export function assertSanitizedModalCollectedFiles(
   if (recoveryContents !== undefined) {
     let recovery: ReturnType<typeof parseModalRecoveryLifecycleDocument>;
     try {
-      recovery = parseModalRecoveryLifecycleDocument(JSON.parse(recoveryContents) as unknown);
+      recovery = parseModalRecoveryLifecycleDocument(
+        parseModalDocumentBytes(MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID, Buffer.from(recoveryContents, "utf8")).value
+      );
       assertModalRecoveryLifecycleContainsNoSecrets(recovery, forbiddenSecretValues);
     } catch (error) {
       throw new Error("refusing to collect an unsanitized Modal recovery lifecycle", { cause: error });
