@@ -133,10 +133,8 @@ function terminalStatus(
     latest.map((record) => workflowObservations.get(record)?.started_at ?? record.launcher.started_at ?? undefined)
   );
   const observedFinishedAt = maxTimestamp(latest.map((record) => workflowObservations.get(record)?.finished_at));
-  const finishedAt =
-    startedAt !== undefined && observedFinishedAt !== undefined && observedFinishedAt < startedAt
-      ? undefined
-      : observedFinishedAt;
+  assertTimestampOrder(startedAt, observedFinishedAt, "aggregate workflow");
+  const finishedAt = observedFinishedAt;
   return {
     schema_version: ANALYSIS_BUNDLE_SCHEMA_VERSION,
     terminal: statuses.length > 0 && statuses.every((status) => TERMINAL_WORKFLOW_STATUSES.has(status as RunStatus)),
@@ -155,12 +153,10 @@ function attemptHistory(
   return {
     schema_version: ANALYSIS_BUNDLE_SCHEMA_VERSION,
     attempts: records.map((record, index) => {
-      const startedAt = normalizedTimestamp(record.launcher.started_at ?? undefined);
-      const observedFinishedAt = normalizedTimestamp(record.launcher.finished_at ?? undefined);
-      const finishedAt =
-        startedAt !== undefined && observedFinishedAt !== undefined && observedFinishedAt < startedAt
-          ? undefined
-          : observedFinishedAt;
+      const startedAt = validatedTimestamp(record.launcher.started_at ?? undefined);
+      const observedFinishedAt = validatedTimestamp(record.launcher.finished_at ?? undefined);
+      assertTimestampOrder(startedAt, observedFinishedAt, `launcher attempt ${index + 1}`);
+      const finishedAt = observedFinishedAt;
       return {
         ordinal: index + 1,
         launcher_status: record.status,
@@ -373,28 +369,38 @@ function aggregateStatus(
 }
 
 function minTimestamp(values: Array<string | undefined>): string | undefined {
-  return values
-    .flatMap((value) => {
-      const timestamp = normalizedTimestamp(value);
-      return timestamp === undefined ? [] : [timestamp];
-    })
-    .sort()[0];
+  return selectTimestamp(values, "minimum");
 }
 
 function maxTimestamp(values: Array<string | undefined>): string | undefined {
-  return values
-    .flatMap((value) => {
-      const timestamp = normalizedTimestamp(value);
-      return timestamp === undefined ? [] : [timestamp];
-    })
-    .sort()
-    .at(-1);
+  return selectTimestamp(values, "maximum");
 }
 
-function normalizedTimestamp(value: string | undefined): string | undefined {
-  if (value === undefined || !Number.isFinite(Date.parse(value))) return undefined;
-  const normalized = new Date(value).toISOString();
-  return normalized === value ? value : normalized;
+function selectTimestamp(values: Array<string | undefined>, selection: "minimum" | "maximum"): string | undefined {
+  const timestamps = values.flatMap((value) => {
+    const timestamp = validatedTimestamp(value);
+    return timestamp === undefined ? [] : [timestamp];
+  });
+  timestamps.sort((left, right) => {
+    const chronological = Date.parse(left) - Date.parse(right);
+    if (chronological !== 0) return chronological;
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+  return selection === "minimum" ? timestamps[0] : timestamps.at(-1);
+}
+
+function validatedTimestamp(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isFinite(Date.parse(value))) {
+    throw new EvalError("EVAL_ANALYSIS_TIMESTAMP_INVALID", "analysis source contains an invalid timestamp");
+  }
+  return value;
+}
+
+function assertTimestampOrder(startedAt: string | undefined, finishedAt: string | undefined, label: string): void {
+  if (startedAt !== undefined && finishedAt !== undefined && Date.parse(finishedAt) < Date.parse(startedAt)) {
+    throw new EvalError("EVAL_ANALYSIS_TIMESTAMP_INVALID", `${label} finished_at precedes started_at`);
+  }
 }
 
 function readJsonBounded(filePath: string): unknown {

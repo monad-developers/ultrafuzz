@@ -344,6 +344,41 @@ describe("privacy-safe eval analysis bundles", () => {
       expect.objectContaining({ code: "EVAL_ANALYSIS_ACCOUNTING_INVALID" })
     );
   });
+
+  it("preserves valid source timestamps and rejects reversed launcher evidence without repair", () => {
+    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-timestamps-"));
+    const evalRunId = "eval-synthetic-timestamps";
+    const fixture = writeSingleEvalSources(projectRoot, evalRunId);
+    const statePath = path.join(fixture.runRoot, "state.json");
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
+    state.started_at = "2026-01-01T01:00:00.000+01:00";
+    state.finished_at = "2026-01-01T01:01:00.000+01:00";
+    writeJson(statePath, state);
+
+    const recordsPath = path.join(fixture.evalRoot, "runs.jsonl");
+    const record = JSON.parse(fs.readFileSync(recordsPath, "utf8")) as {
+      launcher: { started_at: string; finished_at: string };
+    };
+    record.launcher.started_at = "2026-01-01T01:00:00.000+01:00";
+    record.launcher.finished_at = "2026-01-01T01:01:00.000+01:00";
+    fs.writeFileSync(recordsPath, `${JSON.stringify(record)}\n`, "utf8");
+
+    const output = path.join(projectRoot, "bundle");
+    collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output });
+    expect(JSON.parse(fs.readFileSync(path.join(output, "data", "terminal-status.json"), "utf8"))).toMatchObject({
+      started_at: state.started_at,
+      finished_at: state.finished_at
+    });
+    expect(JSON.parse(fs.readFileSync(path.join(output, "data", "attempt-history.json"), "utf8"))).toMatchObject({
+      attempts: [{ started_at: record.launcher.started_at, finished_at: record.launcher.finished_at }]
+    });
+
+    record.launcher.started_at = "2026-01-01T01:02:00.000+01:00";
+    fs.writeFileSync(recordsPath, `${JSON.stringify(record)}\n`, "utf8");
+    expect(() => collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output })).toThrowError(
+      expect.objectContaining({ code: "EVAL_ANALYSIS_TIMESTAMP_INVALID" })
+    );
+  });
 });
 
 function syntheticRecoverySummary(): AnalysisRecoverySummary {
