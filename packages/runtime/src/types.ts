@@ -1,9 +1,11 @@
 import type {
-  ArtifactContractId,
   EventQuery,
   EventRecord,
   NodeAttemptLedgerSummary,
   NodeStateInput,
+  PlannedGraphDocument,
+  PlannedGraphNodeDocument,
+  PlannedGraphOutput,
   RunLayout,
   RunState
 } from "@ultrafuzz/artifacts";
@@ -115,64 +117,9 @@ export interface TopologyTransform {
   excludedNodeIds?: string[];
 }
 
-export interface PlannedGraphNode {
-  id: string;
-  logical_id: string;
-  display_name: string;
-  kind: string;
-  depends_on: string[];
-  artifact_dir: string;
-  outputs: PlannedArtifactOutput[];
-  prompt_id: string;
-  prompt_path: string;
-  reference?: string;
-  reference_revision?: {
-    provider: "github";
-    repo: string;
-    commit: string;
-    paths: string[];
-  };
-  role?: string;
-  loop: {
-    index: number;
-    count: number;
-    mode: string;
-    attempt_index: number;
-  };
-  model_fanout: Array<{
-    model_profile_id: string;
-    agent_ref: string;
-    model_name?: string;
-    reasoning_effort?: string;
-    model_index: number;
-    loop_index: number;
-    attempt_index: number;
-  }>;
-  workflow?: {
-    node_id?: string;
-    task_node_ids?: string[];
-  };
-}
-
-export interface PlannedArtifactOutput {
-  path: string;
-  contract: ArtifactContractId;
-  contract_digest: string;
-  schema_file?: string;
-  schema_id?: string;
-  schema_sha256?: string;
-  schema_bundle_sha256?: string;
-  validator_build?: string;
-  primary: boolean;
-}
-
-export interface PlannedGraph {
-  schema_version: "2.0";
-  graph_version: string;
-  topology_version: number;
-  groups: Record<string, unknown>;
-  nodes: PlannedGraphNode[];
-}
+export type PlannedGraphNode = PlannedGraphNodeDocument;
+export type PlannedArtifactOutput = PlannedGraphOutput;
+export type PlannedGraph = PlannedGraphDocument;
 
 export interface RenderedPromptPlan {
   node_id: string;

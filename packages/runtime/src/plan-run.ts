@@ -3,6 +3,7 @@ import path from "node:path";
 
 import {
   appendEvent,
+  assertPlannedGraph,
   assertNoSymlinkComponents,
   assertRegularFileInside,
   createInitialRunState,
@@ -17,6 +18,7 @@ import {
   writeArtifactManifest,
   writeFileDurable,
   writeJsonDurable,
+  PLANNED_GRAPH_SCHEMA_VERSION,
   type ArtifactContractId,
   type NodeStateInput,
   type RunLayout
@@ -555,19 +557,21 @@ function materializeReferenceNodesForPlan(input: {
 }
 
 export function toPlannedGraph(expanded: ExpandedGraph, catalog?: PromptCatalog): PlannedGraph {
-  const executableNodes = expanded.nodes.filter((node) => node.kind !== "meta");
+  const executableNodes = expanded.nodes.filter(
+    (node): node is ExpandedNode & { kind: "agentic" | "reference" } => node.kind !== "meta"
+  );
   const nodeById = new Map(expanded.nodes.map((node) => [node.id, node]));
-  return {
-    schema_version: "2.0",
+  return assertPlannedGraph({
+    schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
     graph_version: expanded.graphVersion,
     topology_version: expanded.topologyVersion,
     groups: expanded.groups,
     nodes: executableNodes.map((node) => toPlannedGraphNode(node, nodeById, catalog))
-  };
+  });
 }
 
 function toPlannedGraphNode(
-  node: ExpandedNode,
+  node: ExpandedNode & { kind: "agentic" | "reference" },
   nodeById: Map<string, ExpandedNode>,
   catalog: PromptCatalog | undefined
 ): PlannedGraphNode {
@@ -607,7 +611,6 @@ function toPlannedGraphNode(
           }
         }
       : {}),
-    ...(node.role ? { role: node.role } : {}),
     loop: {
       index: node.loop.index,
       count: node.loop.count,

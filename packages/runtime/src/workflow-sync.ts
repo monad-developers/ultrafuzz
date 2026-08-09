@@ -7,6 +7,7 @@ import {
   appendUsageEvents,
   appendNodeAttempts,
   appendEvent,
+  assertPlannedGraph,
   assertNoSymlinkComponents,
   assertPathInside,
   createNodeAttemptLedgerEntry,
@@ -18,6 +19,7 @@ import {
   readJsonFile,
   replayEvents,
   readRunState,
+  parseStrictJsonBytes,
   replayUsageEvents,
   safeResolveInside,
   stableUsageDimension,
@@ -41,6 +43,7 @@ import {
   type NodeStatus,
   type RunLayout,
   type RunStatus,
+  PLANNED_GRAPH_SCHEMA_VERSION,
   type StateJsonValue,
   type UsageField,
   type UsageIncompleteReason as LedgerUsageIncompleteReason,
@@ -3493,21 +3496,24 @@ function loadSynchronizationInputs(
   let graph: PlannedGraph | undefined;
   let tasks: StoredWorkflowTask[] | undefined;
   try {
-    graph = JSON.parse(contents.graph.toString("utf8")) as PlannedGraph;
-    if (graph.schema_version !== "2.0") {
+    const parsed = parseStrictJsonBytes(contents.graph);
+    const version = isRecord(parsed) ? parsed.schema_version : undefined;
+    if (version !== PLANNED_GRAPH_SCHEMA_VERSION) {
       diagnostics.push({
         code: "RUN_GRAPH_VERSION_UNSUPPORTED",
-        message: `Persisted planned graph schema version ${JSON.stringify(graph.schema_version)} is unsupported`,
+        message: `Persisted planned graph schema version ${JSON.stringify(version)} is unsupported; expected ${JSON.stringify(PLANNED_GRAPH_SCHEMA_VERSION)}`,
         severity: "error",
         source: "runtime",
         path: "graph.json#$.schema_version"
       });
+    } else {
+      graph = assertPlannedGraph(parsed);
     }
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "runtime", "RUN_GRAPH_READ_FAILED"));
   }
   try {
-    const parsed = JSON.parse(contents.tasks.toString("utf8")) as { tasks?: unknown };
+    const parsed = parseStrictJsonBytes(contents.tasks) as { tasks?: unknown };
     tasks = Array.isArray(parsed.tasks) ? parsed.tasks.flatMap(parseStoredTask) : [];
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "runtime", "WORKFLOW_TASKS_READ_FAILED"));

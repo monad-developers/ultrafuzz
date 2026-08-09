@@ -207,6 +207,11 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "invariant-source-proof-path-uniqueness",
     "invariant-source-proof-git-binding"
   ]),
+  "invariant-suite-manifest.schema.json": runtime("invariantSuiteManifestJsonSchema", undefined, [
+    "invariant-suite-file-path-uniqueness",
+    "invariant-suite-tombstone-uniqueness",
+    "invariant-suite-file-tombstone-disjointness"
+  ]),
   "node-attempt-ledger.schema.json": runtime("nodeAttemptLedgerJsonSchema", "nodeAttemptLedgerEntrySchema", [
     "attempt-parent-link",
     "attempt-outcome-digest-coupling",
@@ -229,6 +234,20 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "lensPropertiesSchema",
     ["property-lens-id-uniqueness"]
   ),
+  "planned-graph.schema.json": runtime("plannedGraphJsonSchema", undefined, [
+    "planned-graph-node-id-uniqueness",
+    "planned-graph-dependency-join",
+    "planned-graph-acyclicity",
+    "planned-graph-output-path-uniqueness",
+    "planned-graph-exactly-one-primary",
+    "planned-graph-model-fanout-uniqueness",
+    "planned-graph-workflow-task-uniqueness",
+    "planned-graph-workflow-node-join",
+    "planned-graph-artifact-dir-identity",
+    "planned-graph-loop-coupling",
+    "planned-graph-contract-identity",
+    "planned-graph-model-loop-coupling"
+  ]),
   "reference-expectations.schema.json": artifact(
     "ultrafuzz/reference-expectations@2",
     "referenceExpectationsJsonSchema",

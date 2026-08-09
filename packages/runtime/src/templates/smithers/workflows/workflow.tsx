@@ -34,12 +34,15 @@ const {
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
   artifactValidatorSmokeFixturePath,
+  assertValidInvariantSuiteManifest,
   assertArtifactVerificationMarkerSemantics,
   assertRegularFileInside,
   checkInvariantSourcePinned,
   invariantPinnedSourceRefExists,
   materializePromptSchemas,
+  INVARIANT_SUITE_MANIFEST_SCHEMA_VERSION,
   normalizeNodeAttemptFailureMessage,
+  parseInvariantSuiteManifestBytes,
   parseStrictJsonBytes,
   publishFileDurableExclusive,
   validateArtifactContract,
@@ -2176,22 +2179,22 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
     .filter((relativePath) => !publicationSnapshot.has(relativePath))
     .sort();
   assertInvariantSuiteTombstoneBudget(manifestTombstones.length, task.attemptId);
+  const manifest = {
+    schema_version: INVARIANT_SUITE_MANIFEST_SCHEMA_VERSION,
+    producer_node_id: task.metadata.node.logicalNodeId,
+    producer_attempt_id: task.attemptId,
+    files: manifestFiles,
+    tombstones: manifestTombstones
+  };
+  assertValidInvariantSuiteManifest(manifest);
+  const manifestContents = `${JSON.stringify(manifest)}\n`;
   for (const artifactRoot of artifactRoots) {
     resetInvariantSuiteArtifactRoot(artifactRoot);
     copyDependencyInvariantSuiteToArtifact(task, artifactRoot);
     for (const relativePath of paths) {
       copyInvariantSuiteSource(realpathSync(task.workspacePath), artifactRoot, relativePath, true);
     }
-    writeFileDurable(
-      path.join(artifactRoot, INVARIANT_SUITE_MANIFEST_FILE),
-      `${JSON.stringify({
-        schema_version: "ultrafuzz.invariant-suite-manifest.v1",
-        producer_node_id: task.metadata.node.logicalNodeId,
-        producer_attempt_id: task.attemptId,
-        files: manifestFiles,
-        tombstones: manifestTombstones
-      })}\n`
-    );
+    writeFileDurable(path.join(artifactRoot, INVARIANT_SUITE_MANIFEST_FILE), manifestContents);
   }
 }
 
@@ -2219,12 +2222,7 @@ function assertInvariantSuiteTombstoneBudget(count: number, label: string): void
   }
 }
 
-/**
- * Parse a published invariant-suite manifest into its file digests and its
- * deletion channel. `tombstones` is an additive v1 field: a manifest published
- * before deletions were represented simply carries no deletion channel and is
- * read as an empty set.
- */
+/** Parse a current-version invariant-suite manifest into its file digests and deletion channel. */
 function parseInvariantSuiteManifestRecord(
   manifestBytes: Buffer,
   manifestPath: string
@@ -2234,56 +2232,22 @@ function parseInvariantSuiteManifestRecord(
   files: Map<string, { sha256: string; sizeBytes: number }>;
   tombstones: Set<string>;
 } {
-  let parsed: unknown;
+  let parsed: ReturnType<typeof parseInvariantSuiteManifestBytes>;
   try {
-    parsed = JSON.parse(manifestBytes.toString("utf8")) as unknown;
+    parsed = parseInvariantSuiteManifestBytes(manifestBytes);
   } catch (error) {
-    throw new Error(`artifact-contract failure: invariant suite manifest is malformed ${manifestPath}`, {
+    throw new Error(`artifact-contract failure: invariant suite manifest is invalid ${manifestPath}`, {
       cause: error
     });
   }
-  if (
-    !isPlainRecord(parsed) ||
-    parsed.schema_version !== "ultrafuzz.invariant-suite-manifest.v1" ||
-    typeof parsed.producer_node_id !== "string" ||
-    typeof parsed.producer_attempt_id !== "string" ||
-    !Array.isArray(parsed.files)
-  ) {
-    throw new Error(`artifact-contract failure: invariant suite manifest is invalid ${manifestPath}`);
-  }
   const files = new Map<string, { sha256: string; sizeBytes: number }>();
   for (const file of parsed.files) {
-    if (
-      !isPlainRecord(file) ||
-      typeof file.path !== "string" ||
-      typeof file.size_bytes !== "number" ||
-      !Number.isSafeInteger(file.size_bytes) ||
-      file.size_bytes < 1 ||
-      typeof file.sha256 !== "string" ||
-      !/^[0-9a-f]{64}$/u.test(file.sha256)
-    ) {
-      throw new Error(`artifact-contract failure: invariant suite manifest file entry is invalid ${manifestPath}`);
-    }
     const relativePath = assertSafeInvariantSuitePath(file.path);
     assertInvariantSuiteSourceSize(relativePath, file.size_bytes);
-    if (files.has(relativePath)) {
-      throw new Error(`artifact-contract failure: duplicate invariant suite manifest file ${relativePath}`);
-    }
     files.set(relativePath, { sha256: file.sha256, sizeBytes: file.size_bytes });
   }
-  const tombstones = new Set<string>();
-  if (parsed.tombstones !== undefined) {
-    if (!Array.isArray(parsed.tombstones)) {
-      throw new Error(`artifact-contract failure: invariant suite manifest tombstones are invalid ${manifestPath}`);
-    }
-    for (const entry of parsed.tombstones) {
-      if (typeof entry !== "string") {
-        throw new Error(`artifact-contract failure: invariant suite manifest tombstones are invalid ${manifestPath}`);
-      }
-      tombstones.add(assertSafeInvariantSuitePath(entry));
-    }
-    assertInvariantSuiteTombstoneBudget(tombstones.size, manifestPath);
-  }
+  const tombstones = new Set(parsed.tombstones.map((entry) => assertSafeInvariantSuitePath(entry)));
+  assertInvariantSuiteTombstoneBudget(tombstones.size, manifestPath);
   return {
     producerNodeId: parsed.producer_node_id,
     producerAttemptId: parsed.producer_attempt_id,
@@ -2705,29 +2669,20 @@ function invariantSuiteDependencySuitePaths(
     if (!existsSync(suiteRoot)) continue;
     const manifestPath = path.join(dependencyRoot, INVARIANT_SUITE_MANIFEST_FILE);
     if (!existsSync(manifestPath)) continue;
-    let manifest: { schema_version?: unknown; producer_node_id?: unknown; producer_attempt_id?: unknown };
-    try {
-      manifest = JSON.parse(
-        readFileSync(
-          resolveRegularArtifactFile(
-            dependencyRoot,
-            manifestPath,
-            "artifact-contract failure: invariant suite manifest is not a regular file"
-          ),
-          "utf8"
+    const manifest = parseInvariantSuiteManifestRecord(
+      readFileSync(
+        resolveRegularArtifactFile(
+          dependencyRoot,
+          manifestPath,
+          "artifact-contract failure: invariant suite manifest is not a regular file"
         )
-      ) as { schema_version?: unknown; producer_node_id?: unknown; producer_attempt_id?: unknown };
-    } catch (error) {
-      throw new Error(`artifact-contract failure: invariant suite manifest is malformed ${manifestPath}`, {
-        cause: error
-      });
-    }
+      ),
+      manifestPath
+    );
     if (
-      manifest.schema_version !== "ultrafuzz.invariant-suite-manifest.v1" ||
-      typeof manifest.producer_node_id !== "string" ||
-      !invariantSuiteNodeIds.has(manifest.producer_node_id) ||
-      manifest.producer_attempt_id !== dependencyAttemptId ||
-      manifest.producer_node_id !== producer.metadata.node.logicalNodeId
+      !invariantSuiteNodeIds.has(manifest.producerNodeId) ||
+      manifest.producerAttemptId !== dependencyAttemptId ||
+      manifest.producerNodeId !== producer.metadata.node.logicalNodeId
     ) {
       continue;
     }
@@ -3729,54 +3684,16 @@ function rememberExpectedInvariantSuitePublications(
     "artifact-contract failure: invariant suite manifest is empty"
   );
   const manifestBytes = readFileSync(resolvedManifest);
-  let manifest: {
-    schema_version?: unknown;
-    producer_node_id?: unknown;
-    producer_attempt_id?: unknown;
-    files?: unknown;
-  };
-  try {
-    manifest = JSON.parse(manifestBytes.toString("utf8")) as typeof manifest;
-  } catch (error) {
-    throw new Error(`artifact-contract failure: invariant suite manifest is malformed ${manifestPath}`, {
-      cause: error
-    });
-  }
+  const manifest = parseInvariantSuiteManifestRecord(manifestBytes, manifestPath);
   if (
-    manifest.schema_version !== "ultrafuzz.invariant-suite-manifest.v1" ||
-    manifest.producer_node_id !== dependencyTask.metadata.node.logicalNodeId ||
-    manifest.producer_attempt_id !== dependencyTask.attemptId ||
-    !Array.isArray(manifest.files)
+    manifest.producerNodeId !== dependencyTask.metadata.node.logicalNodeId ||
+    manifest.producerAttemptId !== dependencyTask.attemptId
   ) {
     throw new Error(`artifact-contract failure: invariant suite manifest is invalid ${dependencyTask.attemptId}`);
   }
   rememberExpectedVerifiedPublication(publications, INVARIANT_SUITE_MANIFEST_FILE, manifestBytes);
 
-  const expectedFiles = new Map<string, { sha256: string; sizeBytes: number }>();
-  for (const file of manifest.files) {
-    if (
-      typeof file !== "object" ||
-      file === null ||
-      Array.isArray(file) ||
-      typeof (file as { path?: unknown }).path !== "string" ||
-      typeof (file as { size_bytes?: unknown }).size_bytes !== "number" ||
-      !Number.isSafeInteger((file as { size_bytes: number }).size_bytes) ||
-      (file as { size_bytes: number }).size_bytes < 1 ||
-      typeof (file as { sha256?: unknown }).sha256 !== "string" ||
-      !/^[0-9a-f]{64}$/u.test((file as { sha256: string }).sha256)
-    ) {
-      throw new Error(
-        `artifact-contract failure: invariant suite manifest file entry is invalid ${dependencyTask.attemptId}`
-      );
-    }
-    const entry = file as { path: string; size_bytes: number; sha256: string };
-    const relativePath = assertSafeInvariantSuitePath(entry.path);
-    assertInvariantSuiteSourceSize(relativePath, entry.size_bytes);
-    if (expectedFiles.has(relativePath)) {
-      throw new Error(`artifact-contract failure: duplicate invariant suite manifest file ${relativePath}`);
-    }
-    expectedFiles.set(relativePath, { sha256: entry.sha256, sizeBytes: entry.size_bytes });
-  }
+  const expectedFiles = manifest.files;
 
   const suiteRoot = path.join(dependencyRoot, "invariant-suite");
   const actualPaths = existsSync(suiteRoot) ? listInvariantSuiteSources(suiteRoot) : [];

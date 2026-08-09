@@ -3,6 +3,7 @@ import path from "node:path";
 
 import {
   appendEvent,
+  assertPlannedGraph,
   assertNoSymlinkComponents,
   assertPathInside,
   layoutForRunRoot,
@@ -431,11 +432,12 @@ async function persistSmithersEvidence(
     const taskNodeIds = tasksByConcrete.get(node.id) ?? [];
     if (taskNodeIds.length > 0) {
       node.workflow = {
-        node_id: taskNodeIds[0],
+        node_id: taskNodeIds[0]!,
         task_node_ids: taskNodeIds
       };
     }
   }
+  assertPlannedGraph(graph);
   writeJsonDurable(layout.graphPath, graph);
 
   const executionFiles = await smithersExecutionControlFiles(compiled, layout, env);

@@ -6,9 +6,11 @@ import { pathToFileURL } from "node:url";
 import lockfile from "proper-lockfile";
 
 import {
+  assertPlannedGraph,
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
+  parseStrictJsonBytes,
   safeResolveInside,
   type RunLayout,
   writeJsonDurable
@@ -1375,7 +1377,7 @@ function deriveWorkflowControlBindings(
   stateContents: Buffer,
   planContents: Buffer | undefined
 ): WorkflowControlBindings {
-  const graph = parseRecordJson(contents.graph, "run graph");
+  const graph = assertPlannedGraph(parseStrictJsonBytes(contents.graph));
   const expandedGraph = parseRecordJson(contents.expanded_graph, "expanded workflow graph") as unknown as ExpandedGraph;
   const tasksDocument = parseRecordJson(contents.tasks, "workflow task manifest");
   const state = parseRecordJson(stateContents, "run state");
@@ -1861,7 +1863,7 @@ function validateIds(values: readonly unknown[], label: string): string[] {
 
 function parseRecordJson(contents: Buffer, label: string): Record<string, unknown> {
   try {
-    const value = JSON.parse(contents.toString("utf8")) as unknown;
+    const value = parseStrictJsonBytes(contents);
     if (!isRecord(value)) throw new Error(`${label} must be a JSON object`);
     return value;
   } catch (error) {

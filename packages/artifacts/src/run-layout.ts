@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { createEventQueryFacadeInputs } from "./events.js";
+import { assertPlannedGraph, PLANNED_GRAPH_SCHEMA_VERSION, type PlannedGraphDocument } from "./planned-graph.js";
 import { createInitialRunState, type NodeStateInput, type RunState, writeRunState } from "./state.js";
 import {
   assertNoSymlinkComponents,
@@ -44,7 +45,7 @@ export interface CreateRunLayoutInput {
   createdAt?: string;
   resolvedConfigToml?: string;
   configRedactions?: unknown;
-  graph?: unknown;
+  graph?: PlannedGraphDocument;
   graphFingerprint?: string;
   configFingerprint?: string;
   state?: RunState;
@@ -91,6 +92,15 @@ export function createRunLayout(input: CreateRunLayoutInput): RunLayout {
       createdAt,
       nodes: input.stateNodes
     });
+  const graph = assertPlannedGraph(
+    input.graph ?? {
+      schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
+      graph_version: "3",
+      topology_version: 2,
+      groups: {},
+      nodes: []
+    }
+  );
 
   writeJsonIfNeeded(
     layout.runMetadataPath,
@@ -121,11 +131,7 @@ export function createRunLayout(input: CreateRunLayoutInput): RunLayout {
     input.configRedactions ?? { schema_version: RUN_LAYOUT_SCHEMA_VERSION, redactions: [] },
     input.overwrite ?? false
   );
-  writeJsonIfNeeded(
-    layout.graphPath,
-    input.graph ?? { schema_version: RUN_LAYOUT_SCHEMA_VERSION, nodes: [] },
-    input.overwrite ?? false
-  );
+  writeJsonIfNeeded(layout.graphPath, graph, input.overwrite ?? false);
   writeTextIfNeeded(layout.graphFingerprintPath, `${input.graphFingerprint ?? ""}\n`, input.overwrite ?? false);
   if ((input.overwrite ?? false) || !fs.existsSync(layout.statePath)) {
     writeRunState(layout, state);

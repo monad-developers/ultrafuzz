@@ -53,7 +53,6 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
     sourceRunId: "run-0",
     resolvedConfigToml: '[run]\noutput_dir = ".ultrafuzz/runs"\n',
     configRedactions: { schema_version: "1.0", redactions: [{ key: "OPENAI_API_KEY" }] },
-    graph: { schema_version: "1.0", nodes: [{ id: "node-a" }] },
     graphFingerprint: "graph-fp",
     configFingerprint: "config-fp",
     stateNodes: [

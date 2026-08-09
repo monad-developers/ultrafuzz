@@ -19,6 +19,7 @@ import {
   NODE_STATE_STATUSES,
   RUN_STATE_STATUSES,
   PROPERTIES_SCHEMA_VERSION,
+  PLANNED_GRAPH_SCHEMA_VERSION,
   PROPERTY_LENS_SCHEMA_VERSION,
   PROPERTY_CAMPAIGN_SCHEMA_VERSION,
   REPORT_SCHEMA_VERSION,
@@ -29,6 +30,8 @@ import {
   artifactContractDefinition,
   artifactContractSchemaBinding,
   createInitialRunState,
+  assertPlannedGraph,
+  assertPlannedGraphSemantics,
   findingJsonSchema,
   generatedTestsJsonSchema,
   invariantLedgerJsonSchema,
@@ -51,6 +54,7 @@ import {
   validateArtifactContract,
   validateNodeAttemptLedgerEntry,
   validatePropertiesSchema,
+  validatePlannedGraph,
   validatePropertyCampaignSchema,
   validatePropertyReferences,
   validateRunStateSchema,
@@ -60,6 +64,8 @@ import {
   artifactContractSchemaFile,
   isArtifactContractId,
   type ArtifactContractId,
+  type PlannedGraphDocument,
+  type PlannedGraphNodeDocument,
   type PropertyCampaignArtifact,
   trustedCliMetadataJsonSchema
 } from "../src/index.js";
@@ -813,6 +819,158 @@ test("run state schema covers all required node states and rejects malformed sta
   const invalidWait = validateRunStateSchema(missingWait);
   assert.equal(invalidWait.ok, false);
   assert.ok(invalidWait.issues.some((issue) => issue.path.endsWith(".wait_since")));
+});
+
+test("planned graph v3 validates whole documents and executes every registered document semantic gate", () => {
+  const node: PlannedGraphNodeDocument = {
+    id: "node-a",
+    logical_id: "node-a",
+    display_name: "Node A",
+    kind: "agentic" as const,
+    depends_on: [] as string[],
+    artifact_dir: "artifacts/node-a",
+    outputs: [
+      {
+        path: "report.md",
+        contract: "ultrafuzz/nonempty-markdown@1" as const,
+        contract_digest: artifactContractDefinition("ultrafuzz/nonempty-markdown@1").digest,
+        primary: true
+      }
+    ],
+    prompt_id: "node-a",
+    prompt_path: ".ultrafuzz/prompts/node-a.mdx",
+    loop: { index: 0, count: 1, mode: "parallel" as const, attempt_index: 0 },
+    model_fanout: []
+  };
+  const graph: PlannedGraphDocument = {
+    schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
+    graph_version: "3" as const,
+    topology_version: 2 as const,
+    groups: {},
+    nodes: [node]
+  };
+
+  assert.equal(validatePlannedGraph(graph).ok, true);
+  assert.deepEqual(assertPlannedGraph(graph), graph);
+  assert.equal(validatePlannedGraph({ ...graph, schema_version: "2.0" }).ok, false);
+  assert.equal(validatePlannedGraph({ ...graph, legacy: true }).ok, false);
+  const findingsOutput = {
+    path: "findings.json",
+    contract: "ultrafuzz/findings@2" as const,
+    contract_digest: artifactContractDefinition("ultrafuzz/findings@2").digest,
+    ...artifactContractSchemaBinding("ultrafuzz/findings@2"),
+    primary: true
+  };
+
+  const documentGateFailures: Array<{ name: string; graph: PlannedGraphDocument; message: RegExp }> = [
+    {
+      name: "planned-graph-node-id-uniqueness",
+      graph: { ...graph, nodes: [node, structuredClone(node)] },
+      message: /repeats node ID/u
+    },
+    {
+      name: "planned-graph-dependency-join",
+      graph: { ...graph, nodes: [{ ...node, depends_on: ["missing"] }] },
+      message: /depends on unknown node/u
+    },
+    {
+      name: "planned-graph-acyclicity",
+      graph: {
+        ...graph,
+        nodes: [
+          { ...node, depends_on: ["node-b"] },
+          { ...node, id: "node-b", logical_id: "node-b", artifact_dir: "artifacts/node-b", depends_on: ["node-a"] }
+        ]
+      },
+      message: /dependency cycle/u
+    },
+    {
+      name: "planned-graph-output-path-uniqueness",
+      graph: { ...graph, nodes: [{ ...node, outputs: [node.outputs[0]!, { ...node.outputs[0]!, primary: false }] }] },
+      message: /repeats output path/u
+    },
+    {
+      name: "planned-graph-exactly-one-primary",
+      graph: { ...graph, nodes: [{ ...node, outputs: [{ ...node.outputs[0]!, primary: false }] }] },
+      message: /exactly one primary/u
+    },
+    {
+      name: "planned-graph-model-fanout-uniqueness",
+      graph: {
+        ...graph,
+        nodes: [
+          {
+            ...node,
+            model_fanout: [
+              { model_profile_id: "m", agent_ref: "a", model_index: 0, loop_index: 0, attempt_index: 0 },
+              { model_profile_id: "m", agent_ref: "a", model_index: 0, loop_index: 0, attempt_index: 0 }
+            ]
+          }
+        ]
+      },
+      message: /model-fanout identity/u
+    },
+    {
+      name: "planned-graph-workflow-task-uniqueness",
+      graph: {
+        ...graph,
+        nodes: [
+          { ...node, workflow: { node_id: "task-a", task_node_ids: ["task-a"] } },
+          {
+            ...node,
+            id: "node-b",
+            logical_id: "node-b",
+            artifact_dir: "artifacts/node-b",
+            workflow: { node_id: "task-a", task_node_ids: ["task-a"] }
+          }
+        ]
+      },
+      message: /repeats workflow task ID/u
+    },
+    {
+      name: "planned-graph-workflow-node-join",
+      graph: {
+        ...graph,
+        nodes: [{ ...node, workflow: { node_id: "task-a", task_node_ids: ["task-b"] } }]
+      },
+      message: /node_id is not present/u
+    },
+    {
+      name: "planned-graph-artifact-dir-identity",
+      graph: { ...graph, nodes: [{ ...node, artifact_dir: "artifacts/someone-else" }] },
+      message: /artifact_dir does not match/u
+    },
+    {
+      name: "planned-graph-loop-coupling",
+      graph: { ...graph, nodes: [{ ...node, loop: { ...node.loop, index: 1, count: 1, attempt_index: 1 } }] },
+      message: /inconsistent loop coordinates/u
+    },
+    {
+      name: "planned-graph-contract-identity",
+      graph: {
+        ...graph,
+        nodes: [{ ...node, outputs: [{ ...findingsOutput, contract_digest: "f".repeat(64) }] }]
+      },
+      message: /contract digest changed/u
+    },
+    {
+      name: "planned-graph-model-loop-coupling",
+      graph: {
+        ...graph,
+        nodes: [
+          {
+            ...node,
+            model_fanout: [{ model_profile_id: "m", agent_ref: "a", model_index: 0, loop_index: 1, attempt_index: 0 }]
+          }
+        ]
+      },
+      message: /model bound to another loop/u
+    }
+  ];
+  for (const fixture of documentGateFailures) {
+    assert.equal(validatePlannedGraph(fixture.graph).ok, true, `${fixture.name} is semantic, not shape`);
+    assert.throws(() => assertPlannedGraphSemantics(fixture.graph), fixture.message, fixture.name);
+  }
 });
 
 test("generated test manifest runtime and exported schemas enforce the same safe companion paths", () => {
