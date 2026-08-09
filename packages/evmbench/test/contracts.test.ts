@@ -36,6 +36,7 @@ import {
 import {
   NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID,
   NANOEVAL_RECORD_JSON_SCHEMA_ID,
+  NANOEVAL_TIMESTAMP_PATTERN_SOURCE,
   nanoevalFinalReportSchema,
   nanoevalRecordSchema,
   parseNanoevalFinalReport,
@@ -59,6 +60,7 @@ describe("EVMBench JSON Schema and Zod parity", () => {
       expect(entry.schema.$schema).toBe("https://json-schema.org/draft/2020-12/schema");
       if (entry.id === NANOEVAL_RECORD_JSON_SCHEMA_ID) {
         const definitions = entry.schema.$defs as Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+        expect(definitions.timestamp?.pattern).toBe(NANOEVAL_TIMESTAMP_PATTERN_SOURCE);
         for (const name of [
           "runStartedRecord",
           "samplingRecord",
@@ -408,6 +410,26 @@ describe("EVMBench JSON Schema and Zod parity", () => {
       const open = { ...row, compatibility_payload: {} };
       expect(validateEvmbenchJsonSchema(NANOEVAL_RECORD_JSON_SCHEMA_ID, open)).toMatchObject({ ok: false });
       expect(nanoevalRecordSchema.safeParse(open).success).toBe(false);
+    }
+  });
+
+  it("keeps pinned NanoEval timestamp lexical constraints aligned without conversion", () => {
+    const validOffset = validNanoevalRecord();
+    expect(validateEvmbenchJsonSchema(NANOEVAL_RECORD_JSON_SCHEMA_ID, validOffset)).toMatchObject({ ok: true });
+    expect(nanoevalRecordSchema.safeParse(validOffset).success).toBe(true);
+
+    for (const [label, timestamp] of [
+      ["lowercase", "2026-08-09t00:00:00.000z"],
+      ["space separator", "2026-08-09 00:00:00.000Z"],
+      ["missing seconds", "2026-08-09T00:00Z"],
+      ["leap second", "2016-12-31T23:59:60.000Z"],
+      ["impossible date", "2026-02-30T00:00:00.000Z"],
+      ["out-of-range offset", "2026-08-09T00:00:00.000+24:00"]
+    ] as const) {
+      const record = validNanoevalRecord();
+      record.timestamp = timestamp;
+      expect(validateEvmbenchJsonSchema(NANOEVAL_RECORD_JSON_SCHEMA_ID, record), label).toMatchObject({ ok: false });
+      expect(nanoevalRecordSchema.safeParse(record).success, label).toBe(false);
     }
   });
 

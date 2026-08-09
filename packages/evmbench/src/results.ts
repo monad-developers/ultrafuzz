@@ -22,13 +22,19 @@ import { assertEvmbenchDocumentSemantics } from "./semantic-gates.js";
 
 export const NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:evmbench:nanoeval-final-report:1" as const;
 export const NANOEVAL_RECORD_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:evmbench:nanoeval-record:1" as const;
+export const NANOEVAL_TIMESTAMP_PATTERN_SOURCE =
+  "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$" as const;
 
 const jsonValueSchema = z.json();
 const recorderIdSchema = z.string().min(1).max(1024);
 const positiveSafeIntegerSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const nonNegativeSafeIntegerSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const nanoevalTimestampSchema = z
+  .string()
+  .regex(new RegExp(NANOEVAL_TIMESTAMP_PATTERN_SOURCE, "u"))
+  .datetime({ offset: true });
 const commonRecorderFields = {
-  timestamp: z.string().datetime({ offset: true }),
+  timestamp: nanoevalTimestampSchema,
   sample_id: recorderIdSchema.nullable(),
   group_id: recorderIdSchema.nullable()
 } as const;
