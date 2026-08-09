@@ -1,6 +1,8 @@
 import {
   EVAL_ADJUDICATION_HANDOFF_SCHEMA_ID,
   EVAL_BENCHMARK_ANALYSIS_MANIFEST_SCHEMA_ID,
+  EVAL_BENCHMARK_COHORT_SCHEMA_ID,
+  EVAL_BENCHMARK_LANES_SCHEMA_ID,
   EVAL_BENCHMARK_PROVENANCE_SCHEMA_ID,
   EVAL_BENCHMARK_SOURCE_MANIFEST_SCHEMA_ID,
   EVAL_FINDING_SCORE_SCHEMA_ID,
@@ -14,8 +16,14 @@ import {
   EVAL_RUN_RECORD_SCHEMA_ID,
   EVAL_RUN_SUMMARY_SCHEMA_ID,
   EVAL_SCORE_SUMMARY_SCHEMA_ID,
+  EVAL_EVMBENCH_COHORT_SCHEMA_ID,
   evalSchemaRegistry
 } from "./eval-schema-registry.js";
+import type {
+  BenchmarkCohortManifest,
+  BenchmarkLanesManifest,
+  BenchmarkModelProfileManifest
+} from "./benchmark-manifest.js";
 import type {
   AdjudicationHandoff,
   BenchmarkAnalysisManifest,
@@ -58,6 +66,8 @@ type EvalSemanticGate = (value: unknown) => EvalSemanticGateIssue[];
 const gateHandlers: Readonly<Record<string, EvalSemanticGate>> = Object.freeze({
   "eval-adjudication-handoff-canonical-path": adjudicationHandoffCanonicalPath,
   "eval-benchmark-analysis-manifest-identity-joins": benchmarkAnalysisManifestIdentityJoins,
+  "eval-benchmark-cohort-identity-joins": benchmarkCohortIdentityJoins,
+  "eval-benchmark-lanes-policy": benchmarkLanesPolicy,
   "eval-benchmark-provenance-identity-joins": benchmarkProvenanceIdentityJoins,
   "eval-benchmark-source-manifest-identity-joins": benchmarkSourceManifestIdentityJoins,
   "eval-finding-score-decision-coupling": findingScoreDecisionCoupling,
@@ -79,6 +89,8 @@ const gateHandlers: Readonly<Record<string, EvalSemanticGate>> = Object.freeze({
 const gatesBySchema: Readonly<Record<string, readonly string[]>> = Object.freeze({
   [EVAL_ADJUDICATION_HANDOFF_SCHEMA_ID]: ["eval-adjudication-handoff-canonical-path"],
   [EVAL_BENCHMARK_ANALYSIS_MANIFEST_SCHEMA_ID]: ["eval-benchmark-analysis-manifest-identity-joins"],
+  [EVAL_BENCHMARK_COHORT_SCHEMA_ID]: ["eval-benchmark-cohort-identity-joins"],
+  [EVAL_BENCHMARK_LANES_SCHEMA_ID]: ["eval-benchmark-lanes-policy"],
   [EVAL_BENCHMARK_PROVENANCE_SCHEMA_ID]: ["eval-benchmark-provenance-identity-joins"],
   [EVAL_BENCHMARK_SOURCE_MANIFEST_SCHEMA_ID]: ["eval-benchmark-source-manifest-identity-joins"],
   [EVAL_FINDING_SCORE_SCHEMA_ID]: ["eval-finding-score-decision-coupling"],
@@ -99,7 +111,8 @@ const gatesBySchema: Readonly<Record<string, readonly string[]>> = Object.freeze
     "eval-score-summary-count-coupling",
     "eval-score-summary-lineage",
     EVAL_RECOVERY_EQUIVALENCE_SEMANTIC_GATE
-  ]
+  ],
+  [EVAL_EVMBENCH_COHORT_SCHEMA_ID]: ["eval-benchmark-cohort-identity-joins"]
 });
 
 export function executeEvalSchemaSemanticGates(schemaId: string, value: unknown): EvalSemanticGateIssue[] {
@@ -147,6 +160,151 @@ function adjudicationHandoffCanonicalPath(value: unknown): EvalSemanticGateIssue
         )
       ]
     : [];
+}
+
+function benchmarkCohortIdentityJoins(value: unknown): EvalSemanticGateIssue[] {
+  const gate = "eval-benchmark-cohort-identity-joins";
+  const manifest = value as BenchmarkCohortManifest;
+  const issues = uniqueFieldIssues(manifest.targets, (target) => target.id, "$.targets", "target ID", gate);
+  const targetIds = new Set(manifest.targets.map((target) => target.id));
+  manifest.smoke_targets.forEach((targetId, index) => {
+    if (!targetIds.has(targetId)) {
+      issues.push(
+        issue(gate, `$.smoke_targets[${index}]`, `smoke target ${JSON.stringify(targetId)} is absent from targets`)
+      );
+    }
+  });
+  return issues;
+}
+
+const BENCHMARK_JUDGE_PROFILE: BenchmarkModelProfileManifest = {
+  id: "benchmark-judge-gpt-5-6-sol-xhigh",
+  agent: "CodexAgent",
+  model: "gpt-5.6-sol",
+  reasoning: "xhigh"
+};
+
+const BENCHMARK_RUNNER_PROFILES: Readonly<Record<"smoke" | "full", readonly BenchmarkModelProfileManifest[]>> = {
+  smoke: [
+    {
+      id: "benchmark-smoke-gpt-5-6-luna-high",
+      agent: "CodexAgent",
+      model: "gpt-5.6-luna",
+      reasoning: "high"
+    }
+  ],
+  full: [
+    {
+      id: "benchmark-full-gpt-5-6-luna-high",
+      agent: "CodexAgent",
+      model: "gpt-5.6-luna",
+      reasoning: "high"
+    },
+    {
+      id: "benchmark-full-claude-sonnet-5-high",
+      agent: "ClaudeAgent",
+      model: "claude-sonnet-5",
+      reasoning: "high"
+    },
+    {
+      id: "benchmark-full-kimi-k3-max",
+      agent: "KimiAgent",
+      model: "kimi-k3",
+      reasoning: "max"
+    },
+    {
+      id: "benchmark-full-deepseek-v4-pro-max",
+      agent: "DeepSeekAgent",
+      model: "deepseek-v4-pro",
+      reasoning: "max"
+    }
+  ]
+};
+
+function benchmarkLanesPolicy(value: unknown): EvalSemanticGateIssue[] {
+  const gate = "eval-benchmark-lanes-policy";
+  const manifest = value as BenchmarkLanesManifest;
+  const issues: EvalSemanticGateIssue[] = [];
+  for (const laneName of ["smoke", "full"] as const) {
+    const lane = manifest[laneName];
+    issues.push(
+      ...uniqueFieldIssues(
+        lane.model_profiles,
+        (profile) => profile.id,
+        `$.${laneName}.model_profiles`,
+        "profile ID",
+        gate
+      )
+    );
+    if (lane.model_profiles.some((profile) => profile.id === lane.judge_profile.id)) {
+      issues.push(
+        issue(gate, `$.${laneName}.judge_profile.id`, "judge profile ID must be distinct from every runner profile ID")
+      );
+    }
+    if (!sameProfiles(lane.model_profiles, BENCHMARK_RUNNER_PROFILES[laneName])) {
+      issues.push(
+        issue(
+          gate,
+          `$.${laneName}.model_profiles`,
+          `${laneName} lane runner profiles must equal the pinned benchmark policy`
+        )
+      );
+    }
+    if (!sameProfile(lane.judge_profile, BENCHMARK_JUDGE_PROFILE)) {
+      issues.push(
+        issue(
+          gate,
+          `$.${laneName}.judge_profile`,
+          `${laneName} lane judge profile must equal the pinned benchmark policy`
+        )
+      );
+    }
+  }
+  if (
+    manifest.smoke.strategy_loops !== 1 ||
+    !manifest.smoke.disable_invariant_tests ||
+    !manifest.smoke.disable_differential_tests ||
+    !manifest.smoke.disable_dynamic_strategies
+  ) {
+    issues.push(
+      issue(
+        gate,
+        "$.smoke",
+        "smoke lane must use one strategy loop and disable invariant, differential, and dynamic strategies"
+      )
+    );
+  }
+  if (
+    manifest.full.strategy_loops !== 1 ||
+    manifest.full.disable_invariant_tests ||
+    manifest.full.disable_differential_tests ||
+    manifest.full.disable_dynamic_strategies
+  ) {
+    issues.push(
+      issue(
+        gate,
+        "$.full",
+        "full lane must use one strategy loop and include invariant, differential, and dynamic strategies"
+      )
+    );
+  }
+  return issues;
+}
+
+function sameProfiles(
+  actual: readonly BenchmarkModelProfileManifest[],
+  expected: readonly BenchmarkModelProfileManifest[]
+): boolean {
+  return actual.length === expected.length && actual.every((profile, index) => sameProfile(profile, expected[index]!));
+}
+
+function sameProfile(actual: BenchmarkModelProfileManifest, expected: BenchmarkModelProfileManifest): boolean {
+  return (
+    actual.id === expected.id &&
+    actual.agent === expected.agent &&
+    actual.model === expected.model &&
+    actual.reasoning === expected.reasoning
+  );
 }
 
 function publicDiagnosticsConsistency(value: unknown): EvalSemanticGateIssue[] {

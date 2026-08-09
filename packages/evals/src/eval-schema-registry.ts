@@ -27,6 +27,9 @@ export const EVAL_BENCHMARK_SOURCE_MANIFEST_SCHEMA_ID =
   "urn:ultrafuzz:schema:evals:benchmark-source-manifest:1" as const;
 export const EVAL_BENCHMARK_ANALYSIS_MANIFEST_SCHEMA_ID =
   "urn:ultrafuzz:schema:evals:benchmark-analysis-manifest:1" as const;
+export const EVAL_BENCHMARK_COHORT_SCHEMA_ID = "urn:ultrafuzz:schema:evals:benchmark-cohort:1" as const;
+export const EVAL_BENCHMARK_LANES_SCHEMA_ID = "urn:ultrafuzz:schema:evals:benchmark-lanes:2" as const;
+export const EVAL_EVMBENCH_COHORT_SCHEMA_ID = "urn:ultrafuzz:schema:evals:evmbench-cohort:1" as const;
 export const EVAL_RUN_MANIFEST_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-manifest:3" as const;
 export const EVAL_MATRIX_SCHEMA_ID = "urn:ultrafuzz:schema:evals:matrix:2" as const;
 export const EVAL_RUN_RECORD_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-record:3" as const;
@@ -43,7 +46,12 @@ const MAX_EVAL_SCHEMA_BYTES = 2 * 1024 * 1024;
 interface EvalSchemaMetadata {
   role: "runtime-state" | "subschema";
   typescriptExport: keyof typeof EVAL_SCHEMA_EXPORTS;
-  zodParser?: "evalSuiteInputSchema" | "publicEvalDiagnosticsZodSchema";
+  zodParser?:
+    | "benchmarkLanesZodSchema"
+    | "evalSuiteInputSchema"
+    | "evmbenchCohortZodSchema"
+    | "publicEvalDiagnosticsZodSchema"
+    | "ultrafuzzBenchCohortZodSchema";
   semanticGates: readonly string[];
 }
 
@@ -57,6 +65,18 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
     role: "runtime-state",
     typescriptExport: "evalBenchmarkAnalysisManifestJsonSchema",
     semanticGates: ["eval-benchmark-analysis-manifest-identity-joins"]
+  },
+  "benchmark-cohort.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalBenchmarkCohortJsonSchema",
+    zodParser: "ultrafuzzBenchCohortZodSchema",
+    semanticGates: ["eval-benchmark-cohort-identity-joins"]
+  },
+  "benchmark-lanes.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalBenchmarkLanesJsonSchema",
+    zodParser: "benchmarkLanesZodSchema",
+    semanticGates: ["eval-benchmark-lanes-policy"]
   },
   "benchmark-provenance.schema.json": {
     role: "runtime-state",
@@ -133,6 +153,12 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
     zodParser: "evalSuiteInputSchema",
     semanticGates: []
   },
+  "evmbench-cohort.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalEvmbenchCohortJsonSchema",
+    zodParser: "evmbenchCohortZodSchema",
+    semanticGates: ["eval-benchmark-cohort-identity-joins"]
+  },
   "finding-manifest.schema.json": {
     role: "runtime-state",
     typescriptExport: "evalFindingManifestJsonSchema",
@@ -181,6 +207,8 @@ function loadSchemaDocument(filename: string): Readonly<Record<string, unknown>>
 export const evalCommonJsonSchema = loadSchemaDocument("eval-common.schema.json");
 export const evalAdjudicationHandoffJsonSchema = loadSchemaDocument("adjudication-handoff.schema.json");
 export const evalBenchmarkAnalysisManifestJsonSchema = loadSchemaDocument("benchmark-analysis-manifest.schema.json");
+export const evalBenchmarkCohortJsonSchema = loadSchemaDocument("benchmark-cohort.schema.json");
+export const evalBenchmarkLanesJsonSchema = loadSchemaDocument("benchmark-lanes.schema.json");
 export const evalBenchmarkProvenanceJsonSchema = loadSchemaDocument("benchmark-provenance.schema.json");
 export const evalBenchmarkSourceManifestJsonSchema = loadSchemaDocument("benchmark-source-manifest.schema.json");
 export const evalFindingScoreJsonSchema = loadSchemaDocument("eval-finding-score.schema.json");
@@ -196,11 +224,14 @@ export const evalRunRecordJsonSchema = loadSchemaDocument("eval-run-record.schem
 export const evalRunSummaryJsonSchema = loadSchemaDocument("eval-run-summary.schema.json");
 export const evalScoreSummaryJsonSchema = loadSchemaDocument("eval-score-summary.schema.json");
 export const evalSuiteJsonSchema = loadSchemaDocument("eval-suite.schema.json");
+export const evalEvmbenchCohortJsonSchema = loadSchemaDocument("evmbench-cohort.schema.json");
 export const evalTelemetryCursorJsonSchema = loadSchemaDocument("telemetry-cursor.schema.json");
 
 export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalAdjudicationHandoffJsonSchema,
   evalBenchmarkAnalysisManifestJsonSchema,
+  evalBenchmarkCohortJsonSchema,
+  evalBenchmarkLanesJsonSchema,
   evalBenchmarkProvenanceJsonSchema,
   evalBenchmarkSourceManifestJsonSchema,
   evalCommonJsonSchema,
@@ -217,12 +248,15 @@ export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalRunSummaryJsonSchema,
   evalScoreSummaryJsonSchema,
   evalSuiteJsonSchema,
+  evalEvmbenchCohortJsonSchema,
   evalTelemetryCursorJsonSchema
 });
 
 const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, unknown>>>> = Object.freeze({
   "adjudication-handoff.schema.json": evalAdjudicationHandoffJsonSchema,
   "benchmark-analysis-manifest.schema.json": evalBenchmarkAnalysisManifestJsonSchema,
+  "benchmark-cohort.schema.json": evalBenchmarkCohortJsonSchema,
+  "benchmark-lanes.schema.json": evalBenchmarkLanesJsonSchema,
   "benchmark-provenance.schema.json": evalBenchmarkProvenanceJsonSchema,
   "benchmark-source-manifest.schema.json": evalBenchmarkSourceManifestJsonSchema,
   "eval-common.schema.json": evalCommonJsonSchema,
@@ -236,6 +270,7 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "eval-run-summary.schema.json": evalRunSummaryJsonSchema,
   "eval-score-summary.schema.json": evalScoreSummaryJsonSchema,
   "eval-suite.schema.json": evalSuiteJsonSchema,
+  "evmbench-cohort.schema.json": evalEvmbenchCohortJsonSchema,
   "finding-manifest.schema.json": evalFindingManifestJsonSchema,
   "ground-truth-credits.schema.json": evalGroundTruthCreditsJsonSchema,
   "instance-clusters.schema.json": evalInstanceClustersJsonSchema,

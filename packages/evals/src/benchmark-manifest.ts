@@ -1,14 +1,20 @@
 import { z } from "zod/v4";
 
 import { readStrictJsonDocument } from "./eval-durable.js";
+import {
+  EVAL_BENCHMARK_COHORT_SCHEMA_ID,
+  EVAL_BENCHMARK_LANES_SCHEMA_ID,
+  EVAL_EVMBENCH_COHORT_SCHEMA_ID,
+  validateEvalJsonSchema
+} from "./eval-schema-registry.js";
+import { executeEvalSchemaSemanticGates } from "./eval-semantic-gates.js";
 
 import { EVAL_SPEC_SCHEMA_VERSION, type EvalSuiteSpec } from "./types.js";
 import { EvalError } from "./utils.js";
 
 export const EVMBENCH_COHORT_SCHEMA_VERSION = "ultrafuzz.evmbench.cohort.v1" as const;
 export const ULTRAFUZZ_BENCH_COHORT_SCHEMA_VERSION = "ultrafuzz.benchmark.cohort.v1" as const;
-export const BENCHMARK_LANES_SCHEMA_VERSION = "ultrafuzz.benchmark.lanes.v1" as const;
-export const DEFAULT_BENCHMARK_TRIALS_PER_VARIANT = 1;
+export const BENCHMARK_LANES_SCHEMA_VERSION = "ultrafuzz.benchmark.lanes.v2" as const;
 export const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 3;
 export const BENCHMARK_FULL_MAX_PARALLEL_RUNS = 20;
 export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 4;
@@ -118,6 +124,13 @@ export interface BenchmarkLanesManifest {
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
 const fullSha = z.string().regex(/^[0-9a-f]{40}$/u);
 const repository = z.string().regex(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u);
+const positiveSafeInteger = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const uniqueSafeIds = z
+  .array(safeId)
+  .min(1)
+  .refine((values) => new Set(values).size === values.length, {
+    message: "values must be unique"
+  });
 const targetSchema = z.strictObject({
   id: safeId,
   repository,
@@ -125,10 +138,10 @@ const targetSchema = z.strictObject({
   framework: safeId
 });
 const commonCohort = {
-  smoke_targets: z.array(safeId).min(1),
+  smoke_targets: uniqueSafeIds,
   targets: z.array(targetSchema).min(1)
 };
-const evmbenchSchema = z.strictObject({
+export const evmbenchCohortZodSchema = z.strictObject({
   schema_version: z.literal(EVMBENCH_COHORT_SCHEMA_VERSION),
   upstream: z.strictObject({
     repository,
@@ -139,7 +152,7 @@ const evmbenchSchema = z.strictObject({
   }),
   ...commonCohort
 });
-const ultrafuzzBenchSchema = z.strictObject({
+export const ultrafuzzBenchCohortZodSchema = z.strictObject({
   schema_version: z.literal(ULTRAFUZZ_BENCH_COHORT_SCHEMA_VERSION),
   ...commonCohort
 });
@@ -153,15 +166,15 @@ const modelProfileSchema = z.strictObject({
   reasoning: safeId
 });
 const laneSchema = z.strictObject({
-  trials_per_variant: z.number().int().positive().default(DEFAULT_BENCHMARK_TRIALS_PER_VARIANT),
-  strategy_loops: z.number().int().positive(),
+  trials_per_variant: positiveSafeInteger,
+  strategy_loops: positiveSafeInteger,
   disable_invariant_tests: z.boolean(),
   disable_differential_tests: z.boolean(),
   disable_dynamic_strategies: z.boolean(),
   model_profiles: z.array(modelProfileSchema).min(1),
   judge_profile: modelProfileSchema
 });
-const lanesSchema = z.strictObject({
+export const benchmarkLanesZodSchema = z.strictObject({
   schema_version: z.literal(BENCHMARK_LANES_SCHEMA_VERSION),
   smoke: laneSchema,
   full: laneSchema
@@ -169,63 +182,35 @@ const lanesSchema = z.strictObject({
 
 export function loadBenchmarkCohortManifest(filePath: string): BenchmarkCohortManifest {
   const value = readJson(filePath);
-  const parsed = z.union([evmbenchSchema, ultrafuzzBenchSchema]).safeParse(value);
-  if (!parsed.success) {
-    throw manifestError(filePath, parsed.error.issues);
+  if (isRecord(value) && value.schema_version === EVMBENCH_COHORT_SCHEMA_VERSION) {
+    return parseBenchmarkManifest(
+      filePath,
+      value,
+      EVAL_EVMBENCH_COHORT_SCHEMA_ID,
+      evmbenchCohortZodSchema
+    ) as EvmbenchCohortManifest;
   }
-  const manifest = parsed.data as BenchmarkCohortManifest;
-  assertCohortIntegrity(manifest, filePath);
-  return manifest;
+  if (isRecord(value) && value.schema_version === ULTRAFUZZ_BENCH_COHORT_SCHEMA_VERSION) {
+    return parseBenchmarkManifest(
+      filePath,
+      value,
+      EVAL_BENCHMARK_COHORT_SCHEMA_ID,
+      ultrafuzzBenchCohortZodSchema
+    ) as UltrafuzzBenchCohortManifest;
+  }
+  throw new EvalError(
+    "EVAL_BENCHMARK_MANIFEST_INVALID",
+    `${filePath} must declare ${EVMBENCH_COHORT_SCHEMA_VERSION} or ${ULTRAFUZZ_BENCH_COHORT_SCHEMA_VERSION}`
+  );
 }
 
 export function loadBenchmarkLanesManifest(filePath: string): BenchmarkLanesManifest {
-  const parsed = lanesSchema.safeParse(readJson(filePath));
-  if (!parsed.success) throw manifestError(filePath, parsed.error.issues);
-  const manifest = parsed.data as BenchmarkLanesManifest;
-  assertUnique(
-    manifest.smoke.model_profiles.map((profile) => profile.id),
-    "smoke model profile",
-    filePath
-  );
-  assertUnique(
-    manifest.full.model_profiles.map((profile) => profile.id),
-    "full model profile",
-    filePath
-  );
-  for (const [laneName, lane] of [
-    ["smoke", manifest.smoke],
-    ["full", manifest.full]
-  ] as const) {
-    assertUnique(
-      [...lane.model_profiles.map((profile) => profile.id), lane.judge_profile.id],
-      `${laneName} runner and judge profile`,
-      filePath
-    );
-    assertFixedBenchmarkProfiles(laneName, lane);
-  }
-  if (
-    manifest.smoke.strategy_loops !== 1 ||
-    !manifest.smoke.disable_invariant_tests ||
-    !manifest.smoke.disable_differential_tests ||
-    !manifest.smoke.disable_dynamic_strategies
-  ) {
-    throw new EvalError(
-      "EVAL_BENCHMARK_MANIFEST_INVALID",
-      "smoke lane must use one strategy loop and disable invariant tests, differential tests, and dynamic strategies"
-    );
-  }
-  if (
-    manifest.full.strategy_loops !== 1 ||
-    manifest.full.disable_invariant_tests ||
-    manifest.full.disable_differential_tests ||
-    manifest.full.disable_dynamic_strategies
-  ) {
-    throw new EvalError(
-      "EVAL_BENCHMARK_MANIFEST_INVALID",
-      "full lane must use one strategy loop and include invariant tests, differential tests, and dynamic strategies"
-    );
-  }
-  return manifest;
+  return parseBenchmarkManifest(
+    filePath,
+    readJson(filePath),
+    EVAL_BENCHMARK_LANES_SCHEMA_ID,
+    benchmarkLanesZodSchema
+  ) as BenchmarkLanesManifest;
 }
 
 export function benchmarkLaneTopologyExclusions(
@@ -248,71 +233,6 @@ export function benchmarkLaneTopologyExclusions(
   };
 }
 
-function assertFixedBenchmarkProfiles(laneName: "smoke" | "full", lane: BenchmarkLaneManifest): void {
-  const expectedRunners: BenchmarkModelProfileManifest[] = [
-    {
-      id: `benchmark-${laneName}-gpt-5-6-luna-high`,
-      agent: "CodexAgent",
-      model: "gpt-5.6-luna",
-      reasoning: "high"
-    },
-    ...(laneName === "smoke"
-      ? []
-      : [
-          {
-            id: "benchmark-full-claude-sonnet-5-high",
-            agent: "ClaudeAgent",
-            model: "claude-sonnet-5",
-            reasoning: "high"
-          },
-          {
-            id: "benchmark-full-kimi-k3-max",
-            agent: "KimiAgent",
-            model: "kimi-k3",
-            reasoning: "max"
-          },
-          {
-            id: "benchmark-full-deepseek-v4-pro-max",
-            agent: "DeepSeekAgent",
-            model: "deepseek-v4-pro",
-            reasoning: "max"
-          }
-        ])
-  ];
-  const expectedJudge: BenchmarkModelProfileManifest = {
-    id: "benchmark-judge-gpt-5-6-sol-xhigh",
-    agent: "CodexAgent",
-    model: "gpt-5.6-sol",
-    reasoning: "xhigh"
-  };
-  if (
-    JSON.stringify(lane.model_profiles) !== JSON.stringify(expectedRunners) ||
-    JSON.stringify(lane.judge_profile) !== JSON.stringify(expectedJudge)
-  ) {
-    throw new EvalError(
-      "EVAL_BENCHMARK_MANIFEST_INVALID",
-      laneName === "smoke"
-        ? "smoke lane must use exactly the gpt-5.6-luna high runner with the gpt-5.6-sol xhigh judge"
-        : "full lane must use exactly gpt-5.6-luna high, claude-sonnet-5 high, kimi-k3 max, and deepseek-v4-pro max runners with the gpt-5.6-sol xhigh judge"
-    );
-  }
-}
-
-function assertCohortIntegrity(manifest: BenchmarkCohortManifest, filePath: string): void {
-  assertUnique(
-    manifest.targets.map((target) => target.id),
-    "target",
-    filePath
-  );
-  assertUnique(manifest.smoke_targets, "smoke target", filePath);
-  const targets = new Set(manifest.targets.map((target) => target.id));
-  for (const id of manifest.smoke_targets) {
-    if (!targets.has(id)) {
-      throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", `smoke target ${id} is absent from ${filePath}`);
-    }
-  }
-}
-
 function assertUnique(values: string[], description: string, filePath: string): void {
   if (new Set(values).size !== values.length) {
     throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", `${filePath} contains a duplicate ${description}`);
@@ -329,10 +249,37 @@ function readJson(filePath: string): unknown {
   }
 }
 
-function manifestError(filePath: string, issues: z.core.$ZodIssue[]): EvalError {
-  return new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", `${filePath} failed benchmark manifest validation`, {
-    issues: issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
-  });
+function parseBenchmarkManifest<T>(filePath: string, value: unknown, schemaId: string, zodSchema: z.ZodType<T>): T {
+  const canonical = validateEvalJsonSchema(schemaId, value);
+  if (!canonical.ok) {
+    throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", `${filePath} failed benchmark schema validation`, {
+      schema_id: schemaId,
+      issues: canonical.issues.map((issue) => ({ path: issue.instancePath, message: issue.message }))
+    });
+  }
+  const parsed = zodSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_SCHEMA_PARITY",
+      `canonical benchmark schema and retained Zod parser disagree for ${filePath}`,
+      {
+        schema_id: schemaId,
+        issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
+      }
+    );
+  }
+  const semanticIssues = executeEvalSchemaSemanticGates(schemaId, parsed.data);
+  if (semanticIssues.length > 0) {
+    throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", `${filePath} failed benchmark semantic validation`, {
+      schema_id: schemaId,
+      issues: semanticIssues
+    });
+  }
+  return parsed.data;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function adaptBenchmarkManifestToEvalSuite(input: {

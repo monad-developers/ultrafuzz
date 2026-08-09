@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:benchmark-cohort:1",
+  "title": "Pinned Ultrafuzz benchmark cohort",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "smoke_targets", "targets"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.benchmark.cohort.v1" },
+    "smoke_targets": { "$ref": "#/$defs/smokeTargets" },
+    "targets": { "$ref": "#/$defs/targets" }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "fullSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "githubRepository": {
+      "type": "string",
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "smokeTargets": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/safeId" }
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/target" }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "repository", "revision", "framework"],
+      "properties": {
+        "id": { "$ref": "#/$defs/safeId" },
+        "repository": { "$ref": "#/$defs/githubRepository" },
+        "revision": { "$ref": "#/$defs/fullSha" },
+        "framework": { "$ref": "#/$defs/safeId" }
+      }
+    }
+  }
+}

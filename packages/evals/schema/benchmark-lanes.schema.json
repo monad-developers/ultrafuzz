@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:benchmark-lanes:2",
+  "title": "Ultrafuzz public benchmark lane policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "smoke", "full"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.benchmark.lanes.v2" },
+    "smoke": { "$ref": "#/$defs/lane" },
+    "full": { "$ref": "#/$defs/lane" }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "positiveSafeInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "modelProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "agent", "model", "reasoning"],
+      "properties": {
+        "id": { "$ref": "#/$defs/safeId" },
+        "agent": { "$ref": "#/$defs/safeId" },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "not": { "pattern": "(?:^|[-_.])[Ll][Aa][Tt][Ee][Ss][Tt]$" }
+        },
+        "reasoning": { "$ref": "#/$defs/safeId" }
+      }
+    },
+    "lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trials_per_variant",
+        "strategy_loops",
+        "disable_invariant_tests",
+        "disable_differential_tests",
+        "disable_dynamic_strategies",
+        "model_profiles",
+        "judge_profile"
+      ],
+      "properties": {
+        "trials_per_variant": { "$ref": "#/$defs/positiveSafeInteger" },
+        "strategy_loops": { "$ref": "#/$defs/positiveSafeInteger" },
+        "disable_invariant_tests": { "type": "boolean" },
+        "disable_differential_tests": { "type": "boolean" },
+        "disable_dynamic_strategies": { "type": "boolean" },
+        "model_profiles": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/modelProfile" }
+        },
+        "judge_profile": { "$ref": "#/$defs/modelProfile" }
+      }
+    }
+  }
+}
