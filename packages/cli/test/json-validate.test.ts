@@ -14,8 +14,16 @@ test("json validate exposes the strict validator through the primary CLI", async
     const schema = path.join(artifactSchemaDirectory(), "properties.schema.json");
     const valid = path.join(temporary, "valid.json");
     const invalid = path.join(temporary, "invalid.json");
+    const duplicate = path.join(temporary, "duplicate.json");
+    const invalidUtf8 = path.join(temporary, "invalid-utf8.json");
+    const missing = path.join(temporary, "missing.json");
     fs.writeFileSync(valid, '{"schema_version":"ultrafuzz.properties.v1","properties":[]}');
     fs.writeFileSync(invalid, '{"schema_version":"ultrafuzz.properties.v1","properties":[],"extra":true}');
+    fs.writeFileSync(duplicate, '{"schema_version":"ultrafuzz.properties.v1","properties":[],"properties":[]}');
+    fs.writeFileSync(invalidUtf8, Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xff, 0x7d]));
+    const schemaBefore = fs.readFileSync(schema);
+    const validBefore = fs.readFileSync(valid);
+    const invalidBefore = fs.readFileSync(invalid);
 
     const validCapture = await capture(["json", "validate", "--schema", schema, "--file", valid]);
     assert.equal(validCapture.code, 0);
@@ -36,6 +44,18 @@ test("json validate exposes the strict validator through the primary CLI", async
     assert.equal(envelope.data.status, "instance-error");
     assert.equal(invalidCapture.stderr, "");
 
+    const duplicateCapture = await capture(["json", "validate", "--schema", schema, "--file", duplicate]);
+    assert.equal(duplicateCapture.code, 1);
+    assert.match(duplicateCapture.stderr, /JSON_DUPLICATE_KEY/u);
+
+    const encodingCapture = await capture(["json", "validate", "--schema", schema, "--file", invalidUtf8]);
+    assert.equal(encodingCapture.code, 1);
+    assert.match(encodingCapture.stderr, /valid UTF-8/u);
+
+    const missingCapture = await capture(["json", "validate", "--schema", schema, "--file", missing]);
+    assert.equal(missingCapture.code, 1);
+    assert.match(missingCapture.stderr, /JSON_INSTANCE_UNREADABLE/u);
+
     const setupCapture = await capture([
       "json",
       "validate",
@@ -46,6 +66,10 @@ test("json validate exposes the strict validator through the primary CLI", async
     ]);
     assert.equal(setupCapture.code, 2);
     assert.match(setupCapture.stderr, /JSON_SCHEMA_UNREADABLE/u);
+
+    assert.deepEqual(fs.readFileSync(schema), schemaBefore);
+    assert.deepEqual(fs.readFileSync(valid), validBefore);
+    assert.deepEqual(fs.readFileSync(invalid), invalidBefore);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }
