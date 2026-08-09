@@ -15,6 +15,7 @@ import {
   getNodeWorkspaceDir,
   parseStrictJsonBytes,
   readJsonFile,
+  readRegularFileSnapshot,
   readRunPlanDocument,
   SMITHERS_NODE_STATES,
   SMITHERS_RUN_STATES,
@@ -22,7 +23,6 @@ import {
   SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
   SMITHERS_TASK_METADATA_SCHEMA_VERSION as REGISTERED_SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   writeFileDurable,
-  writeJsonDurable,
   type RunLayout,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestMetadata,
@@ -34,6 +34,17 @@ import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultraf
 
 import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
 import { renderRuntimeTemplate } from "./runtime-template.js";
+import {
+  CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
+  CLOUD_EXECUTION_GENERATION_SCHEMA_VERSION,
+  SMITHERS_RESET_NODE_JSON_SCHEMA_ID,
+  SMITHERS_RESET_NODE_SCHEMA_VERSION,
+  SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
+  SMITHERS_SUBMISSION_SCHEMA_VERSION,
+  WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
+  WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION
+} from "./runtime-contracts.js";
+import { assertRuntimeDocument, parseRuntimeDocumentBytes, writeRuntimeDocument } from "./runtime-document-codec.js";
 import {
   acquireSmithersExecutableAnchor,
   bindSmithersExecutableCapability,
@@ -66,7 +77,6 @@ const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
 const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
-const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION = "ultrafuzz.workflow-execution-dependencies.v1" as const;
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = [
   "@smithers-orchestrator/tool-context",
@@ -1029,8 +1039,7 @@ const SMITHERS_ACTIVE_RUN_STATES = new Set<SmithersRunState>([
 
 export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = SMITHERS_TASK_MANIFEST_SCHEMA_VERSION;
 export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = REGISTERED_SMITHERS_TASK_METADATA_SCHEMA_VERSION;
-export const SMITHERS_SUBMISSION_SCHEMA_VERSION = "ultrafuzz.smithers.submission.v1" as const;
-export const SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION = "ultrafuzz.smithers.reset-node.v1" as const;
+export { SMITHERS_RESET_NODE_SCHEMA_VERSION, SMITHERS_SUBMISSION_SCHEMA_VERSION } from "./runtime-contracts.js";
 
 export interface SmithersCompileInput {
   config: ResolvedConfig;
@@ -1400,7 +1409,12 @@ export async function smithersExecutionControlFiles(
     add
   });
   const dependencyMapPath = path.join(layout.root, "smithers", "execution-dependencies.json");
-  writeFileDurable(dependencyMapPath, `${stableWorkflowDependencyJson(dependencyMap)}\n`);
+  const validatedDependencyMap = assertRuntimeDocument(
+    WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
+    dependencyMap,
+    "workflow execution dependency map"
+  );
+  writeFileDurable(dependencyMapPath, `${stableWorkflowDependencyJson(validatedDependencyMap)}\n`);
   add(dependencyMapPath, WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH);
   return [...files.values()].sort((left, right) =>
     compareWorkflowExecutionStrings(left.snapshotPath, right.snapshotPath)
@@ -1533,7 +1547,7 @@ function collectWorkflowExecutionDependencies(input: {
     executablePaths.add(smithersBin);
   }
   return {
-    schema_version: WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION,
+    schema_version: WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION,
     modules: modules.map((module) => ({ id: module.id, name: module.name, snapshot_path: module.snapshotPath })),
     packages: packages.map((entry) => ({
       id: entry.id,
@@ -1726,14 +1740,19 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
     environmentVariableNames: input.environmentVariableNames,
     keepWorkspaces: input.keepWorkspaces
   });
-  writeJsonDurable(path.join(path.dirname(input.compiled.inputPath), "submission.json"), {
-    schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
-    smithers_run_id: input.compiled.smithersRunId,
-    command: displayCommand,
-    stdout: redactedEvidenceText(stdout),
-    stderr: redactedEvidenceText(stderr),
-    submitted_at: new Date().toISOString()
-  });
+  writeRuntimeDocument(
+    path.join(path.dirname(input.compiled.inputPath), "submission.json"),
+    SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
+    {
+      schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
+      smithers_run_id: input.compiled.smithersRunId,
+      command: displayCommand,
+      stdout: redactedEvidenceText(stdout),
+      stderr: redactedEvidenceText(stderr),
+      submitted_at: new Date().toISOString()
+    },
+    "Smithers submission evidence"
+  );
   return {
     smithersRunId: input.compiled.smithersRunId,
     command: displayCommand,
@@ -2163,15 +2182,20 @@ export async function runSmithersLifecycleCommand(input: {
         environmentVariableNames: input.environmentVariableNames,
         keepWorkspaces: input.keepWorkspaces
       });
-      writeJsonDurable(path.join(path.dirname(input.relaunchPaths.inputPath), "recovery-submission.json"), {
-        schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
-        smithers_run_id: input.smithersRunId,
-        recovery: "missing-workflow-run",
-        command: recoveryResult.command,
-        stdout: redactedEvidenceText(recoveryResult.stdout),
-        stderr: redactedEvidenceText(recoveryResult.stderr),
-        submitted_at: new Date().toISOString()
-      });
+      writeRuntimeDocument(
+        path.join(path.dirname(input.relaunchPaths.inputPath), "recovery-submission.json"),
+        SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
+        {
+          schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
+          smithers_run_id: input.smithersRunId,
+          recovery: "missing-workflow-run",
+          command: recoveryResult.command,
+          stdout: redactedEvidenceText(recoveryResult.stdout),
+          stderr: redactedEvidenceText(recoveryResult.stderr),
+          submitted_at: new Date().toISOString()
+        },
+        "Smithers recovery submission evidence"
+      );
       return { ...recoveryResult, recoveredMissingRun: true };
     }
     if (!inspection.ok) {
@@ -2261,18 +2285,28 @@ export async function runSmithersLifecycleCommand(input: {
       resetStderr = resetResult.stderr;
       if (resetMarkerPath !== undefined) {
         const appliedAt = new Date().toISOString();
-        writeJsonDurable(resetMarkerPath, {
-          schema_version: SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION,
-          smithers_run_id: input.smithersRunId,
-          node_id: input.resetNode,
-          applied_at: appliedAt
-        });
-        writeJsonDurable(path.join(path.dirname(input.relaunchPaths!.inputPath), "cloud-execution-generation.json"), {
-          schema_version: "ultrafuzz.cloud.execution-generation.v1",
-          generation: crypto.randomUUID(),
-          reset_node: input.resetNode,
-          applied_at: appliedAt
-        });
+        writeRuntimeDocument(
+          resetMarkerPath,
+          SMITHERS_RESET_NODE_JSON_SCHEMA_ID,
+          {
+            schema_version: SMITHERS_RESET_NODE_SCHEMA_VERSION,
+            smithers_run_id: input.smithersRunId,
+            node_id: input.resetNode,
+            applied_at: appliedAt
+          },
+          "Smithers reset-node marker"
+        );
+        writeRuntimeDocument(
+          path.join(path.dirname(input.relaunchPaths!.inputPath), "cloud-execution-generation.json"),
+          CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
+          {
+            schema_version: CLOUD_EXECUTION_GENERATION_SCHEMA_VERSION,
+            generation: crypto.randomUUID(),
+            reset_node: input.resetNode,
+            applied_at: appliedAt
+          },
+          "cloud execution generation evidence"
+        );
       }
     }
     let resumeResult: Awaited<ReturnType<typeof execSmithersCli>>;
@@ -2792,14 +2826,22 @@ function isCompatibleSmithersRunId(value: string): boolean {
 }
 
 function resetNodeMarkerMatches(markerPath: string | undefined, smithersRunId: string, nodeId: string): boolean {
-  if (markerPath === undefined || !fs.existsSync(markerPath)) {
-    return false;
+  if (markerPath === undefined) return false;
+  try {
+    fs.lstatSync(markerPath);
+  } catch (error) {
+    if (isCausalEnoent(error)) return false;
+    throw error;
   }
-  const parsed = readJsonFile(markerPath);
+  const parsed = parseRuntimeDocumentBytes(
+    SMITHERS_RESET_NODE_JSON_SCHEMA_ID,
+    readRegularFileSnapshot(markerPath, 64 * 1024),
+    "persisted Smithers reset marker"
+  );
   if (
     !isObjectRecord(parsed) ||
     !hasExactObjectKeys(parsed, ["schema_version", "smithers_run_id", "node_id", "applied_at"]) ||
-    parsed.schema_version !== SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION ||
+    parsed.schema_version !== SMITHERS_RESET_NODE_SCHEMA_VERSION ||
     typeof parsed.smithers_run_id !== "string" ||
     parsed.smithers_run_id.length === 0 ||
     typeof parsed.node_id !== "string" ||
@@ -2810,6 +2852,10 @@ function resetNodeMarkerMatches(markerPath: string | undefined, smithersRunId: s
     throw new Error("persisted Smithers reset marker does not match the current strict contract");
   }
   return parsed.smithers_run_id === smithersRunId && parsed.node_id === nodeId;
+}
+
+function isCausalEnoent(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 async function execSmithersCli(input: {

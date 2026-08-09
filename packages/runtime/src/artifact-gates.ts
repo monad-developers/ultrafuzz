@@ -56,6 +56,8 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import { runtimeSemanticGateDiagnostics } from "./semantic-gates.js";
+import { WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID } from "./runtime-contracts.js";
+import { parseRuntimeDocumentBytes } from "./runtime-document-codec.js";
 import type { PlannedGraph, PlannedGraphNode, RuntimeDiagnostic } from "./types.js";
 import { diagnosticFromError } from "./utils.js";
 import { validateSeverityMatrixArtifact, type SeverityArtifactKind } from "./severity-matrix.js";
@@ -1843,13 +1845,12 @@ function workspacePatchGitContext(
     assertRegularFileInside(artifactDir, baselinePath, "workspace patch baseline");
     assertRegularFileInside(artifactDir, patchPath, "workspace patch bytes");
     assertNoSymlinkComponents(layout.root, workspacePath, "workspace patch Git context");
-    const baseline = parseStrictJsonBytes(readRegularFileSnapshot(baselinePath, MAX_ARTIFACT_SNAPSHOT_BYTES));
-    if (
-      !isRecord(baseline) ||
-      baseline.schema_version !== "ultrafuzz.workspace-patch-baseline.v1" ||
-      baseline.attempt_id !== attemptId ||
-      typeof baseline.baseline_tree !== "string"
-    ) {
+    const baseline = parseRuntimeDocumentBytes(
+      WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID,
+      readRegularFileSnapshot(baselinePath, MAX_ARTIFACT_SNAPSHOT_BYTES),
+      "workspace patch baseline"
+    );
+    if (baseline.attempt_id !== attemptId || typeof baseline.baseline_tree !== "string") {
       return undefined;
     }
     return deriveWorkspacePatchGitFacts(
@@ -2203,7 +2204,7 @@ function appendExpectationCatalog(
       });
       return;
     }
-    const catalogContents = fs.readFileSync(catalogPath);
+    const catalogContents = readRegularFileSnapshot(catalogPath, MAX_ARTIFACT_SNAPSHOT_BYTES);
     const actualDigest = sha256Bytes(catalogContents);
     if (actualDigest !== expectedDigest) {
       diagnostics.push({
@@ -2229,10 +2230,7 @@ function appendExpectationCatalog(
       });
       return;
     }
-    const parsed = validateReferenceExpectationsSchema(
-      JSON.parse(catalogContents.toString("utf8")) as unknown,
-      catalogPath
-    );
+    const parsed = validateReferenceExpectationsSchema(parseStrictJsonBytes(catalogContents), catalogPath);
     if (!parsed.ok || parsed.value === undefined) {
       diagnostics.push({
         code: "PROPERTY_REFERENCE_EXPECTATION_TAMPERED",

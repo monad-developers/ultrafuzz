@@ -1692,7 +1692,8 @@ test("generated Smithers workflow preserves the complete invariant suite across 
   assert.match(source, /captureInvariantSuiteBaseline/u);
   assert.match(source, /invariantSuiteProtectedBaselinePath/u);
   assert.match(source, /protected invariant suite baseline was modified/u);
-  assert.match(source, /ultrafuzz\.invariant-suite-baseline\.v1/u);
+  assert.match(source, /INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID/u);
+  assert.match(source, /parseRuntimeDocumentBytes\(\s*INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,\s*snapshot\.bytes/u);
   assert.match(source, /gitTestTreePaths/u);
   assert.match(source, /INVARIANT_SUITE_SENSITIVE_SEGMENTS/u);
   assert.match(source, /assertSafeInvariantSuiteTestPath/u);
@@ -1848,14 +1849,14 @@ test("generated Smithers retry snapshots are durable and restore through canonic
   assert.match(source, /INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR/u);
   assert.match(source, /INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE/u);
   assert.match(source, /invariantSuiteWorkspaceSnapshotRoot/u);
-  assert.match(source, /invariant-workspace-snapshot\.v1/u);
+  assert.match(source, /INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID/u);
   assert.match(source, /loadInvariantSuiteWorkspaceSnapshot/u);
   assert.match(source, /readStableWorkspaceSnapshotFile/u);
   assert.match(source, /const runRootCandidate = path\.resolve\(process\.cwd\(\), task\.runRoot\)/u);
   assert.match(source, /runRootStat = lstatSync\(runRootCandidate\)/u);
   assert.match(source, /realpathSync\(runRootCandidate\) !== runRootCandidate/u);
   assert.match(source, /readRegularFileSnapshot\(resolvedPath, maxBytes\)/u);
-  assert.match(source, /parseStrictJsonBytes\(manifestBytes\)/u);
+  assert.match(source, /parseRuntimeDocumentBytes\(\s*INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,\s*manifestBytes/u);
   assert.match(source, /writeFileDurable\(\s*path\.join\(snapshotRoot,\s*INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE/u);
   const preparationRestoreStart = source.indexOf("function restoreWorkspacePatchPreparation");
   assert.ok(preparationRestoreStart > 0, source);

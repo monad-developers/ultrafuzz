@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:workflow-execution-dependencies:1",
+  "title": "Ultrafuzz workflow execution dependency map",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "modules", "packages", "issuers", "executable_paths", "smithers_bin"],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.workflow-execution-dependencies.v1"
+    },
+    "modules": {
+      "type": "array",
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/module"
+      }
+    },
+    "packages": {
+      "type": "array",
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/package"
+      }
+    },
+    "issuers": {
+      "type": "array",
+      "maxItems": 110001,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/issuer"
+      }
+    },
+    "executable_paths": {
+      "type": "array",
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/snapshotPath"
+      }
+    },
+    "smithers_bin": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/snapshotPath"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "packageName": {
+      "type": "string",
+      "pattern": "^(?:@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)$"
+    },
+    "identity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "snapshotPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "module": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "snapshot_path"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identity"
+        },
+        "name": {
+          "$ref": "#/$defs/packageName"
+        },
+        "snapshot_path": {
+          "$ref": "#/$defs/snapshotPath"
+        }
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "version", "snapshot_path"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identity"
+        },
+        "name": {
+          "$ref": "#/$defs/packageName"
+        },
+        "version": {
+          "$ref": "#/$defs/identity"
+        },
+        "snapshot_path": {
+          "$ref": "#/$defs/snapshotPath"
+        }
+      }
+    },
+    "issuer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "snapshot_path", "dependencies"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identity"
+        },
+        "snapshot_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "dependencies": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/packageName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/identity"
+          }
+        }
+      }
+    }
+  }
+}

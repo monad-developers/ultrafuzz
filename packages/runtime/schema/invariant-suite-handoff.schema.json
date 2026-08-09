@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:invariant-suite-handoff:1",
+  "title": "Ultrafuzz invariant suite dependency handoff",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "producer_node_id", "producer_attempt_id", "producers", "dependencies", "tombstones"],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.invariant-suite-handoff.v1"
+    },
+    "producer_node_id": {
+      "$ref": "#/$defs/identity"
+    },
+    "producer_attempt_id": {
+      "$ref": "#/$defs/identity"
+    },
+    "producers": {
+      "type": "array",
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["attempt_id", "manifest_sha256"],
+        "properties": {
+          "attempt_id": {
+            "$ref": "#/$defs/identity"
+          },
+          "manifest_sha256": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/sha256"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "maxItems": 512,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "attempt_id", "size", "sha256", "direct"],
+        "properties": {
+          "path": {
+            "$ref": "#/$defs/relativePath"
+          },
+          "attempt_id": {
+            "$ref": "#/$defs/identity"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16777216
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "direct": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "tombstones": {
+      "type": "array",
+      "maxItems": 512,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/relativePath"
+      }
+    }
+  },
+  "$defs": {
+    "identity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

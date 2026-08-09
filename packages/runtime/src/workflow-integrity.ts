@@ -14,20 +14,24 @@ import {
   parseStrictJsonBytes,
   parseSmithersTaskManifestBytes,
   safeResolveInside,
-  type RunLayout,
-  writeJsonDurable
+  type RunLayout
 } from "@ultrafuzz/artifacts";
 import { assertExpandedGraphSchema, fingerprintGraph } from "@ultrafuzz/topology";
 
+import {
+  WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
+  WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION,
+  WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
+  WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION
+} from "./runtime-contracts.js";
+import { parseRuntimeDocumentBytes, writeRuntimeDocument } from "./runtime-document-codec.js";
 import { bindSmithersExecutableCapability } from "./smithers-executable-capability.js";
 import {
   bindWorkflowExecutionSnapshotCapability,
   type WorkflowExecutionSnapshotProtectedEntry
 } from "./workflow-execution-snapshot-capability.js";
 
-const WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION = "ultrafuzz.workflow-control-integrity.v2" as const;
 const WORKFLOW_CONTROL_INTEGRITY_FILE = "control-integrity.json";
-const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION = "ultrafuzz.workflow-execution-dependencies.v1" as const;
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const WORKFLOW_CONTROL_LOCK = ".workflow-control";
 const MAX_WORKFLOW_CONTROL_FILE_BYTES = 64 * 1024 * 1024;
@@ -166,7 +170,7 @@ interface WorkflowExecutionDependencyIssuer {
 }
 
 interface WorkflowExecutionDependencyMap {
-  schema_version: typeof WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION;
+  schema_version: typeof WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION;
   modules: WorkflowExecutionDependencyTarget[];
   packages: WorkflowExecutionDependencyPackage[];
   issuers: WorkflowExecutionDependencyIssuer[];
@@ -233,7 +237,7 @@ export function sealWorkflowControlFiles(input: {
   if (pathEntryExists(paths.integrityPath)) {
     throw new Error("workflow control seal already exists");
   }
-  writeJsonDurable(paths.integrityPath, seal);
+  writeRuntimeDocument(paths.integrityPath, WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID, seal, "workflow control seal");
   return paths;
 }
 
@@ -1552,9 +1556,8 @@ function compareCanonicalStrings(left: string, right: string): number {
 }
 
 function parseWorkflowControlIntegritySeal(contents: Buffer): WorkflowControlIntegritySeal {
-  const value = parseRecordJson(contents, "workflow control seal");
+  const value = parseRuntimeDocumentBytes(WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID, contents, "workflow control seal");
   if (
-    !hasExactKeys(value, ["schema_version", "run_id", "files", "execution_files", "bindings"]) ||
     value.schema_version !== WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION ||
     typeof value.run_id !== "string" ||
     !isRecord(value.files) ||
@@ -1660,10 +1663,13 @@ function parseWorkflowExecutionDependencyMap(
 ): WorkflowExecutionDependencyMap {
   const manifest = executionFiles.find((file) => file.snapshotPath === WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH);
   if (manifest === undefined) throw new Error("workflow execution snapshot is missing its sealed dependency map");
-  const value = parseRecordJson(manifest.contents, "workflow execution dependency map");
+  const value = parseRuntimeDocumentBytes(
+    WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
+    manifest.contents,
+    "workflow execution dependency map"
+  );
   if (
-    !hasExactKeys(value, ["schema_version", "modules", "packages", "issuers", "executable_paths", "smithers_bin"]) ||
-    value.schema_version !== WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION ||
+    value.schema_version !== WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION ||
     !Array.isArray(value.modules) ||
     !Array.isArray(value.packages) ||
     !Array.isArray(value.issuers) ||
@@ -1728,7 +1734,7 @@ function parseWorkflowExecutionDependencyMap(
     throw new Error("sealed workflow runner is not a declared executable");
   }
   return {
-    schema_version: WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION,
+    schema_version: WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION,
     modules,
     packages,
     issuers,

@@ -14,6 +14,14 @@ import {
   readRegularFileSnapshot,
   writeFileDurable
 } from "@ultrafuzz/artifacts";
+import {
+  INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
+  INVARIANT_SUITE_BASELINE_SCHEMA_VERSION,
+  INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
+  INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION,
+  parseRuntimeDocumentBytes,
+  serializeRuntimeDocument
+} from "../src/index.js";
 import ts from "typescript";
 
 /**
@@ -236,6 +244,21 @@ function loadWorkflowHelpers(
     isPlainRecord: (value: unknown): boolean => typeof value === "object" && value !== null && !Array.isArray(value),
     isMissingPathError: (error: unknown): boolean =>
       error instanceof Error && "code" in error && error.code === "ENOENT",
+    pathEntryExists: (candidate: string): boolean => {
+      try {
+        fs.lstatSync(candidate);
+        return true;
+      } catch (error) {
+        if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+        throw error;
+      }
+    },
+    compareCanonicalRuntimeStrings: (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0),
+    parseRuntimeDocumentBytes,
+    serializeRuntimeDocument,
+    INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
+    INVARIANT_SUITE_BASELINE_SCHEMA_VERSION,
+    INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
     invariantSuiteNodeIds: INVARIANT_SUITE_NODE_IDS,
     invariantSuiteTombstones: state.tombstones,
     invariantSuiteDependencySnapshots: state.dependencySnapshots,
@@ -251,13 +274,14 @@ function loadWorkflowHelpers(
     INVARIANT_SUITE_BASELINE_FILE: "invariant-suite-baseline.json",
     INVARIANT_SUITE_HANDOFF_DIR: "invariant-suite-handoffs",
     INVARIANT_SUITE_HANDOFF_FILE: "handoff.json",
-    INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION: "ultrafuzz.invariant-suite-handoff.v1",
+    INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION,
     MAX_INVARIANT_SUITE_FILES: 512,
     MAX_INVARIANT_SUITE_SOURCE_BYTES: 16 * 1024 * 1024,
     MAX_INVARIANT_SUITE_TOTAL_BYTES: 64 * 1024 * 1024,
     MAX_INVARIANT_SUITE_SOURCE_DEPTH: 32,
     MAX_INVARIANT_SUITE_PATH_LENGTH: 4_096,
     MAX_INVARIANT_SUITE_SEGMENT_LENGTH: 255,
+    MAX_VERIFIED_ARTIFACT_BYTES: 64 * 1024 * 1024,
     INVARIANT_SUITE_SENSITIVE_SEGMENTS: new Set([".git", ".ultrafuzz", ".smithers", "node_modules", ".env"]),
     INVARIANT_SUITE_ALLOWED_ROOTS: ["src", "contracts", "test", "tests"] as const,
     resolveRegularArtifactFile,
@@ -442,6 +466,7 @@ const DISCOVERY_HELPERS = [
   "gitTestTreePaths",
   "recordInvariantSuiteTombstone",
   "invariantSuiteProtectedBaselinePath",
+  "readAndValidateInvariantSuiteBaseline",
   "captureInvariantSuiteBaseline",
   "changedTestTreePaths"
 ] as const;

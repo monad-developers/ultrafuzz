@@ -4,12 +4,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { schemaRegistryBundleDigest } from "@ultrafuzz/artifacts";
+import { parseStrictJsonBytes, schemaRegistryBundleDigest } from "@ultrafuzz/artifacts";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sourceSchemaRoot = path.join(packageRoot, "schema");
 const distSchemaRoot = path.join(packageRoot, "dist", "schema");
 const registryModule = await import("../dist/schema-registry.js");
+const contractsModule = await import("../dist/runtime-contracts.js");
 
 const schemaFilenames = (directory) =>
   fs
@@ -74,13 +75,28 @@ assert.strictEqual(
   schemaRegistryBundleDigest(registry),
   "runtime schema bundle digest must identify the exact sorted registry"
 );
-assert.strictEqual(
-  registryModule.validateRuntimeJsonSchema(registryModule.CLEAN_AUDIT_JSON_SCHEMA_ID, null).ok,
-  false,
-  "the clean audit schema must compile and reject a non-object"
+for (const entry of registry) {
+  assert.strictEqual(
+    registryModule.validateRuntimeJsonSchema(entry.id, null).ok,
+    false,
+    `${entry.filename} must compile and reject a non-object`
+  );
+}
+
+const runtimeDocumentIds = new Set(contractsModule.RUNTIME_DOCUMENT_SCHEMA_IDS);
+const fixturePath = path.join(packageRoot, "test", "fixtures", "runtime-document-schema-fixtures.json");
+const fixtures = parseStrictJsonBytes(fs.readFileSync(fixturePath));
+assert.ok(fixtures !== null && typeof fixtures === "object" && !Array.isArray(fixtures), "fixtures must be an object");
+const documentEntries = registry.filter((entry) => runtimeDocumentIds.has(entry.id));
+assert.deepStrictEqual(
+  Object.keys(fixtures).sort(),
+  documentEntries.map((entry) => entry.filename).sort(),
+  "current fixtures must cover every retained runtime document schema"
 );
-assert.strictEqual(
-  registryModule.validateRuntimeJsonSchema(registryModule.MATERIALIZE_AUDIT_JSON_SCHEMA_ID, null).ok,
-  false,
-  "the materialize audit schema must compile and reject a non-object"
-);
+for (const entry of documentEntries) {
+  assert.strictEqual(
+    registryModule.validateRuntimeJsonSchema(entry.id, fixtures[entry.filename]).ok,
+    true,
+    `${entry.filename} current fixture must validate`
+  );
+}

@@ -1,0 +1,156 @@
+{
+  "cloud-execution-generation.schema.json": {
+    "schema_version": "ultrafuzz.cloud.execution-generation.v1",
+    "generation": "7cb5f68a-5ef5-46b1-8477-94fe4dfe0730",
+    "reset_node": "node-a",
+    "applied_at": "2026-08-09T12:00:00.000Z"
+  },
+  "invariant-suite-baseline.schema.json": {
+    "schema_version": "ultrafuzz.invariant-suite-baseline.v1",
+    "files": [
+      {
+        "path": "test/Invariant.t.sol",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "size": 128
+      }
+    ]
+  },
+  "invariant-suite-handoff.schema.json": {
+    "schema_version": "ultrafuzz.invariant-suite-handoff.v1",
+    "producer_node_id": "stateful-invariant-handlers",
+    "producer_attempt_id": "stateful-invariant-handlers",
+    "producers": [
+      {
+        "attempt_id": "stateful-invariant-setup",
+        "manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ],
+    "dependencies": [
+      {
+        "path": "test/Handler.sol",
+        "attempt_id": "stateful-invariant-setup",
+        "size": 256,
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "direct": true
+      }
+    ],
+    "tombstones": ["test/Removed.sol"]
+  },
+  "invariant-workspace-snapshot.schema.json": {
+    "schema_version": "ultrafuzz.invariant-workspace-snapshot.v1",
+    "files": [
+      {
+        "path": "src/Contract.sol",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "size": 512
+      }
+    ]
+  },
+  "smithers-reset-node.schema.json": {
+    "schema_version": "ultrafuzz.smithers.reset-node.v1",
+    "smithers_run_id": "ultrafuzz-example",
+    "node_id": "node-a",
+    "applied_at": "2026-08-09T12:00:00.000Z"
+  },
+  "smithers-submission.schema.json": {
+    "schema_version": "ultrafuzz.smithers.submission.v1",
+    "smithers_run_id": "ultrafuzz-example",
+    "command": ["smithers", "up", "workflow.tsx"],
+    "stdout": "submitted\n",
+    "stderr": "",
+    "submitted_at": "2026-08-09T12:00:00.000Z"
+  },
+  "workflow-control-integrity.schema.json": {
+    "schema_version": "ultrafuzz.workflow-control-integrity.v2",
+    "run_id": "example-run",
+    "files": {
+      "graph": {
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "size_bytes": 1
+      },
+      "expanded_graph": {
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "size_bytes": 1
+      },
+      "graph_fingerprint": {
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "size_bytes": 1
+      },
+      "config": {
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "size_bytes": 1
+      },
+      "tasks": {
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "size_bytes": 1
+      },
+      "input": {
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "size_bytes": 1
+      },
+      "workflow": {
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "size_bytes": 1
+      },
+      "evidence_workflow": {
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "size_bytes": 1
+      }
+    },
+    "execution_files": [
+      {
+        "source_path": "/workspace/controls/plan.json",
+        "snapshot_path": "controls/plan.json",
+        "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "size_bytes": 2
+      }
+    ],
+    "bindings": {
+      "run_id": "example-run",
+      "graph_fingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+      "config_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222",
+      "expected_state_node_ids": ["node-a"],
+      "expected_task_attempt_ids": ["node-a"],
+      "expected_task_node_ids": ["agent:node-a", "prepare:node-a", "verify:node-a"]
+    }
+  },
+  "workflow-execution-dependencies.schema.json": {
+    "schema_version": "ultrafuzz.workflow-execution-dependencies.v1",
+    "modules": [],
+    "packages": [],
+    "issuers": [
+      {
+        "id": "root",
+        "snapshot_path": ".",
+        "dependencies": {}
+      }
+    ],
+    "executable_paths": [],
+    "smithers_bin": null
+  },
+  "workflow-run-link-journal.schema.json": {
+    "schema_version": "ultrafuzz.workflow-run-link-journal.v1",
+    "run_id": "example-run",
+    "entries": [
+      {
+        "link_id": "6b139079-531b-46a8-85f9-9e6eaa180105",
+        "action": "start",
+        "workflow_run_id": "ultrafuzz-example",
+        "control_generation": "3333333333333333333333333333333333333333333333333333333333333333",
+        "phase": "prepared",
+        "prepared_at": "2026-08-09T12:00:00.000Z",
+        "updated_at": "2026-08-09T12:00:00.000Z"
+      }
+    ]
+  },
+  "workspace-patch-baseline.schema.json": {
+    "schema_version": "ultrafuzz.workspace-patch-baseline.v1",
+    "attempt_id": "node-a",
+    "baseline_tree": "4444444444444444444444444444444444444444"
+  },
+  "workspace-patch-preparation.schema.json": {
+    "schema_version": "ultrafuzz.workspace-patch-preparation.v1",
+    "attempt_id": "node-a",
+    "preparation_tree": "5555555555555555555555555555555555555555"
+  }
+}

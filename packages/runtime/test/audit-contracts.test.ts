@@ -20,7 +20,21 @@ import {
 test("runtime audit schemas are closed, registered, and enforce exact current versions", () => {
   assert.deepEqual(
     runtimeSchemaRegistry().map((entry) => entry.filename),
-    ["clean-audit.schema.json", "materialize-audit.schema.json"]
+    [
+      "clean-audit.schema.json",
+      "cloud-execution-generation.schema.json",
+      "invariant-suite-baseline.schema.json",
+      "invariant-suite-handoff.schema.json",
+      "invariant-workspace-snapshot.schema.json",
+      "materialize-audit.schema.json",
+      "smithers-reset-node.schema.json",
+      "smithers-submission.schema.json",
+      "workflow-control-integrity.schema.json",
+      "workflow-execution-dependencies.schema.json",
+      "workflow-run-link-journal.schema.json",
+      "workspace-patch-baseline.schema.json",
+      "workspace-patch-preparation.schema.json"
+    ]
   );
   const clean = currentCleanRecord();
   assert.equal(parseCleanAuditRecord(clean), clean);

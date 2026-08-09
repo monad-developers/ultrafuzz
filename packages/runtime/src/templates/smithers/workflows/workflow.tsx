@@ -54,8 +54,25 @@ const {
   writeFileDurable,
   VALIDATOR_BUILD_IDENTITY
 } = await import(artifactsModule);
-const { applyWorkspacePatch, captureWorkspacePatch, captureWorkspaceTree, validateWorkspacePatchCapture } =
-  await import(runtimeModule);
+const {
+  applyWorkspacePatch,
+  captureWorkspacePatch,
+  captureWorkspaceTree,
+  validateWorkspacePatchCapture,
+  parseRuntimeDocumentBytes,
+  serializeRuntimeDocument,
+  CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
+  INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
+  INVARIANT_SUITE_BASELINE_SCHEMA_VERSION,
+  INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
+  INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION,
+  INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
+  INVARIANT_WORKSPACE_SNAPSHOT_SCHEMA_VERSION,
+  WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID,
+  WORKSPACE_PATCH_BASELINE_SCHEMA_VERSION,
+  WORKSPACE_PATCH_PREPARATION_JSON_SCHEMA_ID,
+  WORKSPACE_PATCH_PREPARATION_SCHEMA_VERSION
+} = await import(runtimeModule);
 
 const inputTaskSchema = z.object({
   id: z.string(),
@@ -282,11 +299,12 @@ function readCloudExecutionGeneration(): string {
   const runRoot = taskSpecs.find((task) => task.execution.mode === "cloud")?.runRoot;
   if (runRoot === undefined) return "base";
   const generationPath = path.resolve(process.cwd(), runRoot, "smithers", "cloud-execution-generation.json");
-  if (!existsSync(generationPath)) return "base";
-  const parsed = JSON.parse(readFileSync(generationPath, "utf8")) as { generation?: unknown };
-  if (typeof parsed.generation !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(parsed.generation)) {
-    throw new Error("cloud execution generation evidence is invalid");
-  }
+  if (!pathEntryExists(generationPath)) return "base";
+  const parsed = parseRuntimeDocumentBytes(
+    CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
+    readRegularFileSnapshot(generationPath, 64 * 1024),
+    "cloud execution generation evidence"
+  );
   return parsed.generation;
 }
 
@@ -511,6 +529,20 @@ function resetTaskArtifactContents(
 
 function isMissingPathError(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function pathEntryExists(candidate: string): boolean {
+  try {
+    lstatSync(candidate);
+    return true;
+  } catch (error) {
+    if (isMissingPathError(error)) return false;
+    throw error;
+  }
+}
+
+function compareCanonicalRuntimeStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function taskArtifactRoots(task: (typeof taskSpecs)[number], canonicalArtifactDir: string): string[] {
@@ -776,11 +808,14 @@ function materializeWorkspacePatchDependencies(
     throw new Error(`artifact-contract failure: workspace preparation was modified ${task.attemptId}`);
   }
   const dependencies = [...task.dependencyArtifactDirs]
-    .filter(
-      (dependency) =>
-        existsSync(path.join(dependency, "workspace.patch")) &&
-        existsSync(path.join(dependency, "workspace-patch.json"))
-    )
+    .filter((dependency) => {
+      const patchPresent = pathEntryExists(path.join(dependency, "workspace.patch"));
+      const manifestPresent = pathEntryExists(path.join(dependency, "workspace-patch.json"));
+      if (patchPresent !== manifestPresent) {
+        throw new Error(`artifact-contract failure: workspace patch handoff is incomplete ${dependency}`);
+      }
+      return patchPresent;
+    })
     .sort((left, right) => {
       const leftIndex = taskSpecs.findIndex((candidate) => candidate.attemptId === path.basename(left));
       const rightIndex = taskSpecs.findIndex((candidate) => candidate.attemptId === path.basename(right));
@@ -801,16 +836,34 @@ function materializeWorkspacePatchDependencies(
       path.join(dependency, "workspace-patch.json"),
       "artifact-contract failure: workspace patch manifest is not a regular file"
     );
+    const manifestSnapshot = readBoundedRegularArtifactSnapshot(
+      dependency,
+      manifestPath,
+      "artifact-contract failure: workspace patch manifest is not a regular file",
+      MAX_VERIFIED_ARTIFACT_BYTES,
+      true
+    );
     let manifest: unknown;
     try {
-      manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as unknown;
+      manifest = parseStrictJsonSnapshot(
+        manifestSnapshot,
+        `artifact-contract failure: workspace patch manifest is malformed ${manifestPath}`
+      );
     } catch (error) {
       throw new Error(`artifact-contract failure: workspace patch manifest is malformed ${manifestPath}`, {
         cause: error
       });
     }
     return {
-      patch: readFileSync(patchPath, "utf8"),
+      patch: decodeStrictUtf8Snapshot(
+        readBoundedRegularArtifactSnapshot(
+          dependency,
+          patchPath,
+          "artifact-contract failure: workspace patch is not a regular file",
+          MAX_VERIFIED_ARTIFACT_BYTES
+        ),
+        `artifact-contract failure: workspace patch is malformed ${patchPath}`
+      ),
       manifest: manifest as Parameters<typeof applyWorkspacePatch>[1]["manifest"]
     };
   });
@@ -887,12 +940,16 @@ function writeWorkspacePatchBaseline(task: (typeof taskSpecs)[number], baselineT
     throw new Error(`artifact-contract failure: invalid workspace patch baseline ${task.attemptId}`);
   }
   const target = workspacePatchBaselinePath(task);
-  const contents = `${JSON.stringify({
-    schema_version: "ultrafuzz.workspace-patch-baseline.v1",
-    attempt_id: task.attemptId,
-    baseline_tree: baselineTree
-  })}\n`;
-  if (existsSync(target)) {
+  const contents = serializeRuntimeDocument(
+    WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID,
+    {
+      schema_version: WORKSPACE_PATCH_BASELINE_SCHEMA_VERSION,
+      attempt_id: task.attemptId,
+      baseline_tree: baselineTree
+    },
+    "workspace patch baseline"
+  );
+  if (pathEntryExists(target)) {
     if (readFileSync(target, "utf8") !== contents) {
       throw new Error(`artifact-contract failure: workspace patch baseline was modified ${task.attemptId}`);
     }
@@ -903,7 +960,7 @@ function writeWorkspacePatchBaseline(task: (typeof taskSpecs)[number], baselineT
 
 function readWorkspacePatchBaseline(task: (typeof taskSpecs)[number]): string | undefined {
   const target = workspacePatchBaselinePath(task);
-  if (!existsSync(target)) return undefined;
+  if (!pathEntryExists(target)) return undefined;
   const snapshot = readBoundedRegularArtifactSnapshot(
     realpathSync(task.metadata.artifacts.dir),
     target,
@@ -911,28 +968,22 @@ function readWorkspacePatchBaseline(task: (typeof taskSpecs)[number]): string | 
     MAX_PRE_AGENT_EVIDENCE_BYTES,
     true
   );
-  let parsed: unknown;
+  let parsed: ReturnType<typeof parseRuntimeDocumentBytes<typeof WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID>>;
   try {
-    parsed = parseStrictJsonSnapshot(
-      snapshot,
-      `artifact-contract failure: workspace patch baseline is malformed ${task.attemptId}`
+    parsed = parseRuntimeDocumentBytes(
+      WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID,
+      snapshot.bytes,
+      `workspace patch baseline ${task.attemptId}`
     );
   } catch (error) {
     throw new Error(`artifact-contract failure: workspace patch baseline is malformed ${task.attemptId}`, {
       cause: error
     });
   }
-  if (
-    parsed === null ||
-    typeof parsed !== "object" ||
-    (parsed as Record<string, unknown>).schema_version !== "ultrafuzz.workspace-patch-baseline.v1" ||
-    (parsed as Record<string, unknown>).attempt_id !== task.attemptId ||
-    typeof (parsed as Record<string, unknown>).baseline_tree !== "string" ||
-    !/^[0-9a-f]{40,64}$/u.test((parsed as Record<string, unknown>).baseline_tree as string)
-  ) {
+  if (parsed.attempt_id !== task.attemptId) {
     throw new Error(`artifact-contract failure: workspace patch baseline is invalid ${task.attemptId}`);
   }
-  return (parsed as Record<string, unknown>).baseline_tree as string;
+  return parsed.baseline_tree;
 }
 
 function workspacePatchPreparationPath(task: (typeof taskSpecs)[number]): string {
@@ -949,12 +1000,16 @@ function writeWorkspacePatchPreparation(task: (typeof taskSpecs)[number], prepar
     throw new Error(`artifact-contract failure: invalid workspace preparation ${task.attemptId}`);
   }
   const target = workspacePatchPreparationPath(task);
-  const contents = `${JSON.stringify({
-    schema_version: "ultrafuzz.workspace-patch-preparation.v1",
-    attempt_id: task.attemptId,
-    preparation_tree: preparationTree
-  })}\n`;
-  if (existsSync(target)) {
+  const contents = serializeRuntimeDocument(
+    WORKSPACE_PATCH_PREPARATION_JSON_SCHEMA_ID,
+    {
+      schema_version: WORKSPACE_PATCH_PREPARATION_SCHEMA_VERSION,
+      attempt_id: task.attemptId,
+      preparation_tree: preparationTree
+    },
+    "workspace patch preparation"
+  );
+  if (pathEntryExists(target)) {
     if (readFileSync(target, "utf8") !== contents) {
       throw new Error(`artifact-contract failure: workspace preparation was modified ${task.attemptId}`);
     }
@@ -965,7 +1020,7 @@ function writeWorkspacePatchPreparation(task: (typeof taskSpecs)[number], prepar
 
 function readWorkspacePatchPreparation(task: (typeof taskSpecs)[number]): string | undefined {
   const target = workspacePatchPreparationPath(task);
-  if (!existsSync(target)) return undefined;
+  if (!pathEntryExists(target)) return undefined;
   const snapshot = readBoundedRegularArtifactSnapshot(
     realpathSync(task.metadata.artifacts.dir),
     target,
@@ -973,28 +1028,22 @@ function readWorkspacePatchPreparation(task: (typeof taskSpecs)[number]): string
     MAX_PRE_AGENT_EVIDENCE_BYTES,
     true
   );
-  let parsed: unknown;
+  let parsed: ReturnType<typeof parseRuntimeDocumentBytes<typeof WORKSPACE_PATCH_PREPARATION_JSON_SCHEMA_ID>>;
   try {
-    parsed = parseStrictJsonSnapshot(
-      snapshot,
-      `artifact-contract failure: workspace preparation is malformed ${task.attemptId}`
+    parsed = parseRuntimeDocumentBytes(
+      WORKSPACE_PATCH_PREPARATION_JSON_SCHEMA_ID,
+      snapshot.bytes,
+      `workspace patch preparation ${task.attemptId}`
     );
   } catch (error) {
     throw new Error(`artifact-contract failure: workspace preparation is malformed ${task.attemptId}`, {
       cause: error
     });
   }
-  if (
-    parsed === null ||
-    typeof parsed !== "object" ||
-    (parsed as Record<string, unknown>).schema_version !== "ultrafuzz.workspace-patch-preparation.v1" ||
-    (parsed as Record<string, unknown>).attempt_id !== task.attemptId ||
-    typeof (parsed as Record<string, unknown>).preparation_tree !== "string" ||
-    !/^[0-9a-f]{40,64}$/u.test((parsed as Record<string, unknown>).preparation_tree as string)
-  ) {
+  if (parsed.attempt_id !== task.attemptId) {
     throw new Error(`artifact-contract failure: workspace preparation is invalid ${task.attemptId}`);
   }
-  return (parsed as Record<string, unknown>).preparation_tree as string;
+  return parsed.preparation_tree;
 }
 
 function restoreWorkspacePatchPreparation(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
@@ -1116,28 +1165,44 @@ function holdsSupersededWorkspacePatchPair(artifactRoot: string, workspaceRoot: 
   const manifestPath = path.resolve(artifactRoot, "workspace-patch.json");
   // Both halves are required: a lone patch keeps the caller's rejection, which is what stops an agent
   // laundering one by deleting the manifest beside it.
-  if (!existsSync(patchPath) || !existsSync(manifestPath)) return false;
+  const patchPresent = pathEntryExists(patchPath);
+  const manifestPresent = pathEntryExists(manifestPath);
+  if (patchPresent !== manifestPresent) {
+    throw new Error(`artifact-contract failure: workspace patch artifact pair is incomplete ${artifactRoot}`);
+  }
+  if (!patchPresent) return false;
   // Name the file that failed rather than "artifact", so a symlinked or non-regular half is diagnosable
   // from the message alone.
-  const patch = readFileSync(
-    resolveRegularArtifactFile(
+  const patch = decodeStrictUtf8Snapshot(
+    readBoundedRegularArtifactSnapshot(
       artifactRoot,
-      patchPath,
-      "artifact-contract failure: workspace patch artifact is unsafe workspace.patch"
+      resolveRegularArtifactFile(
+        artifactRoot,
+        patchPath,
+        "artifact-contract failure: workspace patch artifact is unsafe workspace.patch"
+      ),
+      "artifact-contract failure: workspace patch artifact is unsafe workspace.patch",
+      MAX_VERIFIED_ARTIFACT_BYTES
     ),
-    "utf8"
+    "artifact-contract failure: workspace patch artifact is malformed workspace.patch"
   );
-  const manifestText = readFileSync(
+  const manifestSnapshot = readBoundedRegularArtifactSnapshot(
+    artifactRoot,
     resolveRegularArtifactFile(
       artifactRoot,
       manifestPath,
       "artifact-contract failure: workspace patch artifact is unsafe workspace-patch.json"
     ),
-    "utf8"
+    "artifact-contract failure: workspace patch artifact is unsafe workspace-patch.json",
+    MAX_VERIFIED_ARTIFACT_BYTES,
+    true
   );
   let manifest: unknown;
   try {
-    manifest = JSON.parse(manifestText) as unknown;
+    manifest = parseStrictJsonSnapshot(
+      manifestSnapshot,
+      "artifact-contract failure: workspace patch artifact is malformed workspace-patch.json"
+    );
   } catch {
     return false;
   }
@@ -1190,14 +1255,14 @@ function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspa
   if (!isStrictlyInsideDirectory(artifactRoot, baselinePath)) {
     throw new Error(`artifact-contract failure: unsafe invariant suite baseline ${task.attemptId}`);
   }
-  if (existsSync(protectedBaselinePath)) {
+  if (pathEntryExists(protectedBaselinePath)) {
     const protectedRoot = realpathSync(path.dirname(protectedBaselinePath));
-    const resolvedProtected = resolveRegularArtifactFile(
+    const protectedSnapshot = readAndValidateInvariantSuiteBaseline(
       protectedRoot,
       protectedBaselinePath,
-      "artifact-contract failure: protected invariant suite baseline is not a regular file"
+      task.attemptId
     );
-    const contents = readFileSync(resolvedProtected, "utf8");
+    const contents = decodeStrictUtf8Snapshot(protectedSnapshot, "protected invariant suite baseline");
     const digest = createHash("sha256").update(contents).digest("hex");
     const snapshot = invariantSuiteBaselineSnapshots.get(artifactRoot);
     if (snapshot !== undefined && snapshot.sha256 !== digest) {
@@ -1208,13 +1273,9 @@ function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspa
     invariantSuiteBaselineSnapshots.set(artifactRoot, { contents, sha256: digest });
     return;
   }
-  if (existsSync(baselinePath)) {
-    const resolvedBaseline = resolveRegularArtifactFile(
-      artifactRoot,
-      baselinePath,
-      "artifact-contract failure: invariant suite baseline is not a regular file"
-    );
-    const contents = readFileSync(resolvedBaseline, "utf8");
+  if (pathEntryExists(baselinePath)) {
+    const baselineSnapshot = readAndValidateInvariantSuiteBaseline(artifactRoot, baselinePath, task.attemptId);
+    const contents = decodeStrictUtf8Snapshot(baselineSnapshot, "invariant suite baseline");
     const snapshot = invariantSuiteBaselineSnapshots.get(artifactRoot);
     const digest = createHash("sha256").update(contents).digest("hex");
     if (snapshot !== undefined && snapshot.sha256 !== digest) {
@@ -1267,11 +1328,15 @@ function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspa
     if (error instanceof Error && error.message.startsWith("artifact-contract failure:")) throw error;
     throw new Error("artifact-contract failure: unable to capture invariant suite baseline", { cause: error });
   }
-  const contents = `${JSON.stringify(
-    { schema_version: "ultrafuzz.invariant-suite-baseline.v1", files: [...files.values()] },
-    null,
-    2
-  )}\n`;
+  const contents = serializeRuntimeDocument(
+    INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
+    {
+      schema_version: INVARIANT_SUITE_BASELINE_SCHEMA_VERSION,
+      files: [...files.values()].sort((left, right) => compareCanonicalRuntimeStrings(left.path, right.path))
+    },
+    "invariant suite baseline",
+    true
+  );
   writeFileDurable(baselinePath, contents);
   writeFileDurable(protectedBaselinePath, contents);
   invariantSuiteProtectedBaselineSnapshots.set(protectedBaselinePath, {
@@ -1322,31 +1387,25 @@ function readAndValidateInvariantSuiteBaseline(
     MAX_PRE_AGENT_EVIDENCE_BYTES,
     true
   );
-  const parsed = parseStrictJsonSnapshot(
-    snapshot,
-    `artifact-contract failure: invariant suite baseline is malformed ${attemptId}`
-  );
-  if (
-    !isPlainRecord(parsed) ||
-    parsed.schema_version !== "ultrafuzz.invariant-suite-baseline.v1" ||
-    !Array.isArray(parsed.files) ||
-    Object.keys(parsed).length !== 2
-  ) {
+  let parsed: ReturnType<typeof parseRuntimeDocumentBytes<typeof INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID>>;
+  try {
+    parsed = parseRuntimeDocumentBytes(
+      INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
+      snapshot.bytes,
+      `invariant suite baseline ${attemptId}`
+    );
+  } catch (error) {
+    throw new Error(`artifact-contract failure: invariant suite baseline is malformed ${attemptId}`, {
+      cause: error
+    });
+  }
+  if (parsed.schema_version !== INVARIANT_SUITE_BASELINE_SCHEMA_VERSION) {
     throw new Error(`artifact-contract failure: invariant suite baseline is malformed ${attemptId}`);
   }
   const paths = new Set<string>();
   let totalBytes = 0;
   for (const entry of parsed.files) {
-    if (
-      !isPlainRecord(entry) ||
-      Object.keys(entry).length !== 3 ||
-      typeof entry.path !== "string" ||
-      typeof entry.sha256 !== "string" ||
-      !/^[0-9a-f]{64}$/u.test(entry.sha256) ||
-      typeof entry.size !== "number" ||
-      !Number.isSafeInteger(entry.size) ||
-      entry.size < 1
-    ) {
+    if (!isPlainRecord(entry)) {
       throw new Error(`artifact-contract failure: invariant suite baseline entry is malformed ${attemptId}`);
     }
     const relativePath = assertSafeInvariantSuiteTestPath(entry.path);
@@ -1492,19 +1551,19 @@ function loadInvariantSuiteWorkspaceSnapshot(
 ): Map<string, Buffer> | undefined {
   const snapshotRoot = invariantSuiteWorkspaceSnapshotRoot(task, options.createRoot ?? true);
   const manifestPath = path.join(snapshotRoot, INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE);
-  if (!existsSync(manifestPath)) return undefined;
+  if (!pathEntryExists(manifestPath)) return undefined;
   const manifestBytes = readStableWorkspaceSnapshotFile(snapshotRoot, manifestPath, "snapshot manifest");
-  let parsed: unknown;
+  let parsed: ReturnType<typeof parseRuntimeDocumentBytes<typeof INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID>>;
   try {
-    parsed = parseStrictJsonBytes(manifestBytes);
+    parsed = parseRuntimeDocumentBytes(
+      INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
+      manifestBytes,
+      "invariant workspace snapshot manifest"
+    );
   } catch (error) {
     throw new Error("artifact-contract failure: invariant workspace snapshot manifest is malformed", { cause: error });
   }
-  if (
-    !isPlainRecord(parsed) ||
-    parsed.schema_version !== "ultrafuzz.invariant-workspace-snapshot.v1" ||
-    !Array.isArray(parsed.files)
-  ) {
+  if (parsed.schema_version !== INVARIANT_WORKSPACE_SNAPSHOT_SCHEMA_VERSION) {
     throw new Error("artifact-contract failure: invariant workspace snapshot manifest is malformed");
   }
   if (parsed.files.length > MAX_INVARIANT_SUITE_WORKSPACE_FILES) {
@@ -1514,15 +1573,7 @@ function loadInvariantSuiteWorkspaceSnapshot(
   const snapshot = new Map<string, Buffer>();
   let totalBytes = 0;
   for (const entry of parsed.files) {
-    if (
-      !isPlainRecord(entry) ||
-      typeof entry.path !== "string" ||
-      typeof entry.size !== "number" ||
-      !Number.isSafeInteger(entry.size) ||
-      entry.size < 0 ||
-      typeof entry.sha256 !== "string" ||
-      !/^[0-9a-f]{64}$/u.test(entry.sha256)
-    ) {
+    if (!isPlainRecord(entry)) {
       throw new Error("artifact-contract failure: invariant workspace snapshot entry is malformed");
     }
     const relativePath = assertSafeInvariantSuitePath(entry.path);
@@ -1628,7 +1679,15 @@ function captureInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number]
   }
   writeFileDurable(
     path.join(snapshotRoot, INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE),
-    `${JSON.stringify({ schema_version: "ultrafuzz.invariant-workspace-snapshot.v1", files: manifestEntries }, null, 2)}\n`
+    serializeRuntimeDocument(
+      INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
+      {
+        schema_version: INVARIANT_WORKSPACE_SNAPSHOT_SCHEMA_VERSION,
+        files: manifestEntries.sort((left, right) => compareCanonicalRuntimeStrings(left.path, right.path))
+      },
+      "invariant workspace snapshot manifest",
+      true
+    )
   );
   invariantSuiteWorkspaceSnapshots.set(task.attemptId, snapshot);
 }
@@ -2508,7 +2567,7 @@ function invariantSuiteDependencyFingerprints(
     }
     fingerprints.push({ attempt_id: path.basename(dependency), manifest_sha256: digest });
   }
-  return fingerprints.sort((left, right) => left.attempt_id.localeCompare(right.attempt_id));
+  return fingerprints.sort((left, right) => compareCanonicalRuntimeStrings(left.attempt_id, right.attempt_id));
 }
 
 function invariantSuiteFingerprintKey(
@@ -2528,7 +2587,7 @@ function writeInvariantSuiteDependencyHandoff(
   tombstones: ReadonlySet<string>
 ): void {
   const dependencies = [...selected]
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => compareCanonicalRuntimeStrings(left, right))
     .map(([relativePath, entry]) => ({
       path: relativePath,
       attempt_id: path.basename(entry.dependency),
@@ -2539,18 +2598,19 @@ function writeInvariantSuiteDependencyHandoff(
   assertInvariantSuiteTombstoneBudget(tombstones.size, task.attemptId);
   writeFileDurable(
     path.join(invariantSuiteHandoffRoot(task), INVARIANT_SUITE_HANDOFF_FILE),
-    `${JSON.stringify(
+    serializeRuntimeDocument(
+      INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
       {
         schema_version: INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION,
         producer_node_id: task.metadata.node.logicalNodeId,
         producer_attempt_id: task.attemptId,
         producers: invariantSuiteDependencyFingerprints(task),
         dependencies,
-        tombstones: [...tombstones].sort()
+        tombstones: [...tombstones].sort(compareCanonicalRuntimeStrings)
       },
-      null,
-      2
-    )}\n`
+      "invariant suite dependency handoff",
+      true
+    )
   );
 }
 
@@ -2578,7 +2638,7 @@ function loadInvariantSuiteDependencyHandoff(
   | undefined {
   const handoffRoot = invariantSuiteHandoffRoot(task, options.createRoot ?? true);
   const handoffPath = path.join(handoffRoot, INVARIANT_SUITE_HANDOFF_FILE);
-  if (!existsSync(handoffPath)) return undefined;
+  if (!pathEntryExists(handoffPath)) return undefined;
   const handoff = readBoundedRegularArtifactSnapshot(
     handoffRoot,
     handoffPath,
@@ -2586,17 +2646,15 @@ function loadInvariantSuiteDependencyHandoff(
     MAX_PRE_AGENT_EVIDENCE_BYTES,
     true
   );
-  const parsed = parseStrictJsonSnapshot(
-    handoff,
-    `artifact-contract failure: invariant suite handoff record is malformed ${handoffPath}`
+  const parsed = parseRuntimeDocumentBytes(
+    INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
+    handoff.bytes,
+    `invariant suite handoff record ${handoffPath}`
   );
   if (
-    !isPlainRecord(parsed) ||
     parsed.schema_version !== INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION ||
     parsed.producer_node_id !== task.metadata.node.logicalNodeId ||
-    parsed.producer_attempt_id !== task.attemptId ||
-    !Array.isArray(parsed.dependencies) ||
-    !Array.isArray(parsed.tombstones)
+    parsed.producer_attempt_id !== task.attemptId
   ) {
     throw new Error(`artifact-contract failure: invariant suite handoff record is invalid ${handoffPath}`);
   }
@@ -2605,12 +2663,6 @@ function loadInvariantSuiteDependencyHandoff(
   // too late to derive different pre-agent evidence without reopening the
   // attempt against inputs the agent never saw.
   const recordedProducers: Array<{ attempt_id: string; manifest_sha256: string | null }> = [];
-  if (!Array.isArray(parsed.producers)) {
-    if (options.producerMismatch === "fail") {
-      throw new Error(`artifact-contract failure: invariant suite handoff producers are unavailable ${handoffPath}`);
-    }
-    return undefined;
-  }
   const producerIds = new Set<string>();
   for (const entry of parsed.producers) {
     if (
@@ -2912,7 +2964,7 @@ function assertInvariantSuiteDependencyExpectations(
     const implementationCandidate = path.join(dependencyRoot, "implemented-properties.json");
     const expectedPaths = new Set<string>();
     let implementationPath: string | undefined;
-    if (existsSync(implementationCandidate)) {
+    if (pathEntryExists(implementationCandidate)) {
       implementationPath = resolveRegularArtifactFile(
         dependencyRoot,
         implementationCandidate,
@@ -2920,22 +2972,30 @@ function assertInvariantSuiteDependencyExpectations(
       );
     }
     if (implementationPath !== undefined) {
-      let raw: unknown;
-      try {
-        raw = JSON.parse(readFileSync(implementationPath, "utf8")) as unknown;
-      } catch {
-        throw new Error(`artifact-contract failure: implemented properties JSON is malformed ${implementationPath}`);
-      }
+      const implementationSnapshot = readBoundedRegularArtifactSnapshot(
+        dependencyRoot,
+        implementationPath,
+        "artifact-contract failure: implemented properties JSON is not a regular file",
+        MAX_VERIFIED_ARTIFACT_BYTES,
+        true
+      );
+      const raw = parseStrictJsonSnapshot(
+        implementationSnapshot,
+        `artifact-contract failure: implemented properties JSON is malformed ${implementationPath}`
+      );
       const implementation = validateImplementedPropertiesSchema(raw, implementationPath);
-      if (implementation.ok && implementation.value !== undefined) {
-        for (const record of implementation.value.properties) {
-          if (record.status !== "implemented") continue;
-          for (const relativePath of record.implementation_paths) {
-            expectedPaths.add(assertSafeInvariantSuitePath(relativePath));
-          }
-          for (const relativePath of record.test_paths) {
-            expectedPaths.add(assertSafeInvariantSuiteTestPath(relativePath));
-          }
+      if (!implementation.ok || implementation.value === undefined) {
+        throw new Error(
+          `artifact-contract failure: implemented properties JSON is invalid ${implementationPath}: ${formatSchemaValidationIssues(implementation.issues)}`
+        );
+      }
+      for (const record of implementation.value.properties) {
+        if (record.status !== "implemented") continue;
+        for (const relativePath of record.implementation_paths) {
+          expectedPaths.add(assertSafeInvariantSuitePath(relativePath));
+        }
+        for (const relativePath of record.test_paths) {
+          expectedPaths.add(assertSafeInvariantSuiteTestPath(relativePath));
         }
       }
     }
@@ -3155,7 +3215,6 @@ const WORKSPACE_PATCH_PREPARATION_FILE = "workspace-patch-preparation.json";
 const INVARIANT_SUITE_MANIFEST_FILE = "invariant-suite-manifest.json";
 const INVARIANT_SUITE_HANDOFF_DIR = "invariant-suite-handoffs";
 const INVARIANT_SUITE_HANDOFF_FILE = "handoff.json";
-const INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION = "ultrafuzz.invariant-suite-handoff.v1";
 const INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR = "invariant-suite-workspace-snapshots";
 const INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE = "snapshot.json";
 const INVARIANT_SUITE_WORKSPACE_FILES_DIR = "files";
@@ -3372,16 +3431,19 @@ function assertInvariantSuiteSourceSize(relativePath: string, size: number): voi
 function changedTestTreePaths(workspaceRoot: string, baselinePath?: string, protectedBaselinePath?: string): string[] {
   try {
     const authoritativeBaselinePath =
-      protectedBaselinePath !== undefined && existsSync(protectedBaselinePath) ? protectedBaselinePath : baselinePath;
-    if (authoritativeBaselinePath !== undefined && existsSync(authoritativeBaselinePath)) {
+      protectedBaselinePath !== undefined && pathEntryExists(protectedBaselinePath)
+        ? protectedBaselinePath
+        : baselinePath;
+    if (authoritativeBaselinePath !== undefined && pathEntryExists(authoritativeBaselinePath)) {
       const baselineRoot = realpathSync(path.dirname(authoritativeBaselinePath));
-      const resolvedBaseline = resolveRegularArtifactFile(
+      const baselineSnapshot = readBoundedRegularArtifactSnapshot(
         baselineRoot,
         authoritativeBaselinePath,
-        "artifact-contract failure: invariant suite baseline is not a regular file"
+        "artifact-contract failure: invariant suite baseline is not a regular file",
+        MAX_PRE_AGENT_EVIDENCE_BYTES,
+        true
       );
-      const baselineContents = readFileSync(resolvedBaseline, "utf8");
-      const baselineDigest = createHash("sha256").update(baselineContents).digest("hex");
+      const baselineDigest = createHash("sha256").update(baselineSnapshot.bytes).digest("hex");
       const snapshot =
         protectedBaselinePath !== undefined && authoritativeBaselinePath === protectedBaselinePath
           ? invariantSuiteProtectedBaselineSnapshots.get(authoritativeBaselinePath)
@@ -3389,31 +3451,17 @@ function changedTestTreePaths(workspaceRoot: string, baselinePath?: string, prot
       if (snapshot !== undefined && snapshot.sha256 !== baselineDigest) {
         throw new Error("artifact-contract failure: invariant suite baseline was modified by the agent");
       }
-      const parsed = JSON.parse(baselineContents) as {
-        schema_version?: unknown;
-        files?: unknown;
-      };
-      if (parsed.schema_version !== "ultrafuzz.invariant-suite-baseline.v1" || !Array.isArray(parsed.files)) {
-        throw new Error("artifact-contract failure: invariant suite baseline is malformed");
-      }
+      const parsed = parseRuntimeDocumentBytes(
+        INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
+        baselineSnapshot.bytes,
+        "invariant suite baseline"
+      );
       const baseline = new Map<string, { sha256: string; size: number }>();
       for (const entry of parsed.files) {
-        if (
-          typeof entry !== "object" ||
-          entry === null ||
-          Array.isArray(entry) ||
-          typeof (entry as { path?: unknown }).path !== "string" ||
-          typeof (entry as { sha256?: unknown }).sha256 !== "string" ||
-          !/^[0-9a-f]{64}$/u.test((entry as { sha256: string }).sha256) ||
-          !Number.isSafeInteger((entry as { size?: unknown }).size) ||
-          (entry as { size: number }).size < 0
-        ) {
-          throw new Error("artifact-contract failure: invariant suite baseline entry is malformed");
-        }
-        const relativePath = assertSafeInvariantSuiteTestPath((entry as { path: string }).path);
+        const relativePath = assertSafeInvariantSuiteTestPath(entry.path);
         baseline.set(relativePath, {
-          sha256: (entry as { sha256: string }).sha256,
-          size: (entry as { size: number }).size
+          sha256: entry.sha256,
+          size: entry.size
         });
       }
       const current = gitTestTreePaths(workspaceRoot);

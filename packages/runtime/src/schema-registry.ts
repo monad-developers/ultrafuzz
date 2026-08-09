@@ -13,6 +13,21 @@ import {
   type SchemaRegistryEntry
 } from "@ultrafuzz/artifacts";
 
+import {
+  CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
+  INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
+  INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
+  INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
+  SMITHERS_RESET_NODE_JSON_SCHEMA_ID,
+  SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
+  WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
+  WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
+  WORKFLOW_RUN_LINK_JOURNAL_JSON_SCHEMA_ID,
+  WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID,
+  WORKSPACE_PATCH_PREPARATION_JSON_SCHEMA_ID
+} from "./runtime-contracts.js";
+import { RUNTIME_SEMANTIC_GATES_BY_SCHEMA_ID } from "./runtime-semantic-gates.js";
+
 const MAX_RUNTIME_SCHEMA_BYTES = 2 * 1024 * 1024;
 
 export const MATERIALIZE_AUDIT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:materialize-audit:1" as const;
@@ -51,11 +66,35 @@ function loadSchemaDocument(filename: string): Readonly<Record<string, unknown>>
 }
 
 export const cleanAuditJsonSchema = loadSchemaDocument("clean-audit.schema.json");
+export const cloudExecutionGenerationJsonSchema = loadSchemaDocument("cloud-execution-generation.schema.json");
+export const invariantSuiteBaselineJsonSchema = loadSchemaDocument("invariant-suite-baseline.schema.json");
+export const invariantSuiteHandoffJsonSchema = loadSchemaDocument("invariant-suite-handoff.schema.json");
+export const invariantWorkspaceSnapshotJsonSchema = loadSchemaDocument("invariant-workspace-snapshot.schema.json");
 export const materializeAuditJsonSchema = loadSchemaDocument("materialize-audit.schema.json");
+export const smithersResetNodeJsonSchema = loadSchemaDocument("smithers-reset-node.schema.json");
+export const smithersSubmissionJsonSchema = loadSchemaDocument("smithers-submission.schema.json");
+export const workflowControlIntegrityJsonSchema = loadSchemaDocument("workflow-control-integrity.schema.json");
+export const workflowExecutionDependenciesJsonSchema = loadSchemaDocument(
+  "workflow-execution-dependencies.schema.json"
+);
+export const workflowRunLinkJournalJsonSchema = loadSchemaDocument("workflow-run-link-journal.schema.json");
+export const workspacePatchBaselineJsonSchema = loadSchemaDocument("workspace-patch-baseline.schema.json");
+export const workspacePatchPreparationJsonSchema = loadSchemaDocument("workspace-patch-preparation.schema.json");
 
 export const RUNTIME_SCHEMA_EXPORTS = Object.freeze({
   cleanAuditJsonSchema,
-  materializeAuditJsonSchema
+  cloudExecutionGenerationJsonSchema,
+  invariantSuiteBaselineJsonSchema,
+  invariantSuiteHandoffJsonSchema,
+  invariantWorkspaceSnapshotJsonSchema,
+  materializeAuditJsonSchema,
+  smithersResetNodeJsonSchema,
+  smithersSubmissionJsonSchema,
+  workflowControlIntegrityJsonSchema,
+  workflowExecutionDependenciesJsonSchema,
+  workflowRunLinkJournalJsonSchema,
+  workspacePatchBaselineJsonSchema,
+  workspacePatchPreparationJsonSchema
 });
 
 export const RUNTIME_SCHEMA_METADATA: Readonly<Record<string, RuntimeSchemaMetadata>> = Object.freeze({
@@ -64,6 +103,30 @@ export const RUNTIME_SCHEMA_METADATA: Readonly<Record<string, RuntimeSchemaMetad
     role: "runtime-state",
     typescriptExport: "cleanAuditJsonSchema",
     semanticGates: Object.freeze(["clean-audit-selection-path-uniqueness", "audit-history-ordering"])
+  },
+  "cloud-execution-generation.schema.json": {
+    id: CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "cloudExecutionGenerationJsonSchema",
+    semanticGates: Object.freeze([])
+  },
+  "invariant-suite-baseline.schema.json": {
+    id: INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "invariantSuiteBaselineJsonSchema",
+    semanticGates: RUNTIME_SEMANTIC_GATES_BY_SCHEMA_ID[INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID]
+  },
+  "invariant-suite-handoff.schema.json": {
+    id: INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "invariantSuiteHandoffJsonSchema",
+    semanticGates: RUNTIME_SEMANTIC_GATES_BY_SCHEMA_ID[INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID]
+  },
+  "invariant-workspace-snapshot.schema.json": {
+    id: INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "invariantWorkspaceSnapshotJsonSchema",
+    semanticGates: RUNTIME_SEMANTIC_GATES_BY_SCHEMA_ID[INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID]
   },
   "materialize-audit.schema.json": {
     id: MATERIALIZE_AUDIT_JSON_SCHEMA_ID,
@@ -75,6 +138,48 @@ export const RUNTIME_SCHEMA_METADATA: Readonly<Record<string, RuntimeSchemaMetad
       "materialize-audit-patch-source-uniqueness",
       "audit-history-ordering"
     ])
+  },
+  "smithers-reset-node.schema.json": {
+    id: SMITHERS_RESET_NODE_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "smithersResetNodeJsonSchema",
+    semanticGates: Object.freeze([])
+  },
+  "smithers-submission.schema.json": {
+    id: SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "smithersSubmissionJsonSchema",
+    semanticGates: Object.freeze([])
+  },
+  "workflow-control-integrity.schema.json": {
+    id: WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "workflowControlIntegrityJsonSchema",
+    semanticGates: RUNTIME_SEMANTIC_GATES_BY_SCHEMA_ID[WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID]
+  },
+  "workflow-execution-dependencies.schema.json": {
+    id: WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "workflowExecutionDependenciesJsonSchema",
+    semanticGates: RUNTIME_SEMANTIC_GATES_BY_SCHEMA_ID[WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID]
+  },
+  "workflow-run-link-journal.schema.json": {
+    id: WORKFLOW_RUN_LINK_JOURNAL_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "workflowRunLinkJournalJsonSchema",
+    semanticGates: RUNTIME_SEMANTIC_GATES_BY_SCHEMA_ID[WORKFLOW_RUN_LINK_JOURNAL_JSON_SCHEMA_ID]
+  },
+  "workspace-patch-baseline.schema.json": {
+    id: WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "workspacePatchBaselineJsonSchema",
+    semanticGates: Object.freeze([])
+  },
+  "workspace-patch-preparation.schema.json": {
+    id: WORKSPACE_PATCH_PREPARATION_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "workspacePatchPreparationJsonSchema",
+    semanticGates: Object.freeze([])
   }
 });
 

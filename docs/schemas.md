@@ -3,7 +3,7 @@
 Ultrafuzz checks in complete Draft 2020-12 JSON Schema documents under
 `packages/artifacts/schema/`, `packages/cli/schema/`, `packages/config/schema/`,
 `packages/evals/schema/`, `packages/evmbench/src/schema/`,
-`packages/modal/schema/`, `packages/references/schema/`, and
+`packages/modal/schema/`, `packages/references/schema/`, `packages/runtime/schema/`, and
 `packages/topology/schema/`. JSON Schema is the canonical whole-document shape
 contract. TypeScript types describe consumers; where a Zod parser remains
 useful, parity tests require it to accept and reject the same structures without
@@ -24,6 +24,8 @@ Schema IDs are stable, fragment-free URNs such as:
 - `urn:ultrafuzz:schema:evals:public-eval-diagnostics:2`
 - `urn:ultrafuzz:schema:modal:node-input:1`
 - `urn:ultrafuzz:schema:references:reference-cache-manifest:1`
+- `urn:ultrafuzz:schema:runtime:workflow-control-integrity:2`
+- `urn:ultrafuzz:schema:runtime:invariant-suite-handoff:1`
 - `urn:ultrafuzz:schema:topology:expanded-graph:3`
 
 The IDs identify schemas and resolve bundled `$ref` values; they are never
@@ -86,3 +88,37 @@ rebuild output from dependencies, or fall back to a sibling artifact or final
 response. Correction is ordinary producer authorship only while the original
 session is still active and must be followed by another successful validation
 command.
+
+## Runtime-Owned Durable Documents
+
+The runtime registry owns complete current schemas for the following retained
+documents. Reads validate one immutable byte snapshot with the strict JSON
+parser, JSON Schema, and every named semantic gate before using any field.
+Writes validate the complete proposed value before durable publication.
+
+- `ultrafuzz.workspace-patch-baseline.v1`
+- `ultrafuzz.workspace-patch-preparation.v1`
+- `ultrafuzz.invariant-suite-baseline.v1`
+- `ultrafuzz.invariant-workspace-snapshot.v1`
+- `ultrafuzz.invariant-suite-handoff.v1`
+- `ultrafuzz.workflow-control-integrity.v2`
+- `ultrafuzz.workflow-execution-dependencies.v1`
+- `ultrafuzz.workflow-run-link-journal.v1`
+- `ultrafuzz.cloud.execution-generation.v1`
+- `ultrafuzz.smithers.submission.v1`
+- `ultrafuzz.smithers.reset-node.v1`
+
+Projected path/identity uniqueness, canonical ordering, aggregate byte budgets,
+workflow-link chaining, and dependency-graph closure are named runtime semantic
+gates because JSON Schema cannot express them portably. Trusted run, attempt,
+filesystem, Git, event-journal, and digest equalities remain contextual checks
+at the consuming boundary. Missing evidence means only a causal `ENOENT`;
+malformed, inaccessible, partial, stale, or unexpected present evidence is not
+treated as absent and is never rewritten.
+
+`ultrafuzz.terminal-disposition.v1` is not a standalone retained JSON file. It
+is a closed nested value in the canonical run-state v4 document and is validated
+there. Likewise, dependency `package.json` files and the transient models.dev
+catalog are third-party envelopes rather than Ultrafuzz evidence: they are
+strictly parsed and narrowly projected, but their provider-defined whole shape
+is intentionally not registered as an Ultrafuzz schema.
