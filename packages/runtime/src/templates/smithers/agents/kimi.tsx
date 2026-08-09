@@ -15,6 +15,7 @@ import {
   readSync,
   realpathSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -22,9 +23,9 @@ import {
 } from "node:fs";
 import type { Dirent } from "node:fs";
 import path from "node:path";
-import { StringDecoder } from "node:string_decoder";
 import { KimiAgent as SmithersKimiAgent } from "smithers-orchestrator";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
+import { parseStrictJson, parseStrictJsonBytes, readRegularFileSnapshot } from "./strict-json";
 import { readStringTable, stringField } from "./toml";
 
 type KimiAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
@@ -63,6 +64,13 @@ const KIMI_SHARED_AUTH_LOCK_TIMEOUT_MS = 120_000;
 const KIMI_REASONING_EFFORTS = ["low", "high", "max"] as const;
 const KIMI_K3_MANAGED_ALIAS = "kimi-code/k3";
 const KIMI_SESSION_INVOCATIONS_DIR = ".ultrafuzz-invocations";
+const KIMI_CREDENTIAL_MAX_BYTES = 1024 * 1024;
+const KIMI_SESSION_INDEX_MAX_BYTES = 64 * 1024 * 1024;
+const KIMI_SESSION_INDEX_MAX_RECORDS = 100_000;
+const KIMI_SESSION_STATE_MAX_BYTES = 1024 * 1024;
+const KIMI_JSON_MAX_DEPTH = 32;
+const KIMI_JSON_MAX_ITEMS = 100_000;
+const KIMI_JSON_MAX_PROPERTIES = 100_000;
 const KIMI_WIRE_FILE_NAME = "wire.jsonl";
 const KIMI_WIRE_USAGE_TYPE = "usage.record";
 const KIMI_WIRE_MAX_DEPTH = 8;
@@ -73,6 +81,7 @@ const KIMI_WIRE_MAX_FILE_BYTES = 64 * 1024 * 1024;
 const KIMI_WIRE_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
 const KIMI_WIRE_MAX_LINE_BYTES = 1024 * 1024;
 const KIMI_WIRE_CHUNK_BYTES = 64 * 1024;
+const KIMI_RESUME_HINT_TYPE = "session.resume_hint";
 
 /** One Kimi Code `usage.record` payload. The four components are independent:
  * `inputOther` already excludes cached input and `output` already includes
@@ -244,12 +253,7 @@ export class KimiCode029Agent extends SmithersKimiAgent {
     const runtimeHome = this.activeRuntimeHome;
     const baseline = this.activeUsageBaseline;
     if (runtimeHome === undefined || baseline === undefined) return undefined;
-    try {
-      return kimiUsageDelta(runtimeHome, baseline);
-    } catch {
-      // Telemetry must never fail an otherwise successful invocation.
-      return undefined;
-    }
+    return kimiUsageDelta(runtimeHome, baseline);
   }
 
   private withFailureUsage<T>(promise: Promise<T>): Promise<T> {
@@ -436,7 +440,7 @@ function withKimiSharedAuthLock<T>(sharedHome: string, callback: () => T): T {
     } catch (error) {
       if (!isErrno(error, "EEXIST")) throw error;
       if (Date.now() - start > KIMI_SHARED_AUTH_LOCK_TIMEOUT_MS) {
-        throw new Error(`timed out acquiring shared Kimi auth lock: ${lockDir}`);
+        throw new Error(`timed out acquiring shared Kimi auth lock: ${lockDir}`, { cause: error });
       }
       sleepSync(100);
     }
@@ -468,27 +472,43 @@ function createKimiBuildOnlyConfigDir(source: string): string {
 function copyKimiCredentialsIfNewer(source: string, target: string): void {
   for (const name of kimiCredentialFileNames(source)) {
     const sourcePath = path.join(source, "credentials", name);
-    if (!existsSync(sourcePath)) continue;
     const targetPath = path.join(target, "credentials", name);
-    if (kimiCredentialShouldReplace(sourcePath, targetPath)) {
+    let replacement: Buffer | undefined;
+    try {
+      replacement = kimiCredentialReplacement(sourcePath, targetPath);
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) continue;
+      throw error;
+    }
+    if (replacement !== undefined) {
       mkdirSync(path.dirname(targetPath), { recursive: true, mode: 0o700 });
-      cpSync(sourcePath, targetPath, { force: true });
+      publishKimiCredentialSnapshot(targetPath, replacement);
     }
   }
 }
 
 function kimiCredentialFileNames(home: string): string[] {
-  let config = "";
+  let config: string;
   try {
     config = readFileSync(path.join(home, "config.toml"), "utf8");
-  } catch {
-    return existsSync(path.join(home, "credentials", "kimi-code.json")) ? ["kimi-code.json"] : [];
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) {
+      throw new Error(
+        `Kimi credential config cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+        {
+          cause: error
+        }
+      );
+    }
+    return pathEntryExists(path.join(home, "credentials", "kimi-code.json")) ? ["kimi-code.json"] : [];
   }
   const names = new Set<string>();
   for (const match of config.matchAll(/\bkey\s*=\s*"oauth\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})"/gu)) {
     names.add(`${match[1]}.json`);
   }
-  if (names.size === 0 && existsSync(path.join(home, "credentials", "kimi-code.json"))) names.add("kimi-code.json");
+  if (names.size === 0 && pathEntryExists(path.join(home, "credentials", "kimi-code.json"))) {
+    names.add("kimi-code.json");
+  }
   return [...names].sort();
 }
 
@@ -496,37 +516,71 @@ function kimiOAuthLockNames(home: string): string[] {
   return kimiCredentialFileNames(home).map((name) => name.replace(/\.json$/u, ""));
 }
 
-function kimiCredentialShouldReplace(sourcePath: string, targetPath: string): boolean {
-  if (!existsSync(targetPath)) return true;
-  const source = kimiCredentialMetadata(sourcePath);
-  const target = kimiCredentialMetadata(targetPath);
-  if (source.refreshToken !== undefined && target.refreshToken === undefined) return true;
-  if (source.refreshToken === undefined && target.refreshToken !== undefined) return false;
+function kimiCredentialReplacement(sourcePath: string, targetPath: string): Buffer | undefined {
+  const source = kimiCredentialSnapshot(sourcePath);
+  let target: ReturnType<typeof kimiCredentialSnapshot>;
+  try {
+    target = kimiCredentialSnapshot(targetPath);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return source.bytes;
+    throw error;
+  }
+  if (source.refreshToken !== undefined && target.refreshToken === undefined) return source.bytes;
+  if (source.refreshToken === undefined && target.refreshToken !== undefined) return undefined;
   if (
     source.refreshToken !== undefined &&
     target.refreshToken !== undefined &&
     source.refreshToken !== target.refreshToken
   ) {
-    return false;
+    return undefined;
   }
   const sourceExpiresAt = source.expiresAt;
   const targetExpiresAt = target.expiresAt;
-  if (targetExpiresAt === undefined) return true;
-  if (sourceExpiresAt === undefined) return false;
-  return sourceExpiresAt > targetExpiresAt;
+  if (targetExpiresAt === undefined) return source.bytes;
+  if (sourceExpiresAt === undefined) return undefined;
+  return sourceExpiresAt > targetExpiresAt ? source.bytes : undefined;
 }
 
-function kimiCredentialMetadata(filePath: string): { refreshToken?: string; expiresAt?: number } {
+function kimiCredentialSnapshot(filePath: string): { bytes: Buffer; refreshToken?: string; expiresAt?: number } {
+  let bytes: Buffer;
+  let value: unknown;
   try {
-    const value = JSON.parse(readFileSync(filePath, "utf8")) as unknown;
-    if (!isRecord(value)) return {};
-    const refreshToken = typeof value.refresh_token === "string" ? value.refresh_token.trim() : "";
-    return {
-      ...(refreshToken === "" ? {} : { refreshToken }),
-      ...(typeof value.expires_at === "number" ? { expiresAt: value.expires_at } : {})
-    };
-  } catch {
-    return {};
+    bytes = readRegularFileSnapshot(filePath, KIMI_CREDENTIAL_MAX_BYTES);
+    value = parseStrictJsonBytes(bytes, {
+      maxBytes: KIMI_CREDENTIAL_MAX_BYTES,
+      maxDepth: KIMI_JSON_MAX_DEPTH,
+      maxItems: KIMI_JSON_MAX_ITEMS,
+      maxProperties: KIMI_JSON_MAX_PROPERTIES
+    });
+  } catch (error) {
+    throw new Error(`Kimi credential metadata is invalid: ${error instanceof Error ? error.message : String(error)}`, {
+      cause: error
+    });
+  }
+  if (!isRecord(value)) throw new Error(`Kimi credential metadata must be a JSON object: ${filePath}`);
+  const refreshToken = value.refresh_token;
+  if (refreshToken !== undefined && (typeof refreshToken !== "string" || refreshToken.length === 0)) {
+    throw new Error(`Kimi credential refresh_token must be a non-empty string when present: ${filePath}`);
+  }
+  const expiresAt = value.expires_at;
+  if (expiresAt !== undefined && (typeof expiresAt !== "number" || !Number.isSafeInteger(expiresAt) || expiresAt < 0)) {
+    throw new Error(`Kimi credential expires_at must be a non-negative safe integer when present: ${filePath}`);
+  }
+  return {
+    bytes,
+    ...(refreshToken === undefined ? {} : { refreshToken }),
+    ...(expiresAt === undefined ? {} : { expiresAt })
+  };
+}
+
+function publishKimiCredentialSnapshot(targetPath: string, bytes: Buffer): void {
+  const publicationDir = mkdtempSync(path.join(path.dirname(targetPath), ".ultrafuzz-kimi-credential-"));
+  try {
+    const temporaryPath = path.join(publicationDir, "credential.json");
+    writeFileSync(temporaryPath, bytes, { flag: "wx", mode: 0o600 });
+    renameSync(temporaryPath, targetPath);
+  } finally {
+    rmSync(publicationDir, { recursive: true, force: true });
   }
 }
 
@@ -606,6 +660,18 @@ interface KimiSessionIndexEntry {
   workDir: string;
 }
 
+interface KimiSessionIndexRecord {
+  sessionId: string;
+  deleted: boolean;
+  sessionDir?: string;
+  workDir?: string;
+}
+
+interface KimiStrictJsonlRecord {
+  lineNumber: number;
+  value: unknown;
+}
+
 function seedKimiSessionState(sourceHome: string, targetHome: string, sessionId: string | undefined): void {
   if (sessionId === undefined) return;
   for (const home of kimiSessionSourceHomes(sourceHome)) {
@@ -632,8 +698,13 @@ function kimiSessionSourceHomes(storeHome: string): string[] {
       const home = path.join(invocationRoot, entry.name);
       homes.push({ home, mtimeMs: kimiSessionHomeMtime(home) });
     }
-  } catch {
-    // No abandoned invocation homes exist yet.
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) {
+      throw new Error(
+        `cannot enumerate abandoned Kimi invocation homes: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
+      );
+    }
   }
   homes.sort((left, right) => right.mtimeMs - left.mtimeMs || left.home.localeCompare(right.home));
   return [...homes.map((entry) => entry.home), storeHome];
@@ -642,44 +713,107 @@ function kimiSessionSourceHomes(storeHome: string): string[] {
 function kimiSessionHomeMtime(home: string): number {
   try {
     return statSync(path.join(home, "session_index.jsonl")).mtimeMs;
-  } catch {
-    try {
-      return statSync(home).mtimeMs;
-    } catch {
-      return 0;
-    }
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) throw error;
   }
+  return statSync(home).mtimeMs;
 }
 
 function effectiveKimiSessionEntries(home: string): Map<string, KimiSessionIndexEntry> {
   const entries = new Map<string, KimiSessionIndexEntry>();
-  let lines: string[];
-  try {
-    lines = readFileSync(path.join(home, "session_index.jsonl"), "utf8").split(/\r?\n/u);
-  } catch {
-    return entries;
-  }
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed === "") continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(trimmed) as unknown;
-    } catch {
+  const records = readKimiStrictJsonlRecords(
+    path.join(home, "session_index.jsonl"),
+    "Kimi session index",
+    KIMI_SESSION_INDEX_MAX_BYTES,
+    KIMI_WIRE_MAX_LINE_BYTES,
+    KIMI_SESSION_INDEX_MAX_RECORDS
+  );
+  if (records === undefined) return entries;
+  for (const record of records) {
+    const parsed = parseKimiSessionIndexRecord(record.value, record.lineNumber);
+    if (parsed.deleted) {
+      entries.delete(parsed.sessionId);
       continue;
     }
-    if (!isRecord(parsed) || typeof parsed.sessionId !== "string") continue;
-    const sessionId = validSessionId(parsed.sessionId);
-    if (sessionId === undefined) continue;
-    if (parsed.deleted === true) {
-      entries.delete(sessionId);
-      continue;
+    const sessionDir = parsed.sessionDir!;
+    const workDir = parsed.workDir!;
+    if (relativeKimiSessionPath(home, sessionDir) === undefined) {
+      throw new Error(`Kimi session index record ${record.lineNumber} has a sessionDir outside its home`);
     }
-    if (typeof parsed.sessionDir !== "string" || typeof parsed.workDir !== "string") continue;
-    if (relativeKimiSessionPath(home, parsed.sessionDir) === undefined) continue;
-    entries.set(sessionId, { sessionId, sessionDir: parsed.sessionDir, workDir: parsed.workDir });
+    entries.delete(parsed.sessionId);
+    entries.set(parsed.sessionId, { sessionId: parsed.sessionId, sessionDir, workDir });
   }
   return entries;
+}
+
+function readKimiStrictJsonlRecords(
+  filePath: string,
+  label: string,
+  maxBytes: number,
+  maxRecordBytes: number,
+  maxRecords: number
+): KimiStrictJsonlRecord[] | undefined {
+  let bytes: Buffer;
+  try {
+    bytes = readRegularFileSnapshot(filePath, maxBytes);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return undefined;
+    throw new Error(`${label} cannot be read: ${error instanceof Error ? error.message : String(error)}`, {
+      cause: error
+    });
+  }
+  if (bytes.byteLength === 0) return [];
+  if (bytes[bytes.byteLength - 1] !== 0x0a) throw new Error(`${label} has a torn or unterminated final record`);
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (error) {
+    throw new Error(`${label} is not valid UTF-8`, { cause: error });
+  }
+  const lines = text.split("\n");
+  lines.pop();
+  if (lines.length > maxRecords) throw new Error(`${label} exceeds the ${maxRecords}-record limit`);
+  return lines.map((line, index) => {
+    const lineNumber = index + 1;
+    if (line.trim() === "") throw new Error(`${label} contains a blank record at line ${lineNumber}`);
+    const lineBytes = Buffer.from(line, "utf8");
+    if (lineBytes.byteLength > maxRecordBytes) {
+      throw new Error(`${label} record ${lineNumber} exceeds the ${maxRecordBytes}-byte limit`);
+    }
+    try {
+      return {
+        lineNumber,
+        value: parseStrictJsonBytes(lineBytes, {
+          maxBytes: maxRecordBytes,
+          maxDepth: KIMI_JSON_MAX_DEPTH,
+          maxItems: KIMI_JSON_MAX_ITEMS,
+          maxProperties: KIMI_JSON_MAX_PROPERTIES
+        })
+      };
+    } catch (error) {
+      throw new Error(
+        `${label} record ${lineNumber} is invalid strict JSON: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
+      );
+    }
+  });
+}
+
+function parseKimiSessionIndexRecord(value: unknown, lineNumber: number): KimiSessionIndexRecord {
+  if (!isRecord(value)) throw new Error(`Kimi session index record ${lineNumber} must be a JSON object`);
+  const sessionId = typeof value.sessionId === "string" ? validSessionId(value.sessionId) : undefined;
+  if (sessionId === undefined) throw new Error(`Kimi session index record ${lineNumber} has an invalid sessionId`);
+  if (value.deleted !== undefined && typeof value.deleted !== "boolean") {
+    throw new Error(`Kimi session index record ${lineNumber} deleted must be a boolean when present`);
+  }
+  if (value.deleted === true) return { sessionId, deleted: true };
+  if (typeof value.sessionDir !== "string" || value.sessionDir.length === 0) {
+    throw new Error(`Kimi session index record ${lineNumber} sessionDir must be a non-empty string`);
+  }
+  if (typeof value.workDir !== "string" || value.workDir.length === 0) {
+    throw new Error(`Kimi session index record ${lineNumber} workDir must be a non-empty string`);
+  }
+  return { sessionId, deleted: false, sessionDir: value.sessionDir, workDir: value.workDir };
 }
 
 function copyKimiSessionEntry(sourceHome: string, targetHome: string, entry: KimiSessionIndexEntry): void {
@@ -715,21 +849,42 @@ function appendKimiSessionIndexEntry(home: string, entry: KimiSessionIndexEntry)
 
 function rewriteKimiSessionStatePaths(sessionDir: string, sourceSessionDir: string, targetSessionDir: string): void {
   const statePath = path.join(sessionDir, "state.json");
+  let bytes: Buffer;
+  try {
+    bytes = readRegularFileSnapshot(statePath, KIMI_SESSION_STATE_MAX_BYTES);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return;
+    throw new Error(`Kimi session state cannot be read: ${error instanceof Error ? error.message : String(error)}`, {
+      cause: error
+    });
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(statePath, "utf8")) as unknown;
-  } catch {
-    return;
+    parsed = parseStrictJsonBytes(bytes, {
+      maxBytes: KIMI_SESSION_STATE_MAX_BYTES,
+      maxDepth: KIMI_JSON_MAX_DEPTH,
+      maxItems: KIMI_JSON_MAX_ITEMS,
+      maxProperties: KIMI_JSON_MAX_PROPERTIES
+    });
+  } catch (error) {
+    throw new Error(
+      `Kimi session state is invalid strict JSON: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
   }
-  if (!isRecord(parsed) || !isRecord(parsed.agents)) return;
-  const agents: Record<string, unknown> = {};
+  if (!isRecord(parsed)) throw new Error(`Kimi session state must be a JSON object: ${statePath}`);
+  if (parsed.agents === undefined) return;
+  if (!isRecord(parsed.agents)) throw new Error(`Kimi session state agents must be a JSON object: ${statePath}`);
+  const agents = Object.create(null) as Record<string, unknown>;
   let changed = false;
   for (const [agentId, value] of Object.entries(parsed.agents)) {
     if (!isRecord(value)) {
-      agents[agentId] = value;
-      continue;
+      throw new Error(`Kimi session state agent ${agentId} must be a JSON object: ${statePath}`);
     }
     const homedir = value.homedir;
+    if (homedir !== undefined && typeof homedir !== "string") {
+      throw new Error(`Kimi session state agent ${agentId} homedir must be a string when present: ${statePath}`);
+    }
     const nextHomedir =
       typeof homedir === "string" ? remapKimiSessionPath(homedir, sourceSessionDir, targetSessionDir) : homedir;
     agents[agentId] = nextHomedir === homedir ? value : { ...value, homedir: nextHomedir };
@@ -950,78 +1105,72 @@ function scanKimiWireUsageRecords(
   }
   budget.bytes += length;
   const usage: KimiWireUsage = { inputOther: 0, output: 0, inputCacheRead: 0, inputCacheCreation: 0 };
-  const chunk = Buffer.allocUnsafe(KIMI_WIRE_CHUNK_BYTES);
-  const decoder = new StringDecoder("utf8");
-  let pending = "";
+  const contents = Buffer.allocUnsafe(length);
   let position = start;
-  let records = 0;
+  let offset = 0;
   while (position < end) {
-    const requested = Math.min(chunk.length, end - position);
-    const bytes = readSync(descriptor, chunk, 0, requested, position);
+    const requested = Math.min(KIMI_WIRE_CHUNK_BYTES, end - position);
+    const bytes = readSync(descriptor, contents, offset, requested, position);
     if (bytes <= 0) throw new Error("Kimi wire ended before its snapshotted size");
     position += bytes;
-    pending += decoder.write(chunk.subarray(0, bytes));
-    for (;;) {
-      const newline = pending.indexOf("\n");
-      if (newline === -1) break;
-      const line = pending.slice(0, newline);
-      if (Buffer.byteLength(line, "utf8") > KIMI_WIRE_MAX_LINE_BYTES) {
-        throw new Error("Kimi wire line exceeded its byte budget");
-      }
-      const record = kimiWireUsageRecord(line);
-      if (record !== undefined) {
-        addKimiWireUsage(usage, record);
-        records += 1;
-      }
-      pending = pending.slice(newline + 1);
-    }
-    if (Buffer.byteLength(pending, "utf8") > KIMI_WIRE_MAX_LINE_BYTES) {
-      throw new Error("Kimi wire line exceeded its byte budget");
-    }
+    offset += bytes;
   }
-  pending += decoder.end();
-  if (Buffer.byteLength(pending, "utf8") > KIMI_WIRE_MAX_LINE_BYTES) {
-    throw new Error("Kimi wire line exceeded its byte budget");
+  if (contents.byteLength > 0 && contents[contents.byteLength - 1] !== 0x0a) {
+    throw new Error("Kimi wire has a torn or unterminated final record");
   }
-  const finalRecord = kimiWireUsageRecord(pending);
-  if (finalRecord !== undefined) {
-    addKimiWireUsage(usage, finalRecord);
-    records += 1;
+  let lineStart = 0;
+  let records = 0;
+  for (let index = 0; index < contents.byteLength; index += 1) {
+    if (contents[index] !== 0x0a) continue;
+    const line = contents.subarray(lineStart, index);
+    if (line.byteLength > KIMI_WIRE_MAX_LINE_BYTES) throw new Error("Kimi wire line exceeded its byte budget");
+    const record = kimiWireUsageRecord(line);
+    if (record !== undefined) {
+      addKimiWireUsage(usage, record);
+      records += 1;
+    }
+    lineStart = index + 1;
   }
   return { usage, records };
 }
 
-function kimiWireUsageRecord(line: string): KimiWireUsage | undefined {
-  const trimmed = line.trim();
-  // Cheap filter first: wire.jsonl is dominated by message and tool records.
-  if (trimmed === "" || !trimmed.includes(KIMI_WIRE_USAGE_TYPE)) return undefined;
+function kimiWireUsageRecord(line: Uint8Array): KimiWireUsage | undefined {
+  if (isBlankJsonLine(line)) return undefined;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(trimmed) as unknown;
-  } catch {
-    // A torn trailing line is expected; Kimi's own reader tolerates it too.
-    return undefined;
+    parsed = parseStrictJsonBytes(line, {
+      maxBytes: KIMI_WIRE_MAX_LINE_BYTES,
+      maxDepth: KIMI_JSON_MAX_DEPTH,
+      maxItems: KIMI_JSON_MAX_ITEMS,
+      maxProperties: KIMI_JSON_MAX_PROPERTIES
+    });
+  } catch (error) {
+    throw new Error(
+      `Kimi wire record is invalid strict JSON: ${error instanceof Error ? error.message : String(error)}`,
+      {
+        cause: error
+      }
+    );
   }
-  if (!isRecord(parsed) || parsed.type !== KIMI_WIRE_USAGE_TYPE || !isRecord(parsed.usage)) return undefined;
-  const inputOther = kimiUsageComponent(parsed.usage.inputOther);
-  const output = kimiUsageComponent(parsed.usage.output);
-  const inputCacheRead = kimiUsageComponent(parsed.usage.inputCacheRead);
-  const inputCacheCreation = kimiUsageComponent(parsed.usage.inputCacheCreation);
-  // A record missing or misreporting any component is skipped whole: usage is
-  // never coerced, defaulted, or synthesized.
-  if (
-    inputOther === undefined ||
-    output === undefined ||
-    inputCacheRead === undefined ||
-    inputCacheCreation === undefined
-  ) {
-    return undefined;
-  }
+  if (!isRecord(parsed)) throw new Error("Kimi wire record must be a JSON object");
+  if (parsed.type !== KIMI_WIRE_USAGE_TYPE) return undefined;
+  if (!isRecord(parsed.usage)) throw new Error("Kimi wire usage.record usage must be a JSON object");
+  const inputOther = requiredKimiUsageComponent(parsed.usage.inputOther, "inputOther");
+  const output = requiredKimiUsageComponent(parsed.usage.output, "output");
+  const inputCacheRead = requiredKimiUsageComponent(parsed.usage.inputCacheRead, "inputCacheRead");
+  const inputCacheCreation = requiredKimiUsageComponent(parsed.usage.inputCacheCreation, "inputCacheCreation");
   return { inputOther, output, inputCacheRead, inputCacheCreation };
 }
 
-function kimiUsageComponent(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+function isBlankJsonLine(line: Uint8Array): boolean {
+  return line.every((byte) => byte === 0x20 || byte === 0x09 || byte === 0x0d);
+}
+
+function requiredKimiUsageComponent(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`Kimi wire usage.record usage.${field} must be a non-negative safe integer`);
+  }
+  return value;
 }
 
 function addKimiWireUsage(target: KimiWireUsage, value: KimiWireUsage): void {
@@ -1044,24 +1193,22 @@ function kimiUsageTotal(usage: KimiWireUsage): number {
   );
 }
 
-function kimiUsageBaseline(runtimeHome: string): KimiUsageBaseline | undefined {
-  try {
-    const collected = collectKimiWireFiles(runtimeHome);
-    const wires = new Map<string, KimiWireSnapshot>();
-    for (const wire of collected.files) {
-      const opened = openKimiWire(wire, collected.runtimeHome);
-      try {
-        wires.set(wire.relative, opened.snapshot);
-      } finally {
-        closeKimiWire(opened.descriptor);
-      }
+function kimiUsageBaseline(runtimeHome: string): KimiUsageBaseline {
+  const collected = collectKimiWireFiles(runtimeHome);
+  const wires = new Map<string, KimiWireSnapshot>();
+  const readBudget: KimiWireReadBudget = { bytes: 0 };
+  for (const wire of collected.files) {
+    const opened = openKimiWire(wire, collected.runtimeHome);
+    try {
+      // Validate inherited provider history before accepting its byte offset as
+      // the invocation boundary. Invalid history must not become invisible.
+      scanKimiWireUsageRecords(opened.descriptor, 0, opened.snapshot.size, readBudget);
+      wires.set(wire.relative, opened.snapshot);
+    } finally {
+      closeKimiWire(opened.descriptor);
     }
-    return { runtimeHome: collected.runtimeHome, wires };
-  } catch {
-    // An incomplete baseline could reclassify inherited history as new usage.
-    // Suppress telemetry for this invocation instead.
-    return undefined;
   }
+  return { runtimeHome: collected.runtimeHome, wires };
 }
 
 function kimiUsageDelta(runtimeHome: string, baseline: KimiUsageBaseline): KimiWireUsage | undefined {
@@ -1093,8 +1240,7 @@ function kimiUsageDelta(runtimeHome: string, baseline: KimiUsageBaseline): KimiW
   for (const relative of baseline.wires.keys()) {
     if (!seen.has(relative)) throw new Error("A baselined Kimi wire disappeared during invocation");
   }
-  // Validate the aggregate while still inside invocationUsage's telemetry
-  // guard so an otherwise successful invocation cannot fail on overflow.
+  // Validate the aggregate before it can enter Smithers accounting.
   kimiUsageTotal(delta);
   // Absent usage stays absent rather than becoming zeros.
   return counted === 0 ? undefined : delta;
@@ -1220,8 +1366,8 @@ function findKimiSection(lines: string[], headerOrHeaders: string | Set<string>)
 }
 
 function configuredSession(params: KimiCommandParams, opts: KimiCode029Options): string | undefined {
-  const resume = typeof params.options?.resumeSession === "string" ? params.options.resumeSession.trim() : "";
-  if (resume !== "") return requiredSessionId(resume);
+  const resume = typeof params.options?.resumeSession === "string" ? params.options.resumeSession : undefined;
+  if (resume !== undefined) return requiredSessionId(resume);
   if (opts.session !== undefined) return requiredSessionId(opts.session);
   return undefined;
 }
@@ -1292,39 +1438,44 @@ function combineCleanup(
 }
 
 function sessionIdFromJsonLine(line: string): string | undefined {
+  const first = firstNonJsonWhitespace(line);
+  if (first === undefined || first !== "{") return undefined;
+  let value: unknown;
   try {
-    const value = JSON.parse(line) as unknown;
-    if (!isRecord(value) || value.type !== "session.resume_hint") return undefined;
-    return typeof value.session_id === "string" ? value.session_id : undefined;
-  } catch {
-    return undefined;
+    value = parseStrictJson(line, {
+      maxBytes: KIMI_WIRE_MAX_LINE_BYTES,
+      maxDepth: KIMI_JSON_MAX_DEPTH,
+      maxItems: KIMI_JSON_MAX_ITEMS,
+      maxProperties: KIMI_JSON_MAX_PROPERTIES
+    });
+  } catch (error) {
+    throw new Error(`Kimi output JSON is invalid: ${error instanceof Error ? error.message : String(error)}`, {
+      cause: error
+    });
   }
+  if (!isRecord(value) || value.type !== KIMI_RESUME_HINT_TYPE) return undefined;
+  if (typeof value.session_id !== "string") throw new Error("Kimi session.resume_hint session_id must be a string");
+  const sessionId = validSessionId(value.session_id);
+  if (sessionId === undefined) throw new Error("Kimi session.resume_hint session_id is invalid");
+  return sessionId;
 }
 
-function sessionIdFromIndex(configDir: string | undefined): string | undefined {
-  if (configDir === undefined) return undefined;
-  try {
-    const lines = readFileSync(path.join(configDir, "session_index.jsonl"), "utf8").trim().split(/\r?\n/u);
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      const line = lines[index];
-      if (line === undefined || line === "") continue;
-      const value = JSON.parse(line) as unknown;
-      if (isRecord(value) && typeof value.sessionId === "string") {
-        const sessionId = validSessionId(value.sessionId);
-        if (sessionId !== undefined) return sessionId;
-      }
-    }
-  } catch {
-    return undefined;
+function firstNonJsonWhitespace(value: string): string | undefined {
+  for (const character of value) {
+    if (character !== " " && character !== "\t" && character !== "\n" && character !== "\r") return character;
   }
   return undefined;
 }
 
+function sessionIdFromIndex(configDir: string | undefined): string | undefined {
+  if (configDir === undefined) return undefined;
+  return [...effectiveKimiSessionEntries(configDir).keys()].at(-1);
+}
+
 function validSessionId(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
-  const normalized = value.trim();
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(normalized)) return undefined;
-  return normalized;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(value)) return undefined;
+  return value;
 }
 
 function requiredSessionId(value: string): string {
@@ -1337,6 +1488,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function pathEntryExists(filePath: string): boolean {
+  try {
+    lstatSync(filePath);
+    return true;
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return false;
+    throw error;
+  }
+}
+
 function isErrno(error: unknown, code: string): boolean {
-  return isRecord(error) && error.code === code;
+  let current = error;
+  const seen = new Set<unknown>();
+  while (isRecord(current) && !seen.has(current)) {
+    if (current.code === code) return true;
+    seen.add(current);
+    current = current.cause;
+  }
+  return false;
 }

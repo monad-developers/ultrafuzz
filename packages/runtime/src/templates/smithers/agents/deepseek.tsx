@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smithers-orchestrator";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
+import { parseStrictJson } from "./strict-json";
 import { readStringTable, stringField } from "./toml";
 
 type DeepSeekAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
@@ -30,6 +31,19 @@ type DeepSeekSmithersUsage = {
 const DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic";
 const DEEPSEEK_REASONING_EFFORTS = ["low", "high", "max"] as const;
 const DEEPSEEK_CLAUDE_CONFIG_DIR = ".ultrafuzz/deepseek-claude";
+const DEEPSEEK_RESULT_MAX_BYTES = 1024 * 1024;
+const DEEPSEEK_RESULT_MAX_DEPTH = 32;
+const DEEPSEEK_RESULT_MAX_ITEMS = 10_000;
+const DEEPSEEK_RESULT_MAX_PROPERTIES = 10_000;
+const DEEPSEEK_LEGACY_USAGE_FIELDS = [
+  "input_tokens",
+  "inputTokens",
+  "outputTokens",
+  "completion_tokens",
+  "cache_read_input_tokens",
+  "cacheReadTokens",
+  "cached_input_tokens"
+] as const;
 
 /**
  * DeepSeek's supported coding-agent integration is Claude Code over its
@@ -200,43 +214,61 @@ function deepSeekReasoningEffort(value: string | undefined): DeepSeekReasoningEf
  * reasoning count would double-count both tokens and spend.
  */
 function deepSeekUsageFromResultLine(line: string): DeepSeekUsage | undefined {
+  const first = firstNonJsonWhitespace(line);
+  if (first === undefined) return undefined;
+  const objectCandidate = first === "{";
   let payload: unknown;
   try {
-    payload = JSON.parse(line) as unknown;
-  } catch {
+    payload = parseStrictJson(line, {
+      maxBytes: DEEPSEEK_RESULT_MAX_BYTES,
+      maxDepth: DEEPSEEK_RESULT_MAX_DEPTH,
+      maxItems: DEEPSEEK_RESULT_MAX_ITEMS,
+      maxProperties: DEEPSEEK_RESULT_MAX_PROPERTIES
+    });
+  } catch (error) {
+    if (objectCandidate) {
+      throw new Error(
+        `DeepSeek result output is invalid strict JSON: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
+      );
+    }
     return undefined;
   }
-  if (!isRecord(payload) || payload.type !== "result" || !isRecord(payload.usage)) return undefined;
+  if (!isRecord(payload) || payload.type !== "result") return undefined;
+  if (!isRecord(payload.usage)) throw new Error("DeepSeek result usage must be an object");
   const usage = payload.usage;
-  const inputTokens = firstTokenCount(usage, ["prompt_cache_miss_tokens", "input_tokens", "inputTokens"]);
-  const outputTokens = firstTokenCount(usage, ["output_tokens", "outputTokens", "completion_tokens"]);
-  const cacheReadTokens = firstTokenCount(usage, [
-    "prompt_cache_hit_tokens",
-    "cache_read_input_tokens",
-    "cacheReadTokens",
-    "cached_input_tokens"
-  ]);
-  if (inputTokens === undefined && outputTokens === undefined && cacheReadTokens === undefined) return undefined;
+  for (const legacyField of DEEPSEEK_LEGACY_USAGE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(usage, legacyField)) {
+      throw new Error(`DeepSeek result usage contains unsupported legacy alias ${legacyField}`);
+    }
+  }
+  const inputTokens = requiredDeepSeekTokenCount(usage, "prompt_cache_miss_tokens");
+  const outputTokens = requiredDeepSeekTokenCount(usage, "output_tokens");
+  const cacheReadTokens = requiredDeepSeekTokenCount(usage, "prompt_cache_hit_tokens");
   const normalized = {
-    inputTokens: inputTokens ?? 0,
-    outputTokens: outputTokens ?? 0,
-    // DeepSeek enables its disk cache for every request and reports hit/miss
-    // counts. Claude Code's aggregate result may omit an all-zero hit field;
-    // zero is authoritative in that case rather than unknown telemetry.
-    cacheReadTokens: cacheReadTokens ?? 0,
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
     cacheWriteTokens: 0 as const
   };
   const totalTokens = normalized.inputTokens + normalized.cacheReadTokens + normalized.outputTokens;
-  if (!Number.isSafeInteger(totalTokens)) return undefined;
+  if (!Number.isSafeInteger(totalTokens)) throw new Error("DeepSeek result usage exceeds the safe integer range");
   return { ...normalized, totalTokens };
 }
 
-function firstTokenCount(value: Record<string, unknown>, fields: readonly string[]): number | undefined {
-  for (const field of fields) {
-    const candidate = value[field];
-    if (typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0) return candidate;
+function firstNonJsonWhitespace(value: string): string | undefined {
+  for (const character of value) {
+    if (character !== " " && character !== "\t" && character !== "\n" && character !== "\r") return character;
   }
   return undefined;
+}
+
+function requiredDeepSeekTokenCount(value: Record<string, unknown>, field: string): number {
+  const candidate = value[field];
+  if (typeof candidate !== "number" || !Number.isSafeInteger(candidate) || candidate < 0) {
+    throw new Error(`DeepSeek result usage.${field} must be a non-negative safe integer`);
+  }
+  return candidate;
 }
 
 function deepSeekCompletedUsage(usage: DeepSeekUsage): Record<string, number> {
@@ -300,6 +332,6 @@ function attachDeepSeekFailureUsage(error: unknown, usage: DeepSeekSmithersUsage
   return error;
 }
 
-function isRecord(value: unknown): value is Record<string, any> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

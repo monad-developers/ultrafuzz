@@ -181,6 +181,7 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
     .readFileSync(path.join(agentsDir, "kimi.ts"), "utf8")
     .replace('from "smithers-orchestrator"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./toml"', 'from "./toml.mjs"')
+    .replace('from "./strict-json"', 'from "./strict-json.mjs"')
     .replace('from "./environment"', 'from "./environment.mjs"');
   fs.writeFileSync(path.join(fixture, "kimi.mjs"), transpile(kimiSource), "utf8");
   fs.writeFileSync(
@@ -191,6 +192,11 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
   fs.writeFileSync(
     path.join(fixture, "toml.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "strict-json.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "strict-json.ts"), "utf8")),
     "utf8"
   );
   const kimiModule = (await import(pathToFileURL(path.join(fixture, "kimi.mjs")).href)) as {
@@ -320,6 +326,7 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
     .readFileSync(path.join(agentsDir, "deepseek.ts"), "utf8")
     .replace('from "smithers-orchestrator"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./toml"', 'from "./toml.mjs"')
+    .replace('from "./strict-json"', 'from "./strict-json.mjs"')
     .replace('from "./environment"', 'from "./environment.mjs"');
   fs.writeFileSync(path.join(fixture, "deepseek.mjs"), transpile(deepSeekSource), "utf8");
   fs.writeFileSync(
@@ -330,6 +337,11 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   fs.writeFileSync(
     path.join(fixture, "toml.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "strict-json.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "strict-json.ts"), "utf8")),
     "utf8"
   );
   const deepSeekModule = (await import(pathToFileURL(path.join(fixture, "deepseek.mjs")).href)) as {
@@ -1370,6 +1382,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(codexAgentText, /codexAuthOptions/);
   // The TOML parser is shared, so a fix reaches every backend at once.
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/toml.ts")), true);
+  assert.equal(fs.existsSync(path.join(project, ".smithers/agents/strict-json.ts")), true);
   const tomlHelperText = fs.readFileSync(path.join(project, ".smithers/agents/toml.ts"), "utf8");
   assert.match(codexAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
   assert.doesNotMatch(codexAgentText, /function readStringTable/);
@@ -1430,6 +1443,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(deepSeekAgentText, /DEEPSEEK_API_KEY/);
   assert.match(deepSeekAgentText, /cacheReadTokens/);
   assert.match(deepSeekAgentText, /reasoningTokens: undefined/);
+  assert.match(deepSeekAgentText, /import \{ parseStrictJson \} from "\.\/strict-json";/u);
   assert.doesNotMatch(deepSeekAgentText, /=\s*createDeepSeekAgent\(\)/);
   const kimiAgentText = fs.readFileSync(path.join(project, ".smithers/agents/kimi.ts"), "utf8");
   assert.match(kimiAgentText, /KimiAgent/);
@@ -2382,9 +2396,9 @@ test(
       is_error: false,
       result: "done",
       usage: {
-        input_tokens: 120,
+        prompt_cache_miss_tokens: 120,
         output_tokens: 30,
-        cache_read_input_tokens: 400,
+        prompt_cache_hit_tokens: 400,
         cache_creation_input_tokens: 999,
         reasoning_tokens: 20
       }
@@ -2480,6 +2494,102 @@ test(
 );
 
 test(
+  "generated DeepSeek adapter rejects ambiguous or noncanonical result telemetry",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
+    const agent = new DeepSeekClaudeCodeAgent({ model: "deepseek-v4-pro", ultrafuzzApiKey: "test-key" });
+    const interpreter = agent.createOutputInterpreter();
+
+    assert.doesNotThrow(() =>
+      interpreter.onStdoutLine?.(JSON.stringify({ type: "assistant", message: { content: "working" } }))
+    );
+    assert.doesNotThrow(() => interpreter.onStdoutLine?.("provider banner: still starting"));
+
+    const tooDeep = `${"[".repeat(34)}null${"]".repeat(34)}`;
+    const invalid = [
+      {
+        label: "duplicate key",
+        line: '{"type":"result","type":"result","usage":{"prompt_cache_miss_tokens":1,"prompt_cache_hit_tokens":2,"output_tokens":3}}',
+        expected: /duplicate/iu
+      },
+      {
+        label: "malformed candidate",
+        line: '{"type":"result","usage":',
+        expected: /invalid strict JSON/iu
+      },
+      {
+        label: "malformed object without result marker",
+        line: '{"provider_status":',
+        expected: /invalid strict JSON/iu
+      },
+      {
+        label: "legacy aliases",
+        line: JSON.stringify({
+          type: "result",
+          usage: { input_tokens: 1, cache_read_input_tokens: 2, completion_tokens: 3 }
+        }),
+        expected: /legacy alias/iu
+      },
+      {
+        label: "legacy alias alongside canonical fields",
+        line: JSON.stringify({
+          type: "result",
+          usage: {
+            prompt_cache_miss_tokens: 1,
+            prompt_cache_hit_tokens: 2,
+            output_tokens: 3,
+            input_tokens: 1
+          }
+        }),
+        expected: /legacy alias input_tokens/iu
+      },
+      {
+        label: "missing exact field",
+        line: JSON.stringify({
+          type: "result",
+          usage: { prompt_cache_miss_tokens: 1, output_tokens: 3 }
+        }),
+        expected: /prompt_cache_hit_tokens/iu
+      },
+      {
+        label: "oversize raw line whitespace",
+        line:
+          " ".repeat(1024 * 1024) +
+          JSON.stringify({
+            type: "result",
+            usage: { prompt_cache_miss_tokens: 1, prompt_cache_hit_tokens: 2, output_tokens: 3 }
+          }),
+        expected: /1048576-byte limit/iu
+      },
+      {
+        label: "excessive depth",
+        line: `{"type":"result","future":${tooDeep},"usage":{"prompt_cache_miss_tokens":1,"prompt_cache_hit_tokens":2,"output_tokens":3}}`,
+        expected: /nesting-depth limit of 32/iu
+      },
+      {
+        label: "unsafe aggregate",
+        line: JSON.stringify({
+          type: "result",
+          usage: {
+            prompt_cache_miss_tokens: Number.MAX_SAFE_INTEGER,
+            prompt_cache_hit_tokens: 1,
+            output_tokens: 0
+          }
+        }),
+        expected: /safe integer range/iu
+      }
+    ];
+    for (const fixture of invalid) {
+      assert.throws(() => interpreter.onStdoutLine?.(fixture.line), fixture.expected, fixture.label);
+    }
+  }
+);
+
+test(
   "generated Kimi adapter narrows the pinned Smithers command to Kimi Code 0.29.1",
   { skip: !runningUnderBun },
   async () => {
@@ -2522,7 +2632,6 @@ default_effort = "high"
       "utf8"
     );
     fs.writeFileSync(path.join(sourceConfig, "device_id"), "test-device\n", "utf8");
-    fs.writeFileSync(path.join(sourceConfig, "session_index.jsonl"), '{"unrelated":true}\n', "utf8");
     fs.mkdirSync(path.join(sourceConfig, "sessions"));
     fs.writeFileSync(path.join(sourceConfig, "sessions", "unrelated.json"), "{}\n", "utf8");
 
@@ -3218,6 +3327,258 @@ function kimiCompletedEvent(events: unknown): KimiInterpreterEvent {
 }
 
 test(
+  "generated Kimi adapter strictly parses credentials and resume hints without normalization",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
+    const sourceConfig = writeKimiSourceConfig(project, "kimi-strict-credentials");
+    const sourceCredential = path.join(sourceConfig, "credentials", "kimi-code.json");
+    const sharedHome = path.join(project, "kimi-strict-shared-auth");
+    const sharedCredential = path.join(sharedHome, "credentials", "kimi-code.json");
+    fs.mkdirSync(path.dirname(sharedCredential), { recursive: true });
+    const validTarget = `${JSON.stringify({
+      access_token: "target-access",
+      refresh_token: "target-refresh",
+      expires_at: 1
+    })}\n`;
+    const previousSharedHome = process.env.ULTRAFUZZ_KIMI_SHARED_AUTH_HOME;
+    process.env.ULTRAFUZZ_KIMI_SHARED_AUTH_HOME = sharedHome;
+    try {
+      const tooDeep = `${"[".repeat(34)}null${"]".repeat(34)}`;
+      const invalidCredentials: Array<{ label: string; bytes: Buffer; expected: RegExp }> = [
+        {
+          label: "duplicate key",
+          bytes: Buffer.from('{"refresh_token":"first","refresh_token":"second","expires_at":1}'),
+          expected: /duplicate/iu
+        },
+        { label: "invalid UTF-8", bytes: Buffer.from([0x7b, 0xff, 0x7d]), expected: /UTF-8/iu },
+        {
+          label: "oversize",
+          bytes: Buffer.alloc(1024 * 1024 + 1, 0x20),
+          expected: /1048576-byte limit/iu
+        },
+        {
+          label: "excessive depth",
+          bytes: Buffer.from(`{"refresh_token":"source-refresh","future":${tooDeep}}`),
+          expected: /nesting-depth limit of 32/iu
+        }
+      ];
+      for (const [index, fixture] of invalidCredentials.entries()) {
+        if (index === 0) fs.rmSync(sharedCredential, { force: true });
+        else fs.writeFileSync(sharedCredential, validTarget, "utf8");
+        fs.writeFileSync(sourceCredential, fixture.bytes);
+        await assert.rejects(
+          async () => {
+            const command = await new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig)).buildCommand({
+              prompt: fixture.label,
+              cwd: project,
+              options: {}
+            });
+            await command.cleanup?.();
+          },
+          fixture.expected,
+          fixture.label
+        );
+      }
+
+      const outsideCredential = path.join(project, "outside-kimi-credential.json");
+      fs.writeFileSync(outsideCredential, validTarget, "utf8");
+      fs.rmSync(sourceCredential, { force: true });
+      fs.symlinkSync(outsideCredential, sourceCredential);
+      fs.rmSync(sharedCredential, { force: true });
+      await assert.rejects(async () => {
+        const command = await new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig)).buildCommand({
+          prompt: "Symlinked source credential",
+          cwd: project,
+          options: {}
+        });
+        await command.cleanup?.();
+      }, /cannot open regular file|symbolic links|ELOOP/iu);
+      fs.rmSync(sourceCredential);
+
+      fs.writeFileSync(sourceCredential, validTarget, "utf8");
+      fs.symlinkSync(path.join(project, "missing-target-credential.json"), sharedCredential);
+      await assert.rejects(async () => {
+        const command = await new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig)).buildCommand({
+          prompt: "Dangling target credential",
+          cwd: project,
+          options: {}
+        });
+        await command.cleanup?.();
+      }, /cannot open regular file|symbolic links|ELOOP/iu);
+      fs.rmSync(sharedCredential);
+
+      fs.writeFileSync(
+        sourceCredential,
+        `${JSON.stringify({
+          access_token: "source-access",
+          refresh_token: " target-refresh ",
+          expires_at: 10_000
+        })}\n`,
+        "utf8"
+      );
+      fs.writeFileSync(sharedCredential, validTarget, "utf8");
+      const exactTokenCommand = await new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig)).buildCommand({
+        prompt: "Exact refresh token",
+        cwd: project,
+        options: {}
+      });
+      assert.equal(
+        (JSON.parse(fs.readFileSync(sharedCredential, "utf8")) as { refresh_token?: string }).refresh_token,
+        "target-refresh",
+        "whitespace in a refresh token must remain data rather than being normalized into an identity match"
+      );
+      await exactTokenCommand.cleanup?.();
+    } finally {
+      if (previousSharedHome === undefined) delete process.env.ULTRAFUZZ_KIMI_SHARED_AUTH_HOME;
+      else process.env.ULTRAFUZZ_KIMI_SHARED_AUTH_HOME = previousSharedHome;
+    }
+
+    const hintAgent = new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig));
+    const hintInterpreter = hintAgent.createOutputInterpreter();
+    const session = "00000000-0000-0000-0000-000000000301";
+    assert.throws(
+      () =>
+        hintInterpreter.onStdoutLine?.(
+          `{"type":"session.resume_hint","type":"session.resume_hint","session_id":${JSON.stringify(session)}}`
+        ),
+      /duplicate/iu
+    );
+    assert.throws(
+      () => hintInterpreter.onStdoutLine?.(JSON.stringify({ type: "session.resume_hint", session_id: ` ${session}` })),
+      /session_id is invalid/iu
+    );
+    assert.throws(
+      () =>
+        hintInterpreter.onStdoutLine?.(
+          " ".repeat(1024 * 1024) + JSON.stringify({ type: "session.resume_hint", session_id: session })
+        ),
+      /1048576-byte limit/iu
+    );
+    assert.throws(() => hintInterpreter.onStdoutLine?.('{"provider_status":'), /Kimi output JSON is invalid/iu);
+    assert.doesNotThrow(() => hintInterpreter.onStdoutLine?.("Kimi Code provider banner"));
+  }
+);
+
+test(
+  "generated Kimi adapter strictly parses session indexes and state snapshots",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
+    const sourceConfig = writeKimiSourceConfig(project, "kimi-strict-session-state");
+    const session = "00000000-0000-0000-0000-000000000302";
+    const bucket = "wd_target_000000000302";
+    const sessionDir = path.join(sourceConfig, "sessions", bucket, session);
+    const indexPath = path.join(sourceConfig, "session_index.jsonl");
+    const statePath = path.join(sessionDir, "state.json");
+    fs.mkdirSync(sessionDir, { recursive: true });
+    const validIndex = `${JSON.stringify({ sessionId: session, sessionDir, workDir: project })}\n`;
+    const tooDeep = `${"[".repeat(34)}null${"]".repeat(34)}`;
+
+    const brokenAbandonedHome = path.join(sourceConfig, ".ultrafuzz-invocations", "home-broken");
+    fs.mkdirSync(path.join(brokenAbandonedHome, "session_index.jsonl"), { recursive: true });
+    await assert.rejects(async () => {
+      const command = await new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig)).buildCommand({
+        prompt: "Present unreadable abandoned index",
+        cwd: project,
+        options: { resumeSession: session }
+      });
+      await command.cleanup?.();
+    }, /not a regular file/iu);
+    fs.rmSync(brokenAbandonedHome, { recursive: true, force: true });
+
+    const invalidIndexes: Array<{ label: string; bytes: Buffer; expected: RegExp }> = [
+      {
+        label: "duplicate key",
+        bytes: Buffer.from(
+          `{"sessionId":${JSON.stringify(session)},"sessionId":${JSON.stringify(
+            session
+          )},"sessionDir":${JSON.stringify(sessionDir)},"workDir":${JSON.stringify(project)}}\n`
+        ),
+        expected: /duplicate/iu
+      },
+      { label: "invalid UTF-8", bytes: Buffer.from([0x7b, 0xff, 0x7d, 0x0a]), expected: /UTF-8/iu },
+      {
+        label: "oversize record",
+        bytes: Buffer.from(
+          `${JSON.stringify({
+            sessionId: session,
+            sessionDir,
+            workDir: project,
+            padding: "x".repeat(1024 * 1024)
+          })}\n`
+        ),
+        expected: /record 1 exceeds the 1048576-byte limit/iu
+      },
+      {
+        label: "excessive depth",
+        bytes: Buffer.from(
+          `{"sessionId":${JSON.stringify(session)},"sessionDir":${JSON.stringify(
+            sessionDir
+          )},"workDir":${JSON.stringify(project)},"future":${tooDeep}}\n`
+        ),
+        expected: /nesting-depth limit of 32/iu
+      },
+      { label: "torn final record", bytes: Buffer.from(validIndex.trimEnd()), expected: /torn or unterminated/iu }
+    ];
+    for (const fixture of invalidIndexes) {
+      fs.writeFileSync(indexPath, fixture.bytes);
+      await assert.rejects(
+        async () => {
+          const command = await new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig)).buildCommand({
+            prompt: fixture.label,
+            cwd: project,
+            options: { resumeSession: session }
+          });
+          await command.cleanup?.();
+        },
+        fixture.expected,
+        fixture.label
+      );
+    }
+
+    fs.writeFileSync(indexPath, validIndex, "utf8");
+    const invalidStates: Array<{ label: string; bytes: Buffer; expected: RegExp }> = [
+      {
+        label: "duplicate key",
+        bytes: Buffer.from('{"agents":{},"agents":{}}'),
+        expected: /duplicate/iu
+      },
+      { label: "invalid UTF-8", bytes: Buffer.from([0x7b, 0xff, 0x7d]), expected: /UTF-8/iu },
+      {
+        label: "oversize",
+        bytes: Buffer.alloc(1024 * 1024 + 1, 0x20),
+        expected: /1048576-byte limit/iu
+      },
+      {
+        label: "excessive depth",
+        bytes: Buffer.from(`{"agents":{},"future":${tooDeep}}`),
+        expected: /nesting-depth limit of 32/iu
+      }
+    ];
+    for (const fixture of invalidStates) {
+      fs.writeFileSync(statePath, fixture.bytes);
+      await assert.rejects(
+        async () => {
+          const command = await new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig)).buildCommand({
+            prompt: fixture.label,
+            cwd: project,
+            options: { resumeSession: session }
+          });
+          await command.cleanup?.();
+        },
+        fixture.expected,
+        fixture.label
+      );
+    }
+  }
+);
+
+test(
   "generated Kimi adapter reports one invocation's wire usage across every agent wire",
   { skip: !runningUnderBun },
   async () => {
@@ -3447,7 +3808,7 @@ test(
 );
 
 test(
-  "generated Kimi adapter skips malformed wire usage without fabricating tokens",
+  "generated Kimi adapter rejects malformed wire records instead of fabricating tokens",
   { skip: !runningUnderBun },
   async () => {
     const project = tempProject();
@@ -3457,15 +3818,15 @@ test(
     const sourceConfig = writeKimiSourceConfig(project, "kimi-usage-malformed");
     const options = kimiSubscriptionOptions(sourceConfig);
 
-    const tolerant = new KimiCode029Agent(options);
-    const tolerantCommand = await tolerant.buildCommand({
+    const malformed = new KimiCode029Agent(options);
+    const malformedCommand = await malformed.buildCommand({
       prompt: "Malformed usage",
       cwd: "/workspace/target",
       options: {}
     });
-    const tolerantHome = tolerantCommand.env?.KIMI_CODE_HOME;
-    assert.ok(tolerantHome);
-    const tolerantWire = writeKimiWire(tolerantHome, "wd_target_000000000203/session-203", "main", [
+    const malformedHome = malformedCommand.env?.KIMI_CODE_HOME;
+    assert.ok(malformedHome);
+    writeKimiWire(malformedHome, "wd_target_000000000203/session-203", "main", [
       "not json at all",
       "{",
       JSON.stringify({
@@ -3481,20 +3842,11 @@ test(
       JSON.stringify({ type: "message.appended", usage: { inputOther: 999, output: 999 } }),
       kimiUsageRecordLine(33, 7, 2, 1)
     ]);
-    // A torn final line, exactly as a crashed Kimi process leaves it.
-    fs.appendFileSync(tolerantWire, '{"type":"usage.record","model":"kimi-k3","usage":{"inputOth', "utf8");
-
-    const tolerantCompleted = kimiCompletedEvent(
-      tolerant.createOutputInterpreter().onExit?.(kimiExitResult(tolerantCommand.args))
+    assert.throws(
+      () => malformed.createOutputInterpreter().onExit?.(kimiExitResult(malformedCommand.args)),
+      /invalid strict JSON/iu
     );
-    assert.deepEqual(tolerantCompleted.usage, {
-      input_tokens: 33,
-      output_tokens: 7,
-      cache_read_input_tokens: 2,
-      cache_creation_input_tokens: 1,
-      total_tokens: 43
-    });
-    await tolerantCommand.cleanup?.();
+    await malformedCommand.cleanup?.();
 
     const absent = new KimiCode029Agent(options);
     const absentCommand = await absent.buildCommand({ prompt: "No usage", cwd: "/workspace/target", options: {} });
@@ -3505,16 +3857,63 @@ test(
       "still not json",
       JSON.stringify({ type: "usage.record", usage: { inputOther: Number.NaN } })
     ]);
-    const absentCompleted = kimiCompletedEvent(
-      absent.createOutputInterpreter().onExit?.(kimiExitResult(absentCommand.args))
+    assert.throws(
+      () => absent.createOutputInterpreter().onExit?.(kimiExitResult(absentCommand.args)),
+      /invalid strict JSON/iu
     );
-    // Absent usage stays absent so accounting reports it unavailable, not zero,
-    // and the successful-output and session behavior is unchanged.
-    assert.equal(Object.prototype.hasOwnProperty.call(absentCompleted, "usage"), false);
-    assert.equal(absentCompleted.type, "completed");
-    assert.equal(absentCompleted.ok, true);
-    assert.equal(absentCompleted.resume, undefined);
     await absentCommand.cleanup?.();
+  }
+);
+
+test(
+  "generated Kimi adapter rejects ambiguous, invalidly encoded, oversized, or deep wire JSON",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
+    const sourceConfig = writeKimiSourceConfig(project, "kimi-wire-strict-json");
+    const tooDeep = `${"[".repeat(34)}null${"]".repeat(34)}`;
+    const invalidWires: Array<{ label: string; bytes: Buffer; expected: RegExp }> = [
+      {
+        label: "duplicate key",
+        bytes: Buffer.from(
+          '{"type":"usage.record","type":"usage.record","usage":{"inputOther":1,"output":2,"inputCacheRead":3,"inputCacheCreation":4}}\n'
+        ),
+        expected: /duplicate/iu
+      },
+      { label: "invalid UTF-8", bytes: Buffer.from([0x7b, 0xff, 0x7d, 0x0a]), expected: /UTF-8/iu },
+      {
+        label: "oversize line",
+        bytes: Buffer.from(`${JSON.stringify({ type: "message.appended", padding: "x".repeat(1024 * 1024) })}\n`),
+        expected: /line exceeded its byte budget/iu
+      },
+      {
+        label: "excessive depth",
+        bytes: Buffer.from(`{"type":"message.appended","future":${tooDeep}}\n`),
+        expected: /nesting-depth limit of 32/iu
+      },
+      {
+        label: "torn final record",
+        bytes: Buffer.from('{"type":"message.appended"'),
+        expected: /torn or unterminated/iu
+      }
+    ];
+    for (const [index, fixture] of invalidWires.entries()) {
+      const agent = new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig));
+      const command = await agent.buildCommand({ prompt: fixture.label, cwd: project, options: {} });
+      const home = command.env?.KIMI_CODE_HOME;
+      assert.ok(home);
+      const wire = path.join(home, "sessions", `bucket-${index}`, "session-303", "agents", "main", "wire.jsonl");
+      fs.mkdirSync(path.dirname(wire), { recursive: true });
+      fs.writeFileSync(wire, fixture.bytes);
+      assert.throws(
+        () => agent.createOutputInterpreter().onExit?.(kimiExitResult(command.args)),
+        fixture.expected,
+        fixture.label
+      );
+      await command.cleanup?.();
+    }
   }
 );
 
@@ -3584,10 +3983,10 @@ test(
       kimiUsageRecordLine(9, 8, 7, 6)
     ]);
     fs.appendFileSync(oversizedWire, "x".repeat(1024 * 1024 + 1), "utf8");
-    const oversizedCompleted = kimiCompletedEvent(
-      oversized.createOutputInterpreter().onExit?.(kimiExitResult(oversizedCommand.args))
+    assert.throws(
+      () => oversized.createOutputInterpreter().onExit?.(kimiExitResult(oversizedCommand.args)),
+      /torn or unterminated|line exceeded/iu
     );
-    assert.equal(Object.prototype.hasOwnProperty.call(oversizedCompleted, "usage"), false);
     await oversizedCommand.cleanup?.();
 
     const overflowing = new KimiCode029Agent(options);
@@ -3603,10 +4002,10 @@ test(
       // Each component total is independently safe, but the combined total is not.
       kimiUsageRecordLine(0, 1, 0, 0)
     ]);
-    const overflowingCompleted = kimiCompletedEvent(
-      overflowing.createOutputInterpreter().onExit?.(kimiExitResult(overflowingCommand.args))
+    assert.throws(
+      () => overflowing.createOutputInterpreter().onExit?.(kimiExitResult(overflowingCommand.args)),
+      /safe integer range/iu
     );
-    assert.equal(Object.prototype.hasOwnProperty.call(overflowingCompleted, "usage"), false);
     await overflowingCommand.cleanup?.();
 
     const tooMany = new KimiCode029Agent(options);
@@ -3622,10 +4021,10 @@ test(
         kimiUsageRecordLine(1, 1, 0, 0)
       ]);
     }
-    const tooManyCompleted = kimiCompletedEvent(
-      tooMany.createOutputInterpreter().onExit?.(kimiExitResult(tooManyCommand.args))
+    assert.throws(
+      () => tooMany.createOutputInterpreter().onExit?.(kimiExitResult(tooManyCommand.args)),
+      /file budget/iu
     );
-    assert.equal(Object.prototype.hasOwnProperty.call(tooManyCompleted, "usage"), false);
     await tooManyCommand.cleanup?.();
 
     const session = "00000000-0000-0000-0000-000000000210";
@@ -3658,10 +4057,10 @@ test(
     const runtimeWire = path.join(replacedHome, "sessions", bucket, session, "agents", "main", "wire.jsonl");
     fs.rmSync(runtimeWire);
     fs.writeFileSync(runtimeWire, `${kimiUsageRecordLine(99, 88, 77, 66)}\n`, "utf8");
-    const replacedCompleted = kimiCompletedEvent(
-      replaced.createOutputInterpreter().onExit?.(kimiExitResult(replacedCommand.args))
+    assert.throws(
+      () => replaced.createOutputInterpreter().onExit?.(kimiExitResult(replacedCommand.args)),
+      /replaced or truncated/iu
     );
-    assert.equal(Object.prototype.hasOwnProperty.call(replacedCompleted, "usage"), false);
     await replacedCommand.cleanup?.();
   }
 );
@@ -4157,7 +4556,7 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
 
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
-  assert.match(workflowSource, /const taskOutput = z\.object\(\{/);
+  assert.match(workflowSource, /const taskOutput = z\.strictObject\(\{/);
   assert.match(workflowSource, /summary: z\.string\(\)\.min\(1\)/);
   assert.match(workflowSource, /smithers-display-name: Ultrafuzz native-deps/);
   assert.doesNotMatch(workflowSource, /__ULTRAFUZZ_/);

@@ -49,7 +49,10 @@ const AGENT_TEMPLATES = [
     file: "deepseek.ts",
     template: "smithers/agents/deepseek.tsx",
     ref: "DeepSeekAgent",
-    stockSha256: new Set(["c23a03c84e2f62d2e6b23ee7b27b1464a633fe20bb5b91c34d2c93d37dcf7e35"])
+    stockSha256: new Set([
+      "c23a03c84e2f62d2e6b23ee7b27b1464a633fe20bb5b91c34d2c93d37dcf7e35",
+      "65bf43f333cbced8ff0157e942d3c78267d8245d6c0041e053c8577a463e7407"
+    ])
   },
   {
     file: "kimi.ts",
@@ -59,7 +62,8 @@ const AGENT_TEMPLATES = [
       "fdbeaad6ea55122da50e9c9d86ac58a8b6377f419f8e78df23fb1fb401924e0b",
       "6de5f4b00b54b533f8fc1aa0628f5a402dbb6521a4584852d83786ee59dcb2fd",
       "25c499f8631db6e2529b046b5d2243119b456696c7a4a729345baa6f21f4c4f5",
-      "f790a3f121da84049032cfc5bf5d300f7bd56e9e3b15d0a51df5ea1b275de75f"
+      "f790a3f121da84049032cfc5bf5d300f7bd56e9e3b15d0a51df5ea1b275de75f",
+      "da76b1bedd041d2d0a93172e5d629fac566d0879df9720df1e2d0142439db44d"
     ])
   }
 ] as const;
@@ -167,6 +171,15 @@ export function initProject(input: InitProjectInput) {
       projectRoot,
       ".smithers/agents/environment.ts",
       loadRuntimeTemplate("smithers/agents/environment.tsx"),
+      input.force === true,
+      created,
+      preserved,
+      overwritten
+    );
+    writeProjectFile(
+      projectRoot,
+      ".smithers/agents/strict-json.ts",
+      loadRuntimeTemplate("smithers/agents/strict-json.tsx"),
       input.force === true,
       created,
       preserved,
