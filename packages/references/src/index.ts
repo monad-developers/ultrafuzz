@@ -21,7 +21,7 @@ export const REFERENCES_VERSION = 1;
 export const CACHE_MANIFEST_FILE = ".ultrafuzz-reference-manifest.json";
 export const RUN_REFERENCE_MANIFEST_FILE = "references/manifest.json";
 export const REFERENCE_CACHE_SCHEMA_VERSION = "1.0";
-export const RUN_REFERENCE_MANIFEST_SCHEMA_VERSION = "1.0";
+export const RUN_REFERENCE_MANIFEST_SCHEMA_VERSION = "ultrafuzz.reference-manifest.v1";
 
 export type ReferenceProvider = "github";
 

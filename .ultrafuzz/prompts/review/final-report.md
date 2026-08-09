@@ -53,10 +53,9 @@ because that will walk scalar summary fields.
 Severity-classified findings:
 `{{artifact_path:severity-classification}}/severity-classified-findings.json`
 
-The beta severity artifact may be either a top-level findings array or an object
-with a `findings` array. Treat `severity-classified-findings.json#/findings` as
-the source of truth when that field exists. Use the top-level array form only
-for legacy-compatible artifacts.
+The severity artifact is exactly the top-level array defined by
+`ultrafuzz/severity-classified-findings@1`. Reject an object wrapper or any
+legacy spelling.
 
 Strategy detection provenance:
 `{{artifact_path:severity-classification}}/strategy-detections.json`
@@ -207,20 +206,10 @@ Apply these rules to the whole generated `report.md` and `report.json`, not
 only to the examples below.
 
 The report severity, impact, and likelihood vocabularies are closed: High,
-Medium, and Low. Never render or preserve another severity, impact, or
-likelihood label anywhere in `report.md` or `report.json`, including headings,
-issue IDs, index rows, summary buckets, provenance fields, alternate severity
-fields, or copied lifecycle data. When an upstream artifact uses a value outside
-the closed vocabulary, normalize it into the closest allowed value using the
-upstream classification rationale before rendering. If the upstream artifact
-lacks enough rationale to choose one of High, Medium, or Low, stop and report
-the invalid upstream classification artifact instead of guessing.
-
-Independently reassess every production issue's impact and likelihood from its
-evidence before finalizing the report. Treat upstream severity fields and
-rationales as inputs, not immutable results. When reassessment changes them,
-render the revised impact, likelihood, matrix severity, and concise rationale
-consistently in both report formats.
+Medium, and Low. Never render or preserve another label or an alternate severity
+field. Copy the strict severity artifact's `severity`, `impact`, `likelihood`,
+and rationale fields exactly. If they are missing, invalid, or fail the matrix,
+reject the upstream artifact; do not normalize, recompute, or rewrite it.
 
 Use these risk boundaries before applying the matrix:
 
@@ -256,11 +245,9 @@ Apply this Impact x Likelihood matrix before publishing any production issue:
 | Medium | Medium | Medium | Low |
 | Low | Low | Low | Low |
 
-For every production issue, recompute severity from the reassessed impact and
-likelihood. Publish that matrix result even when it corrects an upstream
-severity, and explain the corrected assessment from evidence. If the evidence
-cannot support impact or likelihood, stop and report the invalid upstream
-classification artifact instead of guessing. In particular:
+For every production issue, verify that the upstream final `severity` equals
+the matrix result for its `impact` and `likelihood`. Reject a mismatch instead
+of correcting the artifact. In particular:
 
 - High impact + Low likelihood must render as Medium.
 - Medium impact + Low likelihood must render as Low.
@@ -375,10 +362,10 @@ It must not duplicate prose awkwardly, for example avoid constructions like
 fallback callers could...`. Tighten copied upstream text into a clean actor,
 action, and outcome.
 
-Severity must be recomputed from the final report's reassessed impact and
-likelihood. Upstream `final_severity`, `severity`, and legacy `severity_guess`
-are review inputs only. Normalize the recomputed result to High, Medium, or Low
-and use it consistently for issue IDs, ordering, counts, Markdown, and JSON.
+Use the upstream canonical final `severity` consistently for issue IDs,
+ordering, counts, Markdown, and JSON after verifying the matrix. Preserve
+`severity_guess` as preliminary provenance, and reject `final_severity` or any
+other alias.
 
 Impact and Likelihood must each render as exactly High, Medium, or Low followed
 by a colon and concise explanation, for example
@@ -581,22 +568,25 @@ Also save `{{artifact_path}}/report.json` as structured JSON for the CLI. Includ
 fields, a production `issues` array, a `non_production_outcomes` array, and
 `property_provenance`.
 
-When provenance is available, `property_provenance` must be an array with one
+Set top-level `schema_version` to exactly `"ultrafuzz.report.v2"`.
+`run_metadata` contains exact keys `run_id`, `source_run_id`, `repository`,
+`elapsed_time`, `models_used` (array), `tokens_used`, `estimated_spend`,
+`partial_pricing`, and non-negative integer `strategy_loops`; optional
+`source_run_ids` is a unique array.
+
+`property_provenance` must be an array with one
 object per property-derived finding. Each object contains `finding_id`,
 `title`, non-empty `property_ids`, `sources` entries with `source_node_id` and
 `source_property_id`, `implementation_paths`, and `test_paths`. Use
 `fuzzer_backend` when exactly one backend produced the finding, or a unique
 sorted `fuzzer_backends` array when several backends produced the same stable
 finding ID. Never emit both fields. When no known campaign backend produced the
-finding, omit both `fuzzer_backend` and `fuzzer_backends`; the literal
-`"unavailable"` is never a backend value. Use stable unions when several
-properties contribute. Preserve the whole `property_provenance` value as the
-string `"unavailable"` for genuinely unavailable historical provenance whose
-handoffs are absent. Use an empty array for a current run with no
-property-derived findings.
+finding, omit both. Use stable unions when several properties contribute and
+an empty array when there are no property-derived findings. Do not emit a
+historical `"unavailable"` compatibility value.
 
-Each production issue object must satisfy the canonical normalized finding
-schema. Include at least `schema_version`, `id`, `title`, `status`,
+Each production issue object must satisfy canonical finding v2. Include
+`schema_version: "ultrafuzz.finding.v2"`, `id`, `title`, `status`,
 `severity_guess`, `confidence`, and `summary`, and keep those fields consistent
 with the final rendered issue. Also include the report-specific fields
 `description`, `severity`, `likelihood`, `impact`, and `proof_of_concept`, plus
@@ -604,15 +594,9 @@ with the final rendered issue. Also include the report-specific fields
 available. Keep the canonical `strategy` field a non-empty originating strategy
 name when one is available. The structured `strategy_provenance` object must
 contain a non-empty `detection_rates` or `strategies` array. Use exactly one of
-these array keys; never emit both. Every array element must be an object with a
-non-empty `strategy` string and provide either:
-
-- a non-negative integer detection count under `detections`, `detected_loops`,
-  `hits`, `matches`, or `loop_attempts` (an array under one of those keys is
-  counted by its length), together with a positive-integer `configured_loops`
-  that is greater than or equal to the detection count; or
-- a `rate` or `detection_rate` string matching `^\d+/\d+$`, whose denominator
-  is greater than zero and whose numerator does not exceed its denominator.
+these array keys; never emit both. Every array element contains exactly
+non-empty `strategy`, non-negative integer `detections`, and positive integer
+`configured_loops`. Optional `attempts` use the canonical strategy-hit fields.
 
 For example, this is a canonical renderable value:
 
@@ -626,19 +610,17 @@ For example, this is a canonical renderable value:
 }
 ```
 
-Keep any additional loop-attempt provenance in this object for downstream
-analysis. The production issue
-`severity_guess`, `severity`, `impact`, and `likelihood` values must use the same
-High, Medium, or Low report vocabulary rendered in Markdown. Do not add
-alternate severity fields that preserve nonstandard upstream severity labels;
-`severity_guess` must contain the normalized matrix severity. The production
+Keep any additional loop-attempt provenance only in the fields admitted by the
+schema. `severity_guess` remains the upstream preliminary estimate and need not
+equal final `severity`; `severity`, `impact`, and `likelihood` use the report
+vocabulary. Never add `final_severity` or upstream/compatibility aliases. The production
 issue `title` value must include the same severity-local title ID rendered in the
 Markdown heading, for example
 `[H-01] - Selectorless fallback can refund or spend stale contract ETH`.
 
-Each non-production outcome object must preserve machine-readable
-`triage_classification`, `status`, evidence, strategy provenance, and
-`recommended_next_action`. Both production issues and non-production outcomes
+Each non-production outcome is also a canonical finding v2 object and preserves
+machine-readable `triage_classification`, `status`, evidence, strategy
+provenance, and `recommended_next_action`. Both production issues and non-production outcomes
 must include a `lifecycle` object copied from the matching ledger record with
 `dedupe_key`, `source_artifacts`, `strategy_hits`, `triage_classification`,
 `triage_reason`, `demotion_reason`, `final_disposition`, and
@@ -665,10 +647,9 @@ Before finishing, verify that:
   Medium, or Low followed by a colon.
 - Every production issue severity equals the Impact x Likelihood matrix result.
 - `report.json` contains `schema_version`, `run_metadata`, `issues`, and
-  `non_production_outcomes`, plus `property_provenance` as an array or
-  `"unavailable"`.
-- Every `report.json` production issue satisfies the canonical normalized
-  finding schema, including `schema_version`, `id`, `title`, `status`,
+  `non_production_outcomes`, plus `property_provenance` as an array.
+- Every `report.json` production issue satisfies canonical finding v2,
+  including `schema_version`, `id`, `title`, `status`,
   `severity_guess`, `confidence`, and `summary`.
 - Every `report.json` production issue keeps canonical `strategy` as a string
   when present and stores structured strategy details in `strategy_provenance`.

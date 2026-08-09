@@ -1,6 +1,13 @@
 import { z } from "zod/v4";
 
-import { FINDINGS_SCHEMA_VERSIONS, TRIAGE_CLASSIFICATIONS, type NormalizedFinding } from "./findings.js";
+import {
+  FINDING_CONFIDENCE_LEVELS,
+  FINDING_SEVERITIES,
+  FINDING_STATUSES,
+  FINDINGS_SCHEMA_VERSION,
+  TRIAGE_CLASSIFICATIONS,
+  type NormalizedFinding
+} from "./findings.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 export const FINDING_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:finding:2" as const;
@@ -8,179 +15,220 @@ export const FINDINGS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:findings:
 
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
-const stringArray = z.array(nonEmptyString);
-const propertyIdsSchema = stringArray.min(1).superRefine((propertyIds, context) => {
-  const seen = new Set<string>();
-  for (const [propertyIndex, propertyId] of propertyIds.entries()) {
-    if (seen.has(propertyId)) {
-      context.addIssue({
-        code: "custom",
-        message: `Duplicate property ID ${JSON.stringify(propertyId)}`,
-        path: [propertyIndex]
-      });
-    }
-    seen.add(propertyId);
-  }
-});
-const backendFailureReferenceSchema = z.union([
+const uniqueNonEmptyStrings = z
+  .array(nonEmptyString)
+  .meta({ uniqueItems: true })
+  .refine((values) => new Set(values).size === values.length, { message: "Values must be unique" });
+
+export const findingEvidenceSchema = z.union([
   nonEmptyString,
-  z.looseObject({
-    fuzzer_backend: nonEmptyString,
-    failure_id: nonEmptyString
-  })
-]);
-const contributingBackendFailuresSchema = z
-  .array(backendFailureReferenceSchema)
-  .min(1)
-  .superRefine((references, context) => {
-    const seen = new Set<string>();
-    for (const [referenceIndex, reference] of references.entries()) {
-      const key =
-        typeof reference === "string"
-          ? JSON.stringify(["failure-id", reference])
-          : JSON.stringify(["backend-failure", reference.fuzzer_backend, reference.failure_id]);
-      if (seen.has(key)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate contributing backend failure ${JSON.stringify(reference)}`,
-          path: [referenceIndex]
-        });
-      }
-      seen.add(key);
-    }
-  });
-const findingDeduplicationSchema = z.looseObject({
-  pre_dedup_count: z.number().int().positive()
-});
-const evidenceEntrySchema = z.union([
-  nonEmptyString,
-  z.looseObject({
+  z.strictObject({
     kind: nonEmptyString.optional(),
-    path: nonEmptyString.optional()
+    path: nonEmptyString.optional(),
+    line: nonNegativeInteger.optional(),
+    symbol: nonEmptyString.optional(),
+    command: nonEmptyString.optional(),
+    summary: nonEmptyString.optional(),
+    observed: nonEmptyString.optional(),
+    expected: nonEmptyString.optional()
   })
 ]);
 
-export const findingSchema = z.looseObject({
-  // Optional: nothing reads a finding's schema_version, there is only one findings schema, and
-  // normalizeFinding already defaults an absent value to FINDINGS_SCHEMA_VERSION. A present value is
-  // still checked against the accepted spellings so a genuinely different version cannot slip in.
-  schema_version: z.literal(FINDINGS_SCHEMA_VERSIONS).optional(),
+export const findingStrategyHitSchema = z.strictObject({
+  strategy: nonEmptyString,
+  attempt_index: nonNegativeInteger.optional(),
+  model_id: nonEmptyString.optional(),
+  model: nonEmptyString.optional(),
+  model_index: nonNegativeInteger.optional(),
+  loop_index: nonNegativeInteger.optional()
+});
+
+export const findingSourceArtifactSchema = z.strictObject({
+  path: nonEmptyString,
+  node_id: nonEmptyString,
+  finding_id: nonEmptyString,
+  title: nonEmptyString,
+  relationship: z.enum(["primary", "duplicate", "family-variant"])
+});
+
+export const findingLifecycleStageSchema = z.strictObject({
+  stage: z.enum(["raw", "deduped", "triaged", "severity-classified"]),
+  artifact_path: nonEmptyString,
+  finding_id: nonEmptyString.optional()
+});
+
+export const findingLifecycleSchema = z.strictObject({
+  dedupe_key: nonEmptyString,
+  source_artifacts: z.array(findingSourceArtifactSchema),
+  strategy_hits: z.array(findingStrategyHitSchema),
+  duplicate_finding_ids: uniqueNonEmptyStrings.optional(),
+  family_variant_keys: uniqueNonEmptyStrings.optional(),
+  triage_classification: z.enum(TRIAGE_CLASSIFICATIONS).optional(),
+  triage_reason: nonEmptyString.optional(),
+  demotion_reason: nonEmptyString.optional(),
+  canonical_severity: z.enum(FINDING_SEVERITIES).optional(),
+  final_disposition: z.enum(["promoted", "non-production", "dropped"]).optional(),
+  comparison_disposition: z
+    .enum(["promoted-again", "rediscovered-but-demoted", "not-reproduced", "not-searched"])
+    .optional(),
+  stages: z.array(findingLifecycleStageSchema).optional()
+});
+
+const familyVariantSchema = z.strictObject({
   id: nonEmptyString,
   title: nonEmptyString,
-  status: nonEmptyString,
-  severity_guess: nonEmptyString,
-  confidence: nonEmptyString,
   summary: nonEmptyString,
-  triage_classification: z.enum(TRIAGE_CLASSIFICATIONS).optional(),
-  source_node_id: nonEmptyString.optional(),
+  dedupe_key: nonEmptyString,
   strategy: nonEmptyString.optional(),
   attempt_index: nonNegativeInteger.optional(),
   model_id: nonEmptyString.optional(),
   model: nonEmptyString.optional(),
   model_index: nonNegativeInteger.optional(),
   loop_index: nonNegativeInteger.optional(),
-  affected_files: stringArray.optional(),
-  affected_functions: stringArray.optional(),
-  patch_refs: stringArray.optional(),
-  property_ids: propertyIdsSchema.optional(),
-  contributing_backend_failures: contributingBackendFailuresSchema.optional(),
-  deduplication: findingDeduplicationSchema.optional(),
-  notes: stringArray.optional(),
-  evidence: z.array(evidenceEntrySchema).optional()
+  affected_files: uniqueNonEmptyStrings.optional(),
+  affected_functions: uniqueNonEmptyStrings.optional(),
+  evidence: z.array(findingEvidenceSchema).optional()
 });
 
-export const findingsSchema = z.array(findingSchema);
+const relatedFindingSchema = z.strictObject({
+  id: nonEmptyString,
+  title: nonEmptyString,
+  relationship: nonEmptyString,
+  summary: nonEmptyString,
+  dedupe_key: nonEmptyString.optional()
+});
 
-export const findingJsonSchema = {
-  $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: FINDING_JSON_SCHEMA_ID,
-  title: "Ultrafuzz normalized finding",
-  type: "object",
-  required: ["id", "title", "status", "severity_guess", "confidence", "summary"],
-  additionalProperties: true,
-  properties: {
-    schema_version: { enum: [...FINDINGS_SCHEMA_VERSIONS] },
-    id: { type: "string", minLength: 1 },
-    title: { type: "string", minLength: 1 },
-    status: { type: "string", minLength: 1 },
-    severity_guess: { type: "string", minLength: 1 },
-    confidence: { type: "string", minLength: 1 },
-    summary: { type: "string", minLength: 1 },
-    triage_classification: { enum: TRIAGE_CLASSIFICATIONS },
-    source_node_id: { type: "string", minLength: 1 },
-    strategy: { type: "string", minLength: 1 },
-    attempt_index: { type: "integer", minimum: 0 },
-    model_id: { type: "string", minLength: 1 },
-    model: { type: "string", minLength: 1 },
-    model_index: { type: "integer", minimum: 0 },
-    loop_index: { type: "integer", minimum: 0 },
-    affected_files: { type: "array", items: { type: "string", minLength: 1 } },
-    affected_functions: { type: "array", items: { type: "string", minLength: 1 } },
-    patch_refs: { type: "array", items: { type: "string", minLength: 1 } },
-    property_ids: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1 } },
-    contributing_backend_failures: {
-      type: "array",
-      minItems: 1,
-      uniqueItems: true,
-      items: {
-        anyOf: [
-          { type: "string", minLength: 1 },
-          {
-            type: "object",
-            required: ["fuzzer_backend", "failure_id"],
-            additionalProperties: true,
-            properties: {
-              fuzzer_backend: { type: "string", minLength: 1 },
-              failure_id: { type: "string", minLength: 1 }
-            }
-          }
-        ]
+const backendFailureReferenceSchema = z.union([
+  nonEmptyString,
+  z.strictObject({
+    fuzzer_backend: nonEmptyString,
+    failure_id: nonEmptyString,
+    raw_result_ref: nonEmptyString.optional()
+  })
+]);
+
+const detectionRateSchema = z.strictObject({
+  strategy: nonEmptyString,
+  detections: nonNegativeInteger,
+  configured_loops: z.number().int().positive()
+});
+
+const strategyProvenanceSchema = z.union([
+  z.strictObject({
+    detection_rates: z.array(detectionRateSchema).min(1),
+    attempts: z.array(findingStrategyHitSchema).optional()
+  }),
+  z.strictObject({
+    strategies: z.array(detectionRateSchema).min(1),
+    attempts: z.array(findingStrategyHitSchema).optional()
+  })
+]);
+
+const proofOfConceptSchema = z.strictObject({
+  scenario: z.array(nonEmptyString).min(1),
+  language: nonEmptyString,
+  code: nonEmptyString
+});
+
+/**
+ * The one canonical finding shape used from producer findings through the
+ * report pipeline. Later-stage fields are optional here and become required in
+ * their stage-specific whole-document contracts.
+ */
+export const findingSchema = z
+  .strictObject({
+    schema_version: z.literal(FINDINGS_SCHEMA_VERSION),
+    id: nonEmptyString,
+    title: nonEmptyString,
+    status: z.enum(FINDING_STATUSES),
+    severity_guess: z.enum(FINDING_SEVERITIES),
+    confidence: z.enum(FINDING_CONFIDENCE_LEVELS),
+    summary: nonEmptyString,
+    triage_classification: z.enum(TRIAGE_CLASSIFICATIONS).optional(),
+    source_node_id: nonEmptyString.optional(),
+    strategy: nonEmptyString.optional(),
+    dynamic_strategy_id: nonEmptyString.optional(),
+    enumerator_id: nonEmptyString.optional(),
+    attempt_index: nonNegativeInteger.optional(),
+    model_id: nonEmptyString.optional(),
+    model: nonEmptyString.optional(),
+    model_index: nonNegativeInteger.optional(),
+    loop_index: nonNegativeInteger.optional(),
+    affected_files: uniqueNonEmptyStrings.optional(),
+    affected_functions: uniqueNonEmptyStrings.optional(),
+    patch_refs: uniqueNonEmptyStrings.optional(),
+    property_ids: uniqueNonEmptyStrings.min(1).optional(),
+    fuzzer_backend: nonEmptyString.optional(),
+    fuzzer_backends: uniqueNonEmptyStrings.min(1).optional(),
+    contributing_backend_failures: z.array(backendFailureReferenceSchema).min(1).meta({ uniqueItems: true }).optional(),
+    deduplication: z
+      .strictObject({
+        pre_dedup_count: z.number().int().positive(),
+        basis: nonEmptyString.optional()
+      })
+      .optional(),
+    dedupe_key: nonEmptyString.optional(),
+    family_id: nonEmptyString.optional(),
+    family_variants: z.array(familyVariantSchema).optional(),
+    related_findings: z.array(relatedFindingSchema).optional(),
+    notes: z.array(nonEmptyString).optional(),
+    evidence: z.array(findingEvidenceSchema).optional(),
+    severity: z.enum(FINDING_SEVERITIES).optional(),
+    impact: z.enum(FINDING_SEVERITIES).optional(),
+    likelihood: z.enum(FINDING_SEVERITIES).optional(),
+    impact_rationale: nonEmptyString.optional(),
+    likelihood_rationale: nonEmptyString.optional(),
+    severity_rationale: nonEmptyString.optional(),
+    description: nonEmptyString.optional(),
+    proof_of_concept: proofOfConceptSchema.optional(),
+    recommendation: nonEmptyString.optional(),
+    recommended_next_action: nonEmptyString.optional(),
+    strategy_provenance: strategyProvenanceSchema.optional(),
+    lifecycle: findingLifecycleSchema.optional()
+  })
+  .meta({
+    $id: FINDING_JSON_SCHEMA_ID,
+    title: "Ultrafuzz finding",
+    allOf: [
+      {
+        not: {
+          required: ["fuzzer_backend", "fuzzer_backends"]
+        }
       }
-    },
-    deduplication: {
-      type: "object",
-      required: ["pre_dedup_count"],
-      additionalProperties: true,
-      properties: {
-        pre_dedup_count: { type: "integer", minimum: 1 }
-      }
-    },
-    notes: { type: "array", items: { type: "string", minLength: 1 } },
-    evidence: {
-      type: "array",
-      items: {
-        anyOf: [
-          { type: "string", minLength: 1 },
-          {
-            type: "object",
-            additionalProperties: true,
-            properties: {
-              kind: { type: "string", minLength: 1 },
-              path: { type: "string", minLength: 1 }
-            }
-          }
-        ]
-      }
+    ]
+  })
+  .superRefine((finding, context) => {
+    if (finding.fuzzer_backend !== undefined && finding.fuzzer_backends !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "Use fuzzer_backend or fuzzer_backends, not both",
+        path: ["fuzzer_backends"]
+      });
     }
-  }
-} as const;
+  });
 
+export const findingsSchema = z.array(findingSchema).meta({
+  $id: FINDINGS_JSON_SCHEMA_ID,
+  title: "Ultrafuzz findings"
+});
+
+export const findingJsonSchema = z.toJSONSchema(findingSchema);
 export const findingsJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: FINDINGS_JSON_SCHEMA_ID,
-  title: "Ultrafuzz normalized findings array",
+  title: "Ultrafuzz findings",
   type: "array",
   items: { $ref: FINDING_JSON_SCHEMA_ID }
 } as const;
 
-export function validateFindingSchema(value: unknown, path = "$"): SchemaValidationResult<NormalizedFinding> {
+export function validateFindingSchema(value: unknown, path = "$" ): SchemaValidationResult<NormalizedFinding> {
   return validateWithZod(findingSchema as z.ZodType<NormalizedFinding>, value, {
     path,
     code: "FINDING_SCHEMA_INVALID"
   });
 }
 
-export function validateFindingsSchema(value: unknown, path = "$"): SchemaValidationResult<NormalizedFinding[]> {
+export function validateFindingsSchema(value: unknown, path = "$" ): SchemaValidationResult<NormalizedFinding[]> {
   return validateWithZod(findingsSchema as z.ZodType<NormalizedFinding[]>, value, {
     path,
     code: "FINDINGS_SCHEMA_INVALID"

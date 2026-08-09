@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.boundary-recipes.v1"
+    },
+    "recipes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "workflow": {
+            "type": "string",
+            "minLength": 1
+          },
+          "public_support": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "setup": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "action_sequence": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "oracle": {
+            "type": "string",
+            "minLength": 1
+          },
+          "boundary_values": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "expected_classification_if_red": {
+            "type": "string",
+            "enum": [
+              "production-bug",
+              "implementation-drift",
+              "incomplete-spec",
+              "harness-defect",
+              "inconclusive"
+            ]
+          },
+          "preferred_downstream_lane": {
+            "type": "string",
+            "minLength": 1
+          },
+          "finding_ids": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "property_ids": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "path",
+          "workflow",
+          "public_support",
+          "setup",
+          "action_sequence",
+          "oracle",
+          "boundary_values",
+          "expected_classification_if_red",
+          "preferred_downstream_lane"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "deferred_or_spec_gated": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_paths": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "id",
+          "reason",
+          "evidence_paths"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "coverage_priorities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "workflow": {
+            "type": "string",
+            "minLength": 1
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "workflow",
+          "priority",
+          "rationale"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "recipes",
+    "deferred_or_spec_gated",
+    "coverage_priorities"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:boundary-recipes:1",
+  "title": "Ultrafuzz boundary recipes"
+}

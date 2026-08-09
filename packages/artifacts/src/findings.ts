@@ -3,13 +3,8 @@ import path from "node:path";
 
 import { ArtifactPathError, readJsonFile, safeResolveInside, validateSafeId, writeJsonDurable } from "./safe-paths.js";
 
-export const FINDINGS_SCHEMA_VERSION = "1.0";
-// Every sibling artifact versions itself as `ultrafuzz.<name>.v1`, so producers reach for
-// `ultrafuzz.finding.v1` here. There is only one findings schema, and an absent schema_version
-// already normalizes to FINDINGS_SCHEMA_VERSION, so the house-style spelling names the same
-// version rather than a different one. Accept it and canonicalize.
-export const FINDINGS_SCHEMA_VERSION_ALIASES = ["ultrafuzz.finding.v1"] as const;
-export const FINDINGS_SCHEMA_VERSIONS = [FINDINGS_SCHEMA_VERSION, ...FINDINGS_SCHEMA_VERSION_ALIASES] as const;
+export const FINDINGS_SCHEMA_VERSION = "ultrafuzz.finding.v2" as const;
+export const FINDINGS_SCHEMA_VERSIONS = [FINDINGS_SCHEMA_VERSION] as const;
 export const FINDINGS_FILE = "findings.json";
 export const FINDING_STATUSES = [
   "candidate",
@@ -20,6 +15,8 @@ export const FINDING_STATUSES = [
   "fixed",
   "wont-fix"
 ] as const;
+export const FINDING_SEVERITIES = ["High", "Medium", "Low"] as const;
+export const FINDING_CONFIDENCE_LEVELS = ["high", "medium", "low"] as const;
 export const TRIAGE_CLASSIFICATIONS = [
   "true-positive",
   "false-positive",
@@ -31,7 +28,9 @@ export const TRIAGE_CLASSIFICATIONS = [
   "defensive-hardening"
 ] as const;
 
-export type FindingStatus = string;
+export type FindingStatus = (typeof FINDING_STATUSES)[number];
+export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
+export type FindingConfidence = (typeof FINDING_CONFIDENCE_LEVELS)[number];
 export type TriageClassification = (typeof TRIAGE_CLASSIFICATIONS)[number];
 
 export interface FindingProvenance {
@@ -65,16 +64,15 @@ export class FindingsValidationError extends Error {
   }
 }
 
-export type NormalizedFinding = Record<string, unknown> & {
-  // normalizeFinding always writes this, but the finding schema validates producer output too, where
-  // the field is optional. Nothing reads it, so the honest type is optional.
-  schema_version?: string;
+export type NormalizedFinding = {
+  schema_version: typeof FINDINGS_SCHEMA_VERSION;
   id: string;
   title: string;
-  status: string;
-  severity_guess: string;
-  confidence: string;
+  status: FindingStatus;
+  severity_guess: FindingSeverity;
+  confidence: FindingConfidence;
   summary: string;
+  [key: string]: unknown;
 };
 
 export function normalizeFindings(input: NormalizeFindingsInput): FindingsNormalizeReport {
@@ -107,7 +105,7 @@ export function readFindings(artifactDir: string): NormalizedFinding[] {
 }
 
 export function isSupportedFindingsSchemaVersion(value: string): boolean {
-  return (FINDINGS_SCHEMA_VERSIONS as readonly string[]).includes(value);
+  return value === FINDINGS_SCHEMA_VERSION;
 }
 
 function resolveFindingsSource(artifactDir: string): string {

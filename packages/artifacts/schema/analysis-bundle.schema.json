@@ -3,7 +3,11 @@
   "$id": "urn:ultrafuzz:schema:artifacts:analysis-bundle:1",
   "title": "Ultrafuzz privacy-safe analysis bundle manifest",
   "type": "object",
-  "required": ["schema_version", "policy_version", "files"],
+  "required": [
+    "schema_version",
+    "policy_version",
+    "files"
+  ],
   "additionalProperties": false,
   "properties": {
     "schema_version": {
@@ -20,7 +24,13 @@
         "oneOf": [
           {
             "type": "object",
-            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
+            "required": [
+              "kind",
+              "path",
+              "media_type",
+              "size_bytes",
+              "sha256"
+            ],
             "additionalProperties": false,
             "properties": {
               "kind": {
@@ -44,7 +54,13 @@
           },
           {
             "type": "object",
-            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
+            "required": [
+              "kind",
+              "path",
+              "media_type",
+              "size_bytes",
+              "sha256"
+            ],
             "additionalProperties": false,
             "properties": {
               "kind": {
@@ -68,7 +84,13 @@
           },
           {
             "type": "object",
-            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
+            "required": [
+              "kind",
+              "path",
+              "media_type",
+              "size_bytes",
+              "sha256"
+            ],
             "additionalProperties": false,
             "properties": {
               "kind": {
@@ -92,7 +114,13 @@
           },
           {
             "type": "object",
-            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
+            "required": [
+              "kind",
+              "path",
+              "media_type",
+              "size_bytes",
+              "sha256"
+            ],
             "additionalProperties": false,
             "properties": {
               "kind": {
@@ -116,7 +144,13 @@
           },
           {
             "type": "object",
-            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
+            "required": [
+              "kind",
+              "path",
+              "media_type",
+              "size_bytes",
+              "sha256"
+            ],
             "additionalProperties": false,
             "properties": {
               "kind": {
@@ -140,7 +174,13 @@
           },
           {
             "type": "object",
-            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
+            "required": [
+              "kind",
+              "path",
+              "media_type",
+              "size_bytes",
+              "sha256"
+            ],
             "additionalProperties": false,
             "properties": {
               "kind": {
@@ -166,32 +206,74 @@
       },
       "allOf": [
         {
-          "contains": { "type": "object", "properties": { "kind": { "const": "terminal-status" } } },
+          "contains": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "terminal-status"
+              }
+            }
+          },
           "minContains": 0,
           "maxContains": 1
         },
         {
-          "contains": { "type": "object", "properties": { "kind": { "const": "evaluation-metrics" } } },
+          "contains": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "evaluation-metrics"
+              }
+            }
+          },
           "minContains": 0,
           "maxContains": 1
         },
         {
-          "contains": { "type": "object", "properties": { "kind": { "const": "accounting-summary" } } },
+          "contains": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "accounting-summary"
+              }
+            }
+          },
           "minContains": 0,
           "maxContains": 1
         },
         {
-          "contains": { "type": "object", "properties": { "kind": { "const": "attempt-history" } } },
+          "contains": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "attempt-history"
+              }
+            }
+          },
           "minContains": 0,
           "maxContains": 1
         },
         {
-          "contains": { "type": "object", "properties": { "kind": { "const": "recovery-summary" } } },
+          "contains": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "recovery-summary"
+              }
+            }
+          },
           "minContains": 0,
           "maxContains": 1
         },
         {
-          "contains": { "type": "object", "properties": { "kind": { "const": "omissions" } } },
+          "contains": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "omissions"
+              }
+            }
+          },
           "minContains": 1,
           "maxContains": 1
         }

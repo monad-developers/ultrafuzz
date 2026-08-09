@@ -36,7 +36,7 @@ supplied pinned-reference artifacts. Preserve one
 identifier per named expectation and carry the supplied identifier unchanged;
 when the supplied inputs contain no named expectation, leave the field absent.
 
-When a pinned-reference node declares a catalog with the `ultrafuzz/reference-expectations@1` contract, read its declared artifact and validate it with `{{schema_path}}/reference-expectations.schema.json` before copying identifiers.
+When a pinned-reference node declares a catalog with the `ultrafuzz/reference-expectations@2` contract, read its declared artifact and validate it with `{{schema_path}}/reference-expectations.schema.json` before copying identifiers.
 
 ## Target-derived invariant extraction
 

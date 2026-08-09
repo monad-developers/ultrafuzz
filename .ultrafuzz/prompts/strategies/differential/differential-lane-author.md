@@ -26,7 +26,9 @@ Read the base Foundry setup before authoring tests:
 
 If no lane payload exists for this attempt index, do not author speculative
 tests. Write `{{artifact_path}}/lane-result.json` with status
-`no_assigned_lane`, write empty standard `generated-tests.json` and
+`no_assigned_lane`, `lane_id`, `assigned_lane_payload`, `focused_command`,
+`source_plan_artifact`, and `source_harness_artifact` set to `null`, all result
+arrays empty, `focused_command_ran: false`, and `matched_test_count: 0`; write empty standard `generated-tests.json` and
 `findings.json` outputs, and stop.
 
 For the selected lane, author exactly the intended `.t.sol` file and any lane-local test-only helpers required by that payload. Deploy production and reference side by side and compare only public/external behavior:
@@ -72,43 +74,47 @@ Write {{artifact_path}}/lane-result.json with this JSON shape:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "ultrafuzz.differential-lane-result.v1",
   "lane_id": "stable-kebab-case",
   "attempt_index": {{attempt_index}},
   "auditor_attempt_index": {{attempt_index}},
-  "source_auditor_artifact": "",
-  "source_plan_artifact": "",
-  "source_harness_artifact": "",
-  "assigned_lane_payload": {},
+  "source_auditor_artifact": "artifacts/reference-and-lane-auditor/audited-differential-lanes.json",
+  "source_plan_artifact": "artifacts/differential-oracle-planner/differential-plan.json",
+  "source_harness_artifact": "artifacts/reference-harness-author/reference-harness.json",
+  "assigned_lane_payload": {
+    "lane_id": "stable-kebab-case",
+    "attempt_index": {{attempt_index}},
+    "auditor_attempt_index": {{attempt_index}},
+    "planner_attempt_index": 0,
+    "harness_author_attempt_index": 0,
+    "source_plan_artifact": "artifacts/differential-oracle-planner/differential-plan.json",
+    "source_harness_artifact": "artifacts/reference-harness-author/reference-harness.json",
+    "intended_t_sol_path": "test/foundry/differential/Lane.t.sol",
+    "focused_command": "forge test --match-path test/foundry/differential/Lane.t.sol --match-test test_lane",
+    "public_evidence_paths": ["docs/spec.md"],
+    "exact_observable_equality_assertions": ["Public return values are equal"]
+  },
   "authored_paths": [],
-  "focused_command": "",
+  "focused_command": "forge test --match-path test/foundry/differential/Lane.t.sol --match-test test_lane",
   "focused_command_ran": false,
   "matched_test_count": 0,
   "status": "green | semantic_red_frozen | compile_or_harness_defect | no_assigned_lane",
   "red_preservation_audit": {
     "result": "no_semantic_red_observed | semantic_red_frozen | not_applicable",
-    "pre_repair_file_hash": "",
-    "assertion_predicate": ""
+    "pre_repair_file_hash": null,
+    "assertion_predicate": null
   },
-  "red_candidates": [
-    {
-      "red_candidate_id": "diff-<lane-id>-001",
-      "test_path": "",
-      "failing_test_name": "",
-      "focused_command": "",
-      "failure_signature": "",
-      "assertion": "",
-      "observed": "",
-      "expected": "",
-      "public_oracle_basis": [],
-      "classification": "untriaged"
-    }
-  ],
+  "red_candidates": [],
   "compile_or_harness_defects": [],
   "public_evidence_paths": [],
   "notes": []
 }
 ```
+
+For `semantic_red_frozen`, `red_candidates` is non-empty and each row contains
+non-empty `red_candidate_id`, `test_path`, `failing_test_name`,
+`focused_command`, `failure_signature`, `assertion`, `observed`, and `expected`,
+at least one `public_oracle_basis`, and fixed `classification: "untriaged"`.
 
 Also write `{{artifact_path}}/generated-tests.json` using the standard
 generated-test manifest contract. Include every authored `.t.sol` lane file and

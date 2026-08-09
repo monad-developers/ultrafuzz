@@ -1,0 +1,341 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.aggregation-manifest.v1"
+    },
+    "source_generated_tests": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "copied_generated_tests": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "source_support_files": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "copied_support_files": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "strategy": {
+            "type": "string",
+            "minLength": 1
+          },
+          "node_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "source_manifest_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_artifact_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_relative_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "destination_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "destination_relative_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "language": {
+            "type": "string",
+            "minLength": 1
+          },
+          "framework": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "provenance": {
+            "type": "object",
+            "properties": {
+              "producer_node_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "run_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "logical_node_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "attempt_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "loop_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "model_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "model_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "agent_ref": {
+                "type": "string",
+                "minLength": 1
+              },
+              "workflow_run_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "workflow_task_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source_run_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "origin": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "strategy",
+          "node_id",
+          "attempt_index",
+          "source_manifest_path",
+          "source_artifact_path",
+          "source_relative_path",
+          "destination_path",
+          "destination_relative_path",
+          "bytes"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "support_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "strategy": {
+            "type": "string",
+            "minLength": 1
+          },
+          "node_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "source_manifest_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_artifact_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_relative_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "destination_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "destination_relative_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "language": {
+            "type": "string",
+            "minLength": 1
+          },
+          "framework": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "provenance": {
+            "type": "object",
+            "properties": {
+              "producer_node_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "run_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "logical_node_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "attempt_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "loop_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "model_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "model_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "agent_ref": {
+                "type": "string",
+                "minLength": 1
+              },
+              "workflow_run_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "workflow_task_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source_run_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "origin": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "strategy",
+          "node_id",
+          "attempt_index",
+          "source_manifest_path",
+          "source_artifact_path",
+          "source_relative_path",
+          "destination_path",
+          "destination_relative_path",
+          "bytes"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "skipped_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "strategy": {
+            "type": "string",
+            "minLength": 1
+          },
+          "node_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_manifest_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_relative_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "strategy",
+          "node_id",
+          "source_manifest_path",
+          "source_relative_path",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "source_generated_tests",
+    "copied_generated_tests",
+    "source_support_files",
+    "copied_support_files",
+    "files",
+    "support_files",
+    "skipped_files"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:aggregation-manifest:1",
+  "title": "Ultrafuzz generated-test aggregation manifest"
+}

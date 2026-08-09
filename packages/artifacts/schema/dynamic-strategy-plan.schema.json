@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.dynamic-strategy-plan.v1"
+    },
+    "dynamic_strategies_enumerator": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "selected",
+        "no-actionable-strategies",
+        "blocked"
+      ]
+    },
+    "selected_strategy_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "selected_strategies": {
+      "minItems": 0,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "rejected_strategies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "strategy_id",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "current_run_artifacts_considered": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "relevance": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "path",
+          "relevance"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "excluded_context": {
+      "type": "object",
+      "properties": {
+        "sibling_runs": {
+          "type": "string",
+          "const": "excluded"
+        },
+        "previous_reports": {
+          "type": "string",
+          "const": "excluded"
+        },
+        "host_global_paths": {
+          "type": "string",
+          "const": "excluded"
+        },
+        "network_resources": {
+          "type": "string",
+          "const": "excluded"
+        },
+        "extra_target_context": {
+          "type": "string",
+          "const": "excluded"
+        }
+      },
+      "required": [
+        "sibling_runs",
+        "previous_reports",
+        "host_global_paths",
+        "network_resources",
+        "extra_target_context"
+      ],
+      "additionalProperties": false
+    },
+    "timeout_seconds": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "finalization_reserve_seconds": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "dynamic_strategies_enumerator",
+    "status",
+    "selected_strategy_count",
+    "selected_strategies",
+    "rejected_strategies",
+    "current_run_artifacts_considered",
+    "excluded_context",
+    "timeout_seconds",
+    "finalization_reserve_seconds"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:dynamic-strategy-plan:1",
+  "title": "Ultrafuzz dynamic strategy plan"
+}

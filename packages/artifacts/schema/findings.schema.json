@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ultrafuzz:schema:artifacts:findings:2",
-  "title": "Ultrafuzz normalized findings array",
+  "title": "Ultrafuzz findings",
   "type": "array",
   "items": {
     "$ref": "urn:ultrafuzz:schema:artifacts:finding:2"

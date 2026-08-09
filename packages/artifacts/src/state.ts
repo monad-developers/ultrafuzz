@@ -5,7 +5,7 @@ import { redactSecretsInText } from "@ultrafuzz/security";
 import type { ArtifactContractId } from "./artifact-contracts.js";
 import { readJsonFile, validateSafeId, writeJsonDurable } from "./safe-paths.js";
 
-export const STATE_SCHEMA_VERSION = "1.1";
+export const STATE_SCHEMA_VERSION = "2.0";
 
 export const RUN_STATE_STATUSES = [
   "pending",

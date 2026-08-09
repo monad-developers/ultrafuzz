@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.dynamic-strategy-provenance.v1"
+    },
+    "current_run_artifacts": {
+      "minItems": 0,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "role": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "agent_id",
+          "label",
+          "role"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "backend": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "agent_id",
+          "model",
+          "backend"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "commands": {
+      "minItems": 0,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "generated_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "destination_intent": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "strategy_id",
+          "source_path",
+          "destination_intent"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "validation": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "minLength": 1
+          },
+          "command": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "failed",
+              "blocked",
+              "not-run"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "subject",
+          "command",
+          "status",
+          "summary"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "excluded_context": {
+      "type": "object",
+      "properties": {
+        "sibling_runs": {
+          "type": "string",
+          "const": "excluded"
+        },
+        "previous_reports": {
+          "type": "string",
+          "const": "excluded"
+        },
+        "host_global_paths": {
+          "type": "string",
+          "const": "excluded"
+        },
+        "network_resources": {
+          "type": "string",
+          "const": "excluded"
+        },
+        "extra_target_context": {
+          "type": "string",
+          "const": "excluded"
+        }
+      },
+      "required": [
+        "sibling_runs",
+        "previous_reports",
+        "host_global_paths",
+        "network_resources",
+        "extra_target_context"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "current_run_artifacts",
+    "agents",
+    "models",
+    "commands",
+    "generated_files",
+    "validation",
+    "excluded_context"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:dynamic-strategy-provenance:1",
+  "title": "Ultrafuzz dynamic strategy provenance"
+}

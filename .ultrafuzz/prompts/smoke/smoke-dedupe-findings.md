@@ -32,7 +32,7 @@ per retained root: `dedupe_key`, `finding_id`, `title`, and `hits`. Each hit
 records its strategy and any available attempt/model/loop provenance.
 
 Write `{{artifact_path}}/finding-lifecycle-ledger.json` as an object with
-`schema_version: "1.0"` and `records`. Each record includes `dedupe_key`,
+`schema_version: "ultrafuzz.finding-lifecycle-ledger.v1"` and `records`. Each record includes `dedupe_key`,
 `source_artifacts`, `strategy_hits`, and `stages` containing raw and deduped
 stages. Validate only JSON shape and required normalized-finding fields, then
 stop.

@@ -1,0 +1,276 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.admin-config-boundary-matrix.v1"
+    },
+    "surfaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "surface_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "module_family": {
+            "type": "string",
+            "minLength": 1
+          },
+          "contract_or_interface": {
+            "type": "string",
+            "minLength": 1
+          },
+          "documented_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "implementation_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "selector": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "authorization_model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "getter_or_reflection_path": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_evidence": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "selected_test_cases": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "classification": {
+            "type": "string",
+            "enum": [
+              "production-bug",
+              "implementation-drift",
+              "incomplete-spec",
+              "harness-defect",
+              "inconclusive"
+            ]
+          }
+        },
+        "required": [
+          "surface_id",
+          "module_family",
+          "contract_or_interface",
+          "documented_name",
+          "implementation_name",
+          "selector",
+          "authorization_model",
+          "getter_or_reflection_path",
+          "source_evidence",
+          "selected_test_cases",
+          "classification"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "selector_mismatches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "surface_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "documented_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "implementation_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "documented_selector": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "implementation_selector": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence_paths": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "classification": {
+            "type": "string",
+            "enum": [
+              "implementation-drift",
+              "incomplete-spec"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "surface_id",
+          "documented_name",
+          "implementation_name",
+          "documented_selector",
+          "implementation_selector",
+          "evidence_paths",
+          "classification",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "ambiguous_or_incomplete_specs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "surface_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "classification": {
+            "type": "string",
+            "enum": [
+              "implementation-drift",
+              "incomplete-spec"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_paths": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "surface_id",
+          "classification",
+          "reason",
+          "evidence_paths"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "generated_tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "checks": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "path",
+          "checks"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "coverage_notes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "surface_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "surface_id",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "surfaces",
+    "selector_mismatches",
+    "ambiguous_or_incomplete_specs",
+    "generated_tests",
+    "coverage_notes"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:admin-config-boundary-matrix:1",
+  "title": "Ultrafuzz admin and configuration boundary matrix"
+}

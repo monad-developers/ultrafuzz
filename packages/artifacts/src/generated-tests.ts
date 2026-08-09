@@ -18,7 +18,7 @@ import {
 } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
-export const GENERATED_TESTS_SCHEMA_VERSION = "1.0";
+export const GENERATED_TESTS_SCHEMA_VERSION = "ultrafuzz.generated-tests.v2" as const;
 export const GENERATED_TESTS_DIR = "generated-tests";
 export const GENERATED_TESTS_MANIFEST = "generated-tests.json";
 export const GENERATED_TESTS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:generated-tests:2" as const;
@@ -45,7 +45,7 @@ export interface GeneratedTestEntry {
 }
 
 export interface GeneratedTestManifest {
-  schema_version: string;
+  schema_version: typeof GENERATED_TESTS_SCHEMA_VERSION;
   run_id: string;
   node_id: string;
   generated_tests: GeneratedTestEntry[];
@@ -56,7 +56,7 @@ const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
 const generatedTestManifestPathPattern = new RegExp(GENERATED_TEST_MANIFEST_PATH_PATTERN, "u");
 
-const artifactProvenanceSchema = z.looseObject({
+export const generatedTestProvenanceSchema = z.strictObject({
   producer_node_id: nonEmptyString.optional(),
   run_id: nonEmptyString.optional(),
   logical_node_id: nonEmptyString.optional(),
@@ -69,104 +69,38 @@ const artifactProvenanceSchema = z.looseObject({
   workflow_run_id: nonEmptyString.optional(),
   workflow_task_id: nonEmptyString.optional(),
   source_run_id: nonEmptyString.optional(),
-  origin: nonEmptyString.optional(),
-  metadata: z.record(z.string(), z.unknown()).optional()
+  origin: nonEmptyString.optional()
 });
 
 const generatedTestPathSchema = nonEmptyString.refine((value) => isSafeGeneratedTestManifestPath(value), {
   message: `path must use the ${GENERATED_TESTS_DIR}/<file> prefix and stay inside that directory`
 });
 
-export const generatedTestEntrySchema = z.looseObject({
+export const generatedTestEntrySchema = z.strictObject({
   path: generatedTestPathSchema,
   size_bytes: nonNegativeInteger.optional(),
   sha256: z
     .string()
     .regex(/^[a-f0-9]{64}$/u)
     .optional(),
-  provenance: artifactProvenanceSchema.optional(),
+  provenance: generatedTestProvenanceSchema.optional(),
   language: nonEmptyString.optional(),
   framework: nonEmptyString.optional(),
   description: nonEmptyString.optional()
 });
 
-export const generatedTestManifestSchema = z.looseObject({
+export const generatedTestManifestSchema = z.strictObject({
   schema_version: z.literal(GENERATED_TESTS_SCHEMA_VERSION),
   run_id: nonEmptyString,
   node_id: nonEmptyString,
   generated_tests: z.array(generatedTestEntrySchema),
-  provenance: artifactProvenanceSchema.optional()
+  provenance: generatedTestProvenanceSchema.optional()
+}).meta({
+  $id: GENERATED_TESTS_JSON_SCHEMA_ID,
+  title: "Ultrafuzz generated tests manifest"
 });
 
-export const generatedTestsJsonSchema = {
-  $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: GENERATED_TESTS_JSON_SCHEMA_ID,
-  title: "Ultrafuzz generated tests manifest",
-  type: "object",
-  required: ["schema_version", "run_id", "node_id", "generated_tests"],
-  additionalProperties: true,
-  properties: {
-    schema_version: { const: GENERATED_TESTS_SCHEMA_VERSION },
-    run_id: { type: "string", minLength: 1 },
-    node_id: { type: "string", minLength: 1 },
-    generated_tests: {
-      type: "array",
-      items: {
-        type: "object",
-        required: ["path"],
-        additionalProperties: true,
-        properties: {
-          path: { type: "string", pattern: GENERATED_TEST_MANIFEST_PATH_PATTERN },
-          size_bytes: { type: "integer", minimum: 0 },
-          sha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
-          provenance: {
-            type: "object",
-            additionalProperties: true,
-            properties: {
-              producer_node_id: { type: "string", minLength: 1 },
-              run_id: { type: "string", minLength: 1 },
-              logical_node_id: { type: "string", minLength: 1 },
-              attempt_index: { type: "integer", minimum: 0 },
-              loop_index: { type: "integer", minimum: 0 },
-              model_id: { type: "string", minLength: 1 },
-              model: { type: "string", minLength: 1 },
-              model_index: { type: "integer", minimum: 0 },
-              agent_ref: { type: "string", minLength: 1 },
-              workflow_run_id: { type: "string", minLength: 1 },
-              workflow_task_id: { type: "string", minLength: 1 },
-              source_run_id: { type: "string", minLength: 1 },
-              origin: { type: "string", minLength: 1 },
-              metadata: { type: "object", additionalProperties: true }
-            }
-          },
-          language: { type: "string", minLength: 1 },
-          framework: { type: "string", minLength: 1 },
-          description: { type: "string", minLength: 1 }
-        }
-      }
-    },
-    provenance: {
-      type: "object",
-      additionalProperties: true,
-      properties: {
-        producer_node_id: { type: "string", minLength: 1 },
-        run_id: { type: "string", minLength: 1 },
-        logical_node_id: { type: "string", minLength: 1 },
-        attempt_index: { type: "integer", minimum: 0 },
-        loop_index: { type: "integer", minimum: 0 },
-        model_id: { type: "string", minLength: 1 },
-        model: { type: "string", minLength: 1 },
-        model_index: { type: "integer", minimum: 0 },
-        agent_ref: { type: "string", minLength: 1 },
-        workflow_run_id: { type: "string", minLength: 1 },
-        workflow_task_id: { type: "string", minLength: 1 },
-        source_run_id: { type: "string", minLength: 1 },
-        origin: { type: "string", minLength: 1 },
-        metadata: { type: "object", additionalProperties: true }
-      }
-    }
-  }
-} as const;
+export const generatedTestsJsonSchema = z.toJSONSchema(generatedTestManifestSchema);
 
 export function validateGeneratedTestManifestSchema(
   value: unknown,

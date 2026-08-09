@@ -54,7 +54,7 @@ source row, preserve:
   absent.
 
 When a pinned-reference node declares a catalog with
-`ultrafuzz/reference-expectations@1`, read its declared artifact and validate it
+`ultrafuzz/reference-expectations@2`, read its declared artifact and validate it
 with `{{schema_path}}/reference-expectations.schema.json`.
 
 When several source rows describe one equivalent property, emit one canonical

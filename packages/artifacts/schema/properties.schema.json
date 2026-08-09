@@ -1,20 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:artifacts:properties:1",
-  "title": "Ultrafuzz canonical property catalog",
   "type": "object",
-  "required": ["schema_version", "properties"],
-  "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "ultrafuzz.properties.v1"
+      "type": "string",
+      "const": "ultrafuzz.properties.v2"
     },
     "properties": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "description", "category", "priority", "sources"],
-        "additionalProperties": true,
         "properties": {
           "id": {
             "type": "string",
@@ -29,24 +24,26 @@
             "minLength": 1
           },
           "priority": {
-            "enum": ["high", "medium", "low"]
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
           },
           "reference_expectations": {
             "type": "array",
-            "uniqueItems": true,
             "items": {
               "type": "string",
               "minLength": 1
-            }
+            },
+            "uniqueItems": true
           },
           "sources": {
-            "type": "array",
             "minItems": 1,
-            "uniqueItems": true,
+            "type": "array",
             "items": {
               "type": "object",
-              "required": ["source_node_id", "source_property_id"],
-              "additionalProperties": false,
               "properties": {
                 "source_node_id": {
                   "type": "string",
@@ -56,21 +53,40 @@
                   "type": "string",
                   "minLength": 1
                 }
-              }
+              },
+              "required": [
+                "source_node_id",
+                "source_property_id"
+              ],
+              "additionalProperties": false
             }
           },
           "ledger_ids": {
-            "type": "array",
             "minItems": 1,
-            "uniqueItems": true,
+            "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1,
               "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
-            }
+            },
+            "uniqueItems": true
           }
-        }
+        },
+        "required": [
+          "id",
+          "description",
+          "category",
+          "priority",
+          "sources"
+        ],
+        "additionalProperties": false
       }
     }
-  }
+  },
+  "required": [
+    "schema_version",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:properties:2",
+  "title": "Ultrafuzz canonical property catalog"
 }

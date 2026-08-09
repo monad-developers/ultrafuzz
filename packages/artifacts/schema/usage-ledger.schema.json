@@ -18,7 +18,9 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "1.0" },
+    "schema_version": {
+      "const": "1.0"
+    },
     "event_id": {
       "type": "string",
       "minLength": 1,
@@ -55,32 +57,70 @@
       "maxLength": 512,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
     },
-    "observed_at": { "type": "string", "format": "date-time" },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
     "usage": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "input_tokens": { "type": "number", "minimum": 0 },
-        "output_tokens": { "type": "number", "minimum": 0 },
-        "cache_read_tokens": { "type": "number", "minimum": 0 },
-        "cache_write_tokens": { "type": "number", "minimum": 0 },
-        "reasoning_tokens": { "type": "number", "minimum": 0 },
-        "total_tokens": { "type": "number", "minimum": 0 },
-        "cost_usd": { "type": "number", "minimum": 0 },
-        "model": { "type": "string", "minLength": 1 },
-        "agent": { "type": "string", "minLength": 1 }
+        "input_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_read_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "reasoning_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "total_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cost_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agent": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
-    "usage_complete": { "type": "boolean" },
+    "usage_complete": {
+      "type": "boolean"
+    },
     "usage_incomplete_reasons": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["code"],
+        "required": [
+          "code"
+        ],
         "additionalProperties": false,
         "properties": {
           "code": {
-            "enum": ["usage-missing", "usage-malformed", "attempt-identity-missing"]
+            "enum": [
+              "usage-missing",
+              "usage-malformed",
+              "attempt-identity-missing"
+            ]
           },
           "field": {
             "enum": [
@@ -99,35 +139,87 @@
   "allOf": [
     {
       "if": {
-        "properties": { "usage_complete": { "const": true } },
-        "required": ["usage_complete"]
+        "properties": {
+          "usage_complete": {
+            "const": true
+          }
+        },
+        "required": [
+          "usage_complete"
+        ]
       },
       "then": {
         "properties": {
           "usage": {
             "anyOf": [
-              { "type": "object", "required": ["input_tokens"], "properties": { "input_tokens": {} } },
-              { "type": "object", "required": ["output_tokens"], "properties": { "output_tokens": {} } },
               {
                 "type": "object",
-                "required": ["cache_read_tokens"],
-                "properties": { "cache_read_tokens": {} }
+                "required": [
+                  "input_tokens"
+                ],
+                "properties": {
+                  "input_tokens": {}
+                }
               },
               {
                 "type": "object",
-                "required": ["cache_write_tokens"],
-                "properties": { "cache_write_tokens": {} }
+                "required": [
+                  "output_tokens"
+                ],
+                "properties": {
+                  "output_tokens": {}
+                }
               },
-              { "type": "object", "required": ["reasoning_tokens"], "properties": { "reasoning_tokens": {} } },
-              { "type": "object", "required": ["total_tokens"], "properties": { "total_tokens": {} } }
+              {
+                "type": "object",
+                "required": [
+                  "cache_read_tokens"
+                ],
+                "properties": {
+                  "cache_read_tokens": {}
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "cache_write_tokens"
+                ],
+                "properties": {
+                  "cache_write_tokens": {}
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "reasoning_tokens"
+                ],
+                "properties": {
+                  "reasoning_tokens": {}
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "total_tokens"
+                ],
+                "properties": {
+                  "total_tokens": {}
+                }
+              }
             ]
           },
-          "usage_incomplete_reasons": { "type": "array", "maxItems": 0 }
+          "usage_incomplete_reasons": {
+            "type": "array",
+            "maxItems": 0
+          }
         }
       },
       "else": {
         "properties": {
-          "usage_incomplete_reasons": { "type": "array", "minItems": 1 }
+          "usage_incomplete_reasons": {
+            "type": "array",
+            "minItems": 1
+          }
         }
       }
     }

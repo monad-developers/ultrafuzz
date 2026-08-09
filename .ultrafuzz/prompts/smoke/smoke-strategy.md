@@ -40,7 +40,8 @@ Write at most the strongest few normalized findings to
 `{{output_findings_path}}`. Every entry must include a stable `id`, `title`,
 `status`, `severity_guess`, `confidence`, `summary`,
 `source_node_id: "{{strategy}}"`, `strategy: "{{strategy}}"`, affected source
-paths/functions, and concrete evidence. `schema_version` is optional. Write `confidence` as one of the
+paths/functions, and concrete evidence. Set `schema_version` to exactly
+`"ultrafuzz.finding.v2"`. Write `confidence` as one of the
 strings `high`, `medium`, or `low`. Use `[]` only when no finding is
 supportable; never fabricate a CI canary.
 

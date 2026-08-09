@@ -58,7 +58,7 @@ Write {{artifact_path}}/audited-differential-lanes.json with this JSON shape:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "ultrafuzz.audited-differential-lanes.v1",
   "auditor_attempt_index": {{attempt_index}},
   "source_plan_artifacts": [],
   "source_harness_artifacts": [],

@@ -136,7 +136,7 @@ repository test root when it uses `test/` instead.
 
 ```json
 {
-  "schema_version": "ultrafuzz.implemented-properties.v1",
+  "schema_version": "ultrafuzz.implemented-properties.v3",
   "selection": {
     "priority_threshold": "{{invariant_property_priority_threshold}}",
     "priorities": ["high"],

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:artifacts:agent-source-proof:1",
+  "title": "Ultrafuzz agent source proof",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "attempt_id",
+    "commit",
+    "tree",
+    "base_ref",
+    "refs",
+    "remotes",
+    "revision_count",
+    "commit_object_count"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.agent-source-proof.v1"
+    },
+    "attempt_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "tree": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "base_ref": {
+      "const": "refs/heads/ultrafuzz-pinned"
+    },
+    "refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "object"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^refs/heads/ultrafuzz(?:-[A-Za-z0-9._-]+)?$"
+          },
+          "object": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          }
+        }
+      }
+    },
+    "remotes": {
+      "type": "array",
+      "maxItems": 0,
+      "items": {
+        "type": "string"
+      }
+    },
+    "revision_count": {
+      "const": 1
+    },
+    "commit_object_count": {
+      "const": 1
+    }
+  }
+}

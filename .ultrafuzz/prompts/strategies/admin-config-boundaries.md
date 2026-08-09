@@ -132,19 +132,19 @@ Write structured JSON to:
 
 The JSON must include:
 
-- `schema_version`: `"1.0"`
-- `surfaces`: array of enumerated surfaces with module family, contract or
-  interface, documented name, implementation name, selector, authorization
-  model, getter or reflection path, source evidence, selected test cases, and
-  classification
-- `selector_mismatches`: array of documented/interface/implementation selector
-  or name mismatches, or `[]`
-- `ambiguous_or_incomplete_specs`: array of rows classified as
-  `incomplete-spec` or `implementation-drift`, or `[]`
-- `generated_tests`: array of generated test file paths and the checks each
-  file covers
-- `coverage_notes`: remaining admin/config surfaces that were intentionally
-  skipped, with reasons
+- `schema_version`: `"ultrafuzz.admin-config-boundary-matrix.v1"`
+- `surfaces`: rows with exact keys `surface_id`, `module_family`,
+  `contract_or_interface`, `documented_name`, `implementation_name`, `selector`
+  (string or `null`), `authorization_model`, `getter_or_reflection_path` (string
+  or `null`), `source_evidence`, `selected_test_cases`, and `classification`
+- `selector_mismatches`: rows with `surface_id`, `documented_name`,
+  `implementation_name`, nullable `documented_selector` and
+  `implementation_selector`, `evidence_paths`, `classification`, and `reason`,
+  or `[]`
+- `ambiguous_or_incomplete_specs`: rows with `surface_id`, `classification`,
+  `reason`, and `evidence_paths`, or `[]`
+- `generated_tests`: rows with `path` and non-empty `checks`
+- `coverage_notes`: rows with `surface_id` and `reason`
 
 Write structured findings to {{output_findings_path}}. Use an empty JSON array
 if no finding is confirmed.

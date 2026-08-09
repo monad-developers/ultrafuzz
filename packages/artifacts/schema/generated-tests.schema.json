@@ -1,13 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:artifacts:generated-tests:2",
-  "title": "Ultrafuzz generated tests manifest",
   "type": "object",
-  "required": ["schema_version", "run_id", "node_id", "generated_tests"],
-  "additionalProperties": true,
   "properties": {
     "schema_version": {
-      "const": "1.0"
+      "type": "string",
+      "const": "ultrafuzz.generated-tests.v2"
     },
     "run_id": {
       "type": "string",
@@ -21,16 +18,15 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["path"],
-        "additionalProperties": true,
         "properties": {
           "path": {
             "type": "string",
-            "pattern": "^generated-tests/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127})*(?![\\s\\S])"
+            "minLength": 1
           },
           "size_bytes": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "maximum": 9007199254740991
           },
           "sha256": {
             "type": "string",
@@ -38,7 +34,6 @@
           },
           "provenance": {
             "type": "object",
-            "additionalProperties": true,
             "properties": {
               "producer_node_id": {
                 "type": "string",
@@ -54,11 +49,13 @@
               },
               "attempt_index": {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 9007199254740991
               },
               "loop_index": {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 9007199254740991
               },
               "model_id": {
                 "type": "string",
@@ -70,7 +67,8 @@
               },
               "model_index": {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 9007199254740991
               },
               "agent_ref": {
                 "type": "string",
@@ -91,12 +89,9 @@
               "origin": {
                 "type": "string",
                 "minLength": 1
-              },
-              "metadata": {
-                "type": "object",
-                "additionalProperties": true
               }
-            }
+            },
+            "additionalProperties": false
           },
           "language": {
             "type": "string",
@@ -110,12 +105,15 @@
             "type": "string",
             "minLength": 1
           }
-        }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
       }
     },
     "provenance": {
       "type": "object",
-      "additionalProperties": true,
       "properties": {
         "producer_node_id": {
           "type": "string",
@@ -131,11 +129,13 @@
         },
         "attempt_index": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "loop_index": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "model_id": {
           "type": "string",
@@ -147,7 +147,8 @@
         },
         "model_index": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "agent_ref": {
           "type": "string",
@@ -168,12 +169,18 @@
         "origin": {
           "type": "string",
           "minLength": 1
-        },
-        "metadata": {
-          "type": "object",
-          "additionalProperties": true
         }
-      }
+      },
+      "additionalProperties": false
     }
-  }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "node_id",
+    "generated_tests"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:generated-tests:2",
+  "title": "Ultrafuzz generated tests manifest"
 }

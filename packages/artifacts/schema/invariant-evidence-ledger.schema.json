@@ -4,19 +4,43 @@
   "title": "Ultrafuzz invariant evidence ledger",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "entries", "inventory_rows", "scan_probes"],
+  "required": [
+    "schema_version",
+    "entries",
+    "inventory_rows",
+    "scan_probes"
+  ],
   "properties": {
-    "schema_version": { "const": "ultrafuzz.invariant-evidence-ledger.v1" },
+    "schema_version": {
+      "const": "ultrafuzz.invariant-evidence-ledger.v1"
+    },
     "entries": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "source_path", "source_location", "kind", "verbatim", "inventory_ids"],
+        "required": [
+          "id",
+          "source_path",
+          "source_location",
+          "kind",
+          "verbatim",
+          "inventory_ids"
+        ],
         "properties": {
-          "id": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
-          "source_path": { "type": "string", "minLength": 1 },
-          "source_location": { "type": "string", "minLength": 1 },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+          },
+          "source_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_location": {
+            "type": "string",
+            "minLength": 1
+          },
           "kind": {
             "enum": [
               "invariant",
@@ -39,7 +63,11 @@
             "type": "array",
             "minItems": 1,
             "uniqueItems": true,
-            "items": { "type": "string", "minLength": 1, "pattern": "^inventory-[A-Za-z0-9._-]+$" }
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^inventory-[A-Za-z0-9._-]+$"
+            }
           }
         }
       }
@@ -49,15 +77,30 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "description", "ledger_ids"],
+        "required": [
+          "id",
+          "description",
+          "ledger_ids"
+        ],
         "properties": {
-          "id": { "type": "string", "minLength": 1, "pattern": "^inventory-[A-Za-z0-9._-]+$" },
-          "description": { "type": "string", "minLength": 1 },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^inventory-[A-Za-z0-9._-]+$"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
           "ledger_ids": {
             "type": "array",
             "minItems": 1,
             "uniqueItems": true,
-            "items": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" }
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+            }
           }
         }
       }
@@ -72,34 +115,83 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "source_path", "query", "result"],
+        "required": [
+          "id",
+          "source_path",
+          "query",
+          "result"
+        ],
         "properties": {
-          "id": { "type": "string", "minLength": 1, "pattern": "^probe-[A-Za-z0-9._-]+$" },
-          "source_path": { "type": "string", "minLength": 1 },
-          "query": { "type": "string", "minLength": 1 },
-          "result": { "type": "string", "minLength": 1 }
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^probe-[A-Za-z0-9._-]+$"
+          },
+          "source_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1
+          },
+          "result": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     }
   },
   "allOf": [
     {
-      "if": { "properties": { "entries": { "type": "array", "minItems": 1 } } },
+      "if": {
+        "properties": {
+          "entries": {
+            "type": "array",
+            "minItems": 1
+          }
+        }
+      },
       "then": {
         "not": {
-          "required": ["no_invariants_justification"],
-          "properties": { "no_invariants_justification": {} }
+          "required": [
+            "no_invariants_justification"
+          ],
+          "properties": {
+            "no_invariants_justification": {}
+          }
         },
-        "properties": { "inventory_rows": { "type": "array", "minItems": 1 } }
+        "properties": {
+          "inventory_rows": {
+            "type": "array",
+            "minItems": 1
+          }
+        }
       }
     },
     {
-      "if": { "properties": { "entries": { "type": "array", "maxItems": 0 } } },
-      "then": {
-        "required": ["no_invariants_justification"],
+      "if": {
         "properties": {
-          "inventory_rows": { "type": "array", "maxItems": 0 },
-          "scan_probes": { "type": "array", "minItems": 1 }
+          "entries": {
+            "type": "array",
+            "maxItems": 0
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "no_invariants_justification"
+        ],
+        "properties": {
+          "inventory_rows": {
+            "type": "array",
+            "maxItems": 0
+          },
+          "scan_probes": {
+            "type": "array",
+            "minItems": 1
+          }
         }
       }
     }

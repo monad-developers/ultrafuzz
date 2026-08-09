@@ -62,10 +62,13 @@ Write structured JSON to:
 
 {{artifact_dir}}/boundary-recipes.json
 
-The JSON should include `schema_version`, `recipes`, `deferred_or_spec_gated`,
-and `coverage_priorities`. Each recipe should name the workflow, public support,
-setup, action sequence, oracle, negative/boundary values, expected classification
-if red, and preferred downstream lane.
+Set `schema_version` to `"ultrafuzz.boundary-recipes.v1"` and include `recipes`,
+`deferred_or_spec_gated`, and `coverage_priorities`. Each recipe uses exact keys
+`id`, `title`, `path`, `workflow`, `public_support`, `setup`, `action_sequence`,
+`oracle`, `boundary_values`, `expected_classification_if_red`, and
+`preferred_downstream_lane`; `finding_ids`, `property_ids`, and `summary` are
+optional. Deferred rows use `id`, `reason`, and `evidence_paths`; priority rows
+use `workflow`, `priority`, and `rationale`.
 
 Validate JSON with one direct Bash call when needed. Do not use command
 substitution, pipes, or chained shell commands for post-write validation.

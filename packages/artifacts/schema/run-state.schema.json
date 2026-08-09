@@ -18,14 +18,22 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "1.1"
+      "const": "2.0"
     },
     "run_id": {
       "type": "string",
       "minLength": 1
     },
     "status": {
-      "enum": ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled"]
+      "enum": [
+        "pending",
+        "running",
+        "paused",
+        "succeeded",
+        "failed",
+        "timed-out",
+        "canceled"
+      ]
     },
     "graph_fingerprint": {
       "type": "string"
@@ -59,11 +67,21 @@
     },
     "controller_lease": {
       "type": "object",
-      "required": ["status", "duration_ms", "renewed_at", "expires_at", "recovery_attempts"],
+      "required": [
+        "status",
+        "duration_ms",
+        "renewed_at",
+        "expires_at",
+        "recovery_attempts"
+      ],
       "additionalProperties": false,
       "properties": {
         "status": {
-          "enum": ["active", "expired", "recovering"]
+          "enum": [
+            "active",
+            "expired",
+            "recovering"
+          ]
         },
         "duration_ms": {
           "type": "integer",
@@ -138,21 +156,39 @@
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": ["node_id", "status", "retry_count", "timed_out"],
+        "required": [
+          "node_id",
+          "status",
+          "retry_count",
+          "timed_out"
+        ],
         "allOf": [
           {
             "if": {
               "properties": {
                 "status": {
                   "not": {
-                    "enum": ["succeeded", "failed", "skipped", "timed-out", "reused-from-prior-run", "invalidated"]
+                    "enum": [
+                      "succeeded",
+                      "failed",
+                      "skipped",
+                      "timed-out",
+                      "reused-from-prior-run",
+                      "invalidated"
+                    ]
                   }
                 }
               },
-              "required": ["status"]
+              "required": [
+                "status"
+              ]
             },
             "then": {
-              "required": ["wait_since", "wait_reason", "next_eligible_action"],
+              "required": [
+                "wait_since",
+                "wait_reason",
+                "next_eligible_action"
+              ],
               "properties": {
                 "wait_since": {},
                 "wait_reason": {},
@@ -200,7 +236,12 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["path", "contract", "contract_digest", "primary"],
+              "required": [
+                "path",
+                "contract",
+                "contract_digest",
+                "primary"
+              ],
               "additionalProperties": false,
               "properties": {
                 "path": {
@@ -209,21 +250,44 @@
                 },
                 "contract": {
                   "enum": [
-                    "ultrafuzz/campaign-summary@1",
-                    "ultrafuzz/findings@1",
-                    "ultrafuzz/generated-tests@1",
-                    "ultrafuzz/implemented-properties@1",
-                    "ultrafuzz/implemented-properties@2",
+                    "ultrafuzz/admin-config-boundary-matrix@1",
+                    "ultrafuzz/aggregation-manifest@1",
+                    "ultrafuzz/audited-differential-lanes@1",
+                    "ultrafuzz/boundary-recipes@1",
+                    "ultrafuzz/campaign-summary@2",
+                    "ultrafuzz/coverage-goal@1",
+                    "ultrafuzz/dependency-scope-matrix@1",
+                    "ultrafuzz/differential-gap-review@1",
+                    "ultrafuzz/differential-lane-result@1",
+                    "ultrafuzz/differential-plan@1",
+                    "ultrafuzz/differential-red-triage@1",
+                    "ultrafuzz/differential-repair-summary@1",
+                    "ultrafuzz/differential-report-review@1",
+                    "ultrafuzz/dynamic-enumerator-outputs@1",
+                    "ultrafuzz/dynamic-strategy-plan@1",
+                    "ultrafuzz/dynamic-strategy-provenance@1",
+                    "ultrafuzz/externalized-state-accounting@1",
+                    "ultrafuzz/finding-lifecycle-ledger@1",
+                    "ultrafuzz/findings@2",
+                    "ultrafuzz/generated-tests@2",
+                    "ultrafuzz/harness-repairs@1",
+                    "ultrafuzz/implemented-properties@3",
+                    "ultrafuzz/invariant-campaign-plan@1",
                     "ultrafuzz/invariant-ledger@1",
-                    "ultrafuzz/json-array@1",
-                    "ultrafuzz/json-object@1",
                     "ultrafuzz/nonempty-markdown@1",
-                    "ultrafuzz/property-lens@1",
-                    "ultrafuzz/reference-expectations@1",
-                    "ultrafuzz/properties@1",
-                    "ultrafuzz/property-campaign@1",
-                    "ultrafuzz/report@1",
+                    "ultrafuzz/properties@2",
+                    "ultrafuzz/property-campaign@2",
+                    "ultrafuzz/property-lens@2",
+                    "ultrafuzz/reference-expectations@2",
+                    "ultrafuzz/reference-harness@1",
+                    "ultrafuzz/reference-manifest@1",
+                    "ultrafuzz/report@2",
+                    "ultrafuzz/selected-strategies@1",
+                    "ultrafuzz/semantic-red-registry@1",
+                    "ultrafuzz/severity-classified-findings@1",
+                    "ultrafuzz/strategy-detections@1",
                     "ultrafuzz/text@1",
+                    "ultrafuzz/triaged-findings@1",
                     "ultrafuzz/workspace-patch@1"
                   ]
                 },

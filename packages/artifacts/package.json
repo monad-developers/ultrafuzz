@@ -18,6 +18,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "schema:check": "pnpm build && node scripts/verify-schema-snapshots.mjs",
     "test": "pnpm --filter @ultrafuzz/security build && sh -c 'rm -rf dist-test && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js' --",
     "typecheck": "pnpm --filter @ultrafuzz/security build && tsc -p tsconfig.json --noEmit"
   },

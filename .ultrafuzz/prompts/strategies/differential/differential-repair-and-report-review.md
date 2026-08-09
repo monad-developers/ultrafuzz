@@ -47,7 +47,7 @@ Write {{artifact_path}}/repair-summary.json with this JSON shape:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "ultrafuzz.differential-repair-summary.v1",
   "repairs_attempted": [],
   "repaired_failures": [],
   "preserved_production_or_unknown_reds": [],
@@ -61,7 +61,7 @@ Write {{artifact_path}}/gap-review.json with this JSON shape:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "ultrafuzz.differential-gap-review.v1",
   "ready_lanes": [],
   "lane_results_seen": [],
   "missing_lane_work_orders": [],
@@ -75,7 +75,7 @@ Write {{artifact_path}}/differential-report-review.json with this JSON shape:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "ultrafuzz.differential-report-review.v1",
   "campaign_status": "complete | incomplete | blocked_by_preserved_reds",
   "production_bug_reds": [],
   "harness_or_reference_repairs": [],

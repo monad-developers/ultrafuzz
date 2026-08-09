@@ -170,7 +170,7 @@ per small group of files, with no pipes or command chaining.
 
 Save the aggregation manifest to {{artifact_path}}/aggregation.json as JSON with this shape:
 
-- `schema_version`: `"1.0"`
+- `schema_version`: `"ultrafuzz.aggregation-manifest.v1"`
 - `source_generated_tests`: total number of manifest `generated_tests` entries considered
 - `copied_generated_tests`: number of framework-native test files copied into the workspace
 - `source_support_files`: total number of manifest `support_files` entries considered, or `0`

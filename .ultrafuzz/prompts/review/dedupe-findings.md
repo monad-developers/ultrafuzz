@@ -7,17 +7,9 @@ display_name: Dedupe findings
 
 Your job is to collapse duplicate findings that describe the same root behavior while preserving enough metadata to audit what was removed.
 
-Restart handling: if {{artifact_path}}/deduped-findings.json,
-{{artifact_path}}/findings.json, {{artifact_path}}/strategy-detections.json,
-and {{artifact_path}}/duplicates.json already exist, first validate their
-required JSON shapes (`deduped-findings.json`, `findings.json`, and
-`strategy-detections.json` are arrays; `duplicates.json` is an object or array).
-If those shapes are valid and the files do not clearly contradict the required
-schema, treat them as the materialized dedupe result for this node, refresh only
-missing required files, and finish. Do not rebuild the dedupe from scratch,
-rerun native tests, edit generated tests, or perform optional post-write validation
-unless one of those files is missing, invalid, or clearly contradicts the
-required schema.
+The declared outputs are `deduped-findings.json`, `strategy-detections.json`,
+and `finding-lifecycle-ledger.json`. Do not write prompt-only `findings.json`,
+`duplicates.json`, or alternate compatibility handoffs.
 
 Read the project-discovery and base-test handoffs before validation so the
 repository's checked-in test framework and native test root determine the
@@ -123,12 +115,10 @@ shape, or symptom. A concrete terminal-state failure should stay scoped to the
 proven terminal condition unless the artifacts prove the same root cause across
 the broader state space.
 
-Save the full deduplicated finding array, including candidates that may later
-triage as non-production outcomes, to {{artifact_path}}/deduped-findings.json.
-Also save the same array to {{artifact_path}}/findings.json when a generic
-findings handoff is useful. Save duplicate and family audit details to a
-separate {{artifact_path}}/duplicates.json object or array; do not replace
-`deduped-findings.json` with an audit object.
+Save the full deduplicated canonical finding v2 array, including candidates that
+may later triage as non-production outcomes, only to
+{{artifact_path}}/deduped-findings.json. Carry duplicate and family details in
+the canonical finding fields and lifecycle ledger.
 
 Do not discard unique symptoms merely because they come from the same strategy.
 Do not hide failing tests. Dedupe is only for equivalent findings or proven
@@ -166,7 +156,7 @@ Count each strategy loop attempt only once for the same deduped bug. Do not
 rename this metric Temperature.
 
 Also save {{artifact_path}}/finding-lifecycle-ledger.json. It must be a JSON
-object with `schema_version: "1.0"` and a `records` array keyed by
+object with `schema_version: "ultrafuzz.finding-lifecycle-ledger.v1"` and a `records` array keyed by
 `dedupe_key`. For each deduped root/family, record:
 
 - `source_artifacts`: every raw finding artifact that contributed to the kept

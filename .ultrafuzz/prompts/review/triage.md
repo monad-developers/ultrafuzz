@@ -156,9 +156,10 @@ Reachability fixture examples:
 Do not remove findings during triage. Preserve the upstream finding fields and
 add or update `triage_classification` with the consensus value. Keep concise
 notes that summarize the votes, decisive evidence, and recommended next action.
+Every item retains `schema_version: "ultrafuzz.finding.v2"`.
 Every triaged finding must include a machine-readable `triage_reason=<reason>`
-or `classification_reason=<reason>` note. If triage demotes a previously
-production-looking record to a non-production class, also include
+or `classification_reason=<reason>` note. For every classification other than
+`true-positive`, also include
 `demotion_reason=<reason>`.
 When a finding is classified as `false-positive`, set `status` to
 `false-positive`; otherwise leave the status visible for downstream review unless
@@ -179,7 +180,7 @@ array. Every object must include `triage_classification` set to exactly one of
 the classification values above.
 
 Also save {{artifact_path}}/finding-lifecycle-ledger.json by copying the input
-ledger and updating the matching `dedupe_key` record for every triaged finding:
+ledger with `schema_version: "ultrafuzz.finding-lifecycle-ledger.v1"` and updating the matching `dedupe_key` record for every triaged finding:
 set `triage_classification`, preserve or add `triage_reason`, preserve or add
 `demotion_reason` when present, and append a `triaged` stage that points to
 {{artifact_path}}/triaged-findings.json. Do not match lifecycle records by

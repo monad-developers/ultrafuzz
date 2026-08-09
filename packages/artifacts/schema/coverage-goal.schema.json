@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.coverage-goal.v1"
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "type": "string",
+          "const": "standardized-core-line-coverage-percent"
+        },
+        "value": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "metric",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "current_measurement": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "current_status": {
+      "type": "string",
+      "enum": [
+        "not-run",
+        "in-progress",
+        "target-met",
+        "below-target",
+        "blocked"
+      ]
+    },
+    "planned_commands": {
+      "minItems": 0,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "stop_conditions": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "finalization_reserve_seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": [
+              "coverage-tooling-blocked",
+              "production-source-attribution-blocked",
+              "harness-build-blocked",
+              "dependency-blocked",
+              "time-budget-exhausted",
+              "no-reachable-target"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_paths": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "category",
+          "summary",
+          "evidence_paths"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "target",
+    "current_measurement",
+    "current_status",
+    "planned_commands",
+    "stop_conditions",
+    "timeout_seconds",
+    "finalization_reserve_seconds",
+    "blockers"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:coverage-goal:1",
+  "title": "Ultrafuzz invariant coverage goal"
+}

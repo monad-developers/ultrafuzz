@@ -7,13 +7,18 @@ import {
   type SchemaValidationResult
 } from "./schema-validation.js";
 
-export const PROPERTIES_SCHEMA_VERSION = "ultrafuzz.properties.v1" as const;
-export const PROPERTY_LENS_SCHEMA_VERSION = "ultrafuzz.property-lens.v1" as const;
-export const IMPLEMENTED_PROPERTIES_SCHEMA_VERSION = "ultrafuzz.implemented-properties.v1" as const;
-export const PROPERTY_CAMPAIGN_SCHEMA_VERSION = "ultrafuzz.property-campaign.v1" as const;
-export const REFERENCE_EXPECTATIONS_SCHEMA_VERSION = "ultrafuzz.reference-expectations.v1" as const;
-export const PROPERTIES_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:properties:1" as const;
-export const REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:reference-expectations:1" as const;
+export const PROPERTIES_SCHEMA_VERSION = "ultrafuzz.properties.v2" as const;
+export const PROPERTY_LENS_SCHEMA_VERSION = "ultrafuzz.property-lens.v2" as const;
+export const IMPLEMENTED_PROPERTIES_SCHEMA_VERSION = "ultrafuzz.implemented-properties.v3" as const;
+export const PROPERTY_CAMPAIGN_SCHEMA_VERSION = "ultrafuzz.property-campaign.v2" as const;
+export const REFERENCE_EXPECTATIONS_SCHEMA_VERSION = "ultrafuzz.reference-expectations.v2" as const;
+export const PROPERTIES_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:properties:2" as const;
+export const PROPERTY_LENS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:property-lens:2" as const;
+export const IMPLEMENTED_PROPERTIES_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:artifacts:implemented-properties:3" as const;
+export const PROPERTY_CAMPAIGN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:property-campaign:2" as const;
+export const REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:artifacts:reference-expectations:2" as const;
 
 const nonEmptyString = z.string().min(1);
 const stableLedgerId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
@@ -30,26 +35,15 @@ const nonEmptyStringArray = z.array(nonEmptyString);
  */
 const referenceExpectationIdsSchema = z
   .array(nonEmptyString)
-  .min(1)
-  .superRefine((expectationIds, context) => {
-    const seen = new Set<string>();
-    for (const [expectationIndex, expectationId] of expectationIds.entries()) {
-      if (seen.has(expectationId)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate reference expectation ID ${JSON.stringify(expectationId)}`,
-          path: [expectationIndex]
-        });
-      }
-      seen.add(expectationId);
-    }
-  });
+  .meta({ uniqueItems: true })
+  .refine((ids) => new Set(ids).size === ids.length, { message: "Reference expectation IDs must be unique" });
 export const PROPERTY_PRIORITIES = ["high", "medium", "low"] as const;
 export const propertyPrioritySchema = z.enum(PROPERTY_PRIORITIES);
 export type PropertyPriority = (typeof PROPERTY_PRIORITIES)[number];
 const propertyIdsSchema = z
   .array(nonEmptyString)
   .min(1)
+  .meta({ uniqueItems: true })
   .superRefine((propertyIds, context) => {
     const seen = new Set<string>();
     for (const [propertyIndex, propertyId] of propertyIds.entries()) {
@@ -69,7 +63,7 @@ export interface PropertySource {
   source_property_id: string;
 }
 
-export interface LensProperty extends Record<string, unknown> {
+export interface LensProperty {
   id: string;
   description: string;
   category: string;
@@ -83,7 +77,7 @@ export interface LensPropertiesArtifact {
   properties: LensProperty[];
 }
 
-export interface CanonicalProperty extends Record<string, unknown> {
+export interface CanonicalProperty {
   id: string;
   description: string;
   category: string;
@@ -102,7 +96,7 @@ export interface PropertiesArtifact {
 
 export type PropertyImplementationStatus = "implemented" | "pending" | "deferred" | "blocked";
 
-export interface ImplementedPropertyRecord extends Record<string, unknown> {
+export interface ImplementedPropertyRecord {
   property_id: string;
   status: PropertyImplementationStatus;
   implementation_paths: string[];
@@ -113,7 +107,7 @@ export interface ImplementedPropertyRecord extends Record<string, unknown> {
   blocker?: PropertyImplementationBlocker;
 }
 
-export interface PropertyImplementationBlocker extends Record<string, unknown> {
+export interface PropertyImplementationBlocker {
   code: string;
   summary: string;
   next_action: string;
@@ -123,7 +117,7 @@ export interface PropertyImplementationBlocker extends Record<string, unknown> {
  * Selection metadata makes the implementation handoff auditable. It is
  * optional so historical artifacts (which predate the field) remain readable.
  */
-export interface ImplementedPropertySelection extends Record<string, unknown> {
+export interface ImplementedPropertySelection {
   priority_threshold: PropertyPriority;
   priorities: PropertyPriority[];
   property_ids: string[];
@@ -132,18 +126,38 @@ export interface ImplementedPropertySelection extends Record<string, unknown> {
 export interface ImplementedPropertiesArtifact {
   schema_version: typeof IMPLEMENTED_PROPERTIES_SCHEMA_VERSION;
   properties: ImplementedPropertyRecord[];
-  selection?: ImplementedPropertySelection;
+  selection: ImplementedPropertySelection;
 }
 
-export interface PropertyCampaignFailure extends Record<string, unknown> {
+export interface PropertyCampaignFailure {
   id: string;
   status: string;
   property_ids?: string[];
+  entrypoint?: string;
+  sequence?: string[];
+  precondition_evidence?: string[];
+  raw_reproducer_ref?: string;
 }
 
 export interface PropertyCampaignArtifact {
   schema_version: typeof PROPERTY_CAMPAIGN_SCHEMA_VERSION;
   fuzzer_backend?: string;
+  backend_version?: string | null;
+  command?: string;
+  config_path?: string | null;
+  workers?: number;
+  started_at?: string;
+  finished_at?: string;
+  terminal_status?: "complete" | "partial" | "blocked" | "failed" | "timed-out" | "unavailable";
+  exit_code?: number | null;
+  failure_category?: string | null;
+  paths?: {
+    corpus: string;
+    cache: string;
+    log: string;
+    raw_results: string;
+    reproducers: string;
+  };
   failures: PropertyCampaignFailure[];
 }
 
@@ -242,8 +256,10 @@ export interface PropertyReferenceInput {
   path: string;
 }
 
-export interface ReferenceExpectationEntry extends Record<string, unknown> {
+export interface ReferenceExpectationEntry {
   id: string;
+  benchmark_name?: string;
+  description?: string;
 }
 
 export interface ReferenceExpectationsArtifact {
@@ -256,23 +272,20 @@ const propertySourceSchema = z.strictObject({
   source_property_id: nonEmptyString
 });
 
-/**
- * The optional form: an empty list is normalised to absent rather than rejected.
- *
- * Emitting `[]` and omitting the key say the same thing — "no reference expectations" — and a producer has
- * no way to know the second is required. Normalising rather than relaxing `.min(1)` keeps the meaning of a
- * PRESENT list intact: if it is there, it names something, and its ids are still de-duplicated.
- */
-const optionalReferenceExpectationIds = z.preprocess(
-  (value) => (Array.isArray(value) && value.length === 0 ? undefined : value),
-  referenceExpectationIdsSchema.optional()
-);
+const optionalReferenceExpectationIds = referenceExpectationIdsSchema.optional();
 
-const referenceExpectationEntrySchema = z.looseObject({ id: nonEmptyString });
+const referenceExpectationEntrySchema = z.strictObject({
+  id: nonEmptyString,
+  benchmark_name: nonEmptyString.optional(),
+  description: nonEmptyString.optional()
+});
 
 export const referenceExpectationsSchema = z.strictObject({
   schema_version: z.literal(REFERENCE_EXPECTATIONS_SCHEMA_VERSION),
   expectations: z.array(referenceExpectationEntrySchema).min(1)
+}).meta({
+  $id: REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID,
+  title: "Ultrafuzz supplied reference expectation catalog"
 });
 
 const lensPropertySchema = z.strictObject({
@@ -288,21 +301,12 @@ export const lensPropertiesSchema = z
     schema_version: z.literal(PROPERTY_LENS_SCHEMA_VERSION),
     properties: z.array(lensPropertySchema).min(1)
   })
-  .superRefine((artifact, context) => {
-    const propertyIds = new Set<string>();
-    for (const [propertyIndex, property] of artifact.properties.entries()) {
-      if (propertyIds.has(property.id)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate property ID ${JSON.stringify(property.id)}`,
-          path: ["properties", propertyIndex, "id"]
-        });
-      }
-      propertyIds.add(property.id);
-    }
+  .meta({
+    $id: PROPERTY_LENS_JSON_SCHEMA_ID,
+    title: "Ultrafuzz property lens catalog"
   });
 
-const canonicalPropertySchema = z.looseObject({
+const canonicalPropertySchema = z.strictObject({
   id: nonEmptyString,
   description: nonEmptyString,
   category: nonEmptyString,
@@ -312,6 +316,7 @@ const canonicalPropertySchema = z.looseObject({
   ledger_ids: z
     .array(stableLedgerId)
     .min(1)
+    .meta({ uniqueItems: true })
     .superRefine((ledgerIds, context) => {
       const seen = new Set<string>();
       for (const [ledgerIndex, ledgerId] of ledgerIds.entries()) {
@@ -333,38 +338,16 @@ export const propertiesSchema = z
     schema_version: z.literal(PROPERTIES_SCHEMA_VERSION),
     properties: z.array(canonicalPropertySchema)
   })
-  .superRefine((artifact, context) => {
-    const propertyIds = new Set<string>();
-    for (const [propertyIndex, property] of artifact.properties.entries()) {
-      if (propertyIds.has(property.id)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate canonical property ID ${JSON.stringify(property.id)}`,
-          path: ["properties", propertyIndex, "id"]
-        });
-      }
-      propertyIds.add(property.id);
-
-      const sources = new Set<string>();
-      for (const [sourceIndex, source] of property.sources.entries()) {
-        const key = `${source.source_node_id}\u0000${source.source_property_id}`;
-        if (sources.has(key)) {
-          context.addIssue({
-            code: "custom",
-            message: "Duplicate property source reference",
-            path: ["properties", propertyIndex, "sources", sourceIndex]
-          });
-        }
-        sources.add(key);
-      }
-    }
+  .meta({
+    $id: PROPERTIES_JSON_SCHEMA_ID,
+    title: "Ultrafuzz canonical property catalog"
   });
 
-const implementedPropertySchema = z.looseObject({
+const implementedPropertySchema = z.strictObject({
   property_id: nonEmptyString,
   status: z.enum(["implemented", "pending", "deferred", "blocked"]),
-  implementation_paths: nonEmptyStringArray,
-  test_paths: nonEmptyStringArray,
+  implementation_paths: nonEmptyStringArray.meta({ uniqueItems: true }),
+  test_paths: nonEmptyStringArray.meta({ uniqueItems: true }),
   reference_expectations: optionalReferenceExpectationIds,
   blocker: z
     .strictObject({
@@ -380,6 +363,7 @@ const implementedPropertySelectionSchema = z.strictObject({
   priorities: z
     .array(propertyPrioritySchema)
     .min(1)
+    .meta({ uniqueItems: true })
     .superRefine((priorities, context) => {
       const seen = new Set<PropertyPriority>();
       for (const [priorityIndex, priority] of priorities.entries()) {
@@ -409,23 +393,46 @@ const implementedPropertySelectionSchema = z.strictObject({
 });
 
 export const implementedPropertiesSchema = z
-  .object({
+  .strictObject({
     schema_version: z.literal(IMPLEMENTED_PROPERTIES_SCHEMA_VERSION),
     properties: z.array(implementedPropertySchema),
-    selection: implementedPropertySelectionSchema.optional()
+    selection: implementedPropertySelectionSchema
+  })
+  .meta({
+    $id: IMPLEMENTED_PROPERTIES_JSON_SCHEMA_ID,
+    title: "Ultrafuzz implemented property records",
+    allOf: [
+      {
+        properties: {
+          properties: {
+            items: {
+              allOf: [
+                {
+                  if: { properties: { status: { const: "implemented" } }, required: ["status"] },
+                  then: {
+                    not: {
+                      properties: {
+                        implementation_paths: { maxItems: 0 },
+                        test_paths: { maxItems: 0 }
+                      },
+                      required: ["implementation_paths", "test_paths"]
+                    }
+                  },
+                  else: { required: ["blocker"] }
+                },
+                {
+                  if: { required: ["blocker"] },
+                  then: { properties: { status: { not: { const: "implemented" } } } }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
   })
   .superRefine((artifact, context) => {
-    const propertyIds = new Set<string>();
     for (const [propertyIndex, property] of artifact.properties.entries()) {
-      if (propertyIds.has(property.property_id)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate implemented property ID ${JSON.stringify(property.property_id)}`,
-          path: ["properties", propertyIndex, "property_id"]
-        });
-      }
-      propertyIds.add(property.property_id);
-
       if (
         property.status === "implemented" &&
         property.implementation_paths.length === 0 &&
@@ -437,143 +444,59 @@ export const implementedPropertiesSchema = z
           path: ["properties", propertyIndex]
         });
       }
+      if (property.status === "implemented" && property.blocker !== undefined) {
+        context.addIssue({ code: "custom", message: "Implemented properties cannot have blockers", path: ["properties", propertyIndex, "blocker"] });
+      }
+      if (property.status !== "implemented" && property.blocker === undefined) {
+        context.addIssue({ code: "custom", message: "Non-implemented selected properties require blockers", path: ["properties", propertyIndex, "blocker"] });
+      }
     }
   });
 
-const propertyCampaignFailureSchema = z.looseObject({
+const propertyCampaignFailureSchema = z.strictObject({
   id: nonEmptyString,
   status: nonEmptyString,
-  property_ids: propertyIdsSchema.optional()
+  property_ids: propertyIdsSchema.optional(),
+  entrypoint: nonEmptyString.optional(),
+  sequence: z.array(nonEmptyString).optional(),
+  precondition_evidence: z.array(nonEmptyString).optional(),
+  raw_reproducer_ref: nonEmptyString.optional()
 });
 
 export const propertyCampaignSchema = z
-  .object({
+  .strictObject({
     schema_version: z.literal(PROPERTY_CAMPAIGN_SCHEMA_VERSION),
     fuzzer_backend: nonEmptyString.optional(),
+    backend_version: nonEmptyString.nullable().optional(),
+    command: nonEmptyString.optional(),
+    config_path: nonEmptyString.nullable().optional(),
+    workers: z.number().int().positive().optional(),
+    started_at: z.string().datetime({ offset: true }).optional(),
+    finished_at: z.string().datetime({ offset: true }).optional(),
+    terminal_status: z.enum(["complete", "partial", "blocked", "failed", "timed-out", "unavailable"]).optional(),
+    exit_code: z.number().int().nullable().optional(),
+    failure_category: nonEmptyString.nullable().optional(),
+    paths: z
+      .strictObject({
+        corpus: nonEmptyString,
+        cache: nonEmptyString,
+        log: nonEmptyString,
+        raw_results: nonEmptyString,
+        reproducers: nonEmptyString
+      })
+      .optional(),
     failures: z.array(propertyCampaignFailureSchema)
   })
-  .superRefine((artifact, context) => {
-    const failureIds = new Set<string>();
-    for (const [failureIndex, failure] of artifact.failures.entries()) {
-      if (failureIds.has(failure.id)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate campaign failure ID ${JSON.stringify(failure.id)}`,
-          path: ["failures", failureIndex, "id"]
-        });
-      }
-      failureIds.add(failure.id);
-    }
+  .meta({
+    $id: PROPERTY_CAMPAIGN_JSON_SCHEMA_ID,
+    title: "Ultrafuzz property campaign result"
   });
 
-export const propertiesJsonSchema = {
-  $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: PROPERTIES_JSON_SCHEMA_ID,
-  title: "Ultrafuzz canonical property catalog",
-  type: "object",
-  required: ["schema_version", "properties"],
-  additionalProperties: false,
-  properties: {
-    schema_version: { const: PROPERTIES_SCHEMA_VERSION },
-    properties: {
-      type: "array",
-      items: {
-        type: "object",
-        required: ["id", "description", "category", "priority", "sources"],
-        additionalProperties: true,
-        properties: {
-          id: { type: "string", minLength: 1 },
-          description: { type: "string", minLength: 1 },
-          category: { type: "string", minLength: 1 },
-          priority: { enum: [...PROPERTY_PRIORITIES] },
-          reference_expectations: {
-            type: "array",
-            uniqueItems: true,
-            items: { type: "string", minLength: 1 }
-          },
-          sources: {
-            type: "array",
-            minItems: 1,
-            uniqueItems: true,
-            items: {
-              type: "object",
-              required: ["source_node_id", "source_property_id"],
-              additionalProperties: false,
-              properties: {
-                source_node_id: { type: "string", minLength: 1 },
-                source_property_id: { type: "string", minLength: 1 }
-              }
-            }
-          },
-          ledger_ids: {
-            type: "array",
-            minItems: 1,
-            uniqueItems: true,
-            items: { type: "string", minLength: 1, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" }
-          }
-        }
-      }
-    }
-  }
-} as const;
-
-export const referenceExpectationsJsonSchema = {
-  $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID,
-  title: "Ultrafuzz supplied reference expectation catalog",
-  type: "object",
-  required: ["schema_version", "expectations"],
-  additionalProperties: false,
-  properties: {
-    schema_version: { const: REFERENCE_EXPECTATIONS_SCHEMA_VERSION },
-    expectations: {
-      type: "array",
-      minItems: 1,
-      items: {
-        type: "object",
-        required: ["id"],
-        additionalProperties: true,
-        properties: {
-          id: { type: "string", minLength: 1 },
-          benchmark_name: { type: "string", minLength: 1 },
-          description: { type: "string", minLength: 1 }
-        }
-      }
-    }
-  }
-} as const;
-
-export const lensPropertiesJsonSchema = {
-  $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: "urn:ultrafuzz:schema:artifacts:property-lens:1",
-  title: "Ultrafuzz property lens catalog",
-  type: "object",
-  required: ["schema_version", "properties"],
-  additionalProperties: false,
-  properties: {
-    schema_version: { const: PROPERTY_LENS_SCHEMA_VERSION },
-    properties: {
-      type: "array",
-      minItems: 1,
-      items: {
-        type: "object",
-        required: ["id", "description", "category", "priority"],
-        additionalProperties: false,
-        properties: {
-          id: { type: "string", minLength: 1 },
-          description: { type: "string", minLength: 1 },
-          category: { type: "string", minLength: 1 },
-          priority: { enum: [...PROPERTY_PRIORITIES] },
-          reference_expectations: {
-            type: "array",
-            uniqueItems: true,
-            items: { type: "string", minLength: 1 }
-          }
-        }
-      }
-    }
-  }
-} as const;
+export const propertiesJsonSchema = z.toJSONSchema(propertiesSchema);
+export const referenceExpectationsJsonSchema = z.toJSONSchema(referenceExpectationsSchema);
+export const lensPropertiesJsonSchema = z.toJSONSchema(lensPropertiesSchema);
+export const implementedPropertiesJsonSchema = z.toJSONSchema(implementedPropertiesSchema);
+export const propertyCampaignJsonSchema = z.toJSONSchema(propertyCampaignSchema);
 
 export function validateLensPropertiesSchema(
   value: unknown,

@@ -26,27 +26,36 @@ and never invent a finding to satisfy CI.
 Use only High, Medium, or Low for severity, impact, and likelihood. Recompute
 severity from evidence with this exact matrix: Low impact is Low; Medium impact
 with Low likelihood is Low and otherwise Medium; High impact with Low
-likelihood is Medium and otherwise High. Set both `severity` and
-`severity_guess` to that matrix result. Normalize each production issue to
+likelihood is Medium and otherwise High. Set the final `severity` to that
+matrix result while preserving each finding's preliminary `severity_guess`.
+Each production issue includes:
 include at least:
 
-- `schema_version: "1.0"`, stable `id`, concise `title`, `status`,
+- `schema_version: "ultrafuzz.finding.v2"`, stable `id`, concise `title`, `status`,
   `severity_guess`, `confidence`, and `summary`;
 - `strategy` as one originating strategy string, affected files/functions, and
   concrete evidence;
-- `severity`, `impact`, `likelihood`, `description`, and a reproducible
-  `proof_of_concept` or precise execution trace; and
+- `severity`, `impact`, `likelihood`, all three rationale fields,
+  `description`, and `proof_of_concept` as an object with non-empty `scenario`,
+  `language`, and `code`; and
 - structured `strategy_provenance` and its matching lifecycle record when
 available.
 
 Write every issue's `confidence` as one of the strings `high`, `medium`, or
 `low`; never use a numeric confidence in the normalized report.
 
-Write `{{artifact_path}}/report.json` with `schema_version: "1.0"`, a
-`run_metadata` object, normalized production `issues`,
+Write `{{artifact_path}}/report.json` with `schema_version: "ultrafuzz.report.v2"`.
+The closed `run_metadata` object has `run_id`, `source_run_id`, `repository`,
+`elapsed_time`, `models_used`, `tokens_used`, `estimated_spend`,
+`partial_pricing`, and integer `strategy_loops`. Write canonical finding v2
+objects with matching lifecycle records in production `issues` and
 `non_production_outcomes`, and `property_provenance: []`. The `issues` array is
 the scoring source of truth and must remain non-empty whenever at least one
 deduped finding is supported as a production bug.
+
+Every non-production outcome also preserves the canonical finding v2 fields and
+adds required `triage_classification`, `recommended_next_action`, and
+`lifecycle`.
 
 Write the exact same normalized production issue array to
 `{{artifact_path}}/findings.normalized.json`. Use `[]` only when the bounded

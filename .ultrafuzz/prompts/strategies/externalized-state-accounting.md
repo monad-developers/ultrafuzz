@@ -119,5 +119,26 @@ reward capture, over-decreased active state, or public view reverts in reachable
 states. Explain which non-balance state components were included in the oracle
 and why raw balances alone would miss the issue.
 
+## Required accounting artifacts
+
+Write the human-readable inventory, scenarios, and oracle analysis to
+`{{artifact_dir}}/externalized-state-accounting.md`.
+
+Write `{{artifact_dir}}/externalized-state-accounting.json` with
+`schema_version: "ultrafuzz.externalized-state-accounting.v1"` and exact arrays
+`state_components`, `scenarios`, `accounting_oracles`, `generated_tests`,
+`incomplete_specs`, and `coverage_notes`.
+
+- A state component has `component_id`, `name`, `category`,
+  `economic_relevance`, non-empty `public_evidence`, non-empty `actors`,
+  `mutation_paths`, `settlement_or_claim_paths`, and `value_reads`.
+- A scenario has `scenario_id`, `title`, non-empty `actors`, `preconditions`,
+  non-empty `actions`, non-empty `state_component_ids`, `expected_outcome`, and
+  nullable `test_path`.
+- An accounting oracle has `oracle_id`, non-empty `state_component_ids`,
+  `assertion`, non-empty `public_basis`, and nullable `rounding_rule`.
+- Generated-test rows use `path` and non-empty `scenario_ids`; incomplete-spec
+  rows use `subject`, `reason`, and `evidence_paths`.
+
 Write structured findings to {{output_findings_path}}. Use an empty JSON array
 if no source-backed production finding is confirmed.

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "dedupe_key": {
+        "type": "string",
+        "minLength": 1
+      },
+      "finding_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "family_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "title": {
+        "type": "string",
+        "minLength": 1
+      },
+      "hits": {
+        "minItems": 1,
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "strategy": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1
+            },
+            "model_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "loop_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "strategy"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "required": [
+      "dedupe_key",
+      "title",
+      "hits"
+    ],
+    "additionalProperties": false
+  },
+  "$id": "urn:ultrafuzz:schema:artifacts:strategy-detections:1",
+  "title": "Ultrafuzz strategy detection provenance"
+}

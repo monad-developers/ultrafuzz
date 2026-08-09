@@ -36,7 +36,7 @@ Write {{artifact_path}}/differential-plan.json with this JSON shape:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "ultrafuzz.differential-plan.v1",
   "planner_attempt_index": {{attempt_index}},
   "candidate_surfaces": [
     {

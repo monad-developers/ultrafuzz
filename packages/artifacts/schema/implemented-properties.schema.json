@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.implemented-properties.v3"
+    },
+    "properties": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "property_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "implemented",
+              "pending",
+              "deferred",
+              "blocked"
+            ]
+          },
+          "implementation_paths": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "test_paths": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "reference_expectations": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "blocker": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "minLength": 1
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 1
+              },
+              "next_action": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "code",
+              "summary",
+              "next_action"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "property_id",
+          "status",
+          "implementation_paths",
+          "test_paths"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "selection": {
+      "type": "object",
+      "properties": {
+        "priority_threshold": {
+          "type": "string",
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "priorities": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "property_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "priority_threshold",
+        "priorities",
+        "property_ids"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "properties",
+    "selection"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:implemented-properties:3",
+  "title": "Ultrafuzz implemented property records",
+  "allOf": [
+    {
+      "properties": {
+        "properties": {
+          "items": {
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "implemented"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
+                },
+                "then": {
+                  "not": {
+                    "properties": {
+                      "implementation_paths": {
+                        "maxItems": 0
+                      },
+                      "test_paths": {
+                        "maxItems": 0
+                      }
+                    },
+                    "required": [
+                      "implementation_paths",
+                      "test_paths"
+                    ]
+                  }
+                },
+                "else": {
+                  "required": [
+                    "blocker"
+                  ]
+                }
+              },
+              {
+                "if": {
+                  "required": [
+                    "blocker"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "status": {
+                      "not": {
+                        "const": "implemented"
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

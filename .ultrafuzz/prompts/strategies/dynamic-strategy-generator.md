@@ -171,7 +171,7 @@ Write the aggregate strategy plan to:
 
 The plan JSON must include:
 
-- `schema_version`: `"1.0"`
+- `schema_version`: `"ultrafuzz.dynamic-strategy-plan.v1"`
 - `dynamic_strategies_enumerator`: the resolved integer value
 - `status`: `"selected"`, `"no-actionable-strategies"`, or `"blocked"`
 - `selected_strategy_count`
@@ -180,20 +180,30 @@ The plan JSON must include:
 - `current_run_artifacts_considered`: array of paths and relevance notes
 - `excluded_context`: object summarizing sibling-run, external, or host-global
   context that was intentionally not used
-- `timeout_seconds` and `finalization_reserve_seconds` when available from
-  runtime context
+- nullable `timeout_seconds` and `finalization_reserve_seconds`; use `null` only
+  when the runtime context does not provide them
 
 Write raw enumerator outputs to:
 
 {{artifact_dir}}/enumerator-outputs.json
 
-Write aggregate recommendations to:
-
-{{artifact_dir}}/aggregate-recommendations.json
+Use `schema_version: "ultrafuzz.dynamic-enumerator-outputs.v1"` and an
+`enumerators` array. Each row has `enumerator_id`, `agent_label`, `status`,
+`diagnostics`, and typed `recommendations`. A recommendation has `strategy_id`,
+`title`, `rationale`, `coverage_gap`, `evidence_paths`, `proposed_test_path`,
+`focused_command`, and `priority`. If raw enumerator-specific output is useful,
+put it only in a discriminated `payload` of `{ "kind": "text", "value": "..." }`
+or `{ "kind": "json", "value": <JSON> }`; this is the sole intentionally open
+nested model payload.
 
 Write selected strategy details to:
 
 {{artifact_dir}}/selected-strategies.json
+
+Set `schema_version` to `"ultrafuzz.selected-strategies.v1"` and write a
+`strategies` array. Each selected row preserves every recommendation field and
+adds non-empty `enumerator_ids` and `validation_plan` arrays. The selected IDs
+must exactly match `strategy-plan.json#selected_strategies`.
 
 Write generated-test manifest details to:
 
@@ -216,4 +226,7 @@ Provenance must include current-run artifacts, sub-agent ids or labels,
 model/backend information when visible, commands run, generated files,
 validation outcomes, and a statement that previous reports, sibling run
 directories, host-global paths, network resources, and extra target context were
-not used.
+not used. Set `schema_version` to
+`"ultrafuzz.dynamic-strategy-provenance.v1"`; use exact top-level keys
+`current_run_artifacts`, `agents`, `models`, `commands`, `generated_files`,
+`validation`, and `excluded_context`.

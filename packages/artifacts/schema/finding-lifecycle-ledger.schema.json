@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.finding-lifecycle-ledger.v1"
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "dedupe_key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "node_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "finding_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "relationship": {
+                  "type": "string",
+                  "enum": [
+                    "primary",
+                    "duplicate",
+                    "family-variant"
+                  ]
+                }
+              },
+              "required": [
+                "path",
+                "node_id",
+                "finding_id",
+                "title",
+                "relationship"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "strategy_hits": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "attempt_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "model_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "model": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "model_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "loop_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "strategy"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "duplicate_finding_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "family_variant_keys": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "triage_classification": {
+            "type": "string",
+            "enum": [
+              "true-positive",
+              "false-positive",
+              "undetermined",
+              "incomplete-spec",
+              "harness-defect",
+              "repair-candidate",
+              "spec-gated",
+              "defensive-hardening"
+            ]
+          },
+          "triage_reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "demotion_reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "canonical_severity": {
+            "type": "string",
+            "enum": [
+              "High",
+              "Medium",
+              "Low"
+            ]
+          },
+          "final_disposition": {
+            "type": "string",
+            "enum": [
+              "promoted",
+              "non-production",
+              "dropped"
+            ]
+          },
+          "comparison_disposition": {
+            "type": "string",
+            "enum": [
+              "promoted-again",
+              "rediscovered-but-demoted",
+              "not-reproduced",
+              "not-searched"
+            ]
+          },
+          "stages": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "stage": {
+                  "type": "string",
+                  "enum": [
+                    "raw",
+                    "deduped",
+                    "triaged",
+                    "severity-classified"
+                  ]
+                },
+                "artifact_path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "finding_id": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "stage",
+                "artifact_path"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "dedupe_key",
+          "source_artifacts",
+          "strategy_hits",
+          "stages"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "records"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:finding-lifecycle-ledger:1",
+  "title": "Ultrafuzz finding lifecycle ledger"
+}

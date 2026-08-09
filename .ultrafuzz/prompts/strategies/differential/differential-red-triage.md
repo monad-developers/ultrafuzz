@@ -37,7 +37,7 @@ Write {{artifact_path}}/semantic-red-registry.json with this JSON shape:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "ultrafuzz.semantic-red-registry.v1",
   "semantic_reds": [
     {
       "stable_failure_hash": "",
@@ -60,7 +60,7 @@ Write {{artifact_path}}/triage-a.json and {{artifact_path}}/triage-b.json with t
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "ultrafuzz.differential-red-triage.v1",
   "pass": "a",
   "classifications": [
     {

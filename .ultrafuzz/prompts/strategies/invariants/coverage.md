@@ -173,8 +173,14 @@ Apply these Recon/Chimera rules:
 ## Work
 
 1. Record the coverage plan:
-   - Write `{{artifact_dir}}/coverage-goal.json` with the target, current
-     status, commands planned, and stop conditions.
+   - Write `{{artifact_dir}}/coverage-goal.json` with
+     `schema_version: "ultrafuzz.coverage-goal.v1"`, `target` set to
+     `{ "metric": "standardized-core-line-coverage-percent", "value": 90 }`,
+     nullable `current_measurement`, `current_status` (`not-run`, `in-progress`,
+     `target-met`, `below-target`, or `blocked`), `planned_commands`, non-empty
+     `stop_conditions`, `timeout_seconds`, `finalization_reserve_seconds`, and
+     typed `blockers`. Each blocker has `category`, `summary`, and
+     `evidence_paths`; use only the categories documented by the supplied schema.
    - Immediately write initial checkpoint `{{artifact_dir}}/coverage-report.md`,
      `{{output_findings_path}}`, `{{artifact_dir}}/generated-tests.json`, and
      `{{artifact_dir}}/harness-repairs.json` before starting Recon or any
@@ -300,10 +306,12 @@ Write harness repair records to:
 
 {{artifact_dir}}/harness-repairs.json
 
-The harness repair file must be a JSON array. Use an empty array when no
-harness defects or repair candidates were observed. Each non-empty entry must
-include `schema_version`, `failure_id`, `classification`, `failure_summary`,
+The harness repair file must be a JSON array versioned by its bound contract,
+not by its items. Use an empty array when no harness defects or repair
+candidates were observed. Each non-empty entry includes `failure_id`, fixed
+`classification: "harness-defect"`, `failure_summary`, nullable
 `reproducer_path`, `repair_summary`, `files_changed_or_proposed`, `commands`,
-and `notes`. Only use `classification: "harness-defect"` here; production bugs,
+and `notes`. When `reproducer_path` is null, also include a non-empty
+`reproducer_unavailable_reason`; otherwise omit that field. Production bugs,
 incomplete specs, false positives, and blocked/unreproduced failures stay in
 `findings.json` for downstream triage.

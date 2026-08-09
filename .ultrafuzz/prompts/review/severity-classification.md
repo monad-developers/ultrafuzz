@@ -31,30 +31,26 @@ Finding lifecycle ledger:
 Write reportable severity records to
 {{artifact_path}}/severity-classified-findings.json as JSON. Each kept object
 must preserve upstream provenance fields and assign a stable `id`. Use
-`schema_version: "1.0"` on every emitted finding object.
+`schema_version: "ultrafuzz.finding.v2"` on every emitted finding object.
 Preserve each property-derived finding's `property_ids` unchanged.
 
 For every production report candidate, include these machine-readable fields:
 
-- `severity_guess`: compatibility field for the final classified severity.
-  Keep this field; do not replace it with `severity`.
-- `final_severity`: final matrix severity, exactly `High`, `Medium`, or `Low`.
-- `severity`: compatibility alias for `final_severity`, exactly `High`,
-  `Medium`, or `Low`, for the current final-report renderer.
+- `severity_guess`: the preserved upstream preliminary estimate. It does not
+  have to equal the final classification.
+- `severity`: the one canonical final matrix severity, exactly `High`,
+  `Medium`, or `Low`. Never emit `final_severity` or another alias.
 - `impact`: exactly `High`, `Medium`, or `Low`.
 - `likelihood`: exactly `High`, `Medium`, or `Low`.
-- `confidence`: `High`, `Medium`, or `Low`, based on evidence quality.
+- `confidence`: lowercase `high`, `medium`, or `low`, based on evidence quality.
 - `impact_rationale`, `likelihood_rationale`, and `severity_rationale`: concise
   source-backed explanations.
 
-If the upstream object already had `severity`, `final_severity`,
-`severity_guess`, `impact`, or `likelihood`, preserve those original values only
-under explicit upstream provenance fields such as `upstream_severity` or
-`upstream_severity_guess` when they differ from the final classification. Do
-not carry an upstream severity value through as the classified top-level
-severity. Include exact machine-readable note tokens
-`likelihood=<low|medium|high>` and `impact=<low|medium|high>` in `notes` for
-legacy consumers.
+If the upstream object already had an unauthorized final `severity`, reject the
+upstream handoff instead of copying it into aliases. Preserve `severity_guess`
+unchanged, decide `impact` and `likelihood`, and write only the canonical final
+`severity` plus the three rationale fields. Do not emit `final_severity`,
+`upstream_severity`, note-token aliases, or compatibility fields.
 
 Also copy the strategy detection provenance to
 {{artifact_path}}/strategy-detections.json without dropping or rewriting hits,
@@ -132,8 +128,8 @@ Apply the matrix mechanically after deciding impact and likelihood:
 - High impact + Low likelihood is Medium, not High.
 - Medium impact + Low likelihood is Low, not Medium.
 - Low impact is always Low.
-- If impact and likelihood are available, `final_severity`, `severity`, and
-  compatibility `severity_guess` must equal the matrix result.
+- If impact and likelihood are available, `severity` must equal the matrix
+  result. `severity_guess` remains the preliminary upstream estimate.
 - If impact or likelihood cannot be supported by evidence, do not guess. Demote
   the finding to a non-production lifecycle outcome such as `incomplete-spec`,
   `spec-gated`, `undetermined`, `defensive-hardening`, or
@@ -189,15 +185,13 @@ Use these caps and invalidation rules:
 
 Before saving `severity-classified-findings.json`, check every emitted object:
 
-- `schema_version` is exactly `"1.0"`.
-- `final_severity`, `severity`, `impact`, and `likelihood` use only `High`,
-  `Medium`, or `Low`.
+- `schema_version` is exactly `"ultrafuzz.finding.v2"`.
+- `severity`, `impact`, and `likelihood` use only `High`, `Medium`, or `Low`.
 - No field used as a severity label contains `Critical`.
-- `final_severity == matrix(impact, likelihood)`.
-- `severity == final_severity`.
-- `severity_guess == final_severity`.
-- `notes` contains `impact=<low|medium|high>` and
-  `likelihood=<low|medium|high>` tokens matching the fields.
+- `severity == matrix(impact, likelihood)`.
+- `severity_guess` is preserved even when the final matrix differs.
+- `confidence` is lowercase `high`, `medium`, or `low`.
+- Neither `final_severity` nor a compatibility/upstream severity alias exists.
 - Every kept finding retains provenance, evidence references, lifecycle status,
   triage classification, confidence, and rationale.
 - Non-production records keep their lifecycle and triage disposition instead of
@@ -209,22 +203,19 @@ High:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "ultrafuzz.finding.v2",
   "title": "Public withdrawal path drains vault assets",
   "triage_classification": "true-positive",
   "status": "needs-review",
   "severity": "High",
-  "final_severity": "High",
   "severity_guess": "High",
   "impact": "High",
   "likelihood": "High",
-  "confidence": "High",
+  "confidence": "high",
   "impact_rationale": "External withdrawal path directly steals protocol assets.",
   "likelihood_rationale": "The public withdrawal path is reliably reachable from realistic state.",
   "severity_rationale": "Impact High x Likelihood High maps to High.",
   "notes": [
-    "likelihood=high",
-    "impact=high",
     "classification_reason=external withdrawal path directly steals protocol assets"
   ]
 }
@@ -234,22 +225,19 @@ Medium:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "ultrafuzz.finding.v2",
   "title": "Integration-specific accounting drift blocks redemptions",
   "triage_classification": "true-positive",
   "status": "needs-review",
   "severity": "Medium",
-  "final_severity": "Medium",
   "severity_guess": "Medium",
   "impact": "High",
   "likelihood": "Low",
-  "confidence": "Medium",
+  "confidence": "medium",
   "impact_rationale": "Claimable funds can be locked for affected users.",
   "likelihood_rationale": "The path requires a narrow production state and timing sequence.",
   "severity_rationale": "Impact High x Likelihood Low maps to Medium.",
   "notes": [
-    "likelihood=low",
-    "impact=high",
     "classification_reason=availability and accounting impact requires specific production state"
   ]
 }
@@ -259,22 +247,19 @@ Low:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "ultrafuzz.finding.v2",
   "title": "Rounding dust can be stranded",
   "triage_classification": "defensive-hardening",
   "status": "needs-review",
   "severity": "Low",
-  "final_severity": "Low",
   "severity_guess": "Low",
   "impact": "Medium",
   "likelihood": "Low",
-  "confidence": "Medium",
+  "confidence": "medium",
   "impact_rationale": "The effect is bounded to limited accounting drift without direct asset theft.",
   "likelihood_rationale": "The path requires a narrow low-probability boundary state.",
   "severity_rationale": "Impact Medium x Likelihood Low maps to Low.",
   "notes": [
-    "likelihood=low",
-    "impact=medium",
     "classification_reason=low-risk dust impact without meaningful asset loss"
   ]
 }

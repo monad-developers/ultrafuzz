@@ -80,8 +80,13 @@ Use this configured invariant testing fuzzer timeout:
      attempt reproducers, and finalize every required artifact.
    - The whole configured budget minus the finalization reserve belongs to the
      one campaign; do not divide it into per-backend slices.
-   - Write `available_vcpus`, `workers`, configured budget, deadline, and
-     finalization reserve to `campaign-plan.json` before starting the backend.
+   - Write `campaign-plan.json` before starting the backend with
+     `schema_version: "ultrafuzz.invariant-campaign-plan.v1"`, positive integer
+     `available_vcpus`, `workers`, and `configured_budget_seconds`, RFC 3339
+     `deadline`, non-negative `finalization_reserve_seconds`, `backend` with
+     fixed `name: "recon"` and nullable `version`, a typed `command_plan`, and
+     exact `paths` for `corpus`, `cache`, `log`, `raw_results`, and
+     `reproducers`.
 
 3. Run the backend without path collisions.
    - Start the long campaign from this template, substituting the resolved
@@ -204,6 +209,13 @@ Write the backend-neutral structured summary to:
 
 {{artifact_dir}}/campaign-summary.json
 
+Set its `schema_version` to `"ultrafuzz.campaign-summary.v2"`. Include exact
+keys `outcome`, non-empty `implemented_property_suite_refs`,
+`campaign_plan_ref`, `backend_results`, `finding_refs`, `reproducer_refs`, and
+`failure_counts`. Each backend row has `fuzzer_backend`, `status`, and
+`result_ref`; each reproducer row has `finding_id`, nullable `path`, and nullable
+`blocker`.
+
 Include this exact failure-count object in the summary, using the populations
 defined above:
 
@@ -232,7 +244,7 @@ Use this exact top-level shape for the backend record:
 
 ```json
 {
-  "schema_version": "ultrafuzz.property-campaign.v1",
+  "schema_version": "ultrafuzz.property-campaign.v2",
   "fuzzer_backend": "recon",
   "failures": [
     {

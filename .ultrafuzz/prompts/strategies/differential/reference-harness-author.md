@@ -42,7 +42,7 @@ Write {{artifact_path}}/reference-harness.json with this JSON shape:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "ultrafuzz.reference-harness.v1",
   "harness_author_attempt_index": {{attempt_index}},
   "source_plan_artifacts": [],
   "authored_paths": [],

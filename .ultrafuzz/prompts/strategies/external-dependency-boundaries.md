@@ -138,20 +138,18 @@ Write structured JSON to:
 
 The JSON must include:
 
-- `schema_version`: `"1.0"`
-- `dependencies`: array of enumerated dependency or callback surfaces with
-  contract or interface, dependency type, touched functions, classification,
-  source evidence, source-backed scope claim, in-scope rationale, selected test
-  cases, expected classification if red, scope notes, and harness notes
-- `in_scope_test_targets`: array of rows eligible for production-bug tests, or
-  `[]`
-- `non_finding_rows`: array of trusted, assumed-correct, out-of-scope,
-  known-risk, unknown, or ambiguous rows, with reasons
-- `generated_tests`: array of generated test file paths and the checks each
-  file covers, or `[]`
-- `source_backed_in_scope_rationales`: array of finding candidate ids mapped
-  to the exact evidence that makes the dependency behavior in scope, or `[]`
-- `coverage_notes`: dependency surfaces intentionally skipped, with reasons
+- `schema_version`: `"ultrafuzz.dependency-scope-matrix.v1"`
+- `dependencies`: rows with exact keys `dependency_id`,
+  `contract_or_interface`, `dependency_type`, `touched_functions`,
+  `classification`, `source_evidence`, `source_backed_scope_claim`, nullable
+  `in_scope_rationale`, `selected_test_cases`, nullable
+  `expected_classification_if_red`, `scope_notes`, and `harness_notes`
+- `in_scope_test_targets`: rows with `dependency_id` and `rationale`, or `[]`
+- `non_finding_rows`: rows with `dependency_id` and `reason`, or `[]`
+- `generated_tests`: rows with `path` and non-empty `checks`, or `[]`
+- `source_backed_in_scope_rationales`: rows with `finding_candidate_id`,
+  `dependency_id`, and non-empty `evidence_paths`, or `[]`
+- `coverage_notes`: rows with `dependency_id` and `reason`
 
 Write structured findings to {{output_findings_path}}. Use an empty JSON array
 if no source-backed in-scope production finding is confirmed.
