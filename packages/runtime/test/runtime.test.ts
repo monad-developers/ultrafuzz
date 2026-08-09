@@ -1062,6 +1062,87 @@ const V0_0_2_STOCK_CODEX_ADAPTER = [
   ""
 ].join("\n");
 
+test(
+  "init supports Modal-style directory and child device splits without weakening file identity checks",
+  { concurrency: false, skip: process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
+  () => {
+    const fstatDescriptor = Object.getOwnPropertyDescriptor(fs, "fstatSync")!;
+    const lstatDescriptor = Object.getOwnPropertyDescriptor(fs, "lstatSync")!;
+    const statDescriptor = Object.getOwnPropertyDescriptor(fs, "statSync")!;
+    const originalFstatSync = fs.fstatSync;
+    const originalLstatSync = fs.lstatSync;
+    const originalStatSync = fs.statSync;
+    let mismatchedPath: string | undefined;
+    let mismatchInjected = false;
+
+    const modalizeDirectoryDevice = <T extends fs.Stats | fs.BigIntStats | undefined>(value: T): T => {
+      if (value !== undefined && value.isDirectory()) {
+        if (typeof value.dev === "bigint") (value as fs.BigIntStats).dev += 1_000_000n;
+        else (value as fs.Stats).dev += 1_000_000;
+      }
+      return value;
+    };
+
+    Object.defineProperty(fs, "fstatSync", {
+      ...fstatDescriptor,
+      value: (...args: unknown[]) => {
+        const result = modalizeDirectoryDevice(Reflect.apply(originalFstatSync, fs, args) as fs.Stats | fs.BigIntStats);
+        if (mismatchedPath !== undefined && !result.isDirectory()) {
+          try {
+            if (fs.readlinkSync(`/proc/self/fd/${String(args[0])}`) === mismatchedPath) {
+              const mutable = result as fs.BigIntStats;
+              mutable.ino += 1n;
+              mismatchInjected = true;
+            }
+          } catch {
+            // Let the real descriptor operation determine invalid-fd behavior.
+          }
+        }
+        return result;
+      }
+    });
+    Object.defineProperty(fs, "lstatSync", {
+      ...lstatDescriptor,
+      value: (...args: unknown[]) =>
+        modalizeDirectoryDevice(Reflect.apply(originalLstatSync, fs, args) as fs.Stats | fs.BigIntStats | undefined)
+    });
+    Object.defineProperty(fs, "statSync", {
+      ...statDescriptor,
+      value: (...args: unknown[]) =>
+        modalizeDirectoryDevice(Reflect.apply(originalStatSync, fs, args) as fs.Stats | fs.BigIntStats | undefined)
+    });
+
+    try {
+      const project = tempProject();
+      const initialized = initProject({ projectRoot: project, force: true });
+      assert.equal(initialized.ok, true, JSON.stringify(initialized.diagnostics));
+      assert.notEqual(
+        fs.lstatSync(project, { bigint: true }).dev,
+        fs.lstatSync(path.join(project, "ultrafuzz.toml"), { bigint: true }).dev
+      );
+
+      const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+      fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+      const upgraded = initProject({ projectRoot: project });
+      assert.equal(upgraded.ok, true, JSON.stringify(upgraded.diagnostics));
+      assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+
+      const attackedProject = tempProject();
+      mismatchedPath = path.join(attackedProject, "ultrafuzz.toml");
+      fs.writeFileSync(mismatchedPath, "# must remain intact\n", "utf8");
+      const rejected = initProject({ projectRoot: attackedProject, force: true });
+      assert.equal(mismatchInjected, true);
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.diagnostics[0]?.code, "INIT_PATH_UNSAFE");
+      assert.equal(fs.readFileSync(mismatchedPath, "utf8"), "# must remain intact\n");
+    } finally {
+      Object.defineProperty(fs, "fstatSync", fstatDescriptor);
+      Object.defineProperty(fs, "lstatSync", lstatDescriptor);
+      Object.defineProperty(fs, "statSync", statDescriptor);
+    }
+  }
+);
+
 test("init preserves existing project-owned files and validate exposes launch posture", async () => {
   const project = tempProject();
   fs.writeFileSync(path.join(project, "ultrafuzz.toml"), "# custom\n", "utf8");
