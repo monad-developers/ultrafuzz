@@ -158,6 +158,7 @@ export function artifactSchemaRegistry(): readonly ArtifactSchemaRegistryEntry[]
 
   const ids = new Set<string>();
   let bundleBytes = 0;
+  let bundlePatterns = 0;
   cachedRegistry = Object.freeze(
     filenames.map((filename): ArtifactSchemaRegistryEntry => {
       const metadata = metadataByFilename[filename]!;
@@ -173,7 +174,13 @@ export function artifactSchemaRegistry(): readonly ArtifactSchemaRegistryEntry[]
         maxProperties: 100_000
       });
       if (!isRecord(parsed)) throw new Error(`schema must be a JSON object: ${filename}`);
-      assertRegisteredPatternLimits(parsed, filename);
+      if (parsed.$schema !== "https://json-schema.org/draft/2020-12/schema") {
+        throw new Error(`schema must declare Draft 2020-12: ${filename}`);
+      }
+      bundlePatterns += assertRegisteredPatternLimits(parsed, filename);
+      if (bundlePatterns > MAX_REGISTERED_PATTERNS) {
+        throw new Error(`registered schema bundle exceeds the ${MAX_REGISTERED_PATTERNS}-pattern limit`);
+      }
       const id = parsed.$id;
       if (typeof id !== "string" || id.length === 0 || id.includes("#")) {
         throw new Error(`schema must have a fragment-free non-empty $id: ${filename}`);
@@ -190,7 +197,7 @@ export function artifactSchemaRegistry(): readonly ArtifactSchemaRegistryEntry[]
         role: metadata.role,
         contractIds: Object.freeze([...(metadata.contractIds ?? [])]),
         sha256: sha256(snapshot),
-        schema: Object.freeze(parsed),
+        schema: deepFreezeJson(parsed),
         localReferences: Object.freeze(localReferences),
         semanticGates: Object.freeze([...(metadata.semanticGates ?? [])]),
         typescriptExport: metadata.typescriptExport,
@@ -205,7 +212,7 @@ export function artifactSchemaBundleDigest(): string {
   const manifest = artifactSchemaRegistry()
     .map((entry) => `${entry.filename}\u0000${entry.id}\u0000${entry.sha256}`)
     .join("\n");
-  return sha256(Buffer.from(`${VALIDATOR_BUILD_IDENTITY}\n${manifest}`, "utf8"));
+  return sha256(Buffer.from(manifest, "utf8"));
 }
 
 export function registeredSchemaForPath(filePath: string): ArtifactSchemaRegistryEntry | undefined {
@@ -268,7 +275,7 @@ function collectReferences(value: unknown, output = new Set<string>()): Set<stri
   return output;
 }
 
-function assertRegisteredPatternLimits(value: unknown, filename: string): void {
+function assertRegisteredPatternLimits(value: unknown, filename: string): number {
   let count = 0;
   const visit = (entry: unknown): void => {
     if (Array.isArray(entry)) {
@@ -278,18 +285,35 @@ function assertRegisteredPatternLimits(value: unknown, filename: string): void {
     if (!isRecord(entry)) return;
     for (const [key, item] of Object.entries(entry)) {
       if (key === "pattern" && typeof item === "string") {
-        count += 1;
-        if (count > MAX_REGISTERED_PATTERNS) {
-          throw new Error(`schema exceeds the ${MAX_REGISTERED_PATTERNS}-pattern limit: ${filename}`);
-        }
-        if (item.length > MAX_REGISTERED_PATTERN_LENGTH) {
-          throw new Error(`schema pattern exceeds the ${MAX_REGISTERED_PATTERN_LENGTH}-character limit: ${filename}`);
-        }
+        assertPattern(item);
+      } else if (key === "patternProperties" && isRecord(item)) {
+        for (const pattern of Object.keys(item)) assertPattern(pattern);
       }
       visit(item);
     }
   };
+  const assertPattern = (pattern: string): void => {
+    count += 1;
+    if (count > MAX_REGISTERED_PATTERNS) {
+      throw new Error(`schema exceeds the ${MAX_REGISTERED_PATTERNS}-pattern limit: ${filename}`);
+    }
+    if (pattern.length > MAX_REGISTERED_PATTERN_LENGTH) {
+      throw new Error(`schema pattern exceeds the ${MAX_REGISTERED_PATTERN_LENGTH}-character limit: ${filename}`);
+    }
+  };
   visit(value);
+  return count;
+}
+
+function deepFreezeJson<T>(value: T, seen = new Set<object>()): T {
+  if (typeof value !== "object" || value === null || seen.has(value)) return value;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const entry of value) deepFreezeJson(entry, seen);
+  } else {
+    for (const entry of Object.values(value)) deepFreezeJson(entry, seen);
+  }
+  return Object.freeze(value);
 }
 
 function sha256(bytes: Uint8Array): string {

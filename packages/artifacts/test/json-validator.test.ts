@@ -45,6 +45,12 @@ test("the artifact schema registry is exhaustive, fragment-free, and strictly co
   );
   assert.equal(/^[0-9a-f]{64}$/u.test(artifactSchemaBundleDigest()), true);
   assert.match(VALIDATOR_BUILD_IDENTITY, /^ultrafuzz-json-validator\.v1:[0-9a-f]{64}$/u);
+  const propertiesDocument = registry.find((entry) => entry.filename === "properties.schema.json")?.schema;
+  assert.equal(Object.isFrozen(propertiesDocument), true);
+  assert.equal(Object.isFrozen(propertiesDocument?.properties), true);
+  assert.throws(() => {
+    (propertiesDocument?.properties as Record<string, unknown>).mutated = true;
+  }, TypeError);
   assert.deepEqual(artifactContractSchemaBinding("ultrafuzz/properties@1"), {
     schema_file: "properties.schema.json",
     schema_id: "urn:ultrafuzz:schema:artifacts:properties:1",
@@ -123,6 +129,14 @@ test("file validation uses the registered schema and distinguishes instance from
       bounded.diagnostics.map((diagnostic) => diagnostic.schemaPath),
       ["#/required", "#/required"]
     );
+
+    const oversizedDiagnostic = await validateJsonFile({
+      schemaPath: path.join(temporary, "x".repeat(20_000)),
+      filePath: validPath
+    });
+    assert.equal(oversizedDiagnostic.status, "setup-error");
+    assert.equal(oversizedDiagnostic.truncated, true);
+    assert.equal(Buffer.byteLength(JSON.stringify(oversizedDiagnostic.diagnostics), "utf8") <= 64 * 1024, true);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }
@@ -168,6 +182,41 @@ test("external schemas resolve only local contained references", async () => {
     const remote = await validateJsonFile({ schemaPath: root, filePath: artifact });
     assert.equal(remote.status, "setup-error");
     assert.match(remote.diagnostics[0]?.message ?? "", /HTTP\(S\).*forbidden/u);
+
+    fs.writeFileSync(
+      root,
+      JSON.stringify({
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        $id: "urn:test:root:patterns:1",
+        type: "object",
+        patternProperties: Object.fromEntries(
+          Array.from({ length: 257 }, (_, index) => [`^property-${index}$`, { type: "string" }])
+        )
+      })
+    );
+    const excessivePatterns = await validateJsonFile({ schemaPath: root, filePath: artifact });
+    assert.equal(excessivePatterns.status, "setup-error");
+    assert.match(excessivePatterns.diagnostics[0]?.message ?? "", /pattern limit/u);
+
+    fs.writeFileSync(
+      root,
+      JSON.stringify({
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        properties: { value: { $ref: "child.json" } }
+      })
+    );
+    fs.writeFileSync(
+      child,
+      JSON.stringify({
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        $id: "urn:test:child:cycle:1",
+        $ref: "root.json"
+      })
+    );
+    const unversionedCycle = await validateJsonFile({ schemaPath: root, filePath: artifact });
+    assert.equal(unversionedCycle.status, "setup-error");
+    assert.match(unversionedCycle.diagnostics[0]?.message ?? "", /root schema.*must declare/u);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }

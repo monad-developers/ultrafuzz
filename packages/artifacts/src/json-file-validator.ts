@@ -18,6 +18,13 @@ const MAX_INSTANCE_BYTES = 64 * 1024 * 1024;
 const MAX_EXTERNAL_SCHEMAS = 64;
 const MAX_PATTERN_COUNT = 256;
 const MAX_PATTERN_LENGTH = 1_024;
+const MAX_SCHEMA_ID_LENGTH = 4_096;
+const MAX_SCHEMA_REFERENCE_LENGTH = 4_096;
+const MAX_DIAGNOSTIC_BYTES = 64 * 1024;
+const MAX_DIAGNOSTIC_CODE_BYTES = 128;
+const MAX_DIAGNOSTIC_PATH_BYTES = 8 * 1024;
+const MAX_DIAGNOSTIC_KEYWORD_BYTES = 256;
+const MAX_DIAGNOSTIC_MESSAGE_BYTES = 8 * 1024;
 const DEFAULT_DEADLINE_MS = 5_000;
 
 export interface ValidateJsonFileOptions {
@@ -120,7 +127,7 @@ export async function validateJsonFile(options: ValidateJsonFileOptions): Promis
   }
 
   const workerResult = await runValidationWorker(request, options.deadlineMs ?? DEFAULT_DEADLINE_MS);
-  return {
+  return boundValidationResult({
     ...workerResult,
     schema: {
       id: schemaId,
@@ -130,7 +137,7 @@ export async function validateJsonFile(options: ValidateJsonFileOptions): Promis
       registered
     },
     artifact_sha256: sha256(instanceBytes)
-  };
+  });
 }
 
 /**
@@ -175,7 +182,7 @@ export function validateRegisteredJsonFileSync(options: {
     },
     options.deadlineMs ?? DEFAULT_DEADLINE_MS
   );
-  return {
+  return boundValidationResult({
     ...workerResult,
     schema: {
       id: registration.id,
@@ -185,7 +192,7 @@ export function validateRegisteredJsonFileSync(options: {
       registered: true
     },
     artifact_sha256: sha256(instanceBytes)
-  };
+  });
 }
 
 function prepareExternalSchemas(
@@ -199,6 +206,7 @@ function prepareExternalSchemas(
     for (const refPath of explicit) allowedRoots.add(fs.realpathSync(path.dirname(refPath)));
     const byPath = new Map<string, ExternalSchemaSnapshot>();
     let totalBytes = 0;
+    let totalPatterns = 0;
 
     const load = (filePath: string, supplied?: Buffer, requireId = true): ExternalSchemaSnapshot => {
       const bytes = supplied ?? readRegularFileSnapshot(filePath, MAX_SCHEMA_BYTES);
@@ -230,7 +238,13 @@ function prepareExternalSchemas(
       if (typeof parsed.$id === "string" && parsed.$id.includes("#")) {
         throw new Error(`schema $id must not contain a fragment: ${realPath}`);
       }
-      enforcePatternLimits(parsed);
+      if (typeof parsed.$id === "string" && parsed.$id.length > MAX_SCHEMA_ID_LENGTH) {
+        throw new Error(`schema $id exceeds the ${MAX_SCHEMA_ID_LENGTH}-character limit: ${realPath}`);
+      }
+      totalPatterns += enforcePatternLimits(parsed);
+      if (totalPatterns > MAX_PATTERN_COUNT) {
+        throw new Error(`schema bundle exceeds the ${MAX_PATTERN_COUNT}-pattern limit`);
+      }
       const snapshot = { filePath: realPath, schema: parsed };
       byPath.set(realPath, snapshot);
       return snapshot;
@@ -239,13 +253,20 @@ function prepareExternalSchemas(
     const root = load(rootPath, rootBytes, false);
     for (const refPath of explicit) load(refPath);
     const queue = [root, ...byPath.values()].filter((entry, index, entries) => entries.indexOf(entry) === index);
+    let rootReferencedByAnotherSchema = false;
     for (let index = 0; index < queue.length; index += 1) {
       const current = queue[index]!;
       rewriteAndLoadReferences(current.schema, current.filePath, (relativePath) => {
         const loaded = load(relativePath);
+        if (current.filePath !== root.filePath && loaded.filePath === root.filePath) {
+          rootReferencedByAnotherSchema = true;
+        }
         if (!queue.includes(loaded)) queue.push(loaded);
         return loaded.filePath;
       });
+    }
+    if (rootReferencedByAnotherSchema && typeof root.schema.$id !== "string") {
+      throw new Error("an external root schema referenced by another schema must declare a non-empty $id");
     }
 
     const bundledIds = new Set(artifactSchemaRegistry().map((entry) => entry.id));
@@ -274,6 +295,9 @@ function rewriteAndLoadReferences(value: unknown, referringPath: string, load: (
       rewriteAndLoadReferences(entry, referringPath, load);
       continue;
     }
+    if (entry.length > MAX_SCHEMA_REFERENCE_LENGTH) {
+      throw new Error(`schema reference exceeds the ${MAX_SCHEMA_REFERENCE_LENGTH}-character limit`);
+    }
     if (/^https?:/iu.test(entry)) throw new Error(`HTTP(S) schema references are forbidden: ${entry}`);
     if (/^file:/iu.test(entry) || path.isAbsolute(entry) || /^[A-Za-z]:/u.test(entry) || entry.includes("\\")) {
       throw new Error(`absolute file schema references are forbidden: ${entry}`);
@@ -295,7 +319,7 @@ function rewriteAndLoadReferences(value: unknown, referringPath: string, load: (
   }
 }
 
-function enforcePatternLimits(value: unknown): void {
+function enforcePatternLimits(value: unknown): number {
   let count = 0;
   const visit = (entry: unknown): void => {
     if (Array.isArray(entry)) {
@@ -303,17 +327,23 @@ function enforcePatternLimits(value: unknown): void {
     } else if (isRecord(entry)) {
       for (const [key, item] of Object.entries(entry)) {
         if (key === "pattern" && typeof item === "string") {
-          count += 1;
-          if (count > MAX_PATTERN_COUNT) throw new Error(`schema exceeds the ${MAX_PATTERN_COUNT}-pattern limit`);
-          if (item.length > MAX_PATTERN_LENGTH) {
-            throw new Error(`schema pattern exceeds the ${MAX_PATTERN_LENGTH}-character limit`);
-          }
+          assertPattern(item);
+        } else if (key === "patternProperties" && isRecord(item)) {
+          for (const pattern of Object.keys(item)) assertPattern(pattern);
         }
         visit(item);
       }
     }
   };
+  const assertPattern = (pattern: string): void => {
+    count += 1;
+    if (count > MAX_PATTERN_COUNT) throw new Error(`schema exceeds the ${MAX_PATTERN_COUNT}-pattern limit`);
+    if (pattern.length > MAX_PATTERN_LENGTH) {
+      throw new Error(`schema pattern exceeds the ${MAX_PATTERN_LENGTH}-character limit`);
+    }
+  };
   visit(value);
+  return count;
 }
 
 function runValidationWorker(request: WorkerRequest, deadlineMs: number): Promise<JsonFileValidationResult> {
@@ -384,13 +414,67 @@ function failure(
   code: string,
   message: string
 ): JsonFileValidationResult {
-  return {
+  return boundValidationResult({
     status,
     diagnostics: [{ code, message }],
     schema: null,
     artifact_sha256: null,
     truncated: false
+  });
+}
+
+function boundValidationResult(result: JsonFileValidationResult): JsonFileValidationResult {
+  const diagnostics: JsonFileValidationDiagnostic[] = [];
+  let serializedBytes = 2;
+  let contentTruncated = false;
+  for (const diagnostic of result.diagnostics) {
+    contentTruncated ||=
+      Buffer.byteLength(diagnostic.code, "utf8") > MAX_DIAGNOSTIC_CODE_BYTES ||
+      Buffer.byteLength(diagnostic.message, "utf8") > MAX_DIAGNOSTIC_MESSAGE_BYTES ||
+      (diagnostic.instancePath !== undefined &&
+        Buffer.byteLength(diagnostic.instancePath, "utf8") > MAX_DIAGNOSTIC_PATH_BYTES) ||
+      (diagnostic.schemaPath !== undefined &&
+        Buffer.byteLength(diagnostic.schemaPath, "utf8") > MAX_DIAGNOSTIC_PATH_BYTES) ||
+      (diagnostic.keyword !== undefined &&
+        Buffer.byteLength(diagnostic.keyword, "utf8") > MAX_DIAGNOSTIC_KEYWORD_BYTES);
+    const bounded: JsonFileValidationDiagnostic = {
+      code: truncateUtf8(diagnostic.code, MAX_DIAGNOSTIC_CODE_BYTES),
+      message: truncateUtf8(diagnostic.message, MAX_DIAGNOSTIC_MESSAGE_BYTES),
+      ...(diagnostic.instancePath === undefined
+        ? {}
+        : { instancePath: truncateUtf8(diagnostic.instancePath, MAX_DIAGNOSTIC_PATH_BYTES) }),
+      ...(diagnostic.schemaPath === undefined
+        ? {}
+        : { schemaPath: truncateUtf8(diagnostic.schemaPath, MAX_DIAGNOSTIC_PATH_BYTES) }),
+      ...(diagnostic.keyword === undefined
+        ? {}
+        : { keyword: truncateUtf8(diagnostic.keyword, MAX_DIAGNOSTIC_KEYWORD_BYTES) })
+    };
+    const bytes = Buffer.byteLength(JSON.stringify(bounded), "utf8") + (diagnostics.length === 0 ? 0 : 1);
+    if (serializedBytes + bytes > MAX_DIAGNOSTIC_BYTES) break;
+    diagnostics.push(bounded);
+    serializedBytes += bytes;
+  }
+  if (diagnostics.length === 0 && result.diagnostics.length > 0) {
+    diagnostics.push({
+      code: "JSON_DIAGNOSTIC_TRUNCATED",
+      message: "Validation failed, but the diagnostic exceeded the output limit"
+    });
+  }
+  return {
+    ...result,
+    diagnostics,
+    truncated: result.truncated || contentTruncated || diagnostics.length < result.diagnostics.length
   };
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.byteLength <= maxBytes) return value;
+  const suffix = Buffer.from("…", "utf8");
+  let end = Math.max(0, maxBytes - suffix.byteLength);
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return `${bytes.subarray(0, end).toString("utf8")}…`;
 }
 
 function insideAnyRoot(candidate: string, roots: ReadonlySet<string>): boolean {
