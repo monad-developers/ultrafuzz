@@ -1,11 +1,11 @@
 import crypto from "node:crypto";
-import { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { readRunMetadataDocument, readRunState, type RunMetadataDocument, type RunState } from "@ultrafuzz/artifacts";
 
-import { MODAL_WORKER_RESULT_SCHEMA_ID, type StrictModalWorkerResultDocument } from "./modal-contracts.js";
-import { readModalDocument, serializeModalDocument } from "./modal-documents.js";
+import { MODAL_WORKER_RESULT_SCHEMA_ID } from "./modal-contracts.js";
+import { readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
 import {
   OperationalDispositionError,
   operationalDispositionForError,
@@ -337,34 +337,10 @@ export function emptyWorkerCheckpoint(): WorkerCheckpointSnapshot {
 }
 
 async function writeJsonAtomic(filePath: string, value: WorkerResultContract): Promise<void> {
-  const serialized = serializeModalDocument(
-    MODAL_WORKER_RESULT_SCHEMA_ID,
-    value as StrictModalWorkerResultDocument
-  ).bytes;
-  await mkdir(path.dirname(filePath), { recursive: true });
-  const tempPath = path.join(
-    path.dirname(filePath),
-    `.${path.basename(filePath)}.tmp-${process.pid}-${crypto.randomBytes(8).toString("hex")}`
-  );
-  try {
-    await writeFile(tempPath, serialized, { mode: 0o600, flag: "wx" });
-    const tempHandle = await open(tempPath, "r");
-    try {
-      await tempHandle.sync();
-    } finally {
-      await tempHandle.close();
-    }
-    await rename(tempPath, filePath);
-    const directoryHandle = await open(path.dirname(filePath), "r");
-    try {
-      await directoryHandle.sync();
-    } finally {
-      await directoryHandle.close();
-    }
-  } catch (error) {
-    await unlink(tempPath).catch(() => undefined);
-    throw error;
-  }
+  const target = path.resolve(filePath);
+  const trustedRoot = path.dirname(target);
+  await mkdir(trustedRoot, { recursive: true, mode: 0o700 });
+  await writeModalDocumentAtomic(target, MODAL_WORKER_RESULT_SCHEMA_ID, value, { trustedRoot });
 }
 
 async function persistedGeneration(filePath: string): Promise<number> {

@@ -253,6 +253,21 @@ describe("strict worker result contracts", () => {
     expect(fs.readFileSync(statusPath, "utf8")).toContain("schema_version");
   });
 
+  it("rejects duplicate keys in persisted worker results instead of resetting their generation", async () => {
+    const root = await temporaryRoot();
+    const statusPath = path.join(root, "status.json");
+    const resultPath = path.join(root, "result.json");
+    const writer = await WorkerResultWriter.create({ statusPath, resultPath });
+    await writer.writePartial(emptyWorkerCheckpoint());
+    const serialized = fs.readFileSync(statusPath, "utf8");
+    const field = '"generation": 1';
+    const duplicate = serialized.replace(field, `${field},\n  "generation": 99`);
+    expect(duplicate).not.toBe(serialized);
+    fs.writeFileSync(statusPath, duplicate, { mode: 0o600 });
+
+    await expect(WorkerResultWriter.create({ statusPath, resultPath })).rejects.toThrow(/duplicate|strict JSON/u);
+  });
+
   it("derives checkpoint counts, age, digest, aggregate usage, and pricing provenance", async () => {
     const root = await temporaryRoot();
     const runRoot = path.join(root, ".ultrafuzz", "runs", "run-one");
