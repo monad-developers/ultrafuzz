@@ -88,7 +88,8 @@
           "items": {
             "type": "string",
             "minLength": 1
-          }
+          },
+          "uniqueItems": true
         }
       },
       "required": ["priority_threshold", "priorities", "property_ids"],

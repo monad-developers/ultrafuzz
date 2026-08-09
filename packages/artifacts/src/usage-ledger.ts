@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { z } from "zod/v4";
 
+import { hasAtMostCodePoints } from "./portable-json-primitives.js";
 import { type RunLayout } from "./run-layout.js";
 import { SAFE_ID_PATTERN, validateSafeId } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
@@ -81,8 +82,18 @@ const count = z.number().int().nonnegative().safe();
 const usageCounter = z.number().int().nonnegative().safe();
 
 export const normalizedUsageSchema = z.strictObject({
-  model: z.string().min(1).max(1_024),
-  agent: z.string().min(1).max(1_024),
+  model: z
+    .string()
+    .min(1)
+    .refine((value) => hasAtMostCodePoints(value, 1_024), {
+      message: "Model must not exceed 1024 Unicode code points"
+    }),
+  agent: z
+    .string()
+    .min(1)
+    .refine((value) => hasAtMostCodePoints(value, 1_024), {
+      message: "Agent must not exceed 1024 Unicode code points"
+    }),
   input_tokens: usageCounter,
   output_tokens: usageCounter,
   cache_read_tokens: usageCounter.optional(),

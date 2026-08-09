@@ -2,6 +2,12 @@ import { z } from "zod/v4";
 
 import { ARTIFACT_CONTRACT_IDS, NON_JSON_ARTIFACT_CONTRACT_IDS } from "./artifact-contract-ids.js";
 import {
+  canonicalTimestampJsonSchema,
+  canonicalTimestampSchema,
+  canonicalUuidJsonSchema,
+  canonicalUuidSchema
+} from "./portable-json-primitives.js";
+import {
   CONTROLLER_LEASE_STATUSES,
   NODE_PROVENANCE_FAILURE_CATEGORIES,
   NODE_PROVENANCE_REASON_CODES,
@@ -23,7 +29,8 @@ import {
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 const nonEmptyString = z.string().min(1);
-const nonNegativeInteger = z.number().int().nonnegative();
+const nonNegativeInteger = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const positiveInteger = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
 const uniqueNonEmptyStrings = z.array(nonEmptyString).superRefine((value, context) => {
   if (new Set(value).size !== value.length) {
@@ -36,7 +43,7 @@ const runWorkflowProvenanceSchema = z.strictObject({
   compiledRunId: nonEmptyString,
   name: nonEmptyString,
   controlGeneration: sha256,
-  linkId: z.uuid(),
+  linkId: canonicalUuidSchema,
   executionSnapshot: z.string().regex(/^smithers\/execution-snapshots\/[0-9a-f]{64}$/u)
 });
 const runProvenanceSchema = z.strictObject({ workflow: runWorkflowProvenanceSchema });
@@ -173,10 +180,10 @@ export const nodeStateSchema = z.strictObject({
   model_id: nonEmptyString.optional(),
   model: nonEmptyString.optional(),
   model_index: nonNegativeInteger.optional(),
-  started_at: nonEmptyString.optional(),
-  finished_at: nonEmptyString.optional(),
+  started_at: canonicalTimestampSchema.optional(),
+  finished_at: canonicalTimestampSchema.optional(),
   last_error: nonEmptyString.optional(),
-  wait_since: nonEmptyString.optional(),
+  wait_since: canonicalTimestampSchema.optional(),
   wait_reason: z.enum(NODE_WAIT_REASONS).optional(),
   next_eligible_action: z.enum(NODE_NEXT_ELIGIBLE_ACTIONS).optional(),
   provenance: nodeProvenanceSchema.optional()
@@ -184,21 +191,21 @@ export const nodeStateSchema = z.strictObject({
 
 const controllerLeaseSchema = z.strictObject({
   status: z.enum(CONTROLLER_LEASE_STATUSES),
-  duration_ms: z.number().int().min(1_000),
-  renewed_at: nonEmptyString,
-  expires_at: nonEmptyString,
+  duration_ms: positiveInteger.min(1_000),
+  renewed_at: canonicalTimestampSchema,
+  expires_at: canonicalTimestampSchema,
   recovery_attempts: nonNegativeInteger
 });
 
 const concurrencySchema = z.strictObject({
-  requested_concurrency: z.number().int().positive(),
+  requested_concurrency: positiveInteger,
   effective_concurrency: nonNegativeInteger,
   ready_queue_depth: nonNegativeInteger,
   active_work: nonNegativeInteger,
   queued_duration_ms: nonNegativeInteger,
   active_duration_ms: nonNegativeInteger,
   idle_duration_ms: nonNegativeInteger,
-  observed_at: nonEmptyString
+  observed_at: canonicalTimestampSchema
 });
 
 export const runStateSchema = z
@@ -208,12 +215,12 @@ export const runStateSchema = z
     status: z.enum(RUN_STATE_STATUSES),
     graph_fingerprint: z.string(),
     config_fingerprint: z.string(),
-    created_at: nonEmptyString,
+    created_at: canonicalTimestampSchema,
     source_run_id: nonEmptyString.optional(),
-    started_at: nonEmptyString.optional(),
-    finished_at: nonEmptyString.optional(),
-    workflow_deadline_at: nonEmptyString.optional(),
-    last_transition_at: nonEmptyString,
+    started_at: canonicalTimestampSchema.optional(),
+    finished_at: canonicalTimestampSchema.optional(),
+    workflow_deadline_at: canonicalTimestampSchema.optional(),
+    last_transition_at: canonicalTimestampSchema,
     controller_lease: controllerLeaseSchema,
     concurrency: concurrencySchema,
     provenance: runProvenanceSchema.optional(),
@@ -221,13 +228,6 @@ export const runStateSchema = z
   })
   .superRefine((value, ctx) => {
     for (const [nodeId, node] of Object.entries(value.nodes)) {
-      if (node.node_id !== nodeId) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["nodes", nodeId, "node_id"],
-          message: "node_id must match its map key"
-        });
-      }
       if (!isTerminalNodeStatus(node.status)) {
         for (const key of ["wait_since", "wait_reason", "next_eligible_action"] as const) {
           if (node[key] === undefined) {
@@ -241,6 +241,22 @@ export const runStateSchema = z
       }
     }
   });
+
+const nonNegativeIntegerJsonSchema = {
+  type: "integer",
+  minimum: 0,
+  maximum: Number.MAX_SAFE_INTEGER
+} as const;
+const positiveIntegerJsonSchema = {
+  type: "integer",
+  minimum: 1,
+  maximum: Number.MAX_SAFE_INTEGER
+} as const;
+const controllerLeaseDurationJsonSchema = {
+  type: "integer",
+  minimum: 1_000,
+  maximum: Number.MAX_SAFE_INTEGER
+} as const;
 
 export const runStateJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -266,22 +282,22 @@ export const runStateJsonSchema = {
     status: { enum: [...RUN_STATE_STATUSES] },
     graph_fingerprint: { type: "string" },
     config_fingerprint: { type: "string" },
-    created_at: { type: "string", minLength: 1 },
+    created_at: canonicalTimestampJsonSchema,
     source_run_id: { type: "string", minLength: 1 },
-    started_at: { type: "string", minLength: 1 },
-    finished_at: { type: "string", minLength: 1 },
-    workflow_deadline_at: { type: "string", minLength: 1 },
-    last_transition_at: { type: "string", minLength: 1 },
+    started_at: canonicalTimestampJsonSchema,
+    finished_at: canonicalTimestampJsonSchema,
+    workflow_deadline_at: canonicalTimestampJsonSchema,
+    last_transition_at: canonicalTimestampJsonSchema,
     controller_lease: {
       type: "object",
       required: ["status", "duration_ms", "renewed_at", "expires_at", "recovery_attempts"],
       additionalProperties: false,
       properties: {
         status: { enum: [...CONTROLLER_LEASE_STATUSES] },
-        duration_ms: { type: "integer", minimum: 1_000 },
-        renewed_at: { type: "string", minLength: 1 },
-        expires_at: { type: "string", minLength: 1 },
-        recovery_attempts: { type: "integer", minimum: 0 }
+        duration_ms: controllerLeaseDurationJsonSchema,
+        renewed_at: canonicalTimestampJsonSchema,
+        expires_at: canonicalTimestampJsonSchema,
+        recovery_attempts: nonNegativeIntegerJsonSchema
       }
     },
     concurrency: {
@@ -298,14 +314,14 @@ export const runStateJsonSchema = {
       ],
       additionalProperties: false,
       properties: {
-        requested_concurrency: { type: "integer", minimum: 1 },
-        effective_concurrency: { type: "integer", minimum: 0 },
-        ready_queue_depth: { type: "integer", minimum: 0 },
-        active_work: { type: "integer", minimum: 0 },
-        queued_duration_ms: { type: "integer", minimum: 0 },
-        active_duration_ms: { type: "integer", minimum: 0 },
-        idle_duration_ms: { type: "integer", minimum: 0 },
-        observed_at: { type: "string", minLength: 1 }
+        requested_concurrency: positiveIntegerJsonSchema,
+        effective_concurrency: nonNegativeIntegerJsonSchema,
+        ready_queue_depth: nonNegativeIntegerJsonSchema,
+        active_work: nonNegativeIntegerJsonSchema,
+        queued_duration_ms: nonNegativeIntegerJsonSchema,
+        active_duration_ms: nonNegativeIntegerJsonSchema,
+        idle_duration_ms: nonNegativeIntegerJsonSchema,
+        observed_at: canonicalTimestampJsonSchema
       }
     },
     provenance: { $ref: "#/$defs/runProvenance" },
@@ -334,7 +350,7 @@ export const runStateJsonSchema = {
         properties: {
           node_id: { type: "string", minLength: 1 },
           status: { enum: [...NODE_STATE_STATUSES] },
-          retry_count: { type: "integer", minimum: 0 },
+          retry_count: nonNegativeIntegerJsonSchema,
           timed_out: { type: "boolean" },
           logical_node_id: { type: "string", minLength: 1 },
           artifact_dir: { type: "string", minLength: 1 },
@@ -379,15 +395,15 @@ export const runStateJsonSchema = {
               ]
             }
           },
-          attempt_index: { type: "integer", minimum: 0 },
-          loop_index: { type: "integer", minimum: 0 },
+          attempt_index: nonNegativeIntegerJsonSchema,
+          loop_index: nonNegativeIntegerJsonSchema,
           model_id: { type: "string", minLength: 1 },
           model: { type: "string", minLength: 1 },
-          model_index: { type: "integer", minimum: 0 },
-          started_at: { type: "string", minLength: 1 },
-          finished_at: { type: "string", minLength: 1 },
+          model_index: nonNegativeIntegerJsonSchema,
+          started_at: canonicalTimestampJsonSchema,
+          finished_at: canonicalTimestampJsonSchema,
           last_error: { type: "string", minLength: 1 },
-          wait_since: { type: "string", minLength: 1 },
+          wait_since: canonicalTimestampJsonSchema,
           wait_reason: { enum: [...NODE_WAIT_REASONS] },
           next_eligible_action: { enum: [...NODE_NEXT_ELIGIBLE_ACTIONS] },
           provenance: { $ref: "#/$defs/nodeProvenance" }
@@ -417,7 +433,7 @@ export const runStateJsonSchema = {
         compiledRunId: { type: "string", minLength: 1 },
         name: { type: "string", minLength: 1 },
         controlGeneration: { type: "string", pattern: "^[0-9a-f]{64}$" },
-        linkId: { type: "string", format: "uuid" },
+        linkId: canonicalUuidJsonSchema,
         executionSnapshot: {
           type: "string",
           pattern: "^smithers/execution-snapshots/[0-9a-f]{64}$"
@@ -441,7 +457,7 @@ export const runStateJsonSchema = {
           oneOf: [{ $ref: "#/$defs/taskWorkflowProvenance" }, { $ref: "#/$defs/aggregateWorkflowProvenance" }]
         },
         output_contracts: { $ref: "#/$defs/outputContractProvenance" },
-        findings_count: { type: "integer", minimum: 0 },
+        findings_count: nonNegativeIntegerJsonSchema,
         failure: { $ref: "#/$defs/failureProvenance" },
         terminal_disposition: { $ref: "#/$defs/terminalDisposition" }
       }
@@ -456,7 +472,7 @@ export const runStateJsonSchema = {
         agent_task_id: { type: "string", minLength: 1 },
         verifier_task_id: { type: "string", minLength: 1 },
         state: { enum: [...SMITHERS_NODE_STATES] },
-        attempt: { type: "integer", minimum: 0 }
+        attempt: nonNegativeIntegerJsonSchema
       }
     },
     aggregateWorkflowProvenance: {

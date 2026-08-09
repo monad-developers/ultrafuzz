@@ -5,6 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import * as artifactExports from "../src/index.js";
+import { CANONICAL_TIMESTAMP_PATTERN, CANONICAL_UUID_PATTERN } from "../src/portable-json-primitives.js";
 import {
   ARTIFACT_CONTRACT_IDS,
   ARTIFACT_CONTRACT_SCHEMA_FILES,
@@ -463,6 +464,293 @@ test("Ajv and retained Zod parsers agree on canonical unique-array constraints",
   assert.deepEqual(mismatches, [], `Zod accepted JSON-Schema-invalid unique arrays: ${mismatches.join("; ")}`);
 });
 
+test("portable generated-test paths and implementation selection uniqueness agree bidirectionally", () => {
+  const generatedEntry = artifactSchemaRegistry().find(
+    (candidate) => candidate.filename === "generated-tests.schema.json"
+  );
+  assert.ok(generatedEntry?.zodParser !== undefined);
+  const generatedParser = (artifactExports as unknown as Record<string, unknown>)[
+    generatedEntry.zodParser
+  ] as ZodLikeParser;
+  const generated = {
+    schema_version: "ultrafuzz.generated-tests.v2",
+    run_id: "run-1",
+    node_id: "node-1",
+    generated_tests: [{ path: "generated-tests/nested/Invariant.t.sol" }]
+  };
+  assertParity(generatedEntry.id, generatedParser, generated, true, "generated-tests:path:safe");
+  for (const [label, unsafePath] of [
+    ["wrong-root", "tests/Invariant.t.sol"],
+    ["traversal", "generated-tests/../Invariant.t.sol"],
+    ["backslash", "generated-tests/nested\\Invariant.t.sol"],
+    ["oversized-segment", `generated-tests/${"a".repeat(129)}`],
+    ["trailing-newline", "generated-tests/Invariant.t.sol\n"]
+  ] as const) {
+    const candidate = structuredClone(generated);
+    candidate.generated_tests[0]!.path = unsafePath;
+    assertParity(generatedEntry.id, generatedParser, candidate, false, `generated-tests:path:${label}`);
+  }
+
+  const implementedEntry = artifactSchemaRegistry().find(
+    (candidate) => candidate.filename === "implemented-properties.schema.json"
+  );
+  assert.ok(implementedEntry?.zodParser !== undefined);
+  const implementedParser = (artifactExports as unknown as Record<string, unknown>)[
+    implementedEntry.zodParser
+  ] as ZodLikeParser;
+  const duplicateSelection = {
+    schema_version: "ultrafuzz.implemented-properties.v3",
+    selection: {
+      priority_threshold: "high",
+      priorities: ["high"],
+      property_ids: ["property-1", "property-1"]
+    },
+    properties: []
+  };
+  assertParity(
+    implementedEntry.id,
+    implementedParser,
+    duplicateSelection,
+    false,
+    "implemented-properties:duplicate-selection-property-id"
+  );
+});
+
+test("run-state handwritten integer constraints match Zod's safe-integer boundary", () => {
+  const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === "run-state.schema.json");
+  assert.ok(entry?.zodParser !== undefined);
+  const parser = (artifactExports as unknown as Record<string, unknown>)[entry.zodParser] as ZodLikeParser;
+  const timestamp = "2026-08-09T00:00:00.000Z";
+  const taskWorkflow = {
+    run_id: "workflow-1",
+    task_id: "verify:node-a",
+    agent_task_id: "node:node-a",
+    verifier_task_id: "verify:node-a",
+    state: "finished" as const,
+    attempt: 1
+  };
+  const base = createInitialRunState({
+    runId: "run-1",
+    graphFingerprint: "a".repeat(64),
+    configFingerprint: "b".repeat(64),
+    createdAt: timestamp,
+    nodes: []
+  });
+  base.started_at = timestamp;
+  base.finished_at = timestamp;
+  base.workflow_deadline_at = timestamp;
+  base.nodes["node-a"] = {
+    node_id: "node-a",
+    status: "succeeded",
+    retry_count: 1,
+    timed_out: false,
+    attempt_index: 1,
+    loop_index: 1,
+    model_index: 1,
+    started_at: timestamp,
+    finished_at: timestamp,
+    provenance: { workflow: taskWorkflow, findings_count: 1 }
+  };
+  assertParity(entry.id, parser, base, true, "run-state:safe-integer:baseline");
+
+  const unsafe = Number.MAX_SAFE_INTEGER + 1;
+  const mutations: ReadonlyArray<{ label: string; apply: (value: typeof base) => void }> = [
+    { label: "controller-duration", apply: (value) => (value.controller_lease.duration_ms = unsafe) },
+    { label: "controller-recoveries", apply: (value) => (value.controller_lease.recovery_attempts = unsafe) },
+    { label: "requested-concurrency", apply: (value) => (value.concurrency.requested_concurrency = unsafe) },
+    { label: "effective-concurrency", apply: (value) => (value.concurrency.effective_concurrency = unsafe) },
+    { label: "ready-queue", apply: (value) => (value.concurrency.ready_queue_depth = unsafe) },
+    { label: "active-work", apply: (value) => (value.concurrency.active_work = unsafe) },
+    { label: "queued-duration", apply: (value) => (value.concurrency.queued_duration_ms = unsafe) },
+    { label: "active-duration", apply: (value) => (value.concurrency.active_duration_ms = unsafe) },
+    { label: "idle-duration", apply: (value) => (value.concurrency.idle_duration_ms = unsafe) },
+    { label: "node-retries", apply: (value) => (value.nodes["node-a"]!.retry_count = unsafe) },
+    { label: "node-attempt", apply: (value) => (value.nodes["node-a"]!.attempt_index = unsafe) },
+    { label: "node-loop", apply: (value) => (value.nodes["node-a"]!.loop_index = unsafe) },
+    { label: "node-model", apply: (value) => (value.nodes["node-a"]!.model_index = unsafe) },
+    {
+      label: "node-findings",
+      apply: (value) => (value.nodes["node-a"]!.provenance = { workflow: taskWorkflow, findings_count: unsafe })
+    },
+    {
+      label: "task-attempt",
+      apply: (value) =>
+        (value.nodes["node-a"]!.provenance = {
+          workflow: { ...taskWorkflow, attempt: unsafe },
+          findings_count: 1
+        })
+    }
+  ];
+  for (const mutation of mutations) {
+    const candidate = structuredClone(base);
+    mutation.apply(candidate);
+    assertParity(entry.id, parser, candidate, false, `run-state:unsafe-integer:${mutation.label}`);
+  }
+});
+
+test("canonical timestamp and UUID lexical mutations agree in handwritten schemas and retained Zod", () => {
+  const eventEntry = artifactSchemaRegistry().find((candidate) => candidate.filename === "event-record.schema.json");
+  const attemptEntry = artifactSchemaRegistry().find(
+    (candidate) => candidate.filename === "node-attempt-ledger.schema.json"
+  );
+  const runStateEntry = artifactSchemaRegistry().find((candidate) => candidate.filename === "run-state.schema.json");
+  assert.ok(eventEntry?.zodParser !== undefined);
+  assert.ok(attemptEntry?.zodParser !== undefined);
+  assert.ok(runStateEntry?.zodParser !== undefined);
+  const exports = artifactExports as unknown as Record<string, unknown>;
+  const eventParser = exports[eventEntry.zodParser] as ZodLikeParser;
+  const attemptParser = exports[attemptEntry.zodParser] as ZodLikeParser;
+  const runStateParser = exports[runStateEntry.zodParser] as ZodLikeParser;
+
+  const timestampMutations = [
+    ["lowercase", "2026-08-09t00:00:00.000z"],
+    ["space-separator", "2026-08-09 00:00:00.000Z"],
+    ["leap-second", "2016-12-31T23:59:60Z"],
+    ["missing-seconds", "2026-08-09T00:00Z"]
+  ] as const;
+  for (const [label, timestamp] of timestampMutations) {
+    const event = zodPositiveFixture(eventEntry.filename, eventEntry.contractIds) as { timestamp: string };
+    event.timestamp = timestamp;
+    assertParity(eventEntry.id, eventParser, event, false, `event-record:timestamp:${label}`);
+
+    const attempt = zodPositiveFixture(attemptEntry.filename, attemptEntry.contractIds) as {
+      lifecycle: { started_at: string };
+    };
+    attempt.lifecycle.started_at = timestamp;
+    assertParity(attemptEntry.id, attemptParser, attempt, false, `node-attempt:timestamp:${label}`);
+
+    const state = createInitialRunState({
+      runId: "run-1",
+      graphFingerprint: "a".repeat(64),
+      configFingerprint: "b".repeat(64),
+      createdAt: "2026-08-09T00:00:00.000Z",
+      nodes: []
+    });
+    state.created_at = timestamp;
+    assertParity(runStateEntry.id, runStateParser, state, false, `run-state:timestamp:${label}`);
+  }
+
+  const validUuid = "00000000-0000-4000-8000-000000000001";
+  const eventWithLink = {
+    schema_version: "ultrafuzz.event-record.v2",
+    event_id: `evt-${"a".repeat(24)}`,
+    timestamp: "2026-08-09T00:00:00.000Z",
+    run_id: "run-1",
+    event_type: "workflow-link-recorded",
+    status: "running",
+    payload: {
+      workflow_link_id: validUuid,
+      action: "start",
+      workflow_run_id: "workflow-1",
+      control_generation: "c".repeat(64)
+    }
+  };
+  const stateWithLink = createInitialRunState({
+    runId: "run-1",
+    graphFingerprint: "a".repeat(64),
+    configFingerprint: "b".repeat(64),
+    createdAt: "2026-08-09T00:00:00.000Z",
+    nodes: [],
+    provenance: {
+      workflow: {
+        inspection: { runId: "workflow-1" },
+        runId: "workflow-1",
+        compiledRunId: "workflow-1",
+        name: "workflow",
+        controlGeneration: "c".repeat(64),
+        linkId: validUuid,
+        executionSnapshot: `smithers/execution-snapshots/${"d".repeat(64)}`
+      }
+    }
+  });
+  assertParity(eventEntry.id, eventParser, eventWithLink, true, "event-record:uuid:valid-v4");
+  assertParity(runStateEntry.id, runStateParser, stateWithLink, true, "run-state:uuid:valid-v4");
+  for (const [label, uuid] of [
+    ["unsupported-version", "00000000-0000-9000-8000-000000000001"],
+    ["invalid-variant", "00000000-0000-4000-7000-000000000001"]
+  ] as const) {
+    const event = structuredClone(eventWithLink);
+    event.payload.workflow_link_id = uuid;
+    assertParity(eventEntry.id, eventParser, event, false, `event-record:uuid:${label}`);
+    const state = structuredClone(stateWithLink);
+    state.provenance!.workflow.linkId = uuid;
+    assertParity(runStateEntry.id, runStateParser, state, false, `run-state:uuid:${label}`);
+  }
+});
+
+test("every retained Zod timestamp and UUID field publishes its canonical lexical pattern", () => {
+  let audited = 0;
+  const visit = (value: unknown, path: string): void => {
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => visit(item, `${path}/${String(index)}`));
+      return;
+    }
+    if (!isRecord(value)) return;
+    if (value.format === "date-time" || value.format === "uuid") {
+      audited += 1;
+      assert.equal(
+        value.pattern,
+        value.format === "date-time" ? CANONICAL_TIMESTAMP_PATTERN : CANONICAL_UUID_PATTERN,
+        path
+      );
+    }
+    for (const [key, item] of Object.entries(value)) visit(item, `${path}/${key}`);
+  };
+
+  for (const entry of artifactSchemaRegistry()) {
+    if (entry.zodParser !== undefined) visit(entry.schema, entry.filename);
+  }
+  assert.ok(audited > 0);
+});
+
+test("JSON Schema maxLength and retained Zod count Unicode code points identically", () => {
+  const usageEntry = artifactSchemaRegistry().find((candidate) => candidate.filename === "usage-ledger.schema.json");
+  const attemptEntry = artifactSchemaRegistry().find(
+    (candidate) => candidate.filename === "node-attempt-ledger.schema.json"
+  );
+  assert.ok(usageEntry?.zodParser !== undefined);
+  assert.ok(attemptEntry?.zodParser !== undefined);
+  const exports = artifactExports as unknown as Record<string, unknown>;
+  const usageParser = exports[usageEntry.zodParser] as ZodLikeParser;
+  const attemptParser = exports[attemptEntry.zodParser] as ZodLikeParser;
+
+  for (const field of ["model", "agent"] as const) {
+    const boundary = zodPositiveFixture(usageEntry.filename, usageEntry.contractIds) as {
+      usage: { model: string; agent: string };
+    };
+    boundary.usage[field] = "🙂".repeat(1_024);
+    assertParity(usageEntry.id, usageParser, boundary, true, `usage-ledger:${field}:astral-boundary`);
+    const overflow = structuredClone(boundary);
+    overflow.usage[field] += "🙂";
+    assertParity(usageEntry.id, usageParser, overflow, false, `usage-ledger:${field}:astral-overflow`);
+  }
+
+  const failedAttempt = zodPositiveFixture(attemptEntry.filename, attemptEntry.contractIds) as Record<
+    string,
+    unknown
+  > & { manifests: { output_sha256: string | null }; failure_message?: string };
+  failedAttempt.outcome = "failed";
+  failedAttempt.manifests.output_sha256 = null;
+  failedAttempt.failure_category = "executor-error";
+  failedAttempt.failure_message = "🙂".repeat(1_000);
+  assertParity(
+    attemptEntry.id,
+    attemptParser,
+    failedAttempt,
+    true,
+    "node-attempt:failure-message:astral-structural-boundary"
+  );
+  const overflowAttempt = structuredClone(failedAttempt);
+  overflowAttempt.failure_message += "🙂";
+  assertParity(
+    attemptEntry.id,
+    attemptParser,
+    overflowAttempt,
+    false,
+    "node-attempt:failure-message:astral-structural-overflow"
+  );
+});
+
 test("run-state v4 JSON Schema and Zod agree on every closed provenance variant", () => {
   const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === "run-state.schema.json");
   assert.ok(entry?.zodParser !== undefined);
@@ -598,6 +886,33 @@ test("run-state v4 JSON Schema and Zod agree on every closed provenance variant"
 
   for (const fixture of cases) {
     assertParity(entry.id, parser, fixture.value, fixture.expected, `run-state:${fixture.label}`);
+  }
+});
+
+test("run-state node map-key equality is exclusively a named semantic gate", () => {
+  const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === "run-state.schema.json");
+  assert.ok(entry?.zodParser !== undefined);
+  const parser = (artifactExports as unknown as Record<string, unknown>)[entry.zodParser] as ZodLikeParser;
+  const state = createInitialRunState({
+    runId: "run-1",
+    graphFingerprint: "a".repeat(64),
+    configFingerprint: "b".repeat(64),
+    createdAt: "2026-08-09T00:00:00.000Z",
+    nodes: []
+  });
+  state.nodes["map-key"] = {
+    node_id: "different-node-id",
+    status: "succeeded",
+    retry_count: 0,
+    timed_out: false
+  };
+
+  assertParity(entry.id, parser, state, true, "run-state:semantic-node-map-key");
+  const gate = executeSemanticGate("run-state-node-key-equality", { document: state });
+  assert.equal(gate.status, "failed");
+  if (gate.status === "failed") {
+    assert.equal(gate.issues.length, 1);
+    assert.equal(gate.issues[0]?.path, "$.nodes.map-key.node_id");
   }
 });
 

@@ -6,6 +6,7 @@ import type { ArtifactContractId } from "./artifact-contract-ids.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { validateSafeId, writeJsonDurable } from "./safe-paths.js";
 import { readRegularFileSnapshot } from "./schema-registry.js";
+import { executeSemanticGate } from "./semantic-gates.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
 export const STATE_SCHEMA_VERSION = "ultrafuzz.run-state.v4" as const;
@@ -468,13 +469,13 @@ function assertCurrentRunState(value: unknown): asserts value is RunState {
     const details = validation.issues.map((issue) => `${issue.instancePath || "/"} ${issue.message}`).join("; ");
     throw new Error(`run state is schema-invalid${details.length === 0 ? "" : `: ${details}`}`);
   }
-  const state = value as RunState;
-  for (const [nodeId, node] of Object.entries(state.nodes)) {
-    if (node.node_id !== nodeId) {
-      throw new Error(
-        `run state node key ${JSON.stringify(nodeId)} does not match node_id ${JSON.stringify(node.node_id)}`
-      );
-    }
+  const nodeKeys = executeSemanticGate("run-state-node-key-equality", { document: value });
+  if (nodeKeys.status === "failed") {
+    const details = nodeKeys.issues.map((issue) => `${issue.path} ${issue.message}`).join("; ");
+    throw new Error(`run state is semantically invalid${details.length === 0 ? "" : `: ${details}`}`);
+  }
+  if (nodeKeys.status !== "passed") {
+    throw new Error("run-state node-key validation unexpectedly requires context");
   }
 }
 

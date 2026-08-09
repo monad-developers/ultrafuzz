@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { z } from "zod/v4";
 
+import { canonicalTimestampSchema } from "./portable-json-primitives.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 import { readRegularFileSnapshot } from "./schema-registry.js";
 import { assertRegularFileInside, listSafeFiles, safeResolveInside, sha256Bytes, sha256File } from "./safe-paths.js";
@@ -67,7 +68,7 @@ const ATTEMPT_WORKFLOW_STATUS_VALUES = [
 const nonNegativeInteger = z.number().nonnegative().refine(Number.isInteger, { message: "Expected an integer" });
 const nonNegativeNumber = z.number().finite().nonnegative();
 const unitMetric = z.number().finite().min(0).max(1);
-const isoTimestamp = z.string().datetime({ offset: true });
+const isoTimestamp = canonicalTimestampSchema;
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/u);
 
 export const analysisTerminalStatusSchema = z

@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { artifactContractDefinition, artifactContractSchemaBinding } from "./artifact-contracts.js";
 import { ARTIFACT_SCHEMA_METADATA, type ArtifactSchemaFilename } from "./artifact-schema-metadata.js";
-import { MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "./attempt-ledger.js";
+import { MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "./artifact-limits.js";
 
 export const SEMANTIC_GATE_SCOPES = ["document", "filesystem", "cross-artifact", "git", "runtime-state"] as const;
 

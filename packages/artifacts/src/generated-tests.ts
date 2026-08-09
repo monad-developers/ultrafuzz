@@ -76,7 +76,7 @@ export const generatedTestProvenanceSchema = z.strictObject({
   origin: nonEmptyString.optional()
 });
 
-const generatedTestPathSchema = nonEmptyString.refine((value) => isSafeGeneratedTestManifestPath(value), {
+const generatedTestPathSchema = nonEmptyString.regex(generatedTestManifestPathPattern, {
   message: `path must use the ${GENERATED_TESTS_DIR}/<file> prefix and stay inside that directory`
 });
 
@@ -169,10 +169,6 @@ export function readGeneratedTestManifest(layout: RunLayout, nodeId: string): Ge
   return assertGeneratedTestManifestSchema(
     parseStrictJsonBytes(readRegularFileSnapshot(manifestPath, 64 * 1024 * 1024))
   );
-}
-
-function isSafeGeneratedTestManifestPath(value: string): boolean {
-  return generatedTestManifestPathPattern.test(value);
 }
 
 function writeGeneratedTestEntry(

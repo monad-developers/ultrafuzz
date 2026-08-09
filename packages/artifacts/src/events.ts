@@ -7,6 +7,12 @@ import { redactSecretsInValue } from "@ultrafuzz/security";
 import { z } from "zod/v4";
 
 import { ARTIFACT_CONTRACT_IDS, NON_JSON_ARTIFACT_CONTRACT_IDS } from "./artifact-contract-ids.js";
+import {
+  canonicalTimestampJsonSchema,
+  canonicalTimestampSchema,
+  canonicalUuidJsonSchema,
+  canonicalUuidSchema
+} from "./portable-json-primitives.js";
 import { type RunLayout } from "./run-layout.js";
 import {
   SAFE_ID_PATTERN,
@@ -116,12 +122,12 @@ export interface EventQueryFacade {
 }
 
 const eventIdSchema = z.string().regex(/^evt-[a-f0-9]{24}$/u);
-const timestampSchema = z.string().datetime({ offset: true });
+const timestampSchema = canonicalTimestampSchema;
 const safeIdSchema = z.string().regex(SAFE_ID_PATTERN);
 const nonEmptyStringSchema = z.string().min(1);
 const nonNegativeSafeIntegerSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/u);
-const workflowLinkIdSchema = z.string().uuid();
+const workflowLinkIdSchema = canonicalUuidSchema;
 const workflowActionSchema = z.enum(["start", "resume", "replay", "fork"]);
 const lifecycleActionSchema = z.enum(["resume", "replay", "fork"]);
 const runStatusSchema = z.enum(RUN_STATE_STATUSES);
@@ -444,12 +450,12 @@ export const eventQueryFacadeSchema = z.strictObject({
 
 const eventRecordJsonSchemaDefinitions = {
   eventId: { type: "string", pattern: "^evt-[a-f0-9]{24}$" },
-  timestamp: { type: "string", format: "date-time" },
+  timestamp: canonicalTimestampJsonSchema,
   safeId: { type: "string", minLength: 1, maxLength: 128, pattern: SAFE_ID_PATTERN.source },
   nonEmptyString: { type: "string", minLength: 1 },
   nonNegativeSafeInteger: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
   sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
-  workflowLinkId: { type: "string", format: "uuid" },
+  workflowLinkId: canonicalUuidJsonSchema,
   outputContract: {
     type: "object",
     additionalProperties: false,

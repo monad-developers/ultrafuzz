@@ -3,13 +3,22 @@ import { isDeepStrictEqual } from "node:util";
 import { redactSecretsInText, SENSITIVE_REDACTION_PLACEHOLDER } from "@ultrafuzz/security";
 import { z } from "zod/v4";
 
+import {
+  MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
+  MAX_NODE_ATTEMPT_FAILURE_MESSAGE_CODE_POINTS
+} from "./artifact-limits.js";
+import {
+  canonicalTimestampJsonSchema,
+  canonicalTimestampSchema,
+  hasAtMostCodePoints
+} from "./portable-json-primitives.js";
 import { type RunLayout } from "./run-layout.js";
 import { SAFE_ID_PATTERN, sha256Bytes, validateSafeId } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 import { appendStrictJsonlRecords, readStrictJsonlSnapshot, type StrictJsonlCodec } from "./strict-jsonl.js";
 
 export const NODE_ATTEMPT_LEDGER_SCHEMA_VERSION = "ultrafuzz.node-attempt-ledger.v1" as const;
-export const MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES = 1_000;
+export { MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "./artifact-limits.js";
 export const NODE_ATTEMPT_LEDGER_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:node-attempt-ledger:1" as const;
 
 export const NODE_ATTEMPT_OUTCOMES = ["succeeded", "failed", "timed-out", "canceled", "reused"] as const;
@@ -133,8 +142,12 @@ const safeId = z.string().regex(SAFE_ID_PATTERN);
 const dimensionId = z.string().min(1).max(DIMENSION_ID_MAX_LENGTH).regex(DIMENSION_ID_PATTERN);
 const digest = z.string().regex(SHA256_PATTERN);
 const count = z.number().int().nonnegative().safe();
-const timestamp = z.string().datetime({ offset: true });
-const failureMessage = z.string().min(1).max(MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES);
+const failureMessage = z
+  .string()
+  .min(1)
+  .refine((value) => hasAtMostCodePoints(value, MAX_NODE_ATTEMPT_FAILURE_MESSAGE_CODE_POINTS), {
+    message: `Failure message must not exceed ${MAX_NODE_ATTEMPT_FAILURE_MESSAGE_CODE_POINTS} Unicode code points`
+  });
 const executedReuseSchema = z.strictObject({ status: z.literal("executed") });
 const attemptSourceIdentitySchema = z.strictObject({
   workflow_run_id: dimensionId,
@@ -158,8 +171,8 @@ export const nodeAttemptLedgerEntrySchema = z
     started_event_sequence: count,
     source_event_sequence: count,
     lifecycle: z.strictObject({
-      started_at: timestamp,
-      finished_at: timestamp
+      started_at: canonicalTimestampSchema,
+      finished_at: canonicalTimestampSchema
     }),
     outcome: z.enum(NODE_ATTEMPT_OUTCOMES),
     reuse: z.union([executedReuseSchema, reusedReuseSchema]),
@@ -246,8 +259,8 @@ export const nodeAttemptLedgerJsonSchema = {
       required: ["started_at", "finished_at"],
       additionalProperties: false,
       properties: {
-        started_at: { type: "string", format: "date-time" },
-        finished_at: { type: "string", format: "date-time" }
+        started_at: canonicalTimestampJsonSchema,
+        finished_at: canonicalTimestampJsonSchema
       }
     },
     outcome: { enum: [...NODE_ATTEMPT_OUTCOMES] },
@@ -290,7 +303,11 @@ export const nodeAttemptLedgerJsonSchema = {
       }
     },
     failure_category: { enum: [...NODE_ATTEMPT_FAILURE_CATEGORIES] },
-    failure_message: { type: "string", minLength: 1, maxLength: MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES }
+    failure_message: {
+      type: "string",
+      minLength: 1,
+      maxLength: MAX_NODE_ATTEMPT_FAILURE_MESSAGE_CODE_POINTS
+    }
   },
   allOf: [
     {

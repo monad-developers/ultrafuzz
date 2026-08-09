@@ -1,5 +1,6 @@
 import { z } from "zod/v4";
 
+import { canonicalTimestampSchema } from "./portable-json-primitives.js";
 import {
   schemaErrorMessage,
   validateWithZod,
@@ -385,19 +386,22 @@ const implementedPropertySelectionSchema = z.strictObject({
         seen.add(priority);
       }
     }),
-  property_ids: z.array(nonEmptyString).superRefine((propertyIds, context) => {
-    const seen = new Set<string>();
-    for (const [propertyIndex, propertyId] of propertyIds.entries()) {
-      if (seen.has(propertyId)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate implementation selection property ID ${JSON.stringify(propertyId)}`,
-          path: [propertyIndex]
-        });
+  property_ids: z
+    .array(nonEmptyString)
+    .meta({ uniqueItems: true })
+    .superRefine((propertyIds, context) => {
+      const seen = new Set<string>();
+      for (const [propertyIndex, propertyId] of propertyIds.entries()) {
+        if (seen.has(propertyId)) {
+          context.addIssue({
+            code: "custom",
+            message: `Duplicate implementation selection property ID ${JSON.stringify(propertyId)}`,
+            path: [propertyIndex]
+          });
+        }
+        seen.add(propertyId);
       }
-      seen.add(propertyId);
-    }
-  })
+    })
 });
 
 export const implementedPropertiesSchema = z
@@ -489,8 +493,8 @@ export const propertyCampaignSchema = z
     command: nonEmptyString.optional(),
     config_path: nonEmptyString.nullable().optional(),
     workers: z.number().int().positive().optional(),
-    started_at: z.string().datetime({ offset: true }).optional(),
-    finished_at: z.string().datetime({ offset: true }).optional(),
+    started_at: canonicalTimestampSchema.optional(),
+    finished_at: canonicalTimestampSchema.optional(),
     terminal_status: z.enum(["complete", "partial", "blocked", "failed", "timed-out", "unavailable"]).optional(),
     exit_code: z.number().int().nullable().optional(),
     failure_category: nonEmptyString.nullable().optional(),
