@@ -14,7 +14,7 @@ describe("private ground-truth subject binding", () => {
     const document = parseGroundTruthDocument(
       {
         schema_version: "ultrafuzz.eval-ground-truth.v1",
-        subject: { repository: "https://github.com/Example/Target.git/", revision: REVISION },
+        subject: { repository: "https://github.com/example/target", revision: REVISION },
         bugs: BUGS
       },
       { requireSubject: true }
@@ -27,6 +27,33 @@ describe("private ground-truth subject binding", () => {
         revision: REVISION
       })
     ).toEqual(document.subject);
+  });
+
+  it.each([
+    ["a bare bug array", BUGS, "EVAL_GROUND_TRUTH_INVALID"],
+    ["an unversioned object", { bugs: BUGS }, "EVAL_GROUND_TRUTH_INVALID"],
+    ["a previous or unknown version", { schema_version: "1.0", bugs: BUGS }, "EVAL_GROUND_TRUTH_INVALID"],
+    [
+      "a noncanonical repository alias",
+      {
+        schema_version: "ultrafuzz.eval-ground-truth.v1",
+        subject: { repository: "https://github.com/Example/Target.git/", revision: REVISION },
+        bugs: BUGS
+      },
+      "EVAL_GROUND_TRUTH_SUBJECT_INVALID"
+    ],
+    [
+      "an undeclared root field",
+      { schema_version: "ultrafuzz.eval-ground-truth.v1", bugs: BUGS, source: "legacy" },
+      "EVAL_GROUND_TRUTH_INVALID"
+    ],
+    [
+      "an undeclared bug field",
+      { schema_version: "ultrafuzz.eval-ground-truth.v1", bugs: [{ ...BUGS[0], legacy_id: "H-1" }] },
+      "EVAL_GROUND_TRUTH_INVALID"
+    ]
+  ] as const)("rejects %s instead of reconstructing it", (_description, input, code) => {
+    expect(() => parseGroundTruthDocument(input)).toThrowError(expect.objectContaining({ code }));
   });
 
   it.each([

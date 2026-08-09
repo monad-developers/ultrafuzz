@@ -9,7 +9,7 @@ export const GROUND_TRUTH_SCHEMA_VERSION = "ultrafuzz.eval-ground-truth.v1" as c
 
 const MAX_GROUND_TRUTH_BYTES = 1024 * 1024;
 const fullSha = /^[0-9a-f]{40}$/u;
-const bugSchema = z.looseObject({
+const bugSchema = z.strictObject({
   id: z.string().min(1),
   title: z.string().min(1).optional(),
   severity: z.string().min(1).optional(),
@@ -26,6 +26,11 @@ const bugSchema = z.looseObject({
 const subjectSchema = z.strictObject({
   repository: z.string().min(1),
   revision: z.string().regex(fullSha)
+});
+const groundTruthDocumentSchema = z.strictObject({
+  schema_version: z.literal(GROUND_TRUTH_SCHEMA_VERSION),
+  subject: subjectSchema.optional(),
+  bugs: z.array(bugSchema)
 });
 
 export interface GroundTruthSubject {
@@ -90,42 +95,29 @@ export function parseGroundTruthDocument(
     });
   }
 
-  const bugsValue = Array.isArray(value) ? value : object?.bugs;
-  const bugsResult = z.array(bugSchema).safeParse(bugsValue);
-  if (!bugsResult.success) {
-    throw new EvalError("EVAL_GROUND_TRUTH_INVALID", "ground truth bugs are invalid", {
-      issues: bugsResult.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
+  const result = groundTruthDocumentSchema.safeParse(value);
+  if (!result.success) {
+    throw new EvalError("EVAL_GROUND_TRUTH_INVALID", `ground truth must be a ${GROUND_TRUTH_SCHEMA_VERSION} document`, {
+      issues: result.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
     });
   }
 
-  const version = object?.schema_version;
-  const subjectValue = object?.subject;
-  if (subjectValue !== undefined && version !== GROUND_TRUTH_SCHEMA_VERSION) {
-    throw new EvalError("EVAL_GROUND_TRUTH_INVALID", `bound ground truth must declare ${GROUND_TRUTH_SCHEMA_VERSION}`);
-  }
-  if (options.requireSubject === true && subjectValue === undefined) {
+  if (options.requireSubject === true && result.data.subject === undefined) {
     throw new EvalError(
       "EVAL_GROUND_TRUTH_SUBJECT_MISSING",
       "private ground truth must declare exactly one subject binding"
     );
   }
-  if (subjectValue === undefined) {
-    return { schema_version: GROUND_TRUTH_SCHEMA_VERSION, bugs: bugsResult.data as GroundTruthBug[] };
+  if (result.data.subject !== undefined) {
+    const canonicalRepository = canonicalRepositoryIdentity(result.data.subject.repository);
+    if (canonicalRepository !== result.data.subject.repository) {
+      throw new EvalError(
+        "EVAL_GROUND_TRUTH_SUBJECT_INVALID",
+        `ground-truth subject repository must use canonical spelling ${canonicalRepository}`
+      );
+    }
   }
-  const subjectResult = subjectSchema.safeParse(subjectValue);
-  if (!subjectResult.success) {
-    throw new EvalError("EVAL_GROUND_TRUTH_SUBJECT_INVALID", "ground-truth subject binding is invalid", {
-      issues: subjectResult.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
-    });
-  }
-  return {
-    schema_version: GROUND_TRUTH_SCHEMA_VERSION,
-    subject: {
-      repository: canonicalRepositoryIdentity(subjectResult.data.repository),
-      revision: subjectResult.data.revision.toLowerCase()
-    },
-    bugs: bugsResult.data as GroundTruthBug[]
-  };
+  return result.data;
 }
 
 export function readGroundTruthDocument(

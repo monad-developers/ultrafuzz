@@ -47,7 +47,7 @@ function fixture(): { plan: EvalPlanValue; candidateRoot: string; targetRoot: st
   const targetCommit = initializeRepository(targetRoot);
   fs.mkdirSync(groundTruthRoot, { recursive: true });
   const groundTruthPath = path.join(groundTruthRoot, "target-a.yml");
-  fs.writeFileSync(groundTruthPath, "bugs: []\n", "utf8");
+  fs.writeFileSync(groundTruthPath, "schema_version: ultrafuzz.eval-ground-truth.v1\nbugs: []\n", "utf8");
   const suite = testSuite(groundTruthRoot, {
     targets: [
       {
@@ -95,7 +95,7 @@ describe("versioned eval lineage", () => {
     const changedGroundTruth = buildEvalRunProvenance(generated.plan, policy);
     expect(changedGroundTruth.benchmark.cohort_fingerprint).not.toBe(first.benchmark.cohort_fingerprint);
 
-    fs.writeFileSync(generated.groundTruthPath, "bugs: []\n", "utf8");
+    fs.writeFileSync(generated.groundTruthPath, "schema_version: ultrafuzz.eval-ground-truth.v1\nbugs: []\n", "utf8");
     commitChange(generated.targetRoot, "target v2\n");
     const changedTarget = buildEvalRunProvenance(generated.plan, policy);
     expect(changedTarget.benchmark.cohort_fingerprint).not.toBe(first.benchmark.cohort_fingerprint);
@@ -152,7 +152,7 @@ describe("versioned eval lineage", () => {
       matrix: generated.plan.matrix
     });
     expect(rescoredGroundTruth.fingerprint).not.toBe(cleanScoring.fingerprint);
-    fs.writeFileSync(generated.groundTruthPath, "bugs: []\n", "utf8");
+    fs.writeFileSync(generated.groundTruthPath, "schema_version: ultrafuzz.eval-ground-truth.v1\nbugs: []\n", "utf8");
 
     fs.writeFileSync(path.join(generated.candidateRoot, "tracked.txt"), "dirty candidate\n", "utf8");
     const dirty = buildEvalRunProvenance(generated.plan, { watch: false });

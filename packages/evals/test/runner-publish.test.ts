@@ -84,7 +84,11 @@ describe("runner", () => {
     const groundTruthRoot = path.join(base, "gt");
     fs.mkdirSync(project, { recursive: true });
     fs.mkdirSync(groundTruthRoot, { recursive: true });
-    fs.writeFileSync(path.join(groundTruthRoot, "target-a.yml"), "bugs: []\n", "utf8");
+    fs.writeFileSync(
+      path.join(groundTruthRoot, "target-a.yml"),
+      "schema_version: ultrafuzz.eval-ground-truth.v1\nbugs: []\n",
+      "utf8"
+    );
     const suite = testSuite(groundTruthRoot, {
       targets: [
         {
@@ -223,7 +227,11 @@ describe("runner", () => {
     const groundTruthRoot = path.join(base, "gt");
     fs.mkdirSync(project, { recursive: true });
     fs.mkdirSync(groundTruthRoot, { recursive: true });
-    fs.writeFileSync(path.join(groundTruthRoot, "target-a.yml"), "bugs: []\n", "utf8");
+    fs.writeFileSync(
+      path.join(groundTruthRoot, "target-a.yml"),
+      "schema_version: ultrafuzz.eval-ground-truth.v1\nbugs: []\n",
+      "utf8"
+    );
     const suite = testSuite(groundTruthRoot);
     const suitePath = path.join(project, "suite.yml");
     fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");
@@ -260,7 +268,11 @@ describe("runner", () => {
     const groundTruthRoot = path.join(base, "gt");
     fs.mkdirSync(project, { recursive: true });
     fs.mkdirSync(groundTruthRoot, { recursive: true });
-    fs.writeFileSync(path.join(groundTruthRoot, "target-a.yml"), "bugs: []\n", "utf8");
+    fs.writeFileSync(
+      path.join(groundTruthRoot, "target-a.yml"),
+      "schema_version: ultrafuzz.eval-ground-truth.v1\nbugs: []\n",
+      "utf8"
+    );
     const suite = testSuite(groundTruthRoot);
     const suitePath = path.join(project, "suite.yml");
     fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");
@@ -307,7 +319,11 @@ describe("runner", () => {
       const groundTruthRoot = path.join(base, "gt");
       fs.mkdirSync(project, { recursive: true });
       fs.mkdirSync(groundTruthRoot, { recursive: true });
-      fs.writeFileSync(path.join(groundTruthRoot, "target-a.yml"), "bugs: []\n", "utf8");
+      fs.writeFileSync(
+        path.join(groundTruthRoot, "target-a.yml"),
+        "schema_version: ultrafuzz.eval-ground-truth.v1\nbugs: []\n",
+        "utf8"
+      );
       const suite = testSuite(groundTruthRoot);
       const suitePath = path.join(project, "suite.yml");
       fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");

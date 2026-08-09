@@ -7,10 +7,12 @@ import test from "node:test";
 
 import {
   CACHE_MANIFEST_FILE,
+  REFERENCE_CACHE_SCHEMA_VERSION,
   RUN_REFERENCE_MANIFEST_FILE,
   defaultReferenceCatalogYaml,
   materializeReferenceArtifacts,
   parseReferenceCatalog,
+  readCacheManifest,
   statusReferenceCatalog,
   syncReferenceCatalog
 } from "../src/index.js";
@@ -59,7 +61,7 @@ function writeCacheFixture(cacheRoot: string, reference = fixtureReference()): s
     path.join(cacheDir, CACHE_MANIFEST_FILE),
     `${JSON.stringify(
       {
-        schema_version: "1.0",
+        schema_version: REFERENCE_CACHE_SCHEMA_VERSION,
         provider: "github",
         repo: reference.repo,
         commit: reference.commit,
@@ -73,6 +75,34 @@ function writeCacheFixture(cacheRoot: string, reference = fixtureReference()): s
   );
   return cacheDir;
 }
+
+test("cache manifest reader accepts only the exact current version and canonical shape", () => {
+  const cacheRoot = tempDir("ufz-ref-manifest-contract-");
+  const cacheDir = writeCacheFixture(cacheRoot);
+  const manifestPath = path.join(cacheDir, CACHE_MANIFEST_FILE);
+  const canonical = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+
+  assert.deepEqual(readCacheManifest("properties.example", cacheDir), canonical);
+
+  const { schema_version: _schemaVersion, ...unversioned } = canonical;
+  const variants: unknown[] = [
+    unversioned,
+    { ...canonical, schema_version: "0.9" },
+    { ...canonical, legacy: true },
+    {
+      ...canonical,
+      files: [{ ...((canonical.files as Array<Record<string, unknown>>)[0] ?? {}), legacy_path: "README.md" }]
+    }
+  ];
+  for (const value of variants) {
+    fs.writeFileSync(manifestPath, `${JSON.stringify(value)}\n`, "utf8");
+    assert.throws(
+      () => readCacheManifest("properties.example", cacheDir),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "INVALID_CACHE_MANIFEST",
+      JSON.stringify(value)
+    );
+  }
+});
 
 test("default catalog restores original pinned property references", () => {
   const catalog = parseReferenceCatalog(defaultReferenceCatalogYaml());

@@ -7,8 +7,9 @@ import { fileURLToPath } from "node:url";
 import {
   assertNoSymlinkComponents,
   assertPathInside,
+  parseStrictJsonBytes,
   prepareSafeFilePath,
-  readJsonFile,
+  readRegularFileSnapshot,
   safeResolveInside,
   sha256File,
   writeFileDurable,
@@ -96,7 +97,7 @@ export interface ReferenceManifestFile {
 }
 
 export interface ReferenceCacheManifest {
-  schema_version: string;
+  schema_version: typeof REFERENCE_CACHE_SCHEMA_VERSION;
   provider: ReferenceProvider;
   repo: string;
   commit: string;
@@ -395,7 +396,7 @@ export function readCacheManifest(id: string, cacheDir: string): ReferenceCacheM
   const manifestPath = path.join(cacheDir, CACHE_MANIFEST_FILE);
   let manifest: unknown;
   try {
-    manifest = readJsonFile(manifestPath);
+    manifest = parseStrictJsonBytes(readRegularFileSnapshot(manifestPath, 16 * 1024 * 1024));
   } catch (error) {
     throw referenceError(
       "INVALID_CACHE_MANIFEST",
@@ -804,13 +805,19 @@ function normalizeCacheManifest(id: string, value: unknown, manifestPath: string
       path: manifestPath
     });
   }
+  if (!hasExactKeys(value, ["schema_version", "provider", "repo", "commit", "fetched_at", "files"])) {
+    throw referenceError("INVALID_CACHE_MANIFEST", `cached reference \`${id}\` manifest has invalid shape`, {
+      id,
+      path: manifestPath
+    });
+  }
   if (value.provider !== "github" || typeof value.repo !== "string" || typeof value.commit !== "string") {
     throw referenceError("INVALID_CACHE_MANIFEST", `cached reference \`${id}\` manifest has invalid identity`, {
       id,
       path: manifestPath
     });
   }
-  if (typeof value.schema_version !== "string" || typeof value.fetched_at !== "string") {
+  if (value.schema_version !== REFERENCE_CACHE_SCHEMA_VERSION || typeof value.fetched_at !== "string") {
     throw referenceError("INVALID_CACHE_MANIFEST", `cached reference \`${id}\` manifest has invalid metadata`, {
       id,
       path: manifestPath
@@ -822,18 +829,17 @@ function normalizeCacheManifest(id: string, value: unknown, manifestPath: string
       path: manifestPath
     });
   }
-  return {
-    schema_version: value.schema_version,
-    provider: "github",
-    repo: value.repo,
-    commit: value.commit,
-    fetched_at: value.fetched_at,
-    files: value.files.map((file, index) => normalizeManifestFile(id, file, `${manifestPath}:files[${index}]`))
-  };
+  value.files.forEach((file, index) => validateManifestFile(id, file, `${manifestPath}:files[${index}]`));
+  return value as unknown as ReferenceCacheManifest;
 }
 
-function normalizeManifestFile(id: string, value: unknown, location: string): ReferenceManifestFile {
-  if (!isRecord(value) || typeof value.path !== "string" || typeof value.sha256 !== "string") {
+function validateManifestFile(id: string, value: unknown, location: string): void {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["path", "size_bytes", "sha256"]) ||
+    typeof value.path !== "string" ||
+    typeof value.sha256 !== "string"
+  ) {
     throw referenceError("INVALID_CACHE_MANIFEST", `cached reference \`${id}\` manifest file entry is invalid`, {
       id,
       location
@@ -852,11 +858,11 @@ function normalizeManifestFile(id: string, value: unknown, location: string): Re
       location
     });
   }
-  return {
-    path: value.path,
-    size_bytes: value.size_bytes as number,
-    sha256: value.sha256
-  };
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function defaultReferenceCatalogCandidates(): string[] {
