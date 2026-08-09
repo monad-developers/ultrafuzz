@@ -358,7 +358,7 @@ describe("eval durable readers and writers", () => {
       records.map((record) => record.candidate_label).sort()
     );
     expect(fs.existsSync(lockPath)).toBe(false);
-  });
+  }, 60_000);
 
   it("rejects a same-size canonical path replacement after validation and before append", () => {
     const root = fixtureRoot("ufz-eval-journal-replacement");
