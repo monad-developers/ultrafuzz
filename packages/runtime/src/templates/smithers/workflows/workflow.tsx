@@ -540,6 +540,7 @@ function prepareArtifactMirror(
   const workspaceRoot = realpathSync(task.workspacePath);
   const schemaDirectory = path.join(workspaceRoot, ".ultrafuzz", "schemas");
   materializePromptSchemas(schemaDirectory);
+  assertTaskOutputSchemaBindings(task);
   preflightJsonValidator(schemaDirectory);
   assertTaskInputs(task, workspaceRoot);
   materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true, evidenceMode);
@@ -588,6 +589,23 @@ function prepareArtifactMirror(
   return { prepared: true };
 }
 
+function assertTaskOutputSchemaBindings(task: (typeof taskSpecs)[number]): void {
+  for (const output of task.outputs) {
+    const binding = artifactContractSchemaBinding(
+      output.contract as Parameters<typeof artifactContractSchemaBinding>[0]
+    );
+    if (
+      binding?.schema_file !== output.schemaFile ||
+      binding?.schema_id !== output.schemaId ||
+      binding?.schema_sha256 !== output.schemaSha256 ||
+      binding?.schema_bundle_sha256 !== output.schemaBundleSha256 ||
+      binding?.validator_build !== output.validatorBuild
+    ) {
+      throw new Error(`artifact-contract failure: planned schema binding changed for ${output.path}`);
+    }
+  }
+}
+
 function preflightJsonValidator(schemaDirectory: string): void {
   const findings = artifactSchemaRegistry().find(
     (entry: { filename: string }) => entry.filename === "findings.schema.json"
@@ -628,9 +646,11 @@ function preflightJsonValidator(schemaDirectory: string): void {
     };
   };
   try {
-    parsed = JSON.parse(stdout);
+    parsed = parseStrictJsonBytes(Buffer.from(stdout, "utf8")) as typeof parsed;
   } catch (error) {
-    throw new Error("artifact-contract failure: JSON validator preflight returned invalid JSON", { cause: error });
+    throw new Error("artifact-contract failure: JSON validator preflight returned invalid strict JSON", {
+      cause: error
+    });
   }
   if (
     parsed.ok !== true ||

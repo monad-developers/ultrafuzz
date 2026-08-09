@@ -19,20 +19,22 @@ function temporaryRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-trusted-cli-"));
 }
 
-function fakeCliEntrypoint(root: string): string {
+function fakeCliEntrypoint(root: string, fixedOutput?: string): string {
   const entrypoint = path.join(root, "validator-cli.mjs");
   const artifactsUrl = new URL("../../../artifacts/dist/index.js", import.meta.url).href;
   fs.writeFileSync(
     entrypoint,
-    [
-      `import { validateJsonFile } from ${JSON.stringify(artifactsUrl)};`,
-      "const args = process.argv.slice(2);",
-      "const value = (flag) => args[args.indexOf(flag) + 1];",
-      "const result = await validateJsonFile({ schemaPath: value('--schema'), filePath: value('--file') });",
-      "process.stdout.write(JSON.stringify({ ok: result.status === 'valid', data: result }));",
-      "process.exitCode = result.status === 'valid' ? 0 : result.status === 'instance-error' ? 1 : 2;",
-      ""
-    ].join("\n"),
+    fixedOutput === undefined
+      ? [
+          `import { validateJsonFile } from ${JSON.stringify(artifactsUrl)};`,
+          "const args = process.argv.slice(2);",
+          "const value = (flag) => args[args.indexOf(flag) + 1];",
+          "const result = await validateJsonFile({ schemaPath: value('--schema'), filePath: value('--file') });",
+          "process.stdout.write(JSON.stringify({ ok: result.status === 'valid', data: result }));",
+          "process.exitCode = result.status === 'valid' ? 0 : result.status === 'instance-error' ? 1 : 2;",
+          ""
+        ].join("\n")
+      : `process.stdout.write(${JSON.stringify(fixedOutput)});\n`,
     "utf8"
   );
   fs.chmodSync(entrypoint, 0o500);
@@ -96,6 +98,15 @@ test("trusted CLI identity is schema-valid, preflighted, and ordered before ever
     { encoding: "utf8", env: { ...process.env, ...trusted.env, PATH: commandPath } }
   );
   assert.equal((JSON.parse(output) as { data?: { status?: string } }).data?.status, "valid");
+});
+
+test("trusted CLI preflight rejects duplicate-key validator output", () => {
+  const root = temporaryRoot();
+  const layout = createRunLayout({ projectRoot: root, runId: "duplicate-output" });
+  const entrypoint = fakeCliEntrypoint(root, '{"ok":true,"ok":true}');
+  const trusted = prepareTrustedCliEnvironment({ layout, cliEntrypoint: entrypoint });
+
+  assert.throws(() => runTrustedJsonValidatorPreflight({ layout, trusted }), /duplicate property name/u);
 });
 
 test("resume rejects missing, tampered, and stale trusted CLI identity", () => {

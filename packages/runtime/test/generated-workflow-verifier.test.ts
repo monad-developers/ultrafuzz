@@ -793,6 +793,33 @@ test("generated Smithers workflow prepares output directories without creating a
   assert.match(source, /dependsOn=\{\[task\.preparationId\]\}/u);
 });
 
+test("generated Smithers workflow binds every planned output to the preflighted schema bundle before agent work", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const preparationStart = source.indexOf("function prepareArtifactMirror");
+  const bindingStart = source.indexOf("function assertTaskOutputSchemaBindings", preparationStart);
+  const preflightStart = source.indexOf("function preflightJsonValidator", bindingStart);
+  const preparation = source.slice(preparationStart, bindingStart);
+  const binding = source.slice(bindingStart, preflightStart);
+
+  assert.ok(preparationStart >= 0, source);
+  assert.ok(bindingStart > preparationStart, source);
+  assert.ok(preflightStart > bindingStart, source);
+  assert.ok(
+    preparation.indexOf("assertTaskOutputSchemaBindings(task)") < preparation.indexOf("preflightJsonValidator"),
+    preparation
+  );
+  assert.match(binding, /for \(const output of task\.outputs\)/u);
+  assert.match(binding, /artifactContractSchemaBinding\(/u);
+  for (const field of ["schemaFile", "schemaId", "schemaSha256", "schemaBundleSha256", "validatorBuild"]) {
+    assert.match(binding, new RegExp(`output\\.${field}`, "u"));
+  }
+  assert.match(source, /parsed = parseStrictJsonBytes\(Buffer\.from\(stdout, "utf8"\)\)/u);
+  assert.doesNotMatch(
+    source.slice(preflightStart, source.indexOf("function taskPublishesWorkspacePatch")),
+    /JSON\.parse/u
+  );
+});
+
 test("generated Smithers workflow does not precreate runtime-owned workspace patch outputs", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function prepareArtifactMirror");

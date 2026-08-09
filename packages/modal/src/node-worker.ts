@@ -215,7 +215,7 @@ export function preflightModalJsonValidator(cliPath = "/usr/local/bin/ultrafuzz"
       }
     );
   }
-  const parsed = JSON.parse(stdout) as {
+  let parsed: {
     ok?: unknown;
     data?: {
       status?: unknown;
@@ -228,6 +228,11 @@ export function preflightModalJsonValidator(cliPath = "/usr/local/bin/ultrafuzz"
       };
     };
   };
+  try {
+    parsed = parseStrictJsonBytes(Buffer.from(stdout, "utf8")) as typeof parsed;
+  } catch (error) {
+    throw new Error("Modal JSON validator preflight returned invalid strict JSON", { cause: error });
+  }
   if (
     parsed.ok !== true ||
     parsed.data?.status !== "valid" ||
@@ -631,6 +636,7 @@ export async function runDurableWorkflow(
     const smithers = sealedSmithersExecutable(snapshotAccessRoot);
     const workflowPath = regularSnapshotFile(snapshotAccessRoot, workflowRelativePath, "sealed cloud workflow");
     const environment = {
+      PATH: ["/usr/local/bin", process.env.PATH ?? ""].filter((entry) => entry.length > 0).join(path.delimiter),
       ULTRAFUZZ_CLOUD_WORKER: "1",
       ULTRAFUZZ_ARTIFACTS_MODULE: sealedSnapshotModuleUrl(snapshotAccessRoot, "artifacts"),
       ULTRAFUZZ_RUNTIME_MODULE: sealedSnapshotModuleUrl(snapshotAccessRoot, "runtime"),

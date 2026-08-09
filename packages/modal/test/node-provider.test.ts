@@ -581,6 +581,7 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + "\\n");
 fs.writeFileSync(${JSON.stringify(environmentPath)}, JSON.stringify({
+  path: process.env.PATH,
   artifacts: process.env.ULTRAFUZZ_ARTIFACTS_MODULE,
   runtime: process.env.ULTRAFUZZ_RUNTIME_MODULE,
   config: process.env.ULTRAFUZZ_CONFIG_PATH,
@@ -589,6 +590,13 @@ fs.writeFileSync(${JSON.stringify(environmentPath)}, JSON.stringify({
 if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); process.exit(4); }
 `
     });
+    const shadowBin = path.join(root, "target-bin");
+    fs.mkdirSync(shadowBin, { recursive: true });
+    const shadowCli = path.join(shadowBin, "ultrafuzz");
+    fs.writeFileSync(shadowCli, "#!/bin/sh\nexit 77\n", "utf8");
+    fs.chmodSync(shadowCli, 0o500);
+    const previousPath = process.env.PATH;
+    process.env.PATH = [shadowBin, previousPath ?? ""].filter((entry) => entry.length > 0).join(path.delimiter);
     try {
       await runDurableWorkflow(fixture.root, "inner-run", fixture.input);
       const commands = fs
@@ -601,6 +609,9 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
       expect(commands[1]).toEqual(expect.arrayContaining(["--run-id", "inner-run"]));
       expect(commands[1]).not.toContain("--resume");
       const environment = JSON.parse(fs.readFileSync(environmentPath, "utf8")) as Record<string, string>;
+      const childPath = (environment.path ?? "").split(path.delimiter);
+      expect(childPath[0]).toBe("/usr/local/bin");
+      expect(childPath.indexOf(shadowBin)).toBeGreaterThan(0);
       const childVisibleRoot = `/proc/${process.pid}/fd/`;
       expect(environment.artifacts).toMatch(
         new RegExp(`^file://${childVisibleRoot}[0-9]+/modules/@ultrafuzz/artifacts/dist/index\\.js$`, "u")
@@ -613,6 +624,8 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
         new RegExp(`^${childVisibleRoot}[0-9]+/\\.smithers/workflows/ultrafuzz-run-one\\.tsx$`, "u")
       );
     } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
       fs.rmSync(root, { recursive: true, force: true });
       fixture.cleanup();
     }
