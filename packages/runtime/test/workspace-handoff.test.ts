@@ -7,7 +7,12 @@ import path from "node:path";
 import test from "node:test";
 
 import { rethrowOversizedGitOutput } from "../src/git-capture-diagnostics.js";
-import { applyWorkspacePatch, captureWorkspacePatch, captureWorkspaceTree } from "../src/workspace-handoff.js";
+import {
+  applyWorkspacePatch,
+  captureWorkspacePatch,
+  captureWorkspaceTree,
+  validateWorkspacePatchCapture
+} from "../src/workspace-handoff.js";
 import * as runtime from "../src/index.js";
 
 function git(cwd: string, args: string[], input?: string): string {
@@ -179,13 +184,16 @@ test("attributes a capture overflow to what fed the diff, not to bulk that contr
     for (let file = 0; file < 12; file += 1) {
       writeFileSync(path.join(root, "lib", `${file}.bin`), randomBytes(3 * 1024 * 1024));
     }
+    // Tracked so #368's untracked-only recovery cannot omit it. This keeps the #311 diagnostic loud for
+    // the unsafe case while the generated bulk above remains proof that on-disk size is irrelevant.
+    mkdirSync(path.join(root, "generated"), { recursive: true });
+    writeFileSync(path.join(root, "generated", "huge.bin"), "seed\n");
     git(root, ["add", "."]);
     git(root, ["commit", "--quiet", "-m", "base"]);
     const baseline = captureWorkspaceTree(root);
 
-    // The only new content, and so the only possible source of diff bytes. Incompressible, because
-    // `git diff --binary` deflates the payload.
-    mkdirSync(path.join(root, "generated"), { recursive: true });
+    // The only changed content, and so the only possible source of diff bytes. Incompressible, because
+    // `git diff --binary` deflates the payload. A tracked contributor must never be auto-excluded.
     writeFileSync(path.join(root, "generated", "huge.bin"), randomBytes(34 * 1024 * 1024));
 
     assert.throws(
@@ -506,6 +514,42 @@ test("applies a validated setup patch and rejects a base-tree mismatch", () => {
   } finally {
     rmSync(source, { recursive: true, force: true });
     rmSync(downstreamParent, { recursive: true, force: true });
+  }
+});
+
+test("rejects exclusion metadata that cannot account for a real patch overflow", () => {
+  const root = fixture();
+  try {
+    const baseline = captureWorkspaceTree(root);
+    writeFileSync(path.join(root, "Authored.sol"), "contract Authored {}\n");
+    const captured = captureWorkspacePatch(root, baseline);
+    const exclusion = {
+      path: "scratch/seed.bin",
+      diff_bytes_at_least: 1,
+      reason: "git-diff-overflow" as const
+    };
+
+    assert.throws(
+      () =>
+        validateWorkspacePatchCapture(root, {
+          ...captured,
+          manifest: { ...captured.manifest, excluded_files: [exclusion] }
+        }),
+      /do not carry enough measured diff-overflow evidence/u
+    );
+    assert.throws(
+      () =>
+        validateWorkspacePatchCapture(root, {
+          ...captured,
+          manifest: {
+            ...captured.manifest,
+            excluded_files: [{ ...exclusion, path: "Authored.sol", diff_bytes_at_least: 17 * 1024 * 1024 }]
+          }
+        }),
+      /both included and excluded/u
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -994,8 +1038,6 @@ test("ranks the real capture by real bytes, through git and the code that runs i
     git(root, ["config", "core.bigFileThreshold", "512m"]);
     git(root, ["add", ".gitignore"]);
     git(root, ["commit", "--quiet", "-m", "base"]);
-    const baseline = captureWorkspaceTree(root);
-
     // Both files are NUL-free, so git classifies them as TEXT and `--binary` emits their bytes raw
     // rather than deflating them. `corpus/` sorts before `src/`, and git emits in path order, so the
     // capture holds all of corpus and a truncated head of src.
@@ -1004,6 +1046,11 @@ test("ranks the real capture by real bytes, through git and the code that runs i
     // characters worth 36 MB, which is how a 12 MB root outranks a 21 MB one.
     mkdirSync(path.join(root, "corpus"), { recursive: true });
     mkdirSync(path.join(root, "src"), { recursive: true });
+    writeFileSync(path.join(root, "corpus", "latin.bin"), "seed\n");
+    writeFileSync(path.join(root, "src", "big.bin"), "seed\n");
+    git(root, ["add", "corpus", "src"]);
+    git(root, ["commit", "--quiet", "-m", "seed tracked contributors"]);
+    const baseline = captureWorkspaceTree(root);
     writeFileSync(path.join(root, "corpus", "latin.bin"), Buffer.alloc(12 * 1024 * 1024, 0xe9));
     writeFileSync(path.join(root, "src", "big.bin"), Buffer.alloc(30 * 1024 * 1024, 0x61));
 
@@ -1136,6 +1183,22 @@ test("leaves an ordinary git failure's captures as strings", () => {
   }
 });
 
+test("does not use invalid-UTF-8 decode expansion to authorize an exclusion", () => {
+  const root = fixture();
+  try {
+    git(root, ["config", "core.bigFileThreshold", "512m"]);
+    const baseline = captureWorkspaceTree(root);
+    // Raw Git output is about 6 MiB, below the patch ceiling, but each invalid byte decodes to U+FFFD and
+    // serializes as three UTF-8 bytes. The published string therefore exceeds 16 MiB. That expansion is
+    // not measured Git-diff evidence, so it must retain the old loud ceiling failure.
+    writeFileSync(path.join(root, "latin.txt"), Buffer.alloc(6 * 1024 * 1024, 0xe9));
+
+    assert.throws(() => captureWorkspacePatch(root, baseline), /workspace patch exceeds 16777216 bytes/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // R53's `stateful-invariant-handlers` died here (issue #368) on an image that ALREADY carried the #305
 // exclusion. That exclusion is an exact-name list -- `recon-corpus`, `echidna`, `magic` -- and the agent
 // wrote its deep fuzzing pass to `recon-corpus-deep/` and `echidna-deep/` instead. Grepping the invariant
@@ -1146,17 +1209,21 @@ test("leaves an ordinary git failure's captures as strings", () => {
 //   recon-corpus-deep (>=33865139 diff bytes in 1 file), echidna-deep (>=37453 diff bytes in 15 files)
 test("excludes agent-chosen variants of the generated corpus roots", () => {
   const root = fixture();
+  const downstreamParent = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-overflow-downstream-"));
+  const downstream = path.join(downstreamParent, "checkout");
   try {
     writeFileSync(path.join(root, ".gitignore"), "node_modules\ncache/\nout/\n");
     git(root, ["add", ".gitignore"]);
     git(root, ["commit", "--quiet", "-m", "ignore build output"]);
+    git(downstreamParent, ["clone", "--quiet", root, downstream]);
     const baseline = captureWorkspaceTree(root);
 
     // The two variants R53 actually produced. Deliberately NOT gitignored and NOT in the name list,
-    // exactly as on the real target.
+    // exactly as on the real target. Each binary is individually over the handed-off patch ceiling and
+    // together they cross Git's capture buffer, so this exercises the real ENOBUFS recovery path.
     for (const generated of ["recon-corpus-deep", "echidna-deep"]) {
       mkdirSync(path.join(root, generated, "build-snapshot"), { recursive: true });
-      writeFileSync(path.join(root, generated, "build-snapshot", "0b7f82b3.json"), `{"g":"${generated}"}\n`);
+      writeFileSync(path.join(root, generated, "build-snapshot", "0b7f82b3.bin"), randomBytes(18 * 1024 * 1024));
     }
     writeFileSync(path.join(root, "AuthoredHandlers.t.sol"), "contract AuthoredHandlers {}\n");
 
@@ -1167,43 +1234,105 @@ test("excludes agent-chosen variants of the generated corpus roots", () => {
       ["AuthoredHandlers.t.sol"]
     );
     assert.doesNotMatch(captured.patch, /recon-corpus-deep|echidna-deep/u);
+    assert.deepEqual(captured.manifest.excluded_files?.map((entry) => entry.path).sort(), [
+      "echidna-deep/build-snapshot/0b7f82b3.bin",
+      "recon-corpus-deep/build-snapshot/0b7f82b3.bin"
+    ]);
+    assert.ok(captured.manifest.excluded_files?.every((entry) => entry.diff_bytes_at_least > 16 * 1024 * 1024));
+
+    // Exclusion is capture/apply symmetric: the dependent receives authored work, never the measured
+    // scratch files, and its complete staged tree still matches `result_tree`.
+    applyWorkspacePatch(downstream, captured);
+    assert.equal(
+      readFileSync(path.join(downstream, "AuthoredHandlers.t.sol"), "utf8"),
+      "contract AuthoredHandlers {}\n"
+    );
+    assert.equal(fs.existsSync(path.join(downstream, "recon-corpus-deep")), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
+    rmSync(downstreamParent, { recursive: true, force: true });
   }
 });
 
-// The prefix must stay ROOT-ANCHORED: a `test/` tree containing a NESTED corpus must never be dropped
-// wholesale. That granularity failure is what closed the size-ceiling attempt in PR #372, where an
-// entire authored suite vanished because a corpus sat under the same first path segment.
-//
-// Note what this does NOT claim. An authored top-level directory whose name merely STARTS with a
-// generated root IS dropped -- `echidna-handlers/` would go, and because a pathspec without `:(glob)`
-// lets `*` cross `/`, so would everything beneath it. That is the accepted cost of the prefix, recorded
-// on the constant; it is not a property this test protects.
-test("keeps an authored tree that merely contains a nested corpus", () => {
+// The exclusion unit must be the measured FILE, never its first path segment. PR #372 dropped `test/`
+// wholesale in this shape, destroying the Solidity suite the node existed to hand off.
+test("excludes a nested corpus file without dropping authored source beside it", () => {
   const root = fixture();
   try {
     const baseline = captureWorkspaceTree(root);
     // Nested corpus under an authored test root: the authored Solidity beside it MUST survive.
     mkdirSync(path.join(root, "test", "recon", "recon-corpus"), { recursive: true });
     writeFileSync(path.join(root, "test", "recon", "Handlers.t.sol"), "contract Handlers {}\n");
-    writeFileSync(path.join(root, "test", "recon", "recon-corpus", "seed.bin"), "seed\n");
+    writeFileSync(path.join(root, "test", "recon", "recon-corpus", "seed.bin"), randomBytes(13 * 1024 * 1024));
 
     const captured = captureWorkspacePatch(root, baseline);
 
-    assert.deepEqual(captured.manifest.files.map((entry) => entry.path).sort(), [
-      "test/recon/Handlers.t.sol",
-      "test/recon/recon-corpus/seed.bin"
-    ]);
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["test/recon/Handlers.t.sol"]
+    );
+    assert.deepEqual(
+      captured.manifest.excluded_files?.map((entry) => entry.path),
+      ["test/recon/recon-corpus/seed.bin"]
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-// A TRACKED file under a corpus-prefixed path must never be dropped. This pins the TRACKED half only:
-// the untracked half of that same directory IS dropped, deliberately, as the constant records. PR #372
-// asserted this very property in a comment while applying its rule to the merged tracked+untracked list
-// and silently dropped tracked edits, so it is asserted here rather than inferred from the shape.
+test("excludes unfamiliar, case-variant, and top-level generated files only after measured overflow", () => {
+  const root = fixture();
+  try {
+    const baseline = captureWorkspaceTree(root);
+    const generated = ["CORPUS-DEEP.bin", "corpus-deep/seed.bin", "recon-corpus-deep.bin"];
+    for (const relative of generated) {
+      mkdirSync(path.dirname(path.join(root, relative)), { recursive: true });
+      writeFileSync(path.join(root, relative), randomBytes(13 * 1024 * 1024));
+    }
+    // Legitimate source shares the unfamiliar root with one contributor and a known corpus prefix with
+    // another directory. Exact-file recovery must retain both.
+    writeFileSync(path.join(root, "corpus-deep", "README.sol"), "contract CorpusNotes {}\n");
+    mkdirSync(path.join(root, "recon-corpus-notes"), { recursive: true });
+    writeFileSync(path.join(root, "recon-corpus-notes", "Notes.sol"), "contract Notes {}\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+
+    assert.deepEqual(captured.manifest.files.map((entry) => entry.path).sort(), [
+      "corpus-deep/README.sol",
+      "recon-corpus-notes/Notes.sol"
+    ]);
+    assert.deepEqual(captured.manifest.excluded_files?.map((entry) => entry.path).sort(), generated.sort());
+    assert.ok(captured.manifest.excluded_files?.every((entry) => entry.reason === "git-diff-overflow"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("remeasures aggregate overflow until the remaining patch fits", () => {
+  const root = fixture();
+  try {
+    const baseline = captureWorkspaceTree(root);
+    for (let bucket = 0; bucket < 4; bucket += 1) {
+      mkdirSync(path.join(root, `fuzz-results-${bucket}`), { recursive: true });
+      writeFileSync(path.join(root, `fuzz-results-${bucket}`, "seed.bin"), randomBytes(5 * 1024 * 1024));
+    }
+    writeFileSync(path.join(root, "Handlers.t.sol"), "contract Handlers {}\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+    const excluded = captured.manifest.excluded_files ?? [];
+
+    assert.ok(excluded.length >= 1 && excluded.length < 4, JSON.stringify(excluded));
+    assert.ok(excluded.every((entry) => /^fuzz-results-\d\/seed\.bin$/u.test(entry.path)));
+    assert.ok(Buffer.byteLength(captured.patch, "utf8") <= 16 * 1024 * 1024);
+    assert.ok(captured.manifest.files.some((entry) => entry.path === "Handlers.t.sol"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A TRACKED file must never be a fallback candidate, regardless of its path or measured contribution.
+// PR #372 asserted this property in prose while applying its rule to a merged tracked+untracked list and
+// silently dropped tracked edits, so it remains executable rather than inferred from implementation.
 test("keeps a tracked file under a corpus-prefixed path", () => {
   const root = fixture();
   try {
@@ -1226,13 +1355,8 @@ test("keeps a tracked file under a corpus-prefixed path", () => {
   }
 });
 
-// `magic` stays an EXACT match while the other two get the prefix, and that asymmetry is evidence-based
-// rather than stylistic. R53 produced `recon-corpus-deep/` and `echidna-deep/` and nothing else; those
-// two roots are the ones the prompts expose as CLI flags (`--recon-corpus-dir`, `--corpus-dir`), which is
-// the lever the agent pulled. `magic/` is a fixed destination the prompts name literally, no variant has
-// ever been observed, and `magic` is a common enough word that widening it would drop authored
-// directories to protect against nothing. Widening a name list without an observation is how it acquires
-// collateral damage, so this pins that we did not.
+// `magic` remains an exact prompt-owned destination. Lookalikes are authored unless a real measured diff
+// overflow proves otherwise.
 test("does not widen a generated root that no agent has ever renamed", () => {
   const root = fixture();
   try {
@@ -1254,17 +1378,9 @@ test("does not widen a generated root that no agent has ever renamed", () => {
   }
 });
 
-// The cost of the prefix, made VISIBLE rather than left in prose. A NEW (untracked) authored file under a
-// prefix-named top-level directory is dropped, silently, with a manifest that still validates and a
-// result tree that still matches -- even when git already tracks that directory. Both reviews of this PR
-// raised it, and a comment alone would let the next reader discover it from a production failure instead
-// of from here.
-//
-// It is accepted, not endorsed: the blast radius is one top-level root whose NAME carries a generated
-// prefix, versus PR #372's loss of an entire `test/` tree, and the durable measurement-based fix on #368
-// removes the need for name matching altogether. If that fix lands, this test should start failing and
-// should then be deleted -- that is the intended signal, not a regression.
-test("documents the prefix's cost: a new untracked file under a prefixed root is dropped", () => {
+// The measured fallback retires prefix guessing. A directory sharing `echidna`'s spelling is ordinary
+// authored content when the patch is small, including new untracked source beside a tracked edit.
+test("keeps new authored source under a generated-prefix lookalike", () => {
   const root = fixture();
   try {
     mkdirSync(path.join(root, "echidna-config"), { recursive: true });
@@ -1281,9 +1397,8 @@ test("documents the prefix's cost: a new untracked file under a prefixed root is
     const captured = captureWorkspacePatch(root, baseline);
     const paths = captured.manifest.files.map((entry) => entry.path).sort();
 
-    assert.deepEqual(paths, ["Keep.t.sol", "echidna-config/base.yaml"]);
-    // The new file is gone and nothing reports it. This assertion is the documentation.
-    assert.ok(!paths.includes("echidna-config/NewAuthored.sol"));
+    assert.deepEqual(paths, ["Keep.t.sol", "echidna-config/NewAuthored.sol", "echidna-config/base.yaml"]);
+    assert.equal(captured.manifest.excluded_files, undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
