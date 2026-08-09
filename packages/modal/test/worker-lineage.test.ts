@@ -15,6 +15,19 @@ afterEach(() => {
 });
 
 describe("persistent Modal worker lineage", () => {
+  it("rejects duplicate keys in persisted lineage without replacing ownership evidence", async () => {
+    const fixture = lineageFixture();
+    const current = lineage();
+    const serialized = JSON.stringify(current);
+    const field = `"logical_run_id":"${current.logical_run_id}"`;
+    const duplicate = serialized.replace(field, `${field},"logical_run_id":"shadow-run"`);
+    expect(duplicate).not.toBe(serialized);
+    fs.writeFileSync(fixture.lineagePath, duplicate, { mode: 0o600 });
+
+    await expect(ensure(fixture, current)).rejects.toThrow(/persisted lineage record is invalid/u);
+    expect(fs.readFileSync(fixture.lineagePath, "utf8")).toBe(duplicate);
+  });
+
   it("preserves a matching public workspace and rejects a recreated same-numbered attempt", async () => {
     const fixture = lineageFixture();
     const first = lineage();

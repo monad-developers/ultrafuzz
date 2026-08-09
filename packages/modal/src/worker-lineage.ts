@@ -1,11 +1,11 @@
-import { randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, readdir, rename, rm, unlink } from "node:fs/promises";
-import type { FileHandle } from "node:fs/promises";
+import { lstat, mkdir, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 
 import { fingerprintModalConfigFile, fingerprintModalModel, type ModalBenchmarkConfig } from "./config.js";
 import type { ModalModelSpec } from "./defaults.js";
 import { parseModalWorkerLineage, type ModalWorkerLineage } from "./launch-state.js";
+import { MODAL_WORKER_LINEAGE_SCHEMA_ID } from "./modal-contracts.js";
+import { readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
 
 export class CheckpointIncompatibleError extends Error {
   override readonly name = "CheckpointIncompatibleError";
@@ -44,10 +44,12 @@ export async function ensurePersistentWorkerLineage(input: {
 }): Promise<void> {
   let persisted: ModalWorkerLineage | undefined;
   try {
-    persisted = parseModalWorkerLineage(JSON.parse(await readFile(input.lineagePath, "utf8")) as unknown);
+    persisted = parseModalWorkerLineage(
+      readModalDocument(path.resolve(input.lineagePath), MODAL_WORKER_LINEAGE_SCHEMA_ID).value
+    );
   } catch (error) {
     if (!isNodeError(error, "ENOENT")) {
-      throw new CheckpointIncompatibleError("persisted lineage record is invalid");
+      throw new CheckpointIncompatibleError("persisted lineage record is invalid", { cause: error });
     }
   }
 
@@ -138,29 +140,17 @@ async function hasPersistentEvidence(candidate: string): Promise<boolean> {
   }
 }
 
-async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
-  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  let handle: FileHandle | undefined;
-  try {
-    handle = await open(temporary, "wx", 0o600);
-    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await rename(temporary, filePath);
-    const directory = await open(path.dirname(filePath), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
-  } finally {
-    await handle?.close().catch(() => undefined);
-    await unlink(temporary).catch(() => undefined);
-  }
+async function writeJsonAtomic(filePath: string, value: ModalWorkerLineage): Promise<void> {
+  const target = path.resolve(filePath);
+  const trustedRoot = path.dirname(target);
+  await mkdir(trustedRoot, { recursive: true, mode: 0o700 });
+  await writeModalDocumentAtomic(target, MODAL_WORKER_LINEAGE_SCHEMA_ID, parseModalWorkerLineage(value), {
+    trustedRoot
+  });
 }
 
 function isNodeError(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
+  if (!(error instanceof Error)) return false;
+  if ("code" in error && error.code === code) return true;
+  return "cause" in error && isNodeError(error.cause, code);
 }
