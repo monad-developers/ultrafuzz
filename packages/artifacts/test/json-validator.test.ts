@@ -12,6 +12,7 @@ import {
   compileBundledSchemas,
   parseStrictJsonBytes,
   parseStrictJson,
+  type SchemaRegistryEntry,
   StrictJsonError,
   validateJsonFile,
   validateRegisteredJsonSchema,
@@ -84,6 +85,7 @@ test("file validation uses the registered schema and distinguishes instance from
     const duplicatePath = path.join(temporary, "duplicate.json");
     const badSchemaPath = path.join(temporary, "bad-schema.json");
     const boundedSchemaPath = path.join(temporary, "bounded-schema.json");
+    const oversizedIssueSchemaPath = path.join(temporary, "oversized-issue-schema.json");
     const emptyObjectPath = path.join(temporary, "empty-object.json");
     fs.writeFileSync(validPath, '{"schema_version":"ultrafuzz.properties.v2","properties":[]}\n');
     fs.writeFileSync(invalidPath, '{"schema_version":"ultrafuzz.properties.v2","properties":[],"extra":true}\n');
@@ -122,11 +124,13 @@ test("file validation uses the registered schema and distinguishes instance from
     assert.equal(invalid.status, "instance-error");
     assert.equal(invalid.diagnostics[0]?.code, "JSON_SCHEMA_VIOLATION");
     assert.equal(invalid.diagnostics[0]?.instancePath, "");
+    assert.deepEqual(validateRegisteredJsonFileSync({ schemaPath, filePath: invalidPath }), invalid);
 
     const duplicate = await validateJsonFile({ schemaPath, filePath: duplicatePath });
     assert.equal(duplicate.status, "instance-error");
     assert.equal(duplicate.diagnostics[0]?.code, "JSON_DUPLICATE_KEY");
     assert.equal(duplicate.diagnostics[0]?.instancePath, "/properties");
+    assert.deepEqual(validateRegisteredJsonFileSync({ schemaPath, filePath: duplicatePath }), duplicate);
 
     const badSchema = await validateJsonFile({ schemaPath: badSchemaPath, filePath: validPath });
     assert.equal(badSchema.status, "setup-error");
@@ -144,6 +148,26 @@ test("file validation uses the registered schema and distinguishes instance from
       ["#/required", "#/required"]
     );
 
+    const redactedProperty = `must-not-appear-${"x".repeat(70_000)}`;
+    fs.writeFileSync(
+      oversizedIssueSchemaPath,
+      JSON.stringify({
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        $id: "urn:test:oversized-issue:1",
+        type: "object",
+        required: [redactedProperty],
+        properties: { [redactedProperty]: { type: "string" } }
+      })
+    );
+    const oversizedIssue = await validateJsonFile({
+      schemaPath: oversizedIssueSchemaPath,
+      filePath: emptyObjectPath
+    });
+    assert.equal(oversizedIssue.status, "instance-error");
+    assert.equal(oversizedIssue.diagnostics[0]?.code, "JSON_DIAGNOSTIC_TRUNCATED");
+    assert.equal(oversizedIssue.truncated, true);
+    assert.equal(JSON.stringify(oversizedIssue).includes("must-not-appear"), false);
+
     const oversizedDiagnostic = await validateJsonFile({
       schemaPath: path.join(temporary, "x".repeat(20_000)),
       filePath: validPath
@@ -151,6 +175,45 @@ test("file validation uses the registered schema and distinguishes instance from
     assert.equal(oversizedDiagnostic.status, "setup-error");
     assert.equal(oversizedDiagnostic.truncated, true);
     assert.equal(Buffer.byteLength(JSON.stringify(oversizedDiagnostic.diagnostics), "utf8") <= 64 * 1024, true);
+
+    const instanceDirectory = path.join(temporary, "instance-directory");
+    fs.mkdirSync(instanceDirectory);
+    const nonregularInstance = await validateJsonFile({ schemaPath, filePath: instanceDirectory });
+    assert.equal(nonregularInstance.status, "instance-error");
+    assert.equal(nonregularInstance.diagnostics[0]?.code, "JSON_INSTANCE_UNREADABLE");
+    const nonregularSchema = await validateJsonFile({ schemaPath: instanceDirectory, filePath: validPath });
+    assert.equal(nonregularSchema.status, "setup-error");
+    assert.equal(nonregularSchema.diagnostics[0]?.code, "JSON_SCHEMA_UNREADABLE");
+
+    const instanceSymlink = path.join(temporary, "instance-symlink.json");
+    const schemaSymlink = path.join(temporary, "schema-symlink.json");
+    fs.symlinkSync(validPath, instanceSymlink);
+    fs.symlinkSync(schemaPath, schemaSymlink);
+    assert.equal((await validateJsonFile({ schemaPath, filePath: instanceSymlink })).status, "instance-error");
+    assert.equal((await validateJsonFile({ schemaPath: schemaSymlink, filePath: validPath })).status, "setup-error");
+
+    const registration = artifactSchemaRegistry().find((entry) => entry.filename === "properties.schema.json")!;
+    const uncloneableRegistry = [
+      {
+        ...registration,
+        schema: { ...registration.schema, uncloneable: () => undefined }
+      }
+    ] as unknown as readonly SchemaRegistryEntry[];
+    const workerStartFailure = await validateJsonFile({
+      schemaPath,
+      filePath: validPath,
+      schemaRegistry: uncloneableRegistry,
+      schemaBundleSha256: artifactSchemaBundleDigest()
+    });
+    assert.equal(workerStartFailure.status, "setup-error");
+    assert.equal(workerStartFailure.diagnostics[0]?.code, "JSON_VALIDATOR_INTERNAL_ERROR");
+    const hostWorkerStartFailure = validateRegisteredJsonFileSync({
+      schemaPath,
+      filePath: validPath,
+      schemaRegistry: uncloneableRegistry,
+      schemaBundleSha256: artifactSchemaBundleDigest()
+    });
+    assert.deepEqual(hostWorkerStartFailure, workerStartFailure);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }
@@ -159,8 +222,11 @@ test("file validation uses the registered schema and distinguishes instance from
 test("external schemas resolve only local contained references", async () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-ref-"));
   try {
-    const root = path.join(temporary, "root.json");
-    const child = path.join(temporary, "child.json");
+    const schemaDirectory = path.join(temporary, "schemas");
+    fs.mkdirSync(schemaDirectory);
+    const root = path.join(schemaDirectory, "root.json");
+    const child = path.join(schemaDirectory, "child.json");
+    const outsideChild = path.join(temporary, "outside-child.json");
     const artifact = path.join(temporary, "artifact.json");
     fs.writeFileSync(
       child,
@@ -169,6 +235,14 @@ test("external schemas resolve only local contained references", async () => {
         $id: "urn:test:child:1",
         type: "string",
         minLength: 2
+      })
+    );
+    fs.writeFileSync(
+      outsideChild,
+      JSON.stringify({
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        $id: "urn:test:outside-child:1",
+        type: "object"
       })
     );
     fs.writeFileSync(
@@ -196,6 +270,68 @@ test("external schemas resolve only local contained references", async () => {
     const remote = await validateJsonFile({ schemaPath: root, filePath: artifact });
     assert.equal(remote.status, "setup-error");
     assert.match(remote.diagnostics[0]?.message ?? "", /HTTP\(S\).*forbidden/u);
+
+    for (const reference of ["%2Fetc%2Fpasswd", "%5C%5Cserver%5Cshare%5Cschema.json", "file%3Aoutside.json"]) {
+      fs.writeFileSync(
+        root,
+        JSON.stringify({
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+          $id: "urn:test:root:absolute-ref:1",
+          $ref: reference
+        })
+      );
+      const absolute = await validateJsonFile({ schemaPath: root, filePath: artifact });
+      assert.equal(absolute.status, "setup-error");
+      assert.match(absolute.diagnostics[0]?.message ?? "", /absolute file schema references are forbidden/u);
+    }
+
+    fs.writeFileSync(
+      root,
+      JSON.stringify({
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        $id: "urn:test:root:scheme:1",
+        $ref: "data:application/schema+json,%7B%7D"
+      })
+    );
+    const nonlocalScheme = await validateJsonFile({ schemaPath: root, filePath: artifact });
+    assert.equal(nonlocalScheme.status, "setup-error");
+    assert.match(nonlocalScheme.diagnostics[0]?.message ?? "", /non-local schema reference scheme is forbidden/u);
+
+    fs.writeFileSync(
+      root,
+      JSON.stringify({
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        $id: "urn:test:root:traversal:1",
+        $ref: "..%2Foutside-child.json"
+      })
+    );
+    const traversal = await validateJsonFile({ schemaPath: root, filePath: artifact });
+    assert.equal(traversal.status, "setup-error");
+    assert.match(traversal.diagnostics[0]?.message ?? "", /escapes every allowed root/u);
+    assert.equal(
+      (
+        await validateJsonFile({
+          schemaPath: root,
+          filePath: artifact,
+          refPaths: [outsideChild]
+        })
+      ).status,
+      "valid"
+    );
+
+    const childSymlink = path.join(schemaDirectory, "child-symlink.json");
+    fs.symlinkSync(child, childSymlink);
+    fs.writeFileSync(
+      root,
+      JSON.stringify({
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        $id: "urn:test:root:symlink:1",
+        $ref: "child-symlink.json"
+      })
+    );
+    const symlink = await validateJsonFile({ schemaPath: root, filePath: artifact, refPaths: [child] });
+    assert.equal(symlink.status, "setup-error");
+    assert.match(symlink.diagnostics[0]?.message ?? "", /cannot open regular file/u);
 
     fs.writeFileSync(
       root,
@@ -234,4 +370,39 @@ test("external schemas resolve only local contained references", async () => {
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }
+});
+
+test("repeated external references reuse one bounded file snapshot", async (t) => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-ref-snapshot-"));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const root = path.join(temporary, "root.json");
+  const child = path.join(temporary, "child.json");
+  const artifact = path.join(temporary, "artifact.json");
+  fs.writeFileSync(
+    child,
+    JSON.stringify({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $id: "urn:test:repeated-child:1",
+      type: "string"
+    })
+  );
+  fs.writeFileSync(
+    root,
+    JSON.stringify({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $id: "urn:test:repeated-root:1",
+      allOf: Array.from({ length: 1_000 }, () => ({ $ref: "child.json" }))
+    })
+  );
+  fs.writeFileSync(artifact, '"valid"');
+
+  const originalOpenSync = fs.openSync;
+  let childOpenCount = 0;
+  t.mock.method(fs, "openSync", ((...args: unknown[]) => {
+    if (args[0] === child) childOpenCount += 1;
+    return Reflect.apply(originalOpenSync, fs, args) as number;
+  }) as typeof fs.openSync);
+
+  assert.equal((await validateJsonFile({ schemaPath: root, filePath: artifact })).status, "valid");
+  assert.equal(childOpenCount, 1);
 });

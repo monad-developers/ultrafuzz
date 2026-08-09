@@ -40,6 +40,24 @@ export interface ValidateJsonFileOptions {
   schemaBundleSha256?: string;
 }
 
+export interface ValidateRegisteredJsonFileOptions {
+  schemaPath: string;
+  filePath: string;
+  maxErrors?: number;
+  deadlineMs?: number;
+  schemaRegistry?: readonly SchemaRegistryEntry[];
+  schemaBundleSha256?: string;
+}
+
+export interface ValidateRegisteredJsonBytesOptions {
+  schemaPath: string;
+  instanceBytes: Uint8Array;
+  maxErrors?: number;
+  deadlineMs?: number;
+  schemaRegistry?: readonly SchemaRegistryEntry[];
+  schemaBundleSha256?: string;
+}
+
 export type JsonFileValidationStatus = "instance-error" | "setup-error" | "valid";
 
 export interface JsonFileValidationDiagnostic {
@@ -88,6 +106,14 @@ interface SyncWorkerRequest extends WorkerRequest {
 }
 
 export async function validateJsonFile(options: ValidateJsonFileOptions): Promise<JsonFileValidationResult> {
+  try {
+    return await validateJsonFileUnchecked(options);
+  } catch {
+    return internalFailure();
+  }
+}
+
+async function validateJsonFileUnchecked(options: ValidateJsonFileOptions): Promise<JsonFileValidationResult> {
   const schemaPath = path.resolve(options.schemaPath);
   const filePath = path.resolve(options.filePath);
   const maxErrors = Math.min(Math.max(options.maxErrors ?? 50, 1), 1_000);
@@ -169,14 +195,15 @@ export async function validateJsonFile(options: ValidateJsonFileOptions): Promis
  * resource limits, schema bytes, parser, and diagnostics as the producer-facing CLI,
  * while preserving the runtime's synchronous artifact-gate API.
  */
-export function validateRegisteredJsonFileSync(options: {
-  schemaPath: string;
-  filePath: string;
-  maxErrors?: number;
-  deadlineMs?: number;
-  schemaRegistry?: readonly SchemaRegistryEntry[];
-  schemaBundleSha256?: string;
-}): JsonFileValidationResult {
+export function validateRegisteredJsonFileSync(options: ValidateRegisteredJsonFileOptions): JsonFileValidationResult {
+  try {
+    return validateRegisteredJsonFileSyncUnchecked(options);
+  } catch {
+    return internalFailure();
+  }
+}
+
+function validateRegisteredJsonFileSyncUnchecked(options: ValidateRegisteredJsonFileOptions): JsonFileValidationResult {
   const filePath = path.resolve(options.filePath);
   let instanceBytes: Buffer;
   try {
@@ -195,14 +222,17 @@ export function validateRegisteredJsonFileSync(options: {
 }
 
 /** Validate one already-captured immutable instance snapshot with the host worker. */
-export function validateRegisteredJsonBytesSync(options: {
-  schemaPath: string;
-  instanceBytes: Uint8Array;
-  maxErrors?: number;
-  deadlineMs?: number;
-  schemaRegistry?: readonly SchemaRegistryEntry[];
-  schemaBundleSha256?: string;
-}): JsonFileValidationResult {
+export function validateRegisteredJsonBytesSync(options: ValidateRegisteredJsonBytesOptions): JsonFileValidationResult {
+  try {
+    return validateRegisteredJsonBytesSyncUnchecked(options);
+  } catch {
+    return internalFailure();
+  }
+}
+
+function validateRegisteredJsonBytesSyncUnchecked(
+  options: ValidateRegisteredJsonBytesOptions
+): JsonFileValidationResult {
   const schemaPath = path.resolve(options.schemaPath);
   const instanceBytes = Buffer.from(options.instanceBytes);
   if (instanceBytes.byteLength > MAX_INSTANCE_BYTES) {
@@ -280,16 +310,26 @@ function prepareExternalSchemas(
     const explicit = explicitRefPaths.map((refPath) => path.resolve(refPath));
     for (const refPath of explicit) allowedRoots.add(fs.realpathSync(path.dirname(refPath)));
     const byPath = new Map<string, ExternalSchemaSnapshot>();
+    const byRequestedPath = new Map<string, ExternalSchemaSnapshot>();
     let totalBytes = 0;
     let totalPatterns = 0;
 
     const load = (filePath: string, supplied?: Buffer, requireId = true): ExternalSchemaSnapshot => {
+      const requestedPath = path.resolve(filePath);
+      const requested = byRequestedPath.get(requestedPath);
+      if (requested !== undefined) return requested;
+      if (byRequestedPath.size >= MAX_EXTERNAL_SCHEMAS) {
+        throw new Error(`schema bundle exceeds the ${MAX_EXTERNAL_SCHEMAS}-reference-path limit`);
+      }
       const bytes = supplied ?? readRegularFileSnapshot(filePath, MAX_SCHEMA_BYTES);
       const realPath = fs.realpathSync(filePath);
       if (!insideAnyRoot(realPath, allowedRoots))
         throw new Error(`schema reference escapes every allowed root: ${filePath}`);
       const existing = byPath.get(realPath);
-      if (existing !== undefined) return existing;
+      if (existing !== undefined) {
+        byRequestedPath.set(requestedPath, existing);
+        return existing;
+      }
       if (byPath.size >= MAX_EXTERNAL_SCHEMAS) {
         throw new Error(`schema bundle exceeds the ${MAX_EXTERNAL_SCHEMAS}-schema limit`);
       }
@@ -322,6 +362,7 @@ function prepareExternalSchemas(
       }
       const snapshot = { filePath: realPath, schema: parsed };
       byPath.set(realPath, snapshot);
+      byRequestedPath.set(requestedPath, snapshot);
       return snapshot;
     };
 
@@ -387,10 +428,6 @@ function rewriteAndLoadReferences(value: unknown, referringPath: string, load: (
     if (entry.length > MAX_SCHEMA_REFERENCE_LENGTH) {
       throw new Error(`schema reference exceeds the ${MAX_SCHEMA_REFERENCE_LENGTH}-character limit`);
     }
-    if (/^https?:/iu.test(entry)) throw new Error(`HTTP(S) schema references are forbidden: ${entry}`);
-    if (/^file:/iu.test(entry) || path.isAbsolute(entry) || /^[A-Za-z]:/u.test(entry) || entry.includes("\\")) {
-      throw new Error(`absolute file schema references are forbidden: ${entry}`);
-    }
     if (entry.startsWith("#") || /^urn:/iu.test(entry)) continue;
     const hashIndex = entry.indexOf("#");
     const relative = hashIndex === -1 ? entry : entry.slice(0, hashIndex);
@@ -403,6 +440,20 @@ function rewriteAndLoadReferences(value: unknown, referringPath: string, load: (
     } catch {
       throw new Error(`schema reference contains invalid percent-encoding: ${entry}`);
     }
+    const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/u.exec(decoded)?.[1]?.toLowerCase();
+    if (scheme === "http" || scheme === "https") {
+      throw new Error(`HTTP(S) schema references are forbidden: ${entry}`);
+    }
+    if (
+      scheme === "file" ||
+      path.isAbsolute(decoded) ||
+      path.win32.isAbsolute(decoded) ||
+      /^[A-Za-z]:/u.test(decoded) ||
+      decoded.includes("\\")
+    ) {
+      throw new Error(`absolute file schema references are forbidden: ${entry}`);
+    }
+    if (scheme !== undefined) throw new Error(`non-local schema reference scheme is forbidden: ${entry}`);
     const loadedPath = load(path.resolve(path.dirname(referringPath), decoded));
     value[key] = `${pathToFileURL(loadedPath).href}${fragment}`;
   }
@@ -512,6 +563,10 @@ function failure(
   });
 }
 
+function internalFailure(): JsonFileValidationResult {
+  return failure("setup-error", "JSON_VALIDATOR_INTERNAL_ERROR", "The validator encountered an internal tool failure");
+}
+
 function boundValidationResult(result: JsonFileValidationResult): JsonFileValidationResult {
   const diagnostics: JsonFileValidationDiagnostic[] = [];
   let serializedBytes = 2;
@@ -544,11 +599,12 @@ function boundValidationResult(result: JsonFileValidationResult): JsonFileValida
     diagnostics.push(bounded);
     serializedBytes += bytes;
   }
-  if (diagnostics.length === 0 && result.diagnostics.length > 0) {
+  if (diagnostics.length === 0 && result.status !== "valid") {
     diagnostics.push({
       code: "JSON_DIAGNOSTIC_TRUNCATED",
       message: "Validation failed, but the diagnostic exceeded the output limit"
     });
+    contentTruncated = true;
   }
   return {
     ...result,

@@ -33,6 +33,41 @@ import {
 
 import { runCli } from "../src/index.js";
 
+test("json validate classifies invalid invocations as setup failures", async () => {
+  const missingFile = await capture(["json", "validate", "--schema", "schema.json"]);
+  assert.equal(missingFile.code, 2);
+  assert.equal(missingFile.stdout, "");
+  assert.notEqual(missingFile.stderr, "");
+
+  const invalidMaxErrors = await capture([
+    "json",
+    "validate",
+    "--schema",
+    "schema.json",
+    "--file",
+    "artifact.json",
+    "--max-errors",
+    "0"
+  ]);
+  assert.equal(invalidMaxErrors.code, 2);
+  assert.equal(invalidMaxErrors.stdout, "");
+  assert.notEqual(invalidMaxErrors.stderr, "");
+
+  const jsonFailure = await capture(["json", "validate", "--schema", "schema.json", "--json"]);
+  assert.equal(jsonFailure.code, 2);
+  assert.equal(jsonFailure.stderr, "");
+  const envelope = JSON.parse(jsonFailure.stdout) as {
+    command: string;
+    ok: boolean;
+    data: unknown;
+    diagnostics: Array<{ code: string }>;
+  };
+  assert.equal(envelope.command, "json validate");
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.data, null);
+  assert.equal(envelope.diagnostics[0]?.code, "CLI_OCLIF_ERROR");
+});
+
 test("json validate exposes the strict validator through the primary CLI", async () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-cli-"));
   try {

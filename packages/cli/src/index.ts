@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { run as runOclif } from "@oclif/core";
 
+import { CLI_KNOWN_COMMANDS } from "./cli-contracts.js";
 import { CLI_SCHEMA_VERSION, commandFailure, envelope, type CliIo } from "./command-shared.js";
 
 export async function runCli(argv = process.argv.slice(2), io: CliIo = defaultIo()): Promise<number> {
@@ -16,8 +17,8 @@ export async function runCli(argv = process.argv.slice(2), io: CliIo = defaultIo
     await runOclif(argv, { root: packageRoot() });
     return typeof process.exitCode === "number" ? process.exitCode : 0;
   } catch (error) {
-    const code = exitCodeFor(error);
-    const command = argv.find((entry) => !entry.startsWith("-")) ?? "help";
+    const command = invokedCommand(argv);
+    const code = exitCodeFor(error, command);
     const message = error instanceof Error ? error.message : String(error);
     if (argv.includes("--json")) {
       io.stdout.write(
@@ -42,11 +43,19 @@ function defaultIo(): CliIo {
   };
 }
 
-function exitCodeFor(error: unknown): number {
+function exitCodeFor(error: unknown, command: string): number {
+  if (command === "json validate") return 2;
   const record =
     error && typeof error === "object" ? (error as { oclif?: { exit?: unknown }; exitCode?: unknown }) : {};
   const exit = record.oclif?.exit ?? record.exitCode;
   return typeof exit === "number" ? exit : 1;
+}
+
+function invokedCommand(argv: readonly string[]): string {
+  const known = [...CLI_KNOWN_COMMANDS]
+    .sort((left, right) => right.split(" ").length - left.split(" ").length)
+    .find((candidate) => candidate.split(" ").every((part, index) => argv[index] === part));
+  return known ?? argv.find((entry) => !entry.startsWith("-")) ?? "help";
 }
 
 function packageRoot(): string {
