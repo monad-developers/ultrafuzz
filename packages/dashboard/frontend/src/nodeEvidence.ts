@@ -6,20 +6,18 @@ export type NodeEvidenceAvailability = {
   patch: boolean;
   report: boolean;
   metadata: boolean;
-  transcript: boolean;
 };
 
 export type NodeEvidenceDetail = {
   stdout?: string;
   stderr?: string;
   findings: unknown[];
-  artifacts: Array<{ path: string; kind: string; size_bytes: number; sha256?: string }>;
+  artifacts: Array<{ path: string; kind: string; size_bytes: number; sha256: string }>;
   artifactReferences?: {
     outputs: unknown[];
     referencedPrevious: unknown[];
   };
   metadata?: unknown;
-  transcript?: unknown;
 };
 
 export type NodeEvidenceInput = {
@@ -54,10 +52,7 @@ export function nodeEvidenceCountLabel(section: NodeEvidenceSectionId, input: No
     return countLabel(input.detail.artifacts.length + referenceCount + (input.detail.metadata ? 1 : 0), "item");
   }
   if (section === "logs") {
-    return countLabel(
-      [input.detail.stdout, input.detail.stderr, input.detail.transcript].filter(Boolean).length,
-      "source"
-    );
+    return countLabel([input.detail.stdout, input.detail.stderr].filter(Boolean).length, "source");
   }
   return countLabel(input.detail.findings.length, "finding");
 }
@@ -79,12 +74,12 @@ function hasArtifactEvidence({ availability, detail, detailLoading }: NodeEviden
 
 function hasLogEvidence({ availability, detail, detailLoading }: NodeEvidenceInput): boolean {
   if (detail) {
-    return Boolean(detail.stdout || detail.stderr || detail.transcript);
+    return Boolean(detail.stdout || detail.stderr);
   }
   if (!detailLoading) {
     return false;
   }
-  return availability.logs || availability.transcript;
+  return availability.logs;
 }
 
 function hasFindingEvidence({ availability, detail, detailLoading, findingCount }: NodeEvidenceInput): boolean {

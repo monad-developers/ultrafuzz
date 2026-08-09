@@ -54,20 +54,20 @@
       "minimum": 1,
       "maximum": 9007199254740991
     },
-    "jsonValue": {
-      "description": "Deliberately scoped opaque third-party or workflow-provided JSON payload.",
-      "anyOf": [
+    "operatorWorkflowInput": {
+      "$comment": "Intentionally application-defined operator data. The dashboard preserves this RFC 8259 JSON value exactly and does not infer, repair, normalize, or reinterpret its contents. The HTTP reader enforces a 1 MiB request limit, depth 128, 100000 items, and 100000 properties before schema validation.",
+      "oneOf": [
         { "type": "null" },
         { "type": "boolean" },
         { "type": "number" },
         { "type": "string" },
         {
           "type": "array",
-          "items": { "$ref": "#/$defs/jsonValue" }
+          "items": { "$ref": "#/$defs/operatorWorkflowInput" }
         },
         {
           "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+          "additionalProperties": { "$ref": "#/$defs/operatorWorkflowInput" }
         }
       ]
     },
@@ -223,15 +223,14 @@
     "artifactAvailability": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["logs", "renderedPrompt", "findings", "patch", "report", "metadata", "transcript"],
+      "required": ["logs", "renderedPrompt", "findings", "patch", "report", "metadata"],
       "properties": {
         "logs": { "type": "boolean" },
         "renderedPrompt": { "type": "boolean" },
         "findings": { "type": "boolean" },
         "patch": { "type": "boolean" },
         "report": { "type": "boolean" },
-        "metadata": { "type": "boolean" },
-        "transcript": { "type": "boolean" }
+        "metadata": { "type": "boolean" }
       }
     },
     "expandedAttempt": {
@@ -472,26 +471,13 @@
         "path": { "$ref": "#/$defs/nonEmptyString" },
         "state": { "enum": ["available", "missing", "directory", "unsupported"] },
         "content": {
-          "oneOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["kind", "text"],
-              "properties": {
-                "kind": { "enum": ["markdown", "text"] },
-                "text": { "type": "string" }
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["kind", "json"],
-              "properties": {
-                "kind": { "const": "json" },
-                "json": { "$ref": "#/$defs/jsonValue" }
-              }
-            }
-          ]
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "text"],
+          "properties": {
+            "kind": { "enum": ["markdown", "text"] },
+            "text": { "type": "string" }
+          }
         }
       }
     },
@@ -727,8 +713,7 @@
               "items": { "$ref": "#/$defs/expandedAttempt" }
             }
           }
-        },
-        "transcript": { "$ref": "#/$defs/jsonValue" }
+        }
       }
     },
     "findingsResponse": {
@@ -1057,7 +1042,7 @@
         "agent": { "$ref": "#/$defs/nonEmptyString" },
         "model": { "$ref": "#/$defs/nonEmptyString" },
         "maxConcurrency": { "$ref": "#/$defs/positiveSafeInteger" },
-        "workflowInput": { "$ref": "#/$defs/jsonValue" }
+        "workflowInput": { "$ref": "#/$defs/operatorWorkflowInput" }
       }
     },
     "runIdCommandArguments": {
@@ -1155,7 +1140,18 @@
             "clean"
           ]
         },
-        "arguments": { "type": "object" }
+        "arguments": {
+          "anyOf": [
+            { "$ref": "#/$defs/emptyCommandArguments" },
+            { "$ref": "#/$defs/runCommandArguments" },
+            { "$ref": "#/$defs/runIdCommandArguments" },
+            { "$ref": "#/$defs/resumeCommandArguments" },
+            { "$ref": "#/$defs/forkCommandArguments" },
+            { "$ref": "#/$defs/referencesUpdateCommandArguments" },
+            { "$ref": "#/$defs/materializeCommandArguments" },
+            { "$ref": "#/$defs/cleanCommandArguments" }
+          ]
+        }
       },
       "allOf": [
         {

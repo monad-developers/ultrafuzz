@@ -357,83 +357,6 @@ pre {
   flex-wrap: wrap;
 }
 
-.run-health {
-  min-width: 0;
-  display: grid;
-  gap: var(--mds-space-2);
-  padding: var(--mds-space-2);
-  border: 1px solid var(--mds-border);
-  border-radius: 6px;
-  background: var(--mds-surface-raised);
-}
-
-.run-health--success {
-  border-color: color-mix(in srgb, var(--mds-status-success) 34%, var(--mds-border));
-}
-
-.run-health--error {
-  border-color: color-mix(in srgb, var(--mds-status-error) 36%, var(--mds-border));
-}
-
-.run-health--info {
-  border-color: color-mix(in srgb, var(--mds-status-info) 34%, var(--mds-border));
-}
-
-.run-health__header {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--mds-space-2);
-}
-
-.run-health__header strong {
-  min-width: 0;
-  color: var(--mds-text);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.run-health__grid {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(104px, 1fr));
-  gap: var(--mds-space-1) var(--mds-space-2);
-}
-
-.run-health__fact {
-  min-width: 0;
-  display: grid;
-  gap: 1px;
-}
-
-.run-health__fact span {
-  color: var(--mds-text-subtle);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1.2;
-  text-transform: uppercase;
-}
-
-.run-health__fact strong {
-  min-width: 0;
-  color: var(--mds-text);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.25;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.run-health p {
-  color: var(--mds-text-muted);
-  font-size: 11px;
-  line-height: 1.35;
-}
-
 .advanced-actions__summary {
   min-height: 32px;
   display: inline-flex;
@@ -2026,18 +1949,13 @@ html.dark .phase-group--ungrouped {
   }
 
   .mode-indicator,
-  .toolbar__controls,
-  .run-health {
+  .toolbar__controls {
     width: 100%;
   }
 
   .toolbar__controls {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .run-health__grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .advanced-actions,

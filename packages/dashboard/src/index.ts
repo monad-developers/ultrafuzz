@@ -12,7 +12,6 @@ import {
   listSafeFiles,
   parseStrictJsonBytes,
   queryEvents,
-  readJsonFile,
   readRunMetadataDocument,
   readRunState,
   replayEvents,
@@ -22,7 +21,9 @@ import {
   validateSafeId,
   writeFileDurable,
   type ArtifactContractId,
+  type NodeStatus,
   type NodeState,
+  type RunStatus,
   type RunState
 } from "@ultrafuzz/artifacts";
 import { parseProjectConfigToml, resolveConfig, type ResolvedConfig } from "@ultrafuzz/config";
@@ -100,7 +101,22 @@ export interface DashboardHandle {
   close: () => Promise<void>;
 }
 
-type Status = string;
+type Status = NodeStatus | RunStatus | "queued" | "preview" | "unknown";
+type DashboardCommand =
+  | "validate"
+  | "run"
+  | "ps"
+  | "inspect"
+  | "resume"
+  | "replay"
+  | "fork"
+  | "report"
+  | "references-status"
+  | "references-sync"
+  | "references-update"
+  | "materialize"
+  | "clean";
+type CommandJobStatus = "running" | "succeeded" | "failed";
 type JsonObject = Record<string, unknown>;
 type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 type DashboardSseEventType = "ultrafuzz-event" | "ultrafuzz-error" | "ultrafuzz-command-jobs";
@@ -137,7 +153,7 @@ const SECURITY_HEADERS = {
   "x-frame-options": "DENY"
 } as const;
 
-const SUPPORTED_COMMANDS = new Set([
+const SUPPORTED_COMMANDS: ReadonlySet<string> = new Set([
   "validate",
   "run",
   "ps",
@@ -721,19 +737,17 @@ class DashboardApp {
           loop: attempt.loop,
           modelFanout: attempt.modelFanout
         }))
-      },
-      transcript: primary?.transcript
+      }
     });
   }
 
   async artifactEntriesForAttempts(attempts: ExpandedNode[]): Promise<
     Array<{
       attemptId: string;
-      artifacts: Array<{ path: string; kind: string; size_bytes: number; sha256?: string }>;
+      artifacts: Array<{ path: string; kind: string; size_bytes: number; sha256: string }>;
       stdout?: string;
       stderr?: string;
       renderedPrompt?: string;
-      transcript?: unknown;
     }>
   > {
     const context = await this.runContext();
@@ -758,8 +772,7 @@ class DashboardApp {
         artifacts: files,
         stdout: readTextIfExists(path.join(dir, "stdout.log")),
         stderr: readTextIfExists(path.join(dir, "stderr.log")),
-        renderedPrompt: readTextIfExists(path.join(dir, "prompt.rendered.md")),
-        transcript: readJsonIfExists(path.join(dir, "transcript.json"))
+        renderedPrompt: readTextIfExists(path.join(dir, "prompt.rendered.md"))
       };
     });
   }
@@ -1221,7 +1234,7 @@ class DashboardApp {
   }
 
   async startCommand(command: string, body: JsonObject): Promise<CommandJob> {
-    if (!SUPPORTED_COMMANDS.has(command)) {
+    if (!isDashboardCommand(command)) {
       throw new HttpError(404, `unsupported dashboard command: ${command}`);
     }
     if ((command === "materialize" || command === "clean") && body.confirmed !== true) {
@@ -1250,7 +1263,7 @@ class DashboardApp {
     return job;
   }
 
-  argvForCommand(command: string, body: JsonObject): string[] {
+  argvForCommand(command: DashboardCommand, body: JsonObject): string[] {
     const runId = typeof body.runId === "string" ? body.runId : this.currentRunId;
     const base = ["ultrafuzz"];
     switch (command) {
@@ -1513,8 +1526,7 @@ class DashboardApp {
       findings: paths.some((artifactPath) => /findings.*\.json$/u.test(artifactPath)),
       patch: paths.some((artifactPath) => /\.(patch|diff)$/u.test(artifactPath)),
       report: exists("report.md") || exists("report.json"),
-      metadata: exists("metadata.json"),
-      transcript: exists("transcript.json")
+      metadata: exists("metadata.json")
     };
   }
 
@@ -1582,8 +1594,8 @@ export interface CommandJob {
   schema_version: typeof DASHBOARD_HTTP_SCHEMA_VERSION;
   document_type: "command-job";
   jobId: string;
-  command: string;
-  status: Status;
+  command: DashboardCommand;
+  status: CommandJobStatus;
   startedAtUnixSeconds: number;
   finishedAtUnixSeconds?: number;
   argv: string[];
@@ -2046,7 +2058,11 @@ function copySelections(body: JsonObject): Array<{ source: string; destination: 
   });
 }
 
-function commandNeedsRunId(command: string): boolean {
+function isDashboardCommand(value: string): value is DashboardCommand {
+  return SUPPORTED_COMMANDS.has(value);
+}
+
+function commandNeedsRunId(command: DashboardCommand): boolean {
   return ["inspect", "resume", "replay", "fork", "report", "materialize", "clean"].includes(command);
 }
 
@@ -2093,10 +2109,6 @@ function readTextIfExists(filePath: string): string | undefined {
     }
     throw error;
   }
-}
-
-function readJsonIfExists(filePath: string): unknown | undefined {
-  return lstatIfPresent(filePath) === undefined ? undefined : readJsonFile(filePath);
 }
 
 function lstatIfPresent(filePath: string): fs.Stats | undefined {

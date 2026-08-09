@@ -9,8 +9,10 @@ import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
 import {
   appendDashboardAuditRecord,
   assertDashboardHttpDocument,
+  assertDashboardJsonSchema,
   assertDashboardSseDocument,
   DASHBOARD_AUDIT_SCHEMA_VERSION,
+  DASHBOARD_HTTP_JSON_SCHEMA_ID,
   DASHBOARD_HTTP_SCHEMA_VERSION,
   DASHBOARD_SSE_SCHEMA_VERSION,
   dashboardSchemaBundleDigest,
@@ -28,6 +30,10 @@ test("dashboard schemas are complete, closed, and reference only current compose
   );
   assert.match(dashboardSchemaBundleDigest(), /^[a-f0-9]{64}$/u);
   assert.ok(registry.every((entry) => entry.schema.$schema === "https://json-schema.org/draft/2020-12/schema"));
+  assert.deepEqual(
+    registry.flatMap((entry) => arraysWithoutItemSchemas(entry.schema, entry.filename)),
+    []
+  );
 
   const references = registry.flatMap((entry) => entry.localReferences);
   assert.ok(references.some((reference) => reference.startsWith("urn:ultrafuzz:schema:artifacts:run-state:4#")));
@@ -69,6 +75,85 @@ test("dashboard schemas are complete, closed, and reference only current compose
         "legacy prompt save"
       ),
     /additionalProperties/u
+  );
+});
+
+test("dashboard exposes only the bounded operator-defined JSON extension point", () => {
+  const registry = dashboardSchemaRegistry();
+  const httpSchema = registry.find((entry) => entry.filename === "dashboard-http.schema.json")?.schema as
+    { $defs?: Record<string, unknown> } | undefined;
+  assert.ok(httpSchema?.$defs);
+  assert.equal(Object.prototype.hasOwnProperty.call(httpSchema.$defs, "jsonValue"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(httpSchema.$defs, "operatorWorkflowInput"), true);
+
+  const textPreview = {
+    logicalNodeId: "project-discovery",
+    concreteNodeId: "project-discovery",
+    path: "artifacts/project-discovery/report.md",
+    state: "available",
+    content: { kind: "markdown", text: "# Report" }
+  };
+  assert.doesNotThrow(() =>
+    assertDashboardJsonSchema(
+      `${DASHBOARD_HTTP_JSON_SCHEMA_ID}#/$defs/artifactPreview`,
+      textPreview,
+      "text artifact preview"
+    )
+  );
+  assert.throws(
+    () =>
+      assertDashboardJsonSchema(
+        `${DASHBOARD_HTTP_JSON_SCHEMA_ID}#/$defs/artifactPreview`,
+        { ...textPreview, content: { kind: "json", json: { previously: "opaque" } } },
+        "obsolete JSON artifact preview"
+      ),
+    /kind enum|additionalProperties|required/u
+  );
+
+  const availability = {
+    logs: false,
+    renderedPrompt: false,
+    findings: false,
+    patch: false,
+    report: false,
+    metadata: false
+  };
+  assert.doesNotThrow(() =>
+    assertDashboardJsonSchema(
+      `${DASHBOARD_HTTP_JSON_SCHEMA_ID}#/$defs/artifactAvailability`,
+      availability,
+      "artifact availability"
+    )
+  );
+  assert.throws(
+    () =>
+      assertDashboardJsonSchema(
+        `${DASHBOARD_HTTP_JSON_SCHEMA_ID}#/$defs/artifactAvailability`,
+        { ...availability, transcript: true },
+        "obsolete transcript availability"
+      ),
+    /additionalProperties/u
+  );
+
+  const runRequest = {
+    schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
+    request_type: "command",
+    command: "run",
+    arguments: {
+      workflowInput: {
+        applicationDefined: [null, true, 7, "value", { nested: [false] }]
+      }
+    }
+  };
+  assert.doesNotThrow(() => assertDashboardHttpDocument(runRequest, "commandRequest", "operator workflow input"));
+  assert.throws(
+    () =>
+      assertDashboardHttpDocument(
+        { ...runRequest, arguments: { ...runRequest.arguments, historicalInput: {} } },
+        "commandRequest",
+        "unknown run argument"
+      ),
+    /additionalProperties|anyOf/u
   );
 });
 
@@ -161,3 +246,19 @@ test("dashboard audit journals reject malformed history without changing its byt
   );
   assert.deepEqual(fs.readFileSync(auditPath), malformedBytes);
 });
+
+function arraysWithoutItemSchemas(value: unknown, path: string): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry, index) => arraysWithoutItemSchemas(entry, `${path}/${index}`));
+  }
+  if (typeof value !== "object" || value === null) return [];
+  const record = value as Record<string, unknown>;
+  const current =
+    record.type === "array" && !("items" in record) && !("prefixItems" in record)
+      ? [`${path}: array schema has no items or prefixItems`]
+      : [];
+  return [
+    ...current,
+    ...Object.entries(record).flatMap(([key, entry]) => arraysWithoutItemSchemas(entry, `${path}/${key}`))
+  ];
+}

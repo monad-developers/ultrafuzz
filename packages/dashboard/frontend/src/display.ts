@@ -17,7 +17,7 @@ export type LoopBadgeDisplayData = {
 
 export type PropertySummaryDisplayData = {
   count: number;
-  kind: "candidates" | "properties" | string;
+  kind: "candidates" | "properties";
 };
 
 const setupKindLabels: Record<string, string> = {
@@ -132,7 +132,7 @@ function propertyCountLabel(value: number): string {
   return `${formatNumber(value)} ${value === 1 ? "property" : "properties"}`;
 }
 
-function propertySummaryNoun(kind: string, count: number): string {
+function propertySummaryNoun(kind: PropertySummaryDisplayData["kind"], count: number): string {
   if (kind === "candidates") {
     return count === 1 ? "candidate" : "candidates";
   }

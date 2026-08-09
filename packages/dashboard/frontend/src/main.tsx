@@ -24,6 +24,16 @@ import type {
   OnConnectStartParams,
   ReactFlowInstance
 } from "@xyflow/react";
+import type {
+  EventRecord,
+  NodeState,
+  NormalizedFinding,
+  RunMetadataDocument,
+  SeverityClassifiedFindings,
+  TerminalReport,
+  TriagedFindings
+} from "@ultrafuzz/artifacts";
+import type { ExpandedGraph, ExpandedNode, ProjectTopology as TopologyProjectTopology } from "@ultrafuzz/topology";
 import "@xyflow/react/dist/style.css";
 import "./styles.css";
 import {
@@ -66,14 +76,6 @@ import {
 } from "./theme";
 import { mergeStableGraphEdges, mergeStableGraphNodes } from "./graphMerge";
 import { createLiveRefreshGate, shouldPauseLiveRefresh } from "./liveRefreshGate";
-import {
-  formatHealthSeconds,
-  lineageSummaryLabel,
-  restartReuseLabel,
-  runHealthLabel,
-  runHealthTone,
-  type RunHealthDisplayInput
-} from "./runHealth";
 import { useManagedConfigEditor } from "./useManagedConfigEditor";
 import { useManagedPromptEditor } from "./useManagedPromptEditor";
 import {
@@ -84,11 +86,12 @@ import {
   dashboardSseErrorMessage,
   parseDashboardHttpDocument
 } from "./wireContracts";
-import type { DashboardCommandJob, DashboardHttpDocumentType } from "./wireContracts";
+import type { DashboardCommandJob, DashboardCommandName, DashboardHttpDocumentType } from "./wireContracts";
 
 type Status =
   | "pending"
   | "ready"
+  | "runnable"
   | "running"
   | "queued"
   | "succeeded"
@@ -97,14 +100,17 @@ type Status =
   | "timed-out"
   | "reused-from-prior-run"
   | "invalidated"
-  | "unknown"
-  | string;
+  | "paused"
+  | "canceled"
+  | "preview"
+  | "unknown";
 
 type StatusTone = "success" | "error" | "info" | "neutral";
 type GraphViewMode = "grouped" | "flat";
 type LiveState = "loading" | "off" | "connecting" | "live" | "degraded" | "disconnected";
 type ButtonVariant = "primary" | "secondary" | "ghost" | "destructive";
 type PanelToggle = "side-panel" | "activity-console";
+type CapabilityAction = DashboardCommandName | "config";
 
 type StrategySummary = {
   id: string;
@@ -115,8 +121,6 @@ type StrategySummary = {
   loops: number;
   attempts: number;
   timeout_seconds?: number;
-  expected_cost?: string;
-  cost_note?: string;
 };
 
 type ModelSummary = {
@@ -132,10 +136,12 @@ type ArtifactAvailability = {
   patch: boolean;
   report: boolean;
   metadata: boolean;
-  transcript: boolean;
 };
 
 type PropertySummary = PropertySummaryDisplayData;
+type ExpandedAttempt = Pick<ExpandedNode, "id" | "logicalId" | "dependsOn" | "artifactDir" | "loop" | "modelFanout">;
+type FindingItem =
+  NormalizedFinding | TriagedFindings[number] | SeverityClassifiedFindings[number] | TerminalReport["issues"][number];
 
 type FlowNodeData = {
   label: string;
@@ -147,6 +153,7 @@ type FlowNodeData = {
   loopIndex?: number;
   dependencies: string[];
   artifactDir: string;
+  artifactDirs: string[];
   artifacts: ArtifactAvailability;
   promptAvailable: boolean;
   promptEditable: boolean;
@@ -160,7 +167,7 @@ type FlowNodeData = {
   attemptIndex: number;
   loopCount: number;
   loopBadgeCount?: number;
-  loopMode: "parallel" | "series" | string;
+  loopMode: "parallel" | "series";
   promptPath: string;
   group?: string;
   groupLabel?: string;
@@ -168,64 +175,31 @@ type FlowNodeData = {
   requiredArtifacts: string[];
   timeoutSeconds?: number;
   topologyEditable?: boolean;
+  expandedAttempts: ExpandedAttempt[];
   connectionSourceNodeId?: string | null;
   connectionTargetValidity?: "valid" | "invalid" | null;
 };
 
 type RunOverview = {
   run_id: string;
+  run_root: string;
+  runs_dir: string;
   status: Status;
-  mode: string;
+  mode: "persisted" | "preview";
+  source_run_id?: string;
+  started_at?: string;
+  finished_at?: string;
   findings_count: number;
   event_count: number;
   elapsed_seconds?: number;
   restart_eligible: boolean;
   graph_nodes: number;
+  expanded_nodes: number;
   active_nodes: string[];
   node_counts: Record<string, number>;
   live_updates: boolean;
   report_path?: string;
-  health?: RunHealth;
-};
-
-type RunHealth = RunHealthDisplayInput & {
-  phase: string;
-  start_status?: string;
-  finish_status?: string;
-  active_nodes: Array<{
-    node_id: string;
-    label: string;
-    status: string;
-    artifact_dir: string;
-    timeout_remaining_seconds?: number | null;
-    stdout_updated_seconds_ago?: number | null;
-    stderr_updated_seconds_ago?: number | null;
-  }>;
-  process_liveness: {
-    status: string;
-    observed: boolean;
-    detail: string;
-  };
-  stdout_freshness: {
-    status: string;
-    newest_age_seconds?: number | null;
-    newest_path?: string;
-  };
-  stderr_freshness: {
-    status: string;
-    newest_age_seconds?: number | null;
-    newest_path?: string;
-  };
-  timeout: {
-    status: string;
-    minimum_remaining_seconds?: number | null;
-  };
-  artifacts: {
-    status: string;
-    total_required: number;
-    present_required: number;
-    missing_required: number;
-  };
+  run_metadata?: RunMetadataDocument;
 };
 
 type FlowData = {
@@ -317,15 +291,14 @@ type NodeSummary = {
 type NodeDetail = {
   run_id: string;
   node: NodeSummary;
-  state?: unknown;
+  state?: { logicalNodeId: string; attempts: NodeState[] };
   stdout?: string;
   stderr?: string;
   rendered_prompt?: string;
-  findings: unknown[];
+  findings: FindingItem[];
   artifacts: Array<{ path: string; kind: string; size_bytes: number; sha256: string }>;
   artifactReferences: PromptArtifactReferences;
-  metadata: { expandedAttempts: unknown[] };
-  transcript?: unknown;
+  metadata: { expandedAttempts: ExpandedAttempt[] };
 };
 
 type PromptArtifactReferences = {
@@ -339,7 +312,7 @@ type PromptArtifactPreview = {
   relativePath?: string;
   path: string;
   state: "available" | "missing" | "directory" | "unsupported";
-  content?: { kind: "markdown" | "text"; text: string } | { kind: "json"; json: unknown };
+  content?: { kind: "markdown" | "text"; text: string };
 };
 
 type PromptDetail = {
@@ -370,15 +343,16 @@ type SavePromptResponse = {
 };
 
 type ConfigDetail = {
-  source: string;
-  path: string;
-  editable: boolean;
+  source: "project" | "missing";
+  path: "ultrafuzz.toml";
+  editable: true;
   contentHash: string;
   content: string;
+  validation: { valid: boolean; message: string };
 };
 
 type SaveConfigResponse = {
-  path: string;
+  path: "ultrafuzz.toml";
   contentHash: string;
   validation: {
     valid: boolean;
@@ -386,50 +360,31 @@ type SaveConfigResponse = {
   };
 };
 
-type TopologyGroup = {
-  label?: string;
-  color?: string;
-};
+type ProjectTopology = Omit<TopologyProjectTopology, "version"> & { version: 2 };
 
-type TopologyDefaults = {
-  strategy_loops: number;
-};
-
-type TopologyNode = {
-  id: string;
-  kind?: "agentic" | "meta" | "reference";
-  role?: "start" | "finish";
-  prompt?: string;
-  reference?: string;
-  group?: string;
-  depends_on?: string[];
-  loops?: number;
-  loop_mode?: "parallel" | "series";
-  timeout_seconds?: number;
-  outputs?: Array<{ path: string; contract: string; primary?: boolean }>;
-};
-
-type ProjectTopology = {
-  version: 2;
-  defaults: TopologyDefaults;
-  groups?: Record<string, TopologyGroup>;
-  nodes: TopologyNode[];
-};
-
-type TopologyDetail = {
-  path: string;
-  editable: boolean;
+type TopologyDetailBase = {
+  path: ".ultrafuzz/topology.yml";
+  editable: true;
   contentHash: string;
   content: string;
-  topology?: ProjectTopology;
-  validation: {
-    valid: boolean;
-    message: string;
-  };
 };
 
+type TopologyDetail = TopologyDetailBase &
+  (
+    | {
+        topology: ProjectTopology;
+        expandedGraph: ExpandedGraph;
+        validation: { valid: true; message: string };
+      }
+    | {
+        topology?: never;
+        expandedGraph?: never;
+        validation: { valid: false; message: string };
+      }
+  );
+
 type SaveTopologyResponse = {
-  path: string;
+  path: ".ultrafuzz/topology.yml";
   contentHash: string;
   validation: {
     valid: boolean;
@@ -455,16 +410,10 @@ type TopologyNodeOption = {
 
 type CommandJob = DashboardCommandJob;
 
-type EventRecord = {
-  timestamp: string;
-  event_type: string;
-  node_id?: string;
-  payload: unknown;
-};
-
-const statusLabels: Record<string, string> = {
+const statusLabels: Record<Status, string> = {
   pending: "Pending",
   ready: "Ready",
+  runnable: "Runnable",
   running: "Running",
   queued: "Queued",
   succeeded: "Succeeded",
@@ -473,6 +422,9 @@ const statusLabels: Record<string, string> = {
   "timed-out": "Timed out",
   "reused-from-prior-run": "Reused",
   invalidated: "Invalidated",
+  paused: "Paused",
+  canceled: "Canceled",
+  preview: "Preview",
   unknown: "Unknown"
 };
 
@@ -527,7 +479,7 @@ function DashboardNode({ data, id, selected }: NodeProps<DashboardFlowNode>) {
   const showStrategyName = Boolean(data.strategy && data.strategy.display_name !== data.label);
   const topologyId = data.logicalNodeId;
   const propertyFact = propertySummaryFactLabel(data.propertySummary);
-  const statusLabel = statusLabels[data.status] ?? data.status;
+  const statusLabel = statusLabels[data.status];
   const canCreateTopologyConnection = canEditTopologyWiringData(data);
   const connectionActive = Boolean(data.connectionSourceNodeId);
   const connectionSourceActive = data.connectionSourceNodeId === id;
@@ -644,7 +596,7 @@ function MetaNode({ data, id, selected }: NodeProps<DashboardFlowNode>) {
     .join(" ");
   return (
     <div
-      aria-label={`${data.label} meta node, ${statusLabels[data.status] ?? data.status}`}
+      aria-label={`${data.label} meta node, ${statusLabels[data.status]}`}
       className={`meta-node meta-node--${data.kind} node-tone-${statusToneValue} node-state-${statusClass} ${selected ? "is-selected" : ""} ${connectionClasses}`}
     >
       {incomingHandles.map((handleId, index) => (
@@ -1154,7 +1106,7 @@ function App() {
   }, [selectedFlowNodeExists, selectedIsStrategyAggregate, selectedNodeId]);
 
   const runCommand = useCallback(
-    (command: string, body: Record<string, unknown> = {}) => {
+    (command: DashboardCommandName, body: Record<string, unknown> = {}) => {
       if (!session) {
         setMessage("Dashboard session is not ready.");
         return;
@@ -1821,13 +1773,13 @@ function Toolbar({
   openNewPromptForm: () => void;
   openConfig: () => void;
   panelToggles: Record<PanelToggle, boolean>;
-  runCommand: (command: string, body?: Record<string, unknown>) => void;
+  runCommand: (command: DashboardCommandName, body?: Record<string, unknown>) => void;
   setGraphViewMode: (mode: GraphViewMode) => void;
   setThemePreference: (preference: ThemePreference) => void;
   themePreference: ThemePreference;
   togglePanel: (panel: PanelToggle) => void;
 }) {
-  const can = (command: string) => {
+  const can = (command: CapabilityAction) => {
     const capability = capabilityForCommand(command);
     return Boolean(flow && capability && flow.capabilities[capability]);
   };
@@ -1943,7 +1895,6 @@ function Toolbar({
           </details>
         </div>
       </div>
-      {flow?.run.health ? <RunHealthPanel run={flow.run} /> : null}
       <SystemAlerts errors={errors} message={message} />
     </div>
   );
@@ -1983,7 +1934,7 @@ function ViewToggle({ onChange, value }: { onChange: (mode: GraphViewMode) => vo
 function ModeIndicator({ flow, liveState }: { flow: FlowData | null; liveState: LiveState }) {
   const run = flow?.run;
   const modeLabel = run ? compactModeLabel(run.mode) : "Loading";
-  const statusLabel = run ? (statusLabels[run.status] ?? run.status) : "Unknown";
+  const statusLabel = run ? statusLabels[run.status] : "Unknown";
   const liveLabel = liveStateLabel(liveState);
   return (
     <div
@@ -1997,71 +1948,8 @@ function ModeIndicator({ flow, liveState }: { flow: FlowData | null; liveState: 
   );
 }
 
-function compactModeLabel(mode: string): string {
-  const normalized = mode.trim().toLowerCase();
-  if (!normalized) {
-    return "Unknown";
-  }
-  if (normalized.includes("preview")) {
-    return "Preview";
-  }
-  if (normalized === "persisted" || normalized.includes("run") || normalized.includes("live")) {
-    return "Active run";
-  }
-  return mode;
-}
-
-function RunHealthPanel({ run }: { run: RunOverview }) {
-  const health = run.health;
-  if (!health) {
-    return null;
-  }
-  const tone = runHealthTone(health);
-  const activeNodes = health.active_nodes.map((node) => node.label);
-  const activeNodeLabel = activeNodes.length ? activeNodes.join(", ") : "none";
-  const logLabel = `${health.stdout_freshness.status} / ${health.stderr_freshness.status}`;
-  const timeoutLabel =
-    health.timeout.minimum_remaining_seconds == null
-      ? health.timeout.status
-      : `${health.timeout.status}, ${formatHealthSeconds(health.timeout.minimum_remaining_seconds)} left`;
-  const elapsedLabel =
-    health.lineage?.cumulative_elapsed_seconds != null
-      ? formatHealthSeconds(health.lineage.cumulative_elapsed_seconds)
-      : "unavailable";
-  const spendLabel = health.lineage?.cumulative_estimated_spend ?? "unavailable";
-  const tokenLabel = health.lineage?.cumulative_tokens_used ?? "unavailable";
-
-  return (
-    <section aria-label="Run health" className={`run-health run-health--${tone}`}>
-      <div className="run-health__header">
-        <DenseChip label={runHealthLabel(health)} tone={tone} />
-        <strong>{restartReuseLabel(health)}</strong>
-      </div>
-      <div className="run-health__grid">
-        <RunHealthFact label="Active" value={activeNodeLabel} />
-        <RunHealthFact label="Process" value={health.process_liveness.status} />
-        <RunHealthFact label="Logs" value={logLabel} />
-        <RunHealthFact label="Timeout" value={timeoutLabel} />
-        <RunHealthFact
-          label="Artifacts"
-          value={`${health.artifacts.present_required}/${health.artifacts.total_required} required`}
-        />
-        <RunHealthFact label="Lineage" value={lineageSummaryLabel(health)} />
-        <RunHealthFact label="Elapsed" value={elapsedLabel} />
-        <RunHealthFact label="Spend" value={`${tokenLabel} / ${spendLabel}`} />
-      </div>
-      <p>{health.restart?.guidance ?? health.stale?.guidance ?? "Health detail unavailable."}</p>
-    </section>
-  );
-}
-
-function RunHealthFact({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="run-health__fact">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
+function compactModeLabel(mode: RunOverview["mode"]): string {
+  return mode === "preview" ? "Preview" : "Active run";
 }
 
 function ActionGroup({ children, label }: { children: ReactNode; label: string }) {
@@ -2689,16 +2577,10 @@ function ArtifactPreviewCard({ artifact }: { artifact: PromptArtifactPreview }) 
 }
 
 function ArtifactPreviewContentView({ content }: { content: NonNullable<PromptArtifactPreview["content"]> }) {
-  if (content.kind === "markdown" && content.text !== undefined) {
+  if (content.kind === "markdown") {
     return <MarkdownPreview value={content.text} />;
   }
-  if (content.kind === "json") {
-    return <JsonBlock value={content.json} />;
-  }
-  if (content.text !== undefined) {
-    return <pre>{content.text}</pre>;
-  }
-  return <EmptyState body="This artifact preview is unavailable." title="Unsupported artifact" />;
+  return <pre>{content.text}</pre>;
 }
 
 function artifactPreviewEmptyTitle(state: string): string {
@@ -2725,20 +2607,14 @@ function LogsEvidence({ detail }: { detail: NodeDetail | null }) {
   if (!detail) {
     return <EmptyState body="Node logs are loading." title="Logs loading" />;
   }
-  const hasLogs = Boolean(detail.stdout || detail.stderr || detail.transcript);
+  const hasLogs = Boolean(detail.stdout || detail.stderr);
   if (!hasLogs) {
-    return <EmptyState body="This node has no stdout, stderr, or transcript artifact." title="No logs" />;
+    return <EmptyState body="This node has no stdout or stderr artifact." title="No logs" />;
   }
   return (
     <div className="evidence-stack">
       {detail.stdout ? <CodeBlock title="Stdout" value={detail.stdout} /> : null}
       {detail.stderr ? <CodeBlock title="Stderr" value={detail.stderr} /> : null}
-      {detail.transcript ? (
-        <section className="panel-section">
-          <h3>Transcript</h3>
-          <JsonBlock value={detail.transcript} />
-        </section>
-      ) : null}
     </div>
   );
 }
@@ -2876,7 +2752,7 @@ function ActivityConsole({ errors, events, jobs }: { errors: string[]; events: E
                 <summary>
                   <time>{timeLabel(event.timestamp)}</time>
                   <DenseChip label={eventTone(event)} tone={eventTone(event)} />
-                  <span>{event.node_id ?? "run"}</span>
+                  <span>{"node_id" in event ? event.node_id : "run"}</span>
                   <strong>{event.event_type}</strong>
                 </summary>
                 <JsonBlock value={event.payload} />
@@ -2957,7 +2833,7 @@ function StatusBadge({
     <span
       className={`status-badge status-badge--${tone} ${prominent ? "status-badge--bracketed" : ""} ${dense ? "status-badge--dense" : ""}`}
     >
-      {statusLabels[status] ?? status}
+      {statusLabels[status]}
     </span>
   );
 }
@@ -3091,7 +2967,7 @@ async function getJson<T>(url: string, documentType: DashboardHttpDocumentType):
 
 async function postCommandJson<T>(
   url: string,
-  command: string,
+  command: DashboardCommandName,
   commandArguments: Record<string, unknown>,
   token: string
 ): Promise<T> {
@@ -3970,8 +3846,7 @@ function mergeArtifactAvailability(nodes: DashboardFlowNode[]): ArtifactAvailabi
       findings: false,
       patch: false,
       report: false,
-      metadata: false,
-      transcript: false
+      metadata: false
     }
   );
 }
@@ -3998,7 +3873,7 @@ function mergePropertySummary(nodes: DashboardFlowNode[]): PropertySummary | nul
 
 function combinedNodeStatus(nodes: DashboardFlowNode[]): Status {
   const statuses = nodes.map((node) => node.data.status);
-  for (const status of ["failed", "timed-out", "invalidated", "running", "queued", "ready"]) {
+  for (const status of ["failed", "timed-out", "invalidated", "running", "queued", "ready"] as const) {
     if (statuses.includes(status)) {
       return status;
     }
@@ -4109,7 +3984,7 @@ function edgeColorForStatus(status: Status): string {
   }
 }
 
-function capabilityForCommand(command: string): keyof CommandCapabilities | null {
+function capabilityForCommand(command: CapabilityAction): keyof CommandCapabilities {
   switch (command) {
     case "validate":
       return "validate";
@@ -4139,8 +4014,6 @@ function capabilityForCommand(command: string): keyof CommandCapabilities | null
       return "materialize";
     case "clean":
       return "clean";
-    default:
-      return null;
   }
 }
 
@@ -4227,9 +4100,6 @@ function availabilityFlags(artifacts: ArtifactAvailability): string[] {
   }
   if (artifacts.metadata) {
     flags.push("metadata");
-  }
-  if (artifacts.transcript) {
-    flags.push("transcript");
   }
   return flags;
 }

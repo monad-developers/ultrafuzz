@@ -386,6 +386,9 @@ test("dashboard validates persisted run-state v4 documents through the composed 
   const runId = "dashboard-persisted";
   const plan = await planRun({ projectRoot, runId, env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const artifactDir = path.join(plan.value!.run_root, "artifacts", "project-discovery");
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.writeFileSync(path.join(artifactDir, "transcript.json"), '{"provider":"unowned"}\n', "utf8");
   const handle = await serveDashboard({ projectRoot, runId, port: 0 });
   try {
     const routes: Array<[string, DashboardHttpDefinition, string]> = [
@@ -400,6 +403,18 @@ test("dashboard validates persisted run-state v4 documents through the composed 
       const document = await parseHttpResponse(response, definition);
       assert.equal(document.schema_version, DASHBOARD_HTTP_SCHEMA_VERSION, route);
       assert.equal(document.document_type, documentType, route);
+      if (definition === "nodeDetailResponse") {
+        assert.equal(Object.prototype.hasOwnProperty.call(document, "transcript"), false);
+        assert.throws(
+          () =>
+            assertDashboardHttpDocument(
+              { ...document, transcript: { previously: "opaque" } },
+              "nodeDetailResponse",
+              "obsolete transcript response"
+            ),
+          /additionalProperties/u
+        );
+      }
     }
   } finally {
     await handle.close();

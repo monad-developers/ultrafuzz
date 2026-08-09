@@ -62,7 +62,7 @@ export function dashboardRequest(
 }
 
 export function dashboardCommandRequest(
-  command: string,
+  command: DashboardCommandName,
   commandArguments: Record<string, unknown>
 ): Record<string, unknown> {
   return {
