@@ -2508,9 +2508,18 @@ function verifiedAncestorJsonArtifact(
   contract: string,
   historicalContract?: string
 ): { path: string; value: unknown } | undefined {
+  const declaredProducers = taskSpecs.filter((candidate) => candidate.metadata.node.logicalNodeId === logicalNodeId);
+  // Some selected topologies deliberately omit this producer. The shipped
+  // smoke benchmark, for example, has no invariant-implementation phase, so
+  // there is no authoritative coverage handoff to reconstruct. Once a
+  // topology declares a producer, however, its handoff must be an ancestor
+  // and every current-contract verification below remains fail-closed.
+  if (declaredProducers.length === 0) {
+    return undefined;
+  }
   const candidates = task.dependencyArtifactDirs.flatMap((dependency) => {
-    const dependencyTask = taskSpecs.find((candidate) => candidate.attemptId === path.basename(dependency));
-    if (dependencyTask?.metadata.node.logicalNodeId !== logicalNodeId) {
+    const dependencyTask = declaredProducers.find((candidate) => candidate.attemptId === path.basename(dependency));
+    if (dependencyTask === undefined) {
       return [];
     }
     return dependencyTask.outputs

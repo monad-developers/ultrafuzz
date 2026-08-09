@@ -19,9 +19,11 @@ import {
   validateArtifactContract,
   writeFileDurable
 } from "@ultrafuzz/artifacts";
+import { loadTopology } from "@ultrafuzz/topology";
 import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
+const repositoryRoot = path.resolve(runtimePackageRoot, "../..");
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
 
 function loadBoundedFinalReportReader(): (reportPath: string) => string {
@@ -1697,6 +1699,56 @@ test("generated Smithers final-report producer replaces model coverage with cano
   );
 });
 
+test("generated Smithers coverage authority preserves the shipped smoke topology without a producer", () => {
+  const topology = loadTopology(repositoryRoot, {
+    topologyPath: path.join(repositoryRoot, "benchmarks", "smoke-benchmark.yml"),
+    requirePromptFiles: true
+  });
+  const finalReport = topology.nodes.find((node) => node.id === "final-report");
+  assert.ok(finalReport);
+  const taskSpecs = topology.nodes
+    .filter((node) => node.kind === "agentic")
+    .map((node) => ({
+      attemptId: node.id,
+      metadata: { node: { logicalNodeId: node.id } },
+      outputs: (node.outputs ?? []).map((output) => ({ path: output.path, contract: output.contract }))
+    }));
+  assert.equal(
+    taskSpecs.some((candidate) => candidate.metadata.node.logicalNodeId === "stateful-invariant-implement-properties"),
+    false,
+    "the shipped smoke topology must exercise the genuinely absent-producer path"
+  );
+
+  const ancestors = new Set<string>();
+  const nodesById = new Map(topology.nodes.map((node) => [node.id, node]));
+  const pending = [...finalReport.depends_on];
+  while (pending.length > 0) {
+    const candidate = pending.pop()!;
+    if (ancestors.has(candidate)) continue;
+    ancestors.add(candidate);
+    pending.push(...(nodesById.get(candidate)?.depends_on ?? []));
+  }
+  let verificationCount = 0;
+  const readAncestor = loadVerifiedAncestorJsonArtifact(taskSpecs, () => {
+    verificationCount += 1;
+  });
+  assert.equal(
+    readAncestor(
+      {
+        dependencyArtifactDirs: [...ancestors].map((ancestor) =>
+          path.join(repositoryRoot, ".ultrafuzz", "runs", "smoke", "artifacts", ancestor)
+        )
+      },
+      "stateful-invariant-implement-properties",
+      "implemented-properties.json",
+      "ultrafuzz/implemented-properties@2",
+      "ultrafuzz/implemented-properties@1"
+    ),
+    undefined
+  );
+  assert.equal(verificationCount, 0, "absent authority must not reinterpret another smoke artifact as coverage");
+});
+
 test("generated Smithers coverage authority fails closed except for an explicit historical handoff", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-report-coverage-authority-"));
   const dependency = path.join(root, "implementation-attempt");
@@ -1714,7 +1766,8 @@ test("generated Smithers coverage authority fails closed except for an explicit 
   };
   let verificationFailure = false;
   let verificationCount = 0;
-  const readAncestor = loadVerifiedAncestorJsonArtifact([producer], (_task, verifiedDependency) => {
+  const producers = [producer];
+  const readAncestor = loadVerifiedAncestorJsonArtifact(producers, (_task, verifiedDependency) => {
     verificationCount += 1;
     assert.equal(verifiedDependency, dependency);
     if (verificationFailure) throw new Error("unverified dependency");
@@ -1746,6 +1799,35 @@ test("generated Smithers coverage authority fails closed except for an explicit 
     assert.throws(readCurrent, /declares unexpected contract/u);
 
     producer.outputs[0]!.contract = "ultrafuzz/implemented-properties@2";
+    finalReportTask.dependencyArtifactDirs = [];
+    assert.throws(readCurrent, /authoritative implemented-properties\.json handoff is unavailable/u);
+
+    finalReportTask.dependencyArtifactDirs = [dependency];
+    const alternateDependency = path.join(root, "implementation-attempt-alternate");
+    fs.mkdirSync(alternateDependency);
+    fs.writeFileSync(
+      path.join(alternateDependency, "implemented-properties.json"),
+      JSON.stringify({ authoritative: "alternate" })
+    );
+    producers.push({
+      attemptId: "implementation-attempt-alternate",
+      metadata: { node: { logicalNodeId: "stateful-invariant-implement-properties" } },
+      outputs: [
+        {
+          path: "implemented-properties.json",
+          contract: "ultrafuzz/implemented-properties@2"
+        }
+      ]
+    });
+    finalReportTask.dependencyArtifactDirs = [dependency, alternateDependency];
+    assert.throws(readCurrent, /authoritative implemented-properties\.json handoff is ambiguous/u);
+
+    producers.pop();
+    finalReportTask.dependencyArtifactDirs = [dependency];
+    fs.writeFileSync(path.join(dependency, "implemented-properties.json"), "{malformed");
+    assert.throws(readCurrent, /authoritative implemented-properties\.json handoff is malformed/u);
+
+    fs.writeFileSync(path.join(dependency, "implemented-properties.json"), JSON.stringify({ authoritative: true }));
     verificationFailure = true;
     assert.throws(readCurrent, /unverified dependency/u);
   } finally {
