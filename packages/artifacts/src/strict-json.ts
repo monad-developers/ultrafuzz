@@ -34,6 +34,9 @@ export function parseStrictJsonBytes(bytes: Uint8Array, limits: Partial<StrictJs
   if (bytes.byteLength > resolved.maxBytes) {
     throw new StrictJsonError("limit", `JSON exceeds the ${resolved.maxBytes}-byte limit`);
   }
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    throw new StrictJsonError("syntax", "A UTF-8 byte-order mark is not permitted in strict JSON");
+  }
 
   let text: string;
   try {
