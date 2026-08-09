@@ -76,6 +76,13 @@ import {
 } from "./runHealth";
 import { useManagedConfigEditor } from "./useManagedConfigEditor";
 import { useManagedPromptEditor } from "./useManagedPromptEditor";
+import {
+  dashboardCommandRequest,
+  dashboardRequest,
+  dashboardSseCommandJobs,
+  dashboardSseErrorMessage
+} from "./wireContracts";
+import type { DashboardCommandJob } from "./wireContracts";
 
 type Status =
   | "pending"
@@ -449,17 +456,7 @@ type TopologyNodeOption = {
   label: string;
 };
 
-type CommandJob = {
-  jobId: string;
-  command: string;
-  status: Status;
-  startedAtUnixSeconds: number;
-  finishedAtUnixSeconds?: number;
-  argv: string[];
-  output: string;
-  error?: string;
-  exitCode?: number;
-};
+type CommandJob = DashboardCommandJob;
 
 type EventRecord = {
   timestamp: string;
@@ -816,7 +813,7 @@ function App() {
           "content-type": "application/json",
           "x-ultrafuzz-session": session.sessionToken
         },
-        body: JSON.stringify({ topology: nextTopology })
+        body: JSON.stringify(dashboardRequest("topology-save", { topology: nextTopology }))
       });
       if (!response.ok) {
         throw new Error(await response.text());
@@ -1050,8 +1047,13 @@ function App() {
     });
     stream.addEventListener("ultrafuzz-error", (event) => {
       setLiveState("degraded");
-      setLiveError(event.data);
-      setMessage(event.data);
+      try {
+        const message = dashboardSseErrorMessage(event.data);
+        setLiveError(message);
+        setMessage(message);
+      } catch (error) {
+        setLiveError(`Live event error failed to parse: ${errorMessage(error)}`);
+      }
     });
     return () => {
       closed = true;
@@ -1070,7 +1072,7 @@ function App() {
     };
     stream.addEventListener("ultrafuzz-command-jobs", (event) => {
       try {
-        setJobs(JSON.parse(event.data));
+        setJobs(dashboardSseCommandJobs(event.data));
         setCommandStreamError("");
       } catch (error) {
         setCommandStreamError(`Command job update failed to parse: ${errorMessage(error)}`);
@@ -1169,7 +1171,12 @@ function App() {
           }
         }
 
-        const job = await postJson<CommandJob>(`/api/commands/${command}`, commandBody, session.sessionToken);
+        const job = await postCommandJson<CommandJob>(
+          `/api/commands/${command}`,
+          command,
+          commandBody,
+          session.sessionToken
+        );
         setJobs((current) => [job, ...current.filter((item) => item.jobId !== job.jobId)]);
         setActivityConsoleOpen(true);
         setMessage(`Started ${command}`);
@@ -1193,7 +1200,7 @@ function App() {
             "content-type": "application/json",
             "x-ultrafuzz-session": session.sessionToken
           },
-          body: JSON.stringify({ content })
+          body: JSON.stringify(dashboardRequest("config-save", { content }))
         });
         if (!response.ok) {
           throw new Error(await response.text());
@@ -1475,11 +1482,13 @@ function App() {
             "content-type": "application/json",
             "x-ultrafuzz-session": session.sessionToken
           },
-          body: JSON.stringify({
-            content: draft.content,
-            ...(group ? { group } : {}),
-            dependsOn: dependencies
-          })
+          body: JSON.stringify(
+            dashboardRequest("prompt-create", {
+              content: draft.content,
+              ...(group ? { group } : {}),
+              dependsOn: dependencies
+            })
+          )
         });
         if (!response.ok) {
           throw new Error(await response.text());
@@ -3086,14 +3095,19 @@ async function getJson<T>(url: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function postJson<T>(url: string, body: Record<string, unknown>, token: string): Promise<T> {
+async function postCommandJson<T>(
+  url: string,
+  command: string,
+  commandArguments: Record<string, unknown>,
+  token: string
+): Promise<T> {
   const response = await fetch(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       "x-ultrafuzz-session": token
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(dashboardCommandRequest(command, commandArguments))
   });
   if (!response.ok) {
     throw new Error(await response.text());
@@ -3117,7 +3131,7 @@ function nodePromptEndpoint(nodeId: string): string {
 }
 
 function cloneTopology(topology: ProjectTopology): ProjectTopology {
-  return JSON.parse(JSON.stringify(topology)) as ProjectTopology;
+  return structuredClone(topology);
 }
 
 function edgeIdForLogicalDependency(

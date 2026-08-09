@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:clean-audit:1",
+  "title": "Ultrafuzz clean audit record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "audit_id", "timestamp", "operation", "status", "confirmed", "selections"],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.clean.audit.v1"
+    },
+    "audit_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "operation": {
+      "const": "cleanRun"
+    },
+    "status": {
+      "enum": ["dry-run", "succeeded"]
+    },
+    "confirmed": {
+      "type": "boolean"
+    },
+    "selections": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "existed"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "existed": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

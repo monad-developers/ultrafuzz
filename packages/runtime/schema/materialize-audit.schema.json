@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:materialize-audit:1",
+  "title": "Ultrafuzz materialization audit record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "audit_id",
+    "run_id",
+    "timestamp",
+    "operation",
+    "mode",
+    "unstaged",
+    "confirmed",
+    "allow_overwrite",
+    "copies",
+    "patches"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.materialize.audit.v1"
+    },
+    "audit_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "operation": {
+      "const": "materializeSelection"
+    },
+    "mode": {
+      "enum": ["dry-run", "unstaged-working-tree"]
+    },
+    "unstaged": {
+      "const": true
+    },
+    "confirmed": {
+      "type": "boolean"
+    },
+    "allow_overwrite": {
+      "type": "boolean"
+    },
+    "copies": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "destination", "size_bytes", "sha256"],
+        "properties": {
+          "source": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "destination": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "size_bytes": {
+            "$ref": "#/$defs/nonNegativeSafeInteger"
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    },
+    "patches": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "size_bytes", "sha256"],
+        "properties": {
+          "source": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "size_bytes": {
+            "$ref": "#/$defs/nonNegativeSafeInteger"
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "nonNegativeSafeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

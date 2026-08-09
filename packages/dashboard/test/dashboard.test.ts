@@ -7,7 +7,7 @@ import { test } from "node:test";
 
 import { initProject } from "@ultrafuzz/runtime";
 
-import { serveDashboard } from "../src/index.js";
+import { DASHBOARD_HTTP_SCHEMA_VERSION, serveDashboard } from "../src/index.js";
 
 interface FlowResponse {
   run: {
@@ -74,11 +74,13 @@ test("creates a topology node prompt as terminal work before finish", async () =
         "content-type": "application/json",
         "x-ultrafuzz-session": handle.sessionToken
       },
-      body: JSON.stringify({
-        content: "---\nid: added-check\ndisplay_name: Added check\n---\n\n# Added check\n",
-        group: "strategies",
-        dependsOn: []
-      })
+      body: JSON.stringify(
+        dashboardRequest("prompt-create", {
+          content: "---\nid: added-check\ndisplay_name: Added check\n---\n\n# Added check\n",
+          group: "strategies",
+          dependsOn: []
+        })
+      )
     });
     if (response.status !== 201) {
       assert.fail(await response.text());
@@ -111,7 +113,7 @@ test("mutating APIs require the session token and reject invalid saves without w
     const denied = await fetch(apiUrl(handle.url, "/api/config"), {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ content: "unknown_key = true\n" })
+      body: JSON.stringify(dashboardRequest("config-save", { content: "unknown_key = true\n" }))
     });
     assert.equal(denied.status, 401);
 
@@ -121,7 +123,7 @@ test("mutating APIs require the session token and reject invalid saves without w
         "content-type": "application/json",
         "x-ultrafuzz-session": handle.sessionToken
       },
-      body: JSON.stringify({ content: "unknown_key = true\n" })
+      body: JSON.stringify(dashboardRequest("config-save", { content: "unknown_key = true\n" }))
     });
     assert.equal(invalid.status, 400);
     assert.equal(fs.readFileSync(configPath, "utf8"), originalConfig);
@@ -195,7 +197,7 @@ test("dashboard rejects oversized JSON request bodies", async () => {
         "content-type": "application/json",
         "x-ultrafuzz-session": handle.sessionToken
       },
-      body: JSON.stringify({ content: "x".repeat(1024 * 1024) })
+      body: JSON.stringify(dashboardRequest("config-save", { content: "x".repeat(1024 * 1024) }))
     });
     assert.equal(response.status, 413);
   } finally {
@@ -215,7 +217,7 @@ test("dashboard rejects duplicate JSON request keys before handling a mutation",
         "content-type": "application/json",
         "x-ultrafuzz-session": handle.sessionToken
       },
-      body: '{"content":"project_name = \\"first\\"\\n","content":"project_name = \\"second\\"\\n"}'
+      body: `{"schema_version":"${DASHBOARD_HTTP_SCHEMA_VERSION}","request_type":"config-save","content":"project_name = \\"first\\"\\n","content":"project_name = \\"second\\"\\n"}`
     });
     assert.equal(response.status, 400);
     assert.equal(fs.readFileSync(configPath, "utf8"), originalConfig);
@@ -291,7 +293,7 @@ test("dashboard audit append refuses a final-component symlink", async () => {
         "content-type": "application/json",
         "x-ultrafuzz-session": handle.sessionToken
       },
-      body: JSON.stringify({ content: config })
+      body: JSON.stringify(dashboardRequest("config-save", { content: config }))
     });
     assert.equal(response.status, 500);
     assert.equal(fs.readFileSync(outsidePath, "utf8"), "sentinel\n");
@@ -314,6 +316,14 @@ async function getJson<T>(url: string): Promise<T> {
     assert.fail(await response.text());
   }
   return (await response.json()) as T;
+}
+
+function dashboardRequest(requestType: string, fields: Record<string, unknown>): Record<string, unknown> {
+  return {
+    schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
+    request_type: requestType,
+    ...fields
+  };
 }
 
 function apiUrl(dashboardUrl: string, apiPath: string): string {

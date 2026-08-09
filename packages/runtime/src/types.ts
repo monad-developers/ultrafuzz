@@ -339,6 +339,7 @@ export interface MaterializeValue {
   patches: string[];
   audit: {
     schema_version: "ultrafuzz.materialize.audit.v1";
+    audit_id: string;
     mode: "dry-run" | "unstaged-working-tree";
     unstaged: true;
     audit_path: string;
@@ -418,6 +419,7 @@ export interface CleanGeneratedValue {
   removed: string[];
   audit: {
     schema_version: "ultrafuzz.clean.audit.v1";
+    audit_id: string;
     audit_path: string;
     selections: string[];
   };

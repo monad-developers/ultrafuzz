@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { validatePromptTemplateVariables } from "./templateValidation";
 import type { TemplateValidation } from "./templateValidation";
+import { dashboardRequest } from "./wireContracts";
 
 export const promptAutosaveDelayMs = 1500;
 
@@ -161,7 +162,7 @@ export function useManagedPromptEditor({
             "content-type": "application/json",
             "x-ultrafuzz-session": sessionToken
           },
-          body: JSON.stringify({ content })
+          body: JSON.stringify(dashboardRequest("prompt-save", { content }))
         });
         if (!response.ok) {
           throw new Error(await response.text());

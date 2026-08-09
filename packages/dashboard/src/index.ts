@@ -5,7 +5,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  appendLineDurable,
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
@@ -68,6 +67,22 @@ import {
 } from "@ultrafuzz/topology";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
+import {
+  appendDashboardAuditRecord,
+  assertDashboardHttpDocument,
+  DASHBOARD_HTTP_SCHEMA_VERSION,
+  DASHBOARD_SSE_SCHEMA_VERSION,
+  readDashboardAuditJournal,
+  serializeDashboardHttpDocument,
+  serializeDashboardSseDocument,
+  type DashboardAuditInput,
+  type DashboardHttpDefinition,
+  type DashboardSseDefinition
+} from "./contracts.js";
+
+export * from "./contracts.js";
+export * from "./schema-registry.js";
+
 export interface DashboardServerConfig {
   projectRoot?: string;
   host?: string;
@@ -88,6 +103,7 @@ export interface DashboardHandle {
 type Status = string;
 type JsonObject = Record<string, unknown>;
 type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
+type DashboardSseEventType = "ultrafuzz-event" | "ultrafuzz-error" | "ultrafuzz-command-jobs";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 3875;
@@ -235,43 +251,43 @@ class DashboardApp {
   }
 
   async handleApi(request: http.IncomingMessage, response: http.ServerResponse, url: URL): Promise<void> {
-    const method = request.method as HttpMethod;
+    const method = parseHttpMethod(request.method);
     const segments = url.pathname.split("/").filter(Boolean).slice(1);
 
     if (method === "GET" && segments.length === 1 && segments[0] === "session") {
-      sendJson(response, await this.session());
+      sendJson(response, await this.session(), "sessionResponse");
       return;
     }
     if (method === "GET" && segments.length === 1 && segments[0] === "flow") {
-      sendJson(response, await this.flow());
+      sendJson(response, await this.flow(), "flowResponse");
       return;
     }
     if (method === "GET" && segments.length === 1 && segments[0] === "run") {
-      sendJson(response, await this.runOverview());
+      sendJson(response, await this.runOverview(), "runOverviewResponse");
       return;
     }
     if (method === "GET" && segments.length === 1 && segments[0] === "graph") {
-      sendJson(response, await this.graphDetail());
+      sendJson(response, await this.graphDetail(), "graphResponse");
       return;
     }
     if (method === "GET" && segments.length === 1 && segments[0] === "nodes") {
-      sendJson(response, { nodes: (await this.flow()).nodes });
+      sendJson(response, dashboardHttpDocument("nodes", { nodes: (await this.flow()).nodes }), "nodesResponse");
       return;
     }
     if (method === "GET" && segments.length === 2 && segments[0] === "nodes") {
-      sendJson(response, await this.nodeDetail(decodeURIComponent(segments[1]!)));
+      sendJson(response, await this.nodeDetail(decodeURIComponent(segments[1]!)), "nodeDetailResponse");
       return;
     }
     if (method === "GET" && segments.length === 1 && segments[0] === "findings") {
-      sendJson(response, await this.findings());
+      sendJson(response, await this.findings(), "findingsResponse");
       return;
     }
     if (method === "GET" && segments.length === 1 && segments[0] === "report") {
-      sendJson(response, await this.report());
+      sendJson(response, await this.report(), "reportResponse");
       return;
     }
     if (method === "GET" && segments.length === 1 && segments[0] === "events") {
-      sendJson(response, await this.events());
+      sendJson(response, await this.events(), "eventsResponse");
       return;
     }
     if (method === "GET" && segments.length === 2 && segments[0] === "events" && segments[1] === "stream") {
@@ -280,23 +296,31 @@ class DashboardApp {
     }
     if (segments[0] === "config") {
       if (method === "GET" && segments.length === 1) {
-        sendJson(response, await this.configDetail());
+        sendJson(response, await this.configDetail(), "configDetailResponse");
         return;
       }
       if (method === "PUT" && segments.length === 1) {
         requireMutation(request, this.sessionToken);
-        sendJson(response, await this.saveConfig(await readBodyObject(request)));
+        sendJson(
+          response,
+          await this.saveConfig(await readDashboardRequest(request, "configSaveRequest")),
+          "configSaveResponse"
+        );
         return;
       }
     }
     if (segments[0] === "topology") {
       if (method === "GET" && segments.length === 1) {
-        sendJson(response, await this.topologyDetail());
+        sendJson(response, await this.topologyDetail(), "topologyDetailResponse");
         return;
       }
       if (method === "PUT" && segments.length === 1) {
         requireMutation(request, this.sessionToken);
-        sendJson(response, await this.saveTopology(await readBodyObject(request)));
+        sendJson(
+          response,
+          await this.saveTopology(await readDashboardRequest(request, "topologySaveRequest")),
+          "topologySaveResponse"
+        );
         return;
       }
     }
@@ -318,35 +342,52 @@ class DashboardApp {
     segments: string[]
   ): Promise<void> {
     if (method === "GET" && segments.length === 2 && segments[1] === "strategies") {
-      sendJson(response, { prompts: this.promptSummaries() });
+      sendJson(
+        response,
+        dashboardHttpDocument("prompt-list", { prompts: this.promptSummaries() }),
+        "promptListResponse"
+      );
       return;
     }
     if (segments.length === 3 && segments[1] === "strategies") {
       const id = decodeURIComponent(segments[2]!);
       if (method === "GET") {
-        sendJson(response, this.promptDetail(id, "strategy"));
+        sendJson(response, this.promptDetail(id, "strategy"), "promptDetailResponse");
         return;
       }
       if (method === "PUT") {
         requireMutation(request, this.sessionToken);
-        sendJson(response, await this.saveStrategyPrompt(id, await readBodyObject(request)));
+        sendJson(
+          response,
+          await this.saveStrategyPrompt(id, await readDashboardRequest(request, "promptSaveRequest")),
+          "promptSaveResponse"
+        );
         return;
       }
     }
     if (segments.length === 2 && segments[1] === "nodes" && method === "POST") {
       requireMutation(request, this.sessionToken);
-      sendJson(response, await this.createNodePrompt(await readBodyObject(request)), 201);
+      sendJson(
+        response,
+        await this.createNodePrompt(await readDashboardRequest(request, "promptCreateRequest")),
+        "promptSaveResponse",
+        201
+      );
       return;
     }
     if (segments.length === 3 && segments[1] === "nodes") {
       const id = decodeURIComponent(segments[2]!);
       if (method === "GET") {
-        sendJson(response, await this.nodePromptDetail(id));
+        sendJson(response, await this.nodePromptDetail(id), "promptDetailResponse");
         return;
       }
       if (method === "PUT") {
         requireMutation(request, this.sessionToken);
-        sendJson(response, await this.saveNodePrompt(id, await readBodyObject(request)));
+        sendJson(
+          response,
+          await this.saveNodePrompt(id, await readDashboardRequest(request, "promptSaveRequest")),
+          "promptSaveResponse"
+        );
         return;
       }
     }
@@ -366,7 +407,11 @@ class DashboardApp {
     if (method === "POST" && segments.length === 2) {
       requireMutation(request, this.sessionToken);
       const command = decodeURIComponent(segments[1]!);
-      sendJson(response, await this.startCommand(command, await readBodyObject(request)), 202);
+      const body = await readDashboardRequest(request, "commandRequest");
+      if (stringField(body, "command") !== command) {
+        throw new HttpError(400, "command request does not match the command route");
+      }
+      sendJson(response, await this.startCommand(command, recordField(body, "arguments")), "commandJobResponse", 202);
       return;
     }
     if (method === "GET" && segments.length === 2) {
@@ -374,7 +419,7 @@ class DashboardApp {
       if (!job) {
         throw new HttpError(404, "command job not found");
       }
-      sendJson(response, job);
+      sendJson(response, job, "commandJobResponse");
       return;
     }
     throw new HttpError(404, "unknown commands route");
@@ -404,12 +449,12 @@ class DashboardApp {
   }
 
   async session(): Promise<JsonObject> {
-    return {
+    return dashboardHttpDocument("session", {
       runId: await this.selectedRunId(),
       liveUpdates: this.liveUpdates,
       sessionToken: this.sessionToken,
       templateVariables: [...SUPPORTED_TEMPLATE_VARIABLES]
-    };
+    });
   }
 
   async runContext(): Promise<{
@@ -476,13 +521,19 @@ class DashboardApp {
         };
       })
     );
-    return {
+    const strategies = nodes.flatMap((node) => {
+      const data = node.data;
+      if (!isRecord(data)) throw new Error(`flow node ${String(node.id)} has invalid data`);
+      const strategy = data.strategy;
+      return strategy === undefined ? [] : [strategy];
+    });
+    return dashboardHttpDocument("flow", {
       run,
       nodes,
       edges,
-      strategies: nodes.map((node) => (node.data as JsonObject).strategy).filter(Boolean),
+      strategies,
       capabilities: this.commandCapabilities()
-    };
+    });
   }
 
   flowNode(
@@ -588,8 +639,7 @@ class DashboardApp {
       }
     }
     const report = await this.report();
-    return {
-      schema_version: "1.0",
+    return dashboardHttpDocument("run-overview", {
       run_id: context.runId,
       run_root: context.runRoot,
       runs_dir: context.runsRoot,
@@ -608,21 +658,21 @@ class DashboardApp {
       mode: context.persisted ? "persisted" : "preview",
       restart_eligible: Boolean(state?.finished_at),
       report_path: typeof report.markdown_path === "string" ? report.markdown_path : undefined,
-      run_metadata: context.persisted
-        ? readRunMetadataDocument(path.join(context.runRoot, "run.json"), context.runId)
-        : {}
-    };
+      ...(context.persisted
+        ? { run_metadata: readRunMetadataDocument(path.join(context.runRoot, "run.json"), context.runId) }
+        : {})
+    });
   }
 
   async graphDetail(): Promise<JsonObject> {
     const topology = this.loadTopologyForDisplay();
     const expanded = await this.expandCurrentTopology(topology);
-    return {
+    return dashboardHttpDocument("graph", {
       topology,
       expandedGraph: expanded,
       logicalNodes: topology.nodes.length,
       expandedNodes: expanded.nodes.length
-    };
+    });
   }
 
   async nodeDetail(nodeId: string): Promise<JsonObject> {
@@ -638,7 +688,7 @@ class DashboardApp {
     const context = await this.runContext();
     const attemptArtifacts = await this.artifactEntriesForAttempts(attempts);
     const primary = attemptArtifacts[0];
-    return {
+    return dashboardHttpDocument("node-detail", {
       run_id: await this.selectedRunId(),
       node: {
         id: safeNodeId,
@@ -673,7 +723,7 @@ class DashboardApp {
         }))
       },
       transcript: primary?.transcript
-    };
+    });
   }
 
   async artifactEntriesForAttempts(attempts: ExpandedNode[]): Promise<
@@ -717,7 +767,7 @@ class DashboardApp {
   async findings(): Promise<JsonObject> {
     const context = await this.runContext();
     if (!context.persisted) {
-      return { source: "none", findings: [] };
+      return dashboardHttpDocument("findings", { source: "none", findings: [] });
     }
     const candidates = [
       "artifacts/severity-classification/severity-classified-findings.json",
@@ -731,26 +781,26 @@ class DashboardApp {
         continue;
       }
       assertRegularFileInside(context.runRoot, file, "findings path");
-      return {
+      return dashboardHttpDocument("findings", {
         source: candidate,
         findings: readValidatedFindingsArtifact(context.runRoot, file)
-      };
+      });
     }
-    return {
+    return dashboardHttpDocument("findings", {
       source: "scan",
       findings: this.findingsForArtifactsRoot(context.runRoot)
-    };
+    });
   }
 
   async report(): Promise<JsonObject> {
     const context = await this.runContext();
     if (!context.persisted) {
-      return {
+      return dashboardHttpDocument("report", {
         markdown_path: undefined,
         markdown: undefined,
         json_path: undefined,
         json: undefined
-      };
+      });
     }
     const candidateDirs = this.finalReportDirs(context.runRoot, context.runId);
     for (const candidateDir of uniqueStrings(candidateDirs)) {
@@ -766,20 +816,20 @@ class DashboardApp {
           "report Markdown"
         );
         const report = readValidatedArtifact(context.runRoot, jsonPath, REPORT_CONTRACT, "report JSON");
-        return {
+        return dashboardHttpDocument("report", {
           markdown_path: `${candidateDir}/report.md`,
           markdown,
           json_path: `${candidateDir}/report.json`,
           json: report
-        };
+        });
       }
     }
-    return {
+    return dashboardHttpDocument("report", {
       markdown_path: undefined,
       markdown: undefined,
       json_path: undefined,
       json: undefined
-    };
+    });
   }
 
   finalReportDirs(runRoot: string, runId: string): string[] {
@@ -797,16 +847,26 @@ class DashboardApp {
   async events(): Promise<JsonObject> {
     const context = await this.runContext();
     if (!context.persisted) {
-      return { source: "none", events: [], malformed_records: 0, truncated_records: 0 };
+      return dashboardHttpDocument("events", {
+        source: "none",
+        events: [],
+        malformed_records: 0,
+        truncated_records: 0
+      });
     }
     const layout = layoutForRunRoot(context.runRoot, context.runId);
     const replay = replayEvents(layout);
-    return {
+    if (replay.malformedRecords !== 0 || replay.truncatedRecords !== 0) {
+      throw new Error(
+        `event journal is invalid: ${replay.malformedRecords} malformed and ${replay.truncatedRecords} truncated records`
+      );
+    }
+    return dashboardHttpDocument("events", {
       source: path.relative(context.runRoot, layout.eventsPath).split(path.sep).join("/"),
       events: queryEvents(layout, { limit: 500 }),
       malformed_records: replay.malformedRecords,
       truncated_records: replay.truncatedRecords
-    };
+    });
   }
 
   async configDetail(): Promise<JsonObject> {
@@ -814,14 +874,14 @@ class DashboardApp {
     assertPathInside(this.projectRoot, configPath, "config path");
     const content = readTextIfExists(configPath) ?? "";
     const validation = await this.validateConfigText(content);
-    return {
+    return dashboardHttpDocument("config-detail", {
       source: fs.existsSync(configPath) ? "project" : "missing",
       path: "ultrafuzz.toml",
       editable: true,
       contentHash: sha256Bytes(content),
       content,
       validation
-    };
+    });
   }
 
   async saveConfig(body: JsonObject): Promise<JsonObject> {
@@ -833,18 +893,18 @@ class DashboardApp {
     const configPath = path.join(this.projectRoot, "ultrafuzz.toml");
     assertPathInside(this.projectRoot, configPath, "config path");
     assertNoSymlinkComponents(this.projectRoot, configPath, "config path");
+    preflightDashboardAudit(this.projectRoot);
     writeFileDurable(configPath, content);
     appendAudit(this.projectRoot, {
       kind: "config-edit",
       path: "ultrafuzz.toml",
-      content_hash: sha256Bytes(content),
-      timestamp: new Date().toISOString()
+      content_hash: sha256Bytes(content)
     });
-    return {
+    return dashboardHttpDocument("config-save", {
       path: "ultrafuzz.toml",
       contentHash: sha256Bytes(content),
       validation
-    };
+    });
   }
 
   async validateConfigText(content: string): Promise<{ valid: boolean; message: string }> {
@@ -878,25 +938,22 @@ class DashboardApp {
     const topologyPath = resolveTopologyPath(this.projectRoot);
     const content = readTextIfExists(topologyPath) ?? "";
     const validation = await this.validateTopologyText(content);
-    return {
+    return dashboardHttpDocument("topology-detail", {
       path: ".ultrafuzz/topology.yml",
       editable: true,
       contentHash: sha256Bytes(content),
       content,
-      topology: content.trim() ? (parseYaml(content) as ProjectTopology) : emptyTopology(),
+      topology: validation.topology,
       expandedGraph: validation.expandedGraph,
       validation: {
         valid: validation.valid,
         message: validation.message
       }
-    };
+    });
   }
 
   async saveTopology(body: JsonObject): Promise<JsonObject> {
-    const content =
-      typeof body.content === "string"
-        ? body.content
-        : stringifyYaml(recordField(body, "topology"), { sortMapEntries: false });
+    const content = stringifyYaml(recordField(body, "topology"), { sortMapEntries: false });
     const validation = await this.validateTopologyText(content);
     if (!validation.valid) {
       throw new HttpError(400, validation.message);
@@ -904,21 +961,21 @@ class DashboardApp {
     const topologyPath = resolveTopologyPath(this.projectRoot);
     assertPathInside(this.projectRoot, topologyPath, "topology path");
     assertNoSymlinkComponents(this.projectRoot, topologyPath, "topology path");
+    preflightDashboardAudit(this.projectRoot);
     writeFileDurable(topologyPath, content.endsWith("\n") ? content : `${content}\n`);
     appendAudit(this.projectRoot, {
       kind: "topology-edit",
       path: ".ultrafuzz/topology.yml",
-      content_hash: sha256Bytes(content),
-      timestamp: new Date().toISOString()
+      content_hash: sha256Bytes(content)
     });
-    return {
+    return dashboardHttpDocument("topology-save", {
       path: ".ultrafuzz/topology.yml",
       contentHash: sha256Bytes(content),
       validation: {
         valid: true,
         message: validation.message
       }
-    };
+    });
   }
 
   async validateTopologyText(
@@ -930,12 +987,13 @@ class DashboardApp {
   ): Promise<{
     valid: boolean;
     message: string;
+    topology?: ProjectTopology;
     expandedGraph?: ExpandedGraph;
   }> {
     try {
       const requirePromptFiles = options.requirePromptFiles ?? true;
-      const parsed = parseYaml(content) as ProjectTopology;
-      validateTopology(parsed, {
+      const parsed: unknown = parseYaml(content);
+      const topologyValidation = validateTopology(parsed, {
         projectRoot: this.projectRoot,
         promptTexts: options.promptTexts,
         requirePromptFiles
@@ -951,7 +1009,8 @@ class DashboardApp {
       });
       return {
         valid: true,
-        message: `topology validates: ${parsed.nodes.length} logical nodes, ${expandedGraph.nodes.length} expanded attempts`,
+        message: `topology validates: ${topologyValidation.topology.nodes.length} logical nodes, ${expandedGraph.nodes.length} expanded attempts`,
+        topology: parsed as ProjectTopology,
         expandedGraph
       };
     } catch (error) {
@@ -982,7 +1041,7 @@ class DashboardApp {
     if (!entry) {
       throw new HttpError(404, `prompt ${id} not found`);
     }
-    return {
+    return dashboardHttpDocument("prompt-detail", {
       summary: {
         strategyId: kind === "strategy" ? id : undefined,
         nodeId: kind === "node" ? id : undefined,
@@ -995,7 +1054,7 @@ class DashboardApp {
         contentHash: sha256Bytes(entry.markdown)
       },
       content: entry.markdown
-    };
+    });
   }
 
   async nodePromptDetail(nodeId: string): Promise<JsonObject> {
@@ -1005,7 +1064,7 @@ class DashboardApp {
     const content =
       readTextIfExists(absolute) ?? defaultPromptMarkdown(node.id, displayNameForNode(this.projectRoot, node));
     const document = parsePromptFrontmatter(content);
-    return {
+    return dashboardHttpDocument("prompt-detail", {
       summary: {
         nodeId: document.frontmatter.id ?? node.id,
         promptId: document.frontmatter.id ?? node.id,
@@ -1016,7 +1075,7 @@ class DashboardApp {
         contentHash: sha256Bytes(content)
       },
       content
-    };
+    });
   }
 
   async saveStrategyPrompt(id: string, body: JsonObject): Promise<JsonObject> {
@@ -1058,6 +1117,7 @@ class DashboardApp {
     const target = this.promptPath(normalized);
     assertNoSymlinkComponents(this.projectRoot, target, "prompt path");
     const previousContent = readTextIfExists(target);
+    preflightDashboardAudit(this.projectRoot);
     writeFileDurable(target, content);
     try {
       loadPromptCatalog({ projectRoot: this.projectRoot });
@@ -1076,10 +1136,9 @@ class DashboardApp {
     appendAudit(this.projectRoot, {
       kind: "prompt-edit",
       path: `.ultrafuzz/prompts/${normalized}`,
-      content_hash: sha256Bytes(content),
-      timestamp: new Date().toISOString()
+      content_hash: sha256Bytes(content)
     });
-    return {
+    return dashboardHttpDocument("prompt-save", {
       strategyId: expectedId,
       nodeId: expectedId,
       path: `.ultrafuzz/prompts/${normalized}`,
@@ -1088,7 +1147,7 @@ class DashboardApp {
         valid: true,
         message: `prompt ${expectedId} validates`
       }
-    };
+    });
   }
 
   async createNodePrompt(body: JsonObject): Promise<JsonObject> {
@@ -1196,6 +1255,8 @@ class DashboardApp {
       throw new HttpError(400, `${command} requires explicit confirmation`);
     }
     const job: CommandJob = {
+      schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
+      document_type: "command-job",
       jobId: `job-${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}`,
       command,
       status: "running",
@@ -1369,11 +1430,22 @@ class DashboardApp {
 
   async streamEvents(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
     startSse(response);
+    let sequence = 0;
     const send = async () => {
       try {
-        writeSse(response, "ultrafuzz-event", await this.events());
+        writeSse(
+          response,
+          "ultrafuzz-event",
+          dashboardSseDocument("ultrafuzz-event", sequence++, await this.events()),
+          "eventsEnvelope"
+        );
       } catch (error) {
-        writeSse(response, "ultrafuzz-error", errorMessage(error));
+        writeSse(
+          response,
+          "ultrafuzz-error",
+          dashboardSseDocument("ultrafuzz-error", sequence++, { message: errorMessage(error) }),
+          "errorEnvelope"
+        );
       }
     };
     await send();
@@ -1385,7 +1457,14 @@ class DashboardApp {
 
   async streamCommandJobs(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
     startSse(response);
-    const send = () => writeSse(response, "ultrafuzz-command-jobs", this.commandJobs());
+    let sequence = 0;
+    const send = () =>
+      writeSse(
+        response,
+        "ultrafuzz-command-jobs",
+        dashboardSseDocument("ultrafuzz-command-jobs", sequence++, { jobs: this.commandJobs() }),
+        "commandJobsEnvelope"
+      );
     send();
     const interval = setInterval(send, 1000);
     request.on("close", () => clearInterval(interval));
@@ -1527,6 +1606,8 @@ class DashboardApp {
 }
 
 export interface CommandJob {
+  schema_version: typeof DASHBOARD_HTTP_SCHEMA_VERSION;
+  document_type: "command-job";
   jobId: string;
   command: string;
   status: Status;
@@ -1548,6 +1629,11 @@ class HttpError extends Error {
     this.status = status;
     this.closeConnection = closeConnection;
   }
+}
+
+function parseHttpMethod(method: string | undefined): HttpMethod {
+  if (method === "GET" || method === "POST" || method === "PUT" || method === "DELETE") return method;
+  throw new HttpError(405, `unsupported HTTP method: ${method ?? "missing"}`);
 }
 
 function listen(server: http.Server, host: string, port: number): Promise<string> {
@@ -1658,12 +1744,30 @@ async function readBodyObject(request: http.IncomingMessage): Promise<JsonObject
   }
 }
 
-function sendJson(response: http.ServerResponse, value: unknown, status = 200): void {
-  const body = `${JSON.stringify(value, null, 2)}\n`;
+async function readDashboardRequest(
+  request: http.IncomingMessage,
+  definition: DashboardHttpDefinition
+): Promise<JsonObject> {
+  const body = await readBodyObject(request);
+  try {
+    assertDashboardHttpDocument(body, definition, `dashboard HTTP ${definition}`);
+  } catch (error) {
+    throw new HttpError(400, errorMessage(error));
+  }
+  return body;
+}
+
+function sendJson(
+  response: http.ServerResponse,
+  value: unknown,
+  definition: DashboardHttpDefinition,
+  status = 200
+): void {
+  const body = serializeDashboardHttpDocument(value, definition);
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
-    "content-length": Buffer.byteLength(body)
+    "content-length": body.byteLength
   });
   response.end(body);
 }
@@ -1674,7 +1778,7 @@ function sendError(response: http.ServerResponse, error: unknown): void {
     response.shouldKeepAlive = false;
     response.setHeader("connection", "close");
   }
-  sendJson(response, { error: errorMessage(error) }, status);
+  sendJson(response, dashboardHttpDocument("error", { error: errorMessage(error) }), "errorResponse", status);
 }
 
 function applySecurityHeaders(response: http.ServerResponse): void {
@@ -1712,9 +1816,34 @@ function startSse(response: http.ServerResponse): void {
   response.write(": connected\n\n");
 }
 
-function writeSse(response: http.ServerResponse, event: string, data: unknown): void {
+function writeSse(
+  response: http.ServerResponse,
+  event: DashboardSseEventType,
+  data: JsonObject,
+  definition: DashboardSseDefinition
+): void {
+  if (data.event_type !== event) throw new Error("dashboard SSE event name and envelope type disagree");
+  const serialized = serializeDashboardSseDocument(data, definition);
   response.write(`event: ${event}\n`);
-  response.write(`data: ${JSON.stringify(data)}\n\n`);
+  response.write(`data: ${serialized}\n\n`);
+}
+
+function dashboardHttpDocument(documentType: string, value: JsonObject): JsonObject {
+  return {
+    schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
+    document_type: documentType,
+    ...value
+  };
+}
+
+function dashboardSseDocument(eventType: DashboardSseEventType, sequence: number, payload: JsonObject): JsonObject {
+  return {
+    schema_version: DASHBOARD_SSE_SCHEMA_VERSION,
+    event_type: eventType,
+    sequence,
+    generated_at: new Date().toISOString(),
+    payload
+  };
 }
 
 function emptyTopology(): ProjectTopology {
@@ -1930,14 +2059,18 @@ function readValidatedArtifact(
 }
 
 function copySelections(body: JsonObject): Array<{ source: string; destination: string }> {
-  const copies = body.copies ?? body.copy;
+  const copies = body.copies;
+  if (copies === undefined) return [];
   if (!Array.isArray(copies)) {
-    return [];
+    throw new HttpError(400, "copies must be an array");
   }
-  return copies.filter(isRecord).map((copy) => ({
-    source: stringField(copy, "source"),
-    destination: stringField(copy, "destination")
-  }));
+  return copies.map((copy, index) => {
+    if (!isRecord(copy)) throw new HttpError(400, `copies[${index}] must be an object`);
+    return {
+      source: stringField(copy, "source"),
+      destination: stringField(copy, "destination")
+    };
+  });
 }
 
 function commandNeedsRunId(command: string): boolean {
@@ -1969,9 +2102,13 @@ function pruneJobs(jobs: Map<string, CommandJob>): void {
   }
 }
 
-function appendAudit(projectRoot: string, value: JsonObject): void {
+function preflightDashboardAudit(projectRoot: string): void {
+  readDashboardAuditJournal(path.join(projectRoot, ".ultrafuzz", "dashboard-audit.jsonl"));
+}
+
+function appendAudit(projectRoot: string, value: DashboardAuditInput): void {
   const auditPath = path.join(projectRoot, ".ultrafuzz", "dashboard-audit.jsonl");
-  appendLineDurable(auditPath, JSON.stringify(value), projectRoot);
+  appendDashboardAuditRecord(auditPath, value, projectRoot);
 }
 
 function readTextIfExists(filePath: string): string | undefined {
@@ -1985,9 +2122,9 @@ function readTextIfExists(filePath: string): string | undefined {
   }
 }
 
-function readJsonIfExists<T = unknown>(filePath: string): T | undefined {
+function readJsonIfExists(filePath: string): unknown | undefined {
   try {
-    return readJsonFile<T>(filePath);
+    return readJsonFile(filePath);
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") {
       return undefined;

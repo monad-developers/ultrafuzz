@@ -1,4 +1,5 @@
 export * from "./artifact-gates.js";
+export * from "./audit-contracts.js";
 export * from "./clean.js";
 export * from "./doctor.js";
 export * from "./init.js";
@@ -8,6 +9,7 @@ export * from "./npm-install-retry.js";
 export * from "./plan-run.js";
 export * from "./references.js";
 export * from "./run-progress.js";
+export * from "./schema-registry.js";
 export * from "./semantic-gates.js";
 export * from "./severity-matrix.js";
 export * from "./smithers-package.js";

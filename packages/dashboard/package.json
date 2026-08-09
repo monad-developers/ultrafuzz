@@ -15,7 +15,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "vite build --config frontend/vite.config.ts && tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "build": "vite build --config frontend/vite.config.ts && tsc -p tsconfig.json && node scripts/copy-assets.mjs && rm -rf dist/schema && cp -R schema dist/schema && node scripts/verify-schema-registry.mjs",
     "test": "pnpm --filter @ultrafuzz/dashboard... build && rm -rf dist-test && tsc -p tsconfig.test.json && node --test --test-concurrency=1 dist-test/test/*.test.js",
     "typecheck": "pnpm --filter @ultrafuzz/dashboard^... build && tsc -p tsconfig.json --noEmit --pretty false && tsc -p frontend/tsconfig.json --noEmit --pretty false"
   },
