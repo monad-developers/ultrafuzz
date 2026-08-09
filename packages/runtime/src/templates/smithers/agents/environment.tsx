@@ -8,6 +8,10 @@ const CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = [
   "ULTRAFUZZ_CONFIG_PATH",
   "ULTRAFUZZ_MODAL_MODULE",
   "ULTRAFUZZ_RUNTIME_MODULE",
+  "ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR",
+  "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT",
+  "ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR",
+  "ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT",
   "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
 ] as const;
 
@@ -30,6 +34,7 @@ export function workflowControlChildEnvironment(
   for (const [name, value] of Object.entries(additions)) {
     if (value !== undefined) child[name] = value;
   }
+  for (const name of CONTROLLER_ONLY_ENVIRONMENT_VARIABLES) child[name] = "";
   for (const [name, value] of Object.entries(child)) {
     if (roots.some((root) => environmentPath(value).includes(root))) child[name] = "";
   }

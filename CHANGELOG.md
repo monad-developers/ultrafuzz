@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Detached Smithers engines now replace controller-owned execution-snapshot paths with process-owned descriptor paths before admission, so later renders cannot follow a closed or reused `/proc/<pid>/fd/<n>` after the submitting controller exits (#413).
 - Workflow submissions and lifecycle inspections now execute from a sealed, content-addressed snapshot of workflow controls and their dependency closure, with immutable generation binding and controller-only capabilities withheld from model subprocesses (#165, #413).
 - Runs created before sealed controls and authenticated workflow-link journals keep their stored artifacts, but lifecycle and live-inspection commands now fail closed and require a new run ID instead of synthesizing historical trust. Rerunning `ultrafuzz init` upgrades byte-identical stock agent adapters; customized, symlinked, and hard-linked adapters remain untouched and receive manual upgrade guidance (#165, #413).
 - Hardened workflow execution now requires a Linux host with procfs mounted so the controller and Modal worker can invoke Smithers through held `/proc/<pid>/fd` directory descriptors (#165, #413).

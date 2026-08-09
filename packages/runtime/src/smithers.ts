@@ -60,22 +60,133 @@ const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = [
 ] as const;
 const SMITHERS_CLI_DETACHED_ADMISSION_SOURCE = "export const DETACHED_ADMISSION_TIMEOUT_MS = 30_000;";
 const SMITHERS_CLI_DETACHED_ADMISSION_PATCH = "export const DETACHED_ADMISSION_TIMEOUT_MS = 300_000;";
+const SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_SOURCE = `        child = spawn("bun", [cliPath, ...childArgs], {
+          detached: true,
+          stdio: ["ignore", fd, fd],
+          env: {
+            ...process.env,
+            [DETACHED_RUN_LOG_FILE_ENV]: logFile,
+            [DETACHED_ADMISSION_NONCE_ENV]: admissionNonce,
+          },
+        });`;
+const SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_PATCH = `        const childSnapshotTransfer = ultrafuzzExecutionSnapshotChildTransfer([
+          cliPath,
+          ...childArgs,
+        ]);
+        child = spawn("bun", childSnapshotTransfer?.args ?? [cliPath, ...childArgs], {
+          detached: true,
+          stdio:
+            childSnapshotTransfer === undefined
+              ? ["ignore", fd, fd]
+              : ["ignore", fd, fd, childSnapshotTransfer.descriptor],
+          env: {
+            ...process.env,
+            [DETACHED_RUN_LOG_FILE_ENV]: logFile,
+            [DETACHED_ADMISSION_NONCE_ENV]: admissionNonce,
+            ...(childSnapshotTransfer?.env ?? {}),
+          },
+        });`;
 const SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE = `        const supervisor = spawn("bun", supervisorArgs, {
           detached: true,
           stdio: ["ignore", fd, fd],
           env: process.env,
-        });`;
-const SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH = `        const supervisorFd = openSync(logFile, "a");
+        });
+        supervisor.unref();
+        supervisorPid = supervisor.pid;`;
+const SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH = `        const supervisorSnapshotTransfer = ultrafuzzExecutionSnapshotChildTransfer(supervisorArgs);
+        const supervisorFd = openSync(logFile, "a");
         let supervisor;
         try {
-          supervisor = spawn("bun", supervisorArgs, {
+          supervisor = spawn("bun", supervisorSnapshotTransfer?.args ?? supervisorArgs, {
             detached: true,
-            stdio: ["ignore", supervisorFd, supervisorFd],
-            env: process.env,
+            stdio:
+              supervisorSnapshotTransfer === undefined
+                ? ["ignore", supervisorFd, supervisorFd]
+                : ["ignore", supervisorFd, supervisorFd, supervisorSnapshotTransfer.descriptor],
+            env: {
+              ...process.env,
+              ...(supervisorSnapshotTransfer?.env ?? {}),
+            },
           });
         } finally {
           closeSync(supervisorFd);
-        }`;
+        }
+        supervisor.unref();
+        supervisorPid = supervisor.pid;`;
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE = `    const child = spawn("bun", args, {
+      cwd,
+      stdio: logFd === null ? "ignore" : ["ignore", logFd, logFd],
+      env: process.env,
+      detached: true,
+    });`;
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = `    const snapshotDescriptorValue =
+      process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR?.trim();
+    const snapshotProcessRoot = process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT?.trim();
+    const snapshotPersistedRoot = process.env.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT?.trim();
+    const snapshotTransferDeclared =
+      snapshotDescriptorValue !== undefined ||
+      snapshotProcessRoot !== undefined ||
+      snapshotPersistedRoot !== undefined;
+    const parsedSnapshotDescriptor = Number(snapshotDescriptorValue ?? "");
+    const snapshotDescriptor =
+      /^[0-9]+$/u.test(snapshotDescriptorValue ?? "") &&
+      Number.isSafeInteger(parsedSnapshotDescriptor) &&
+      parsedSnapshotDescriptor >= 0
+        ? parsedSnapshotDescriptor
+        : undefined;
+    if (snapshotTransferDeclared) {
+      const expectedProcessRoot = "/proc/" + process.pid + "/fd/" + snapshotDescriptor;
+      const processStat =
+        snapshotDescriptor === undefined || !snapshotProcessRoot
+          ? undefined
+          : statSync(snapshotProcessRoot);
+      const persistedStat =
+        snapshotDescriptor === undefined || !snapshotPersistedRoot
+          ? undefined
+          : statSync(snapshotPersistedRoot);
+      if (
+        snapshotDescriptor === undefined ||
+        processStat === undefined ||
+        persistedStat === undefined ||
+        snapshotProcessRoot !== expectedProcessRoot ||
+        !processStat.isDirectory() ||
+        !persistedStat.isDirectory() ||
+        processStat.dev !== persistedStat.dev ||
+        processStat.ino !== persistedStat.ino
+      ) {
+        throw new Error("detached resume execution snapshot transfer capability is no longer current");
+      }
+    }
+    const snapshotRoots = [snapshotProcessRoot, snapshotPersistedRoot].filter(
+      (value) => value !== undefined && value.length > 1,
+    );
+    const rewriteSnapshotArgument = (value) => {
+      if (snapshotDescriptor === undefined) return value;
+      for (const root of snapshotRoots) {
+        if (value === root || value.startsWith(root + "/")) {
+          return "/proc/self/fd/3" + value.slice(root.length);
+        }
+      }
+      return value;
+    };
+    const child = spawn("bun", args.map(rewriteSnapshotArgument), {
+      cwd,
+      stdio:
+        snapshotDescriptor === undefined
+          ? logFd === null
+            ? "ignore"
+            : ["ignore", logFd, logFd]
+          : logFd === null
+            ? ["ignore", "ignore", "ignore", snapshotDescriptor]
+            : ["ignore", logFd, logFd, snapshotDescriptor],
+      env: {
+        ...process.env,
+        ...(snapshotDescriptor === undefined
+          ? {}
+          : { ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR: "3" }),
+      },
+      detached: true,
+    });`;
 const SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE =
   'import { closeSync, readFileSync, existsSync, mkdirSync, openSync, statSync, writeFileSync, writeSync } from "node:fs";';
 const SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH =
@@ -95,6 +206,181 @@ const SMITHERS_CLI_WORKFLOW_PATH_PATCH = `    const resolvedWorkflowPath = resol
       });
     }
     const { resume, resumeRunId } = normalizeResumeOption(options.resume);`;
+const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE =
+  "process.env.SMITHERS_CLI_SRC_DIR ??= dirname(fileURLToPath(import.meta.url));";
+const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH = `process.env.SMITHERS_CLI_SRC_DIR ??= dirname(fileURLToPath(import.meta.url));
+
+// Ultrafuzz invokes this process through a descriptor held by its controller.
+// Each detached descendant receives that directory atomically as fd 3, opens a
+// process-owned anchor, and passes the capability the same way to its children.
+// This avoids every parent-exit race around /proc/<parent>/fd/<n> pathnames.
+const ultrafuzzInheritedSnapshotDescriptorEnv = "ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR";
+const ultrafuzzProcessSnapshotDescriptorEnv = "ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR";
+const ultrafuzzProcessSnapshotRootEnv = "ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT";
+const ultrafuzzPersistedSnapshotRootEnv = "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT";
+
+function ultrafuzzPersistedExecutionSnapshotRoot(persistedWorkflowValue) {
+  const persistedWorkflowPath = resolve(process.cwd(), persistedWorkflowValue);
+  const persistedWorkflowsDirectory = dirname(persistedWorkflowPath);
+  const persistedSmithersDirectory = dirname(persistedWorkflowsDirectory);
+  if (
+    basename(persistedWorkflowsDirectory) !== "workflows" ||
+    basename(persistedSmithersDirectory) !== ".smithers"
+  ) {
+    throw new Error("persisted workflow path is outside an execution snapshot");
+  }
+  return { persistedWorkflowPath, persistedRoot: dirname(persistedSmithersDirectory) };
+}
+
+function rewriteUltrafuzzExecutionSnapshotValue(value, sourceRoots, destinationRoot) {
+  let candidate = value;
+  let fileUrl = false;
+  if (value.startsWith("file:")) {
+    try {
+      candidate = fileURLToPath(value);
+      fileUrl = true;
+    } catch {
+      return value;
+    }
+  }
+  if (resolve(candidate) !== candidate) return value;
+  for (const sourceRoot of sourceRoots) {
+    const relativePath = relative(sourceRoot, candidate);
+    if (
+      relativePath === ".." ||
+      relativePath.startsWith("../") ||
+      relativePath.startsWith("..\\\\") ||
+      resolve(sourceRoot, relativePath) !== candidate
+    ) {
+      continue;
+    }
+    const rewritten = resolve(destinationRoot, relativePath);
+    return fileUrl ? pathToFileURL(rewritten).href : rewritten;
+  }
+  return value;
+}
+
+function ultrafuzzSnapshotDescriptor(value) {
+  if (!/^[0-9]+$/u.test(value)) return undefined;
+  const descriptor = Number(value);
+  return Number.isSafeInteger(descriptor) && descriptor >= 0 ? descriptor : undefined;
+}
+
+function ultrafuzzExecutionSnapshotChildTransfer(args) {
+  const descriptorValue = process.env[ultrafuzzProcessSnapshotDescriptorEnv]?.trim();
+  const processRoot = process.env[ultrafuzzProcessSnapshotRootEnv]?.trim();
+  const persistedRoot = process.env[ultrafuzzPersistedSnapshotRootEnv]?.trim();
+  const transferDeclared =
+    descriptorValue !== undefined || processRoot !== undefined || persistedRoot !== undefined;
+  if (!transferDeclared) return undefined;
+
+  const descriptor = ultrafuzzSnapshotDescriptor(descriptorValue ?? "");
+  if (descriptor === undefined || !processRoot || !persistedRoot) {
+    throw new Error("process execution snapshot transfer capability is incomplete or invalid");
+  }
+
+  const expectedProcessRoot = "/proc/" + process.pid + "/fd/" + descriptor;
+  if (
+    processRoot !== expectedProcessRoot ||
+    !statSync(processRoot).isDirectory() ||
+    realpathSync(processRoot) !== realpathSync(persistedRoot)
+  ) {
+    throw new Error("process execution snapshot transfer capability is no longer current");
+  }
+  return {
+    descriptor,
+    args: args.map((value) =>
+      rewriteUltrafuzzExecutionSnapshotValue(value, [processRoot, persistedRoot], "/proc/self/fd/3")
+    ),
+    env: { [ultrafuzzInheritedSnapshotDescriptorEnv]: "3" },
+  };
+}
+
+function anchorUltrafuzzExecutionSnapshotForProcess() {
+  const inheritedDescriptorValue = process.env[ultrafuzzInheritedSnapshotDescriptorEnv]?.trim();
+  delete process.env[ultrafuzzInheritedSnapshotDescriptorEnv];
+  delete process.env[ultrafuzzProcessSnapshotDescriptorEnv];
+  delete process.env[ultrafuzzProcessSnapshotRootEnv];
+  delete process.env[ultrafuzzPersistedSnapshotRootEnv];
+
+  const configValue = process.env.ULTRAFUZZ_CONFIG_PATH?.trim();
+  const persistedWorkflowValue = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
+  if (!configValue || !persistedWorkflowValue) {
+    if (inheritedDescriptorValue !== undefined) {
+      throw new Error("inherited execution snapshot is missing its persisted controls");
+    }
+    return;
+  }
+
+  let configPath;
+  try {
+    configPath = configValue.startsWith("file:") ? fileURLToPath(configValue) : configValue;
+  } catch {
+    if (inheritedDescriptorValue !== undefined) {
+      throw new Error("inherited execution snapshot has an invalid config path");
+    }
+    return;
+  }
+  const sourceRoot = dirname(dirname(configPath));
+  if (inheritedDescriptorValue !== undefined && inheritedDescriptorValue !== "3") {
+    throw new Error("inherited execution snapshot descriptor must be fixed fd 3");
+  }
+  const inheritedDescriptor = inheritedDescriptorValue === undefined ? undefined : 3;
+  if (inheritedDescriptor === undefined && !/^\\/proc\\/[0-9]+\\/fd\\/[0-9]+$/u.test(sourceRoot)) return;
+
+  const { persistedWorkflowPath, persistedRoot } =
+    ultrafuzzPersistedExecutionSnapshotRoot(persistedWorkflowValue);
+  const acquisitionRoot =
+    inheritedDescriptor === undefined ? sourceRoot : "/proc/self/fd/" + inheritedDescriptor;
+  let descriptor;
+  try {
+    descriptor = openSync(acquisitionRoot, "r");
+    const processRoot = "/proc/" + process.pid + "/fd/" + descriptor;
+    const processStat = statSync(processRoot);
+    if (
+      !processStat.isDirectory() ||
+      realpathSync(processRoot) !== realpathSync(persistedRoot)
+    ) {
+      throw new Error("process execution snapshot descriptor changed during acquisition");
+    }
+
+    for (const [name, value] of Object.entries(process.env)) {
+      if (value !== undefined && name !== "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH") {
+        process.env[name] = rewriteUltrafuzzExecutionSnapshotValue(
+          value,
+          [sourceRoot, acquisitionRoot, persistedRoot],
+          processRoot,
+        );
+      }
+    }
+    for (let index = 0; index < process.argv.length; index += 1) {
+      process.argv[index] = rewriteUltrafuzzExecutionSnapshotValue(
+        process.argv[index],
+        [sourceRoot, acquisitionRoot, persistedRoot],
+        processRoot,
+      );
+    }
+    const loadedWorkflow = process.argv.find((value) => value.includes("/.smithers/workflows/"));
+    if (loadedWorkflow && realpathSync(loadedWorkflow) !== realpathSync(persistedWorkflowPath)) {
+      throw new Error("process-owned workflow path does not match its persisted generation");
+    }
+
+    process.env[ultrafuzzProcessSnapshotDescriptorEnv] = String(descriptor);
+    process.env[ultrafuzzProcessSnapshotRootEnv] = processRoot;
+    process.env[ultrafuzzPersistedSnapshotRootEnv] = persistedRoot;
+    process.env.SMITHERS_MONITOR_SUPPRESS = "1";
+    process.env.SMITHERS_POST_FAILURE = "0";
+  } catch (error) {
+    if (descriptor !== undefined) closeSync(descriptor);
+    throw error;
+  } finally {
+    if (inheritedDescriptor !== undefined) closeSync(inheritedDescriptor);
+  }
+  // This descriptor is the process-scoped execution capability. The kernel
+  // closes it when this CLI, detached engine, or supervisor exits.
+}
+
+anchorUltrafuzzExecutionSnapshotForProcess();`;
 const SMITHERS_CLI_POST_FAILURE_PATH_SOURCE = `        launchPostFailureAutopsy({
           failedRunId: result.runId,
           workflowPath: resolvedWorkflowPath,
@@ -332,11 +618,14 @@ const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `          resumeWorkflowNameVali
 
 export type SmithersCompatibilityPatchId =
   | "detached_admission"
+  | "detached_snapshot_transfer"
   | "supervisor_descriptor"
+  | "resume_snapshot_transfer"
   | "terminal_state_restore"
   | "resume_hydration"
   | "workflow_path_import"
   | "workflow_path_persistence"
+  | "process_snapshot_anchor"
   | "post_failure_workflow_path"
   | "replay_workflow_path"
   | "replay_workflow_metadata"
@@ -392,12 +681,28 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     upstreamAbsent: ["SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS"]
   },
   {
+    id: "detached_snapshot_transfer",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_SOURCE,
+    patched: SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_PATCH,
+    upstreamAbsent: ["ultrafuzzExecutionSnapshotChildTransfer"]
+  },
+  {
     id: "supervisor_descriptor",
     packageName: "@smithers-orchestrator/cli",
     sourceRelativePath: "src/index.js",
     patchable: SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE,
     patched: SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH,
     upstreamAbsent: []
+  },
+  {
+    id: "resume_snapshot_transfer",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/resume-detached.js",
+    patchable: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE,
+    patched: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH,
+    upstreamAbsent: ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"]
   },
   {
     id: "terminal_state_restore",
@@ -432,6 +737,14 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patchable: SMITHERS_CLI_WORKFLOW_PATH_SOURCE,
     patched: SMITHERS_CLI_WORKFLOW_PATH_PATCH,
     upstreamAbsent: []
+  },
+  {
+    id: "process_snapshot_anchor",
+    packageName: "@smithers-orchestrator/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE,
+    patched: SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH,
+    upstreamAbsent: ["anchorUltrafuzzExecutionSnapshotForProcess"]
   },
   {
     id: "post_failure_workflow_path",
@@ -2768,9 +3081,11 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
   const packageJson = path.join(packageRoot, "package.json");
   const admissionSource = path.join(packageRoot, "src", "detached-admission.js");
   const cliSource = path.join(packageRoot, "src", "index.js");
+  const resumeDetachedSource = path.join(packageRoot, "src", "resume-detached.js");
   assertRegularFileInside(nodeModules, packageJson, "installed Smithers CLI package metadata");
   assertRegularFileInside(nodeModules, admissionSource, "installed Smithers detached admission implementation");
   assertRegularFileInside(nodeModules, cliSource, "installed Smithers CLI implementation");
+  assertRegularFileInside(nodeModules, resumeDetachedSource, "installed Smithers detached resume implementation");
   const metadata = JSON.parse(fs.readFileSync(packageJson, "utf8")) as unknown;
   if (!isObjectRecord(metadata) || metadata.version !== SMITHERS_ORCHESTRATOR_VERSION) {
     throw new Error(`installed Smithers CLI package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`);
@@ -2796,9 +3111,19 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
   }
   let cliContents = fs.readFileSync(cliSource, "utf8");
   for (const [source, patched, label] of [
+    [
+      SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_SOURCE,
+      SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_PATCH,
+      "detached engine execution snapshot transfer"
+    ],
     [SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE, SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH, "detached supervisor"],
     [SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE, SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH, "workflow path import"],
     [SMITHERS_CLI_WORKFLOW_PATH_SOURCE, SMITHERS_CLI_WORKFLOW_PATH_PATCH, "workflow path validation"],
+    [
+      SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE,
+      SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH,
+      "process-owned execution snapshot"
+    ],
     [SMITHERS_CLI_POST_FAILURE_PATH_SOURCE, SMITHERS_CLI_POST_FAILURE_PATH_PATCH, "post-failure workflow path"],
     [SMITHERS_CLI_REPLAY_WORKFLOW_PATH_SOURCE, SMITHERS_CLI_REPLAY_WORKFLOW_PATH_PATCH, "replay workflow path"],
     [
@@ -2812,6 +3137,16 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
     cliContents = applyRequiredSmithersPatch(cliContents, source, patched, label);
   }
   writeFileDurable(cliSource, cliContents);
+  const resumeDetachedContents = fs.readFileSync(resumeDetachedSource, "utf8");
+  writeFileDurable(
+    resumeDetachedSource,
+    applyRequiredSmithersPatch(
+      resumeDetachedContents,
+      SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE,
+      SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH,
+      "detached resume execution snapshot transfer"
+    )
+  );
 
   const schedulerRoot = schedulerRoots[0]!;
   const engineRoot = engineRoots[0]!;
