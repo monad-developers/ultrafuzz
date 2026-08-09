@@ -1,6 +1,17 @@
 {
   "schema_version": "ultrafuzz.eval.history.v1",
-  "supersessions": [],
+  "supersessions": [
+    {
+      "superseded_source_eval_run_id": "ci-31264673583-1-smoke-ultrafuzz-bench-deepseek-benchmark-smoke-deepseek-v4-flash-max",
+      "replacement_source_eval_run_id": "ci-31305609686-1-smoke-ultrafuzz-bench-deepseek-benchmark-smoke-deepseek-v4-flash-max",
+      "cohort_transition": {
+        "superseded_cohort_fingerprint": "sha256:2198f4731c9d00084f64229f5956aedee74ce25f33603306c748676ef2c813ad",
+        "replacement_cohort_fingerprint": "sha256:d49aa3e24b0349f68a3e383f5a17d6f030dae9eaa14152682043fa7cd3373dad"
+      },
+      "reason": "Replace the legacy partial DeepSeek V4 Flash accounting row with the complete rerun published for #427.",
+      "issue_url": "https://github.com/monad-developers/ultrafuzz/issues/427"
+    }
+  ],
   "observations": [
     {
       "schema_version": "ultrafuzz.eval.history.observation.v2",

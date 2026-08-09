@@ -30,11 +30,8 @@
 <text x="920" y="464" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">$20</text>
 <line x1="90" y1="120" x2="920" y2="120" stroke="#e5e7eb"/>
 <text x="80" y="125" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">40.0%</text>
-<g data-model="deepseek-v4-flash" data-status="partial" data-run-count="2" data-expected-run-count="2" data-available-target-count="5" data-expected-target-count="6" data-cost-q1="0.48140641" data-cost-median="0.54879808" data-cost-q3="0.61618975" data-f1-q1="0.24480833" data-f1-median="0.25271667" data-f1-q3="0.260625"><title>deepseek-v4-flash: median 25.3% at $0.55; partial cost; 5/6 targets available; 2/2 cohorts priced from 2026-08-08 to 2026-08-09 (pricing-incomplete)</title>
-<line data-iqr="cost" x1="109.98" y1="237.83" x2="115.57" y2="237.83" stroke="#2563eb" stroke-width="10" stroke-linecap="round" opacity="0.22"/>
-<line data-iqr="f1" x1="112.78" y1="244.15" x2="112.78" y2="231.5" stroke="#2563eb" stroke-width="10" stroke-linecap="round" opacity="0.22"/>
-<circle  fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="112.78" cy="237.83" r="8"/>
-<circle data-completeness-marker="partial" cx="112.78" cy="237.83" r="13" fill="none" stroke="#2563eb" stroke-width="2" stroke-dasharray="3 3"/>
+<g data-model="deepseek-v4-flash" data-status="complete" data-run-count="1" data-expected-run-count="1" data-available-target-count="3" data-expected-target-count="3" data-cost-q1="0.68358141" data-cost-median="0.68358141" data-cost-q3="0.68358141" data-f1-q1="0.26853333" data-f1-median="0.26853333" data-f1-q3="0.26853333"><title>deepseek-v4-flash: median 26.9% at $0.68; complete cost; 3/3 targets available; 1/1 cohorts priced from 2026-08-09 to 2026-08-09</title>
+<circle  fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="118.37" cy="225.17" r="8"/>
 </g>
 <g data-model="deepseek-v4-pro" data-status="complete" data-run-count="1" data-expected-run-count="1" data-available-target-count="3" data-expected-target-count="3" data-cost-q1="1.26551998" data-cost-median="1.26551998" data-cost-q3="1.26551998" data-f1-q1="0.1" data-f1-median="0.1" data-f1-q3="0.1"><title>deepseek-v4-pro: median 10.0% at $1.27; complete cost; 3/3 targets available; 1/1 cohorts priced from 2026-08-01 to 2026-08-01</title>
 <rect  fill="#c2410c" stroke="#ffffff" stroke-width="1" x="134.52" y="352" width="16" height="16"/>
@@ -49,7 +46,7 @@
 <circle data-completeness-marker="partial" cx="781.54" cy="205.01" r="13" fill="none" stroke="#be123c" stroke-width="2" stroke-dasharray="3 3"/>
 </g>
 <circle  fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="98" cy="530" r="6"/>
-<text x="114" y="534" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">deepseek-v4-flash</tspan><tspan fill="#6b7280"> · median 25.3% · $0.55 · n=2 · targets 5/6 · partial</tspan></text>
+<text x="114" y="534" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">deepseek-v4-flash</tspan><tspan fill="#6b7280"> · median 26.9% · $0.68 · n=1 · targets 3/3 · complete</tspan></text>
 <rect  fill="#c2410c" stroke="#ffffff" stroke-width="1" x="92" y="550" width="12" height="12"/>
 <text x="114" y="560" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">deepseek-v4-pro</tspan><tspan fill="#6b7280"> · median 10.0% · $1.27 · n=1 · targets 3/3 · complete</tspan></text>
 <polygon  fill="#7c3aed" stroke="#ffffff" stroke-width="1" points="98,575 105,582 98,589 91,582"/>
