@@ -2,6 +2,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { readRegularFileSnapshot } from "./schema-registry.js";
+import { parseStrictJsonBytes } from "./strict-json.js";
+
 export const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 export const SAFE_PATH_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -415,7 +418,12 @@ export function truncateDurable(
 }
 
 export function readJsonFile<T = unknown>(filePath: string): T {
-  return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
+  return parseStrictJsonBytes(readRegularFileSnapshot(filePath, 64 * 1024 * 1024), {
+    maxBytes: 64 * 1024 * 1024,
+    maxDepth: 128,
+    maxItems: 1_000_000,
+    maxProperties: 1_000_000
+  }) as T;
 }
 
 export function sha256Bytes(data: string | Uint8Array): string {
