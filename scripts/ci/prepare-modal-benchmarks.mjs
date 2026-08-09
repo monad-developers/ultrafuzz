@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { parseStrictJsonBytes } from "../../packages/artifacts/dist/index.js";
 import { loadBenchmarkCohortManifest, loadBenchmarkLanesManifest } from "../../packages/evals/dist/index.js";
 import { parseModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
 import { MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID } from "../../packages/modal/dist/modal-contracts.js";
@@ -19,6 +20,7 @@ import {
 
 const PUBLIC_NODE_TIMEOUT_SECONDS = 1800;
 const PUBLIC_CONTROL_POLLING_GRACE_SECONDS = 5 * 60;
+const MAX_BENCHMARK_MODELS_JSON_BYTES = 64 * 1024;
 const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SAFE_REASONING = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const MODEL_KEYS = ["model", "provider", "reasoning"];
@@ -172,9 +174,9 @@ fs.writeFileSync(path.join(root, "manifest.json"), serializedManifest.bytes, { m
 console.log(JSON.stringify(manifest));
 
 function benchmarkModels(benchmarkMode, checkedInProfiles) {
-  const configured = process.env.BENCHMARK_MODELS_JSON?.trim();
+  const configured = process.env.BENCHMARK_MODELS_JSON;
   let requested;
-  if (configured === undefined || configured === "") {
+  if (configured === undefined) {
     requested = checkedInProfiles.map((profile) => ({
       provider: providerForAgent(profile.agent),
       model: profile.model,
@@ -182,16 +184,21 @@ function benchmarkModels(benchmarkMode, checkedInProfiles) {
     }));
   } else {
     try {
-      requested = JSON.parse(configured);
+      requested = parseStrictJsonBytes(Buffer.from(configured, "utf8"), {
+        maxBytes: MAX_BENCHMARK_MODELS_JSON_BYTES,
+        maxDepth: 8,
+        maxItems: 16,
+        maxProperties: 64
+      });
     } catch (error) {
-      throw new Error("BENCHMARK_MODELS_JSON must be valid JSON", { cause: error });
+      throw new Error("BENCHMARK_MODELS_JSON must be valid strict JSON", { cause: error });
     }
   }
   if (!Array.isArray(requested)) throw new Error("BENCHMARK_MODELS_JSON must be an array");
 
   const validated = requested.map((entry, index) => validateModelEntry(entry, index));
   const expectedProviders =
-    benchmarkMode === "smoke" && configured !== undefined && configured !== ""
+    benchmarkMode === "smoke" && configured !== undefined
       ? validated.length === 1
         ? [validated[0].provider]
         : []

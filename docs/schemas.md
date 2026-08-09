@@ -125,7 +125,8 @@ treated as absent and is never rewritten.
 `ultrafuzz.terminal-disposition.v1` has its own registered whole-document
 schema and is also embedded as a closed value in the canonical run-state v4
 document. Runtime production and Modal consumption validate the value against
-that same root contract. Dependency `package.json` files and the transient models.dev
-catalog are third-party envelopes rather than Ultrafuzz evidence: they are
-strictly parsed and narrowly projected, but their provider-defined whole shape
-is intentionally not registered as an Ultrafuzz schema.
+that same root contract. Dependency `package.json` files, GitHub Actions event
+and REST API responses, and the transient models.dev catalog are third-party
+envelopes rather than Ultrafuzz evidence: they are strictly parsed from bounded
+bytes and narrowly projected, but their provider-defined whole shape is
+intentionally not registered as an Ultrafuzz schema.

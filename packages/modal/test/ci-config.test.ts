@@ -436,6 +436,38 @@ describe("public Modal benchmark configuration", () => {
     }
   });
 
+  it("rejects malformed-present model selection JSON instead of defaulting or converting it", () => {
+    const workspace = path.resolve("../..");
+    for (const [index, testCase] of [
+      { value: "   ", message: /must be valid strict JSON/u },
+      {
+        value: '[{"provider":"openai","provider":"anthropic","model":"gpt-5.6-luna","reasoning":"high"}]',
+        message: /duplicate/iu
+      }
+    ].entries()) {
+      const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-invalid-model-json-"));
+      const result = spawnSync(
+        process.execPath,
+        [
+          path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
+          "d".repeat(40),
+          "https://github.com/monad-developers/ultrafuzz",
+          `${70_000 + index}-1`,
+          output,
+          "smoke"
+        ],
+        {
+          cwd: workspace,
+          encoding: "utf8",
+          env: { ...process.env, BENCHMARK_MODELS_JSON: testCase.value }
+        }
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toMatch(testCase.message);
+      expect(fs.existsSync(path.join(output, "manifest.json"))).toBe(false);
+    }
+  });
+
   it("uses GitHub Actions only as the asynchronous Modal control and publication plane", () => {
     const workspace = path.resolve("../..");
     const workflowText = fs.readFileSync(path.join(workspace, ".github/workflows/eval-benchmarks.yml"), "utf8");
