@@ -63,6 +63,7 @@ import {
   type ExpandedGraph,
   type ExpandedNode,
   type ProjectTopology,
+  TopologyError,
   type TopologyNode
 } from "@ultrafuzz/topology";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -726,7 +727,7 @@ class DashboardApp {
     ];
     for (const candidate of candidates) {
       const file = safeResolveInside(context.runRoot, candidate, "findings path");
-      if (!fs.existsSync(file)) {
+      if (lstatIfPresent(file) === undefined) {
         continue;
       }
       assertRegularFileInside(context.runRoot, file, "findings path");
@@ -751,11 +752,11 @@ class DashboardApp {
         json: undefined
       };
     }
-    const candidateDirs = this.finalReportDirs(context.runRoot);
+    const candidateDirs = this.finalReportDirs(context.runRoot, context.runId);
     for (const candidateDir of uniqueStrings(candidateDirs)) {
       const markdownPath = safeResolveInside(context.runRoot, `${candidateDir}/report.md`, "report markdown");
       const jsonPath = safeResolveInside(context.runRoot, `${candidateDir}/report.json`, "report JSON");
-      if (fs.existsSync(markdownPath) || fs.existsSync(jsonPath)) {
+      if (lstatIfPresent(markdownPath) !== undefined || lstatIfPresent(jsonPath) !== undefined) {
         assertRegularFileInside(context.runRoot, markdownPath, "report markdown");
         assertRegularFileInside(context.runRoot, jsonPath, "report JSON");
         const markdown = readValidatedArtifact(
@@ -781,12 +782,12 @@ class DashboardApp {
     };
   }
 
-  finalReportDirs(runRoot: string): string[] {
+  finalReportDirs(runRoot: string, runId: string): string[] {
     const candidates = new Set(["final-report"]);
-    const state = readJsonIfExists<JsonObject>(path.join(runRoot, "state.json"));
-    const nodes = isRecord(state?.nodes) ? state.nodes : {};
-    for (const [nodeId, nodeState] of Object.entries(nodes)) {
-      if (isRecord(nodeState) && nodeState.logical_node_id === "final-report") {
+    const layout = layoutForRunRoot(runRoot, runId);
+    const state = lstatIfPresent(layout.statePath) === undefined ? undefined : readRunState(layout);
+    for (const [nodeId, nodeState] of Object.entries(state?.nodes ?? {})) {
+      if (nodeState.logical_node_id === "final-report") {
         candidates.add(validateSafeId(nodeId, "final report node ID"));
       }
     }
@@ -1400,7 +1401,7 @@ class DashboardApp {
       return undefined;
     }
     const layout = layoutForRunRoot(context.runRoot, context.runId);
-    if (!fs.existsSync(layout.statePath)) {
+    if (lstatIfPresent(layout.statePath) === undefined) {
       return undefined;
     }
     assertRegularFileInside(context.runRoot, layout.statePath, "run state");
@@ -1421,8 +1422,11 @@ class DashboardApp {
   loadTopologyForDisplay(): ProjectTopology {
     try {
       return loadTopology(this.projectRoot, { requirePromptFiles: false });
-    } catch {
-      return emptyTopology();
+    } catch (error) {
+      if (error instanceof TopologyError && error.code === "MISSING_TOPOLOGY") {
+        return emptyTopology();
+      }
+      throw error;
     }
   }
 
@@ -1984,6 +1988,17 @@ function readTextIfExists(filePath: string): string | undefined {
 function readJsonIfExists<T = unknown>(filePath: string): T | undefined {
   try {
     return readJsonFile<T>(filePath);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function lstatIfPresent(filePath: string): fs.Stats | undefined {
+  try {
+    return fs.lstatSync(filePath);
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") {
       return undefined;

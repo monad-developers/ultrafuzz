@@ -51,6 +51,19 @@ test("serves logical topology flow with expanded attempt details", async () => {
   }
 });
 
+test("does not replace a malformed present topology with an empty preview", async () => {
+  const projectRoot = makeProject();
+  fs.writeFileSync(path.join(projectRoot, ".ultrafuzz", "topology.yml"), "version: [\n", "utf8");
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const response = await fetch(apiUrl(handle.url, "/api/flow"));
+    assert.equal(response.status, 500);
+    assert.match(await response.text(), /topology/u);
+  } finally {
+    await handle.close();
+  }
+});
+
 test("creates a topology node prompt as terminal work before finish", async () => {
   const projectRoot = makeProject();
   const handle = await serveDashboard({ projectRoot, port: 0 });
