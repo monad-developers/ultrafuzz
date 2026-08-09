@@ -19,11 +19,11 @@ import {
   publicEvalDiagnosticsFailedTargetCount,
   readEvalRunRecords,
   readEvalRunSummary,
-  resolveTerminalReportPath,
   type BenchmarkCohortManifest,
   type EvalRunRecord,
   type EvalSuiteSpec
 } from "@ultrafuzz/evals";
+import { loadVerifiedFinalReportSnapshot } from "@ultrafuzz/runtime";
 import { stringify } from "yaml";
 
 import { kimiSubscriptionAuthSecretValuesFromRoots, runnerApiKeyEnv } from "./auth.js";
@@ -1004,15 +1004,36 @@ export function publicBundleSources(
     if (!scoreable) {
       throw new Error(`public benchmark row is not a scoreable terminal outcome: ${row.id}`);
     }
-    const report = resolveTerminalReportPath({
-      ...(record.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root })
-    }).path;
-    if (report === undefined || record.ultrafuzz_run_root === undefined) {
-      throw new Error(`public benchmark row is missing its terminal report: ${row.id}`);
+    if (
+      record.ultrafuzz_run_root === undefined ||
+      record.ultrafuzz_run_id === undefined ||
+      record.report_json_path === undefined
+    ) {
+      throw new Error(`public benchmark row is missing its terminal report authority binding: ${row.id}`);
+    }
+    let report: ReturnType<typeof loadVerifiedFinalReportSnapshot>;
+    try {
+      report = loadVerifiedFinalReportSnapshot(record.ultrafuzz_run_root);
+    } catch (error) {
+      throw new Error(`public benchmark row has no verified terminal report authority: ${row.id}`, { cause: error });
+    }
+    if (
+      typeof report.json !== "object" ||
+      report.json === null ||
+      !("run_metadata" in report.json) ||
+      typeof report.json.run_metadata !== "object" ||
+      report.json.run_metadata === null ||
+      !("run_id" in report.json.run_metadata) ||
+      report.json.run_metadata.run_id !== record.ultrafuzz_run_id
+    ) {
+      throw new Error(`public benchmark row verified report belongs to another run: ${row.id}`);
+    }
+    if (path.resolve(record.report_json_path) !== path.resolve(report.artifacts.json_path)) {
+      throw new Error(`public benchmark row record names a different terminal report: ${row.id}`);
     }
     const candidates = [
-      { name: "report.json", source: report },
-      { name: "report.md", source: path.join(path.dirname(report), "report.md") }
+      { name: "report.json", source: report.artifacts.json_path, immutableContents: report.json_bytes },
+      { name: "report.md", source: report.artifacts.markdown_path, immutableContents: report.markdown_bytes }
     ];
     for (const candidate of candidates) {
       if (!fs.existsSync(candidate.source)) {
@@ -1021,7 +1042,8 @@ export function publicBundleSources(
       sources.push({
         path: `reports/${row.id}/${candidate.name}`,
         root: record.ultrafuzz_run_root,
-        source: candidate.source
+        source: candidate.source,
+        immutableContents: candidate.immutableContents
       });
     }
     sources.push(...optionalRowArtifactSources(record.ultrafuzz_run_root, row.id));

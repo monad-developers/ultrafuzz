@@ -4,11 +4,10 @@ import path from "node:path";
 import {
   assertRegularFileInside,
   parseStrictJson,
-  readRegularFileSnapshot,
-  validateArtifactContractBytes,
   validateFindingSchema,
   type NormalizedFinding
 } from "@ultrafuzz/artifacts";
+import { loadVerifiedFinalReportSnapshot } from "@ultrafuzz/runtime";
 import { z } from "zod/v4";
 
 import { summarizeEvalTerminal } from "./efficiency.js";
@@ -69,8 +68,6 @@ import { EvalError, evalRunRoot, isRecord, mean, resolveTerminalReportPath, roun
 const DEFAULT_EVAL_JUDGE_ENDPOINT = "https://gateway.braintrust.dev/v1/chat/completions";
 const PRIVATE_DATA_JUDGE_ACK = "ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA";
 const MIN_CONCRETE_EVIDENCE_TEXT_LENGTH = 8;
-const MAX_TERMINAL_REPORT_BYTES = 64 * 1024 * 1024;
-
 const llmJudgeSchema = z.strictObject({
   matched_ground_truth_bug_id: z.string().min(1).nullable(),
   score: z.number().min(0).max(1),
@@ -640,12 +637,12 @@ async function scoreRow(input: {
           revision: input.row.target.ref
         })
       : groundTruth.subject;
-  const report = readReport(input.reportPath);
+  const report = readReport(input.record, input.reportPath);
   return scoreFindings({
     suite: input.suite,
     row: input.row,
     record: input.record,
-    reportPath: input.reportPath,
+    reportPath: report.path,
     findings: report.findings,
     bugs,
     groundTruthSubject,
@@ -1176,23 +1173,58 @@ function loadGroundTruthDocument(
   return readGroundTruthDocument(filePath, { requireSubject });
 }
 
-function readReport(filePath: string): { schemaValid: boolean; findings: unknown[] } {
-  let bytes: Buffer;
+function readReport(
+  record: EvalRunRecord,
+  filePath: string
+): {
+  schemaValid: boolean;
+  findings: unknown[];
+  path: string;
+} {
+  if (
+    record.ultrafuzz_run_root === undefined ||
+    record.ultrafuzz_run_id === undefined ||
+    record.report_json_path === undefined
+  ) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report has no bound Ultrafuzz run authority", {
+      path: filePath
+    });
+  }
+  let snapshot: ReturnType<typeof loadVerifiedFinalReportSnapshot>;
   try {
-    bytes = readRegularFileSnapshot(filePath, MAX_TERMINAL_REPORT_BYTES);
+    snapshot = loadVerifiedFinalReportSnapshot(record.ultrafuzz_run_root);
   } catch (error) {
-    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report is not a readable regular file", {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report lacks current verification authority", {
       path: filePath,
+      authority_code:
+        error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : undefined,
       cause: error instanceof Error ? error.message : String(error)
     });
   }
-  const validation = validateArtifactContractBytes("ultrafuzz/report@2", bytes, filePath);
-  if (!validation.ok || !isRecord(validation.value)) {
-    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report does not satisfy ultrafuzz/report@2", {
-      issues: validation.issues.map((issue) => ({ code: issue.code, path: issue.path }))
+  if (path.resolve(filePath) !== path.resolve(snapshot.artifacts.json_path)) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report path is not the verified current report", {
+      path: filePath,
+      verified_path: snapshot.artifacts.json_path
     });
   }
-  return { schemaValid: true, findings: validation.value.issues as unknown[] };
+  if (path.resolve(record.report_json_path) !== path.resolve(filePath)) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "eval run record names a different terminal report", {
+      path: filePath,
+      recorded_path: record.report_json_path
+    });
+  }
+  if (!isRecord(snapshot.json) || !isRecord(snapshot.json.run_metadata)) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "verified terminal report has invalid run metadata", {
+      path: filePath
+    });
+  }
+  if (snapshot.json.run_metadata.run_id !== record.ultrafuzz_run_id) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "verified terminal report belongs to another run", {
+      path: filePath,
+      expected_run_id: record.ultrafuzz_run_id
+    });
+  }
+  return { schemaValid: true, findings: snapshot.json.issues as unknown[], path: snapshot.artifacts.json_path };
 }
 
 function validatedReviewFinding(value: unknown, index: number): NormalizedFinding {

@@ -1,10 +1,12 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   artifactContractSchemaBinding,
   assertRegularFileInside,
+  executeOfflineSchemaSemanticGates,
   parseStrictJsonBytes,
   validateRegisteredJsonSchema,
   type TerminalReport
@@ -17,6 +19,7 @@ import {
   publicEvalDiagnosticsRowIsFailedDatapoint
 } from "@ultrafuzz/evals";
 import { redactSecretsInText } from "@ultrafuzz/security";
+import { projectCanonicalFinalReport } from "@ultrafuzz/runtime";
 import { z } from "zod/v4";
 
 import type { ModalWorkerLineage } from "./launch-state.js";
@@ -130,6 +133,8 @@ export interface PublicBenchmarkBundleSource {
   path: string;
   root: string;
   source: string;
+  /** Immutable bytes captured by a stronger source authority, when available. */
+  immutableContents?: Buffer;
 }
 
 export function createPublicBenchmarkBundle(input: {
@@ -151,7 +156,10 @@ export function createPublicBenchmarkBundle(input: {
 }): PublicBenchmarkBundle {
   const forbiddenSecretValues = [...new Set(input.forbiddenSecretValues ?? [])].filter((value) => value.length > 0);
   const files = input.files.map((entry) => {
-    const contents = readRegularFileNoFollow(entry.root, entry.source);
+    const contents =
+      entry.immutableContents === undefined
+        ? readRegularFileNoFollow(entry.root, entry.source)
+        : Buffer.from(entry.immutableContents);
     if (contents.byteLength > MAX_FILE_BYTES) throw new Error(`public benchmark file is too large: ${entry.path}`);
     assertPublicBenchmarkFileContainsNoSecrets(entry.path, contents, forbiddenSecretValues);
     return {
@@ -401,6 +409,20 @@ function parseTerminalReports(
         .join("; ");
       throw new Error(`public benchmark row ${rowId} has a schema-invalid terminal report: ${detail}`);
     }
+    const semanticFailures = executeOfflineSchemaSemanticGates("report.schema.json", value).filter(
+      (result) => result.status === "failed"
+    );
+    if (semanticFailures.length > 0) {
+      throw new Error(
+        `public benchmark row ${rowId} has a semantic-invalid terminal report: ${semanticFailures
+          .map((result) =>
+            result.status === "failed"
+              ? `${result.gate}: ${result.issues.map((issue) => `${issue.path} ${issue.message}`).join("; ")}`
+              : result.gate
+          )
+          .join("; ")}`
+      );
+    }
     const report = value as TerminalReport;
     const row = matrixRows.get(rowId);
     const score = summaryRows.get(rowId);
@@ -416,6 +438,16 @@ function parseTerminalReports(
     }
     if (report.issues.length !== score.finding_count) {
       throw new Error(`public benchmark row ${rowId} terminal report issue count does not match its score`);
+    }
+    const markdownPath = `reports/${rowId}/report.md`;
+    const markdown = contentsByPath.get(markdownPath);
+    if (markdown === undefined) throw new Error(`public benchmark bundle is missing ${markdownPath}`);
+    const projection = projectCanonicalFinalReport(report);
+    if (!isDeepStrictEqual(projection.report, report)) {
+      throw new Error(`public benchmark row ${rowId} report.json is not the canonical final-report projection`);
+    }
+    if (!markdown.equals(Buffer.from(projection.markdown, "utf8"))) {
+      throw new Error(`public benchmark row ${rowId} report.md is not the canonical projection of report.json`);
     }
     reports.set(rowId, report);
   }

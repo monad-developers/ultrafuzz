@@ -27,7 +27,7 @@ import {
   type EventRecord,
   type RunState
 } from "@ultrafuzz/artifacts";
-import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
+import { loadVerifiedFinalReportSnapshot, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import {
   reporterForReliableDelivery,
@@ -525,6 +525,42 @@ export class NodeTelemetryPump {
     const uploads: EvalArtifactUpload[] = [];
     const layout = layoutForRunRoot(this.input.runRoot);
     const nodeDir = getNodeArtifactDir(layout, nodeId);
+    const publishesFinalReport = manifest.output_contracts.some((output) => output.contract === "ultrafuzz/report@2");
+    let verifiedFinalReport: Map<string, { bytes: Buffer; sha256: string; absolutePath: string }> | undefined;
+    if (publishesFinalReport) {
+      try {
+        const snapshot = loadVerifiedFinalReportSnapshot(this.input.runRoot);
+        if (snapshot.authority.attempt_id !== nodeId) {
+          throw new Error(`verified final-report authority belongs to ${snapshot.authority.attempt_id}`);
+        }
+        verifiedFinalReport = new Map([
+          [
+            "report.json",
+            {
+              bytes: snapshot.json_bytes,
+              sha256: sha256Bytes(snapshot.json_bytes),
+              absolutePath: snapshot.artifacts.json_path
+            }
+          ],
+          [
+            "report.md",
+            {
+              bytes: snapshot.markdown_bytes,
+              sha256: sha256Bytes(snapshot.markdown_bytes),
+              absolutePath: snapshot.artifacts.markdown_path
+            }
+          ]
+        ]);
+      } catch (error) {
+        warnings.push(
+          warningDiagnostic(
+            "EVAL_TELEMETRY_ARTIFACT_UNVERIFIED",
+            `skipped unverified final-report publication ${nodeId}: ${error instanceof Error ? error.message : String(error)}`
+          )
+        );
+        return uploads;
+      }
+    }
     for (const file of manifest.files) {
       if (!includeSet.has(file.path)) {
         continue;
@@ -532,16 +568,34 @@ export class NodeTelemetryPump {
       if (file.size_bytes > policy.max_file_bytes) {
         continue;
       }
-      try {
-        validateArtifact(nodeDir, file, policy.max_file_bytes);
-      } catch (error) {
-        warnings.push(
-          warningDiagnostic(
-            "EVAL_TELEMETRY_ARTIFACT_UNSAFE",
-            `skipped unsafe artifact ${nodeId}/${file.path}: ${error instanceof Error ? error.message : String(error)}`
-          )
-        );
-        continue;
+      const verified = verifiedFinalReport?.get(file.path);
+      if (publishesFinalReport && verified === undefined) continue;
+      if (verified !== undefined) {
+        if (
+          verified.absolutePath !== safeResolveInside(nodeDir, file.path, "verified artifact upload path") ||
+          verified.bytes.length !== file.size_bytes ||
+          verified.sha256 !== file.sha256
+        ) {
+          warnings.push(
+            warningDiagnostic(
+              "EVAL_TELEMETRY_ARTIFACT_UNVERIFIED",
+              `skipped final-report publication whose manifest differs from verified bytes ${nodeId}/${file.path}`
+            )
+          );
+          continue;
+        }
+      } else {
+        try {
+          validateArtifact(nodeDir, file, policy.max_file_bytes);
+        } catch (error) {
+          warnings.push(
+            warningDiagnostic(
+              "EVAL_TELEMETRY_ARTIFACT_UNSAFE",
+              `skipped unsafe artifact ${nodeId}/${file.path}: ${error instanceof Error ? error.message : String(error)}`
+            )
+          );
+          continue;
+        }
       }
       uploads.push({
         idempotencyKey: telemetryIdempotencyKey("artifact", [this.input.row.id, nodeId, file.path, file.sha256]),
@@ -551,7 +605,14 @@ export class NodeTelemetryPump {
         contentType: contentTypeForArtifact(file.path),
         sizeBytes: file.size_bytes,
         sha256: file.sha256,
-        ...(payloadAllowed ? { read: async () => readValidatedArtifact(nodeDir, file, policy.max_file_bytes) } : {})
+        ...(payloadAllowed
+          ? {
+              read: async () =>
+                verified === undefined
+                  ? readValidatedArtifact(nodeDir, file, policy.max_file_bytes)
+                  : Buffer.from(verified.bytes)
+            }
+          : {})
       });
     }
     return uploads;

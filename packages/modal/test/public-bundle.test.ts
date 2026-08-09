@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { parseEvalRunRecord, type EvalRunRecord } from "@ultrafuzz/evals";
+import { projectCanonicalFinalReport } from "@ultrafuzz/runtime";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -96,7 +97,7 @@ describe("public Modal benchmark bundles", () => {
     ).toMatchObject({ summary: { scoring_ready: true } });
     for (const rowId of rowIds) {
       expect(fs.readFileSync(path.join(output, "reports", rowId, "report.json"), "utf8")).toContain("issues");
-      expect(fs.readFileSync(path.join(output, "reports", rowId, "report.md"), "utf8")).toContain("Report");
+      expect(fs.readFileSync(path.join(output, "reports", rowId, "report.md"), "utf8")).toContain("Ultrafuzz report");
     }
   });
 
@@ -173,6 +174,19 @@ describe("public Modal benchmark bundles", () => {
         })
       ).toThrow(new RegExp(`missing reports/${rowIds[1]}/${required.replace(".", "\\.")}`, "u"));
     }
+  });
+
+  it("requires report.md to be the exact canonical projection of report.json", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-report-projection-"));
+    const rowId = "target-a-runner-trial-1";
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, [rowId])
+    });
+
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, `reports/${rowId}/report.md`, "# Noncanonical report\n"))
+    ).toThrow(/report\.md is not the canonical projection/u);
   });
 
   it("fails the smoke no-regression gate when any target row has no finding", () => {
@@ -259,6 +273,23 @@ describe("public Modal benchmark bundles", () => {
     expect(() => parsePublicBenchmarkBundle(replaceReportIssuesAndScore(bundle, rowId, [{}]))).toThrow(
       /schema-invalid terminal report/u
     );
+  });
+
+  it("rejects schema-valid terminal reports that fail document semantic gates", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-semantic-report-"));
+    const rowId = "target-a-runner-trial-1";
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, [rowId])
+    });
+    const report = JSON.parse(bundleFileText(bundle, `reports/${rowId}/report.json`)) as {
+      issues: Array<Record<string, unknown>>;
+    };
+    const duplicate = structuredClone(report.issues[0]!);
+
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceReportIssuesAndScore(bundle, rowId, [report.issues[0], duplicate]))
+    ).toThrow(/semantic-invalid terminal report/u);
   });
 
   it("joins each terminal report to its run, target, and scored issue count", () => {
@@ -641,6 +672,12 @@ function replaceReportIssuesAndScore(
   const report = JSON.parse(bundleFileText(bundle, reportPath)) as Record<string, unknown>;
   report.issues = issues;
   let updated = replaceBundleContents(bundle, reportPath, `${JSON.stringify(report, null, 2)}\n`);
+  try {
+    const projection = projectCanonicalFinalReport(report);
+    updated = replaceBundleContents(updated, `reports/${rowId}/report.md`, projection.markdown);
+  } catch {
+    // Invalid report fixtures are intentionally rejected before projection parity.
+  }
   const summary = JSON.parse(bundleFileText(updated, "eval/summary.json")) as {
     rows: Array<Record<string, unknown>>;
   };
@@ -747,7 +784,6 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
         source_artifacts: [],
         strategy_hits: []
       },
-      id: `${row.id}-finding-1`,
       summary: "A fixture finding used to exercise public bundle validation."
     });
     const report = currentTerminalReport({
@@ -764,9 +800,10 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
       },
       issues: [finding]
     });
+    const projection = projectCanonicalFinalReport(report);
     for (const [name, contents] of [
-      ["report.md", `# Report for ${row.id}\n`],
-      ["report.json", `${JSON.stringify(report, null, 2)}\n`]
+      ["report.md", projection.markdown],
+      ["report.json", `${JSON.stringify(projection.report, null, 2)}\n`]
     ] as const) {
       const source = path.join(root, "report-source", row.id, name);
       fs.mkdirSync(path.dirname(source), { recursive: true });

@@ -61,7 +61,8 @@ import { OperationalDispositionError } from "../src/terminal-disposition.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "../src/worker-result.js";
 import {
   currentGenuineTaskFailureState,
-  currentRunState,
+  currentReportIssue,
+  currentTerminalReport,
   writeCurrentSmithersTaskFixture,
   writeCurrentTerminalReport
 } from "./current-artifact-fixtures.js";
@@ -1355,8 +1356,6 @@ it("publishes only the final journal record for each benchmark row", () => {
   const reportRoot = path.join(runRoot, "artifacts/final-report");
   fs.mkdirSync(evalRoot, { recursive: true });
   const reportPath = writeCurrentTerminalReport(runRoot);
-  writeSuccessfulRunStateFixture(runRoot);
-  fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
   const record = {
     schema_version: "ultrafuzz.eval.run.v1",
     eval_run_id: evalRunId,
@@ -1407,8 +1406,17 @@ it("publishes only the final journal record for each benchmark row", () => {
       .map((source) => source.path)
   ).toEqual(["reports/target-a-runner-trial-1/report.json", "reports/target-a-runner-trial-1/report.md"]);
 
+  const verifiedReportBytes = fs.readFileSync(reportPath);
+  fs.appendFileSync(reportPath, " \n", "utf8");
+  expect(() => publicBundleSources(controlRoot, evalRunId, diagnostics)).toThrow(
+    /no verified terminal report authority/u
+  );
+  fs.writeFileSync(reportPath, verifiedReportBytes);
+
   fs.rmSync(path.join(reportRoot, "report.md"));
-  expect(() => publicBundleSources(controlRoot, evalRunId, diagnostics)).toThrow(/missing report\.md/u);
+  expect(() => publicBundleSources(controlRoot, evalRunId, diagnostics)).toThrow(
+    /no verified terminal report authority/u
+  );
 });
 
 it("uses report.json as the sole public finding authority", () => {
@@ -1421,9 +1429,7 @@ it("uses report.json as the sole public finding authority", () => {
   const dedupeRoot = path.join(runRoot, "artifacts/dedupe-findings");
   fs.mkdirSync(evalRoot, { recursive: true });
   writeCurrentTerminalReport(runRoot);
-  writeSuccessfulRunStateFixture(runRoot);
   fs.mkdirSync(dedupeRoot, { recursive: true });
-  fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
   // These former authorities may still exist in an old workspace, but a new
   // bundle must neither select nor publish either one.
   fs.writeFileSync(path.join(reportRoot, "findings.normalized.json"), "[]\n");
@@ -1431,6 +1437,7 @@ it("uses report.json as the sole public finding authority", () => {
   const rowId = "target-a-runner-trial-1";
   const record = {
     row_id: rowId,
+    ultrafuzz_run_id: "target-run",
     ultrafuzz_run_root: runRoot,
     report_json_path: path.join(reportRoot, "report.json"),
     final_status: "succeeded",
@@ -1467,6 +1474,62 @@ it("uses report.json as the sole public finding authority", () => {
     `reports/${rowId}/report.json`,
     `reports/${rowId}/report.md`
   ]);
+});
+
+it("rejects a schema-valid report whose current semantic gates fail", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-semantic-"));
+  const controlRoot = path.join(root, "control");
+  const evalRunId = "eval-semantic-invalid";
+  const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
+  const runRoot = path.join(root, "target-run");
+  const rowId = "target-a-runner-trial-1";
+  fs.mkdirSync(evalRoot, { recursive: true });
+  const reportMetadata = {
+    run_id: "target-run",
+    source_run_id: "target-run",
+    repository: "https://github.com/example/fixture",
+    elapsed_time: "0s",
+    models_used: ["fixture-model"],
+    tokens_used: "0",
+    estimated_spend: "0",
+    partial_pricing: false,
+    strategy_loops: 0
+  };
+  const firstIssue = currentReportIssue();
+  const secondIssue = currentReportIssue({
+    id: "L-02",
+    title: "[L-02] - Second fixture finding",
+    lifecycle: { dedupe_key: "fixture-dedupe-key-2", source_artifacts: [], strategy_hits: [] }
+  });
+  const canonicalReport = currentTerminalReport({
+    run_metadata: reportMetadata,
+    issues: [firstIssue, secondIssue]
+  });
+  const duplicateIdReport = structuredClone(canonicalReport) as { issues: Array<Record<string, unknown>> };
+  duplicateIdReport.issues[1]!.id = "L-01";
+  duplicateIdReport.issues[1]!.title = "[L-01] - Second fixture finding";
+  const reportPath = writeCurrentTerminalReport(runRoot, {
+    report: duplicateIdReport,
+    markdownReport: canonicalReport
+  });
+  fs.writeFileSync(
+    path.join(evalRoot, "runs.jsonl"),
+    `${JSON.stringify({
+      row_id: rowId,
+      ultrafuzz_run_id: "target-run",
+      ultrafuzz_run_root: runRoot,
+      report_json_path: reportPath,
+      final_status: "succeeded",
+      workflow: { status: "succeeded", terminal: true }
+    })}\n`
+  );
+  fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify([{ id: rowId }])}\n`);
+  const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
+  fs.writeFileSync(diagnosticsPath, "{}\n");
+
+  expect(() => publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath })).toThrow(
+    /no verified terminal report authority/u
+  );
 });
 
 it("rejects a persisted public bundle unless every worker lineage field matches", () => {
@@ -1657,18 +1720,6 @@ function writeGenuineTaskFailureFixture(runRoot: string): void {
   writeCurrentSmithersTaskFixture(runRoot, attemptId);
 }
 
-function writeSuccessfulRunStateFixture(runRoot: string): void {
-  fs.writeFileSync(
-    path.join(runRoot, "state.json"),
-    `${JSON.stringify(
-      currentRunState(
-        { "final-report": { status: "succeeded", finished_at: "2026-07-20T00:00:00.000Z" } },
-        { run_id: "target-run" }
-      )
-    )}\n`
-  );
-}
-
 it("retains threat-model, goal-plan and vulnerability-database artifacts per row when the run produced them", () => {
   // #183 requires the real generated documents to be retrievable. They cannot
   // reach the bundle any other way: `reporting.artifacts.include` is consumed
@@ -1680,11 +1731,8 @@ it("retains threat-model, goal-plan and vulnerability-database artifacts per row
   const evalRunId = "eval-threat-model";
   const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
   const runRoot = path.join(root, "target-run");
-  const reportRoot = path.join(runRoot, "artifacts/final-report");
   fs.mkdirSync(evalRoot, { recursive: true });
   const reportPath = writeCurrentTerminalReport(runRoot);
-  writeSuccessfulRunStateFixture(runRoot);
-  fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
 
   const threatModelRoot = path.join(runRoot, "artifacts/threat-model");
   fs.mkdirSync(threatModelRoot, { recursive: true });

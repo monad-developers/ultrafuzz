@@ -2,10 +2,19 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  ARTIFACT_VERIFICATION_SCHEMA_VERSION,
   artifactContractDefinition,
   artifactContractSchemaBinding,
-  type ArtifactContractId
+  layoutForRunRoot,
+  sha256Bytes,
+  writeArtifactManifest,
+  writeFileDurable,
+  writeJsonDurable,
+  type ArtifactContractId,
+  type ArtifactManifestOutputContract,
+  type ArtifactVerificationMarker
 } from "@ultrafuzz/artifacts";
+import { projectCanonicalFinalReport } from "@ultrafuzz/runtime";
 
 const FIXTURE_TIMESTAMP = "2026-01-01T00:00:00.000Z";
 
@@ -24,6 +33,8 @@ export function currentFinding(overrides: Record<string, unknown> = {}): Record<
 
 export function currentReportIssue(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return currentFinding({
+    id: "L-01",
+    title: "[L-01] - Fixture finding",
     description: "A caller can reach a state that violates the documented relationship.",
     severity: "Low",
     impact: "Low",
@@ -35,6 +46,10 @@ export function currentReportIssue(overrides: Record<string, unknown> = {}): Rec
       scenario: ["Prepare the bounded state.", "Execute the transition and observe the mismatch."],
       language: "solidity",
       code: "function testCanonicalFinding() public {}"
+    },
+    strategy: "stateful-invariant",
+    strategy_provenance: {
+      detection_rates: [{ strategy: "stateful-invariant", detections: 1, configured_loops: 1 }]
     },
     lifecycle: {
       dedupe_key: "fixture-dedupe-key",
@@ -70,10 +85,29 @@ export function currentTerminalReport(overrides: Record<string, unknown> = {}): 
   };
 }
 
-export function writeCurrentTerminalReport(runRoot: string): string {
+export function writeCurrentTerminalReport(
+  runRoot: string,
+  overrides: { report?: Record<string, unknown>; markdownReport?: Record<string, unknown> } = {}
+): string {
+  const runId = path.basename(runRoot);
+  const baseReport = currentTerminalReport();
+  const baseMetadata = baseReport.run_metadata as Record<string, unknown>;
+  const report =
+    overrides.report ??
+    currentTerminalReport({
+      run_metadata: { ...baseMetadata, run_id: runId, source_run_id: runId }
+    });
+  const projection = projectCanonicalFinalReport(overrides.markdownReport ?? report);
+  const reportBytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`, "utf8");
+  const markdownBytes = Buffer.from(projection.markdown, "utf8");
+  const outputs = currentFinalReportOutputs();
+  const workflowRunId = "workflow-one";
+  const agentTaskId = "node:final-report";
+  const verifierTaskId = "verify:final-report";
   const reportPath = path.join(runRoot, "artifacts", "final-report", "report.json");
-  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-  fs.writeFileSync(reportPath, `${JSON.stringify(currentTerminalReport())}\n`);
+  const markdownPath = path.join(runRoot, "artifacts", "final-report", "report.md");
+  writeFileDurable(reportPath, reportBytes);
+  writeFileDurable(markdownPath, markdownBytes);
   fs.writeFileSync(
     path.join(runRoot, "graph.json"),
     `${JSON.stringify({
@@ -89,13 +123,7 @@ export function writeCurrentTerminalReport(runRoot: string): string {
           kind: "agentic",
           depends_on: [],
           artifact_dir: "artifacts/final-report",
-          outputs: [
-            {
-              path: "report.json",
-              ...currentArtifactBinding("ultrafuzz/report@2"),
-              primary: true
-            }
-          ],
+          outputs,
           prompt_id: "final-report",
           prompt_path: "review/final-report.md",
           loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
@@ -104,7 +132,83 @@ export function writeCurrentTerminalReport(runRoot: string): string {
       ]
     })}\n`
   );
+  fs.writeFileSync(
+    path.join(runRoot, "state.json"),
+    `${JSON.stringify(
+      currentRunState(
+        {
+          "final-report": {
+            status: "succeeded",
+            finished_at: FIXTURE_TIMESTAMP,
+            logical_node_id: "final-report",
+            artifact_dir: "artifacts/final-report",
+            outputs,
+            provenance: {
+              workflow: {
+                run_id: workflowRunId,
+                task_id: verifierTaskId,
+                agent_task_id: agentTaskId,
+                verifier_task_id: verifierTaskId,
+                state: "finished",
+                attempt: 0
+              },
+              output_contracts: { ok: true, missing: [] }
+            }
+          }
+        },
+        { run_id: runId }
+      )
+    )}\n`
+  );
+  const layout = layoutForRunRoot(runRoot, runId);
+  writeArtifactManifest({
+    layout,
+    nodeId: "final-report",
+    include: ["report.md", "report.json"],
+    outputs,
+    provenance: {
+      producer_node_id: "final-report",
+      logical_node_id: "final-report",
+      attempt_index: 0,
+      loop_index: 0,
+      model_index: 0,
+      agent_ref: "CodexAgent",
+      workflow_run_id: workflowRunId,
+      workflow_task_id: agentTaskId,
+      origin: "workflow",
+      metadata: { concrete_node_id: "final-report" }
+    }
+  });
+  const marker: ArtifactVerificationMarker = {
+    schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+    attempt_id: "final-report",
+    node_id: "final-report",
+    artifacts: outputs.map((output) => ({
+      ...output,
+      sha256: sha256Bytes(output.path === "report.json" ? reportBytes : markdownBytes)
+    })),
+    publications: outputs.map((output) => ({
+      path: output.path,
+      sha256: sha256Bytes(output.path === "report.json" ? reportBytes : markdownBytes)
+    }))
+  };
+  writeJsonDurable(path.join(runRoot, ".ultrafuzz-verification", "final-report.json"), marker);
   return reportPath;
+}
+
+function currentFinalReportOutputs(): ArtifactManifestOutputContract[] {
+  return [
+    {
+      path: "report.md",
+      ...currentArtifactBinding("ultrafuzz/nonempty-markdown@1"),
+      primary: true
+    },
+    {
+      path: "report.json",
+      ...currentArtifactBinding("ultrafuzz/report@2"),
+      primary: false
+    }
+  ];
 }
 
 export function currentArtifactBinding<C extends ArtifactContractId>(contract: C) {
@@ -236,9 +340,21 @@ export function currentGenuineTaskFailureState(attemptId: string): Record<string
 }
 
 export function writeCurrentSmithersTaskFixture(runRoot: string, attemptId: string): void {
-  const taskSpecifications: Array<{ id: string; path: string; contract: ArtifactContractId }> = [
-    { id: attemptId, path: "result.md", contract: "ultrafuzz/nonempty-markdown@1" },
-    { id: "final-report", path: "report.json", contract: "ultrafuzz/report@2" }
+  const taskSpecifications: Array<{
+    id: string;
+    outputs: Array<{ path: string; contract: ArtifactContractId; primary: boolean }>;
+  }> = [
+    {
+      id: attemptId,
+      outputs: [{ path: "result.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true }]
+    },
+    {
+      id: "final-report",
+      outputs: [
+        { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
+        { path: "report.json", contract: "ultrafuzz/report@2", primary: false }
+      ]
+    }
   ];
   fs.writeFileSync(
     path.join(runRoot, "graph.json"),
@@ -254,13 +370,11 @@ export function writeCurrentSmithersTaskFixture(runRoot: string, attemptId: stri
         kind: "agentic",
         depends_on: [],
         artifact_dir: `artifacts/${task.id}`,
-        outputs: [
-          {
-            path: task.path,
-            ...currentArtifactBinding(task.contract),
-            primary: true
-          }
-        ],
+        outputs: task.outputs.map((output) => ({
+          path: output.path,
+          ...currentArtifactBinding(output.contract),
+          primary: output.primary
+        })),
         prompt_id: task.id,
         prompt_path: `.ultrafuzz/prompts/${task.id}.md`,
         loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
@@ -346,13 +460,11 @@ export function writeCurrentSmithersTaskFixture(runRoot: string, attemptId: stri
           },
           artifacts: {
             dir: `/runs/fixture-run/artifacts/${task.id}`,
-            outputs: [
-              {
-                path: task.path,
-                ...currentTaskOutputBinding(task.contract),
-                primary: true
-              }
-            ],
+            outputs: task.outputs.map((output) => ({
+              path: output.path,
+              ...currentTaskOutputBinding(output.contract),
+              primary: output.primary
+            })),
             manifestPath: `/runs/fixture-run/artifacts/${task.id}/artifact-manifest.json`
           },
           retryPolicy: { maxAttempts: 1, smithersRetries: 0 },

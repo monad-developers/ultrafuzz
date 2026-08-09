@@ -4,17 +4,26 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  ARTIFACT_VERIFICATION_SCHEMA_VERSION,
   EVENT_SCHEMA_VERSION,
   PLANNED_GRAPH_SCHEMA_VERSION,
   STATE_SCHEMA_VERSION,
   assertEventRecord,
   artifactContractDefinition,
   artifactContractSchemaBinding,
+  layoutForRunRoot,
+  sha256Bytes,
+  writeArtifactManifest,
+  writeFileDurable,
+  writeJsonDurable,
+  type ArtifactManifestOutputContract,
+  type ArtifactVerificationMarker,
   type EventRecord,
   type NodeState,
   type PlannedGraphDocument,
   type RunState
 } from "@ultrafuzz/artifacts";
+import { projectCanonicalFinalReport } from "@ultrafuzz/runtime";
 
 import type {
   EvalArtifactUpload,
@@ -557,6 +566,134 @@ export function writeCurrentRunEvidence(input: {
     )}\n`,
     "utf8"
   );
+}
+
+export function writeVerifiedFinalReport(input: {
+  runRoot: string;
+  runId?: string;
+  report?: Record<string, unknown>;
+  accounting?: Record<string, unknown>;
+}): { reportPath: string; markdownPath: string; reportBytes: Buffer; markdownBytes: Buffer } {
+  const runId = input.runId ?? path.basename(input.runRoot);
+  const report =
+    input.report ??
+    ({
+      schema_version: "ultrafuzz.report.v2",
+      run_metadata: {
+        run_id: runId,
+        source_run_id: runId,
+        repository: "https://example.com/target-a",
+        elapsed_time: "0s",
+        models_used: ["gpt-test"],
+        tokens_used: "0",
+        estimated_spend: "$0",
+        partial_pricing: false,
+        strategy_loops: 0
+      },
+      issues: [],
+      non_production_outcomes: [],
+      property_provenance: [],
+      property_implementation_coverage: {
+        status: "not-planned",
+        reason: "property-implementation-track-not-declared"
+      }
+    } satisfies Record<string, unknown>);
+  const projection = projectCanonicalFinalReport(report);
+  const reportBytes = Buffer.from(`${JSON.stringify(projection.report, null, 2)}\n`, "utf8");
+  const markdownBytes = Buffer.from(projection.markdown, "utf8");
+  const outputs = verifiedFinalReportOutputs();
+  const graph = currentPlannedGraph();
+  graph.nodes[0]!.outputs = outputs;
+  const workflowRunId = `workflow-${runId}`;
+  const agentTaskId = "node:final-report";
+  const verifierTaskId = "verify:final-report";
+  const state = currentRunState({
+    runId,
+    nodes: {
+      "final-report": {
+        logical_node_id: "final-report",
+        artifact_dir: "artifacts/final-report",
+        outputs,
+        provenance: {
+          workflow: {
+            run_id: workflowRunId,
+            task_id: verifierTaskId,
+            agent_task_id: agentTaskId,
+            verifier_task_id: verifierTaskId,
+            state: "finished",
+            attempt: 0
+          },
+          output_contracts: { ok: true, missing: [] }
+        }
+      }
+    }
+  });
+  writeCurrentRunEvidence({
+    runRoot: input.runRoot,
+    runId,
+    state,
+    graph,
+    ...(input.accounting === undefined ? {} : { accounting: input.accounting })
+  });
+
+  const layout = layoutForRunRoot(input.runRoot, runId);
+  const reportPath = path.join(layout.artifactsDir, "final-report", "report.json");
+  const markdownPath = path.join(layout.artifactsDir, "final-report", "report.md");
+  writeFileDurable(reportPath, reportBytes);
+  writeFileDurable(markdownPath, markdownBytes);
+  writeArtifactManifest({
+    layout,
+    nodeId: "final-report",
+    include: ["report.md", "report.json"],
+    outputs,
+    provenance: {
+      producer_node_id: "final-report",
+      logical_node_id: "final-report",
+      attempt_index: 0,
+      loop_index: 0,
+      model_index: 0,
+      agent_ref: "CodexAgent",
+      workflow_run_id: workflowRunId,
+      workflow_task_id: agentTaskId,
+      origin: "workflow",
+      metadata: { concrete_node_id: "final-report" }
+    }
+  });
+  const marker: ArtifactVerificationMarker = {
+    schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+    attempt_id: "final-report",
+    node_id: "final-report",
+    artifacts: outputs.map((output) => ({
+      ...output,
+      sha256: sha256Bytes(output.path === "report.json" ? reportBytes : markdownBytes)
+    })),
+    publications: outputs.map((output) => ({
+      path: output.path,
+      sha256: sha256Bytes(output.path === "report.json" ? reportBytes : markdownBytes)
+    }))
+  };
+  writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", "final-report.json"), marker);
+  return { reportPath, markdownPath, reportBytes, markdownBytes };
+}
+
+function verifiedFinalReportOutputs(): ArtifactManifestOutputContract[] {
+  const reportBinding = artifactContractSchemaBinding("ultrafuzz/report@2");
+  if (reportBinding === undefined) throw new Error("missing current report schema binding");
+  return [
+    {
+      path: "report.md",
+      contract: "ultrafuzz/nonempty-markdown@1",
+      contract_digest: artifactContractDefinition("ultrafuzz/nonempty-markdown@1").digest,
+      primary: true
+    },
+    {
+      path: "report.json",
+      contract: "ultrafuzz/report@2",
+      contract_digest: artifactContractDefinition("ultrafuzz/report@2").digest,
+      ...reportBinding,
+      primary: false
+    }
+  ];
 }
 
 export interface RecordedCall {

@@ -15,7 +15,8 @@ import {
   initializeTestGitRepository,
   testRow,
   testSuite,
-  writeCurrentRunEvidence
+  writeCurrentRunEvidence,
+  writeVerifiedFinalReport
 } from "./helpers.js";
 
 const BUGS: GroundTruthBug[] = [
@@ -62,6 +63,10 @@ function canonicalFinding(overrides: Record<string, unknown> = {}): Record<strin
       scenario: ["Invoke the affected path with attacker-controlled input.", "Observe the invariant violation."],
       language: "text",
       code: "reproduce();"
+    },
+    strategy: "stateful-invariant",
+    strategy_provenance: {
+      detection_rates: [{ strategy: "stateful-invariant", detections: 1, configured_loops: 1 }]
     },
     lifecycle: { dedupe_key: "finding-1", source_artifacts: [], strategy_hits: [] },
     ...overrides
@@ -139,7 +144,7 @@ async function scoreInMemory(
   });
 }
 
-function scoreRunFixture(): {
+function scoreRunFixture(overrides: { issues?: unknown[] } = {}): {
   projectRoot: string;
   evalRunId: string;
   evalRunRoot: string;
@@ -177,40 +182,34 @@ function scoreRunFixture(): {
   });
   const row = testRow(suite);
   const runRoot = path.join(base, "generated-run");
-  const reportPath = path.join(runRoot, "artifacts", "final-report", "report.json");
-  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-  fs.writeFileSync(
-    reportPath,
-    JSON.stringify(
-      canonicalReport([
-        matchedFinding(),
-        canonicalFinding({
-          id: "finding-2",
-          title: "Plausible but unknown overflow",
-          summary: "overflow in mint",
-          severity_guess: "Medium",
-          severity: "Medium",
-          impact: "Medium",
-          likelihood: "Medium",
-          confidence: "medium",
-          triage_classification: "undetermined",
-          recommended_next_action: "Review the overflow trace.",
-          evidence: ["reproduction trace"],
-          description: "The mint path may overflow an intermediate value.",
-          impact_rationale: "An overflow could corrupt minted balances.",
-          likelihood_rationale: "The boundary input is reachable but constrained.",
-          severity_rationale: "Moderate impact and likelihood make this medium severity.",
-          lifecycle: { dedupe_key: "finding-2", source_artifacts: [], strategy_hits: [] }
-        })
-      ])
-    ),
-    "utf8"
-  );
-  writeCurrentRunEvidence({
+  const issues = overrides.issues ?? [
+    matchedFinding({
+      id: "H-01",
+      title: "[H-01] - Reentrancy lets attackers drain the vault via withdraw"
+    }),
+    canonicalFinding({
+      id: "M-01",
+      title: "[M-01] - Plausible but unknown overflow",
+      summary: "overflow in mint",
+      severity_guess: "Medium",
+      severity: "Medium",
+      impact: "Medium",
+      likelihood: "Medium",
+      confidence: "medium",
+      triage_classification: "undetermined",
+      recommended_next_action: "Review the overflow trace.",
+      evidence: ["reproduction trace"],
+      description: "The mint path may overflow an intermediate value.",
+      impact_rationale: "An overflow could corrupt minted balances.",
+      likelihood_rationale: "The boundary input is reachable but constrained.",
+      severity_rationale: "Moderate impact and likelihood make this medium severity.",
+      lifecycle: { dedupe_key: "finding-2", source_artifacts: [], strategy_hits: [] }
+    })
+  ];
+  writeVerifiedFinalReport({
     runRoot,
     runId: "generated-run",
-    state: currentRunState({ runId: "generated-run", nodes: { "final-report": {} } }),
-    graph: currentPlannedGraph(),
+    report: canonicalReport(issues),
     accounting: {
       total_tokens: 123,
       estimated_spend_usd: 0.456,
@@ -1082,12 +1081,20 @@ describe("deterministic scorer math", () => {
     ).rejects.toMatchObject({ code: "EVAL_TERMINAL_REPORT_INVALID" });
   });
 
-  it("scores canonical empty terminal reports as all missed", async () => {
+  it("rejects schema-valid report bytes changed after verification", async () => {
     const fixture = scoreRunFixture();
     const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
       report_json_path: string;
     };
-    fs.writeFileSync(record.report_json_path, JSON.stringify(canonicalReport([])), "utf8");
+    fs.appendFileSync(record.report_json_path, " \n", "utf8");
+
+    await expect(
+      scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId })
+    ).rejects.toMatchObject({ code: "EVAL_TERMINAL_REPORT_INVALID" });
+  });
+
+  it("scores canonical empty terminal reports as all missed", async () => {
+    const fixture = scoreRunFixture({ issues: [] });
 
     const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
 
@@ -1102,7 +1109,7 @@ describe("deterministic scorer math", () => {
     expect(fs.readFileSync(path.join(fixture.evalRunRoot, "scores.jsonl"), "utf8")).toBe("");
   });
 
-  it("scores the topology-declared terminal report path when eval metadata omits it", async () => {
+  it("rejects a topology-declared terminal path without final-report verification authority", async () => {
     const fixture = scoreRunFixture();
     const runsPath = path.join(fixture.evalRunRoot, "runs.jsonl");
     const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as Record<string, unknown> & {
@@ -1132,9 +1139,9 @@ describe("deterministic scorer math", () => {
     record.ultrafuzz_run_root = runRoot;
     fs.writeFileSync(runsPath, `${JSON.stringify(record)}\n`, "utf8");
 
-    const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
-
-    expect(summary.rows[0]?.finding_count).toBe(2);
+    await expect(
+      scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId })
+    ).rejects.toMatchObject({ code: "EVAL_TERMINAL_REPORT_INVALID" });
   });
 
   it("requires a dedicated credential for the optional gateway judge", () => {

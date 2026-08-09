@@ -17,6 +17,7 @@ import {
   testReportingPolicy,
   testRow,
   testSuite,
+  writeVerifiedFinalReport,
   writeRunFixture,
   type JournalEventInput
 } from "./helpers.js";
@@ -231,6 +232,40 @@ describe("NodeTelemetryPump", () => {
     expect(reporter.artifacts()).toHaveLength(0);
     expect(result.warnings).toEqual(
       expect.arrayContaining([expect.objectContaining({ code: "EVAL_TELEMETRY_ARTIFACT_UNSAFE" })])
+    );
+  });
+
+  it("publishes no final-report payload after post-verification mutation", async () => {
+    const policy = testReportingPolicy({
+      artifacts: {
+        mode: "upload",
+        include: ["report.md", "report.json"],
+        max_file_bytes: 5_000_000,
+        mode_explicit: true
+      }
+    });
+    const { runRoot, reporter, pump } = setup({ policy });
+    const verified = writeVerifiedFinalReport({ runRoot, runId: "run-1" });
+    writeRunFixture({
+      runRoot,
+      events: [
+        {
+          event_id: eventId("verified-final-report-mutated"),
+          event_type: "artifact-manifest-written",
+          timestamp: T1,
+          node_id: "final-report",
+          status: "succeeded",
+          payload: { file_count: 2, path: "artifacts/final-report/artifact-manifest.json" }
+        }
+      ]
+    });
+    fs.appendFileSync(verified.reportPath, " \n", "utf8");
+
+    const result = await pump().drain();
+
+    expect(reporter.artifacts()).toHaveLength(0);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "EVAL_TELEMETRY_ARTIFACT_UNVERIFIED" })])
     );
   });
 
