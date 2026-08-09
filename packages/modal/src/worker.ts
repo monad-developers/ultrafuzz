@@ -13,7 +13,13 @@ import {
 
 import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig, type PrivateModalBenchmarkConfig } from "./config.js";
 import { EVAL_WATCH_TIMEOUT_SECONDS } from "./defaults.js";
+import { readBoundedResponseBytes } from "./bounded-response.js";
 import { convertAuditMarkdownGroundTruth } from "./ground-truth.js";
+import {
+  JudgeCredentialResponseError,
+  MAX_EPHEMERAL_JUDGE_CREDENTIAL_RESPONSE_BYTES,
+  parseEphemeralJudgeCredentialResponse
+} from "./judge-credential.js";
 import {
   PERSISTED_LINEAGE_FILE,
   REMOTE_CONFIG_PATH,
@@ -456,7 +462,6 @@ async function ephemeralJudgeCredential(sourceKey: string): Promise<string> {
   } catch (error) {
     throw new OperationalDispositionError("unreachable", { cause: error });
   }
-  const body = await response.text();
   if (!response.ok) {
     const category =
       response.status === 401 || response.status === 403
@@ -466,19 +471,24 @@ async function ephemeralJudgeCredential(sourceKey: string): Promise<string> {
           : "unreachable";
     throw new OperationalDispositionError(category);
   }
-  if (body.length > 64 * 1024) throw new OperationalDispositionError("unreachable");
-  let parsed: unknown;
+  let contents: Uint8Array;
   try {
-    parsed = JSON.parse(body) as unknown;
+    contents = await readBoundedResponseBytes(
+      response,
+      MAX_EPHEMERAL_JUDGE_CREDENTIAL_RESPONSE_BYTES,
+      "judge credential response"
+    );
   } catch (error) {
     throw new OperationalDispositionError("unreachable", { cause: error });
   }
-  const key =
-    typeof parsed === "object" && parsed !== null && "key" in parsed && typeof parsed.key === "string"
-      ? parsed.key
-      : undefined;
-  if (key === undefined || key.trim() === "") throw new OperationalDispositionError("authentication-failure");
-  return key;
+  try {
+    return parseEphemeralJudgeCredentialResponse(contents);
+  } catch (error) {
+    if (error instanceof JudgeCredentialResponseError) {
+      throw new OperationalDispositionError(error.category, { cause: error });
+    }
+    throw error;
+  }
 }
 
 async function cloneAtRef(repo: string, ref: string, destination: string, label: string): Promise<void> {

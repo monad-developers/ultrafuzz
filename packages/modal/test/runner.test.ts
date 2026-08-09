@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   NotFoundError,
@@ -88,6 +89,11 @@ const MODEL: ModalModelSpec = {
   reasoning: "high",
   auth_mode: "api-key"
 };
+const ARTIFACTS_MODULE_PATH = fileURLToPath(new URL("../../artifacts/dist/index.js", import.meta.url));
+
+function stageKimiCredential(pending: string, destination: string, mode = "resume"): void {
+  execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, mode, ARTIFACTS_MODULE_PATH]);
+}
 
 describe("Modal benchmark capacity", () => {
   it("forwards the high-capacity resource profile to sandbox creation", async () => {
@@ -1543,7 +1549,7 @@ describe("Modal worker identity", () => {
       "utf8"
     );
 
-    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination]);
+    stageKimiCredential(pending, destination);
 
     const staged = JSON.parse(fs.readFileSync(destination, "utf8")) as {
       access_token?: string;
@@ -1557,6 +1563,83 @@ describe("Modal worker identity", () => {
     });
     expect(fs.existsSync(pending)).toBe(false);
     expect(fs.existsSync(lineage)).toBe(false);
+  });
+
+  it.each([
+    ["pending malformed", "pending", '{"access_token":"pending"'],
+    [
+      "pending duplicate",
+      "pending",
+      '{"access_token":"pending","refresh_token":"first","refresh_token":"shadow","expires_at":2100000,"expires_in":900}\n'
+    ],
+    ["destination malformed", "destination", '{"access_token":"destination"'],
+    [
+      "destination duplicate",
+      "destination",
+      '{"access_token":"destination","refresh_token":"first","refresh_token":"shadow","expires_at":2100000,"expires_in":900}\n'
+    ],
+    ["destination unsupported", "destination", "{}\n"]
+  ] as const)(
+    "rejects %s Kimi credential evidence without replacing or normalizing either file",
+    (_name, target, bytes) => {
+      const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-invalid-"));
+      const pending = path.join(root, "kimi-code.json.pending");
+      const destination = path.join(root, "kimi-code.json");
+      const validPending =
+        '{"access_token":"pending-access","refresh_token":"pending-refresh","expires_at":2100000,"expires_in":900}\n';
+      const validDestination =
+        '{"access_token":"destination-access","refresh_token":"destination-refresh","expires_at":2200000,"expires_in":900}\n';
+      fs.writeFileSync(pending, target === "pending" ? bytes : validPending, { mode: 0o600 });
+      fs.writeFileSync(destination, target === "destination" ? bytes : validDestination, { mode: 0o600 });
+      const pendingBefore = fs.readFileSync(pending);
+      const destinationBefore = fs.readFileSync(destination);
+
+      expect(() => stageKimiCredential(pending, destination)).toThrow(/strict bounded JSON|unsupported shape/u);
+
+      expect(fs.readFileSync(pending)).toEqual(pendingBefore);
+      expect(fs.readFileSync(destination)).toEqual(destinationBefore);
+      expect(fs.existsSync(`${destination}.ultrafuzz-source-refresh-token.sha256`)).toBe(false);
+    }
+  );
+
+  it("moves a strict new Kimi provider envelope byte-for-byte without normalizing it", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-new-"));
+    const pending = path.join(root, "kimi-code.json.pending");
+    const destination = path.join(root, "kimi-code.json");
+    const bytes = Buffer.from(
+      '{ "provider_state": { "generation": 2 }, "expires_in": 900, "expires_at": 2100000, "refresh_token": "fresh-refresh", "access_token": "fresh-access" }',
+      "utf8"
+    );
+    fs.writeFileSync(pending, bytes, { mode: 0o600 });
+
+    stageKimiCredential(pending, destination);
+
+    expect(fs.readFileSync(destination)).toEqual(bytes);
+    expect(fs.existsSync(pending)).toBe(false);
+  });
+
+  it("rejects symlinked Kimi credential evidence without following or replacing it", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-symlink-"));
+    const pending = path.join(root, "kimi-code.json.pending");
+    const destination = path.join(root, "kimi-code.json");
+    const outside = path.join(root, "outside.json");
+    const pendingBytes = Buffer.from(
+      '{"access_token":"pending-access","refresh_token":"pending-refresh","expires_at":2100000,"expires_in":900}\n',
+      "utf8"
+    );
+    const outsideBytes = Buffer.from(
+      '{"access_token":"outside-access","refresh_token":"outside-refresh","expires_at":2200000,"expires_in":900}\n',
+      "utf8"
+    );
+    fs.writeFileSync(pending, pendingBytes, { mode: 0o600 });
+    fs.writeFileSync(outside, outsideBytes, { mode: 0o600 });
+    fs.symlinkSync(outside, destination);
+
+    expect(() => stageKimiCredential(pending, destination)).toThrow();
+
+    expect(fs.readFileSync(pending)).toEqual(pendingBytes);
+    expect(fs.lstatSync(destination).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(outside)).toEqual(outsideBytes);
   });
 
   it("does not replace a rotated shared Modal Kimi credential with a stale ancestor", () => {
@@ -1586,7 +1669,7 @@ describe("Modal worker identity", () => {
     );
     fs.writeFileSync(lineage, `${createHash("sha256").update("ancestor-refresh").digest("hex")}\n`, "utf8");
 
-    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination]);
+    stageKimiCredential(pending, destination);
 
     expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
       access_token: "rotated-volume-access",
@@ -1624,7 +1707,7 @@ describe("Modal worker identity", () => {
     );
     fs.writeFileSync(lineage, `${createHash("sha256").update("previous-host-refresh").digest("hex")}\n`, "utf8");
 
-    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, "fresh"]);
+    stageKimiCredential(pending, destination, "fresh");
 
     expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
       access_token: "current-host-access",
@@ -1666,9 +1749,9 @@ describe("Modal worker identity", () => {
       if (lineageCase === "corrupt") fs.writeFileSync(lineage, "not-a-sha\n", "utf8");
       if (lineageCase === "unreadable") fs.mkdirSync(lineage);
 
-      expect(() =>
-        execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, "fresh"])
-      ).toThrow(/Kimi credential lineage is missing or invalid/u);
+      expect(() => stageKimiCredential(pending, destination, "fresh")).toThrow(
+        /Kimi credential lineage is missing or invalid/u
+      );
       expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
         access_token: "rotated-volume-access",
         refresh_token: "rotated-volume-refresh",
@@ -1702,7 +1785,7 @@ describe("Modal worker identity", () => {
       "utf8"
     );
 
-    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination]);
+    stageKimiCredential(pending, destination);
 
     expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
       access_token: "fresh-access",

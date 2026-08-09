@@ -4,6 +4,7 @@ import { lstatSync, readFileSync, readlinkSync, type Stats } from "node:fs";
 import { mkdir, open, readFile, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
+import { parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
 import { z } from "zod/v4";
 
 import {
@@ -992,6 +993,15 @@ export interface ModalLaunchLockOptions {
   token?: string;
 }
 
+interface ModalLaunchLockOwner {
+  token: string;
+  pid: number;
+  pid_start_ticks?: string;
+  created_at: string;
+}
+
+const MAX_MODAL_LAUNCH_LOCK_BYTES = 4 * 1024;
+
 export async function withModalLaunchStateLock<T>(
   statePath: string,
   operation: () => Promise<T>,
@@ -1004,6 +1014,9 @@ export async function withModalLaunchStateLock<T>(
   const timeoutMs = options.timeoutMs ?? 30_000;
   const pollMs = options.pollMs ?? 25;
   const token = options.token ?? randomUUID();
+  if (!isModalLaunchLockToken(token)) {
+    throw new Error("Modal launch state lock token must be a non-empty bounded opaque string");
+  }
   const pidStartTicks = readProcessStartTicksSync(process.pid);
   const deadline = now() + timeoutMs;
   await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
@@ -1048,7 +1061,7 @@ export async function withModalLaunchStateLock<T>(
   await handle.close().catch(() => undefined);
   let releaseError: unknown;
   try {
-    const owner = JSON.parse(await readFile(lockPath, "utf8")) as { token?: unknown };
+    const owner = parseModalLaunchLockOwner(readRegularFileSnapshot(lockPath, MAX_MODAL_LAUNCH_LOCK_BYTES), lockPath);
     if (owner.token === token) await unlink(lockPath);
   } catch (error) {
     if (!isNodeError(error, "ENOENT")) releaseError = error;
@@ -1127,40 +1140,84 @@ function sha256(value: string | Buffer): string {
 
 interface ObservedLaunchLock {
   identity: string;
-  owner: { token?: unknown; pid?: unknown; pid_start_ticks?: unknown } | undefined;
+  owner: ModalLaunchLockOwner;
   dead: boolean;
 }
 
 async function observeLaunchLock(lockPath: string): Promise<ObservedLaunchLock | undefined> {
   try {
-    const contents = await readFile(lockPath, "utf8");
+    const contents = readRegularFileSnapshot(lockPath, MAX_MODAL_LAUNCH_LOCK_BYTES);
     const metadata = await stat(lockPath);
-    let owner: ObservedLaunchLock["owner"];
-    try {
-      owner = JSON.parse(contents) as { token?: unknown; pid?: unknown; pid_start_ticks?: unknown };
-    } catch {
-      owner = undefined;
-    }
+    const owner = parseModalLaunchLockOwner(contents, lockPath);
     let dead = Date.now() - metadata.mtimeMs > 5_000;
-    if (typeof owner?.pid === "number" && Number.isInteger(owner.pid) && owner.pid > 0) {
-      try {
-        process.kill(owner.pid, 0);
-        const expectedStartTicks = owner.pid_start_ticks;
-        const actualStartTicks =
-          typeof expectedStartTicks === "string" ? await readProcessStartTicks(owner.pid) : undefined;
-        dead =
-          typeof expectedStartTicks === "string" && actualStartTicks !== undefined
-            ? actualStartTicks !== expectedStartTicks
-            : false;
-      } catch (error) {
-        dead = isNodeError(error, "ESRCH");
-      }
+    try {
+      process.kill(owner.pid, 0);
+      const expectedStartTicks = owner.pid_start_ticks;
+      const actualStartTicks = expectedStartTicks === undefined ? undefined : await readProcessStartTicks(owner.pid);
+      dead =
+        expectedStartTicks !== undefined && actualStartTicks !== undefined
+          ? actualStartTicks !== expectedStartTicks
+          : false;
+    } catch (error) {
+      dead = isNodeError(error, "ESRCH");
     }
     return { identity: sha256(contents), owner, dead };
   } catch (error) {
     if (isNodeError(error, "ENOENT")) return undefined;
     throw error;
   }
+}
+
+function parseModalLaunchLockOwner(contents: Uint8Array, lockPath: string): ModalLaunchLockOwner {
+  let value: unknown;
+  try {
+    value = parseStrictJsonBytes(contents, {
+      maxBytes: MAX_MODAL_LAUNCH_LOCK_BYTES,
+      maxDepth: 2,
+      maxItems: 0,
+      maxProperties: 4
+    });
+  } catch (error) {
+    throw new Error(`Modal launch state lock metadata is not strict bounded JSON: ${lockPath}`, { cause: error });
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`Modal launch state lock metadata must be an object: ${lockPath}`);
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  const allowedKeys = new Set(["token", "pid", "pid_start_ticks", "created_at"]);
+  const exactKeyCount = Object.hasOwn(record, "pid_start_ticks") ? 4 : 3;
+  if (
+    keys.length !== exactKeyCount ||
+    keys.some((key) => !allowedKeys.has(key)) ||
+    !isModalLaunchLockToken(record.token) ||
+    typeof record.pid !== "number" ||
+    !Number.isSafeInteger(record.pid) ||
+    record.pid <= 0 ||
+    (record.pid_start_ticks !== undefined &&
+      (typeof record.pid_start_ticks !== "string" || !/^[0-9]+$/u.test(record.pid_start_ticks))) ||
+    typeof record.created_at !== "string" ||
+    !isCanonicalTimestamp(record.created_at)
+  ) {
+    throw new Error(`Modal launch state lock metadata has an unsupported shape: ${lockPath}`);
+  }
+  return {
+    token: record.token,
+    pid: record.pid,
+    ...(record.pid_start_ticks === undefined ? {} : { pid_start_ticks: record.pid_start_ticks }),
+    created_at: record.created_at
+  };
+}
+
+function isCanonicalTimestamp(value: string): boolean {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
+
+function isModalLaunchLockToken(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.length > 0 && value === value.trim() && Buffer.byteLength(value, "utf8") <= 256
+  );
 }
 
 async function reclaimDeadLaunchLock(lockPath: string): Promise<boolean> {

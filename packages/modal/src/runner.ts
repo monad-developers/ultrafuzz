@@ -182,9 +182,13 @@ const KIMI_SHARED_CREDENTIAL_SOURCE_SHA256_SUFFIX = ".ultrafuzz-source-refresh-t
 export const KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT = `
 const fs = require("node:fs");
 const crypto = require("node:crypto");
-const [pending, destination, mode = "resume"] = process.argv.slice(1);
+const { pathToFileURL } = require("node:url");
+const [pending, destination, mode, artifactsModulePath] = process.argv.slice(1);
 if (mode !== "fresh" && mode !== "resume") {
   throw new Error("Kimi credential staging mode must be fresh or resume");
+}
+if (typeof artifactsModulePath !== "string" || artifactsModulePath === "") {
+  throw new Error("Kimi credential staging requires the Ultrafuzz artifact reader");
 }
 const sourceHashPath = destination + ${JSON.stringify(KIMI_SHARED_CREDENTIAL_SOURCE_SHA256_SUFFIX)};
 const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
@@ -196,60 +200,114 @@ const sourceHash = () => {
     return { ok: false };
   }
 };
-const token = (file) => {
+const isOpaqueCredential = (value) =>
+  typeof value === "string" && value !== "" && value === value.trim();
+const isPositiveSafeInteger = (value) =>
+  typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+const readBoundedFile = (file, allowAbsent) => {
+  let handle;
   try {
-    const value = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
-    const refreshToken = typeof value.refresh_token === "string" ? value.refresh_token.trim() : "";
-    return {
-      value,
-      expiresAt: typeof value.expires_at === "number" ? value.expires_at : undefined,
-      refreshToken,
-      hasRefreshToken: refreshToken !== ""
-    };
-  } catch {
-    return {};
+    const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0);
+    handle = fs.openSync(file, flags);
+  } catch (error) {
+    if (allowAbsent && error !== null && typeof error === "object" && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+  try {
+    const before = fs.fstatSync(handle, { bigint: true });
+    if (!before.isFile()) throw new Error("Kimi credential evidence must be a regular file: " + file);
+    if (before.size > BigInt(64 * 1024)) {
+      throw new Error("Kimi credential evidence exceeds the 65536-byte limit: " + file);
+    }
+    const contents = fs.readFileSync(handle);
+    const after = fs.fstatSync(handle, { bigint: true });
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeNs !== after.mtimeNs ||
+      before.ctimeNs !== after.ctimeNs ||
+      after.size !== BigInt(contents.byteLength)
+    ) {
+      throw new Error("Kimi credential evidence changed while it was read: " + file);
+    }
+    return contents;
+  } finally {
+    fs.closeSync(handle);
   }
 };
-const pendingToken = token(pending);
-if (pendingToken.value === undefined) {
-  throw new Error("Kimi credential snapshot must be a JSON object");
-}
-if (!pendingToken.hasRefreshToken) {
-  throw new Error("Kimi credential snapshot must include a refresh token");
-}
-fs.writeFileSync(pending, JSON.stringify(pendingToken.value, null, 2) + "\\n", { mode: 0o600 });
-const pendingRefreshTokenHash = sha256(pendingToken.refreshToken);
-const stagedSourceHash = sourceHash();
-let replace = !fs.existsSync(destination);
-let destinationToken = {};
-if (!replace) {
-  destinationToken = token(destination);
-  if (destinationToken.value === undefined || !destinationToken.hasRefreshToken) {
-    replace = true;
-  } else if (pendingToken.refreshToken === destinationToken.refreshToken) {
-    replace =
-      destinationToken.expiresAt === undefined ||
-      (pendingToken.expiresAt !== undefined && pendingToken.expiresAt > destinationToken.expiresAt);
-  } else {
-    if (mode === "fresh" && !stagedSourceHash.ok) {
-      throw new Error("Kimi credential lineage is missing or invalid; refusing to replace shared credential");
+async function main() {
+  const artifacts = await import(pathToFileURL(artifactsModulePath).href);
+  if (typeof artifacts.parseStrictJsonBytes !== "function") {
+    throw new Error("Ultrafuzz strict JSON reader is unavailable for Kimi credential staging");
+  }
+  // Kimi owns this credential envelope. Ultrafuzz preserves provider-defined
+  // fields but validates every field used for staging decisions.
+  const token = (file, allowAbsent) => {
+    const contents = readBoundedFile(file, allowAbsent);
+    if (contents === undefined) return undefined;
+    let value;
+    try {
+      value = artifacts.parseStrictJsonBytes(contents, {
+        maxBytes: 64 * 1024,
+        maxDepth: 16,
+        maxItems: 1024,
+        maxProperties: 1024
+      });
+    } catch (error) {
+      throw new Error("Kimi credential evidence is not strict bounded JSON: " + file, { cause: error });
     }
-    replace = mode === "fresh" && stagedSourceHash.ok && stagedSourceHash.value !== pendingRefreshTokenHash;
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      Array.isArray(value) ||
+      !isOpaqueCredential(value.access_token) ||
+      !isPositiveSafeInteger(value.expires_at) ||
+      !isPositiveSafeInteger(value.expires_in) ||
+      (value.refresh_token !== undefined && !isOpaqueCredential(value.refresh_token)) ||
+      (value.token_type !== undefined && !isOpaqueCredential(value.token_type)) ||
+      (value.scope !== undefined && typeof value.scope !== "string")
+    ) {
+      throw new Error("Kimi credential evidence has an unsupported shape: " + file);
+    }
+    return { value, expiresAt: value.expires_at, refreshToken: value.refresh_token };
+  };
+  const pendingToken = token(pending, false);
+  if (pendingToken.refreshToken === undefined) {
+    throw new Error("Kimi credential snapshot must include a refresh token");
   }
-}
-if (replace) {
-  fs.renameSync(pending, destination);
-  fs.writeFileSync(sourceHashPath, pendingRefreshTokenHash + "\\n", { mode: 0o600 });
-} else {
-  fs.rmSync(pending, { force: true });
-  if (
-    destinationToken.refreshToken === pendingToken.refreshToken ||
-    (stagedSourceHash.ok && stagedSourceHash.value === pendingRefreshTokenHash)
-  ) {
+  const destinationToken = token(destination, true);
+  const pendingRefreshTokenHash = sha256(pendingToken.refreshToken);
+  const stagedSourceHash = sourceHash();
+  let replace = destinationToken === undefined;
+  if (destinationToken !== undefined) {
+    if (destinationToken.refreshToken === undefined) {
+      replace = true;
+    } else if (pendingToken.refreshToken === destinationToken.refreshToken) {
+      replace = pendingToken.expiresAt > destinationToken.expiresAt;
+    } else {
+      if (mode === "fresh" && !stagedSourceHash.ok) {
+        throw new Error("Kimi credential lineage is missing or invalid; refusing to replace shared credential");
+      }
+      replace = mode === "fresh" && stagedSourceHash.ok && stagedSourceHash.value !== pendingRefreshTokenHash;
+    }
+  }
+  if (replace) {
+    fs.renameSync(pending, destination);
     fs.writeFileSync(sourceHashPath, pendingRefreshTokenHash + "\\n", { mode: 0o600 });
+  } else {
+    fs.rmSync(pending, { force: true });
+    if (
+      destinationToken.refreshToken === pendingToken.refreshToken ||
+      (stagedSourceHash.ok && stagedSourceHash.value === pendingRefreshTokenHash)
+    ) {
+      fs.writeFileSync(sourceHashPath, pendingRefreshTokenHash + "\\n", { mode: 0o600 });
+    }
   }
 }
+void main();
 `;
 const LEGACY_UNSAFE_COLLECT_FILES = ["failure-details.json"] as const;
 export const MODAL_COLLECT_RESULT_FILES = [
@@ -1038,7 +1096,7 @@ async function stageKimiSharedCredential(
         "deadline=$((SECONDS + 120))",
         'until mkdir "$lock"; do if (( SECONDS >= deadline )); then echo "Kimi credential stage lock timed out" >&2; exit 70; fi; sleep 1; done',
         "trap 'rmdir \"$lock\"' EXIT",
-        `node -e ${shellQuote(KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT)} ${shellQuote(pending)} ${shellQuote(destination)} ${shellQuote(workspaceMode)}`,
+        `node -e ${shellQuote(KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT)} ${shellQuote(pending)} ${shellQuote(destination)} ${shellQuote(workspaceMode)} ${shellQuote(MODAL_ARTIFACTS_MODULE_PATH)}`,
         `chmod -R go-rwx ${shellQuote(sharedHome)}`
       ].join("; ")
     ]);

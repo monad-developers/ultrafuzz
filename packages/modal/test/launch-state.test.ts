@@ -163,6 +163,20 @@ describe("Modal launch ownership", () => {
     expect(fs.readdirSync(root).filter((name) => name.endsWith(".tmp"))).toEqual([]);
   });
 
+  it.each(["", " padded-token ", "x".repeat(257)])(
+    "rejects an invalid explicit launch lock token before creating evidence",
+    async (token) => {
+      const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-invalid-lock-token-"));
+      const statePath = path.join(root, "launch-state.json");
+
+      await expect(withModalLaunchStateLock(statePath, async () => undefined, { token })).rejects.toThrow(
+        /lock token/u
+      );
+
+      expect(fs.existsSync(`${statePath}.lock`)).toBe(false);
+    }
+  );
+
   it("reclaims a crashed owner before admitting the restarted process", async () => {
     const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-crashed-lock-"));
     const statePath = path.join(root, "launch-state.json");
@@ -193,6 +207,46 @@ describe("Modal launch ownership", () => {
 
     await expect(withModalLaunchStateLock(statePath, async () => "new-owner")).resolves.toBe("new-owner");
     expect(fs.existsSync(`${statePath}.lock`)).toBe(false);
+  });
+
+  it("never reclaims malformed-present or duplicate-key launch lock evidence", async () => {
+    for (const [name, contents] of [
+      ["malformed", '{"token":"owner"'],
+      ["duplicate", '{"token":"owner","token":"shadow","pid":2147483647,"created_at":"2026-01-01T00:00:00.000Z"}\n'],
+      ["underspecified", '{"token":"owner","pid":2147483647,"created_at":"2026-01-01T00:00:00.000Z","extra":true}\n']
+    ] as const) {
+      const root = mkdtempSync(path.join(tmpdir(), `ultrafuzz-modal-${name}-lock-`));
+      const statePath = path.join(root, "launch-state.json");
+      const lockPath = `${statePath}.lock`;
+      fs.writeFileSync(lockPath, contents, { mode: 0o600 });
+      fs.utimesSync(lockPath, new Date(0), new Date(0));
+      let operationRan = false;
+
+      await expect(
+        withModalLaunchStateLock(statePath, async () => {
+          operationRan = true;
+        })
+      ).rejects.toThrow(/lock metadata/u);
+
+      expect(operationRan).toBe(false);
+      expect(fs.readFileSync(lockPath, "utf8")).toBe(contents);
+      expect(fs.readdirSync(root).filter((entry) => entry.includes(".reclaim-"))).toEqual([]);
+    }
+  });
+
+  it("does not unlink lock metadata that becomes malformed while the owner is running", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-mutated-lock-"));
+    const statePath = path.join(root, "launch-state.json");
+    const lockPath = `${statePath}.lock`;
+    const malformed = '{"token":"truncated"';
+
+    await expect(
+      withModalLaunchStateLock(statePath, async () => {
+        fs.writeFileSync(lockPath, malformed, { mode: 0o600 });
+      })
+    ).rejects.toThrow(/lock metadata/u);
+
+    expect(fs.readFileSync(lockPath, "utf8")).toBe(malformed);
   });
 
   // Three Aave v4 runs lost their sandbox at `stateful-invariant-setup` and none could be diagnosed,
