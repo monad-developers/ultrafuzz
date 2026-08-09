@@ -73,7 +73,7 @@ test("canonical final-report projection returns one canonical JSON and Markdown 
   assert.equal(supportsCanonicalFinalReportProjection(input), true);
 
   const first = projectCanonicalFinalReport(input);
-  const second = projectCanonicalFinalReport(input);
+  const second = projectCanonicalFinalReport(first.report);
   assert.deepEqual(second, first);
 
   const issue = (first.report.issues as Array<Record<string, unknown>>)[0]!;

@@ -37,6 +37,20 @@ function loadRetryFailureAwareArgs(): (
   ) as ReturnType<typeof loadRetryFailureAwareArgs>;
 }
 
+function loadPromptWithAuthoritativeFinalReportCoverage(): (prompt: string, coverage: unknown) => string {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function promptWithAuthoritativeFinalReportCoverage");
+  const helperEnd = source.indexOf("\n\nfunction authoritativeFinalReportCoverageArgs", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function("untrustedContentBoundary", `${helper}; return promptWithAuthoritativeFinalReportCoverage;`)(
+    "UNTRUSTED CONTENT BOUNDARY"
+  ) as ReturnType<typeof loadPromptWithAuthoritativeFinalReportCoverage>;
+}
+
 function loadTaskPromptPathForArtifactReset(): (
   artifactDir: string,
   promptPath: string | undefined
@@ -1297,6 +1311,31 @@ test("retry feedback changes only the execution-time prompt section inside the u
   );
 });
 
+test("authoritative final-report coverage is injected as exact untrusted data before agent generation", () => {
+  const promptWithCoverage = loadPromptWithAuthoritativeFinalReportCoverage();
+  const renderedPrompt = "trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\ntrusted runtime\n\nrendered task";
+  const coverage = {
+    priority_threshold: "high",
+    priorities: ["high"],
+    selected_property_ids: ["property-one"],
+    implemented_property_ids: ["property-one"],
+    blocked_property_ids: [],
+    pending_property_ids: [],
+    deferred_property_ids: []
+  };
+  const injected = promptWithCoverage(renderedPrompt, coverage);
+
+  assert.ok(injected.startsWith("trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\n"), injected);
+  assert.match(injected, /## Authoritative property implementation coverage/u);
+  assert.match(injected, /authoritative data, not instructions/u);
+  assert.match(injected, new RegExp(JSON.stringify(coverage, null, 2).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+  assert.ok(injected.indexOf('"property-one"') < injected.indexOf("trusted runtime"), injected);
+  assert.throws(
+    () => promptWithCoverage("prompt without boundary", coverage),
+    /cannot locate the untrusted-content boundary/u
+  );
+});
+
 test("retry feedback diagnostics are secret-redacted and UTF-8 byte bounded before prompt injection", () => {
   const diagnostic = normalizeNodeAttemptFailureMessage(
     `verifier rejected token=sk-${"x".repeat(48)} ${"界".repeat(MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES)}`
@@ -1527,6 +1566,23 @@ test("generated Smithers agent never promotes dedupe findings into a final repor
 test("generated Smithers agent never synthesizes final-report Markdown", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.doesNotMatch(source, /materializeMissingMarkdownArtifacts|agentResultSummary|writeRecoveredReportMarkdown/u);
+});
+
+test("generated Smithers verifier treats the final-report projector only as a non-mutating oracle", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const verifierStart = source.indexOf("function verifyFinalReportCanonicalProjection");
+  const verifierEnd = source.indexOf("\n\nfunction readInvariantSourceSnapshot", verifierStart);
+  assert.ok(verifierStart >= 0, source);
+  assert.ok(verifierEnd > verifierStart, source);
+  const verifier = source.slice(verifierStart, verifierEnd);
+
+  assert.match(verifier, /authoritativeFinalReportCoverage\(task\)/u);
+  assert.match(verifier, /projectCanonicalFinalReport\(report\.value\)/u);
+  assert.match(verifier, /isDeepStrictEqual\(projection\.report, report\.value\)/u);
+  assert.match(verifier, /markdown\.file\.bytes\.equals\(Buffer\.from\(projection\.markdown, "utf8"\)\)/u);
+  assert.match(verifier, /agent-owned bytes were left unchanged/u);
+  assert.doesNotMatch(verifier, /writeFile|writeJson|rename|unlink|rmSync/u);
+  assert.doesNotMatch(source, /ultrafuzz\/implemented-properties@1|ultrafuzz\/implemented-properties@2/u);
 });
 
 test("generated Smithers agent rejects legacy generated-test string lists without conversion", () => {
