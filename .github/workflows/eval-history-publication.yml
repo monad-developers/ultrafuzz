@@ -149,6 +149,8 @@ jobs:
             "$BENCHMARK_MODE" \
             "$PUBLICATION_GENERATION" \
             "$PUBLICATION_PLAN"
+          publication_rows="$RUNNER_TEMP/eval-history-publication-rows.tsv"
+          node scripts/ci/prepare-eval-history-publication.mjs plan-rows "$PUBLICATION_PLAN" > "$publication_rows"
           mkdir "$PUBLICATION_UNPACKED"
           while IFS=$'\t' read -r bundle_path unpack_path eval_run_id benchmark lane model_slug; do
             metadata="$(node packages/modal/dist/cli.js unpack-public \
@@ -166,8 +168,7 @@ jobs:
                .model_slug == $model_slug and
                .candidate_commit == $candidate_commit' \
               <<< "$metadata" > /dev/null
-          done < <(jq -r '.pairs[] | [.bundle_path, .unpack_path, .eval_run_id, .benchmark, .lane, .model_slug] | @tsv' \
-            "$PUBLICATION_PLAN")
+          done < "$publication_rows"
 
       - name: Create the narrowly scoped eval-history publisher token
         id: publisher-token

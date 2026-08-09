@@ -5,7 +5,7 @@ import path from "node:path";
 import {
   formatEvalHistoryJson,
   mergeEvalHistory,
-  parseEvalHistory,
+  parseEvalHistoryBytes,
   readEvalHistory
 } from "../../packages/evals/dist/index.js";
 
@@ -21,7 +21,7 @@ const pendingText = execFileSync("git", ["show", `${ref}:benchmarks/history.json
 });
 
 const current = readEvalHistory(historyPath);
-const pending = parseEvalHistory(JSON.parse(pendingText), `${ref}:benchmarks/history.json`);
+const pending = parseEvalHistoryBytes(Buffer.from(pendingText, "utf8"), `${ref}:benchmarks/history.json`);
 const merged = mergeEvalHistory(current, pending.observations);
 fs.writeFileSync(historyPath, formatEvalHistoryJson(merged), "utf8");
 process.stdout.write(`Preserved ${merged.observations.length - current.observations.length} pending observations.\n`);

@@ -10,6 +10,8 @@ import {
   EVAL_FINDING_MANIFEST_SCHEMA_ID,
   EVAL_GROUND_TRUTH_SCHEMA_ID,
   EVAL_GROUND_TRUTH_CREDITS_SCHEMA_ID,
+  EVAL_HISTORY_AUTOMATIC_PUBLICATION_PLAN_SCHEMA_ID,
+  EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_ID,
   EVAL_HISTORY_SCHEMA_ID,
   EVAL_INSTANCE_CLUSTERS_SCHEMA_ID,
   EVAL_MATRIX_SCHEMA_ID,
@@ -40,6 +42,12 @@ import type {
 } from "./benchmark-analysis-contracts.js";
 import { groundTruthSemanticIssues, type GroundTruthDocument } from "./ground-truth.js";
 import { evalHistorySemanticIssues, type EvalHistory } from "./history.js";
+import {
+  evalHistoryAutomaticPublicationPlanSemanticIssues,
+  evalHistoryPublicationGenerationSemanticIssues,
+  type EvalHistoryAutomaticPublicationPlan,
+  type EvalHistoryPublicationGeneration
+} from "./history-publication.js";
 import { publicEvalDiagnosticsSemanticIssues, type PublicEvalDiagnostics } from "./public-diagnostics.js";
 import { evalStatusSemanticIssues, type EvalStatusSnapshot } from "./status.js";
 import type {
@@ -82,6 +90,8 @@ const gateHandlers: Readonly<Record<string, EvalSemanticGate>> = Object.freeze({
   "eval-ground-truth-integrity": groundTruthIntegrity,
   "eval-ground-truth-credits-identity-joins": groundTruthCreditsIdentityJoins,
   "eval-history-integrity": historyIntegrity,
+  "eval-history-automatic-publication-plan-integrity": historyAutomaticPublicationPlanIntegrity,
+  "eval-history-publication-generation-integrity": historyPublicationGenerationIntegrity,
   "eval-instance-clusters-identity-joins": instanceClustersIdentityJoins,
   "eval-matrix-identity-joins": matrixIdentityJoins,
   "eval-public-diagnostics-consistency": publicDiagnosticsConsistency,
@@ -108,6 +118,8 @@ const gatesBySchema: Readonly<Record<string, readonly string[]>> = Object.freeze
   [EVAL_GROUND_TRUTH_SCHEMA_ID]: ["eval-ground-truth-integrity"],
   [EVAL_GROUND_TRUTH_CREDITS_SCHEMA_ID]: ["eval-ground-truth-credits-identity-joins"],
   [EVAL_HISTORY_SCHEMA_ID]: ["eval-history-integrity"],
+  [EVAL_HISTORY_AUTOMATIC_PUBLICATION_PLAN_SCHEMA_ID]: ["eval-history-automatic-publication-plan-integrity"],
+  [EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_ID]: ["eval-history-publication-generation-integrity"],
   [EVAL_INSTANCE_CLUSTERS_SCHEMA_ID]: ["eval-instance-clusters-identity-joins"],
   [EVAL_MATRIX_SCHEMA_ID]: ["eval-matrix-identity-joins"],
   [EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID]: ["eval-public-diagnostics-consistency"],
@@ -341,6 +353,18 @@ function groundTruthIntegrity(value: unknown): EvalSemanticGateIssue[] {
 function historyIntegrity(value: unknown): EvalSemanticGateIssue[] {
   return evalHistorySemanticIssues(value as EvalHistory).map((entry) =>
     issue("eval-history-integrity", entry.path, entry.message)
+  );
+}
+
+function historyAutomaticPublicationPlanIntegrity(value: unknown): EvalSemanticGateIssue[] {
+  return evalHistoryAutomaticPublicationPlanSemanticIssues(value as EvalHistoryAutomaticPublicationPlan).map((entry) =>
+    issue("eval-history-automatic-publication-plan-integrity", entry.path, entry.message)
+  );
+}
+
+function historyPublicationGenerationIntegrity(value: unknown): EvalSemanticGateIssue[] {
+  return evalHistoryPublicationGenerationSemanticIssues(value as EvalHistoryPublicationGeneration).map((entry) =>
+    issue("eval-history-publication-generation-integrity", entry.path, entry.message)
   );
 }
 

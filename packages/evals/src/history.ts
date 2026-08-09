@@ -306,6 +306,10 @@ export function readEvalHistory(filePath: string): EvalHistory {
       reason: error instanceof Error ? error.message : String(error)
     });
   }
+  return parseEvalHistoryBytes(bytes, filePath);
+}
+
+export function parseEvalHistoryBytes(bytes: Uint8Array, source = "eval history"): EvalHistory {
   let value: unknown;
   try {
     value = parseStrictJsonBytes(bytes, {
@@ -315,11 +319,11 @@ export function readEvalHistory(filePath: string): EvalHistory {
       maxProperties: 1_000_000
     });
   } catch (error) {
-    throw new EvalError("EVAL_HISTORY_INVALID", `failed to parse eval history ${filePath}`, {
+    throw new EvalError("EVAL_HISTORY_INVALID", `failed to parse eval history ${source}`, {
       reason: error instanceof Error ? error.message : String(error)
     });
   }
-  return parseEvalHistory(value, filePath);
+  return parseEvalHistory(value, source);
 }
 
 export interface EvalHistorySemanticIssue {

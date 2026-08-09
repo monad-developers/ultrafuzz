@@ -21,6 +21,10 @@ export const EVAL_SUITE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:suite:2" as cons
 export const EVAL_ADJUDICATION_HANDOFF_SCHEMA_ID = "urn:ultrafuzz:schema:evals:adjudication-handoff:1" as const;
 export const EVAL_FINDING_MANIFEST_SCHEMA_ID = "urn:ultrafuzz:schema:evals:finding-manifest:1" as const;
 export const EVAL_GROUND_TRUTH_SCHEMA_ID = "urn:ultrafuzz:schema:evals:ground-truth:1" as const;
+export const EVAL_HISTORY_AUTOMATIC_PUBLICATION_PLAN_SCHEMA_ID =
+  "urn:ultrafuzz:schema:evals:history-automatic-publication-plan:1" as const;
+export const EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_ID =
+  "urn:ultrafuzz:schema:evals:history-publication-generation:1" as const;
 export const EVAL_HISTORY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:history:2" as const;
 export const EVAL_INSTANCE_CLUSTERS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:instance-clusters:1" as const;
 export const EVAL_GROUND_TRUTH_CREDITS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:ground-truth-credits:1" as const;
@@ -116,6 +120,16 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
     typescriptExport: "evalHistoryJsonSchema",
     zodParser: "evalHistoryZodSchema",
     semanticGates: ["eval-history-integrity"]
+  },
+  "eval-history-automatic-publication-plan.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalHistoryAutomaticPublicationPlanJsonSchema",
+    semanticGates: ["eval-history-automatic-publication-plan-integrity"]
+  },
+  "eval-history-publication-generation.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalHistoryPublicationGenerationJsonSchema",
+    semanticGates: ["eval-history-publication-generation-integrity"]
   },
   "eval-matrix.schema.json": {
     role: "runtime-state",
@@ -243,6 +257,12 @@ export const evalBenchmarkProvenanceJsonSchema = loadSchemaDocument("benchmark-p
 export const evalBenchmarkSourceManifestJsonSchema = loadSchemaDocument("benchmark-source-manifest.schema.json");
 export const evalFindingScoreJsonSchema = loadSchemaDocument("eval-finding-score.schema.json");
 export const evalGroundTruthJsonSchema = loadSchemaDocument("eval-ground-truth.schema.json");
+export const evalHistoryAutomaticPublicationPlanJsonSchema = loadSchemaDocument(
+  "eval-history-automatic-publication-plan.schema.json"
+);
+export const evalHistoryPublicationGenerationJsonSchema = loadSchemaDocument(
+  "eval-history-publication-generation.schema.json"
+);
 export const evalHistoryJsonSchema = loadSchemaDocument("eval-history.schema.json");
 export const evalFindingManifestJsonSchema = loadSchemaDocument("finding-manifest.schema.json");
 export const evalGroundTruthCreditsJsonSchema = loadSchemaDocument("ground-truth-credits.schema.json");
@@ -271,6 +291,8 @@ export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalCommonJsonSchema,
   evalFindingScoreJsonSchema,
   evalGroundTruthJsonSchema,
+  evalHistoryAutomaticPublicationPlanJsonSchema,
+  evalHistoryPublicationGenerationJsonSchema,
   evalHistoryJsonSchema,
   evalFindingManifestJsonSchema,
   evalGroundTruthCreditsJsonSchema,
@@ -300,6 +322,8 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "eval-common.schema.json": evalCommonJsonSchema,
   "eval-finding-score.schema.json": evalFindingScoreJsonSchema,
   "eval-ground-truth.schema.json": evalGroundTruthJsonSchema,
+  "eval-history-automatic-publication-plan.schema.json": evalHistoryAutomaticPublicationPlanJsonSchema,
+  "eval-history-publication-generation.schema.json": evalHistoryPublicationGenerationJsonSchema,
   "eval-history.schema.json": evalHistoryJsonSchema,
   "eval-matrix.schema.json": evalMatrixJsonSchema,
   "eval-public-diagnostics.schema.json": evalPublicDiagnosticsJsonSchema,

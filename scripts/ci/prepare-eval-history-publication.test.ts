@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION,
   automaticProducerPolicyDimensions,
+  automaticPublicationPlanRows,
   assertPublicBenchmarkBundleMatrixScope,
   readAutomaticPublicationManifest,
   summarizePublicBenchmarkBundlePublication,
@@ -30,6 +32,50 @@ afterEach(() => {
 });
 
 describe("trusted automatic eval-history publication handoff", () => {
+  it("strictly reads the exact automatic publication plan before emitting workflow rows", () => {
+    const root = temporaryRoot("ultrafuzz-publication-plan-");
+    const planPath = path.join(root, "plan.json");
+    const pair = smokeManifest().pairs[0]!;
+    const sourceArtifact = `${context.repository}/actions/runs/${context.producerRunId}`;
+    const plan = {
+      schema_version: AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION,
+      candidate_commit: context.candidateCommit,
+      candidate_repository_url: context.repository,
+      source_artifact: sourceArtifact,
+      producer_run_id: context.producerRunId,
+      producer_run_attempt: context.producerRunAttempt,
+      mode: context.mode,
+      benchmark: "ultrafuzz-bench",
+      pairs: [
+        {
+          pair: pair.pair,
+          provider: pair.provider,
+          model_slug: pair.model_slug,
+          bundle_path: `${pair.pair}/${pair.model_slug}/public-results.json`,
+          unpack_path: pair.pair,
+          eval_run_id: "eval-run-1",
+          benchmark: "ultrafuzz-bench",
+          lane: "smoke",
+          status: "succeeded",
+          target_ids: smokeTargets().map((target) => target.id),
+          executed_case_count: 3,
+          graded_case_count: 3,
+          publication_url: `${sourceArtifact}/artifacts`
+        }
+      ]
+    };
+    fs.writeFileSync(planPath, `${JSON.stringify(plan)}\n`, "utf8");
+    expect(automaticPublicationPlanRows(planPath)).toBe(
+      `${pair.pair}/${pair.model_slug}/public-results.json\t${pair.pair}\teval-run-1\tultrafuzz-bench\tsmoke\t${pair.model_slug}\n`
+    );
+
+    const duplicatePath = path.join(root, "duplicate-plan.json");
+    const serialized = JSON.stringify(plan);
+    const field = `"schema_version":"${AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION}"`;
+    fs.writeFileSync(duplicatePath, `${serialized.replace(field, `${field},"schema_version":"shadow"`)}\n`);
+    expect(() => automaticPublicationPlanRows(duplicatePath)).toThrow(/duplicate property/u);
+  });
+
   it("accepts only the exact event-bound smoke manifest", () => {
     const manifest = smokeManifest();
     expect(validateAutomaticPublicationManifest(manifest, smokeContext())).toBe(manifest);

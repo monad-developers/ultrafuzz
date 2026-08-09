@@ -3,15 +3,25 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import ts from "typescript";
 
 import { readRegularFileSnapshot } from "../../packages/artifacts/dist/index.js";
+import {
+  EVAL_HISTORY_AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION,
+  EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION,
+  assertEvalHistoryPublicationHandoff,
+  parseEvalHistoryAutomaticPublicationPlan,
+  parseEvalHistoryPublicationGeneration,
+  readEvalHistoryAutomaticPublicationPlan,
+  readEvalHistoryPublicationGeneration
+} from "../../packages/evals/dist/index.js";
 import { MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID } from "../../packages/modal/dist/modal-contracts.js";
 import { assertModalDocumentValue, parseModalDocumentBytes } from "../../packages/modal/dist/modal-documents.js";
 
-export const AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION = "ultrafuzz.eval-history-automatic-publication-plan.v1";
+export const AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION = EVAL_HISTORY_AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION;
 
-const GENERATION_SCHEMA_VERSION = "ultrafuzz.eval-history-publication-generation.v1";
+const GENERATION_SCHEMA_VERSION = EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_CONFIG_BYTES = 1024 * 1024;
 const MAX_POLICY_BYTES = 16 * 1024 * 1024;
@@ -314,9 +324,27 @@ export async function prepareAutomaticPublication(input) {
     benchmark: context.benchmark,
     pairs
   };
-  writeJsonExclusive(input.generationPath, generation, "publication generation");
-  writeJsonExclusive(input.planPath, plan, "automatic publication plan");
-  return { generation, plan };
+  const validatedGeneration = parseEvalHistoryPublicationGeneration(generation);
+  const validatedPlan = parseEvalHistoryAutomaticPublicationPlan(plan);
+  assertEvalHistoryPublicationHandoff(validatedPlan, validatedGeneration);
+  writeJsonExclusive(input.generationPath, validatedGeneration, "publication generation");
+  writeJsonExclusive(input.planPath, validatedPlan, "automatic publication plan");
+  if (!isDeepStrictEqual(readEvalHistoryPublicationGeneration(input.generationPath), validatedGeneration)) {
+    throw new Error("persisted publication generation does not equal its validated source document");
+  }
+  if (!isDeepStrictEqual(readEvalHistoryAutomaticPublicationPlan(input.planPath), validatedPlan)) {
+    throw new Error("persisted automatic publication plan does not equal its validated source document");
+  }
+  return { generation: validatedGeneration, plan: validatedPlan };
+}
+
+export function automaticPublicationPlanRows(filePath) {
+  const plan = readEvalHistoryAutomaticPublicationPlan(filePath);
+  return `${plan.pairs
+    .map((pair) =>
+      [pair.bundle_path, pair.unpack_path, pair.eval_run_id, pair.benchmark, pair.lane, pair.model_slug].join("\t")
+    )
+    .join("\n")}\n`;
 }
 
 function publicationExpectations(input) {
@@ -1194,6 +1222,14 @@ function gitOutput(cwd, args) {
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
+  if (command === "plan-rows") {
+    const [planPath, ...extra] = args;
+    if (planPath === undefined || extra.length > 0) {
+      throw new Error("usage: prepare-eval-history-publication.mjs plan-rows <publication-plan.json>");
+    }
+    process.stdout.write(automaticPublicationPlanRows(planPath));
+    return;
+  }
   if (command === "policy") {
     const [policyRoot, candidateCommit, benchmark, ...extra] = args;
     if (policyRoot === undefined || candidateCommit === undefined || benchmark === undefined || extra.length > 0) {
