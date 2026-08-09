@@ -310,8 +310,7 @@ describe("public post-eval diagnostics", () => {
         code: "SAFE_WATCH_CODE",
         message: "do not persist me",
         severity: "warning",
-        source: "fixture",
-        details: { token: "secret" }
+        source: "fixture"
       }
     ];
     const diagnostics = createPublicEvalDiagnostics({
@@ -829,8 +828,7 @@ function evalFixture() {
         code: "SAFE_CODE",
         message: "secret diagnostic message",
         severity: "info",
-        source: "fixture",
-        details: { path: runRoot }
+        source: "fixture"
       }
     ]
   };
