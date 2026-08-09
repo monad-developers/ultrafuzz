@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- The Aave v4 private benchmark ground truth now binds its 12 scored labels to the exact ScFuzzBench fork and immutable revision that contains the injected harness, and regression coverage pins the R60 invariant-only target, exclusions, loop count, timeouts, and concurrency ceiling (#453; related to #404).
+- The Aave v4 private benchmark ground truth now binds its 12 scored labels to the exact ScFuzzBench fork and immutable revision that contains the injected harness, with regression coverage against the checked-in document (#453; related to #404).
 - Retry artifact cleanup now preserves only legacy prompts directly owned by the task artifact root, so sealed snapshot prompts remain outside cleanup; evidence paths with homogeneous comma-, semicolon-, or `and`-separated line/range lists, singleton `line_ranges`, and numeric ranges followed by colon or semicolon prose normalize into safe scalar or typed disjoint metadata while preserving independent detail; and Modal launch-state inspection resolves states that carry image IDs through the persisted immutable ID rather than a mutable published name (#416, #443, #444, #449, #450, #451, #452, #455).
 - Detached Smithers engines now replace controller-owned execution-snapshot paths with process-owned descriptor paths before admission, so later renders cannot follow a closed or reused `/proc/<pid>/fd/<n>` after the submitting controller exits (#413).
 - Workflow submissions and lifecycle inspections now execute from a sealed, content-addressed snapshot of workflow controls and their dependency closure, with immutable generation binding and controller-only capabilities withheld from model subprocesses (#165, #413).
