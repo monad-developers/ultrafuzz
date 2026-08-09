@@ -9776,8 +9776,28 @@ test("syncRun starts artifact grace from the refreshed post-inspection clock", a
   );
 });
 
-test("syncRun fails closed for semantically invalid persisted artifact grace", async () => {
-  const variants: Array<{ label: string; mutate: (grace: Record<string, unknown>) => void }> = [
+test("syncRun fails closed without repairing invalid persisted artifact grace", async () => {
+  const variants: Array<{
+    label: string;
+    replacement?: unknown;
+    mutate?: (grace: Record<string, unknown>) => void;
+  }> = [
+    {
+      label: "non-object",
+      replacement: "corrupt"
+    },
+    {
+      label: "wrong-version",
+      mutate: (grace) => {
+        grace.schema_version = "ultrafuzz.artifact-reconciliation-grace.v0";
+      }
+    },
+    {
+      label: "missing-field",
+      mutate: (grace) => {
+        delete grace.attempts;
+      }
+    },
     {
       label: "oversized-deadline",
       mutate: (grace) => {
@@ -9836,9 +9856,15 @@ test("syncRun fails closed for semantically invalid persisted artifact grace", a
     assert.equal(pending.value?.status, "running");
     const statePath = path.join(run.value!.run_root, "state.json");
     const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
-      nodes: Record<string, { provenance: { artifact_reconciliation_grace: Record<string, unknown> } }>;
+      nodes: Record<string, { provenance: Record<string, unknown> }>;
     };
-    variant.mutate(state.nodes["project-discovery"]!.provenance.artifact_reconciliation_grace);
+    const provenance = state.nodes["project-discovery"]!.provenance;
+    if (variant.replacement !== undefined) {
+      provenance.artifact_reconciliation_grace = variant.replacement;
+    } else {
+      variant.mutate!(provenance.artifact_reconciliation_grace as Record<string, unknown>);
+    }
+    const invalidGrace = structuredClone(provenance.artifact_reconciliation_grace);
     fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
 
     const rejected = await syncRun(
@@ -9846,10 +9872,34 @@ test("syncRun fails closed for semantically invalid persisted artifact grace", a
       { now: () => now + ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS }
     );
     assert.equal(rejected.value?.status, "failed", variant.label);
-    assert.ok(rejected.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_MISSING"));
+    const invalidDiagnostic = rejected.diagnostics.find(
+      (diagnostic) => diagnostic.code === "ARTIFACT_RECONCILIATION_GRACE_INVALID"
+    );
+    assert.ok(invalidDiagnostic, variant.label);
+    assert.equal(
+      invalidDiagnostic.path,
+      "state.nodes.project-discovery.provenance.artifact_reconciliation_grace",
+      variant.label
+    );
+    assert.match(invalidDiagnostic.message, /will not synthesize or repair reconciliation history/u, variant.label);
+    assert.match(invalidDiagnostic.message, /start a new run with a new run ID/u, variant.label);
+    assert.equal(
+      rejected.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_MISSING"),
+      false,
+      variant.label
+    );
     assert.equal(
       rejected.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_GRACE_PENDING"),
-      false
+      false,
+      variant.label
+    );
+    const rejectedState = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+      nodes: Record<string, { provenance: Record<string, unknown> }>;
+    };
+    assert.deepEqual(
+      rejectedState.nodes["project-discovery"]!.provenance.artifact_reconciliation_grace,
+      invalidGrace,
+      `${variant.label}: persisted grace must not be converted`
     );
   }
 });

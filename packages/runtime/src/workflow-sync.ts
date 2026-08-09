@@ -306,6 +306,11 @@ interface ArtifactReconciliationGrace {
   missing_count: number;
 }
 
+type ArtifactReconciliationGraceRead =
+  | { status: "absent" }
+  | { status: "valid"; value: ArtifactReconciliationGrace }
+  | { status: "invalid"; issues: string[] };
+
 const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
   "succeeded",
   "failed",
@@ -2035,11 +2040,27 @@ async function synchronizeTasks(input: {
 function artifactReconciliationGrace(
   previous: NodeState | undefined,
   nowMs: number
-): ArtifactReconciliationGrace | undefined {
-  const provenance = previous?.provenance as Record<string, unknown> | undefined;
-  const stored = recordField(provenance, "artifact_reconciliation_grace");
-  if (stored === undefined) {
-    return undefined;
+): ArtifactReconciliationGraceRead {
+  const storedValue = previous?.provenance?.artifact_reconciliation_grace;
+  if (storedValue === undefined) {
+    return { status: "absent" };
+  }
+  if (!isRecord(storedValue)) {
+    return { status: "invalid", issues: ["artifact_reconciliation_grace must be an object"] };
+  }
+  const stored = storedValue;
+  const issues: string[] = [];
+  const expectedFields = new Set([
+    "schema_version",
+    "started_at",
+    "deadline_at",
+    "attempts",
+    "last_attempt_at",
+    "missing_count"
+  ]);
+  const unexpectedFields = Object.keys(stored).filter((field) => !expectedFields.has(field));
+  if (unexpectedFields.length > 0) {
+    issues.push(`unexpected properties: ${unexpectedFields.sort().join(", ")}`);
   }
   const startedAt = stringField(stored, "started_at");
   const deadlineAt = stringField(stored, "deadline_at");
@@ -2049,46 +2070,73 @@ function artifactReconciliationGrace(
   const startedAtMs = startedAt === undefined ? Number.NaN : Date.parse(startedAt);
   const deadlineAtMs = deadlineAt === undefined ? Number.NaN : Date.parse(deadlineAt);
   const lastAttemptAtMs = lastAttemptAt === undefined ? Number.NaN : Date.parse(lastAttemptAt);
+  if (stored.schema_version !== "ultrafuzz.artifact-reconciliation-grace.v1") {
+    issues.push('schema_version must equal "ultrafuzz.artifact-reconciliation-grace.v1"');
+  }
+  if (startedAt === undefined || !Number.isFinite(startedAtMs)) {
+    issues.push("started_at must be a valid timestamp");
+  }
+  if (deadlineAt === undefined || !Number.isFinite(deadlineAtMs)) {
+    issues.push("deadline_at must be a valid timestamp");
+  }
+  if (lastAttemptAt === undefined || !Number.isFinite(lastAttemptAtMs)) {
+    issues.push("last_attempt_at must be a valid timestamp");
+  }
+  if (!Number.isFinite(nowMs)) {
+    issues.push("the synchronization clock must be finite");
+  }
+  if (Number.isFinite(startedAtMs) && startedAtMs > nowMs + ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS) {
+    issues.push("started_at is later than the permitted clock-skew window");
+  }
+  if (Number.isFinite(lastAttemptAtMs) && lastAttemptAtMs > nowMs + ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS) {
+    issues.push("last_attempt_at is later than the permitted clock-skew window");
+  }
   if (
-    stored.schema_version !== "ultrafuzz.artifact-reconciliation-grace.v1" ||
-    startedAt === undefined ||
-    deadlineAt === undefined ||
-    lastAttemptAt === undefined ||
+    Number.isFinite(deadlineAtMs) &&
+    deadlineAtMs > nowMs + ARTIFACT_RECONCILIATION_GRACE_MS + ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS
+  ) {
+    issues.push("deadline_at is later than the permitted reconciliation window");
+  }
+  if (Number.isFinite(startedAtMs) && Number.isFinite(deadlineAtMs) && deadlineAtMs < startedAtMs) {
+    issues.push("deadline_at must not precede started_at");
+  }
+  if (
+    Number.isFinite(startedAtMs) &&
+    Number.isFinite(deadlineAtMs) &&
+    deadlineAtMs > startedAtMs + ARTIFACT_RECONCILIATION_GRACE_MS
+  ) {
+    issues.push("deadline_at exceeds the maximum reconciliation grace");
+  }
+  if (Number.isFinite(startedAtMs) && Number.isFinite(lastAttemptAtMs) && lastAttemptAtMs < startedAtMs) {
+    issues.push("last_attempt_at must not precede started_at");
+  }
+  if (Number.isFinite(lastAttemptAtMs) && Number.isFinite(deadlineAtMs) && lastAttemptAtMs > deadlineAtMs) {
+    issues.push("last_attempt_at must not follow deadline_at");
+  }
+  if (
     attempts === undefined ||
-    missingCount === undefined ||
-    !Number.isFinite(startedAtMs) ||
-    !Number.isFinite(deadlineAtMs) ||
-    !Number.isFinite(lastAttemptAtMs) ||
-    !Number.isFinite(nowMs) ||
-    startedAtMs > nowMs + ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS ||
-    lastAttemptAtMs > nowMs + ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS ||
-    deadlineAtMs > nowMs + ARTIFACT_RECONCILIATION_GRACE_MS + ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS ||
-    deadlineAtMs < startedAtMs ||
-    deadlineAtMs > startedAtMs + ARTIFACT_RECONCILIATION_GRACE_MS ||
-    lastAttemptAtMs < startedAtMs ||
-    lastAttemptAtMs > deadlineAtMs ||
     !Number.isInteger(attempts) ||
     attempts < 1 ||
-    attempts > ARTIFACT_RECONCILIATION_MAX_ATTEMPTS ||
-    !Number.isInteger(missingCount) ||
-    missingCount < 0
+    attempts > ARTIFACT_RECONCILIATION_MAX_ATTEMPTS
   ) {
-    return {
-      schema_version: "ultrafuzz.artifact-reconciliation-grace.v1",
-      started_at: new Date(0).toISOString(),
-      deadline_at: new Date(0).toISOString(),
-      attempts: ARTIFACT_RECONCILIATION_MAX_ATTEMPTS,
-      last_attempt_at: new Date(0).toISOString(),
-      missing_count: Math.max(0, missingCount ?? 0)
-    };
+    issues.push(`attempts must be an integer from 1 through ${ARTIFACT_RECONCILIATION_MAX_ATTEMPTS}`);
+  }
+  if (missingCount === undefined || !Number.isInteger(missingCount) || missingCount < 0) {
+    issues.push("missing_count must be a non-negative integer");
+  }
+  if (issues.length > 0) {
+    return { status: "invalid", issues };
   }
   return {
-    schema_version: "ultrafuzz.artifact-reconciliation-grace.v1",
-    started_at: startedAt,
-    deadline_at: deadlineAt,
-    attempts: Math.trunc(attempts),
-    last_attempt_at: lastAttemptAt,
-    missing_count: Math.trunc(missingCount)
+    status: "valid",
+    value: {
+      schema_version: "ultrafuzz.artifact-reconciliation-grace.v1",
+      started_at: startedAt!,
+      deadline_at: deadlineAt!,
+      attempts: attempts!,
+      last_attempt_at: lastAttemptAt!,
+      missing_count: missingCount!
+    }
   };
 }
 
@@ -2200,8 +2248,36 @@ async function finalizeTerminalTask(input: {
   const diagnostics: RuntimeDiagnostic[] = [];
   const events: PendingNodeEvent[] = [];
   assertSynchronizationBudget(input.control);
+  const previousGraceRead = artifactReconciliationGrace(input.previous, input.nowMs);
+  if (previousGraceRead.status === "invalid") {
+    const diagnostic: RuntimeDiagnostic = {
+      code: "ARTIFACT_RECONCILIATION_GRACE_INVALID",
+      message: `persisted artifact reconciliation grace for ${input.task.attemptId} is invalid: ${previousGraceRead.issues.join("; ")}. Ultrafuzz will not synthesize or repair reconciliation history; preserve this run's artifacts and start a new run with a new run ID`,
+      severity: "error",
+      source: "artifact-reconciliation",
+      path: `state.nodes.${input.task.attemptId}.provenance.artifact_reconciliation_grace`,
+      details: {
+        expected_schema_version: "ultrafuzz.artifact-reconciliation-grace.v1",
+        issues: previousGraceRead.issues
+      }
+    };
+    return {
+      status: "failed",
+      diagnostics: [diagnostic],
+      lastError: diagnostic.message,
+      provenance: {
+        failure: {
+          category: "artifact-contract",
+          causal_task_id: input.task.verifierSmithersNodeId,
+          causal_failure_category: "artifact-contract",
+          dependent_task_ids: []
+        }
+      },
+      events
+    };
+  }
+  const previousGrace = previousGraceRead.status === "valid" ? previousGraceRead.value : undefined;
   const artifactDir = getNodeArtifactDir(input.layout, input.task.attemptId, { create: true });
-  const previousGrace = artifactReconciliationGrace(input.previous, input.nowMs);
   const shouldReconcile = artifactReconciliationAttemptDue(previousGrace, input.nowMs);
   let reconciledArtifacts: string[] = [];
   let reconciliationError: RuntimeDiagnostic | undefined;
