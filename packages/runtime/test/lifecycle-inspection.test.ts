@@ -4,7 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { artifactSchemaBundleDigest, artifactSchemaRegistry, VALIDATOR_BUILD_IDENTITY } from "@ultrafuzz/artifacts";
+import {
+  artifactSchemaBundleDigest,
+  artifactSchemaRegistry,
+  ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+  VALIDATOR_BUILD_IDENTITY
+} from "@ultrafuzz/artifacts";
 
 import {
   cancelRun,
@@ -38,16 +43,22 @@ function fakeUltrafuzzCliEntrypoint(project: string): string {
   const findings = artifactSchemaRegistry().find((entry) => entry.filename === "findings.schema.json");
   assert.ok(findings);
   const preflightResponse = {
+    schema_version: "ultrafuzz.cli.result.v2",
+    command: "json validate",
     ok: true,
+    diagnostics: [],
     data: {
       status: "valid",
+      diagnostics: [],
       schema: {
         id: findings.id,
         sha256: findings.sha256,
         bundle_sha256: artifactSchemaBundleDigest(),
         validator_build: VALIDATOR_BUILD_IDENTITY,
         registered: true
-      }
+      },
+      artifact_sha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+      truncated: false
     }
   };
   fs.writeFileSync(entrypoint, `process.stdout.write(${JSON.stringify(JSON.stringify(preflightResponse))});\n`, "utf8");

@@ -4,7 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { artifactSchemaDirectory, DEFAULT_MAX_JSON_INSTANCE_BYTES } from "@ultrafuzz/artifacts";
+import {
+  artifactSchemaDirectory,
+  artifactValidatorSmokeFixturePath,
+  DEFAULT_MAX_JSON_INSTANCE_BYTES,
+  parseJsonValidatorPreflightSuccessEnvelope
+} from "@ultrafuzz/artifacts";
 import {
   RESOLVED_CONFIG_JSON_SCHEMA_ID,
   configSchemaBundleDigest,
@@ -72,6 +77,57 @@ test("json validate classifies invalid invocations as setup failures", async () 
   assert.equal(envelope.ok, false);
   assert.equal(envelope.data, null);
   assert.equal(envelope.diagnostics[0]?.code, "CLI_OCLIF_ERROR");
+});
+
+test("json validate emits the exact shared preflight success envelope", async () => {
+  const captureResult = await capture([
+    "json",
+    "validate",
+    "--schema",
+    path.join(artifactSchemaDirectory(), "findings.schema.json"),
+    "--file",
+    artifactValidatorSmokeFixturePath(),
+    "--json"
+  ]);
+
+  assert.equal(captureResult.code, 0);
+  assert.equal(captureResult.stderr, "");
+  assert.doesNotThrow(() => parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(captureResult.stdout, "utf8")));
+});
+
+test("json validate shared success envelope admits an unregistered schema with a null ID", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-external-success-"));
+  try {
+    const schema = path.join(temporary, "external.schema.json");
+    const artifact = path.join(temporary, "artifact.json");
+    fs.writeFileSync(
+      schema,
+      `${JSON.stringify({
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        additionalProperties: false,
+        required: ["value"],
+        properties: { value: { type: "string" } }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(artifact, '{"value":"valid"}\n', "utf8");
+
+    const captureResult = await capture(["json", "validate", "--schema", schema, "--file", artifact, "--json"]);
+    assert.equal(captureResult.code, 0, captureResult.stderr);
+    const envelope = JSON.parse(captureResult.stdout) as {
+      ok: boolean;
+      data: { status: string; schema: { id: string | null; registered: boolean } };
+    };
+    assert.equal(envelope.ok, true);
+    assert.equal(envelope.data.status, "valid");
+    assert.deepEqual(
+      { id: envelope.data.schema.id, registered: envelope.data.schema.registered },
+      { id: null, registered: false }
+    );
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
 });
 
 test("json validate exposes the strict validator through the primary CLI", async () => {

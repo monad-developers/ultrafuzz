@@ -1077,6 +1077,8 @@ test("generated Smithers restores sealed submodules before inputs and verifies t
 
 test("generated Smithers workflow binds every planned output to the preflighted schema bundle before agent work", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const artifactsImportStart = source.indexOf("const {");
+  const artifactsImportEnd = source.indexOf("} = await import(artifactsModule);", artifactsImportStart);
   const preparationStart = source.indexOf("function prepareArtifactMirror");
   const bindingStart = source.indexOf("function assertTaskOutputSchemaBindings", preparationStart);
   const preflightStart = source.indexOf("function preflightJsonValidator", bindingStart);
@@ -1084,6 +1086,7 @@ test("generated Smithers workflow binds every planned output to the preflighted 
   const binding = source.slice(bindingStart, preflightStart);
 
   assert.ok(preparationStart >= 0, source);
+  assert.ok(artifactsImportStart >= 0 && artifactsImportEnd > artifactsImportStart, source);
   assert.ok(bindingStart > preparationStart, source);
   assert.ok(preflightStart > bindingStart, source);
   assert.ok(
@@ -1095,10 +1098,11 @@ test("generated Smithers workflow binds every planned output to the preflighted 
   for (const field of ["schemaFile", "schemaId", "schemaSha256", "schemaBundleSha256", "validatorBuild"]) {
     assert.match(binding, new RegExp(`output\\.${field}`, "u"));
   }
-  assert.match(source, /parsed = parseStrictJsonBytes\(Buffer\.from\(stdout, "utf8"\)\)/u);
+  assert.match(source.slice(artifactsImportStart, artifactsImportEnd), /parseJsonValidatorPreflightSuccessEnvelope/u);
+  assert.match(source, /parseJsonValidatorPreflightSuccessEnvelope\(Buffer\.from\(stdout, "utf8"\)\)/u);
   assert.doesNotMatch(
     source.slice(preflightStart, source.indexOf("function taskPublishesWorkspacePatch")),
-    /JSON\.parse/u
+    /JSON\.parse|parseStrictJsonBytes|\bok\??:|\bstatus\??:|registered !== true/u
   );
 });
 

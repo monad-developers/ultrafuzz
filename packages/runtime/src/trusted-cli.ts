@@ -10,6 +10,7 @@ import {
   artifactValidatorSmokeFixturePath,
   assertNoSymlinkComponents,
   ensureSafeDirectory,
+  parseJsonValidatorPreflightSuccessEnvelope,
   parseStrictJsonBytes,
   TRUSTED_CLI_METADATA_SCHEMA_VERSION,
   VALIDATOR_BUILD_IDENTITY,
@@ -125,30 +126,7 @@ export function runTrustedJsonValidatorPreflight(input: { layout: RunLayout; tru
       windowsHide: true
     }
   );
-  const parsed = parseStrictJsonBytes(Buffer.from(stdout, "utf8")) as {
-    ok?: unknown;
-    data?: {
-      status?: unknown;
-      schema?: {
-        id?: unknown;
-        sha256?: unknown;
-        bundle_sha256?: unknown;
-        validator_build?: unknown;
-        registered?: unknown;
-      };
-    };
-  };
-  if (
-    parsed.ok !== true ||
-    parsed.data?.status !== "valid" ||
-    parsed.data.schema?.registered !== true ||
-    parsed.data.schema.id !== findings.id ||
-    parsed.data.schema.sha256 !== findings.sha256 ||
-    parsed.data.schema.bundle_sha256 !== artifactSchemaBundleDigest() ||
-    parsed.data.schema.validator_build !== VALIDATOR_BUILD_IDENTITY
-  ) {
-    throw new Error("trusted Ultrafuzz CLI validator preflight returned a mismatched build or schema identity");
-  }
+  parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(stdout, "utf8"));
   assertTrustedCliLauncher({ layout: input.layout, launcherPath: input.trusted.launcherPath });
 }
 

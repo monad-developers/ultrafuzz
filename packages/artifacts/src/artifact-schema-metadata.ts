@@ -220,6 +220,9 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "invariant-suite-tombstone-uniqueness",
     "invariant-suite-file-tombstone-disjointness"
   ]),
+  "json-validator-preflight-success.schema.json": runtime("jsonValidatorPreflightSuccessJsonSchema", undefined, [
+    "json-validator-preflight-current-identity"
+  ]),
   "node-attempt-ledger.schema.json": runtime("nodeAttemptLedgerJsonSchema", "nodeAttemptLedgerEntrySchema", [
     "attempt-failure-message-byte-length",
     "attempt-reuse-source-link",

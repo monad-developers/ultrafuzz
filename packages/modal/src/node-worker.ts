@@ -7,15 +7,14 @@ import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
 import {
-  artifactSchemaBundleDigest,
   artifactSchemaDirectory,
   artifactSchemaRegistry,
   artifactValidatorSmokeFixturePath,
   assertArtifactVerificationMarkerSemantics,
+  parseJsonValidatorPreflightSuccessEnvelope,
   parseStrictJsonBytes,
   validateArtifactVerificationMarker,
-  type ArtifactVerificationMarker,
-  VALIDATOR_BUILD_IDENTITY
+  type ArtifactVerificationMarker
 } from "@ultrafuzz/artifacts";
 
 import {
@@ -215,34 +214,10 @@ export function preflightModalJsonValidator(cliPath = "/usr/local/bin/ultrafuzz"
       }
     );
   }
-  let parsed: {
-    ok?: unknown;
-    data?: {
-      status?: unknown;
-      schema?: {
-        id?: unknown;
-        sha256?: unknown;
-        bundle_sha256?: unknown;
-        validator_build?: unknown;
-        registered?: unknown;
-      };
-    };
-  };
   try {
-    parsed = parseStrictJsonBytes(Buffer.from(stdout, "utf8")) as typeof parsed;
+    parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(stdout, "utf8"));
   } catch (error) {
-    throw new Error("Modal JSON validator preflight returned invalid strict JSON", { cause: error });
-  }
-  if (
-    parsed.ok !== true ||
-    parsed.data?.status !== "valid" ||
-    parsed.data.schema?.registered !== true ||
-    parsed.data.schema.id !== findings.id ||
-    parsed.data.schema.sha256 !== findings.sha256 ||
-    parsed.data.schema.bundle_sha256 !== artifactSchemaBundleDigest() ||
-    parsed.data.schema.validator_build !== VALIDATOR_BUILD_IDENTITY
-  ) {
-    throw new Error("Modal JSON validator preflight returned a mismatched build or schema identity");
+    throw new Error("Modal JSON validator preflight returned an invalid success envelope", { cause: error });
   }
 }
 

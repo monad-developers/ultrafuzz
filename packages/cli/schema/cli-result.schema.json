@@ -1119,12 +1119,12 @@
         }
       }
     },
-    "jsonValidationData": {
+    "jsonValidationFailureData": {
       "type": "object",
       "additionalProperties": false,
       "required": ["status", "diagnostics", "schema", "artifact_sha256", "truncated"],
       "properties": {
-        "status": { "enum": ["instance-error", "setup-error", "valid"] },
+        "status": { "enum": ["instance-error", "setup-error"] },
         "diagnostics": {
           "type": "array",
           "items": {
@@ -1144,16 +1144,7 @@
           "oneOf": [
             { "type": "null" },
             {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["id", "sha256", "bundle_sha256", "validator_build", "registered"],
-              "properties": {
-                "id": { "type": ["string", "null"] },
-                "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-                "bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-                "validator_build": { "type": "string" },
-                "registered": { "type": "boolean" }
-              }
+              "$ref": "urn:ultrafuzz:schema:artifacts:json-validator-preflight-success:1#/$defs/validationSchemaIdentity"
             }
           ]
         },
@@ -1761,8 +1752,16 @@
     "commandTemplate-json-validate": {
       "if": { "type": "object", "properties": { "command": { "const": "json validate" } }, "required": ["command"] },
       "then": {
-        "type": "object",
-        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/jsonValidationData" }] } }
+        "if": { "type": "object", "properties": { "ok": { "const": true } }, "required": ["ok"] },
+        "then": {
+          "$ref": "urn:ultrafuzz:schema:artifacts:json-validator-preflight-success:1#/$defs/validationSuccessEnvelope"
+        },
+        "else": {
+          "type": "object",
+          "properties": {
+            "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/jsonValidationFailureData" }] }
+          }
+        }
       }
     },
     "commandTemplate-eval-plan": {

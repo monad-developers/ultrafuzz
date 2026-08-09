@@ -6,12 +6,13 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import * as ts from "typescript";
 
 import {
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
+  ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
   createEventRecord,
   layoutForRunRoot,
   replayEvents,
@@ -68,25 +69,38 @@ function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
 }
 
-function fakeUltrafuzzCliEntrypoint(project: string): string {
-  const entrypoint = path.join(project, "fake-ultrafuzz-cli.mjs");
-  if (fs.existsSync(entrypoint)) return entrypoint;
+function validatorPreflightResponse(): Record<string, unknown> {
   const findings = artifactSchemaRegistry().find((entry) => entry.filename === "findings.schema.json");
   assert.ok(findings);
-  const preflightResponse = {
+  return {
+    schema_version: "ultrafuzz.cli.result.v2",
+    command: "json validate",
     ok: true,
+    diagnostics: [],
     data: {
       status: "valid",
+      diagnostics: [],
       schema: {
         id: findings.id,
         sha256: findings.sha256,
         bundle_sha256: artifactSchemaBundleDigest(),
         validator_build: VALIDATOR_BUILD_IDENTITY,
         registered: true
-      }
+      },
+      artifact_sha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+      truncated: false
     }
   };
-  fs.writeFileSync(entrypoint, `process.stdout.write(${JSON.stringify(JSON.stringify(preflightResponse))});\n`, "utf8");
+}
+
+function fakeUltrafuzzCliEntrypoint(project: string): string {
+  const entrypoint = path.join(project, "fake-ultrafuzz-cli.mjs");
+  if (fs.existsSync(entrypoint)) return entrypoint;
+  fs.writeFileSync(
+    entrypoint,
+    `process.stdout.write(${JSON.stringify(JSON.stringify(validatorPreflightResponse()))});\n`,
+    "utf8"
+  );
   fs.chmodSync(entrypoint, 0o500);
   return entrypoint;
 }
@@ -5858,6 +5872,28 @@ test("startRun submits the exact sealed redacted workflow input bytes", async ()
   const inputArgumentIndex = submissionEvidence.command?.indexOf("--input") ?? -1;
   assert.equal(submissionEvidence.command?.[inputArgumentIndex + 1], "<redacted>");
   assert.doesNotMatch(JSON.stringify(submissionEvidence), /sk-(?:operator|nested|success)/);
+});
+
+test("sealed workflow artifacts module stages and exports the exact validator preflight parser", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sealed-validator-preflight-parser";
+  const run = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+
+  const sealedArtifactsDist = path.join(evidence.executionSnapshot.root, "modules", "@ultrafuzz", "artifacts", "dist");
+  assert.match(
+    fs.readFileSync(path.join(sealedArtifactsDist, "index.js"), "utf8"),
+    /export \* from "\.\/json-validator-preflight\.js";/u
+  );
+  assert.deepEqual(
+    fs.readFileSync(path.join(sealedArtifactsDist, "json-validator-preflight.js")),
+    fs.readFileSync(fileURLToPath(new URL("../../../artifacts/dist/json-validator-preflight.js", import.meta.url)))
+  );
 });
 
 test("snapshot recovery removes a nested read-only stale current-generation publication before retry", async () => {
