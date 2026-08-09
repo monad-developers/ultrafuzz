@@ -54,6 +54,7 @@ export const IMPLEMENTED_MODAL_SEMANTIC_GATES = Object.freeze([
   "modal-launch-active-recovery-uniqueness",
   "modal-node-checkpoint-index-sequence",
   "modal-pinned-source-ref-object-lineage",
+  "modal-pinned-source-submodule-lineage",
   "modal-recovery-lifecycle-parent-order",
   "modal-recovery-lifecycle-timestamp-order",
   "modal-recovery-lifecycle-summary-reconciliation",
@@ -122,7 +123,10 @@ export const MODAL_SEMANTIC_GATES_BY_SCHEMA_ID = Object.freeze({
     "modal-execution-dependency-canonical-order",
     "modal-execution-dependency-smithers-executable"
   ],
-  [MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID]: ["modal-pinned-source-ref-object-lineage"],
+  [MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID]: [
+    "modal-pinned-source-ref-object-lineage",
+    "modal-pinned-source-submodule-lineage"
+  ],
   [MODAL_SMOKE_CHECKPOINT_SCHEMA_ID]: [],
   [MODAL_SMOKE_COMPLETION_SCHEMA_ID]: [],
   [MODAL_SMOKE_RESULT_SCHEMA_ID]: ["modal-smoke-status-check-reconciliation"]
@@ -711,6 +715,52 @@ function assertPinnedSourceProofSemantics(proof: StrictModalPinnedSourceProofDoc
   if (!baseRefPresent) {
     fail("modal-pinned-source-ref-object-lineage", "pinned source base ref is absent");
   }
+  const submodules = proof.submodules;
+  if (submodules === null) return;
+  const gate = "modal-pinned-source-submodule-lineage";
+  if (submodules.source_commit !== proof.commit || submodules.source_tree !== proof.tree) {
+    fail(gate, "pinned submodule source identity differs from the pinned source proof");
+  }
+  const roots = submodules.top_level_roots;
+  const gitlinkPaths = submodules.recursive_gitlinks.map((entry) => entry.path);
+  for (const value of [...roots, ...gitlinkPaths]) assertModalPinnedSubmodulePath(value);
+  if (!isStrictlyOrderedUniqueStrings(roots)) fail(gate, "pinned submodule roots are not unique and ordered");
+  if (!isStrictlyOrderedUniqueStrings(gitlinkPaths)) {
+    fail(gate, "pinned submodule gitlinks are not unique and path-ordered");
+  }
+  if (submodules.file_count > submodules.entry_count) {
+    fail(gate, "pinned submodule file count exceeds its entry count");
+  }
+  for (const [index, root] of roots.entries()) {
+    if (!gitlinkPaths.includes(root)) fail(gate, `pinned submodule root is not a gitlink: ${root}`);
+    if (roots.some((candidate, candidateIndex) => candidateIndex !== index && root.startsWith(`${candidate}/`))) {
+      fail(gate, `pinned submodule roots overlap at ${root}`);
+    }
+  }
+}
+
+function assertModalPinnedSubmodulePath(value: string): void {
+  const gate = "modal-pinned-source-submodule-lineage";
+  const segments = value.split("/");
+  if (
+    value.includes("\\") ||
+    path.posix.isAbsolute(value) ||
+    path.posix.normalize(value) !== value ||
+    Buffer.byteLength(value, "utf8") > 4_096 ||
+    segments.length > 128 ||
+    segments.some(
+      (segment) =>
+        segment.length === 0 || segment === "." || segment === ".." || segment === ".git" || /^[A-Za-z]:/u.test(segment)
+    )
+  ) {
+    fail(gate, `pinned submodule path is not portable and bounded: ${value}`);
+  }
+}
+
+function isStrictlyOrderedUniqueStrings(values: readonly string[]): boolean {
+  return (
+    new Set(values).size === values.length && values.every((value, index) => index === 0 || values[index - 1]! < value)
+  );
 }
 
 function assertSmokeResultSemantics(result: StrictModalSmokeResultDocument): void {

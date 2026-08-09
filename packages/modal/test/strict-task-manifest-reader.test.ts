@@ -43,15 +43,15 @@ it("classifies only a current strict task manifest joined to its planned graph",
   const currentTasks = fs.readFileSync(fixture.tasksPath, "utf8");
   fs.writeFileSync(
     fixture.tasksPath,
-    currentTasks.replace("ultrafuzz.smithers.workflow.v2", "ultrafuzz.smithers.workflow.v1")
+    currentTasks.replace("ultrafuzz.smithers.workflow.v3", "ultrafuzz.smithers.workflow.v2")
   );
   expect(inspectTerminalDispositionAtRunRoot(fixture.runRoot).kind).toBe("operational-failure");
 
   fs.writeFileSync(
     fixture.tasksPath,
     currentTasks.replace(
-      '"schema_version":"ultrafuzz.smithers.workflow.v2"',
-      '"schema_version":"ultrafuzz.smithers.workflow.v2","schema_version":"ultrafuzz.smithers.workflow.v2"'
+      '"schema_version":"ultrafuzz.smithers.workflow.v3"',
+      '"schema_version":"ultrafuzz.smithers.workflow.v3","schema_version":"ultrafuzz.smithers.workflow.v3"'
     )
   );
   expect(inspectTerminalDispositionAtRunRoot(fixture.runRoot).kind).toBe("operational-failure");

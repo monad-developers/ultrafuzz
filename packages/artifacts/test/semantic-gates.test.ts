@@ -79,6 +79,18 @@ const smithersIdentityTask = {
   }
 };
 
+const pinnedSubmoduleExpectation = {
+  schema_version: "ultrafuzz.pinned-submodules-expectation.v1",
+  source_commit: "a".repeat(40),
+  source_tree: "b".repeat(40),
+  manifest_sha256: "c".repeat(64),
+  top_level_roots: ["vendor/dependency"],
+  recursive_gitlinks: [{ path: "vendor/dependency", commit: "d".repeat(40), tree: "e".repeat(40) }],
+  entry_count: 1,
+  file_count: 0,
+  total_file_bytes: 0
+};
+
 const fixtures = {
   "admin-config-surface-id-uniqueness": {
     positive: { surfaces: [{ surface_id: "a" }] },
@@ -91,6 +103,14 @@ const fixtures = {
   "agent-source-proof-ref-uniqueness": {
     positive: { refs: [{ name: "refs/heads/a" }] },
     negative: { refs: [{ name: "refs/heads/a" }, { name: "refs/heads/a" }] }
+  },
+  "agent-source-proof-dependency-lineage": {
+    positive: { commit: "a".repeat(40), tree: "b".repeat(40), dependencies: pinnedSubmoduleExpectation },
+    negative: {
+      commit: "a".repeat(40),
+      tree: "b".repeat(40),
+      dependencies: { ...pinnedSubmoduleExpectation, source_commit: "f".repeat(40) }
+    }
   },
   "aggregation-count-coupling": {
     positive: { copied_generated_tests: 1, copied_support_files: 1, files: [{}], support_files: [{}] },
@@ -539,6 +559,10 @@ const fixtures = {
       workflow_name: "workflow-a",
       tasks: [{ ...smithersIdentityTask, smithersNodeId: "node:wrong" }]
     }
+  },
+  "smithers-task-pinned-submodule-expectation": {
+    positive: { pinned_submodules: pinnedSubmoduleExpectation, tasks: [{ execution: { mode: "local" } }] },
+    negative: { pinned_submodules: pinnedSubmoduleExpectation, tasks: [{ execution: { mode: "cloud" } }] }
   },
   "smithers-task-dependency-join": {
     positive: {

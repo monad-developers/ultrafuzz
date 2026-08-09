@@ -27,6 +27,8 @@ test("runtime audit schemas are closed, registered, and enforce exact current ve
       "invariant-suite-handoff.schema.json",
       "invariant-workspace-snapshot.schema.json",
       "materialize-audit.schema.json",
+      "pinned-submodule-expectation.schema.json",
+      "pinned-submodule-snapshot.schema.json",
       "smithers-reset-node.schema.json",
       "smithers-submission.schema.json",
       "workflow-control-integrity.schema.json",

@@ -46,7 +46,7 @@ function loadGeneratedWorkflowInputSchema(): { safeParse(value: unknown): { succ
 test("generated workflow input is an exact current-only envelope with bounded JSON operator data", () => {
   const inputSchema = loadGeneratedWorkflowInputSchema();
   const local = {
-    schema_version: "ultrafuzz.smithers.workflow.v2",
+    schema_version: "ultrafuzz.smithers.workflow.v3",
     run_id: "run-1",
     tasks: [{ id: "node:one", prompt_path: ".ultrafuzz/prompts/one.md" }],
     operator_prompt: "focus",
@@ -1030,6 +1030,45 @@ test("generated Smithers workflow prepares output directories without creating a
   assert.match(source, /dependsOn=\{\[task\.preparationId\]\}/u);
 });
 
+test("generated Smithers restores sealed submodules before inputs and verifies them only in the finalizer", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const preparationStart = source.indexOf("function prepareArtifactMirror");
+  const preparationEnd = source.indexOf("\n\nfunction preservePinnedSourceProof", preparationStart);
+  const agentStart = source.indexOf("function artifactAwareAgent");
+  const agentEnd = source.indexOf("function resetTaskArtifactsForRetry", agentStart);
+  const finalizerStart = source.indexOf("function finalizeAndVerifyArtifacts");
+  const finalizerEnd = source.indexOf("\n\nfunction verifyArtifacts", finalizerStart);
+  assert.ok(preparationStart >= 0, source);
+  assert.ok(preparationEnd > preparationStart, source);
+  assert.ok(agentStart >= 0, source);
+  assert.ok(agentEnd > agentStart, source);
+  assert.ok(finalizerStart >= 0, source);
+  assert.ok(finalizerEnd > finalizerStart, source);
+
+  const preparation = source.slice(preparationStart, preparationEnd);
+  const agent = source.slice(agentStart, agentEnd);
+  const finalizer = source.slice(finalizerStart, finalizerEnd);
+  assert.match(preparation, /options\.pinnedSubmodules === "verify"/u);
+  assert.match(preparation, /verifyPinnedSubmodulesFromExecutionSnapshot\(/u);
+  assert.match(preparation, /hydratePinnedSubmodulesFromExecutionSnapshot\(/u);
+  assert.match(preparation, /expectation: task\.pinnedSubmodules \?\? undefined/u);
+  assert.ok(
+    preparation.indexOf("hydratePinnedSubmodulesFromExecutionSnapshot") <
+      preparation.indexOf("assertTaskInputs(task, workspaceRoot)"),
+    preparation
+  );
+  assert.ok(
+    preparation.indexOf("verifyPinnedSubmodulesFromExecutionSnapshot") <
+      preparation.indexOf("preservePinnedSourceProof(task)"),
+    preparation
+  );
+  assert.doesNotMatch(
+    agent,
+    /hydratePinnedSubmodulesFromExecutionSnapshot|verifyPinnedSubmodulesFromExecutionSnapshot/u
+  );
+  assert.match(finalizer, /prepareArtifactMirror\(task, \{[\s\S]*?pinnedSubmodules: "verify"[\s\S]*?\}\);/u);
+});
+
 test("generated Smithers workflow binds every planned output to the preflighted schema bundle before agent work", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const preparationStart = source.indexOf("function prepareArtifactMirror");
@@ -1320,7 +1359,8 @@ test("generated Smithers worktrees fail closed on any source other than the pinn
   assert.match(source, /"source-proofs"/u);
   assert.match(source, /path\.resolve\(process\.cwd\(\), task\.metadata\.artifacts\.dir, "\.\.", "\.\."\)/u);
   assert.doesNotMatch(source.slice(proofStart, proofEnd), /task\.runRoot/u);
-  assert.match(source, /ultrafuzz\.agent-source-proof\.v1/u);
+  assert.match(source, /ultrafuzz\.agent-source-proof\.v2/u);
+  assert.match(source.slice(proofStart, proofEnd), /dependencies: pinnedDependencies/u);
 });
 
 test("generated Smithers pinned source proof counts hidden unreachable commits without batch object output", () => {
@@ -1399,7 +1439,13 @@ test("generated Smithers pinned source proof rejects any previously published by
     git(["branch", "ultrafuzz/test-run/actors-flows", pinnedCommit]);
 
     preservePinnedSourceProof(task);
-    const canonicalProof = JSON.parse(fs.readFileSync(proofPath, "utf8")) as { refs: unknown[] };
+    const canonicalProof = JSON.parse(fs.readFileSync(proofPath, "utf8")) as {
+      schema_version: unknown;
+      refs: unknown[];
+      dependencies: unknown;
+    };
+    assert.equal(canonicalProof.schema_version, "ultrafuzz.agent-source-proof.v2");
+    assert.equal(canonicalProof.dependencies, null);
     assert.deepEqual(canonicalProof.refs, [{ name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit }]);
 
     fs.writeFileSync(proofPath, JSON.stringify(canonicalProof));
@@ -2638,7 +2684,7 @@ test("generated Smithers preserves setup-patch baselines across post-agent prepa
   assert.ok(verifierStart > finalizerStart, source);
   assert.match(
     source.slice(finalizerStart, verifierStart),
-    /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, evidenceMode: "require" \}\);/u
+    /prepareArtifactMirror\(task, \{[\s\S]*?replayWorkspacePatches: false,[\s\S]*?evidenceMode: "require",[\s\S]*?pinnedSubmodules: "verify"[\s\S]*?\}\);/u
   );
 });
 

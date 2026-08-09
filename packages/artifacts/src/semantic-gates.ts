@@ -1160,6 +1160,43 @@ function smithersDocumentIdentityIssues(document: unknown): SemanticGateIssue[] 
   return issues;
 }
 
+function smithersPinnedSubmoduleIssues(document: unknown): SemanticGateIssue[] {
+  const expectation = at(document, ["pinned_submodules"]);
+  if (expectation === null || !isRecord(expectation)) return [];
+  const issues: SemanticGateIssue[] = [];
+  const roots = stringArray(at(expectation, ["top_level_roots"]));
+  const gitlinks = arrayAt(expectation, ["recursive_gitlinks"]);
+  const gitlinkPaths = gitlinks.flatMap((entry) => stringField(entry, "path") ?? []);
+  issues.push(...pinnedSubmodulePortablePathIssues(expectation, "$.pinned_submodules"));
+  const canonical = (values: readonly string[]): boolean =>
+    new Set(values).size === values.length && values.every((value, index) => index === 0 || values[index - 1]! < value);
+  if (!canonical(roots)) {
+    issues.push(issue("$.pinned_submodules.top_level_roots", "Pinned submodule roots must be unique and ordered"));
+  }
+  if (!canonical(gitlinkPaths)) {
+    issues.push(
+      issue("$.pinned_submodules.recursive_gitlinks", "Pinned submodule gitlinks must be unique and path-ordered")
+    );
+  }
+  for (const [index, root] of roots.entries()) {
+    if (!gitlinkPaths.includes(root)) {
+      issues.push(issue(`$.pinned_submodules.top_level_roots[${index}]`, "Pinned submodule root is not a gitlink"));
+    }
+    if (roots.some((candidate, candidateIndex) => candidateIndex !== index && root.startsWith(`${candidate}/`))) {
+      issues.push(issue(`$.pinned_submodules.top_level_roots[${index}]`, "Pinned submodule roots overlap"));
+    }
+  }
+  const entryCount = numberField(expectation, "entry_count");
+  const fileCount = numberField(expectation, "file_count");
+  if (entryCount !== undefined && fileCount !== undefined && fileCount > entryCount) {
+    issues.push(issue("$.pinned_submodules.file_count", "Pinned submodule file count exceeds entry count"));
+  }
+  if (!smithersTasks(document).some((task) => stringField(at(task, ["execution"]), "mode") === "local")) {
+    issues.push(issue("$.pinned_submodules", "Pinned submodule expectation has no local task consumer"));
+  }
+  return issues;
+}
+
 function smithersDependencyJoinIssues(document: unknown): SemanticGateIssue[] {
   const tasks = smithersTasks(document);
   const byAttempt = new Map(
@@ -1516,6 +1553,78 @@ function agentSourceProofGitIssues(document: unknown, context: SemanticGateConte
     }
   }
   return issues;
+}
+
+function agentSourceProofDependencyIssues(document: unknown): SemanticGateIssue[] {
+  const dependencies = at(document, ["dependencies"]);
+  if (dependencies === null || !isRecord(dependencies)) return [];
+  const issues: SemanticGateIssue[] = [];
+  issues.push(...pinnedSubmodulePortablePathIssues(dependencies, "$.dependencies"));
+  if (
+    stringField(dependencies, "source_commit") !== stringField(document, "commit") ||
+    stringField(dependencies, "source_tree") !== stringField(document, "tree")
+  ) {
+    issues.push(issue("$.dependencies", "Pinned dependency source identity does not match the source proof"));
+  }
+  const roots = stringArray(at(dependencies, ["top_level_roots"]));
+  const gitlinks = arrayAt(dependencies, ["recursive_gitlinks"]);
+  const gitlinkPaths = gitlinks.flatMap((entry) => {
+    const entryPath = stringField(entry, "path");
+    return entryPath === undefined ? [] : [entryPath];
+  });
+  const canonical = (values: readonly string[]): boolean =>
+    new Set(values).size === values.length && values.every((value, index) => index === 0 || values[index - 1]! < value);
+  if (!canonical(roots)) {
+    issues.push(issue("$.dependencies.top_level_roots", "Pinned dependency roots must be unique and ordered"));
+  }
+  if (!canonical(gitlinkPaths)) {
+    issues.push(issue("$.dependencies.recursive_gitlinks", "Pinned dependency gitlinks must be unique and ordered"));
+  }
+  for (const [index, root] of roots.entries()) {
+    if (!gitlinkPaths.includes(root)) {
+      issues.push(issue(`$.dependencies.top_level_roots[${index}]`, "Pinned dependency root is not a gitlink"));
+    }
+    if (roots.some((candidate, candidateIndex) => candidateIndex !== index && root.startsWith(`${candidate}/`))) {
+      issues.push(issue(`$.dependencies.top_level_roots[${index}]`, "Pinned dependency roots overlap"));
+    }
+  }
+  const entryCount = numberField(dependencies, "entry_count");
+  const fileCount = numberField(dependencies, "file_count");
+  if (entryCount !== undefined && fileCount !== undefined && fileCount > entryCount) {
+    issues.push(issue("$.dependencies.file_count", "Pinned dependency file count exceeds entry count"));
+  }
+  return issues;
+}
+
+function pinnedSubmodulePortablePathIssues(expectation: unknown, basePath: string): SemanticGateIssue[] {
+  const candidates = [
+    ...stringArray(at(expectation, ["top_level_roots"])).map((value, index) => ({
+      value,
+      path: `${basePath}.top_level_roots[${index}]`
+    })),
+    ...arrayAt(expectation, ["recursive_gitlinks"]).flatMap((entry, index) => {
+      const value = stringField(entry, "path");
+      return value === undefined ? [] : [{ value, path: `${basePath}.recursive_gitlinks[${index}].path` }];
+    })
+  ];
+  return candidates.flatMap(({ value, path: issuePath }) => {
+    const segments = value.split("/");
+    return value.includes("\\") ||
+      path.posix.isAbsolute(value) ||
+      path.posix.normalize(value) !== value ||
+      Buffer.byteLength(value, "utf8") > 4_096 ||
+      segments.length > 128 ||
+      segments.some(
+        (segment) =>
+          segment.length === 0 ||
+          segment === "." ||
+          segment === ".." ||
+          segment === ".git" ||
+          /^[A-Za-z]:/u.test(segment)
+      )
+      ? [issue(issuePath, "Pinned submodule path is not portable and bounded")]
+      : [];
+  });
 }
 
 function invariantSourceProofGitIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
@@ -1911,6 +2020,7 @@ const gateSpecifications = {
     ["git.commit", "git.tree", "git.refs"],
     agentSourceProofGitIssues
   ),
+  "agent-source-proof-dependency-lineage": documentGate(agentSourceProofDependencyIssues),
   "agent-source-proof-ref-uniqueness": documentGate(uniqueFieldGate([["refs"]], "name", "source proof ref name")),
   "aggregation-count-coupling": documentGate(aggregationCountIssues),
   "aggregation-destination-path-uniqueness": documentGate(aggregationDestinationIssues),
@@ -2191,6 +2301,7 @@ const gateSpecifications = {
   "smithers-task-attempt-id-uniqueness": documentGate(uniqueFieldGate([["tasks"]], "attemptId", "Smithers attempt ID")),
   "smithers-task-workflow-id-uniqueness": documentGate(smithersWorkflowIdentityIssues),
   "smithers-task-document-identity": documentGate(smithersDocumentIdentityIssues),
+  "smithers-task-pinned-submodule-expectation": documentGate(smithersPinnedSubmoduleIssues),
   "smithers-task-dependency-join": documentGate(smithersDependencyJoinIssues),
   "smithers-task-dependency-acyclicity": documentGate(smithersDependencyAcyclicityIssues),
   "smithers-task-planned-graph-coverage": contextualGate(

@@ -17,6 +17,10 @@ export const CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID =
   "urn:ultrafuzz:schema:runtime:cloud-execution-generation:1" as const;
 export const SMITHERS_SUBMISSION_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:smithers-submission:1" as const;
 export const SMITHERS_RESET_NODE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:smithers-reset-node:1" as const;
+export const PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:runtime:pinned-submodule-snapshot:2" as const;
+export const PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:runtime:pinned-submodule-expectation:1" as const;
 
 export const WORKSPACE_PATCH_BASELINE_SCHEMA_VERSION = "ultrafuzz.workspace-patch-baseline.v1" as const;
 export const WORKSPACE_PATCH_PREPARATION_SCHEMA_VERSION = "ultrafuzz.workspace-patch-preparation.v1" as const;
@@ -29,12 +33,16 @@ export const WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-run-
 export const CLOUD_EXECUTION_GENERATION_SCHEMA_VERSION = "ultrafuzz.cloud.execution-generation.v1" as const;
 export const SMITHERS_SUBMISSION_SCHEMA_VERSION = "ultrafuzz.smithers.submission.v1" as const;
 export const SMITHERS_RESET_NODE_SCHEMA_VERSION = "ultrafuzz.smithers.reset-node.v1" as const;
+export const PINNED_SUBMODULE_SNAPSHOT_SCHEMA_VERSION = "ultrafuzz.pinned-submodules.v2" as const;
+export const PINNED_SUBMODULE_EXPECTATION_SCHEMA_VERSION = "ultrafuzz.pinned-submodules-expectation.v1" as const;
 
 export const RUNTIME_DOCUMENT_SCHEMA_IDS = Object.freeze([
   CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
   INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
   INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
   INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
+  PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID,
+  PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID,
   SMITHERS_RESET_NODE_JSON_SCHEMA_ID,
   SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
   WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
@@ -206,6 +214,56 @@ export interface SmithersResetNodeDocument {
   applied_at: string;
 }
 
+export interface PinnedSubmoduleGitlinkDocument {
+  path: string;
+  commit: string;
+  tree: string;
+}
+
+export interface PinnedSubmoduleDirectoryEntryDocument {
+  path: string;
+  type: "directory";
+  mode: 493;
+}
+
+export interface PinnedSubmoduleFileEntryDocument {
+  path: string;
+  type: "file";
+  mode: 420 | 493;
+  size_bytes: number;
+  sha256: string;
+}
+
+export interface PinnedSubmoduleSymlinkEntryDocument {
+  path: string;
+  type: "symlink";
+  target: string;
+}
+
+export type PinnedSubmoduleSnapshotEntryDocument =
+  PinnedSubmoduleDirectoryEntryDocument | PinnedSubmoduleFileEntryDocument | PinnedSubmoduleSymlinkEntryDocument;
+
+export interface PinnedSubmoduleSnapshotDocument {
+  schema_version: typeof PINNED_SUBMODULE_SNAPSHOT_SCHEMA_VERSION;
+  source_commit: string;
+  source_tree: string;
+  top_level_roots: string[];
+  recursive_gitlinks: PinnedSubmoduleGitlinkDocument[];
+  entries: PinnedSubmoduleSnapshotEntryDocument[];
+}
+
+export interface PinnedSubmoduleExpectationDocument {
+  schema_version: typeof PINNED_SUBMODULE_EXPECTATION_SCHEMA_VERSION;
+  source_commit: string;
+  source_tree: string;
+  manifest_sha256: string;
+  top_level_roots: string[];
+  recursive_gitlinks: PinnedSubmoduleGitlinkDocument[];
+  entry_count: number;
+  file_count: number;
+  total_file_bytes: number;
+}
+
 export interface RuntimeDocumentBySchemaId {
   [WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID]: WorkspacePatchBaselineDocument;
   [WORKSPACE_PATCH_PREPARATION_JSON_SCHEMA_ID]: WorkspacePatchPreparationDocument;
@@ -218,6 +276,8 @@ export interface RuntimeDocumentBySchemaId {
   [CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID]: CloudExecutionGenerationDocument;
   [SMITHERS_SUBMISSION_JSON_SCHEMA_ID]: SmithersSubmissionDocument;
   [SMITHERS_RESET_NODE_JSON_SCHEMA_ID]: SmithersResetNodeDocument;
+  [PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID]: PinnedSubmoduleSnapshotDocument;
+  [PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID]: PinnedSubmoduleExpectationDocument;
 }
 
 export type RuntimeDocumentForSchemaId<SchemaId extends RuntimeDocumentSchemaId> = RuntimeDocumentBySchemaId[SchemaId];

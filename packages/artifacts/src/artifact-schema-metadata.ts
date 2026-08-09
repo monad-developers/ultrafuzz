@@ -48,6 +48,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
   ),
   "agent-source-proof.schema.json": runtime("agentSourceProofJsonSchema", undefined, [
     "agent-source-proof-ref-uniqueness",
+    "agent-source-proof-dependency-lineage",
     "agent-source-proof-commit-binding"
   ]),
   "aggregation-manifest.schema.json": artifact(
@@ -321,6 +322,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "smithers-task-attempt-id-uniqueness",
     "smithers-task-workflow-id-uniqueness",
     "smithers-task-document-identity",
+    "smithers-task-pinned-submodule-expectation",
     "smithers-task-dependency-join",
     "smithers-task-dependency-acyclicity",
     "smithers-task-planned-graph-coverage",

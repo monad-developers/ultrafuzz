@@ -4330,12 +4330,12 @@ test("plan applies smoke eval model profiles to a normally initialized target", 
 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const executable = plan.value!.graph.nodes.filter((node) => node.kind === "agentic");
-  assert.equal(executable.length, 7);
+  assert.equal(executable.length, 8);
   const strategies = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "benchmark");
   const coordination = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "smoke-coordination");
   assert.equal(strategies.length, 4);
   assert.ok(strategies.every((node) => node.model_fanout[0]?.reasoning_effort === "high"));
-  assert.equal(coordination.length, 3);
+  assert.equal(coordination.length, 4);
   assert.ok(coordination.every((node) => node.model_fanout[0]?.reasoning_effort === "medium"));
 });
 
@@ -4555,6 +4555,8 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   assert.equal(parseResolvedConfigJsonBytes(resolvedConfigBytes).schemaVersion, "ultrafuzz.config.v2");
 
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  assert.equal(compiled.pinnedSubmodules, undefined);
+  assert.match(workflowSource, /"pinnedSubmodules": null/u);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
   assert.match(workflowSource, /const taskOutput = z\.strictObject\(\{/);
   assert.match(workflowSource, /summary: z\.string\(\)\.min\(1\)/);
@@ -4566,8 +4568,10 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
 
   const smithersTasks = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as {
     layers?: unknown;
+    pinned_submodules?: unknown;
     tasks: Array<{ attemptId: string; dependencySmithersNodeIds: string[] }>;
   };
+  assert.equal(smithersTasks.pinned_submodules, null);
   assert.equal("layers" in smithersTasks, false);
   assert.equal(workflowSource.match(/"runtimeContext":/gu)?.length, smithersTasks.tasks.length);
   assert.deepEqual(
@@ -5136,6 +5140,10 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
     /materializeMissingMarkdownArtifacts|normalizeLegacyFinding|normalizeLegacyReportProvenance|normalizeLegacyGeneratedTest/u
   );
   assert.match(workflowSource, /function finalizeAndVerifyArtifacts/);
+  assert.match(
+    workflowSource,
+    /function finalizeAndVerifyArtifacts[\s\S]*?prepareArtifactMirror\(task, \{[\s\S]*?pinnedSubmodules: "verify"/u
+  );
   assert.match(workflowSource, /materializeGeneratedTestCompanions\(task, capturedOutputs\)/);
   assert.match(workflowSource, /INVARIANT_TEST_ROOT_NAMES\.flatMap\(\(testRoot\) => \[/);
   assert.match(workflowSource, /path\.resolve\(workspaceRoot, testRoot, "foundry", workspaceRelativePath\)/);

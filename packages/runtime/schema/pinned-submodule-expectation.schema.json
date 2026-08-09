@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:pinned-submodule-expectation:1",
+  "title": "Ultrafuzz pinned submodule execution expectation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_commit",
+    "source_tree",
+    "manifest_sha256",
+    "top_level_roots",
+    "recursive_gitlinks",
+    "entry_count",
+    "file_count",
+    "total_file_bytes"
+  ],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.pinned-submodules-expectation.v1" },
+    "source_commit": {
+      "$ref": "urn:ultrafuzz:schema:runtime:pinned-submodule-snapshot:2#/$defs/gitObjectId"
+    },
+    "source_tree": {
+      "$ref": "urn:ultrafuzz:schema:runtime:pinned-submodule-snapshot:2#/$defs/gitObjectId"
+    },
+    "manifest_sha256": {
+      "$ref": "urn:ultrafuzz:schema:runtime:pinned-submodule-snapshot:2#/$defs/sha256"
+    },
+    "top_level_roots": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100000,
+      "items": {
+        "$ref": "urn:ultrafuzz:schema:runtime:pinned-submodule-snapshot:2#/$defs/relativePath"
+      }
+    },
+    "recursive_gitlinks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100000,
+      "items": { "$ref": "urn:ultrafuzz:schema:runtime:pinned-submodule-snapshot:2#/$defs/gitlink" }
+    },
+    "entry_count": { "type": "integer", "minimum": 1, "maximum": 100000 },
+    "file_count": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "total_file_bytes": { "type": "integer", "minimum": 0, "maximum": 2147483648 }
+  }
+}

@@ -8,6 +8,8 @@ import {
   INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
   INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
   INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
+  PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID,
+  PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID,
   parseRuntimeDocumentBytes,
   RUNTIME_DOCUMENT_SCHEMA_IDS,
   runtimeSchemaRegistry,
@@ -86,6 +88,28 @@ test("runtime document semantic gates reject projected duplicates, noncanonical 
         "workspace snapshot"
       ),
     /invariant-workspace-snapshot-path-identity-and-budget/u
+  );
+
+  const pinnedSnapshot = fixture("pinned-submodule-snapshot.schema.json");
+  assert.throws(
+    () =>
+      assertRuntimeDocument(
+        PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID,
+        { ...pinnedSnapshot, top_level_roots: ["vendor/z", "vendor/a"] },
+        "pinned snapshot"
+      ),
+    /pinned-submodule-snapshot-closure-order-and-budget/u
+  );
+
+  const pinnedExpectation = fixture("pinned-submodule-expectation.schema.json");
+  assert.throws(
+    () =>
+      assertRuntimeDocument(
+        PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID,
+        { ...pinnedExpectation, file_count: 2, entry_count: 1 },
+        "pinned expectation"
+      ),
+    /pinned-submodule-expectation-order-and-accounting/u
   );
 
   const seal = fixture("workflow-control-integrity.schema.json");

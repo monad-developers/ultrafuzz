@@ -397,10 +397,11 @@ export function writeCurrentSmithersTaskFixture(runRoot: string, attemptId: stri
   fs.writeFileSync(
     path.join(runRoot, "smithers", "tasks.json"),
     `${JSON.stringify({
-      schema_version: "ultrafuzz.smithers.workflow.v2",
+      schema_version: "ultrafuzz.smithers.workflow.v3",
       run_id: "fixture-run",
       smithers_run_id: "workflow-one",
       workflow_name: "fixture-workflow",
+      pinned_submodules: null,
       tasks: taskSpecifications.map((task) => ({
         attemptId: task.id,
         concreteNodeId: task.id,

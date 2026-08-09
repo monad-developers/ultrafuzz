@@ -63,8 +63,10 @@ const {
   captureWorkspacePatch,
   captureWorkspaceTree,
   deriveWorkspacePatchGitFacts,
+  hydratePinnedSubmodulesFromExecutionSnapshot,
   projectCanonicalFinalReport,
   validateWorkspacePatchCapture,
+  verifyPinnedSubmodulesFromExecutionSnapshot,
   parseRuntimeDocumentBytes,
   serializeRuntimeDocument,
   CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
@@ -127,7 +129,7 @@ const operatorInputSchema = boundedJsonValueSchema(0).superRefine((value, ctx) =
 });
 
 const localWorkflowInputSchema = z.strictObject({
-  schema_version: z.literal("ultrafuzz.smithers.workflow.v2"),
+  schema_version: z.literal("ultrafuzz.smithers.workflow.v3"),
   run_id: z.literal(__ULTRAFUZZ_RUN_ID_LITERAL__),
   tasks: z.array(inputTaskSchema).max(MAX_WORKFLOW_INPUT_TASKS),
   operator_prompt: z.string().optional(),
@@ -830,11 +832,28 @@ function taskArtifactRoots(task: (typeof taskSpecs)[number], canonicalArtifactDi
 
 function prepareArtifactMirror(
   task: (typeof taskSpecs)[number],
-  options: { replayWorkspacePatches?: boolean; evidenceMode?: "create" | "require" } = {}
+  options: {
+    replayWorkspacePatches?: boolean;
+    evidenceMode?: "create" | "require";
+    pinnedSubmodules?: "restore" | "verify";
+  } = {}
 ): z.infer<typeof preparationOutput> {
   const evidenceMode = options.evidenceMode ?? "create";
-  preservePinnedSourceProof(task);
   const workspaceRoot = realpathSync(task.workspacePath);
+  if (options.pinnedSubmodules === "verify") {
+    verifyPinnedSubmodulesFromExecutionSnapshot({
+      executionSnapshotRoot: task.executionSnapshotRoot,
+      workspaceRoot,
+      expectation: task.pinnedSubmodules ?? undefined
+    });
+  } else {
+    hydratePinnedSubmodulesFromExecutionSnapshot({
+      executionSnapshotRoot: task.executionSnapshotRoot,
+      workspaceRoot,
+      expectation: task.pinnedSubmodules ?? undefined
+    });
+  }
+  preservePinnedSourceProof(task);
   const schemaDirectory = path.join(workspaceRoot, ".ultrafuzz", "schemas");
   materializePromptSchemas(schemaDirectory);
   assertTaskOutputSchemaBindings(task);
@@ -2351,6 +2370,7 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
   const unreachableCommitCount = Number(gitUnreachableCommitCount());
   const commitObjectCount = reachableCommitCount + unreachableCommitCount;
   const pinnedSourceRefPresent = refs.some((ref) => ref.name === pinnedSourceRef && ref.object === pinnedCommit);
+  const pinnedDependencies = task.pinnedSubmodules ?? null;
   if (
     !/^[0-9a-f]{40}$/u.test(commit) ||
     !/^[0-9a-f]{40}$/u.test(tree) ||
@@ -2384,7 +2404,7 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
   const proofPath = path.join(resolvedProofRoot, `${task.attemptId}.json`);
   const proofContents = `${JSON.stringify(
     {
-      schema_version: "ultrafuzz.agent-source-proof.v1",
+      schema_version: "ultrafuzz.agent-source-proof.v2",
       attempt_id: task.attemptId,
       commit,
       tree,
@@ -2392,7 +2412,8 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
       refs: [{ name: pinnedSourceRef, object: pinnedCommit }],
       remotes,
       revision_count: reachableCommitCount,
-      commit_object_count: commitObjectCount
+      commit_object_count: commitObjectCount,
+      dependencies: pinnedDependencies
     },
     null,
     2
@@ -4502,7 +4523,11 @@ function finalizeAndVerifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<t
   // artifacts and exact-byte companions may be materialized here. This task is
   // always configured with zero retries so a missing or malformed agent-owned
   // output is terminal and can never reopen or replay model work.
-  prepareArtifactMirror(task, { replayWorkspacePatches: false, evidenceMode: "require" });
+  prepareArtifactMirror(task, {
+    replayWorkspacePatches: false,
+    evidenceMode: "require",
+    pinnedSubmodules: "verify"
+  });
   clearArtifactVerificationMarker(task);
   materializeWorkspacePatch(task);
   const capturedOutputs = captureTaskOutputs(task);

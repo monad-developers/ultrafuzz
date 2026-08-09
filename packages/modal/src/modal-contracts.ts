@@ -15,7 +15,7 @@ export const MODAL_NODE_RESTORE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-res
 export const MODAL_NODE_WORKER_ERROR_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-worker-error:1" as const;
 export const MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID =
   "urn:ultrafuzz:schema:modal:execution-dependency-manifest:1" as const;
-export const MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID = "urn:ultrafuzz:schema:modal:pinned-source-proof:1" as const;
+export const MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID = "urn:ultrafuzz:schema:modal:pinned-source-proof:2" as const;
 export const MODAL_SMOKE_CHECKPOINT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:smoke-checkpoint:1" as const;
 export const MODAL_SMOKE_COMPLETION_SCHEMA_ID = "urn:ultrafuzz:schema:modal:smoke-completion:1" as const;
 export const MODAL_SMOKE_RESULT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:smoke-result:1" as const;
@@ -474,8 +474,21 @@ export interface StrictModalExecutionDependencyManifestDocument {
   smithers_bin: string;
 }
 
+export interface StrictModalPinnedSubmoduleExpectation {
+  manifest_location: "git-common-dir";
+  schema_version: "ultrafuzz.pinned-submodules-expectation.v1";
+  source_commit: string;
+  source_tree: string;
+  manifest_sha256: string;
+  top_level_roots: string[];
+  recursive_gitlinks: Array<{ path: string; commit: string; tree: string }>;
+  entry_count: number;
+  file_count: number;
+  total_file_bytes: number;
+}
+
 export interface StrictModalPinnedSourceProofDocument {
-  schema_version: "ultrafuzz.pinned-source-proof.v1";
+  schema_version: "ultrafuzz.pinned-source-proof.v2";
   commit: string;
   tree: string;
   base_ref: "refs/heads/ultrafuzz-pinned";
@@ -483,6 +496,7 @@ export interface StrictModalPinnedSourceProofDocument {
   remotes: [];
   revision_count: 1;
   commit_object_count: 1;
+  submodules: StrictModalPinnedSubmoduleExpectation | null;
 }
 
 export type StrictModalSmokeFailureStage =

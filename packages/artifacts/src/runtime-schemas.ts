@@ -6,16 +6,64 @@ import {
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 
 export const ARTIFACT_VERIFICATION_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:artifact-verification:2" as const;
-export const AGENT_SOURCE_PROOF_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:agent-source-proof:1" as const;
+export const AGENT_SOURCE_PROOF_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:agent-source-proof:2" as const;
 
 export const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v2" as const;
-export const AGENT_SOURCE_PROOF_SCHEMA_VERSION = "ultrafuzz.agent-source-proof.v1" as const;
+export const AGENT_SOURCE_PROOF_SCHEMA_VERSION = "ultrafuzz.agent-source-proof.v2" as const;
 
 const SHA256_PATTERN = "^[0-9a-f]{64}$";
 const GIT_OBJECT_PATTERN = "^[0-9a-f]{40}$";
 const SAFE_PATH_PATTERN = "^[A-Za-z0-9._-]{1,128}(?:/[A-Za-z0-9._-]{1,128})*$";
 const SCHEMA_FILE_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$";
 const VALIDATOR_BUILD_PATTERN = "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$";
+const PINNED_SUBMODULE_PATH_PATTERN =
+  "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))[^\\u0000-\\u001f\\u007f]+$";
+
+const pinnedSubmoduleExpectationJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "schema_version",
+    "source_commit",
+    "source_tree",
+    "manifest_sha256",
+    "top_level_roots",
+    "recursive_gitlinks",
+    "entry_count",
+    "file_count",
+    "total_file_bytes"
+  ],
+  properties: {
+    schema_version: { const: "ultrafuzz.pinned-submodules-expectation.v1" },
+    source_commit: { type: "string", pattern: GIT_OBJECT_PATTERN },
+    source_tree: { type: "string", pattern: GIT_OBJECT_PATTERN },
+    manifest_sha256: { type: "string", pattern: SHA256_PATTERN },
+    top_level_roots: {
+      type: "array",
+      minItems: 1,
+      maxItems: 100_000,
+      items: { type: "string", minLength: 1, maxLength: 4_096, pattern: PINNED_SUBMODULE_PATH_PATTERN }
+    },
+    recursive_gitlinks: {
+      type: "array",
+      minItems: 1,
+      maxItems: 100_000,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["path", "commit", "tree"],
+        properties: {
+          path: { type: "string", minLength: 1, maxLength: 4_096, pattern: PINNED_SUBMODULE_PATH_PATTERN },
+          commit: { type: "string", pattern: GIT_OBJECT_PATTERN },
+          tree: { type: "string", pattern: GIT_OBJECT_PATTERN }
+        }
+      }
+    },
+    entry_count: { type: "integer", minimum: 1, maximum: 100_000 },
+    file_count: { type: "integer", minimum: 0, maximum: 100_000 },
+    total_file_bytes: { type: "integer", minimum: 0, maximum: 2_147_483_648 }
+  }
+} as const;
 
 const schemaBindingFieldNames = [
   "schema_file",
@@ -107,7 +155,8 @@ export const agentSourceProofJsonSchema = {
     "refs",
     "remotes",
     "revision_count",
-    "commit_object_count"
+    "commit_object_count",
+    "dependencies"
   ],
   properties: {
     schema_version: { const: AGENT_SOURCE_PROOF_SCHEMA_VERSION },
@@ -130,7 +179,8 @@ export const agentSourceProofJsonSchema = {
     },
     remotes: { type: "array", maxItems: 0, items: { type: "string" } },
     revision_count: { const: 1 },
-    commit_object_count: { const: 1 }
+    commit_object_count: { const: 1 },
+    dependencies: { anyOf: [{ type: "null" }, pinnedSubmoduleExpectationJsonSchema] }
   }
 } as const;
 
@@ -144,6 +194,17 @@ export interface AgentSourceProof {
   remotes: [];
   revision_count: 1;
   commit_object_count: 1;
+  dependencies: {
+    schema_version: "ultrafuzz.pinned-submodules-expectation.v1";
+    source_commit: string;
+    source_tree: string;
+    manifest_sha256: string;
+    top_level_roots: string[];
+    recursive_gitlinks: Array<{ path: string; commit: string; tree: string }>;
+    entry_count: number;
+    file_count: number;
+    total_file_bytes: number;
+  } | null;
 }
 
 export interface ArtifactVerificationEntry {

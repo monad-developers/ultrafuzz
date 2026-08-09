@@ -46,6 +46,37 @@
       }
     ]
   },
+  "pinned-submodule-expectation.schema.json": {
+    "schema_version": "ultrafuzz.pinned-submodules-expectation.v1",
+    "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "manifest_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "top_level_roots": ["vendor/dependency"],
+    "recursive_gitlinks": [
+      {
+        "path": "vendor/dependency",
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "tree": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    ],
+    "entry_count": 1,
+    "file_count": 0,
+    "total_file_bytes": 0
+  },
+  "pinned-submodule-snapshot.schema.json": {
+    "schema_version": "ultrafuzz.pinned-submodules.v2",
+    "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "top_level_roots": ["vendor/dependency"],
+    "recursive_gitlinks": [
+      {
+        "path": "vendor/dependency",
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "tree": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    ],
+    "entries": [{ "path": "vendor/dependency", "type": "directory", "mode": 493 }]
+  },
   "smithers-reset-node.schema.json": {
     "schema_version": "ultrafuzz.smithers.reset-node.v1",
     "smithers_run_id": "ultrafuzz-example",

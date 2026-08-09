@@ -307,14 +307,15 @@ function contractFixtures(): ContractFixtures {
       smithers_bin: "bin/smithers"
     },
     [MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID]: {
-      schema_version: "ultrafuzz.pinned-source-proof.v1",
+      schema_version: "ultrafuzz.pinned-source-proof.v2",
       commit: gitA,
       tree: gitB,
       base_ref: "refs/heads/ultrafuzz-pinned",
       refs: [{ name: "refs/heads/ultrafuzz-pinned", object: gitA }],
       remotes: [],
       revision_count: 1,
-      commit_object_count: 1
+      commit_object_count: 1,
+      submodules: null
     },
     [MODAL_SMOKE_CHECKPOINT_SCHEMA_ID]: {
       schema_version: "ultrafuzz.modal.smoke-checkpoint.v1",
@@ -438,6 +439,48 @@ describe("Modal strict JSON contract foundation", () => {
               checkpoint_id: "0002-prepared"
             }
           ]
+        })
+      )
+    ).toThrow(ModalDocumentValidationError);
+
+    const pinnedProof = {
+      ...fixtures[MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID],
+      submodules: {
+        manifest_location: "git-common-dir" as const,
+        schema_version: "ultrafuzz.pinned-submodules-expectation.v1" as const,
+        source_commit: gitA,
+        source_tree: gitB,
+        manifest_sha256: shaA,
+        top_level_roots: ["vendor/dependency"],
+        recursive_gitlinks: [{ path: "vendor/dependency", commit: gitA, tree: gitB }],
+        entry_count: 1,
+        file_count: 0,
+        total_file_bytes: 0
+      }
+    };
+    expect(parseModalDocumentBytes(MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID, bytes(pinnedProof)).value).toEqual(pinnedProof);
+    expect(() =>
+      parseModalDocumentBytes(
+        MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
+        bytes({
+          ...pinnedProof,
+          submodules: { ...pinnedProof.submodules, source_commit: gitB }
+        })
+      )
+    ).toThrow(ModalDocumentValidationError);
+    expect(() =>
+      parseModalDocumentBytes(
+        MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
+        bytes({
+          ...pinnedProof,
+          submodules: {
+            ...pinnedProof.submodules,
+            top_level_roots: ["vendor", "vendor/dependency"],
+            recursive_gitlinks: [
+              { path: "vendor", commit: gitA, tree: gitB },
+              { path: "vendor/dependency", commit: gitA, tree: gitB }
+            ]
+          }
         })
       )
     ).toThrow(ModalDocumentValidationError);

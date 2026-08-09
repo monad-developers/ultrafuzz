@@ -7,9 +7,9 @@ import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from ".
 import type { PlannedGraphDocument, PlannedGraphNodeDocument, PlannedGraphOutput } from "./planned-graph.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
-export const SMITHERS_TASK_MANIFEST_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v2" as const;
+export const SMITHERS_TASK_MANIFEST_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v3" as const;
 export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v2" as const;
-export const SMITHERS_TASK_MANIFEST_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:smithers-task-manifest:2" as const;
+export const SMITHERS_TASK_MANIFEST_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:smithers-task-manifest:3" as const;
 
 const MAX_SMITHERS_TASK_MANIFEST_BYTES = 64 * 1024 * 1024;
 const MAX_SMITHERS_TASKS = 100_000;
@@ -22,6 +22,7 @@ const SCHEMA_FILE_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$";
 const VALIDATOR_BUILD_PATTERN = "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$";
 const NON_NUL_STRING_PATTERN = "^[^\\u0000]+$";
 const ENVIRONMENT_VARIABLE_PATTERN = "^[A-Za-z_][A-Za-z0-9_]{0,127}$";
+const GIT_OBJECT_PATTERN = "^[0-9a-f]{40}$";
 const SCHEMA_BINDING_FIELDS = [
   "schemaFile",
   "schemaId",
@@ -42,6 +43,62 @@ const safePathValueJsonSchema = {
   minLength: 1,
   maxLength: 4_096,
   pattern: NON_NUL_STRING_PATTERN
+} as const;
+
+const pinnedSubmodulePathJsonSchema = {
+  type: "string",
+  minLength: 1,
+  maxLength: 4_096,
+  pattern:
+    "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))[^\\u0000-\\u001f\\u007f]+$"
+} as const;
+
+const pinnedSubmoduleGitlinkJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["path", "commit", "tree"],
+  properties: {
+    path: pinnedSubmodulePathJsonSchema,
+    commit: { type: "string", pattern: GIT_OBJECT_PATTERN },
+    tree: { type: "string", pattern: GIT_OBJECT_PATTERN }
+  }
+} as const;
+
+const pinnedSubmoduleExpectationJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "schema_version",
+    "source_commit",
+    "source_tree",
+    "manifest_sha256",
+    "top_level_roots",
+    "recursive_gitlinks",
+    "entry_count",
+    "file_count",
+    "total_file_bytes"
+  ],
+  properties: {
+    schema_version: { const: "ultrafuzz.pinned-submodules-expectation.v1" },
+    source_commit: { type: "string", pattern: GIT_OBJECT_PATTERN },
+    source_tree: { type: "string", pattern: GIT_OBJECT_PATTERN },
+    manifest_sha256: { type: "string", pattern: SHA256_PATTERN },
+    top_level_roots: {
+      type: "array",
+      minItems: 1,
+      maxItems: 100_000,
+      items: pinnedSubmodulePathJsonSchema
+    },
+    recursive_gitlinks: {
+      type: "array",
+      minItems: 1,
+      maxItems: 100_000,
+      items: pinnedSubmoduleGitlinkJsonSchema
+    },
+    entry_count: { type: "integer", minimum: 1, maximum: 100_000 },
+    file_count: { type: "integer", minimum: 0, maximum: 100_000 },
+    total_file_bytes: { type: "integer", minimum: 0, maximum: 2_147_483_648 }
+  }
 } as const;
 
 const executionResourcesJsonSchema = {
@@ -288,12 +345,13 @@ export const smithersTaskManifestJsonSchema = {
   title: "Ultrafuzz sealed Smithers task manifest",
   type: "object",
   additionalProperties: false,
-  required: ["schema_version", "run_id", "smithers_run_id", "workflow_name", "tasks"],
+  required: ["schema_version", "run_id", "smithers_run_id", "workflow_name", "pinned_submodules", "tasks"],
   properties: {
     schema_version: { const: SMITHERS_TASK_MANIFEST_SCHEMA_VERSION },
     run_id: { type: "string", pattern: SAFE_ID_PATTERN },
     smithers_run_id: nonEmptyStringJsonSchema,
     workflow_name: nonEmptyStringJsonSchema,
+    pinned_submodules: { anyOf: [{ type: "null" }, pinnedSubmoduleExpectationJsonSchema] },
     tasks: {
       type: "array",
       maxItems: MAX_SMITHERS_TASKS,
@@ -497,11 +555,24 @@ export interface SmithersTaskManifestTask {
   metadata: SmithersTaskManifestMetadata;
 }
 
+export interface SmithersPinnedSubmoduleExpectation {
+  schema_version: "ultrafuzz.pinned-submodules-expectation.v1";
+  source_commit: string;
+  source_tree: string;
+  manifest_sha256: string;
+  top_level_roots: string[];
+  recursive_gitlinks: Array<{ path: string; commit: string; tree: string }>;
+  entry_count: number;
+  file_count: number;
+  total_file_bytes: number;
+}
+
 export interface SmithersTaskManifestDocument {
   schema_version: typeof SMITHERS_TASK_MANIFEST_SCHEMA_VERSION;
   run_id: string;
   smithers_run_id: string;
   workflow_name: string;
+  pinned_submodules: SmithersPinnedSubmoduleExpectation | null;
   tasks: SmithersTaskManifestTask[];
 }
 
@@ -538,6 +609,8 @@ export function assertSmithersTaskManifestSemantics(manifest: SmithersTaskManife
   const byPreparationNodeId = new Map<string, SmithersTaskManifestTask>();
   const bySmithersNodeId = new Map<string, SmithersTaskManifestTask>();
   const byVerifierNodeId = new Map<string, SmithersTaskManifestTask>();
+
+  assertPinnedSubmoduleExpectation(manifest);
 
   for (const task of manifest.tasks) {
     assertUniqueTaskIdentity(byAttemptId, task.attemptId, task, "attempt ID");
@@ -643,6 +716,55 @@ export function assertSmithersTaskManifestSemantics(manifest: SmithersTaskManife
     visited.add(task.attemptId);
   };
   for (const task of manifest.tasks) visit(task);
+}
+
+function assertPinnedSubmoduleExpectation(manifest: SmithersTaskManifestDocument): void {
+  const expectation = manifest.pinned_submodules;
+  if (expectation === null) return;
+  if (!manifest.tasks.some((task) => task.execution.mode === "local")) {
+    throw new Error("Smithers pinned submodule expectation has no local task consumer");
+  }
+  const roots = expectation.top_level_roots;
+  const gitlinkPaths = expectation.recursive_gitlinks.map((entry) => entry.path);
+  for (const value of [...roots, ...gitlinkPaths]) assertPinnedSubmodulePath(value);
+  assertCanonicalUniqueStrings(roots, "Smithers pinned submodule roots");
+  assertCanonicalUniqueStrings(gitlinkPaths, "Smithers pinned submodule gitlinks");
+  if (expectation.file_count > expectation.entry_count) {
+    throw new Error("Smithers pinned submodule file count exceeds its entry count");
+  }
+  for (const [index, root] of roots.entries()) {
+    if (!gitlinkPaths.includes(root)) {
+      throw new Error(`Smithers pinned submodule root is not a gitlink: ${JSON.stringify(root)}`);
+    }
+    if (roots.some((candidate, candidateIndex) => candidateIndex !== index && root.startsWith(`${candidate}/`))) {
+      throw new Error(`Smithers pinned submodule roots overlap at ${JSON.stringify(root)}`);
+    }
+  }
+}
+
+function assertPinnedSubmodulePath(value: string): void {
+  const segments = value.split("/");
+  if (
+    value.includes("\\") ||
+    value.startsWith("/") ||
+    Buffer.byteLength(value, "utf8") > 4_096 ||
+    segments.length > 128 ||
+    segments.some(
+      (segment) =>
+        segment.length === 0 || segment === "." || segment === ".." || segment === ".git" || /^[A-Za-z]:/u.test(segment)
+    )
+  ) {
+    throw new Error(`Smithers pinned submodule path is not portable and bounded: ${JSON.stringify(value)}`);
+  }
+}
+
+function assertCanonicalUniqueStrings(values: readonly string[], label: string): void {
+  if (
+    new Set(values).size !== values.length ||
+    values.some((value, index) => index > 0 && values[index - 1]! >= value)
+  ) {
+    throw new Error(`${label} are not unique and canonically ordered`);
+  }
 }
 
 /** Execute the planned-graph/task cross-document gates named by the schema registry. */

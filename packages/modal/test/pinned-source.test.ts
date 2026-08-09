@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -27,14 +28,15 @@ describe("pinned benchmark source", () => {
     const proofPath = path.join(root, "proof.json");
     const commit = "a".repeat(40);
     const proof = {
-      schema_version: "ultrafuzz.pinned-source-proof.v1",
+      schema_version: "ultrafuzz.pinned-source-proof.v2",
       commit,
       tree: "b".repeat(40),
       base_ref: PINNED_SOURCE_REF,
       refs: [{ name: PINNED_SOURCE_REF, object: commit }],
       remotes: [],
       revision_count: 1,
-      commit_object_count: 1
+      commit_object_count: 1,
+      submodules: null
     };
     const serialized = JSON.stringify(proof);
     const field = `"commit":"${commit}"`;
@@ -98,6 +100,13 @@ describe("pinned benchmark source", () => {
     expect(git(destination, ["branch", "--show-current"])).toBe(PINNED_SOURCE_BRANCH);
     expect(git(destination, ["remote"])).toBe("");
     expect(fs.readFileSync(path.join(destination, ".git", "config"), "utf8")).not.toContain(fixture.repository);
+    const submoduleConfig = spawnSync("git", ["config", "--local", "--get-regexp", "^submodule\\."], {
+      cwd: destination,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    expect(submoduleConfig.status).toBe(1);
+    expect(submoduleConfig.stdout).toBe("");
     expect(git(destination, ["rev-list", "--all"])).toBe(fixture.pinned);
     expect(() => git(destination, ["show", fixture.later])).toThrow();
     expect(await readPinnedSourceProof(proofPath)).toEqual(proof);
@@ -177,13 +186,44 @@ describe("pinned benchmark source", () => {
     });
     expect(persistedUrlConfig.status).toBe(1);
     expect(persistedUrlConfig.stdout).toBe("");
+    const persistedSubmoduleConfig = spawnSync("git", ["config", "--local", "--get-regexp", "^submodule\\."], {
+      cwd: destination,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    expect(persistedSubmoduleConfig.status).toBe(1);
+    expect(persistedSubmoduleConfig.stdout).toBe("");
     const invocations = fs.readFileSync(gitProbe.log, "utf8").trim().split("\n").filter(Boolean);
     expect(invocations).toContain([...GITHUB_HTTPS_SUBMODULE_CONFIG, "submodule", "sync", "--recursive"].join(" "));
     expect(invocations).toContain(
       [...GITHUB_HTTPS_SUBMODULE_CONFIG, "submodule", "update", "--init", "--recursive", "--depth", "1"].join(" ")
     );
     expect(proof).toMatchObject({ commit: fixture.pinned, revision_count: 1, remotes: [] });
+    expect(proof.schema_version).toBe("ultrafuzz.pinned-source-proof.v2");
+    expect(proof.submodules).toMatchObject({
+      manifest_location: "git-common-dir",
+      source_commit: fixture.pinned,
+      source_tree: git(destination, ["rev-parse", "HEAD^{tree}"]),
+      top_level_roots: ["vendor/dependency"],
+      entry_count: expect.any(Number),
+      file_count: expect.any(Number),
+      total_file_bytes: expect.any(Number)
+    });
+    expect(proof.submodules?.recursive_gitlinks.map(({ path: entryPath, commit }) => [entryPath, commit])).toEqual([
+      ["vendor/dependency", fixture.submoduleCommit],
+      ["vendor/dependency/nested/child", fixture.nestedCommit]
+    ]);
+    expect(proof.submodules?.recursive_gitlinks.every((entry) => /^[0-9a-f]{40}$/u.test(entry.tree))).toBe(true);
+    const manifestPath = path.join(destination, ".git", "ultrafuzz", "pinned-submodules", `${fixture.pinned}.json`);
+    expect(fs.existsSync(manifestPath)).toBe(true);
+    expect(fs.existsSync(path.join(destination, ".ultrafuzz", "cache", "pinned-submodules.json"))).toBe(false);
+    expect(crypto.createHash("sha256").update(fs.readFileSync(manifestPath)).digest("hex")).toBe(
+      proof.submodules?.manifest_sha256
+    );
+    expect(git(destination, ["status", "--porcelain=v1", "--untracked-files=all"])).toBe("");
     await expect(inspectPinnedSource(destination, fixture.pinned)).resolves.toEqual(proof);
+    fs.appendFileSync(manifestPath, " ");
+    await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(/manifest is not canonical/u);
   }, 15_000);
 
   it("fails closed for symbolic refs and revisions that are not full commits", async () => {

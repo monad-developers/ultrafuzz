@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:artifacts:smithers-task-manifest:2",
+  "$id": "urn:ultrafuzz:schema:artifacts:smithers-task-manifest:3",
   "title": "Ultrafuzz sealed Smithers task manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "run_id", "smithers_run_id", "workflow_name", "tasks"],
+  "required": ["schema_version", "run_id", "smithers_run_id", "workflow_name", "pinned_submodules", "tasks"],
   "properties": {
     "schema_version": {
-      "const": "ultrafuzz.smithers.workflow.v2"
+      "const": "ultrafuzz.smithers.workflow.v3"
     },
     "run_id": {
       "type": "string",
@@ -24,6 +24,66 @@
       "minLength": 1,
       "maxLength": 4096,
       "pattern": "^[^\\u0000]+$"
+    },
+    "pinned_submodules": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "source_commit",
+            "source_tree",
+            "manifest_sha256",
+            "top_level_roots",
+            "recursive_gitlinks",
+            "entry_count",
+            "file_count",
+            "total_file_bytes"
+          ],
+          "properties": {
+            "schema_version": { "const": "ultrafuzz.pinned-submodules-expectation.v1" },
+            "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "source_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "top_level_roots": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100000,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))[^\\u0000-\\u001f\\u007f]+$"
+              }
+            },
+            "recursive_gitlinks": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100000,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "commit", "tree"],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))[^\\u0000-\\u001f\\u007f]+$"
+                  },
+                  "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+                  "tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+                }
+              }
+            },
+            "entry_count": { "type": "integer", "minimum": 1, "maximum": 100000 },
+            "file_count": { "type": "integer", "minimum": 0, "maximum": 100000 },
+            "total_file_bytes": { "type": "integer", "minimum": 0, "maximum": 2147483648 }
+          }
+        }
+      ]
     },
     "tasks": {
       "type": "array",

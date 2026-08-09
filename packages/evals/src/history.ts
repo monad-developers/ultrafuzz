@@ -1823,7 +1823,11 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
   const visibleAggregates = aggregates.filter((aggregate) => visibleColumnKeys.has(aggregateColumnKey(aggregate)));
   const profiles = [
     ...new Map(visibleAggregates.map((aggregate) => [aggregateProfileKey(aggregate), aggregate])).values()
-  ];
+  ].sort(
+    (leftAggregate, rightAggregate) =>
+      compareText(leftAggregate.model, rightAggregate.model) ||
+      compareText(aggregateProfileKey(leftAggregate), aggregateProfileKey(rightAggregate))
+  );
   const legendTop = dateLabelBottom + 34;
   const legendRowCount = OVERVIEW_METRICS.length + 1 + profiles.length;
   const height = legendTop + Math.max(1, legendRowCount) * 22 + 18;

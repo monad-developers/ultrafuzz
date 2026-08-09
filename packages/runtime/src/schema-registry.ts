@@ -18,6 +18,8 @@ import {
   INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
   INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
   INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
+  PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID,
+  PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID,
   SMITHERS_RESET_NODE_JSON_SCHEMA_ID,
   SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
   WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
@@ -71,6 +73,8 @@ export const invariantSuiteBaselineJsonSchema = loadSchemaDocument("invariant-su
 export const invariantSuiteHandoffJsonSchema = loadSchemaDocument("invariant-suite-handoff.schema.json");
 export const invariantWorkspaceSnapshotJsonSchema = loadSchemaDocument("invariant-workspace-snapshot.schema.json");
 export const materializeAuditJsonSchema = loadSchemaDocument("materialize-audit.schema.json");
+export const pinnedSubmoduleExpectationJsonSchema = loadSchemaDocument("pinned-submodule-expectation.schema.json");
+export const pinnedSubmoduleSnapshotJsonSchema = loadSchemaDocument("pinned-submodule-snapshot.schema.json");
 export const smithersResetNodeJsonSchema = loadSchemaDocument("smithers-reset-node.schema.json");
 export const smithersSubmissionJsonSchema = loadSchemaDocument("smithers-submission.schema.json");
 export const workflowControlIntegrityJsonSchema = loadSchemaDocument("workflow-control-integrity.schema.json");
@@ -88,6 +92,8 @@ export const RUNTIME_SCHEMA_EXPORTS = Object.freeze({
   invariantSuiteHandoffJsonSchema,
   invariantWorkspaceSnapshotJsonSchema,
   materializeAuditJsonSchema,
+  pinnedSubmoduleExpectationJsonSchema,
+  pinnedSubmoduleSnapshotJsonSchema,
   smithersResetNodeJsonSchema,
   smithersSubmissionJsonSchema,
   workflowControlIntegrityJsonSchema,
@@ -138,6 +144,18 @@ export const RUNTIME_SCHEMA_METADATA: Readonly<Record<string, RuntimeSchemaMetad
       "materialize-audit-patch-source-uniqueness",
       "audit-history-ordering"
     ])
+  },
+  "pinned-submodule-expectation.schema.json": {
+    id: PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "pinnedSubmoduleExpectationJsonSchema",
+    semanticGates: RUNTIME_SEMANTIC_GATES_BY_SCHEMA_ID[PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID]
+  },
+  "pinned-submodule-snapshot.schema.json": {
+    id: PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "pinnedSubmoduleSnapshotJsonSchema",
+    semanticGates: RUNTIME_SEMANTIC_GATES_BY_SCHEMA_ID[PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID]
   },
   "smithers-reset-node.schema.json": {
     id: SMITHERS_RESET_NODE_JSON_SCHEMA_ID,

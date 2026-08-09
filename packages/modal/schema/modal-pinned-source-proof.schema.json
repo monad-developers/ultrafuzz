@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:modal:pinned-source-proof:1",
+  "$id": "urn:ultrafuzz:schema:modal:pinned-source-proof:2",
   "title": "Ultrafuzz pinned source proof",
   "type": "object",
   "additionalProperties": false,
@@ -12,10 +12,11 @@
     "refs",
     "remotes",
     "revision_count",
-    "commit_object_count"
+    "commit_object_count",
+    "submodules"
   ],
   "properties": {
-    "schema_version": { "const": "ultrafuzz.pinned-source-proof.v1" },
+    "schema_version": { "const": "ultrafuzz.pinned-source-proof.v2" },
     "commit": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },
     "tree": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },
     "base_ref": { "const": "refs/heads/ultrafuzz-pinned" },
@@ -35,6 +36,68 @@
     },
     "remotes": { "type": "array", "maxItems": 0 },
     "revision_count": { "const": 1 },
-    "commit_object_count": { "const": 1 }
+    "commit_object_count": { "const": 1 },
+    "submodules": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "manifest_location",
+            "schema_version",
+            "source_commit",
+            "source_tree",
+            "manifest_sha256",
+            "top_level_roots",
+            "recursive_gitlinks",
+            "entry_count",
+            "file_count",
+            "total_file_bytes"
+          ],
+          "properties": {
+            "manifest_location": { "const": "git-common-dir" },
+            "schema_version": { "const": "ultrafuzz.pinned-submodules-expectation.v1" },
+            "source_commit": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },
+            "source_tree": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },
+            "manifest_sha256": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/sha256" },
+            "top_level_roots": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100000,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))[^\\u0000-\\u001f\\u007f]+$"
+              }
+            },
+            "recursive_gitlinks": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100000,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "commit", "tree"],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))[^\\u0000-\\u001f\\u007f]+$"
+                  },
+                  "commit": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },
+                  "tree": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" }
+                }
+              }
+            },
+            "entry_count": { "type": "integer", "minimum": 1, "maximum": 100000 },
+            "file_count": { "type": "integer", "minimum": 0, "maximum": 100000 },
+            "total_file_bytes": { "type": "integer", "minimum": 0, "maximum": 2147483648 }
+          }
+        }
+      ]
+    }
   }
 }

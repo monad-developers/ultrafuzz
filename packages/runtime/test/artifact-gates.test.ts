@@ -1258,7 +1258,7 @@ test("project discovery gate verifies immutable source proof after the discovery
   fs.writeFileSync(
     path.join(layout.root, "source-proofs", "project-discovery.json"),
     JSON.stringify({
-      schema_version: "ultrafuzz.agent-source-proof.v1",
+      schema_version: "ultrafuzz.agent-source-proof.v2",
       attempt_id: "project-discovery",
       commit: "a".repeat(40),
       tree: "b".repeat(40),
@@ -1266,7 +1266,8 @@ test("project discovery gate verifies immutable source proof after the discovery
       refs: [{ name: "refs/heads/ultrafuzz-pinned", object: "a".repeat(40) }],
       remotes: [],
       revision_count: 1,
-      commit_object_count: 1
+      commit_object_count: 1,
+      dependencies: null
     })
   );
   fs.rmSync(path.join(layout.workspacesDir, "project-discovery"), { recursive: true, force: true });

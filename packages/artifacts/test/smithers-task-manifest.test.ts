@@ -106,6 +106,7 @@ function manifest(tasks: SmithersTaskManifestTask[] = [task()]): SmithersTaskMan
     run_id: "run-1",
     smithers_run_id: "smithers-run-1",
     workflow_name: "workflow-1",
+    pinned_submodules: null,
     tasks
   };
 }

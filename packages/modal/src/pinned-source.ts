@@ -3,12 +3,21 @@ import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID } from "./modal-contracts.js";
+import {
+  capturePinnedSubmoduleSnapshot,
+  PINNED_SUBMODULE_MANIFEST_LOCATION,
+  pinnedSubmoduleExpectation,
+  readPinnedSubmoduleSnapshot,
+  writePinnedSubmoduleSnapshot,
+  type PinnedSubmoduleExpectation
+} from "@ultrafuzz/runtime";
+
+import { MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID, type DeepReadonly } from "./modal-contracts.js";
 import { readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
 
 export const PINNED_SOURCE_BRANCH = "ultrafuzz-pinned" as const;
 export const PINNED_SOURCE_REF = `refs/heads/${PINNED_SOURCE_BRANCH}` as const;
-export const PINNED_SOURCE_PROOF_SCHEMA_VERSION = "ultrafuzz.pinned-source-proof.v1" as const;
+export const PINNED_SOURCE_PROOF_SCHEMA_VERSION = "ultrafuzz.pinned-source-proof.v2" as const;
 /**
  * Keep this command-scoped: Git propagates `-c` configuration to the child
  * processes used by recursive submodule updates without persisting a rewrite
@@ -35,6 +44,7 @@ export interface PinnedSourceProof {
   remotes: [];
   revision_count: 1;
   commit_object_count: 1;
+  submodules: ({ manifest_location: typeof PINNED_SUBMODULE_MANIFEST_LOCATION } & PinnedSubmoduleExpectation) | null;
 }
 
 /**
@@ -79,6 +89,7 @@ export async function materializePinnedSource(input: {
     if (fetched !== revision) throw new Error("pinned benchmark source fetch returned a different commit");
 
     await git(destination, ["checkout", "--quiet", "-B", PINNED_SOURCE_BRANCH, revision], input.signal);
+    let submoduleSnapshot: ReturnType<typeof capturePinnedSubmoduleSnapshot> = undefined;
     if (await containsGitlinks(destination, input.signal)) {
       await git(destination, ["remote", "add", "origin", input.repository], input.signal);
       try {
@@ -88,6 +99,8 @@ export async function materializePinnedSource(input: {
           [...GITHUB_HTTPS_SUBMODULE_CONFIG, "submodule", "update", "--init", "--recursive", "--depth", "1"],
           input.signal
         );
+        submoduleSnapshot = capturePinnedSubmoduleSnapshot(destination);
+        if (submoduleSnapshot === undefined) throw new Error("hydrated benchmark submodule snapshot is unavailable");
       } finally {
         await git(destination, ["remote", "remove", "origin"], input.signal).catch(() => undefined);
       }
@@ -100,6 +113,8 @@ export async function materializePinnedSource(input: {
     await rm(path.join(destination, ".git", "refs", "remotes"), { recursive: true, force: true });
     await rm(path.join(destination, ".git", "refs", "tags"), { recursive: true, force: true });
     await rm(path.join(destination, ".git", "objects", "info", "alternates"), { force: true });
+
+    if (submoduleSnapshot !== undefined) writePinnedSubmoduleSnapshot(destination, submoduleSnapshot);
 
     const proof = await inspectPinnedSource(destination, revision, input.signal);
     if (input.proofPath !== undefined) await writeProofAtomic(input.proofPath, proof);
@@ -155,6 +170,8 @@ export async function inspectPinnedSource(
   const onlyRevision = onlyRevisionText.trim().toLowerCase();
   const unreachableCommitCount = Number(unreachableCommitCountText.trim());
   const commitObjectCount = revisionCount + unreachableCommitCount;
+  const submoduleSnapshot = readPinnedSubmoduleSnapshot(repositoryRoot);
+  const hasGitlinks = await containsGitlinks(repositoryRoot, signal);
 
   if (
     !fullSha.test(expected) ||
@@ -162,6 +179,8 @@ export async function inspectPinnedSource(
     !fullSha.test(normalizedTree) ||
     currentBranch.trim() !== PINNED_SOURCE_BRANCH ||
     (options.allowDirty !== true && status.trim() !== "") ||
+    (hasGitlinks && submoduleSnapshot === undefined) ||
+    (!hasGitlinks && submoduleSnapshot !== undefined) ||
     remotes.length !== 0 ||
     !Number.isSafeInteger(revisionCount) ||
     !Number.isSafeInteger(unreachableCommitCount) ||
@@ -189,7 +208,14 @@ export async function inspectPinnedSource(
     refs,
     remotes: [],
     revision_count: 1,
-    commit_object_count: 1
+    commit_object_count: 1,
+    submodules:
+      submoduleSnapshot === undefined
+        ? null
+        : {
+            manifest_location: PINNED_SUBMODULE_MANIFEST_LOCATION,
+            ...pinnedSubmoduleExpectation(submoduleSnapshot)
+          }
   };
 }
 
@@ -204,6 +230,12 @@ async function removeSubmoduleMetadata(repositoryRoot: string, signal?: AbortSig
     paths.map((relative) => rm(path.join(repositoryRoot, relative, ".git"), { recursive: true, force: true }))
   );
   await rm(path.join(repositoryRoot, ".git", "modules"), { recursive: true, force: true });
+  const localConfigNames = (await git(repositoryRoot, ["config", "--local", "--null", "--name-only", "--list"], signal))
+    .split("\0")
+    .filter(Boolean);
+  for (const name of localConfigNames.filter((entry) => /^submodule\./iu.test(entry))) {
+    await git(repositoryRoot, ["config", "--local", "--unset-all", name], signal);
+  }
 }
 
 async function submodulePaths(repositoryRoot: string, signal?: AbortSignal, prefix = ""): Promise<string[]> {
@@ -250,11 +282,6 @@ async function writeProofAtomic(filePath: string, proof: PinnedSourceProof): Pro
   });
 }
 
-export async function readPinnedSourceProof(filePath: string): Promise<PinnedSourceProof> {
-  const proof = readModalDocument(path.resolve(filePath), MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID).value;
-  return {
-    ...proof,
-    refs: proof.refs.map((reference) => ({ ...reference })),
-    remotes: []
-  };
+export async function readPinnedSourceProof(filePath: string): Promise<DeepReadonly<PinnedSourceProof>> {
+  return readModalDocument(path.resolve(filePath), MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID).value;
 }

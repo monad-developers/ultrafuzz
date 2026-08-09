@@ -4,12 +4,16 @@ import {
   INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
   INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
   INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
+  PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID,
+  PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID,
   WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
   WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
   WORKFLOW_RUN_LINK_JOURNAL_JSON_SCHEMA_ID,
   type InvariantSuiteBaselineDocument,
   type InvariantSuiteHandoffDocument,
   type InvariantWorkspaceSnapshotDocument,
+  type PinnedSubmoduleExpectationDocument,
+  type PinnedSubmoduleSnapshotDocument,
   type RuntimeDocumentForSchemaId,
   type RuntimeDocumentSchemaId,
   type WorkflowControlIntegrityDocument,
@@ -21,6 +25,8 @@ export const IMPLEMENTED_RUNTIME_SEMANTIC_GATES = Object.freeze([
   "invariant-suite-baseline-path-identity-and-budget",
   "invariant-workspace-snapshot-path-identity-and-budget",
   "invariant-suite-handoff-identity-order-and-budget",
+  "pinned-submodule-expectation-order-and-accounting",
+  "pinned-submodule-snapshot-closure-order-and-budget",
   "workflow-control-integrity-identity-order",
   "workflow-execution-dependency-closure-and-order",
   "workflow-run-link-chain-and-order"
@@ -32,6 +38,8 @@ export const RUNTIME_SEMANTIC_GATES_BY_SCHEMA_ID = Object.freeze({
   [INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID]: ["invariant-suite-baseline-path-identity-and-budget"],
   [INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID]: ["invariant-workspace-snapshot-path-identity-and-budget"],
   [INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID]: ["invariant-suite-handoff-identity-order-and-budget"],
+  [PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID]: ["pinned-submodule-expectation-order-and-accounting"],
+  [PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID]: ["pinned-submodule-snapshot-closure-order-and-budget"],
   [WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID]: ["workflow-control-integrity-identity-order"],
   [WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID]: ["workflow-execution-dependency-closure-and-order"],
   [WORKFLOW_RUN_LINK_JOURNAL_JSON_SCHEMA_ID]: ["workflow-run-link-chain-and-order"]
@@ -60,6 +68,12 @@ export function assertRuntimeDocumentSemantics<SchemaId extends RuntimeDocumentS
       return;
     case INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID:
       assertInvariantSuiteHandoff(value as InvariantSuiteHandoffDocument);
+      return;
+    case PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID:
+      assertPinnedSubmoduleExpectation(value as PinnedSubmoduleExpectationDocument);
+      return;
+    case PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID:
+      assertPinnedSubmoduleSnapshot(value as PinnedSubmoduleSnapshotDocument);
       return;
     case WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID:
       assertWorkflowControlIntegrity(value as WorkflowControlIntegrityDocument);
@@ -114,6 +128,158 @@ function assertInvariantSuiteHandoff(document: InvariantSuiteHandoffDocument): v
   assertUniqueAndOrderedPaths(gate, document.tombstones, "tombstones");
   const total = document.dependencies.reduce((sum, entry) => sum + entry.size, 0);
   if (total > 64 * 1024 * 1024) fail(gate, "dependencies exceed the 64 MiB aggregate budget");
+}
+
+function assertPinnedSubmoduleExpectation(document: PinnedSubmoduleExpectationDocument): void {
+  const gate = "pinned-submodule-expectation-order-and-accounting";
+  assertPinnedPaths(gate, document.top_level_roots, "top-level roots");
+  assertPinnedGitlinks(gate, document.recursive_gitlinks, "recursive gitlinks");
+  if (document.file_count > document.entry_count) {
+    fail(gate, "file count exceeds the total entry count");
+  }
+  for (const root of document.top_level_roots) {
+    if (!document.recursive_gitlinks.some((entry) => entry.path === root)) {
+      fail(gate, `top-level root is not a recursive gitlink: ${root}`);
+    }
+  }
+  assertNonoverlappingRoots(gate, document.top_level_roots);
+}
+
+function assertPinnedSubmoduleSnapshot(document: PinnedSubmoduleSnapshotDocument): void {
+  const gate = "pinned-submodule-snapshot-closure-order-and-budget";
+  assertPinnedPaths(gate, document.top_level_roots, "top-level roots");
+  assertPinnedGitlinks(gate, document.recursive_gitlinks, "recursive gitlinks");
+  assertPinnedPaths(
+    gate,
+    document.entries.map((entry) => entry.path),
+    "snapshot entries"
+  );
+  assertNonoverlappingRoots(gate, document.top_level_roots);
+
+  const entryByPath = new Map(document.entries.map((entry) => [entry.path, entry]));
+  const gitlinkPaths = new Set(document.recursive_gitlinks.map((entry) => entry.path));
+  for (const link of document.recursive_gitlinks) {
+    if (entryByPath.get(link.path)?.type !== "directory") {
+      fail(gate, `gitlink has no dependency directory: ${link.path}`);
+    }
+    if (!document.top_level_roots.some((root) => isAtOrBelowPinnedPath(link.path, root))) {
+      fail(gate, `recursive gitlink is outside the top-level roots: ${link.path}`);
+    }
+    if (
+      !document.top_level_roots.includes(link.path) &&
+      !document.recursive_gitlinks.some(
+        (candidate) => candidate.path !== link.path && isAtOrBelowPinnedPath(link.path, candidate.path)
+      )
+    ) {
+      fail(gate, `recursive gitlink has no parent repository: ${link.path}`);
+    }
+  }
+
+  for (const entry of document.entries) {
+    const root = document.top_level_roots.find((candidate) => isAtOrBelowPinnedPath(entry.path, candidate));
+    if (root === undefined) fail(gate, `snapshot entry is outside the top-level roots: ${entry.path}`);
+    if (entry.path !== root && entryByPath.get(path.posix.dirname(entry.path))?.type !== "directory") {
+      fail(gate, `snapshot entry has no physical directory parent: ${entry.path}`);
+    }
+    if (
+      entry.type !== "directory" &&
+      document.entries.some((candidate) => isStrictlyBelowPinnedPath(candidate.path, entry.path))
+    ) {
+      fail(gate, `non-directory entry is a path prefix: ${entry.path}`);
+    }
+    if (entry.type === "symlink") {
+      const owner = document.recursive_gitlinks
+        .filter((candidate) => isAtOrBelowPinnedPath(entry.path, candidate.path))
+        .sort((left, right) => pathDepth(right.path) - pathDepth(left.path) || left.path.localeCompare(right.path))[0];
+      if (owner === undefined) fail(gate, `snapshot entry has no owning repository: ${entry.path}`);
+      assertPinnedSymlinkTarget(gate, entry.path, entry.target, [owner.path]);
+    }
+  }
+  for (const root of document.top_level_roots) {
+    if (entryByPath.get(root)?.type !== "directory" || !gitlinkPaths.has(root)) {
+      fail(gate, `top-level root is absent from the byte tree: ${root}`);
+    }
+  }
+
+  const totalFileBytes = document.entries.reduce(
+    (total, entry) => total + (entry.type === "file" ? entry.size_bytes : 0),
+    0
+  );
+  if (!Number.isSafeInteger(totalFileBytes) || totalFileBytes > 2 * 1024 * 1024 * 1024) {
+    fail(gate, "snapshot exceeds the aggregate file-byte budget");
+  }
+  if (Buffer.byteLength(`${JSON.stringify(document, null, 2)}\n`, "utf8") > 64 * 1024 * 1024) {
+    fail(gate, "snapshot manifest exceeds the serialized byte budget");
+  }
+}
+
+function assertPinnedGitlinks(gate: RuntimeSemanticGateName, values: readonly { path: string }[], label: string): void {
+  assertPinnedPaths(
+    gate,
+    values.map((entry) => entry.path),
+    label
+  );
+}
+
+function assertPinnedPaths(gate: RuntimeSemanticGateName, values: readonly string[], label: string): void {
+  for (const value of values) {
+    assertPortableRelativePath(gate, value, label);
+    const segments = value.split("/");
+    if (
+      Buffer.byteLength(value, "utf8") > 4_096 ||
+      segments.length > 128 ||
+      segments.some(
+        (segment) =>
+          segment.length === 0 ||
+          segment === ".git" ||
+          segment === "." ||
+          segment === ".." ||
+          /^[A-Za-z]:/u.test(segment)
+      )
+    ) {
+      fail(gate, `${label} contains an unsafe Git path ${JSON.stringify(value)}`);
+    }
+  }
+  assertUniqueAndOrderedStrings(gate, values, label);
+}
+
+function assertNonoverlappingRoots(gate: RuntimeSemanticGateName, roots: readonly string[]): void {
+  for (const [index, root] of roots.entries()) {
+    if (roots.some((candidate, candidateIndex) => candidateIndex !== index && isAtOrBelowPinnedPath(root, candidate))) {
+      fail(gate, `top-level roots overlap at ${JSON.stringify(root)}`);
+    }
+  }
+}
+
+function assertPinnedSymlinkTarget(
+  gate: RuntimeSemanticGateName,
+  relativePath: string,
+  target: string,
+  roots: readonly string[]
+): void {
+  if (
+    Buffer.byteLength(target, "utf8") > 4_096 ||
+    target.includes("\\") ||
+    path.posix.isAbsolute(target) ||
+    path.win32.isAbsolute(target) ||
+    target.split("/").some((segment) => /^[A-Za-z]:/u.test(segment))
+  ) {
+    fail(gate, `symlink has an unsafe target: ${relativePath}`);
+  }
+  const root = roots.find((candidate) => isAtOrBelowPinnedPath(relativePath, candidate));
+  if (root === undefined) fail(gate, `symlink is outside the top-level roots: ${relativePath}`);
+  const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(relativePath), target));
+  if (!isAtOrBelowPinnedPath(resolved, root) || resolved.split("/").includes(".git")) {
+    fail(gate, `symlink escapes its root: ${relativePath}`);
+  }
+}
+
+function isAtOrBelowPinnedPath(candidate: string, root: string): boolean {
+  return candidate === root || candidate.startsWith(`${root}/`);
+}
+
+function isStrictlyBelowPinnedPath(candidate: string, root: string): boolean {
+  return candidate !== root && candidate.startsWith(`${root}/`);
 }
 
 function assertWorkflowControlIntegrity(document: WorkflowControlIntegrityDocument): void {
