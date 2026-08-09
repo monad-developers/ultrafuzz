@@ -2590,12 +2590,6 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function recordValue(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
