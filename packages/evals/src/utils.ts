@@ -111,16 +111,9 @@ export interface TerminalReportPathResolution {
   reason: string;
 }
 
-export function resolveTerminalReportPath(input: {
-  runRoot?: string;
-  recordedPath?: string;
-  fallbackPath?: string;
-}): TerminalReportPathResolution {
+export function resolveTerminalReportPath(input: { runRoot?: string }): TerminalReportPathResolution {
   if (input.runRoot === undefined) {
-    const reportPath = input.recordedPath ?? input.fallbackPath;
-    return reportPath === undefined
-      ? { reason: "terminal report path is unavailable" }
-      : { path: reportPath, reason: "terminal report path came from eval metadata" };
+    return { reason: "terminal report run root is unavailable" };
   }
 
   const runRoot = path.resolve(input.runRoot);
@@ -128,7 +121,7 @@ export function resolveTerminalReportPath(input: {
   try {
     graph = JSON.parse(fs.readFileSync(path.join(runRoot, "graph.json"), "utf8"));
   } catch {
-    return recordedReportFallback(runRoot, input.recordedPath, "run graph is unavailable");
+    return { reason: "run graph is unavailable" };
   }
   const candidates = terminalReportCandidates(runRoot, graph);
   if (candidates.length === 1) {
@@ -139,9 +132,9 @@ export function resolveTerminalReportPath(input: {
     };
   }
   if (candidates.length > 1) {
-    return { reason: "run graph declares more than one ultrafuzz/report@1 output" };
+    return { reason: "run graph declares more than one ultrafuzz/report@2 output" };
   }
-  return recordedReportFallback(runRoot, input.recordedPath, "run graph does not declare ultrafuzz/report@1");
+  return { reason: "run graph does not declare ultrafuzz/report@2" };
 }
 
 function terminalReportCandidates(runRoot: string, graph: unknown): Array<{ path: string; relativePath: string }> {
@@ -154,7 +147,7 @@ function terminalReportCandidates(runRoot: string, graph: unknown): Array<{ path
       continue;
     }
     for (const output of node.outputs) {
-      if (!isRecord(output) || output.contract !== "ultrafuzz/report@1" || typeof output.path !== "string") {
+      if (!isRecord(output) || output.contract !== "ultrafuzz/report@2" || typeof output.path !== "string") {
         continue;
       }
       try {
@@ -167,26 +160,6 @@ function terminalReportCandidates(runRoot: string, graph: unknown): Array<{ path
     }
   }
   return [...candidates.values()];
-}
-
-function recordedReportFallback(
-  runRoot: string,
-  recordedPath: string | undefined,
-  missingGraphReason: string
-): TerminalReportPathResolution {
-  if (recordedPath === undefined || !path.isAbsolute(recordedPath) || !isPathInside(runRoot, recordedPath)) {
-    return { reason: missingGraphReason };
-  }
-  try {
-    const relativePath = path.relative(runRoot, recordedPath).split(path.sep).join("/");
-    return {
-      path: safeResolveInside(runRoot, relativePath, "recorded terminal report path"),
-      relativePath,
-      reason: `${missingGraphReason}; using compatible recorded path`
-    };
-  } catch {
-    return { reason: `${missingGraphReason}; recorded path is unsafe` };
-  }
 }
 
 export function assertExternalPath(projectRoot: string, candidate: string, label: string): void {

@@ -191,7 +191,7 @@ function assertPublishableTerminalReports(
   const diagnostics: Array<{
     code: string;
     row_id: string;
-    contract: "ultrafuzz/report@1";
+    contract: "ultrafuzz/report@2";
     reason: string;
     report_path?: string;
   }> = [];
@@ -201,20 +201,23 @@ function assertPublishableTerminalReports(
     const state = runRoot === undefined ? undefined : readJsonSafe(path.join(runRoot, "state.json"));
     const status = isRecord(state) && typeof state.status === "string" ? state.status : record?.final_status;
     const reportResolution = resolveTerminalReportPath({
-      ...(runRoot === undefined ? {} : { runRoot }),
-      ...(record?.report_json_path === undefined ? {} : { recordedPath: record.report_json_path })
+      ...(runRoot === undefined ? {} : { runRoot })
     });
     const reportPath = reportResolution.path;
     const reportExists = reportPath !== undefined && fs.existsSync(reportPath) && fs.lstatSync(reportPath).isFile();
     let valid = status === "succeeded" && reportExists;
     if (valid && reportPath !== undefined) {
-      valid = validateArtifactContract("ultrafuzz/report@1", fs.readFileSync(reportPath, "utf8"), reportPath).ok;
+      valid = validateArtifactContract(
+        "ultrafuzz/report@2" as Parameters<typeof validateArtifactContract>[0],
+        fs.readFileSync(reportPath, "utf8"),
+        reportPath
+      ).ok;
     }
     if (!valid) {
       diagnostics.push({
         code: "TERMINAL_REPORT_NOT_PUBLISHABLE",
         row_id: row.id,
-        contract: "ultrafuzz/report@1",
+        contract: "ultrafuzz/report@2",
         reason:
           status !== "succeeded"
             ? `run status is ${status ?? "unknown"}`
@@ -222,7 +225,7 @@ function assertPublishableTerminalReports(
               ? reportResolution.reason
               : !reportExists
                 ? "terminal report file is missing"
-                : "terminal report does not satisfy ultrafuzz/report@1",
+                : "terminal report does not satisfy ultrafuzz/report@2",
         ...(reportResolution.relativePath === undefined ? {} : { report_path: reportResolution.relativePath })
       });
     }
@@ -234,7 +237,7 @@ function assertPublishableTerminalReports(
       diagnostics.push({
         code: "RECOVERY_EQUIVALENCE_NOT_PUBLISHABLE",
         row_id: row.id,
-        contract: "ultrafuzz/report@1",
+        contract: "ultrafuzz/report@2",
         reason:
           recoveryEquivalence?.reason ??
           `recovery classification ${recoveryEquivalence?.classification ?? "unavailable"} is not allowed by the suite publication policy`

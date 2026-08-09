@@ -319,8 +319,7 @@ export function publicEvalRecordTerminalDisposition(
 
 function hasTerminalReport(record: EvalRunRecord): boolean {
   const resolution = resolveTerminalReportPath({
-    ...(record.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root }),
-    ...(record.report_json_path === undefined ? {} : { recordedPath: record.report_json_path })
+    ...(record.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root })
   });
   if (resolution.path === undefined || record.ultrafuzz_run_root === undefined) return false;
   try {

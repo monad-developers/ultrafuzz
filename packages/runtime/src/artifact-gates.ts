@@ -28,7 +28,6 @@ import {
   validatePropertyCampaignSchema,
   validatePropertyReferences,
   verifyArtifactManifestPrerequisites,
-  writeJsonDurable,
   type ImplementedPropertiesArtifact,
   type InvariantLedgerEntry,
   type InvariantSourceProof,
@@ -185,13 +184,6 @@ export function verifyRequiredArtifactsForAttempt(
     diagnostics.push(...verifyInvariantEvidenceArtifacts(layout, artifactDir, node));
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_EVIDENCE_READ_FAILED"));
-  }
-  try {
-    diagnostics.push(...sanitizeLensReferenceExpectationAuthority(layout, artifactDir, node, attemptId));
-  } catch (error) {
-    diagnostics.push(
-      diagnosticFromError(error, "property-provenance", "PROPERTY_REFERENCE_EXPECTATION_SANITIZE_FAILED")
-    );
   }
   try {
     diagnostics.push(...verifyPropertyProvenanceArtifacts(layout, artifactDir, node));
@@ -708,15 +700,13 @@ function verifyLensReferenceExpectationPreservation(
     const lensName = dependency.slice("property-specification-".length);
     // Expanded graphs may give fan-in concrete dependencies such as
     // `property-specification-recon-0` and `property-specification-recon-1`.
-    // Resolve each concrete artifact directory first so one loop cannot hide
-    // metadata emitted by another; retain the logical lookup for historical
-    // runs whose artifacts were written under the unexpanded logical ID.
+    // Only that declared concrete dependency may satisfy the handoff.
     const declaredLensPath = state.nodes[dependencyId]?.outputs?.find(
-      (output) => output.contract === "ultrafuzz/property-lens@1"
+      (output) => String(output.contract) === "ultrafuzz/property-lens@2"
     )?.path;
     const lensRelativePath = declaredLensPath ?? `properties/${lensName}.json`;
     lensPathsByDependency.set(dependencyId, lensRelativePath);
-    const lensPath = findDependencyArtifact(layout, dependencyId, dependency, lensRelativePath);
+    const lensPath = findDependencyArtifact(layout, dependencyId, lensRelativePath);
     if (lensPath === undefined) {
       diagnostics.push({
         code: "PROPERTY_LENS_MISSING",
@@ -1498,7 +1488,7 @@ function verifyRequiredArtifactShape(
     }
     return diagnostics;
   }
-  if (!contract.ok || output.contract !== "ultrafuzz/generated-tests@1") {
+  if (!contract.ok || String(output.contract) !== "ultrafuzz/generated-tests@2") {
     return diagnostics;
   }
 
@@ -1591,9 +1581,6 @@ function severityArtifactForNode(
  */
 export const CAMPAIGN_LOGICAL_NODE_IDS = ["stateful-invariant-campaign", "stateful-invariant-recon-campaign"] as const;
 
-// Mirrors the generated workflow's verification-marker directory inside the run root.
-const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
-
 const campaignLogicalNodeIds = CAMPAIGN_LOGICAL_NODE_IDS;
 
 const campaignResultArtifactNames = [
@@ -1612,7 +1599,7 @@ function verifyPropertyProvenanceArtifacts(
   node: PlannedGraphNode
 ): RuntimeDiagnostic[] {
   const logicalId = node.logical_id ?? node.id;
-  const isPropertyLens = node.outputs.some((output) => output.contract === "ultrafuzz/property-lens@1");
+  const isPropertyLens = node.outputs.some((output) => String(output.contract) === "ultrafuzz/property-lens@2");
   if (isPropertyLens) {
     return verifyLensReferenceExpectationAuthority(layout, artifactDir, node);
   }
@@ -1647,16 +1634,7 @@ function verifyPropertyProvenanceArtifacts(
     }
     return [
       ...propertyReferenceDiagnostics(catalog.value, references),
-      ...verifyImplementationSelectionCoverage(
-        catalog.value,
-        implementation.value,
-        implementationPath,
-        layout,
-        node.outputs.some(
-          (output) =>
-            output.path === "implemented-properties.json" && output.contract === "ultrafuzz/implemented-properties@2"
-        )
-      )
+      ...verifyImplementationSelectionCoverage(catalog.value, implementation.value, implementationPath, layout)
     ];
   }
 
@@ -1699,305 +1677,8 @@ function verifyLensReferenceExpectationAuthority(
   return diagnostics;
 }
 
-/**
- * Keep a verification marker consistent with an artifact a runtime gate just rewrote. Updates the
- * recorded sha256 for that one path in both `artifacts` and `publications`, leaving every other
- * entry and the rest of the marker untouched, so the marker still attests exactly what is on disk.
- *
- * Exported because findings normalization rewrites `findings.json` from `workflow-sync`, outside
- * this module, and leaves exactly the same stale attestation behind (issue #348).
- */
-export function refreshVerifiedArtifactDigest(
-  layout: RunLayout,
-  attemptId: string,
-  relativePath: string,
-  absolutePath: string,
-  source = "property-provenance"
-): RuntimeDiagnostic[] {
-  const markerPath = path.join(layout.root, ARTIFACT_VERIFICATION_DIRECTORY, `${attemptId}.json`);
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(fs.readFileSync(markerPath, "utf8"));
-  } catch {
-    // No marker yet: the verifier has not run, so it will hash the sanitized bytes itself.
-    return [];
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return [];
-  const marker = parsed as Record<string, unknown>;
-  const digest = crypto.createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex");
-  const previous = new Set<string>();
-  let updated = false;
-  for (const key of ["artifacts", "publications"] as const) {
-    const entries = marker[key];
-    if (!Array.isArray(entries)) continue;
-    for (const entry of entries) {
-      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
-      const record = entry as Record<string, unknown>;
-      if (record.path !== relativePath || typeof record.sha256 !== "string") continue;
-      if (record.sha256 === digest) continue;
-      previous.add(record.sha256);
-      record.sha256 = digest;
-      updated = true;
-    }
-  }
-  if (!updated) return [];
-  writeJsonDurable(markerPath, marker);
-  return [
-    {
-      code: "ARTIFACT_VERIFICATION_DIGEST_REFRESHED",
-      message: `Refreshed the verification marker digest for ${relativePath} after runtime sanitization`,
-      severity: "warning",
-      source,
-      path: markerPath,
-      details: {
-        attempt_id: attemptId,
-        artifact_path: relativePath,
-        sha256: digest,
-        // Both sides recorded: this rewrites a security-relevant attestation.
-        previous_sha256: [...previous].sort()
-      }
-    }
-  ];
-}
-
-/**
- * Report a verification marker that disagrees with the bytes on disk for one artifact, without
- * touching either. Used where the runtime did not itself rewrite the artifact, so re-sealing would
- * be indistinguishable from laundering an unexplained change past verification.
- */
-function reportVerifiedArtifactDigestDrift(
-  layout: RunLayout,
-  attemptId: string,
-  relativePath: string,
-  absolutePath: string
-): RuntimeDiagnostic[] {
-  const markerPath = path.join(layout.root, ARTIFACT_VERIFICATION_DIRECTORY, `${attemptId}.json`);
-  const recorded = recordedMarkerDigests(markerPath, relativePath);
-  if (recorded === undefined || recorded.size === 0) return [];
-  let digest: string;
-  try {
-    digest = crypto.createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex");
-  } catch {
-    return [];
-  }
-  if (recorded.size === 1 && recorded.has(digest)) return [];
-  return [
-    {
-      code: "ARTIFACT_VERIFICATION_DIGEST_DRIFTED",
-      message: `Verification marker digest for ${relativePath} does not match the published artifact`,
-      severity: "error",
-      source: "property-provenance",
-      path: markerPath,
-      details: {
-        attempt_id: attemptId,
-        artifact_path: relativePath,
-        sha256: digest,
-        marker_sha256: [...recorded].sort()
-      }
-    }
-  ];
-}
-
-/** Digests recorded for one artifact path across the marker's artifact and publication sets. */
-function recordedMarkerDigests(markerPath: string, relativePath: string): Set<string> | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(fs.readFileSync(markerPath, "utf8"));
-  } catch {
-    return undefined;
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
-  const marker = parsed as Record<string, unknown>;
-  const digests = new Set<string>();
-  for (const key of ["artifacts", "publications"] as const) {
-    const entries = marker[key];
-    if (!Array.isArray(entries)) continue;
-    for (const entry of entries) {
-      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
-      const record = entry as Record<string, unknown>;
-      if (record.path === relativePath && typeof record.sha256 === "string") digests.add(record.sha256);
-    }
-  }
-  return digests;
-}
-
-function sanitizeLensReferenceExpectationAuthority(
-  layout: RunLayout,
-  artifactDir: string,
-  node: PlannedGraphNode,
-  attemptId: string
-): RuntimeDiagnostic[] {
-  const lensOutput = propertyLensOutput(node);
-  if (lensOutput === undefined) return [];
-  const lensPath = safeResolveInside(artifactDir, lensOutput.path, "property lens output");
-  if (!fs.existsSync(lensPath)) return [];
-  const lens = validateLensPropertiesSchema(readJsonFile(lensPath), lensPath);
-  if (!lens.ok || lens.value === undefined) return [];
-  const supplied = readLensSuppliedExpectationIds(layout, node);
-  if (supplied.diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
-    return supplied.diagnostics;
-  }
-  if (supplied.catalogSupplied && readReferenceExpectationEnforcement(layout) === "fail") {
-    // Issue #285 staging switch, deliberately OFF by default. Once an operator supplies a catalogue,
-    // a citation outside it is a stronger signal than the same citation on a run with no catalogue
-    // at all — the authoritative set was declared and the lens went outside it. Enforcing that as a
-    // node failure is still a behaviour change nobody has watched land, so it stays opt-in until a
-    // smoke lane has been observed. Skipping the rewrite leaves the lens bytes intact, and
-    // `verifyLensReferenceExpectationAuthority` then reports each unauthorized ID as an error. The
-    // marker/disk drift report still runs: no rewrite happened, which is the case it exists for.
-    return reportVerifiedArtifactDigestDrift(layout, attemptId, lensOutput.path, lensPath);
-  }
-
-  let removed = 0;
-  const removedExpectationIds = new Set<string>();
-  const properties = lens.value.properties.map((property) => {
-    const expectationIds = property.reference_expectations ?? [];
-    if (expectationIds.length === 0) return property;
-    // Judged per property, not per ID, and deliberately so: unless EVERY unauthorized ID is a plausible
-    // copied citation, the lens is left byte-unchanged. An ID claiming a reserved authority namespace is
-    // a forged benchmark mapping, and free text or a URL is an authoring error,
-    // and the artifact as the model wrote it is the evidence of that, so rewriting it would destroy
-    // what the authority check exists to surface. `verifyPropertyProvenanceArtifacts` reports it and
-    // the node fails with the citation intact.
-    const unauthorized = expectationIds.filter((expectationId) => !supplied.ids.has(expectationId));
-    if (!unauthorized.every((expectationId) => isCopiedReferenceCitation(expectationId))) return property;
-    const authorized = expectationIds.filter((expectationId) => supplied.ids.has(expectationId));
-    if (authorized.length === expectationIds.length) return property;
-    removed += expectationIds.length - authorized.length;
-    for (const expectationId of expectationIds) {
-      if (!supplied.ids.has(expectationId)) removedExpectationIds.add(expectationId);
-    }
-    const sanitized = { ...property };
-    if (authorized.length === 0) {
-      delete sanitized.reference_expectations;
-    } else {
-      sanitized.reference_expectations = authorized;
-    }
-    return sanitized;
-  });
-  if (removed === 0) {
-    // Nothing to sanitize now, but the marker can still disagree with disk: the verifier may have
-    // hashed the lens and published its marker while an earlier pass was mid-rewrite. That leftover
-    // never repairs itself here, and downstream it surfaces only on a `prepare:` wrapper, which
-    // records no failed node and so cannot be retried. Report it as an error instead, so the node
-    // fails visibly and `--retry-failed` can act on it (issue #275).
-    return reportVerifiedArtifactDigestDrift(layout, attemptId, lensOutput.path, lensPath);
-  }
-
-  writeJsonDurable(lensPath, {
-    ...lens.value,
-    properties
-  });
-  // This gate rewrites an artifact the workflow verifier may already have published and sealed.
-  // Leaving the marker describing the pre-sanitization bytes makes every dependent's
-  // `assertVerifiedDependency` fail permanently with no failed node to retry, which stranded Aave
-  // run R43 (issue #275). The sanitizer is trusted runtime policy removing unauthorized reference
-  // expectation IDs, so the marker must follow its edit rather than contradict it.
-  const markerDiagnostics = refreshVerifiedArtifactDigest(layout, attemptId, lensOutput.path, lensPath);
-  return [
-    ...markerDiagnostics,
-    {
-      code: "PROPERTY_REFERENCE_EXPECTATION_SANITIZED",
-      message: `Removed ${removed} unauthorized reference expectation ID${removed === 1 ? "" : "s"} from property lens output`,
-      severity: "warning",
-      source: "property-provenance",
-      path: lensPath,
-      details: {
-        removed_reference_expectations: [...removedExpectationIds].sort()
-      }
-    }
-  ];
-}
-
 function propertyLensOutput(node: PlannedGraphNode): PlannedGraphNode["outputs"][number] | undefined {
-  return node.outputs.find((output) => output.contract === "ultrafuzz/property-lens@1");
-}
-
-/**
- * Namespaces that assert an external authority blessed a property. An identifier under one of these is
- * a benchmark-mapping claim: the gate exists to reject it, so it fails the node with its bytes intact.
- *
- * Everything else is a citation the lens prompt told the model to copy out of a pinned-reference
- * document, and is stripped with a `PROPERTY_REFERENCE_EXPECTATION_SANITIZED` diagnostic.
- *
- * This rule was previously approximated by a SHAPE pattern, and the approximation kept costing runs:
- *
- *   1. `LEND-01` — stripped correctly.
- *   2. `LEND_ACC_01` — killed R44's `property-specification-0kn0t` (issue #283) because the pattern
- *      allowed only a single hyphen before the digits, so the ID was neither authorised nor
- *      strippable. Fixed by widening the pattern to `-`/`_` segments (PR #284).
- *   3. `testConvertToAssetsSharesDesirable` — killed R45's `property-specification-runtime-verification`
- *      (issue #293). A test-function name from that lens's own pinned reference, which no shape pattern
- *      should be expected to anticipate.
- *
- * An allowlist of authority prefixes is used rather than "does it contain a colon", because a colon
- * test fails in both directions. Real catalogue identifiers are not colon-namespaced: the ScFuzzBench
- * ground truth uses bare labels such as `total-borrowed-v0`, `reference-expectations.schema.json` puts
- * no namespace requirement on `id`, and `.ultrafuzz/references.yml` namespaces with dots
- * (`properties.crytic`). Meanwhile a colon appears in perfectly ordinary citations — a source URL, a
- * `RoundingProps.sol:88` line reference, or `ERC4626-01: totalAssets never reverts` — and hard-failing
- * a whole lens on one punctuation character in model-authored text is the same trap in a new costume.
- *
- * Matching is prefix-anchored and case-insensitive so `Benchmark:` cannot slip past.
- *
- * Stripping is not free, and the cost is worth stating rather than assuming. `reference_expectations`
- * forces a property into the implementation selection regardless of the priority threshold
- * (`report-artifacts.ts`), and every fan-in `PROPERTY_REFERENCE_EXPECTATION_DROPPED` check skips a row
- * whose expectation list is empty — so a stripped property can quietly fall out of implementation and
- * out of those checks, with only a `warning` to show for it. What stripping cannot do is manufacture
- * provenance: `reference_expectation_ids` is report-only and no grading path reads it. So the residual
- * exposure is reduced DETECTION of an odd citation, weighed against losing an entire reference lens's
- * coverage, which is what failing the node actually costs.
- *
- * The wider authority question (#285) is now DECIDED, in two stages, and this rule is unchanged by
- * either. The disagreement was that the lens prompt says "copy identifiers out of the supplied
- * pinned-reference artifacts" — Markdown documents — while authority comes only from a structured
- * `ultrafuzz/reference-expectations@1` catalogue, which no benchmark run supplies. Option 3 in the
- * issue was taken: the catalogue is the definition of "supplied", and a run that wants its lens
- * citations authorized has to provide one.
- *
- * Stage one, shipped: when no dependency supplies a catalogue,
- * `readLensSuppliedExpectationIds` now says so with `PROPERTY_REFERENCE_EXPECTATION_CATALOG_ABSENT`
- * instead of returning an empty id set in silence. That path was not the exception, it was every
- * benchmark run, and the silence is what let the gate — and #240's
- * `verifyImplementationSelectionCoverage` — look active while doing nothing.
- *
- * Stage two, NOT shipped by default: once a catalogue is supplied, treating a citation outside it as
- * a node failure is available behind `invariants.reference_expectation_enforcement = "fail"`. It
- * stays `warn` (strip, report, keep the run alive) until a smoke lane has been observed, because the
- * failure mode of getting this wrong is exactly the one items 2 and 3 above document: killing a
- * whole reference lens over model-authored text.
- */
-// Separator-agnostic on purpose, both BETWEEN the namespace and the identifier and WITHIN the keyword.
-// A prefix allowlist that only knew `:` would let `scfuzzbench_aave_v4_iSpoke_supply` through as an
-// ordinary citation, and one that only allowed a hyphen inside `ground-truth` would let
-// `ground_truth.total-borrowed-v0` and `sc_fuzzbench.x` through — the same forgery with different
-// punctuation each time. A separator is still REQUIRED after the keyword, so ordinary words that merely
-// begin with one (`benchmarking`, `Benchmarks-are-fine`) are citations, not authority claims.
-const RESERVED_REFERENCE_AUTHORITY = /^(?:sc[._-]?fuzz[._-]?bench|benchmark|ground[-._]?truth)[:._/-]/u;
-
-// The strippable set is bounded POSITIVELY: a single-line token that could plausibly have been copied
-// out of a reference document. Bounding it negatively ("anything without an authority prefix") would
-// silently swallow a sentence, a whitespace-only entry, a URL or a JSON blob -- all of which are
-// authoring errors worth failing on, and none of which any prompt asks a model to put in this field.
-//
-// Deliberately admits shapes that would otherwise be the NEXT trap in this series: a leading digit or
-// underscore (`4626-01`, `_internal`) and an interior colon (`RoundingProps.sol:88`). A colon is safe
-// here precisely because the authority check runs first and wins, so `benchmark:unexpected` still fails
-// closed. `testConvertToAssetsSharesDesirable` (issue #293) and `LEND_ACC_01` (issue #283) both match,
-// so this stays as permissive as it needs to be and no more.
-const COPIED_REFERENCE_CITATION = /^[A-Za-z0-9_][A-Za-z0-9._:-]{0,63}$/u;
-
-function claimsReservedReferenceAuthority(expectationId: string): boolean {
-  // Lower-cased so `Benchmark_unexpected` cannot slip past; a regression pins that. NOT trimmed: a
-  // `.trim()` here would be unreachable defensive code, because `isCopiedReferenceCitation` tests the raw
-  // string first and any leading or trailing whitespace fails it outright. Keeping it would imply a
-  // protection that no test could pin.
-  return RESERVED_REFERENCE_AUTHORITY.test(expectationId.toLowerCase());
-}
-
-function isCopiedReferenceCitation(expectationId: string): boolean {
-  return COPIED_REFERENCE_CITATION.test(expectationId) && !claimsReservedReferenceAuthority(expectationId);
+  return node.outputs.find((output) => String(output.contract) === "ultrafuzz/property-lens@2");
 }
 
 function readLensSuppliedExpectationIds(
@@ -2079,7 +1760,7 @@ function declaresReferenceExpectationCatalog(
 ): boolean {
   return (
     outputs?.some(
-      (output) => output.path === expectedPath && output.contract === "ultrafuzz/reference-expectations@1"
+      (output) => output.path === expectedPath && output.contract === "ultrafuzz/reference-expectations@2"
     ) ?? false
   );
 }
@@ -2157,36 +1838,29 @@ function appendExpectationCatalog(
   }
 }
 
-/**
- * Validate the explicit priority selection emitted by new invariant
- * implementation agents. Historical artifacts omit `selection`; those remain
- * valid and continue to receive the legacy canonical-reference checks above.
- */
+/** Validate the explicit priority selection required by the current contract. */
 function verifyImplementationSelectionCoverage(
   catalog: PropertiesArtifact,
   implementation: ImplementedPropertiesArtifact,
   implementationPath: string,
-  layout: RunLayout,
-  required: boolean
+  layout: RunLayout
 ): RuntimeDiagnostic[] {
   const selection = implementation.selection;
   if (selection === undefined) {
-    return required
-      ? [
-          {
-            code: "PROPERTY_IMPLEMENTATION_SELECTION_MISSING",
-            message: "Current invariant implementation artifacts must declare selection metadata",
-            severity: "error",
-            source: "property-provenance",
-            path: `${implementationPath}#$.selection`
-          }
-        ]
-      : [];
+    return [
+      {
+        code: "PROPERTY_IMPLEMENTATION_SELECTION_MISSING",
+        message: "Invariant implementation artifacts must declare selection metadata",
+        severity: "error",
+        source: "property-provenance",
+        path: `${implementationPath}#$.selection`
+      }
+    ];
   }
 
   const diagnostics: RuntimeDiagnostic[] = [];
   const configuredSelection = readConfiguredInvariantPrioritySelection(layout);
-  if (required && configuredSelection === undefined) {
+  if (configuredSelection === undefined) {
     diagnostics.push({
       code: "PROPERTY_IMPLEMENTATION_CONFIG_MISSING",
       message:
@@ -2307,24 +1981,11 @@ function readConfiguredInvariantPrioritySelection(
   return { priority_threshold, priorities: order.slice(0, order.indexOf(priority_threshold) + 1) };
 }
 
-/**
- * Staging switch for issue #285, read the same way as the invariant priority threshold above.
- * `warn` — the default, and what every run gets until someone changes it — keeps today's behaviour:
- * an expectation absent from a supplied catalogue is stripped and reported as a warning. `fail`
- * escalates that to a node failure with the lens bytes left intact.
- */
-function readReferenceExpectationEnforcement(layout: RunLayout): "warn" | "fail" {
-  if (!fs.existsSync(layout.resolvedConfigPath)) return "warn";
-  const contents = fs.readFileSync(layout.resolvedConfigPath, "utf8");
-  const match = /^\s*reference_expectation_enforcement\s*=\s*["'](warn|fail)["']\s*$/mu.exec(contents);
-  return match === null ? "warn" : (match[1] as "warn" | "fail");
-}
-
 function verifyCampaignPropertyReferences(
   layout: RunLayout,
   artifactDir: string,
   catalog: PropertiesArtifact,
-  node: PlannedGraphNode
+  _node: PlannedGraphNode
 ): RuntimeDiagnostic[] {
   const findingsPath = path.join(artifactDir, "findings.json");
   const campaignPaths = campaignResultArtifactNames
@@ -2353,14 +2014,7 @@ function verifyCampaignPropertyReferences(
       : [];
   const partitionDiagnostics =
     campaigns.length === campaignPaths.length
-      ? campaignFailurePartitionDiagnostics(
-          campaigns,
-          validatedFindings,
-          findingsPath,
-          node.outputs.some(
-            (output) => output.path === "campaign-summary.json" && output.contract === "ultrafuzz/campaign-summary@1"
-          )
-        )
+      ? campaignFailurePartitionDiagnostics(campaigns, validatedFindings, findingsPath)
       : [];
   const implementation = readImplementedProperties(layout);
   if (implementation.diagnostics.length > 0 || implementation.value === undefined) {
@@ -2440,17 +2094,11 @@ interface PartitionedCampaignFailure {
   path: string;
 }
 
-/**
- * Proves the producer-owned failure-to-finding partition introduced for #391.
- * Current plans are identified by their typed campaign-summary contract;
- * persisted plans with the historical json-object contract keep the #388
- * coverage fallback unless they volunteer partition metadata themselves.
- */
+/** Prove the producer-owned failure-to-finding partition for every campaign. */
 function campaignFailurePartitionDiagnostics(
   campaigns: readonly { path: string; value: PropertyCampaignArtifact }[],
   findings: readonly Readonly<Record<string, unknown>>[],
-  findingsPath: string,
-  requiredForCurrentPlan: boolean
+  findingsPath: string
 ): RuntimeDiagnostic[] {
   const failures: PartitionedCampaignFailure[] = campaigns.flatMap((campaign, campaignIndex) =>
     campaign.value.failures.map((failure, failureIndex) => ({
@@ -2475,15 +2123,6 @@ function campaignFailurePartitionDiagnostics(
     }
   }
 
-  const partitionDeclared = findings.some(
-    (finding) =>
-      Object.prototype.hasOwnProperty.call(finding, "contributing_backend_failures") ||
-      Object.prototype.hasOwnProperty.call(finding, "deduplication")
-  );
-  if (!requiredForCurrentPlan && !partitionDeclared) {
-    return [];
-  }
-
   const diagnostics: RuntimeDiagnostic[] = [];
   const claimedBy = new Map<string, { findingIndex: number; referenceIndex: number }>();
   for (const [findingIndex, finding] of findings.entries()) {
@@ -2492,8 +2131,7 @@ function campaignFailurePartitionDiagnostics(
       : [];
     const hasContributions = Object.prototype.hasOwnProperty.call(finding, "contributing_backend_failures");
     const hasDeduplication = Object.prototype.hasOwnProperty.call(finding, "deduplication");
-    const mustAccount =
-      (propertyIds.length > 0 && (requiredForCurrentPlan || partitionDeclared)) || hasContributions || hasDeduplication;
+    const mustAccount = propertyIds.length > 0 || hasContributions || hasDeduplication;
     if (!mustAccount) continue;
 
     const contributionPath = `${findingsPath}#$[${findingIndex}].contributing_backend_failures`;
@@ -2627,10 +2265,8 @@ function campaignFailurePartitionDiagnostics(
         : contributedBackends.length === 1
           ? Object.prototype.hasOwnProperty.call(finding, "fuzzer_backend")
           : Object.prototype.hasOwnProperty.call(finding, "fuzzer_backends");
-    const enforceExactBackends = requiredForCurrentPlan || ownedBackends.present;
     if (
       ownedBackends.valid &&
-      enforceExactBackends &&
       (missingBackendCount > 0 ||
         !hasExpectedBackendShape ||
         !sameStringSet(ownedBackends.backends, contributedBackends))
@@ -2860,13 +2496,7 @@ function verifyFinalReportPropertyReferences(
   return diagnostics;
 }
 
-/**
- * A current invariant run carries selection metadata in the @2 implementation
- * handoff. Its terminal report must preserve the same coverage accounting and
- * render the corresponding Markdown section. Reports from before this
- * handoff, which have no implementation selection, retain historical
- * compatibility.
- */
+/** Require the final report to preserve the current implementation selection. */
 function verifyFinalReportImplementationCoverage(
   layout: RunLayout,
   node: PlannedGraphNode,
@@ -2882,8 +2512,19 @@ function verifyFinalReportImplementationCoverage(
     return [];
   }
   const implementation = validateImplementedPropertiesSchema(readJsonFile(implementationPath), implementationPath);
-  if (!implementation.ok || implementation.value === undefined || implementation.value.selection === undefined) {
-    return [];
+  if (!implementation.ok || implementation.value === undefined) {
+    return schemaDiagnostics(implementation.issues);
+  }
+  if (implementation.value.selection === undefined) {
+    return [
+      {
+        code: "PROPERTY_IMPLEMENTATION_SELECTION_MISSING",
+        message: "Invariant implementation artifacts must declare selection metadata",
+        severity: "error",
+        source: "property-provenance",
+        path: `${implementationPath}#$.selection`
+      }
+    ];
   }
 
   const catalog = readCanonicalPropertyCatalog(layout);
@@ -2895,8 +2536,7 @@ function verifyFinalReportImplementationCoverage(
     catalog.value,
     implementation.value,
     implementationPath,
-    layout,
-    true
+    layout
   );
   const coverage = report.property_implementation_coverage;
   if (!isRecord(coverage)) {
@@ -3507,9 +3147,9 @@ function readImplementedProperties(layout: RunLayout): {
 
 function findLogicalNodeArtifact(layout: RunLayout, logicalNodeId: string, fileName: string): string | undefined {
   const state = readRunState(layout);
-  const candidateIds = new Set([logicalNodeId]);
+  const candidateIds = new Set<string>();
   for (const [nodeId, nodeState] of Object.entries(state.nodes)) {
-    if (nodeState.logical_node_id === logicalNodeId) {
+    if (nodeId === logicalNodeId || nodeState.logical_node_id === logicalNodeId) {
       candidateIds.add(nodeId);
     }
   }
@@ -3522,23 +3162,9 @@ function findLogicalNodeArtifact(layout: RunLayout, logicalNodeId: string, fileN
   return undefined;
 }
 
-function findDependencyArtifact(
-  layout: RunLayout,
-  dependencyId: string,
-  logicalNodeId: string,
-  fileName: string
-): string | undefined {
+function findDependencyArtifact(layout: RunLayout, dependencyId: string, fileName: string): string | undefined {
   const concretePath = path.join(getNodeArtifactDir(layout, dependencyId), fileName);
-  if (fs.existsSync(concretePath)) {
-    return concretePath;
-  }
-  // A persisted concrete node proves that this run was expanded. In that
-  // case, do not satisfy the dependency from a stale logical-ID artifact.
-  const state = readRunState(layout);
-  if (dependencyId !== logicalNodeId && state.nodes[dependencyId] !== undefined) {
-    return undefined;
-  }
-  return findLogicalNodeArtifact(layout, logicalNodeId, fileName);
+  return fs.existsSync(concretePath) ? concretePath : undefined;
 }
 
 function findingPropertyReferences(value: unknown, artifactPath: string): PropertyReferenceInput[] {

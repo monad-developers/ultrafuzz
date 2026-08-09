@@ -29,10 +29,6 @@ import { EvalError, evalRunRoot, jsonFile, readJsonLines, safeEvalId } from "./u
 
 export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v1" as const;
 export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v5" as const;
-const EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v4" as const;
-const EVAL_HISTORY_LEGACY_PUBLICATION_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v3" as const;
-const EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v2" as const;
-const EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v1" as const;
 const EVAL_HISTORY_PUBLIC_BUNDLE_FILE = "public-results.json";
 const EVAL_HISTORY_PUBLIC_REPORT_FILES = ["report.md", "report.json", "findings.normalized.json"] as const;
 
@@ -61,16 +57,11 @@ export interface EvalHistoryTargetPublication {
 }
 
 export interface EvalHistoryObservation {
-  schema_version:
-    | typeof EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION
-    | typeof EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION
-    | typeof EVAL_HISTORY_LEGACY_PUBLICATION_OBSERVATION_SCHEMA_VERSION
-    | typeof EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION
-    | typeof EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION;
+  schema_version: typeof EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION;
   id: string;
   benchmark: EvalHistoryBenchmark;
   lane: EvalHistoryLane;
-  status?: EvalHistoryObservationStatus;
+  status: EvalHistoryObservationStatus;
   target: string;
   variant: string;
   trial_count: number;
@@ -88,15 +79,15 @@ export interface EvalHistoryObservation {
   recall: number;
   f1: number;
   cumulative_unique_true_positives: number;
-  ground_truth_bug_count?: number;
+  ground_truth_bug_count: number;
   wall_clock_seconds: number | null;
   wall_clock_completeness: EvalHistoryCompleteness;
   cost_usd: number | null;
   cost_completeness: EvalHistoryCompleteness;
-  executed_case_count?: number;
-  graded_case_count?: number;
-  publication_url?: string;
-  target_publication?: EvalHistoryTargetPublication;
+  executed_case_count: number;
+  graded_case_count: number;
+  publication_url: string;
+  target_publication: EvalHistoryTargetPublication;
   source_eval_run_id: string;
   source_artifact: string;
 }
@@ -142,7 +133,6 @@ const githubRepositoryUrl = z
   .url()
   .regex(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/u);
 const publicationStatusSchema = z.enum(["succeeded", "genuine-task-failures", "failed"]);
-const legacyPublicationStatusSchema = z.enum(["succeeded", "genuine-task-failures"]);
 const positiveInteger = z.number().int().positive();
 const nonNegativeInteger = z.number().int().nonnegative();
 const relativePathSchema = z
@@ -182,12 +172,6 @@ const targetPublicationResultShape = {
 const targetPublicationSchema = z.strictObject({
   ...targetPublicationIdentityShape,
   status: publicationStatusSchema,
-  ...targetPublicationResultShape
-});
-
-const legacyTargetPublicationSchema = z.strictObject({
-  ...targetPublicationIdentityShape,
-  status: legacyPublicationStatusSchema,
   ...targetPublicationResultShape
 });
 
@@ -231,53 +215,7 @@ const currentObservationSchema = z.strictObject({
   target_publication: targetPublicationSchema
 });
 
-const previousObservationSchema = z.strictObject({
-  schema_version: z.literal(EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION),
-  ...observationBaseShape,
-  ground_truth_bug_count: nonNegativeInteger,
-  status: publicationStatusSchema,
-  executed_case_count: positiveInteger,
-  graded_case_count: positiveInteger,
-  publication_url: publicationUrlSchema,
-  target_publication: targetPublicationSchema
-});
-
-const legacyPublicationObservationSchema = z.strictObject({
-  schema_version: z.literal(EVAL_HISTORY_LEGACY_PUBLICATION_OBSERVATION_SCHEMA_VERSION),
-  ...observationBaseShape,
-  ground_truth_bug_count: nonNegativeInteger,
-  status: legacyPublicationStatusSchema,
-  executed_case_count: positiveInteger,
-  graded_case_count: positiveInteger,
-  publication_url: publicationUrlSchema,
-  target_publication: legacyTargetPublicationSchema
-});
-
-const publishedObservationSchema = z.strictObject({
-  schema_version: z.union([
-    z.literal(EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION),
-    z.literal(EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION)
-  ]),
-  ...observationBaseShape,
-  status: legacyPublicationStatusSchema,
-  executed_case_count: positiveInteger,
-  graded_case_count: positiveInteger,
-  publication_url: publicationUrlSchema,
-  target_publication: legacyTargetPublicationSchema
-});
-
-const legacyObservationSchema = z.strictObject({
-  schema_version: z.literal(EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION),
-  ...observationBaseShape
-});
-
-const observationSchema = z.union([
-  currentObservationSchema,
-  previousObservationSchema,
-  legacyPublicationObservationSchema,
-  publishedObservationSchema,
-  legacyObservationSchema
-]);
+const observationSchema = currentObservationSchema;
 
 const supersessionSchema = z.strictObject({
   superseded_source_eval_run_id: safeText,
@@ -288,7 +226,7 @@ const supersessionSchema = z.strictObject({
 
 const historySchema = z.strictObject({
   schema_version: z.literal(EVAL_HISTORY_SCHEMA_VERSION),
-  supersessions: z.array(supersessionSchema).default([]),
+  supersessions: z.array(supersessionSchema),
   observations: z.array(observationSchema)
 });
 
@@ -353,50 +291,34 @@ function assertHistoryIntegrity(history: EvalHistory): void {
     assertCompletenessValue(
       observation.wall_clock_seconds,
       observation.wall_clock_completeness,
-      `${observation.id}.wall_clock_seconds`,
-      observation.schema_version === EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION
+      `${observation.id}.wall_clock_seconds`
     );
-    assertCompletenessValue(
-      observation.cost_usd,
-      observation.cost_completeness,
-      `${observation.id}.cost_usd`,
-      observation.schema_version === EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION
-    );
+    assertCompletenessValue(observation.cost_usd, observation.cost_completeness, `${observation.id}.cost_usd`);
     const targetKeys = observation.target_revisions.map((target) => target.target);
     if (new Set(targetKeys).size !== targetKeys.length) {
       throw new EvalError("EVAL_HISTORY_INVALID", `observation ${observation.id} repeats a target revision`);
     }
-    if (
-      observation.ground_truth_bug_count !== undefined &&
-      observation.cumulative_unique_true_positives > observation.ground_truth_bug_count
-    ) {
+    if (observation.cumulative_unique_true_positives > observation.ground_truth_bug_count) {
       throw new EvalError(
         "EVAL_HISTORY_INVALID",
         `observation ${observation.id} finds more unique true positives than its ground truth contains`
       );
     }
-    if (hasPublicationMetadata(observation)) {
-      const targetRevision = observation.target_revisions.find((target) => target.target === observation.target);
-      if (
-        observation.status === undefined ||
-        observation.executed_case_count === undefined ||
-        observation.graded_case_count === undefined ||
-        observation.publication_url === undefined ||
-        observation.target_publication === undefined ||
-        targetRevision === undefined ||
-        observation.target_publication.target !== observation.target ||
-        observation.target_publication.revision !== targetRevision.revision ||
-        observation.target_publication.status !== observation.status ||
-        observation.target_publication.executed_case_count !== observation.executed_case_count ||
-        observation.target_publication.graded_case_count !== observation.graded_case_count ||
-        observation.executed_case_count !== observation.trial_count ||
-        observation.graded_case_count !== observation.trial_count
-      ) {
-        throw new EvalError(
-          "EVAL_HISTORY_INVALID",
-          `observation ${observation.id} has inconsistent publication metadata`
-        );
-      }
+    const targetRevision = observation.target_revisions.find((target) => target.target === observation.target);
+    if (
+      targetRevision === undefined ||
+      observation.target_publication.target !== observation.target ||
+      observation.target_publication.revision !== targetRevision.revision ||
+      observation.target_publication.status !== observation.status ||
+      observation.target_publication.executed_case_count !== observation.executed_case_count ||
+      observation.target_publication.graded_case_count !== observation.graded_case_count ||
+      observation.executed_case_count !== observation.trial_count ||
+      observation.graded_case_count !== observation.trial_count
+    ) {
+      throw new EvalError(
+        "EVAL_HISTORY_INVALID",
+        `observation ${observation.id} has inconsistent publication metadata`
+      );
     }
     const canonical = stableStringify(observation);
     const previous = byId.get(observation.id);
@@ -517,32 +439,10 @@ function assertSupersessionIntegrity(history: EvalHistory): void {
   }
 }
 
-function hasPublicationMetadata(observation: EvalHistoryObservation): boolean {
-  return (
-    observation.schema_version === EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION ||
-    observation.status !== undefined ||
-    observation.executed_case_count !== undefined ||
-    observation.graded_case_count !== undefined ||
-    observation.publication_url !== undefined ||
-    observation.target_publication !== undefined
-  );
-}
-
-function assertCompletenessValue(
-  value: number | null,
-  completeness: EvalHistoryCompleteness,
-  field: string,
-  currentSemantics: boolean
-): void {
+function assertCompletenessValue(value: number | null, completeness: EvalHistoryCompleteness, field: string): void {
   if (completeness.status === "complete") {
     if (value === null || completeness.reasons.length > 0) {
       throw new EvalError("EVAL_HISTORY_INVALID", `${field} must have a value and no reasons when complete`);
-    }
-    return;
-  }
-  if (!currentSemantics) {
-    if (value !== null || completeness.reasons.length === 0) {
-      throw new EvalError("EVAL_HISTORY_INVALID", `${field} must be unavailable with at least one reason`);
     }
     return;
   }

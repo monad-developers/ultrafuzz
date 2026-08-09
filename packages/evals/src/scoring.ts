@@ -144,9 +144,7 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
   const scoredRows = await mapLimitStable(matrix, suite.run.max_parallel_runs ?? 1, async (row) => {
     const record = recordsByRow.get(row.id);
     const reportResolution = resolveTerminalReportPath({
-      ...(record?.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root }),
-      ...(record?.report_json_path === undefined ? {} : { recordedPath: record.report_json_path }),
-      fallbackPath: defaultReportPath(row)
+      ...(record?.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root })
     });
     if (reportResolution.path === undefined) {
       throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", reportResolution.reason, { row_id: row.id });
@@ -608,13 +606,6 @@ function completenessValue(value: EvalRowScore["efficiency"]["runtime"]): string
   return value.reason === null ? value.status : `${value.status} (${value.reason})`;
 }
 
-function defaultReportPath(row: EvalMatrixRow): string {
-  if (row.target.path === undefined) {
-    return `missing-target-path/${row.run_id}/report.json`;
-  }
-  return path.join(row.target.path, ".ultrafuzz", "runs", row.run_id, "artifacts", "final-report", "report.json");
-}
-
 function resolveJudge(
   llmJudge: boolean | FindingJudge | undefined,
   env: Record<string, string | undefined> | undefined
@@ -729,7 +720,7 @@ async function scoreFindings(input: {
           fullMatches += 1;
         }
         const bug = input.bugs.find((candidate) => candidate.id === bugId);
-        const severity = stringField(finding, "severity_guess");
+        const severity = stringField(finding, "severity");
         if (bug?.severity && severity) {
           severityChecks += 1;
           if (bug.severity.toLowerCase() === severity.toLowerCase()) {
@@ -1200,9 +1191,13 @@ function readReport(filePath: string): { schemaValid: boolean; findings: unknown
   if (!fs.existsSync(filePath) || !fs.lstatSync(filePath).isFile()) {
     throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report is missing", { path: filePath });
   }
-  const validation = validateArtifactContract("ultrafuzz/report@1", fs.readFileSync(filePath, "utf8"), filePath);
+  const validation = validateArtifactContract(
+    "ultrafuzz/report@2" as Parameters<typeof validateArtifactContract>[0],
+    fs.readFileSync(filePath, "utf8"),
+    filePath
+  );
   if (!validation.ok || !isRecord(validation.value)) {
-    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report does not satisfy ultrafuzz/report@1", {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report does not satisfy ultrafuzz/report@2", {
       issues: validation.issues.map((issue) => ({ code: issue.code, path: issue.path }))
     });
   }

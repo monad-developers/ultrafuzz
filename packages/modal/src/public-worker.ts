@@ -1008,8 +1008,7 @@ export function publicBundleSources(
       throw new Error(`public benchmark row is not a scoreable terminal outcome: ${row.id}`);
     }
     const report = resolveTerminalReportPath({
-      ...(record.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root }),
-      ...(record.report_json_path === undefined ? {} : { recordedPath: record.report_json_path })
+      ...(record.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root })
     }).path;
     if (report === undefined || record.ultrafuzz_run_root === undefined) {
       throw new Error(`public benchmark row is missing its terminal report: ${row.id}`);

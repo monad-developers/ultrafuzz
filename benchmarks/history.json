@@ -1,8 +1,9 @@
 {
   "schema_version": "ultrafuzz.eval.history.v1",
+  "supersessions": [],
   "observations": [
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-29873789559-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -68,10 +69,11 @@
             "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-29873789559-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -137,10 +139,11 @@
             "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 17
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-29873789559-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -206,10 +209,11 @@
             "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-29932964600-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -275,10 +279,11 @@
             "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-29932964600-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -344,10 +349,11 @@
             "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 17
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-29932964600-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -413,10 +419,11 @@
             "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-29951188421-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -482,10 +489,11 @@
             "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-29951188421-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -551,10 +559,11 @@
             "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 17
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-29951188421-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -620,10 +629,11 @@
             "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-29967558871-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -689,10 +699,11 @@
             "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-29967558871-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -758,10 +769,11 @@
             "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 17
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-29967558871-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -827,10 +839,11 @@
             "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30009663361-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -896,10 +909,11 @@
             "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30009663361-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -965,10 +979,11 @@
             "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 17
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30009663361-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -1034,10 +1049,11 @@
             "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30028731084-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -1103,10 +1119,11 @@
             "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30028731084-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -1172,10 +1189,11 @@
             "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 17
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30028731084-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -1241,10 +1259,11 @@
             "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30506327033-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -1310,10 +1329,11 @@
             "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30506327033-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -1379,10 +1399,11 @@
             "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 17
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30506327033-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -1448,10 +1469,11 @@
             "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30562655330-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -1517,10 +1539,11 @@
             "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30562655330-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -1586,10 +1609,11 @@
             "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 17
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30562655330-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -1655,10 +1679,11 @@
             "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30567456432-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -1724,10 +1749,11 @@
             "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30567456432-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -1793,10 +1819,11 @@
             "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 17
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30567456432-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -1862,10 +1889,11 @@
             "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "manual-kimi-smoke-bdf2482-nt7200-benchmark-smoke-kimi-k3-max:stableswap-ng-vyper:benchmark-smoke-kimi-k3-max:benchmark-smoke-kimi-k3-max",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -1931,10 +1959,11 @@
             "reports/stableswap-ng-vyper-benchmark-smoke-kimi-k3-max-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "manual-kimi-smoke-bdf2482-nt7200-benchmark-smoke-kimi-k3-max:venus-isolated-pools-hardhat:benchmark-smoke-kimi-k3-max:benchmark-smoke-kimi-k3-max",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -2000,10 +2029,11 @@
             "reports/venus-isolated-pools-hardhat-benchmark-smoke-kimi-k3-max-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 17
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "manual-kimi-smoke-bdf2482-nt7200-benchmark-smoke-kimi-k3-max:very-liquid-vaults-foundry:benchmark-smoke-kimi-k3-max:benchmark-smoke-kimi-k3-max",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -2069,10 +2099,11 @@
             "reports/very-liquid-vaults-foundry-benchmark-smoke-kimi-k3-max-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30586240043-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -2138,10 +2169,11 @@
             "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30586240043-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -2207,10 +2239,11 @@
             "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 17
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30586240043-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -2276,10 +2309,11 @@
             "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30590203967-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -2345,10 +2379,11 @@
             "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30590203967-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -2414,10 +2449,11 @@
             "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 17
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v2",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30590203967-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -2483,10 +2519,11 @@
             "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
           ]
         }
-      }
+      },
+      "ground_truth_bug_count": 7
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30640129870-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -2556,7 +2593,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30640129870-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -2626,7 +2663,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30640129870-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -2696,7 +2733,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30643345519-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -2766,7 +2803,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30643345519-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -2836,7 +2873,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30643345519-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -2906,7 +2943,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30645677931-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -2976,7 +3013,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30645677931-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -3046,7 +3083,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30645677931-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -3116,7 +3153,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30649494164-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -3186,7 +3223,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30649494164-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -3256,7 +3293,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30649494164-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -3326,7 +3363,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30665828723-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -3396,7 +3433,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30665828723-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -3466,7 +3503,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30665828723-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -3536,7 +3573,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-163000001-1-smoke-ultrafuzz-bench-deepseek-benchmark-smoke-deepseek-v4-pro-max:stableswap-ng-vyper:benchmark-smoke-deepseek-v4-pro-max:benchmark-smoke-deepseek-v4-pro-max",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -3606,7 +3643,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-163000001-1-smoke-ultrafuzz-bench-deepseek-benchmark-smoke-deepseek-v4-pro-max:venus-isolated-pools-hardhat:benchmark-smoke-deepseek-v4-pro-max:benchmark-smoke-deepseek-v4-pro-max",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -3676,7 +3713,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-163000001-1-smoke-ultrafuzz-bench-deepseek-benchmark-smoke-deepseek-v4-pro-max:very-liquid-vaults-foundry:benchmark-smoke-deepseek-v4-pro-max:benchmark-smoke-deepseek-v4-pro-max",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -3746,7 +3783,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30760195772-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -3816,7 +3853,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30760195772-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -3886,7 +3923,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30760195772-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -3956,7 +3993,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30775330610-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -4026,7 +4063,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30775330610-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -4096,7 +4133,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30775330610-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -4166,7 +4203,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "manual-kimi-smoke-5771bbc-cost-20260803-benchmark-smoke-kimi-k3-max:stableswap-ng-vyper:benchmark-smoke-kimi-k3-max:benchmark-smoke-kimi-k3-max",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -4236,7 +4273,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "manual-kimi-smoke-5771bbc-cost-20260803-benchmark-smoke-kimi-k3-max:venus-isolated-pools-hardhat:benchmark-smoke-kimi-k3-max:benchmark-smoke-kimi-k3-max",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -4306,7 +4343,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "manual-kimi-smoke-5771bbc-cost-20260803-benchmark-smoke-kimi-k3-max:very-liquid-vaults-foundry:benchmark-smoke-kimi-k3-max:benchmark-smoke-kimi-k3-max",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -4376,7 +4413,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30824429104-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -4446,7 +4483,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30824429104-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -4516,7 +4553,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30824429104-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -4586,7 +4623,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30920966290-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -4656,7 +4693,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30920966290-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -4726,7 +4763,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30920966290-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -4796,7 +4833,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30924672507-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -4866,7 +4903,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30924672507-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -4936,7 +4973,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30924672507-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -5006,7 +5043,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30959174038-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -5076,7 +5113,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30959174038-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -5146,7 +5183,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30959174038-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -5216,7 +5253,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30964241284-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -5286,7 +5323,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30964241284-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -5356,7 +5393,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30964241284-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -5426,7 +5463,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30966211639-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -5496,7 +5533,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30966211639-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -5566,7 +5603,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30966211639-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -5636,7 +5673,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30969679373-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -5706,7 +5743,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30969679373-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -5776,7 +5813,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30969679373-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -5846,7 +5883,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30971538185-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -5916,7 +5953,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30971538185-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -5986,7 +6023,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30971538185-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -6056,7 +6093,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30980205271-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -6126,7 +6163,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30980205271-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -6196,7 +6233,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-30980205271-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -6266,7 +6303,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31005761232-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -6336,7 +6373,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31005761232-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -6406,7 +6443,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31005761232-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -6476,7 +6513,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31009762476-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -6546,7 +6583,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31009762476-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -6616,7 +6653,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31009762476-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -6686,7 +6723,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31015717846-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -6756,7 +6793,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31015717846-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -6826,7 +6863,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31015717846-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -6896,7 +6933,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31214773803-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -6966,7 +7003,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31214773803-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -7036,7 +7073,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31214773803-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -7106,7 +7143,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31220226212-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -7176,7 +7213,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31220226212-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -7246,7 +7283,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31220226212-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -7316,7 +7353,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31243537480-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -7386,7 +7423,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31243537480-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -7456,7 +7493,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31243537480-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -7526,7 +7563,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31264673583-1-smoke-ultrafuzz-bench-deepseek-benchmark-smoke-deepseek-v4-flash-max:stableswap-ng-vyper:benchmark-smoke-deepseek-v4-flash-max:benchmark-smoke-deepseek-v4-flash-max",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -7596,7 +7633,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31264673583-1-smoke-ultrafuzz-bench-deepseek-benchmark-smoke-deepseek-v4-flash-max:venus-isolated-pools-hardhat:benchmark-smoke-deepseek-v4-flash-max:benchmark-smoke-deepseek-v4-flash-max",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -7666,7 +7703,7 @@
       }
     },
     {
-      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "schema_version": "ultrafuzz.eval.history.observation.v5",
       "id": "ci-31264673583-1-smoke-ultrafuzz-bench-deepseek-benchmark-smoke-deepseek-v4-flash-max:very-liquid-vaults-foundry:benchmark-smoke-deepseek-v4-flash-max:benchmark-smoke-deepseek-v4-flash-max",
       "benchmark": "ultrafuzz-bench",
       "lane": "smoke",
@@ -7707,7 +7744,7 @@
       },
       "cost_usd": null,
       "cost_completeness": {
-        "status": "partial",
+        "status": "unavailable",
         "reasons": ["pricing-incomplete"]
       },
       "source_eval_run_id": "ci-31264673583-1-smoke-ultrafuzz-bench-deepseek-benchmark-smoke-deepseek-v4-flash-max",

@@ -6,7 +6,7 @@ import { assertNoSymlinkComponents, assertPathInside, layoutForRunRoot, validate
 import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { commandFailure, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
-import { reconcileReportArtifacts } from "../report-artifacts.js";
+import { loadValidatedReportArtifacts } from "../report-artifacts.js";
 
 type AccountingField = "tokens_used" | "estimated_spend";
 
@@ -30,7 +30,7 @@ export default class Report extends Command {
       const layout = layoutForRunRoot(path.join(runsRoot, runId), runId);
       assertPathInside(runsRoot, layout.root, "run root");
       assertNoSymlinkComponents(runsRoot, layout.root, "run root");
-      const written = reconcileReportArtifacts(layout.root);
+      const written = loadValidatedReportArtifacts(layout.root);
       const diagnostics = reportAccountingDiagnostics(layout.root, written);
       emitCommandResult(
         this,
@@ -95,9 +95,9 @@ function expectedAccountingFromRunMetadata(metadataPath: string): ExpectedAccoun
   if (cumulative === undefined) {
     return undefined;
   }
-  const tokensUsed = labelField(cumulative, ["tokens_used", "tokensUsed"], "integer");
-  const estimatedSpend = labelField(cumulative, ["estimated_spend", "estimatedSpend"], "usd");
-  const partialPricing = booleanField(cumulative, ["partial_pricing", "partialPricing"]);
+  const tokensUsed = labelField(cumulative, "tokens_used", "integer");
+  const estimatedSpend = labelField(cumulative, "estimated_spend", "usd");
+  const partialPricing = booleanField(cumulative, "partial_pricing");
   const expected = {
     ...(isAvailableLabel(tokensUsed) ? { tokens_used: tokensUsed } : {}),
     ...(isAvailableLabel(estimatedSpend) ? { estimated_spend: estimatedSpend } : {}),
@@ -141,7 +141,7 @@ function reportJsonAccountingDiagnostics(
   jsonPath: string
 ): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
-  const runMetadata = recordField(reportJson, "run_metadata") ?? recordField(reportJson, "runMetadata");
+  const runMetadata = recordField(reportJson, "run_metadata");
   if (runMetadata === undefined) {
     diagnostics.push({
       code: "REPORT_RUN_METADATA_MISSING",
@@ -155,7 +155,7 @@ function reportJsonAccountingDiagnostics(
   diagnostics.push(
     ...accountingValueDiagnostics({
       field: "tokens_used",
-      actual: labelField(runMetadata, ["tokens_used", "tokensUsed", "token_usage", "tokenUsage"], "integer"),
+      actual: labelField(runMetadata, "tokens_used", "integer"),
       expected: expected.tokens_used,
       expectedPartialPricing: false,
       filePath: jsonPath,
@@ -165,7 +165,7 @@ function reportJsonAccountingDiagnostics(
   diagnostics.push(
     ...accountingValueDiagnostics({
       field: "estimated_spend",
-      actual: labelField(runMetadata, ["estimated_spend", "estimatedSpend", "estimated_cost", "estimatedCost"], "usd"),
+      actual: labelField(runMetadata, "estimated_spend", "usd"),
       expected: expected.estimated_spend,
       expectedPartialPricing: expected.partial_pricing === true,
       filePath: jsonPath,
@@ -270,19 +270,18 @@ function isAvailableLabel(value: string | undefined): value is string {
 
 function labelField(
   value: Record<string, unknown> | undefined,
-  keys: string[],
+  key: string,
   numericFormat: "integer" | "usd"
 ): string | undefined {
-  for (const key of keys) {
-    const field = value?.[key];
-    if (typeof field === "string") {
-      return field;
-    }
-    if (typeof field === "number" && Number.isFinite(field)) {
-      return numericFormat === "usd" ? formatUsd(field) : formatInteger(field);
-    }
+  const field = value?.[key];
+  if (typeof field === "string") {
+    return field;
   }
-  return undefined;
+  return typeof field === "number" && Number.isFinite(field)
+    ? numericFormat === "usd"
+      ? formatUsd(field)
+      : formatInteger(field)
+    : undefined;
 }
 
 function recordField(value: unknown, key: string): Record<string, unknown> | undefined {
@@ -320,14 +319,9 @@ function hasPartialPricingSuffix(value: string): boolean {
   return value.trim().endsWith("+");
 }
 
-function booleanField(value: Record<string, unknown> | undefined, keys: string[]): boolean | undefined {
-  for (const key of keys) {
-    const field = value?.[key];
-    if (typeof field === "boolean") {
-      return field;
-    }
-  }
-  return undefined;
+function booleanField(value: Record<string, unknown> | undefined, key: string): boolean | undefined {
+  const field = value?.[key];
+  return typeof field === "boolean" ? field : undefined;
 }
 
 function escapeRegExp(value: string): string {

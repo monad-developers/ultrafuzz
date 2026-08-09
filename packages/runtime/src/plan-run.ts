@@ -21,6 +21,7 @@ import {
   writeArtifactManifest,
   writeFileDurable,
   writeJsonDurable,
+  type ArtifactContractId,
   type NodeStateInput,
   type RunLayout
 } from "@ultrafuzz/artifacts";
@@ -58,6 +59,8 @@ import {
   type PlannedGraphNode,
   type RenderedPromptPlan
 } from "./types.js";
+
+const REFERENCE_EXPECTATIONS_CONTRACT = "ultrafuzz/reference-expectations@2" as ArtifactContractId;
 import { validateProject } from "./validate.js";
 import { loadResolvedProject, modelProfilesForTopology, outputRootForConfig } from "./validate.js";
 import {
@@ -676,7 +679,7 @@ function provisionReferenceExpectationOutput(
         .join("; ")}`
     );
   }
-  const contract = artifactContractDefinition("ultrafuzz/reference-expectations@1");
+  const contract = artifactContractDefinition(REFERENCE_EXPECTATIONS_CONTRACT);
   const referenceNodes = graph.nodes.filter((node) => node.kind === "reference");
   if (referenceNodes.length === 0) {
     throw new Error("reference expectation catalog requires at least one pinned reference node");
@@ -685,7 +688,7 @@ function provisionReferenceExpectationOutput(
     const existingOutput = node.outputs.find((output) => output.path === "references/expectations.json");
     if (
       existingOutput !== undefined &&
-      (existingOutput.contract !== "ultrafuzz/reference-expectations@1" ||
+      (existingOutput.contract !== REFERENCE_EXPECTATIONS_CONTRACT ||
         existingOutput.contract_digest !== contract.digest)
     ) {
       throw new Error(
@@ -695,7 +698,7 @@ function provisionReferenceExpectationOutput(
     if (existingOutput === undefined) {
       node.outputs.push({
         path: "references/expectations.json",
-        contract: "ultrafuzz/reference-expectations@1",
+        contract: REFERENCE_EXPECTATIONS_CONTRACT,
         contract_digest: contract.digest,
         primary: false
       });
@@ -705,7 +708,7 @@ function provisionReferenceExpectationOutput(
       const expandedOutput = expandedNode.outputs.find((output) => output.path === "references/expectations.json");
       if (
         expandedOutput !== undefined &&
-        (expandedOutput.contract !== "ultrafuzz/reference-expectations@1" ||
+        (expandedOutput.contract !== REFERENCE_EXPECTATIONS_CONTRACT ||
           expandedOutput.contractDigest !== contract.digest)
       ) {
         throw new Error(
@@ -715,7 +718,7 @@ function provisionReferenceExpectationOutput(
       if (expandedOutput === undefined) {
         expandedNode.outputs.push({
           path: "references/expectations.json",
-          contract: "ultrafuzz/reference-expectations@1",
+          contract: REFERENCE_EXPECTATIONS_CONTRACT,
           contractDigest: contract.digest,
           primary: false
         });

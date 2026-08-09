@@ -504,7 +504,7 @@ function removeHandoffTemporaryRoot(temporaryRoot: string): void {
 }
 
 interface ModalNodeResult {
-  schema_version: "ultrafuzz.modal.node-result.v1" | "ultrafuzz.modal.node-result.v2";
+  schema_version: "ultrafuzz.modal.node-result.v2";
   status: "succeeded";
   artifact_archive: string;
   artifact_sha256: string;
@@ -557,8 +557,7 @@ async function readModalNodeResult(
   }
   if (
     isRecord(parsed) &&
-    (parsed.schema_version === "ultrafuzz.modal.node-result.v1" ||
-      parsed.schema_version === "ultrafuzz.modal.node-result.v2") &&
+    parsed.schema_version === "ultrafuzz.modal.node-result.v2" &&
     parsed.status === "succeeded" &&
     parsed.artifact_archive === path.posix.join(attemptRoot, "artifacts.tgz") &&
     typeof parsed.artifact_sha256 === "string" &&
@@ -654,33 +653,24 @@ async function publishModalNodeResult(
     assertSafeTree(extracted);
     const verificationMarkerName = modalAttemptVerificationMarkerName(input.attempt_id);
     const verificationMarker = path.join(extracted, "verification", verificationMarkerName);
-    let verificationDestination: string | undefined;
-    if (fs.existsSync(verificationMarker)) {
-      const markerStat = fs.lstatSync(verificationMarker);
-      if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.nlink !== 1) {
-        throw new Error("cloud node result verification marker is unsafe");
-      }
-      const verificationRoot = checkedPath(
-        root,
-        path.join(input.run_root, ARTIFACT_VERIFICATION_DIRECTORY),
-        "artifact verification directory",
-        false
-      );
-      verificationDestination = path.join(verificationRoot, verificationMarkerName);
-      if (path.dirname(verificationDestination) !== verificationRoot) {
-        throw new Error("cloud node result verification marker path is unsafe");
-      }
-    } else if (result.schema_version === "ultrafuzz.modal.node-result.v2") {
+    if (!fs.existsSync(verificationMarker)) {
       throw new Error("cloud node result is missing artifact verification marker");
     }
-    // Decided here, before the artifact directory is replaced, because the answer depends on the
-    // artifacts this machine currently holds; by the time the marker is written they are the
-    // remote ones again.
-    let markerRefreshed = false;
-    if (verificationDestination !== undefined) {
-      markerRefreshed = isRefreshedVerificationMarker(verificationMarker, verificationDestination, artifactDir);
-      assertPublishedFileReplacementAllowed(verificationMarker, verificationDestination, markerRefreshed);
+    const markerStat = fs.lstatSync(verificationMarker);
+    if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.nlink !== 1) {
+      throw new Error("cloud node result verification marker is unsafe");
     }
+    const verificationRoot = checkedPath(
+      root,
+      path.join(input.run_root, ARTIFACT_VERIFICATION_DIRECTORY),
+      "artifact verification directory",
+      false
+    );
+    const verificationDestination = path.join(verificationRoot, verificationMarkerName);
+    if (path.dirname(verificationDestination) !== verificationRoot) {
+      throw new Error("cloud node result verification marker path is unsafe");
+    }
+    assertPublishedFileReplacementAllowed(verificationMarker, verificationDestination);
     const proofRoot = checkedPath(root, path.join(input.run_root, "source-proofs"), "source proof directory", false);
     const sourceProofs: Array<{ source: string; destination: string }> = [];
     for (const suffix of [".json", ".invariant.json"] as const) {
@@ -704,9 +694,7 @@ async function publishModalNodeResult(
     for (const { source, destination } of sourceProofs) {
       replacePublishedFile(source, destination);
     }
-    if (verificationDestination !== undefined) {
-      replacePublishedFile(verificationMarker, verificationDestination, markerRefreshed);
-    }
+    replacePublishedFile(verificationMarker, verificationDestination);
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -1714,12 +1702,12 @@ function assertPublishedDirectoryReplacementAllowed(source: string, destination:
   }
 }
 
-function replacePublishedFile(source: string, destination: string, refreshedMarker = false): void {
-  assertPublishedFileReplacementAllowed(source, destination, refreshedMarker);
+function replacePublishedFile(source: string, destination: string): void {
+  assertPublishedFileReplacementAllowed(source, destination);
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   if (fs.existsSync(destination)) {
-    assertPublishedFileReplacementAllowed(source, destination, refreshedMarker);
-    if (!refreshedMarker) return;
+    assertPublishedFileReplacementAllowed(source, destination);
+    return;
   }
   const pending = `${destination}.publishing-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
   fs.copyFileSync(source, pending);
@@ -1730,7 +1718,7 @@ function replacePublishedFile(source: string, destination: string, refreshedMark
   }
 }
 
-function assertPublishedFileReplacementAllowed(source: string, destination: string, refreshedMarker = false): void {
+function assertPublishedFileReplacementAllowed(source: string, destination: string): void {
   const sourceStat = fs.lstatSync(source);
   if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.nlink !== 1) {
     throw new Error("cloud node result source file is unsafe");
@@ -1742,85 +1730,10 @@ function assertPublishedFileReplacementAllowed(source: string, destination: stri
   ) {
     throw new Error("cloud node result destination file is unsafe");
   }
-  if (destinationStat !== undefined && !refreshedMarker) {
+  if (destinationStat !== undefined) {
     if (!fs.readFileSync(destination).equals(fs.readFileSync(source))) {
       throw new Error("cloud node result would replace an immutable publication file");
     }
-  }
-}
-
-/**
- * Published files are immutable, with one exception the runtime creates deliberately: a gate that
- * sanitizes an already-verified artifact refreshes the recorded sha256 for that path in the local
- * verification marker (`refreshVerifiedArtifactDigest`), so the marker keeps attesting the bytes on
- * disk. Republishing the same attempt — a resumed or recovered sandbox — then byte-compares that
- * refreshed marker against the original remote one. `stableAttemptId` keeps the attempt id, artifact
- * directory and marker name identical on every retry, so a plain byte compare strands the attempt
- * permanently instead of failing once.
- *
- * The only difference permitted here is a refreshed digest: every field of both markers must be
- * identical once the `sha256` of each `artifacts`/`publications` entry is blanked, at least one
- * digest must differ, and every differing local digest must be the sha256 of the artifact this
- * machine currently publishes at that entry's path. A changed path, node or attempt id, an added or
- * dropped entry, a reordered array, a digest naming no local file, or a marker that is not JSON is
- * not a refresh and stays rejected. Replacing is then safe and self-correcting: the artifact
- * directory is replaced from the same remote result moments later, so marker and artifacts stay a
- * matched pair, and the gate re-sanitizes and re-refreshes on the next sync tick.
- */
-function isRefreshedVerificationMarker(source: string, destination: string, artifactDir: string): boolean {
-  if (!fs.existsSync(destination)) return false;
-  const remote = readVerificationMarkerDigests(source);
-  const published = readVerificationMarkerDigests(destination);
-  if (remote === undefined || published === undefined) return false;
-  if (remote.skeleton !== published.skeleton) return false;
-  let refreshed = false;
-  for (const [index, entry] of published.digests.entries()) {
-    if (remote.digests[index]?.sha256 === entry.sha256) continue;
-    if (!publishedArtifactHasDigest(artifactDir, entry.path, entry.sha256)) return false;
-    refreshed = true;
-  }
-  return refreshed;
-}
-
-/**
- * A marker split into everything but its recorded artifact digests, plus those digests in document
- * order. The skeleton is compared verbatim, so any other edit fails the comparison.
- */
-function readVerificationMarkerDigests(
-  markerPath: string
-): { skeleton: string; digests: Array<{ path: string; sha256: string }> } | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(fs.readFileSync(markerPath, "utf8"));
-  } catch {
-    return undefined;
-  }
-  if (!isRecord(parsed)) return undefined;
-  const digests: Array<{ path: string; sha256: string }> = [];
-  const skeleton: Record<string, unknown> = { ...parsed };
-  for (const key of ["artifacts", "publications"] as const) {
-    const entries = parsed[key];
-    if (!Array.isArray(entries)) continue;
-    skeleton[key] = entries.map((entry) => {
-      if (!isRecord(entry) || typeof entry.path !== "string" || typeof entry.sha256 !== "string") return entry;
-      digests.push({ path: entry.path, sha256: entry.sha256 });
-      return { ...entry, sha256: null };
-    });
-  }
-  return { skeleton: JSON.stringify(skeleton), digests };
-}
-
-function publishedArtifactHasDigest(artifactDir: string, relativePath: string, sha256: string): boolean {
-  if (!/^[0-9a-f]{64}$/u.test(sha256)) return false;
-  const resolved = path.resolve(artifactDir, relativePath);
-  if (!resolved.startsWith(`${artifactDir}${path.sep}`)) return false;
-  try {
-    const stat = fs.lstatSync(resolved);
-    if (!stat.isFile() || stat.isSymbolicLink()) return false;
-    if (fs.realpathSync(resolved) !== resolved) return false;
-    return crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex") === sha256;
-  } catch {
-    return false;
   }
 }
 

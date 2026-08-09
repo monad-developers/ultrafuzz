@@ -14,7 +14,7 @@ import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
 
 import { commandFailure, emitCommandResult, globalFlags, projectRoot } from "../../command-shared.js";
-import { reconcileReportArtifacts } from "../../report-artifacts.js";
+import { loadValidatedReportArtifacts } from "../../report-artifacts.js";
 
 const TOP_LEVEL_RUN_FILES = [
   "attempts.jsonl",
@@ -96,7 +96,7 @@ export default class ReportBundle extends Command {
 
       const diagnostics: RuntimeDiagnostic[] = [];
       if (hasFinalReportJson(layout.root, layout.artifactsDir)) {
-        reconcileReportArtifacts(layout.root);
+        loadValidatedReportArtifacts(layout.root);
       }
       const files = collectBundleFiles(layout.root, diagnostics);
       if (files.length === 0) {
@@ -180,15 +180,20 @@ function hasFinalReportJson(runRoot: string, artifactsDirectory: string): boolea
   assertPathInside(runRoot, artifactsDirectory, "report artifacts directory");
   assertNoSymlinkComponents(runRoot, artifactsDirectory, "report artifacts directory");
 
-  const entries = fs.readdirSync(artifactsDirectory, { withFileTypes: true });
-  const reportDirectories = [
-    ...entries.filter((entry) => entry.isDirectory() && entry.name === "final-report"),
-    ...entries.filter(
-      (entry) => entry.isDirectory() && entry.name !== "final-report" && entry.name.startsWith("final-report")
-    )
-  ];
-  for (const entry of reportDirectories) {
-    const reportJsonPath = path.join(artifactsDirectory, entry.name, "report.json");
+  const nodeIds = new Set(["final-report"]);
+  const statePath = path.join(runRoot, "state.json");
+  if (fs.existsSync(statePath)) {
+    assertRegularFileInside(runRoot, statePath, "run state path");
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as unknown;
+    const nodes = recordField(state, "nodes");
+    for (const [nodeId, nodeState] of Object.entries(nodes ?? {})) {
+      if (recordValue(nodeState, "logical_node_id") === "final-report") {
+        nodeIds.add(validateSafeId(nodeId, "final report node ID"));
+      }
+    }
+  }
+  for (const nodeId of nodeIds) {
+    const reportJsonPath = path.join(artifactsDirectory, nodeId, "report.json");
     if (lstatIfPresent(reportJsonPath) === undefined) {
       continue;
     }
@@ -196,6 +201,22 @@ function hasFinalReportJson(runRoot: string, artifactsDirectory: string): boolea
     return true;
   }
   return false;
+}
+
+function recordField(value: unknown, key: string): Record<string, unknown> | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const field = (value as Record<string, unknown>)[key];
+  return field !== null && typeof field === "object" && !Array.isArray(field)
+    ? (field as Record<string, unknown>)
+    : undefined;
+}
+
+function recordValue(value: unknown, key: string): unknown {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)[key]
+    : undefined;
 }
 
 function collectBundleFiles(runRoot: string, diagnostics: RuntimeDiagnostic[]): BundleFile[] {

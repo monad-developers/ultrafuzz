@@ -17,8 +17,10 @@ import {
   replayEvents,
   safeResolveInside,
   sha256Bytes,
+  validateArtifactContract,
   validateSafeId,
   writeFileDurable,
+  type ArtifactContractId,
   type NodeState,
   type RunState
 } from "@ultrafuzz/artifacts";
@@ -91,6 +93,10 @@ const SESSION_HEADER = "x-ultrafuzz-session";
 const MAX_COMMAND_JOBS = 20;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024;
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
+const MAX_DASHBOARD_ARTIFACT_BYTES = 64 * 1024 * 1024;
+const FINDINGS_CONTRACT = "ultrafuzz/findings@2" as ArtifactContractId;
+const REPORT_CONTRACT = "ultrafuzz/report@2" as ArtifactContractId;
+const REPORT_MARKDOWN_CONTRACT = "ultrafuzz/nonempty-markdown@1" as ArtifactContractId;
 const SECURITY_HEADERS = {
   "content-security-policy": [
     "default-src 'none'",
@@ -633,6 +639,7 @@ class DashboardApp {
     const expanded = await this.expandCurrentTopology(topology);
     const attempts = expanded.nodes.filter((attempt) => attempt.logicalId === safeNodeId);
     const state = await this.optionalRunState();
+    const context = await this.runContext();
     const attemptArtifacts = await this.artifactEntriesForAttempts(attempts);
     const primary = attemptArtifacts[0];
     return {
@@ -658,7 +665,7 @@ class DashboardApp {
       stdout: primary?.stdout,
       stderr: primary?.stderr,
       rendered_prompt: primary?.renderedPrompt,
-      findings: this.findingsForAttempts(attempts),
+      findings: this.findingsForAttempts(attempts, context.persisted ? context.runRoot : undefined),
       metadata: {
         expandedAttempts: attempts.map((attempt) => ({
           id: attempt.id,
@@ -730,7 +737,7 @@ class DashboardApp {
       assertRegularFileInside(context.runRoot, file, "findings path");
       return {
         source: candidate,
-        findings: extractFindings(readJsonFile(file))
+        findings: readValidatedFindingsArtifact(context.runRoot, file)
       };
     }
     return {
@@ -749,22 +756,25 @@ class DashboardApp {
         json: undefined
       };
     }
-    const candidateDirs = ["artifacts/final-report", ...this.finalReportDirs(context.runRoot)];
+    const candidateDirs = this.finalReportDirs(context.runRoot);
     for (const candidateDir of uniqueStrings(candidateDirs)) {
       const markdownPath = safeResolveInside(context.runRoot, `${candidateDir}/report.md`, "report markdown");
       const jsonPath = safeResolveInside(context.runRoot, `${candidateDir}/report.json`, "report JSON");
       if (fs.existsSync(markdownPath) || fs.existsSync(jsonPath)) {
-        if (fs.existsSync(markdownPath)) {
-          assertRegularFileInside(context.runRoot, markdownPath, "report markdown");
-        }
-        if (fs.existsSync(jsonPath)) {
-          assertRegularFileInside(context.runRoot, jsonPath, "report JSON");
-        }
+        assertRegularFileInside(context.runRoot, markdownPath, "report markdown");
+        assertRegularFileInside(context.runRoot, jsonPath, "report JSON");
+        const markdown = readValidatedArtifact(
+          context.runRoot,
+          markdownPath,
+          REPORT_MARKDOWN_CONTRACT,
+          "report Markdown"
+        );
+        const report = readValidatedArtifact(context.runRoot, jsonPath, REPORT_CONTRACT, "report JSON");
         return {
-          markdown_path: fs.existsSync(markdownPath) ? `${candidateDir}/report.md` : undefined,
-          markdown: readTextIfExists(markdownPath),
-          json_path: fs.existsSync(jsonPath) ? `${candidateDir}/report.json` : undefined,
-          json: readJsonIfExists(jsonPath)
+          markdown_path: `${candidateDir}/report.md`,
+          markdown,
+          json_path: `${candidateDir}/report.json`,
+          json: report
         };
       }
     }
@@ -777,15 +787,15 @@ class DashboardApp {
   }
 
   finalReportDirs(runRoot: string): string[] {
-    const artifacts = path.join(runRoot, "artifacts");
-    if (!fs.existsSync(artifacts)) {
-      return [];
+    const candidates = new Set(["final-report"]);
+    const state = readJsonIfExists<JsonObject>(path.join(runRoot, "state.json"));
+    const nodes = isRecord(state?.nodes) ? state.nodes : {};
+    for (const [nodeId, nodeState] of Object.entries(nodes)) {
+      if (isRecord(nodeState) && nodeState.logical_node_id === "final-report") {
+        candidates.add(validateSafeId(nodeId, "final report node ID"));
+      }
     }
-    assertNoSymlinkComponents(runRoot, artifacts, "artifacts root");
-    return fs
-      .readdirSync(artifacts, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && entry.name.startsWith("final-report"))
-      .map((entry) => `artifacts/${entry.name}`);
+    return [...candidates].map((nodeId) => `artifacts/${nodeId}`);
   }
 
   async events(): Promise<JsonObject> {
@@ -1115,7 +1125,7 @@ class DashboardApp {
           prompt: promptPath,
           ...(group ? { group } : {}),
           depends_on: dependsOn,
-          outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@1", primary: true }]
+          outputs: [{ path: "findings.json", contract: FINDINGS_CONTRACT, primary: true }]
         }
       ]
     };
@@ -1500,12 +1510,8 @@ class DashboardApp {
         if (!fs.existsSync(candidate)) {
           return [];
         }
-        try {
-          assertRegularFileInside(runRoot, candidate, "findings path");
-          return extractFindings(readJsonFile(candidate));
-        } catch {
-          return [];
-        }
+        assertRegularFileInside(runRoot, candidate, "findings path");
+        return readValidatedFindingsArtifact(runRoot, candidate);
       });
     });
   }
@@ -1516,14 +1522,8 @@ class DashboardApp {
       return [];
     }
     return listSafeFiles(artifacts)
-      .filter((entry) => entry.relativePath.endsWith("findings.json") || entry.relativePath.endsWith("report.json"))
-      .flatMap((entry) => {
-        try {
-          return extractFindings(readJsonFile(entry.absolutePath));
-        } catch {
-          return [];
-        }
-      });
+      .filter((entry) => findingsContractForFile(entry.relativePath) !== undefined)
+      .flatMap((entry) => readValidatedFindingsArtifact(runRoot, entry.absolutePath));
   }
 }
 
@@ -1870,14 +1870,60 @@ function edgeColorForStatus(status: string): string {
   return "var(--mds-border-strong)";
 }
 
-function extractFindings(value: unknown): unknown[] {
-  if (Array.isArray(value)) {
-    return value;
+function readValidatedFindingsArtifact(runRoot: string, filePath: string): unknown[] {
+  const contract = findingsContractForFile(filePath);
+  if (contract === undefined) {
+    throw new Error(`dashboard has no findings contract for ${filePath}`);
   }
-  if (isRecord(value) && Array.isArray(value.findings)) {
-    return value.findings;
+  const value = readValidatedArtifact(runRoot, filePath, contract, "findings artifact");
+  if (path.basename(filePath) === "report.json") {
+    if (!isRecord(value) || !Array.isArray(value.issues)) {
+      throw new Error(`validated report does not contain an issues array: ${filePath}`);
+    }
+    return value.issues;
   }
-  return [];
+  if (!Array.isArray(value)) {
+    throw new Error(`validated findings-stage artifact is not an array: ${filePath}`);
+  }
+  return value;
+}
+
+function findingsContractForFile(filePath: string): ArtifactContractId | undefined {
+  switch (path.basename(filePath)) {
+    case "findings.json":
+    case "deduped-findings.json":
+      return FINDINGS_CONTRACT;
+    case "triaged-findings.json":
+      return "ultrafuzz/triaged-findings@1" as ArtifactContractId;
+    case "severity-classified-findings.json":
+      return "ultrafuzz/severity-classified-findings@1" as ArtifactContractId;
+    case "report.json":
+      return REPORT_CONTRACT;
+    default:
+      return undefined;
+  }
+}
+
+function readValidatedArtifact(
+  runRoot: string,
+  filePath: string,
+  contract: ArtifactContractId,
+  label: string
+): unknown {
+  assertRegularFileInside(runRoot, filePath, `${label} path`);
+  const stat = fs.statSync(filePath);
+  if (stat.size > MAX_DASHBOARD_ARTIFACT_BYTES) {
+    throw new Error(`${label} exceeds the ${MAX_DASHBOARD_ARTIFACT_BYTES}-byte limit: ${filePath}`);
+  }
+  const validation = validateArtifactContract(contract, fs.readFileSync(filePath, "utf8"), filePath);
+  if (!validation.ok) {
+    throw new Error(
+      `${label} failed ${contract} validation: ${validation.issues
+        .map((issue) => `${issue.code} ${issue.path}: ${issue.message}`)
+        .join("; ")}`
+    );
+  }
+  return validation.value;
 }
 
 function copySelections(body: JsonObject): Array<{ source: string; destination: string }> {

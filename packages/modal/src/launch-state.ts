@@ -19,7 +19,6 @@ import {
 import {
   finishModalRecoveryLifecycle,
   modalRecoveryLifecycleRecordSchema,
-  parseModalRecoveryLifecycleRecord,
   parseModalRecoveryLifecycleRecords,
   startModalRecoveryLifecycle,
   type FinishModalRecoveryLifecycleInput,
@@ -32,8 +31,6 @@ import { WORKER_DIAGNOSTIC_CODES, WORKER_RESULT_SCHEMA_VERSION, type WorkerResul
 
 const fingerprintSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const timestampSchema = z.string().min(1);
-const LEGACY_MODAL_LAUNCH_STATE_SCHEMA_VERSION = "ultrafuzz.modal.launch-state.v1" as const;
-const PREVIOUS_MODAL_LAUNCH_STATE_SCHEMA_VERSION = "ultrafuzz.modal.launch-state.v2" as const;
 const modelSchema = z
   .object({
     slug: z.string().min(1),
@@ -196,41 +193,6 @@ const launchRecordSchema = modelSchema
     }
   });
 
-const previousLaunchStateSchema = z
-  .object({
-    schema_version: z.literal(PREVIOUS_MODAL_LAUNCH_STATE_SCHEMA_VERSION),
-    logical_run_id: z.string().min(1),
-    generation: z.number().int().positive(),
-    generation_mode: z.enum(["resume", "fresh"]),
-    app: z.string().min(1),
-    image: z.string().min(1),
-    image_id: z.string().min(1),
-    timeout_ms: z.number().int().positive(),
-    source_revision: z.string().min(1),
-    fingerprints: lineageFingerprintsSchema,
-    launches: z.array(launchRecordSchema),
-    attempt_history: z.array(attemptProvenanceSchema)
-  })
-  .strict()
-  .superRefine((state, context) => {
-    const slugs = new Set<string>();
-    for (const launch of state.launches) {
-      if (launch.generation !== state.generation) {
-        context.addIssue({ code: "custom", message: `launch ${launch.slug} has the wrong generation` });
-      }
-      if (slugs.has(launch.slug)) {
-        context.addIssue({ code: "custom", message: `duplicate launch slug: ${launch.slug}` });
-      }
-      slugs.add(launch.slug);
-    }
-    const attempts = new Set<string>();
-    for (const attempt of [...state.attempt_history, ...state.launches]) {
-      const key = `${attempt.generation}:${attempt.slug}:${attempt.attempt}`;
-      if (attempts.has(key)) context.addIssue({ code: "custom", message: `duplicate launch attempt: ${key}` });
-      attempts.add(key);
-    }
-  });
-
 const launchStateSchema = z
   .object({
     schema_version: z.literal(MODAL_LAUNCH_STATE_SCHEMA_VERSION),
@@ -321,44 +283,6 @@ const launchStateSchema = z
       });
     }
   });
-
-const legacyLaunchRecordSchema = modelSchema
-  .extend({
-    sandbox_id: z.string().min(1),
-    volume_name: z.string().min(1),
-    remote_root: z.string().min(1),
-    launched_at: timestampSchema
-  })
-  .strict();
-
-const legacyLaunchStateSchema = z
-  .object({
-    schema_version: z.literal(LEGACY_MODAL_LAUNCH_STATE_SCHEMA_VERSION),
-    run_id: z.string().min(1),
-    app: z.string().min(1),
-    image: z.string().min(1),
-    timeout_ms: z.number().int().positive(),
-    source_revision: z.string().min(1),
-    launches: z.array(legacyLaunchRecordSchema)
-  })
-  .strict()
-  .superRefine((state, context) => {
-    const slugs = new Set<string>();
-    for (const launch of state.launches) {
-      if (slugs.has(launch.slug)) {
-        context.addIssue({ code: "custom", message: `duplicate launch slug: ${launch.slug}` });
-      }
-      slugs.add(launch.slug);
-    }
-  });
-
-type LegacyModalLaunchState = z.infer<typeof legacyLaunchStateSchema>;
-type PreviousModalLaunchState = z.infer<typeof previousLaunchStateSchema>;
-
-export interface ModalLaunchStateCompatibilityContext {
-  imageId: string;
-  fingerprints: ModalLineageFingerprints;
-}
 
 const workerLineageSchema = z
   .object({
@@ -466,22 +390,6 @@ const workerResultStatusSchema = z
 
 export function parseModalLaunchState(value: unknown): ModalLaunchState {
   return launchStateSchema.parse(value) as ModalLaunchState;
-}
-
-export function parseCompatibleModalLaunchState(
-  value: unknown,
-  compatibility?: ModalLaunchStateCompatibilityContext
-): ModalLaunchState {
-  const current = launchStateSchema.safeParse(value);
-  if (current.success) return current.data as ModalLaunchState;
-  const previous = previousLaunchStateSchema.safeParse(value);
-  if (previous.success) return migratePreviousLaunchState(previous.data);
-  const legacy = legacyLaunchStateSchema.safeParse(value);
-  if (!legacy.success) return launchStateSchema.parse(value) as ModalLaunchState;
-  if (compatibility === undefined) {
-    throw new Error("legacy Modal launch state requires compatibility context");
-  }
-  return migrateLegacyLaunchState(legacy.data, compatibility);
 }
 
 export function parseModalWorkerLineage(value: unknown): ModalWorkerLineage {
@@ -653,53 +561,6 @@ export function createModalLaunchState(input: {
     launches: [],
     attempt_history: input.attemptHistory ?? [],
     recovery_lifecycle: input.recoveryLifecycle ?? []
-  });
-}
-
-function migratePreviousLaunchState(state: PreviousModalLaunchState): ModalLaunchState {
-  return parseModalLaunchState({
-    ...state,
-    schema_version: MODAL_LAUNCH_STATE_SCHEMA_VERSION,
-    generation_start_reason: "unknown",
-    recovery_lifecycle: historicalRecoveryLifecycle(
-      state.logical_run_id,
-      [...state.attempt_history, ...state.launches],
-      state.fingerprints
-    )
-  });
-}
-
-function migrateLegacyLaunchState(
-  state: LegacyModalLaunchState,
-  compatibility: ModalLaunchStateCompatibilityContext
-): ModalLaunchState {
-  const launches: ModalLaunchRecord[] = state.launches.map((launch, index) => ({
-    ...launch,
-    generation: 1,
-    attempt: 1,
-    attempt_id: legacyAttemptId(launch, index),
-    model_fingerprint: fingerprintLegacyModel(launch),
-    workspace_mode: "resume",
-    phase: "launched",
-    reserved_at: launch.launched_at,
-    sandbox_id: launch.sandbox_id,
-    launched_at: launch.launched_at
-  }));
-  return parseModalLaunchState({
-    schema_version: MODAL_LAUNCH_STATE_SCHEMA_VERSION,
-    logical_run_id: state.run_id,
-    generation: 1,
-    generation_mode: "resume",
-    generation_start_reason: "unknown",
-    app: state.app,
-    image: state.image,
-    image_id: compatibility.imageId,
-    timeout_ms: state.timeout_ms,
-    source_revision: state.source_revision,
-    fingerprints: compatibility.fingerprints,
-    launches,
-    attempt_history: [],
-    recovery_lifecycle: historicalRecoveryLifecycle(state.run_id, launches, compatibility.fingerprints)
   });
 }
 
@@ -1102,15 +963,9 @@ export function isTransientModalError(error: unknown): boolean {
   return false;
 }
 
-export async function readModalLaunchState(
-  statePath: string,
-  compatibility?: ModalLaunchStateCompatibilityContext
-): Promise<ModalLaunchState | undefined> {
+export async function readModalLaunchState(statePath: string): Promise<ModalLaunchState | undefined> {
   try {
-    return parseCompatibleModalLaunchState(
-      JSON.parse(await readFile(path.resolve(statePath), "utf8")) as unknown,
-      compatibility
-    );
+    return parseModalLaunchState(JSON.parse(await readFile(path.resolve(statePath), "utf8")) as unknown);
   } catch (error) {
     if (isNodeError(error, "ENOENT")) return undefined;
     throw error;
@@ -1238,54 +1093,6 @@ export function modalAttemptProvenance(
   };
 }
 
-function historicalRecoveryLifecycle(
-  logicalRunId: string,
-  attempts: ReadonlyArray<ModalAttemptProvenance | ModalLaunchRecord>,
-  fallbackFingerprints: ModalLineageFingerprints
-): ModalRecoveryLifecycleRecord[] {
-  const records: ModalRecoveryLifecycleRecord[] = [];
-  const latestBySlug = new Map<string, ModalRecoveryLifecycleRecord>();
-  for (const attempt of attempts) {
-    const parent = latestBySlug.get(attempt.slug);
-    const record = parseModalRecoveryLifecycleRecord({
-      schema_version: "ultrafuzz.modal.recovery-lifecycle.v1",
-      logical_run_id: logicalRunId,
-      model_slug: attempt.slug,
-      generation: attempt.generation,
-      attempt: attempt.attempt,
-      attempt_id: attempt.attempt_id,
-      ...(parent === undefined
-        ? {}
-        : {
-            parent_generation: parent.generation,
-            parent_attempt_id: parent.attempt_id
-          }),
-      trigger_action: "unknown",
-      start_reason: "unknown",
-      terminal_reason: "unknown",
-      terminal_class: "unknown",
-      launched_at: attempt.launched_at ?? attempt.reserved_at,
-      ...(attempt.finished_at === undefined ? {} : { finished_at: attempt.finished_at }),
-      worker_exit_code: "unknown",
-      fingerprints: {
-        ...("fingerprints" in attempt ? attempt.fingerprints : fallbackFingerprints),
-        model: attempt.model_fingerprint
-      },
-      model_work_started: "unknown",
-      last_durable_transition_at: "unknown",
-      node_counts_before: "unknown",
-      node_counts_after: "unknown",
-      progress_made: "unknown",
-      controller_requested: "unknown",
-      node_attempt_ledger_digest: "unknown",
-      evaluation_lineage_digest: "unknown"
-    });
-    records.push(record);
-    latestBySlug.set(attempt.slug, record);
-  }
-  return records;
-}
-
 function latestModalRecoveryLifecycle(
   records: readonly ModalRecoveryLifecycleRecord[],
   modelSlug: string
@@ -1325,23 +1132,6 @@ function updateFramed(hash: ReturnType<typeof createHash>, value: string | Buffe
   hash.update("\0");
   hash.update(contents);
   hash.update("\0");
-}
-
-function legacyAttemptId(launch: Pick<ModalLaunchRecord, "slug" | "sandbox_id">, index: number): string {
-  return `legacy-${sha256(`${launch.slug}\0${launch.sandbox_id}\0${index}`).slice(0, 32)}`;
-}
-
-function fingerprintLegacyModel(model: ModalModelSpec): string {
-  return sha256(
-    JSON.stringify({
-      slug: model.slug,
-      model: model.model,
-      provider: model.provider,
-      agent: model.agent,
-      reasoning: model.reasoning,
-      auth_mode: model.auth_mode
-    })
-  );
 }
 
 function sha256(value: string | Buffer): string {

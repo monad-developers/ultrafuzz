@@ -1,5 +1,5 @@
 {
-  "schema_version": "ultrafuzz.modal.public-benchmark-bundle.v3",
+  "schema_version": "ultrafuzz.modal.public-benchmark-bundle.v4",
   "benchmark": "ultrafuzz-bench",
   "lane": "smoke",
   "model_slug": "benchmark-smoke-kimi-k3-max",

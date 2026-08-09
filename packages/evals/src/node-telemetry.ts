@@ -40,7 +40,7 @@ export interface TelemetryCursorState {
   uploadedArtifacts: Record<string, string>; // `${nodeId}/${relativePath}` -> sha256
   lastHeartbeatAt: Record<string, string>; // nodeId -> ISO, heartbeat rate limiting
   providerIds: Record<string, string>; // nodeId -> provider span/run id (rebuilt on resume)
-  /** findings-normalized counts folded into node-finished events. */
+  /** findings-validated counts folded into node-finished events. */
   findingsCountByNode: Record<string, number>;
 }
 
@@ -290,7 +290,7 @@ export class NodeTelemetryPump {
         }
         return;
       }
-      case "findings-normalized": {
+      case "findings-validated": {
         if (typeof payload.count === "number") {
           this.cursor.findingsCountByNode[nodeId] = payload.count;
         }

@@ -9,15 +9,13 @@ import {
   appendEvent,
   assertNoSymlinkComponents,
   assertPathInside,
-  FINDINGS_FILE,
-  FindingsValidationError,
   createNodeAttemptLedgerEntry,
   getNodeArtifactDir,
   layoutForRunRoot,
-  normalizeFindings,
   manifestDigest,
   normalizeNodeAttemptFailureMessage,
   queryNodeAttempts,
+  readJsonFile,
   replayEvents,
   readRunState,
   replayUsageEvents,
@@ -26,6 +24,7 @@ import {
   sha256File,
   updateNodeState,
   updateRunStatus,
+  validateFindingsSchema,
   validateSafeId,
   writeArtifactManifest,
   writeJsonDurable,
@@ -48,7 +47,7 @@ import {
   type UsageLedgerReplay
 } from "@ultrafuzz/artifacts";
 
-import { refreshVerifiedArtifactDigest, verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
+import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
 import {
   ArtifactReconciliationInterruptedError,
   isRetryableArtifactReconciliationError,
@@ -2324,78 +2323,67 @@ async function finalizeTerminalTask(input: {
   if (fs.existsSync(findingsPath)) {
     try {
       assertSynchronizationBudget(input.control);
-      const report = normalizeFindings({
-        artifactDir,
-        nodeId: input.task.attemptId,
-        provenance: findingsProvenance(input.node, input.task)
-      });
-      findingsCount = report.count;
-      // Normalization REWRITES findings.json: it fills in ids, canonicalizes confidence and stamps
-      // the node/strategy/attempt/model/loop provenance the producer omitted. The workflow verifier
-      // has already hashed the pre-normalization bytes into this attempt's verification marker, and
-      // every dependent re-hashes the published file against that marker in
-      // `assertVerifiedDependency`. Left alone, the marker attests bytes that no longer exist and
-      // each dependent's `prepare:` wrapper fails permanently as `artifact-contract` before its
-      // agent ever runs -- which is what kept `dedupe-findings`, the only smoke-lane node whose
-      // dependencies publish findings.json, red on all three targets (issue #348). The runtime made
-      // the edit, so the marker follows it, exactly as the property-lens sanitizer already does
-      // (issue #275). A findings.json that is not a declared output leaves the marker untouched.
-      diagnostics.push(
-        ...refreshVerifiedArtifactDigest(
-          input.layout,
-          input.task.attemptId,
-          FINDINGS_FILE,
-          report.normalized_path,
-          "findings"
-        )
-      );
+      const result = validateFindingsSchema(readJsonFile(findingsPath), findingsPath);
+      if (!result.ok || result.value === undefined) {
+        findingsValidationFailed = true;
+        diagnostics.push({
+          code: "FINDINGS_VALIDATION_FAILED",
+          message: `findings schema validation failed: ${result.issues
+            .map((issue) => `${issue.path} ${issue.message}`)
+            .join("; ")}`,
+          severity: "error",
+          source: "findings",
+          details: { issues: result.issues }
+        });
+      } else {
+        findingsCount = result.value.length;
+      }
       events.push({
-        eventType: "findings-normalized",
-        status: "succeeded",
+        eventType: "findings-validated",
+        status: result.ok ? "succeeded" : "failed",
         payload: {
-          count: report.count,
-          path: path.relative(input.layout.root, report.normalized_path).split(path.sep).join("/")
+          ...(findingsCount === undefined ? {} : { count: findingsCount }),
+          path: path.relative(input.layout.root, findingsPath).split(path.sep).join("/")
         }
       });
     } catch (error) {
       if (synchronizationInterruptionDiagnostic(error) !== undefined) {
         throw error;
       }
-      findingsValidationFailed = error instanceof FindingsValidationError;
-      diagnostics.push(diagnosticFromError(error, "findings", "FINDINGS_NORMALIZE_FAILED"));
+      findingsValidationFailed = true;
+      diagnostics.push(diagnosticFromError(error, "findings", "FINDINGS_VALIDATION_FAILED"));
     }
   }
 
-  let artifactManifestWritten = false;
-  try {
-    assertSynchronizationBudget(input.control);
-    const manifest = writeArtifactManifest({
-      layout: input.layout,
-      nodeId: input.task.attemptId,
-      outputs: input.node.outputs,
-      prerequisiteNodeIds: input.task.dependencies,
-      provenance: artifactProvenance(input.node, input.task, input.workflowRunId)
-    });
-    artifactManifestWritten = true;
-    events.push({
-      eventType: "artifact-manifest-written",
-      status: "succeeded",
-      payload: {
-        file_count: manifest.files.length,
-        path: path.posix.join("artifacts", input.task.attemptId, "artifact-manifest.json")
+  if (!diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
+    try {
+      assertSynchronizationBudget(input.control);
+      const manifest = writeArtifactManifest({
+        layout: input.layout,
+        nodeId: input.task.attemptId,
+        outputs: input.node.outputs,
+        prerequisiteNodeIds: input.task.dependencies,
+        provenance: artifactProvenance(input.node, input.task, input.workflowRunId)
+      });
+      events.push({
+        eventType: "artifact-manifest-written",
+        status: "succeeded",
+        payload: {
+          file_count: manifest.files.length,
+          path: path.posix.join("artifacts", input.task.attemptId, "artifact-manifest.json")
+        }
+      });
+    } catch (error) {
+      if (synchronizationInterruptionDiagnostic(error) !== undefined) {
+        throw error;
       }
-    });
-  } catch (error) {
-    if (synchronizationInterruptionDiagnostic(error) !== undefined) {
-      throw error;
+      diagnostics.push(diagnosticFromError(error, "artifacts", "ARTIFACT_MANIFEST_WRITE_FAILED"));
     }
-    diagnostics.push(diagnosticFromError(error, "artifacts", "ARTIFACT_MANIFEST_WRITE_FAILED"));
   }
 
   const errorDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
   if (errorDiagnostics.length > 0) {
-    const taskOutputValidationFailure =
-      findingsValidationFailed && artifactManifestWritten && reconciliationError === undefined;
+    const taskOutputValidationFailure = findingsValidationFailed && reconciliationError === undefined;
     return {
       status: "failed",
       diagnostics,
@@ -2854,7 +2842,7 @@ function finalizationFailureCategory(
   if (outcome !== "failed") {
     return undefined;
   }
-  if (finalization.diagnostics.some((diagnostic) => diagnostic.code === "FINDINGS_NORMALIZE_FAILED")) {
+  if (finalization.diagnostics.some((diagnostic) => diagnostic.code === "FINDINGS_VALIDATION_FAILED")) {
     return "invalid-output";
   }
   if (
@@ -3606,19 +3594,6 @@ function artifactProvenance(
     metadata: {
       concrete_node_id: task.concreteNodeId
     }
-  };
-}
-
-function findingsProvenance(node: PlannedGraphNode, task: StoredWorkflowTask) {
-  const model = task.metadata?.model;
-  return {
-    nodeId: task.attemptId,
-    strategy: task.logicalNodeId,
-    attemptIndex: model?.attemptIndex ?? task.metadata?.loop?.attemptIndex ?? node.loop.attempt_index,
-    modelId: model?.profileId ?? node.model_fanout[0]?.model_profile_id,
-    model: model?.modelName ?? task.modelName ?? node.model_fanout[0]?.model_name,
-    modelIndex: model?.modelIndex ?? node.model_fanout[0]?.model_index,
-    loopIndex: task.metadata?.loop?.index ?? node.loop.index
   };
 }
 

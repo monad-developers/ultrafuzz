@@ -83,7 +83,6 @@ import {
   modalWorkerLineage,
   parseModalLaunchState,
   parseModalWorkerResult,
-  parseCompatibleModalLaunchState,
   readModalLaunchState,
   reserveModalLaunchAttempt,
   withModalLaunchStateLock,
@@ -388,7 +387,7 @@ export async function launchModalBenchmark(input: {
       image: fingerprintModalImage(config.image_name, image.imageId)
     };
     return await withModalLaunchStateLock(statePath, async () => {
-      let state = await readModalLaunchState(statePath, { imageId: image.imageId, fingerprints });
+      let state = await readModalLaunchState(statePath);
       if (state === undefined) {
         state = createModalLaunchState({
           logicalRunId: config.run_id,
@@ -3018,14 +3017,7 @@ async function requiredLaunchStateForInspection(
   const metadata = launchStateMetadata(raw);
   const app = await modal.apps.fromName(metadata.app, { createIfMissing: false });
   const image = await modal.images.fromName(metadata.image);
-  const state = parseCompatibleModalLaunchState(raw, {
-    imageId: image.imageId,
-    fingerprints: {
-      config: "0".repeat(64),
-      source: "0".repeat(64),
-      image: fingerprintModalImage(metadata.image, image.imageId)
-    }
-  });
+  const state = parseModalLaunchState(raw);
   assertStateImage(state, image);
   return { state, app, image };
 }

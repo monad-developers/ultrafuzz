@@ -15,7 +15,6 @@ import { z } from "zod/v4";
 import type { ModalWorkerLineage } from "./launch-state.js";
 
 export const PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v4" as const;
-const PUBLIC_BENCHMARK_BUNDLE_LEGACY_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v3" as const;
 export const MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES = 256 * 1024 * 1024;
 
 export const MAX_PUBLIC_BENCHMARK_FILE_BYTES = 5 * 1024 * 1024;
@@ -35,7 +34,6 @@ const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
 const fullSha = z.string().regex(/^[0-9a-f]{40}$/u);
 const caseCount = z.number().int().nonnegative().max(MAX_ROWS);
 const bundleStatus = z.enum(["succeeded", "genuine-task-failures", "failed"]);
-const legacyBundleStatus = z.enum(["succeeded", "genuine-task-failures"]);
 const relativePath = z
   .string()
   .min(1)
@@ -75,17 +73,6 @@ const bundleTargetSchema = z.strictObject({
   publication_location: targetPublicationLocationSchema
 });
 
-const legacyBundleTargetSchema = z.strictObject({
-  id: safeId,
-  repository: z.string().url().max(2_048),
-  revision: fullSha,
-  framework: safeId.optional(),
-  status: legacyBundleStatus,
-  executed_case_count: caseCount,
-  graded_case_count: caseCount,
-  publication_location: targetPublicationLocationSchema
-});
-
 const bundleLineageSchema = z.strictObject({
   logical_run_id: safeId,
   generation: z.number().int().positive(),
@@ -117,24 +104,14 @@ const bundleShape = {
     .max(MAX_ROWS * MAX_ROW_FILES + 16)
 } as const;
 
-const currentBundleSchema = z.strictObject({
+const bundleSchema = z.strictObject({
   schema_version: z.literal(PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION),
   ...bundleShape,
   status: bundleStatus,
   targets: z.array(bundleTargetSchema).min(1).max(MAX_ROWS)
 });
 
-const legacyBundleSchema = z.strictObject({
-  schema_version: z.literal(PUBLIC_BENCHMARK_BUNDLE_LEGACY_SCHEMA_VERSION),
-  ...bundleShape,
-  status: legacyBundleStatus,
-  targets: z.array(legacyBundleTargetSchema).min(1).max(MAX_ROWS)
-});
-
-const bundleSchema = z.union([currentBundleSchema, legacyBundleSchema]);
-
 export type PublicBenchmarkBundle = z.infer<typeof bundleSchema>;
-type CurrentPublicBenchmarkBundle = z.infer<typeof currentBundleSchema>;
 type PublicBenchmarkBundleFile = z.infer<typeof bundleFileSchema>;
 type PublicBenchmarkBundleTarget = PublicBenchmarkBundle["targets"][number];
 type PublicBenchmarkBundleMetadata = Pick<
@@ -164,7 +141,7 @@ export function createPublicBenchmarkBundle(input: {
   forbiddenSecretValues?: readonly string[];
   createdAt?: string;
   publicationBundlePath?: string;
-}): CurrentPublicBenchmarkBundle {
+}): PublicBenchmarkBundle {
   const forbiddenSecretValues = [...new Set(input.forbiddenSecretValues ?? [])].filter((value) => value.length > 0);
   const files = input.files.map((entry) => {
     const contents = readRegularFileNoFollow(entry.root, entry.source);

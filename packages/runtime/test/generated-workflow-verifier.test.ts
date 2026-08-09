@@ -226,7 +226,7 @@ function loadPreservePinnedSourceProof(): (task: {
   const commandStart = source.indexOf("const unreachableCommitCountCommand");
   const commandEnd = source.indexOf("\n\nconst { Workflow", commandStart);
   const helperStart = source.indexOf("function preservePinnedSourceProof");
-  const helperEnd = source.indexOf("\n\nfunction canonicalEmptyArtifact", helperStart);
+  const helperEnd = source.indexOf("\n\nfunction materializeGeneratedTestCompanions", helperStart);
   assert.ok(commandStart >= 0, source);
   assert.ok(commandEnd > commandStart, source);
   assert.ok(helperStart >= 0, source);
@@ -518,7 +518,7 @@ test("generated Smithers verifier rejects zero-byte generated-test companions", 
   assert.match(generatedTestVerifier, /generated test file is empty \$\{relativePath\}/u);
 });
 
-test("generated Smithers workflow prepares canonical empty sidecars and primary findings", () => {
+test("generated Smithers workflow prepares output directories without creating agent-owned files", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const preparationStart = source.indexOf("function prepareArtifactMirror");
   const verifierStart = source.indexOf("function resolveRegularArtifactFile");
@@ -527,29 +527,23 @@ test("generated Smithers workflow prepares canonical empty sidecars and primary 
   assert.ok(verifierStart > preparationStart, source);
 
   const preparation = source.slice(preparationStart, verifierStart);
-  assert.match(preparation, /function canonicalEmptyArtifact/u);
-  assert.match(preparation, /output\.primary && output\.contract !== "ultrafuzz\/findings@1"/u);
-  assert.match(
-    preparation,
-    /output\.contract === "ultrafuzz\/invariant-ledger@1" \|\| output\.contract === "ultrafuzz\/properties@1"/u
-  );
-  assert.match(preparation, /source-completeness and provenance joins/u);
-  assert.match(preparation, /artifactContractDefinition\(output\.contract\)\.validEmptyExample/u);
+  assert.match(preparation, /for \(const output of task\.outputs\)/u);
+  assert.match(preparation, /mkdirSync\(parentPath, \{ recursive: true \}\)/u);
+  assert.doesNotMatch(preparation, /canonicalEmptyArtifact|validEmptyExample|writeFileDurable\(artifactPath/u);
   assert.match(source, /id=\{task\.preparationId\}/u);
   assert.match(source, /dependsOn=\{\[task\.preparationId\]\}/u);
 });
 
-test("generated Smithers workflow leaves runtime-owned workspace patch outputs unmaterialized", () => {
+test("generated Smithers workflow does not precreate runtime-owned workspace patch outputs", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("function canonicalEmptyArtifact");
-  const helperEnd = source.indexOf("\n\nfunction materializeMissingMarkdownArtifacts", helperStart);
+  const helperStart = source.indexOf("function prepareArtifactMirror");
+  const helperEnd = source.indexOf("\n\nfunction taskPublishesWorkspacePatch", helperStart);
 
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
 
   const helper = source.slice(helperStart, helperEnd);
-  assert.match(helper, /output\.path === "workspace\.patch" \|\| output\.path === "workspace-patch\.json"/u);
-  assert.match(helper, /runtime-owned workspace patch outputs/u);
+  assert.doesNotMatch(helper, /workspace\.patch|workspace-patch\.json|writeFileDurable/u);
 });
 
 test("generated Smithers workflow guards runtime-owned workspace patch publication", () => {
@@ -781,7 +775,7 @@ test("generated Smithers invariant snapshot delegates the pin check to the share
 test("generated Smithers worktrees fail closed on any source other than the pinned benchmark ref", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const proofStart = source.indexOf("function preservePinnedSourceProof");
-  const proofEnd = source.indexOf("\n\nfunction canonicalEmptyArtifact", proofStart);
+  const proofEnd = source.indexOf("\n\nfunction materializeGeneratedTestCompanions", proofStart);
   const preparationStart = source.indexOf("function prepareArtifactMirror");
   const workflowStart = source.indexOf("export default smithers");
 
@@ -851,7 +845,7 @@ test("generated Smithers pinned source proof counts hidden unreachable commits w
   }
 });
 
-test("generated Smithers pinned source proof ignores unrelated same-commit Ultrafuzz refs", () => {
+test("generated Smithers pinned source proof rejects any previously published byte drift", () => {
   const preservePinnedSourceProof = loadPreservePinnedSourceProof();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-source-proof-"));
   const workspace = path.join(root, "workspace");
@@ -897,7 +891,7 @@ test("generated Smithers pinned source proof ignores unrelated same-commit Ultra
     };
     fs.writeFileSync(proofPath, `${JSON.stringify(legacyNoisyProof, null, 2)}\n`);
     git(["branch", "ultrafuzz/test-run/property-specification-crytic", pinnedCommit]);
-    assert.doesNotThrow(() => preservePinnedSourceProof(task));
+    assert.throws(() => preservePinnedSourceProof(task), /pinned source proof property-specification-certora changed/u);
 
     fs.writeFileSync(
       proofPath,
@@ -1063,7 +1057,7 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
     reset,
     /resetTaskArtifactContents\(path\.join\(artifactsParent, task\.attemptId\), task\.attemptId, "mirror"\)/u
   );
-  assert.match(reset, /output\.contract === "ultrafuzz\/generated-tests@1"/u);
+  assert.match(reset, /output\.contract === "ultrafuzz\/generated-tests@2"/u);
   assert.match(reset, /for \(const testRoot of invariantTestRoots\(workspaceRoot\)\)/u);
   assert.match(reset, /path\.resolve\(workspaceRoot, testRoot, "foundry"\)/u);
   assert.match(reset, /for \(const nodeId of generatedTestNodeIds\(task\)\)/u);
@@ -1139,48 +1133,30 @@ test("post-agent snapshot restoration keeps modified, deleted, and new source st
   }
 });
 
-test("generated Smithers agent preserves its final response as missing non-report Markdown", () => {
+test("generated Smithers agent boundary performs no post-completion artifact work", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const agentStart = source.indexOf("function artifactAwareAgent");
-  const preparationStart = source.indexOf("function prepareArtifactMirror");
+  const agentEnd = source.indexOf("\n\nfunction retryFailureText", agentStart);
 
   assert.ok(agentStart >= 0, source);
-  assert.ok(preparationStart > agentStart, source);
+  assert.ok(agentEnd > agentStart, source);
 
-  const agent = source.slice(agentStart, preparationStart);
-  assert.match(agent, /const result = await agent\.generate\(attemptArgs\)/u);
-  assert.match(agent, /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\)/u);
-  assert.match(agent, /materializeMissingMarkdownArtifacts\(task, result\)/u);
-  assert.match(agent, /materializeMissingFinalReportArtifacts\(task\)/u);
-  assert.match(agent, /normalizeLegacyReportProvenance\(task\)/u);
-  assert.match(agent, /normalizeLegacyGeneratedTestManifests\(task\)/u);
-  assert.match(agent, /materializeGeneratedTestCompanions\(task\)/u);
-  assert.match(agent, /verifyArtifacts\(task\)/u);
-  assert.match(source, /output\.contract !== "ultrafuzz\/nonempty-markdown@1"/u);
-  assert.match(source, /const fallback = `# \$\{title\}\\n\\n\$\{summary\}\\n`/u);
+  const agent = source.slice(agentStart, agentEnd);
+  assert.match(agent, /return await agent\.generate\(attemptArgs\)/u);
+  assert.doesNotMatch(
+    agent,
+    /prepareArtifactMirror|materializeMissing|normalizeLegacy|materializeGeneratedTestCompanions|verifyArtifacts/u
+  );
+  assert.match(source, /function finalizeAndVerifyArtifacts/u);
+  assert.match(source, /dependsOn=\{\[task\.id\]\}[\s\S]*?retries=\{0\}/u);
 });
 
-test("generated Smithers agent retains validated strategy findings when dedupe output is missing", () => {
+test("generated Smithers workflow contains no output repair or legacy normalization helpers", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const fallbackStart = source.indexOf("function materializeMissingDedupeArtifact");
-  const finalReportStart = source.indexOf("function materializeMissingFinalReportArtifacts");
-
-  assert.ok(fallbackStart >= 0, source);
-  assert.ok(finalReportStart > fallbackStart, source);
-
-  const fallback = source.slice(fallbackStart, finalReportStart);
-  assert.match(fallback, /logicalNodeId !== "dedupe-findings"/u);
-  assert.match(fallback, /candidate\.primary && candidate\.path === "deduped-findings\.json"/u);
-  assert.match(fallback, /output\.contract !== "ultrafuzz\/findings@1"/u);
-  assert.match(fallback, /validation\.value\.length > 0/u);
-  assert.match(fallback, /task\.metadata\.dependencies\.attemptIds/u);
-  assert.match(fallback, /validateArtifactContract\(\s*"ultrafuzz\/findings@1"/u);
-  assert.match(fallback, /normalizeLegacyFindingArray\(contents\)/u);
-  assert.match(fallback, /writeFileDurable\(candidatePath, normalized\)/u);
-  assert.match(fallback, /retained\.push\(\.\.\.validation\.value\)/u);
-  assert.match(fallback, /JSON\.stringify\(retained, null, 2\)/u);
-  assert.match(fallback, /writeFileDurable\(outputPath, serialized\)/u);
-  assert.doesNotMatch(fallback, /writeFileSync\(/u);
+  assert.doesNotMatch(
+    source,
+    /canonicalEmptyArtifact|materializeMissingMarkdownArtifacts|materializeMissingDedupeArtifact|materializeMissingFinalReportArtifacts|normalizeLegacyFinding|normalizeLegacyReportProvenance|normalizeLegacyGeneratedTest/u
+  );
 });
 
 test("durable dedupe recovery replaces a symlink without overwriting its target", () => {
@@ -1201,133 +1177,40 @@ test("durable dedupe recovery replaces a symlink without overwriting its target"
   }
 });
 
-test("generated Smithers agent fails closed instead of promoting dedupe findings into a final report", () => {
+test("generated Smithers agent never promotes dedupe findings into a final report", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const fallbackStart = source.indexOf("function materializeMissingFinalReportArtifacts");
-  const reportReaderStart = source.indexOf("function meaningfulFinalReport");
-
-  assert.ok(fallbackStart >= 0, source);
-  assert.ok(reportReaderStart > fallbackStart, source);
-
-  const fallback = source.slice(fallbackStart, reportReaderStart);
-  assert.match(fallback, /logicalNodeId !== "final-report"/u);
-  assert.match(fallback, /candidate\.path === "report\.json" && candidate\.contract === "ultrafuzz\/report@1"/u);
-  assert.match(fallback, /candidate\.path === "findings\.normalized\.json"/u);
-  assert.match(fallback, /if \(report === undefined\) \{[\s\S]*?return;\s*\}/u);
-  assert.match(fallback, /writeValidatedTaskArtifact\(task, reportOutput, report\)/u);
-  assert.match(fallback, /let findings = normalizedFindingArray\(report\.issues\)/u);
-  assert.doesNotMatch(fallback, /dedupe-findings|retainedDedupeFindings|recoveredReport|artifact_recovery/u);
-  assert.doesNotMatch(source, /function normalizedFallbackReportIssue|issue\.impact =|issue\.likelihood =/u);
-});
-
-test("generated Smithers agent leaves final-report Markdown to the final-review worker", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const markdownStart = source.indexOf("function materializeMissingMarkdownArtifacts");
-  const summaryStart = source.indexOf("function agentResultSummary");
-  const finalReportStart = source.indexOf("function materializeMissingFinalReportArtifacts");
-  const reportReaderStart = source.indexOf("function meaningfulFinalReport");
-
-  assert.ok(markdownStart >= 0, source);
-  assert.ok(summaryStart > markdownStart, source);
-  assert.ok(finalReportStart > summaryStart, source);
-  assert.ok(reportReaderStart > finalReportStart, source);
-
-  const markdownFallback = source.slice(markdownStart, summaryStart);
-  assert.match(
-    markdownFallback,
-    /task\.metadata\.node\.logicalNodeId === "final-report" && output\.path === "report\.md"/u
+  assert.doesNotMatch(
+    source,
+    /materializeMissingFinalReportArtifacts|meaningfulFinalReport|normalizedFallbackReportIssue/u
   );
-  assert.match(markdownFallback, /continue;/u);
-
-  const finalReportFallback = source.slice(finalReportStart, reportReaderStart);
-  assert.doesNotMatch(finalReportFallback, /report\.md|markdown|writeValidatedTextArtifact/u);
-  assert.doesNotMatch(source, /function writeRecoveredReportMarkdown|function writeValidatedTextArtifact/u);
 });
 
-test("generated Smithers agent normalizes legacy generated-test string lists", () => {
+test("generated Smithers agent never synthesizes final-report Markdown", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const normalizerStart = source.indexOf("function normalizeLegacyGeneratedTestManifests");
-  const resolverStart = source.indexOf("function resolveRegularArtifactFile");
-
-  assert.ok(normalizerStart >= 0, source);
-  assert.ok(resolverStart > normalizerStart, source);
-
-  const normalizer = source.slice(normalizerStart, resolverStart);
-  assert.match(normalizer, /output\.contract !== "ultrafuzz\/generated-tests@1"/u);
-  assert.match(normalizer, /validateArtifactContract\(output\.contract, contents, output\.path\)\.ok/u);
-  assert.match(normalizer, /manifest\.generated_tests\.some\(\(entry\) => typeof entry === "string"\)/u);
-  assert.match(normalizer, /typeof entry === "string" \? \{ path: entry \} : entry/u);
-  assert.match(normalizer, /validateArtifactContract\(output\.contract, normalized, output\.path\)\.ok/u);
-  assert.match(normalizer, /writeFileSync\(resolvedPath, normalized/u);
+  assert.doesNotMatch(source, /materializeMissingMarkdownArtifacts|agentResultSummary|writeRecoveredReportMarkdown/u);
 });
 
-test("generated Smithers agent strips line suffixes from safe finding path fields", () => {
+test("generated Smithers agent rejects legacy generated-test string lists without conversion", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const normalizerStart = source.indexOf("function normalizeLegacyFindingFields");
-  const generatedTestNormalizerStart = source.indexOf("function normalizeLegacyGeneratedTestManifests");
-
-  assert.ok(normalizerStart >= 0, source);
-  assert.ok(generatedTestNormalizerStart > normalizerStart, source);
-
-  const normalizer = source.slice(normalizerStart, generatedTestNormalizerStart);
-  assert.match(normalizer, /\["affected_files", "patch_refs"\] as const/u);
-  assert.match(normalizer, /normalizeLegacyPathReferences\(finding\[key\]\)/u);
-  assert.match(normalizer, /finding\[key\] = normalizedPaths\.value/u);
-  assert.match(normalizer, /function normalizeLegacyPathReference/u);
-  assert.ok(normalizer.includes("trimmed.match(/^(.+?)#L\\d+(?:-L?\\d+)?$/u)"));
-  assert.ok(normalizer.includes("withoutHashLineSuffix.match(/^(.+?):\\d+(?::\\d+)?$/u)"));
+  assert.doesNotMatch(source, /normalizeLegacyGeneratedTestManifests|typeof entry === "string" \? \{ path: entry \}/u);
 });
 
-test("generated Smithers agent normalizes legacy finding field shapes", () => {
+test("generated Smithers agent does not strip finding path suffixes", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const normalizerStart = source.indexOf("function normalizeLegacyFindingFields");
-  const generatedTestNormalizerStart = source.indexOf("function normalizeLegacyGeneratedTestManifests");
-
-  assert.ok(normalizerStart >= 0, source);
-  assert.ok(generatedTestNormalizerStart > normalizerStart, source);
-
-  const normalizer = source.slice(normalizerStart, generatedTestNormalizerStart);
-  assert.match(normalizer, /output\.contract !== "ultrafuzz\/findings@1"/u);
-  assert.match(normalizer, /validateArtifactContract\(output\.contract, contents, output\.path\)\.ok/u);
-  assert.match(normalizer, /typeof finding\.confidence === "number"/u);
-  assert.match(normalizer, /Number\.isFinite\(finding\.confidence\)/u);
-  assert.match(normalizer, /finding\.confidence = String\(finding\.confidence\)/u);
-  assert.match(normalizer, /typeof strategy === "object" && strategy !== null && !Array\.isArray\(strategy\)/u);
-  assert.match(normalizer, /\(strategy as Record<string, unknown>\)\.origin/u);
-  assert.match(normalizer, /finding\.strategy = legacyStrategy\.trim\(\)/u);
-  assert.match(normalizer, /"affected_files"/u);
-  assert.match(normalizer, /"affected_functions"/u);
-  assert.match(normalizer, /"patch_refs"/u);
-  assert.match(normalizer, /"property_ids"/u);
-  assert.match(normalizer, /"notes"/u);
-  assert.match(normalizer, /finding\[key\] = \[value\.trim\(\)\]/u);
-  assert.match(normalizer, /typeof evidence === "string"/u);
-  assert.match(normalizer, /finding\.evidence = \[evidence\]/u);
-  assert.match(normalizer, /validateArtifactContract\(output\.contract, normalized, output\.path\)\.ok/u);
-  assert.match(normalizer, /writeFileSync\(resolvedPath, normalized/u);
+  assert.doesNotMatch(source, /normalizeLegacyPathReference|withoutHashLineSuffix/u);
 });
 
-test("generated Smithers agent normalizes legacy unavailable report provenance fields", () => {
+test("generated Smithers agent does not convert legacy finding field shapes", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const normalizerStart = source.indexOf("function normalizeLegacyReportProvenance");
-  const generatedTestNormalizerStart = source.indexOf("function normalizeLegacyGeneratedTestManifests");
+  assert.doesNotMatch(
+    source,
+    /normalizeLegacyFindingFields|finding\.confidence = String|finding\.evidence = \[evidence\]/u
+  );
+});
 
-  assert.ok(normalizerStart >= 0, source);
-  assert.ok(generatedTestNormalizerStart > normalizerStart, source);
-
-  const normalizer = source.slice(normalizerStart, generatedTestNormalizerStart);
-  assert.match(normalizer, /output\.contract !== "ultrafuzz\/report@1"/u);
-  assert.match(normalizer, /validateArtifactContract\(output\.contract, contents, output\.path\)\.ok/u);
-  assert.match(normalizer, /report\.issues\.map/u);
-  assert.match(normalizer, /normalizeLegacyFindingRecord\(entry\)/u);
-  assert.match(normalizer, /normalizeFinalReportSeverityRecord\(normalized\.value\)/u);
-  assert.match(normalizer, /originalIsValid/u);
-  assert.match(normalizer, /\["implementation_paths", "test_paths"\]/u);
-  assert.match(normalizer, /provenance\[field\] = \[\]/u);
-  assert.match(normalizer, /\["fuzzer_backend", "fuzzer_backends"\]/u);
-  assert.match(normalizer, /delete provenance\[field\]/u);
-  assert.match(normalizer, /validateArtifactContract\(output\.contract, normalized, output\.path\)\.ok/u);
-  assert.match(normalizer, /writeFileSync\(resolvedPath, normalized/u);
+test("generated Smithers agent does not convert legacy report provenance", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  assert.doesNotMatch(source, /normalizeLegacyReportProvenance|normalizeFinalReportSeverityRecord|originalIsValid/u);
 });
 
 test("generated Smithers agent mirrors declared workspace tests before strict verification", () => {
@@ -1783,7 +1666,7 @@ test("generated Smithers dependency verification fails closed before descendant 
       outputs: [
         {
           path: "generated-tests.json",
-          contract: "ultrafuzz/generated-tests@1",
+          contract: "ultrafuzz/generated-tests@2",
           contractDigest: "a".repeat(64),
           primary: true
         }
@@ -1837,7 +1720,7 @@ test("generated Smithers dependency verification fails closed before descendant 
       ok: true,
       issues: [],
       value:
-        contract === "ultrafuzz/generated-tests@1"
+        contract === "ultrafuzz/generated-tests@2"
           ? { generated_tests: [{ path: "generated-tests/Property.t.sol" }] }
           : undefined
     }),
@@ -1954,7 +1837,7 @@ test("generated Smithers dependency verification fails closed before descendant 
   fs.writeFileSync(path.join(generatedDependency, "generated-tests.json"), generatedBytes);
   const generatedArtifact = {
     path: "generated-tests.json",
-    contract: "ultrafuzz/generated-tests@1",
+    contract: "ultrafuzz/generated-tests@2",
     contract_digest: "a".repeat(64),
     sha256: createHash("sha256").update(generatedBytes).digest("hex"),
     primary: true
@@ -2110,9 +1993,13 @@ test("generated Smithers preserves setup-patch baselines across post-agent prepa
   // The skip is only sound when the skipped prefix is a real chain; a sibling fan-in must replay.
   assert.match(source, /return chained \? index \+ 1 : 0;/u);
   assert.match(helper, /captures\.slice\(replayFrom\)/u);
+  const finalizerStart = source.indexOf("function finalizeAndVerifyArtifacts");
+  const verifierStart = source.indexOf("\n\nfunction verifyArtifacts", finalizerStart);
+  assert.ok(finalizerStart >= 0, source);
+  assert.ok(verifierStart > finalizerStart, source);
   assert.match(
-    source,
-    /const result = await agent\.generate\(attemptArgs\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\);/u
+    source.slice(finalizerStart, verifierStart),
+    /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\);/u
   );
 });
 
