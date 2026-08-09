@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
 import {
   adaptBenchmarkManifestToEvalSuite,
   benchmarkLaneConcurrency,
@@ -329,15 +330,10 @@ export async function runPublicBenchmarkWorker(input: {
         candidateCommit: input.config.public_benchmark.candidate_commit,
         evalRunId: prepared.evalRunId,
         lineage: input.lineage,
-        files: publicBundleSources(
-          prepared.controlRoot,
-          prepared.evalRunId,
-          {
-            root: input.dataRoot,
-            source: diagnosticsPath
-          },
-          input.config.public_benchmark.lane
-        ),
+        files: publicBundleSources(prepared.controlRoot, prepared.evalRunId, {
+          root: input.dataRoot,
+          source: diagnosticsPath
+        }),
         forbiddenSecretValues: await resolveForbiddenSecretValues()
       });
       await writePublicBundleAtomic(bundlePath, bundle);
@@ -956,8 +952,7 @@ async function cloneAtCommit(
 export function publicBundleSources(
   controlRoot: string,
   evalRunId: string,
-  diagnostics: { root: string; source: string },
-  lane: "smoke" | "full" = "full"
+  diagnostics: { root: string; source: string }
 ): PublicBenchmarkBundleSource[] {
   const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
   const sources: PublicBenchmarkBundleSource[] = [
@@ -974,16 +969,18 @@ export function publicBundleSources(
     return fs.existsSync(source) ? [{ path: `eval/${relative}`, root: evalRoot, source }] : [];
   });
   sources.push({ path: `eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`, ...diagnostics });
-  const records = fs
-    .readFileSync(path.join(evalRoot, "runs.jsonl"), "utf8")
-    .split(/\r?\n/u)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as EvalRunRecord);
+  const records = parsePublicSourceJsonLines(
+    fs.readFileSync(path.join(evalRoot, "runs.jsonl")),
+    "public benchmark runs.jsonl"
+  ) as EvalRunRecord[];
   const finalRecordsByRow = new Map<string, EvalRunRecord>();
   for (const record of records) {
     if (record.row_id !== undefined) finalRecordsByRow.set(record.row_id, record);
   }
-  const matrix = JSON.parse(fs.readFileSync(path.join(evalRoot, "matrix.json"), "utf8")) as unknown;
+  const matrix = parsePublicSourceJson(
+    fs.readFileSync(path.join(evalRoot, "matrix.json")),
+    "public benchmark matrix.json"
+  );
   if (
     !Array.isArray(matrix) ||
     matrix.length === 0 ||
@@ -1013,21 +1010,9 @@ export function publicBundleSources(
     if (report === undefined || record.ultrafuzz_run_root === undefined) {
       throw new Error(`public benchmark row is missing its terminal report: ${row.id}`);
     }
-    const reportFindingsSource = path.join(path.dirname(report), "findings.normalized.json");
-    const smokeFindingsSource = path.join(
-      record.ultrafuzz_run_root,
-      "artifacts",
-      "dedupe-findings",
-      "deduped-findings.json"
-    );
-    const normalizedFindingsSource =
-      lane === "smoke" && (!failedDatapoint || fs.existsSync(smokeFindingsSource))
-        ? smokeFindingsSource
-        : reportFindingsSource;
     const candidates = [
       { name: "report.json", source: report },
-      { name: "report.md", source: path.join(path.dirname(report), "report.md") },
-      { name: "findings.normalized.json", source: normalizedFindingsSource }
+      { name: "report.md", source: path.join(path.dirname(report), "report.md") }
     ];
     for (const candidate of candidates) {
       if (!fs.existsSync(candidate.source)) {
@@ -1042,6 +1027,35 @@ export function publicBundleSources(
     sources.push(...optionalRowArtifactSources(record.ultrafuzz_run_root, row.id));
   }
   return sources;
+}
+
+function parsePublicSourceJson(contents: Buffer, label: string): unknown {
+  try {
+    return parseStrictJsonBytes(contents, {
+      maxBytes: MAX_PUBLIC_BENCHMARK_FILE_BYTES,
+      maxDepth: 128
+    });
+  } catch (error) {
+    throw new Error(`${label} is not strict JSON`, { cause: error });
+  }
+}
+
+function parsePublicSourceJsonLines(contents: Buffer, label: string): unknown[] {
+  const values: unknown[] = [];
+  let lineStart = 0;
+  for (let index = 0; index <= contents.byteLength; index += 1) {
+    if (index !== contents.byteLength && contents[index] !== 0x0a) continue;
+    let lineEnd = index;
+    if (lineEnd > lineStart && contents[lineEnd - 1] === 0x0d) lineEnd -= 1;
+    if (lineEnd === lineStart) {
+      if (index !== contents.byteLength) throw new Error(`${label} contains a blank line`);
+    } else {
+      values.push(parsePublicSourceJson(contents.subarray(lineStart, lineEnd), `${label} line ${values.length + 1}`));
+    }
+    lineStart = index + 1;
+  }
+  if (values.length === 0) throw new Error(`${label} must not be empty`);
+  return values;
 }
 
 /**

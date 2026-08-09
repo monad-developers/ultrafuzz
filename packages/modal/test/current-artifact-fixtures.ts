@@ -22,6 +22,29 @@ export function currentFinding(overrides: Record<string, unknown> = {}): Record<
   };
 }
 
+export function currentReportIssue(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return currentFinding({
+    description: "A caller can reach a state that violates the documented relationship.",
+    severity: "Low",
+    impact: "Low",
+    likelihood: "Low",
+    impact_rationale: "The affected state remains bounded.",
+    likelihood_rationale: "The transition uses ordinary preconditions.",
+    severity_rationale: "Low impact maps to Low severity.",
+    proof_of_concept: {
+      scenario: ["Prepare the bounded state.", "Execute the transition and observe the mismatch."],
+      language: "solidity",
+      code: "function testCanonicalFinding() public {}"
+    },
+    lifecycle: {
+      dedupe_key: "fixture-dedupe-key",
+      source_artifacts: [],
+      strategy_hits: []
+    },
+    ...overrides
+  });
+}
+
 export function currentTerminalReport(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     schema_version: "ultrafuzz.report.v2",

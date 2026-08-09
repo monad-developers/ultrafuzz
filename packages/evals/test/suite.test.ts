@@ -53,7 +53,7 @@ reporting:
   experiment_prefix: bug-finding
   artifacts:
     mode: manifest-only
-    include: ["report.md", "report.json", "findings.normalized.json"]
+    include: ["report.md", "report.json"]
     max_file_bytes: 5000000
 `;
 
@@ -131,7 +131,7 @@ describe("eval suite loading and planning", () => {
       heartbeat_interval_seconds: 60,
       artifacts: {
         mode: "manifest-only",
-        include: ["report.md", "report.json", "findings.normalized.json"],
+        include: ["report.md", "report.json"],
         max_file_bytes: 5_000_000,
         mode_explicit: false
       }

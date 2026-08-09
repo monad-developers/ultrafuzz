@@ -27,10 +27,10 @@ import {
 import { parseRecoveryEquivalence } from "./recovery-equivalence.js";
 import { EvalError, evalRunRoot, jsonFile, readJsonLines, safeEvalId } from "./utils.js";
 
-export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v1" as const;
-export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v5" as const;
+export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v2" as const;
+export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v6" as const;
 const EVAL_HISTORY_PUBLIC_BUNDLE_FILE = "public-results.json";
-const EVAL_HISTORY_PUBLIC_REPORT_FILES = ["report.md", "report.json", "findings.normalized.json"] as const;
+const EVAL_HISTORY_PUBLIC_REPORT_FILES = ["report.md", "report.json"] as const;
 
 export type EvalHistoryBenchmark = "evmbench" | "ultrafuzz-bench";
 export type EvalHistoryLane = "smoke" | "full";

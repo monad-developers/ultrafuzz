@@ -389,13 +389,15 @@ volume artifacts.
 
 Public EVMBench and Ultrafuzz-bench targets use a separate explicit contract.
 For those old open-source projects, `collect --public-results --config <path>`
-additionally copies the scored eval generation plus `report.md`, `report.json`,
-and `findings.normalized.json`. It also embeds the exact
+additionally copies the scored eval generation plus `report.md` and the
+schema-validated `report.json`. The latter's `issues` array is the sole terminal
+finding authority. The bundle also embeds the exact
 `public-eval-diagnostics.json` sidecar under `eval/`, so report-backed genuine
 task failures remain verifiable when the generation is published to history.
 The bundle validates a fixed path allowlist, byte limits, canonical base64,
 unique paths, sizes, SHA-256 hashes, exact launch and diagnostic lineage,
-score-ready lifecycle evidence, complete per-row report files, and the absence
+score-ready lifecycle evidence, report/run/score identity joins, complete
+per-row report files, and the absence
 of generic or exact injected secrets before any file is extracted or uploaded.
 
 This public mode assumes the pinned benchmark repositories are trusted inputs.

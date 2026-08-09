@@ -65,7 +65,7 @@ describe("public benchmark manifests", () => {
     expect(suite.reporting.artifacts).toMatchObject({
       mode: "upload",
       mode_explicit: true,
-      include: ["report.md", "report.json", "findings.normalized.json"]
+      include: ["report.md", "report.json"]
     });
     expect(suite.variants[0]?.topology).toBe(BENCHMARK_SMOKE_WORKFLOW_PATH);
     expect(suite.variants[0]?.workflow_input).toMatchObject({

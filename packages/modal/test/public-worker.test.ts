@@ -1243,7 +1243,6 @@ it("publishes only the final journal record for each benchmark row", () => {
   fs.mkdirSync(evalRoot, { recursive: true });
   const reportPath = writeCurrentTerminalReport(runRoot);
   fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
-  fs.writeFileSync(path.join(reportRoot, "findings.normalized.json"), "[]\n");
   const record = {
     schema_version: "ultrafuzz.eval.run.v1",
     eval_run_id: evalRunId,
@@ -1276,8 +1275,7 @@ it("publishes only the final journal record for each benchmark row", () => {
   const reportSources = sources.filter((source) => source.path.startsWith("reports/"));
   expect(reportSources.map((source) => source.path)).toEqual([
     "reports/target-a-runner-trial-1/report.json",
-    "reports/target-a-runner-trial-1/report.md",
-    "reports/target-a-runner-trial-1/findings.normalized.json"
+    "reports/target-a-runner-trial-1/report.md"
   ]);
 
   writeGenuineTaskFailureFixture(runRoot);
@@ -1293,17 +1291,13 @@ it("publishes only the final journal record for each benchmark row", () => {
     publicBundleSources(controlRoot, evalRunId, diagnostics)
       .filter((source) => source.path.startsWith("reports/"))
       .map((source) => source.path)
-  ).toEqual([
-    "reports/target-a-runner-trial-1/report.json",
-    "reports/target-a-runner-trial-1/report.md",
-    "reports/target-a-runner-trial-1/findings.normalized.json"
-  ]);
+  ).toEqual(["reports/target-a-runner-trial-1/report.json", "reports/target-a-runner-trial-1/report.md"]);
 
   fs.rmSync(path.join(reportRoot, "report.md"));
   expect(() => publicBundleSources(controlRoot, evalRunId, diagnostics)).toThrow(/missing report\.md/u);
 });
 
-it("publishes smoke dedupe evidence through the trusted normalized-findings bundle path", () => {
+it("uses report.json as the sole public finding authority", () => {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-smoke-"));
   const controlRoot = path.join(root, "control");
   const evalRunId = "eval-smoke-dedupe";
@@ -1315,6 +1309,8 @@ it("publishes smoke dedupe evidence through the trusted normalized-findings bund
   writeCurrentTerminalReport(runRoot);
   fs.mkdirSync(dedupeRoot, { recursive: true });
   fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
+  // These former authorities may still exist in an old workspace, but a new
+  // bundle must neither select nor publish either one.
   fs.writeFileSync(path.join(reportRoot, "findings.normalized.json"), "[]\n");
   fs.writeFileSync(path.join(dedupeRoot, "deduped-findings.json"), "[]\n");
   const rowId = "target-a-runner-trial-1";
@@ -1330,15 +1326,14 @@ it("publishes smoke dedupe evidence through the trusted normalized-findings bund
   const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
   fs.writeFileSync(diagnosticsPath, "{}\n");
 
-  const reportSources = publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath }, "smoke").filter(
+  const reportSources = publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath }).filter(
     (source) => source.path.startsWith("reports/")
   );
   expect(reportSources.map((source) => source.path)).toEqual([
     `reports/${rowId}/report.json`,
-    `reports/${rowId}/report.md`,
-    `reports/${rowId}/findings.normalized.json`
+    `reports/${rowId}/report.md`
   ]);
-  expect(reportSources.at(-1)?.source).toBe(path.join(dedupeRoot, "deduped-findings.json"));
+  expect(reportSources.some((source) => source.source.includes("findings"))).toBe(false);
 
   fs.rmSync(path.join(dedupeRoot, "deduped-findings.json"));
   fs.appendFileSync(
@@ -1349,13 +1344,14 @@ it("publishes smoke dedupe evidence through the trusted normalized-findings bund
       workflow: { status: "failed", terminal: true }
     })}\n`
   );
-  const failedReportSources = publicBundleSources(
-    controlRoot,
-    evalRunId,
-    { root, source: diagnosticsPath },
-    "smoke"
-  ).filter((source) => source.path.startsWith("reports/"));
-  expect(failedReportSources.at(-1)?.source).toBe(path.join(reportRoot, "findings.normalized.json"));
+  const failedReportSources = publicBundleSources(controlRoot, evalRunId, {
+    root,
+    source: diagnosticsPath
+  }).filter((source) => source.path.startsWith("reports/"));
+  expect(failedReportSources.map((source) => source.path)).toEqual([
+    `reports/${rowId}/report.json`,
+    `reports/${rowId}/report.md`
+  ]);
 });
 
 it("rejects a persisted public bundle unless every worker lineage field matches", () => {
@@ -1589,7 +1585,6 @@ it("retains threat-model, goal-plan and vulnerability-database artifacts per row
   fs.mkdirSync(evalRoot, { recursive: true });
   const reportPath = writeCurrentTerminalReport(runRoot);
   fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
-  fs.writeFileSync(path.join(reportRoot, "findings.normalized.json"), "[]\n");
 
   const threatModelRoot = path.join(runRoot, "artifacts/threat-model");
   fs.mkdirSync(threatModelRoot, { recursive: true });
@@ -1631,12 +1626,11 @@ it("retains threat-model, goal-plan and vulnerability-database artifacts per row
     .map((source) => source.path);
 
   // The fixed set keeps its exact shape and position; retention is additive.
-  expect(paths.slice(0, 3)).toEqual([
+  expect(paths.slice(0, 2)).toEqual([
     "reports/target-a-runner-trial-1/report.json",
-    "reports/target-a-runner-trial-1/report.md",
-    "reports/target-a-runner-trial-1/findings.normalized.json"
+    "reports/target-a-runner-trial-1/report.md"
   ]);
-  expect(paths.slice(3)).toEqual([
+  expect(paths.slice(2)).toEqual([
     "reports/target-a-runner-trial-1/artifacts/goal-planner/goal-plan.json",
     "reports/target-a-runner-trial-1/artifacts/goal-planner/vulnerability-db-manifest.json",
     "reports/target-a-runner-trial-1/artifacts/threat-model/THREAT_MODEL.md",

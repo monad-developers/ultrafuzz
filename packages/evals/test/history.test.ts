@@ -78,11 +78,7 @@ function observation(overrides: Partial<EvalHistoryObservation> = {}): EvalHisto
       graded_case_count: 1,
       publication_location: {
         bundle_path: "public-results.json",
-        report_paths: [
-          "reports/target-a-baseline-trial-1/report.md",
-          "reports/target-a-baseline-trial-1/report.json",
-          "reports/target-a-baseline-trial-1/findings.normalized.json"
-        ]
+        report_paths: ["reports/target-a-baseline-trial-1/report.md", "reports/target-a-baseline-trial-1/report.json"]
       }
     },
     source_eval_run_id: "run-1",
@@ -535,7 +531,8 @@ describe("longitudinal eval history", () => {
       "ultrafuzz.eval.history.observation.v1",
       "ultrafuzz.eval.history.observation.v2",
       "ultrafuzz.eval.history.observation.v3",
-      "ultrafuzz.eval.history.observation.v4"
+      "ultrafuzz.eval.history.observation.v4",
+      "ultrafuzz.eval.history.observation.v5"
     ]) {
       expect(() =>
         parseEvalHistory({
@@ -545,6 +542,16 @@ describe("longitudinal eval history", () => {
         })
       ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
     }
+  });
+
+  it("rejects the pre-report-authority history root version", () => {
+    expect(() =>
+      parseEvalHistory({
+        schema_version: "ultrafuzz.eval.history.v1",
+        supersessions: [],
+        observations: []
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
   });
 
   it("requires ground-truth counts for current observations and bounds unique matches", () => {
@@ -810,10 +817,8 @@ describe("longitudinal eval history", () => {
           report_paths: [
             "reports/target-a-baseline-trial-1/report.md",
             "reports/target-a-baseline-trial-1/report.json",
-            "reports/target-a-baseline-trial-1/findings.normalized.json",
             "reports/target-a-baseline-trial-2/report.md",
-            "reports/target-a-baseline-trial-2/report.json",
-            "reports/target-a-baseline-trial-2/findings.normalized.json"
+            "reports/target-a-baseline-trial-2/report.json"
           ]
         }
       }

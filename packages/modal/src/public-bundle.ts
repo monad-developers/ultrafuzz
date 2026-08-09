@@ -2,8 +2,15 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertFindingsSchema, assertRegularFileInside } from "@ultrafuzz/artifacts";
 import {
+  artifactContractSchemaBinding,
+  assertRegularFileInside,
+  parseStrictJsonBytes,
+  validateRegisteredJsonSchema,
+  type TerminalReport
+} from "@ultrafuzz/artifacts";
+import {
+  EVAL_RUN_SCHEMA_VERSION,
   MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
   PUBLIC_EVAL_DIAGNOSTICS_FILE,
   parsePublicEvalDiagnostics,
@@ -14,14 +21,14 @@ import { z } from "zod/v4";
 
 import type { ModalWorkerLineage } from "./launch-state.js";
 
-export const PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v4" as const;
+export const PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v5" as const;
 export const MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES = 256 * 1024 * 1024;
 
 export const MAX_PUBLIC_BENCHMARK_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_FILE_BYTES = MAX_PUBLIC_BENCHMARK_FILE_BYTES;
 const MAX_FILE_BASE64_CHARACTERS = 4 * Math.ceil(MAX_FILE_BYTES / 3);
 const MAX_ROWS = 2_048;
-const PUBLIC_REPORT_FILES = ["report.md", "report.json", "findings.normalized.json"] as const;
+const PUBLIC_REPORT_FILES = ["report.md", "report.json"] as const;
 /**
  * Files a row may contribute: the fixed report set, plus the bounded set of
  * optional run artifacts `publicBundleSources` retains when the topology
@@ -283,6 +290,9 @@ export function parsePublicBenchmarkBundle(
   const summaryContents = contentsByPath.get("eval/summary.json");
   if (summaryContents === undefined) throw new Error("public benchmark bundle is missing eval/summary.json");
   const summaryRows = parseSummaryRows(summaryContents);
+  const runRecordsContents = contentsByPath.get("eval/runs.jsonl");
+  if (runRecordsContents === undefined) throw new Error("public benchmark bundle is missing eval/runs.jsonl");
+  const runRecords = parsePublicRunRecords(runRecordsContents, parsed.eval_run_id, matrixRows);
   const diagnosticsPath = `eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`;
   const diagnosticsContents = contentsByPath.get(diagnosticsPath);
   if (diagnosticsContents === undefined) throw new Error(`public benchmark bundle is missing ${diagnosticsPath}`);
@@ -308,8 +318,14 @@ export function parsePublicBenchmarkBundle(
       throw new Error(`public benchmark bundle diagnostics row does not match the matrix: ${diagnostic.row_id}`);
     }
   }
-  for (const rowId of summaryRows) {
-    if (!matrixRows.has(rowId)) {
+  for (const [rowId, score] of summaryRows) {
+    const matrixRow = matrixRows.get(rowId);
+    if (
+      matrixRow === undefined ||
+      matrixRow.target_id !== score.target_id ||
+      matrixRow.variant_id !== score.variant_id ||
+      matrixRow.trial_id !== score.trial_id
+    ) {
       throw new Error(`public benchmark bundle graded row does not match the matrix: ${rowId}`);
     }
   }
@@ -326,7 +342,8 @@ export function parsePublicBenchmarkBundle(
       if (!paths.has(required)) throw new Error(`public benchmark bundle is missing ${required}`);
     }
   }
-  assertSmokeFindingFloor(parsed.lane, matrixRows, contentsByPath, diagnostics);
+  const reportsByRow = parseTerminalReports(matrixRows, summaryRows, runRecords, contentsByPath);
+  assertSmokeFindingFloor(parsed.lane, matrixRows, reportsByRow, diagnostics);
   const publicationBundlePath = uniqueDeclaredPublicationBundlePath(parsed.targets);
   const expectedMetadata = summarizePublicBenchmarkBundleContents({
     matrixRows,
@@ -341,7 +358,7 @@ export function parsePublicBenchmarkBundle(
 function assertSmokeFindingFloor(
   lane: PublicBenchmarkBundle["lane"],
   matrixRows: Map<string, PublicBundleMatrixRow>,
-  contentsByPath: Map<string, Buffer>,
+  reportsByRow: Map<string, TerminalReport>,
   diagnostics: ReturnType<typeof parsePublicEvalDiagnostics>
 ): void {
   if (lane !== "smoke") return;
@@ -349,20 +366,118 @@ function assertSmokeFindingFloor(
     diagnostics.rows.filter(publicEvalDiagnosticsRowIsFailedDatapoint).map((row) => row.row_id)
   );
   for (const rowId of matrixRows.keys()) {
-    const bundlePath = `reports/${rowId}/findings.normalized.json`;
-    const contents = contentsByPath.get(bundlePath);
-    let findings;
-    try {
-      findings = assertFindingsSchema(
-        contents === undefined ? undefined : (JSON.parse(contents.toString("utf8")) as unknown)
-      );
-    } catch (error) {
-      throw new Error(`smoke benchmark row ${rowId} has invalid normalized findings`, { cause: error });
-    }
-    if (findings.length === 0 && !failedDatapointRows.has(rowId)) {
-      throw new Error(`smoke benchmark row ${rowId} must report at least one normalized finding`);
+    const report = reportsByRow.get(rowId);
+    if (report === undefined) throw new Error(`public benchmark bundle is missing a parsed report for ${rowId}`);
+    if (report.issues.length === 0 && !failedDatapointRows.has(rowId)) {
+      throw new Error(`smoke benchmark row ${rowId} must report at least one production issue`);
     }
   }
+}
+
+function parseTerminalReports(
+  matrixRows: Map<string, PublicBundleMatrixRow>,
+  summaryRows: Map<string, PublicBundleSummaryRow>,
+  runRecords: Map<string, PublicBundleRunRecord>,
+  contentsByPath: Map<string, Buffer>
+): Map<string, TerminalReport> {
+  const binding = artifactContractSchemaBinding("ultrafuzz/report@2");
+  if (binding === undefined) throw new Error("terminal report schema binding is unavailable");
+  const reports = new Map<string, TerminalReport>();
+  for (const rowId of matrixRows.keys()) {
+    const bundlePath = `reports/${rowId}/report.json`;
+    const contents = contentsByPath.get(bundlePath);
+    if (contents === undefined) throw new Error(`public benchmark bundle is missing ${bundlePath}`);
+    let value: unknown;
+    try {
+      value = parseStrictJsonBytes(contents, { maxBytes: MAX_FILE_BYTES, maxDepth: 128 });
+    } catch (error) {
+      throw new Error(`public benchmark row ${rowId} has invalid strict report JSON`, { cause: error });
+    }
+    const validation = validateRegisteredJsonSchema(binding.schema_id, value);
+    if (!validation.ok) {
+      const detail = validation.issues
+        .slice(0, 5)
+        .map((issue) => `${issue.instancePath || "/"} ${issue.message}`)
+        .join("; ");
+      throw new Error(`public benchmark row ${rowId} has a schema-invalid terminal report: ${detail}`);
+    }
+    const report = value as TerminalReport;
+    const row = matrixRows.get(rowId);
+    const score = summaryRows.get(rowId);
+    const record = runRecords.get(rowId);
+    if (row === undefined || score === undefined || record === undefined) {
+      throw new Error(`public benchmark row ${rowId} is missing report lineage`);
+    }
+    if (report.run_metadata.run_id !== record.ultrafuzz_run_id) {
+      throw new Error(`public benchmark row ${rowId} terminal report does not match its Ultrafuzz run ID`);
+    }
+    if (canonicalRepository(report.run_metadata.repository) !== canonicalRepository(row.target.repo)) {
+      throw new Error(`public benchmark row ${rowId} terminal report does not match its target repository`);
+    }
+    if (report.issues.length !== score.finding_count) {
+      throw new Error(`public benchmark row ${rowId} terminal report issue count does not match its score`);
+    }
+    reports.set(rowId, report);
+  }
+  return reports;
+}
+
+interface PublicBundleRunRecord {
+  row_id: string;
+  target_id: string;
+  variant_id: string;
+  trial_id: string;
+  ultrafuzz_run_id: string;
+}
+
+function parsePublicRunRecords(
+  contents: Buffer,
+  evalRunId: string,
+  matrixRows: Map<string, PublicBundleMatrixRow>
+): Map<string, PublicBundleRunRecord> {
+  const records = new Map<string, PublicBundleRunRecord>();
+  for (const [index, value] of parseStrictJsonLines(contents, "eval/runs.jsonl").entries()) {
+    const record = recordValue(value);
+    if (record === undefined || record.schema_version !== EVAL_RUN_SCHEMA_VERSION || record.eval_run_id !== evalRunId) {
+      throw new Error(`public benchmark bundle run record ${index} has invalid version or eval identity`);
+    }
+    const rowId = safeId.safeParse(record.row_id);
+    const targetId = safeId.safeParse(record.target_id);
+    const variantId = safeId.safeParse(record.variant_id);
+    const trialId = safeId.safeParse(record.trial_id);
+    if (!rowId.success || !targetId.success || !variantId.success || !trialId.success) {
+      throw new Error(`public benchmark bundle run record ${index} has invalid row identity`);
+    }
+    const row = matrixRows.get(rowId.data);
+    if (
+      row === undefined ||
+      row.target_id !== targetId.data ||
+      row.variant_id !== variantId.data ||
+      row.trial_id !== trialId.data ||
+      (record.status !== "launched" && record.status !== "failed")
+    ) {
+      throw new Error(`public benchmark bundle run record ${index} does not match its matrix row`);
+    }
+    if (record.status === "failed") {
+      records.delete(rowId.data);
+      continue;
+    }
+    const runId = safeId.safeParse(record.ultrafuzz_run_id);
+    if (!runId.success) {
+      throw new Error(`public benchmark bundle launched run record ${index} has an invalid Ultrafuzz run ID`);
+    }
+    records.set(rowId.data, {
+      row_id: rowId.data,
+      target_id: targetId.data,
+      variant_id: variantId.data,
+      trial_id: trialId.data,
+      ultrafuzz_run_id: runId.data
+    });
+  }
+  for (const rowId of matrixRows.keys()) {
+    if (!records.has(rowId)) throw new Error(`public benchmark bundle is missing a current run record for ${rowId}`);
+  }
+  return records;
 }
 
 interface PublicBundleMatrixRow {
@@ -379,12 +494,7 @@ interface PublicBundleMatrixRow {
 }
 
 function parseMatrixRows(contents: Buffer): Map<string, PublicBundleMatrixRow> {
-  let value: unknown;
-  try {
-    value = JSON.parse(contents.toString("utf8")) as unknown;
-  } catch (error) {
-    throw new Error("public benchmark bundle eval/matrix.json is not valid JSON", { cause: error });
-  }
+  const value = parseBundleJson(contents, "eval/matrix.json");
   if (!Array.isArray(value) || value.length === 0) {
     throw new Error("public benchmark bundle eval/matrix.json must be a non-empty array");
   }
@@ -442,13 +552,16 @@ function parseMatrixTargetFramework(row: Record<string, unknown>, targetId: stri
   return framework.data;
 }
 
-function parseSummaryRows(contents: Buffer): Set<string> {
-  let value: unknown;
-  try {
-    value = JSON.parse(contents.toString("utf8")) as unknown;
-  } catch (error) {
-    throw new Error("public benchmark bundle eval/summary.json is not valid JSON", { cause: error });
-  }
+interface PublicBundleSummaryRow {
+  row_id: string;
+  target_id: string;
+  variant_id: string;
+  trial_id: string;
+  finding_count: number;
+}
+
+function parseSummaryRows(contents: Buffer): Map<string, PublicBundleSummaryRow> {
+  const value = parseBundleJson(contents, "eval/summary.json");
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("public benchmark bundle eval/summary.json must be an object");
   }
@@ -456,15 +569,35 @@ function parseSummaryRows(contents: Buffer): Set<string> {
   if (!Array.isArray(rowsValue) || rowsValue.length === 0) {
     throw new Error("public benchmark bundle eval/summary.json rows must be a non-empty array");
   }
-  const rows = new Set<string>();
+  const rows = new Map<string, PublicBundleSummaryRow>();
   for (const [index, row] of rowsValue.entries()) {
     if (typeof row !== "object" || row === null || Array.isArray(row)) {
       throw new Error(`public benchmark bundle summary row ${index} must be an object`);
     }
-    const rowId = safeId.safeParse((row as Record<string, unknown>).row_id);
-    if (!rowId.success) throw new Error(`public benchmark bundle summary row ${index} has an invalid row ID`);
+    const input = row as Record<string, unknown>;
+    const rowId = safeId.safeParse(input.row_id);
+    const targetId = safeId.safeParse(input.target_id);
+    const variantId = safeId.safeParse(input.variant_id);
+    const trialId = safeId.safeParse(input.trial_id);
+    const findingCount = z.number().int().nonnegative().safeParse(input.finding_count);
+    if (
+      !rowId.success ||
+      !targetId.success ||
+      !variantId.success ||
+      !trialId.success ||
+      !findingCount.success ||
+      input.report_schema_valid !== true
+    ) {
+      throw new Error(`public benchmark bundle summary row ${index} has invalid score identity`);
+    }
     if (rows.has(rowId.data)) throw new Error(`public benchmark bundle summary repeats row ID ${rowId.data}`);
-    rows.add(rowId.data);
+    rows.set(rowId.data, {
+      row_id: rowId.data,
+      target_id: targetId.data,
+      variant_id: variantId.data,
+      trial_id: trialId.data,
+      finding_count: findingCount.data
+    });
   }
   return rows;
 }
@@ -494,7 +627,7 @@ function summarizePublicBenchmarkBundleFiles(
 function summarizePublicBenchmarkBundleContents(input: {
   matrixRows: Map<string, PublicBundleMatrixRow>;
   diagnostics: ReturnType<typeof parsePublicEvalDiagnostics>;
-  summaryRows: Set<string>;
+  summaryRows: Map<string, PublicBundleSummaryRow>;
   publicationBundlePath: string;
 }): PublicBenchmarkBundleMetadata {
   const diagnosticsByRow = new Map(input.diagnostics.rows.map((row) => [row.row_id, row]));
@@ -600,12 +733,7 @@ function parseBundleDiagnostics(contents: Buffer): ReturnType<typeof parsePublic
   if (contents.byteLength > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES) {
     throw new Error("public benchmark bundle diagnostics exceed the size limit");
   }
-  let value: unknown;
-  try {
-    value = JSON.parse(contents.toString("utf8")) as unknown;
-  } catch (error) {
-    throw new Error("public benchmark bundle diagnostics are not valid JSON", { cause: error });
-  }
+  const value = parseBundleJson(contents, `eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`);
   try {
     return parsePublicEvalDiagnostics(value);
   } catch (error) {
@@ -648,7 +776,10 @@ export function readPublicBenchmarkBundle(
     MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
     "public benchmark bundle exceeds the size limit"
   );
-  return parsePublicBenchmarkBundle(JSON.parse(contents.toString("utf8")) as unknown, forbiddenSecretValues);
+  return parsePublicBenchmarkBundle(
+    parseBundleJson(contents, "public benchmark bundle", MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES),
+    forbiddenSecretValues
+  );
 }
 
 export function extractPublicBenchmarkBundle(bundle: PublicBenchmarkBundle, outputDirectory: string): void {
@@ -857,7 +988,10 @@ function isAllowedBundlePath(value: string): boolean {
     "eval/review/new-findings.jsonl"
   ]);
   if (evalFiles.has(value)) return true;
-  return /^reports\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/(?:report\.md|report\.json|findings\.normalized\.json)$/u.test(
+  if (/^reports\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/(?:report\.md|report\.json)$/u.test(value)) {
+    return true;
+  }
+  return /^reports\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/artifacts\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/(?:THREAT_MODEL\.md|goal-plan\.json|threat-model\.json|vulnerability-db-manifest\.json)$/u.test(
     value
   );
 }
@@ -870,6 +1004,57 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function parseBundleJson(contents: Buffer, label: string, maxBytes = MAX_FILE_BYTES): unknown {
+  try {
+    return parseStrictJsonBytes(contents, { maxBytes, maxDepth: 128 });
+  } catch (error) {
+    throw new Error(`public benchmark bundle ${label} is not strict JSON`, { cause: error });
+  }
+}
+
+function parseStrictJsonLines(contents: Buffer, label: string): unknown[] {
+  const values: unknown[] = [];
+  let lineStart = 0;
+  for (let index = 0; index <= contents.byteLength; index += 1) {
+    if (index !== contents.byteLength && contents[index] !== 0x0a) continue;
+    let lineEnd = index;
+    if (lineEnd > lineStart && contents[lineEnd - 1] === 0x0d) lineEnd -= 1;
+    if (lineEnd === lineStart) {
+      if (index !== contents.byteLength) throw new Error(`public benchmark bundle ${label} contains a blank line`);
+    } else {
+      try {
+        values.push(
+          parseStrictJsonBytes(contents.subarray(lineStart, lineEnd), {
+            maxBytes: MAX_FILE_BYTES,
+            maxDepth: 128
+          })
+        );
+      } catch (error) {
+        throw new Error(`public benchmark bundle ${label} line ${values.length + 1} is not strict JSON`, {
+          cause: error
+        });
+      }
+    }
+    lineStart = index + 1;
+  }
+  if (values.length === 0) throw new Error(`public benchmark bundle ${label} must not be empty`);
+  return values;
+}
+
+function canonicalRepository(value: string): string {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === "https:" && parsed.hostname.toLowerCase() === "github.com") {
+      const pathname = parsed.pathname.replace(/\/+$/u, "").replace(/\.git$/u, "");
+      return `https://github.com${pathname}`;
+    }
+  } catch {
+    // The report schema deliberately allows the canonical `unavailable` value;
+    // the lineage comparison below will reject it for a publishable benchmark.
+  }
+  return value.replace(/\/+$/u, "");
 }
 
 function compareText(left: string, right: string): number {

@@ -48,5 +48,5 @@ reporting: # policy only — provider selection/credentials live in ultrafuzz.to
   experiment_prefix: bug-finding
   artifacts:
     mode: manifest-only # forced default when target.sensitivity == private; opt in to "upload"
-    include: ["report.md", "report.json", "findings.normalized.json"]
+    include: ["report.md", "report.json"]
     max_file_bytes: 5000000

@@ -57,14 +57,9 @@ Every non-production outcome also preserves the canonical finding v2 fields and
 adds required `triage_classification`, `recommended_next_action`, and
 `lifecycle`.
 
-Write the exact same normalized production issue array to
-`{{artifact_path}}/findings.normalized.json`. Use `[]` only when the bounded
-final review supports no production issue; this is a required smoke terminal
-artifact and must never contain synthetic findings.
-
 Write `{{artifact_path}}/report.md` beginning with `# Ultrafuzz report`. Include
 a concise run summary, an issue index, and for each production issue its
 severity reasoning, evidence/PoC, affected code, and strategy detections. Add a
 short non-production outcomes table when needed. State `No issues reported.`
-only when the evidence supports no production issue. Validate all three
+only when the evidence supports no production issue. Validate both
 required files against their output contracts, then stop.

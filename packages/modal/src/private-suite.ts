@@ -62,7 +62,7 @@ reporting:
   experiment_prefix: modal
   artifacts:
     mode: manifest-only
-    include: ["report.md", "report.json", "findings.normalized.json"]
+    include: ["report.md", "report.json"]
     max_file_bytes: 5000000
 `;
 }

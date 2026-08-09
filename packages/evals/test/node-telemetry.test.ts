@@ -43,11 +43,11 @@ describe("NodeTelemetryPump", () => {
         { event_id: "evt-1", event_type: "node-synced", timestamp: T0, node_id: "setup-1", status: "running" },
         {
           event_id: "evt-2",
-          event_type: "findings-normalized",
+          event_type: "findings-validated",
           timestamp: T1,
           node_id: "setup-1",
           status: "succeeded",
-          payload: { count: 3, path: "artifacts/setup-1/findings.normalized.json" }
+          payload: { count: 3, path: "artifacts/setup-1/deduped-findings.json" }
         },
         {
           event_id: "evt-3",

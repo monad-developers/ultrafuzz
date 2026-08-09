@@ -121,5 +121,3 @@ nodes:
         primary: true
       - path: report.json
         contract: ultrafuzz/report@2
-      - path: findings.normalized.json
-        contract: ultrafuzz/findings@2

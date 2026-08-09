@@ -28,7 +28,7 @@ import {
 } from "./utils.js";
 
 export const DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60;
-export const DEFAULT_ARTIFACT_INCLUDE = ["report.md", "report.json", "findings.normalized.json"];
+export const DEFAULT_ARTIFACT_INCLUDE = ["report.md", "report.json"];
 export const DEFAULT_ARTIFACT_MAX_FILE_BYTES = 5_000_000;
 
 const nonEmptyString = z.string().min(1);

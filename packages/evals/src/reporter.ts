@@ -68,7 +68,7 @@ export interface EvalNodeEventEnvelope {
 export interface EvalArtifactUpload {
   rowId: string;
   nodeId: string;
-  relativePath: string; // e.g. "report.md", "findings.normalized.json"
+  relativePath: string; // e.g. "report.md", "report.json"
   contentType: string;
   sizeBytes: number;
   sha256: string;

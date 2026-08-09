@@ -640,11 +640,7 @@ function completeHistoryBundle(
       graded_case_count: 1,
       publication_location: {
         bundle_path: "public-results.json",
-        report_paths: [
-          `reports/${row.id}/report.md`,
-          `reports/${row.id}/report.json`,
-          `reports/${row.id}/findings.normalized.json`
-        ]
+        report_paths: [`reports/${row.id}/report.md`, `reports/${row.id}/report.json`]
       }
     })),
     files: [
