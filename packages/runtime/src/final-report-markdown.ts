@@ -246,7 +246,6 @@ function reconcileIssuePresentation(report: JsonRecord): JsonRecord {
         id,
         title: `[${id}] - ${cleanIssueTitle(recordTitle(issue, "Untitled issue"))}`,
         severity,
-        severity_guess: severity,
         impact: impact.label,
         likelihood: likelihood.label,
         ...(impact.rationale === undefined ? {} : { impact_rationale: impact.rationale }),

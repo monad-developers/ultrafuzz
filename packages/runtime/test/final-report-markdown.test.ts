@@ -80,7 +80,7 @@ test("canonical final-report projection returns one canonical JSON and Markdown 
   assert.equal(issue.id, "L-01");
   assert.equal(issue.title, "[L-01] - State mismatch");
   assert.equal(issue.severity, "Low");
-  assert.equal(issue.severity_guess, "Low");
+  assert.equal(issue.severity_guess, "Medium", "the upstream preliminary estimate must remain unchanged");
   assert.equal((first.report.property_provenance as Array<Record<string, unknown>>)[0]?.finding_id, "L-01");
   assert.equal(
     (first.report.property_provenance as Array<Record<string, unknown>>)[0]?.source_finding_id,
