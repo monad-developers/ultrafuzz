@@ -16,6 +16,7 @@ import {
   validateArtifactContract,
   writeFileDurable
 } from "@ultrafuzz/artifacts";
+import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
@@ -53,6 +54,152 @@ function loadFinalReportProducerNormalizers(): {
     (value: unknown) => ({ value, changed: false }),
     validateArtifactContract
   ) as ReturnType<typeof loadFinalReportProducerNormalizers>;
+}
+
+function loadValidatedTaskArtifactWriter(
+  durableWriter: (filePath: string, contents: string | Uint8Array) => void = writeFileDurable
+): (
+  task: {
+    metadata: { artifacts: { dir: string } };
+    mirrorRoot: string;
+  },
+  output: { path: string; contract: string },
+  contents: string
+) => void {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const writerStart = source.indexOf("function writeValidatedTaskArtifactContents");
+  const writerEnd = source.indexOf("\n\nfunction isPlainRecord", writerStart);
+  assert.ok(writerStart >= 0 && writerEnd > writerStart, source);
+  const helper = ts.transpileModule(source.slice(writerStart, writerEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "path",
+    "realpathSync",
+    "existsSync",
+    "validateArtifactContract",
+    "isStrictlyInsideDirectory",
+    "resolveRegularArtifactFile",
+    "mirroredArtifactDir",
+    "writeFileDurable",
+    `${helper}; return writeValidatedTaskArtifactContents;`
+  )(
+    path,
+    fs.realpathSync,
+    fs.existsSync,
+    validateArtifactContract,
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    (root: string, candidate: string, message: string) => {
+      assertRegularFileInside(root, candidate, message);
+      const resolved = fs.realpathSync(candidate);
+      if (!resolved.startsWith(`${root}${path.sep}`) || !fs.statSync(resolved).isFile()) {
+        throw new Error(message);
+      }
+      return resolved;
+    },
+    (task: { mirrorRoot: string }) => task.mirrorRoot,
+    durableWriter
+  ) as ReturnType<typeof loadValidatedTaskArtifactWriter>;
+}
+
+function loadFinalReportArtifactMaterializer(
+  options: {
+    maximumJsonBytes?: number;
+    open?: (filePath: string, flags: number) => number;
+    fstat?: (descriptor: number) => { size: number; isFile: () => boolean };
+    read?: (descriptor: number) => Buffer;
+    close?: (descriptor: number) => void;
+  } = {}
+): (task: {
+  metadata: { node: { logicalNodeId: string }; artifacts: { dir: string } };
+  outputs: Array<{ path: string; contract: string }>;
+  mirrorRoot: string;
+}) => void {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const materializerStart = source.indexOf("function materializeMissingFinalReportArtifacts");
+  const helperEnd = source.indexOf("\n\nfunction normalizeLegacyFindingFields", materializerStart);
+  assert.ok(materializerStart >= 0 && helperEnd > materializerStart, source);
+  const helper = ts.transpileModule(source.slice(materializerStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "path",
+    "realpathSync",
+    "openSync",
+    "fstatSync",
+    "readFileSync",
+    "closeSync",
+    "fsConstants",
+    "existsSync",
+    "taskArtifactRoots",
+    "resolveRegularArtifactFile",
+    "MAX_FINAL_REPORT_JSON_BYTES",
+    "validateArtifactContract",
+    "projectCanonicalFinalReport",
+    "normalizeLegacyFindingRecord",
+    "isStrictlyInsideDirectory",
+    "mirroredArtifactDir",
+    "writeFileDurable",
+    `${helper}; return materializeMissingFinalReportArtifacts;`
+  )(
+    path,
+    fs.realpathSync,
+    options.open ?? ((filePath: string, flags: number) => fs.openSync(filePath, flags)),
+    options.fstat ?? ((descriptor: number) => fs.fstatSync(descriptor)),
+    options.read ?? ((descriptor: number) => fs.readFileSync(descriptor)),
+    options.close ?? ((descriptor: number) => fs.closeSync(descriptor)),
+    fs.constants,
+    fs.existsSync,
+    (task: { mirrorRoot: string }, canonicalRoot: string) => [canonicalRoot, task.mirrorRoot],
+    (root: string, candidate: string, message: string) => {
+      assertRegularFileInside(root, candidate, message);
+      const resolved = fs.realpathSync(candidate);
+      if (!resolved.startsWith(`${root}${path.sep}`) || !fs.statSync(resolved).isFile()) {
+        throw new Error(message);
+      }
+      return resolved;
+    },
+    options.maximumJsonBytes ?? 64 * 1024 * 1024,
+    validateArtifactContract,
+    projectCanonicalFinalReport,
+    (value: unknown) => ({ value, changed: false }),
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    (task: { mirrorRoot: string }) => task.mirrorRoot,
+    writeFileDurable
+  ) as ReturnType<typeof loadFinalReportArtifactMaterializer>;
+}
+
+function generatedFinalReportFixture(): Record<string, unknown> {
+  return {
+    schema_version: "1.0",
+    run_metadata: { run_id: "generated-final-report" },
+    issues: [
+      {
+        schema_version: "1.0",
+        id: "source-finding",
+        title: "Generated projection mismatch",
+        status: "confirmed",
+        severity: "Medium",
+        severity_guess: "Medium",
+        confidence: "high",
+        summary: "A bounded transition violates the expected relationship.",
+        description: "A caller can trigger the bounded state mismatch.",
+        impact: "Medium",
+        impact_rationale: "The affected state remains bounded.",
+        likelihood: "Low",
+        likelihood_rationale: "The transition requires uncommon preconditions.",
+        proof_of_concept: {
+          scenario: ["Prepare the bounded state.", "Execute the transition and observe the mismatch."]
+        },
+        strategy: "stateful-invariant",
+        strategy_provenance: {
+          detection_rates: [{ strategy: "stateful-invariant", detections: 1, configured_loops: 4 }]
+        }
+      }
+    ],
+    non_production_outcomes: [],
+    property_provenance: []
+  };
 }
 
 function loadRetryFailureAwareArgs(): (
@@ -1388,9 +1535,10 @@ test("generated Smithers final-report normalization emits canonical report and s
   const normalizedFindings = normalizeFindings(JSON.parse(normalizedReportBytes!).issues);
   assert.deepEqual(normalizedFindings, canonicalReport.issues);
   const normalizedSidecarBytes = `${JSON.stringify(normalizedFindings, null, 2)}\n`;
+  assert.equal(normalizedSidecarBytes, `${JSON.stringify(canonicalReport.issues, null, 2)}\n`);
   assert.equal(
     createHash("sha256").update(normalizedSidecarBytes).digest("hex"),
-    "e71234ffb758f6ff82ed0fa92b3232b5bfca6260754bf90b0175806525eadb6d"
+    "21413a3a47d1253ca7ef4f5af0950f7884d1ba5a8b3bd740d6e85f5a400e925c"
   );
   assert.equal(validateArtifactContract("ultrafuzz/report@1", normalizedReportBytes!, "report.json").ok, true);
   assert.equal(
@@ -1446,7 +1594,7 @@ test("durable dedupe recovery replaces a symlink without overwriting its target"
 test("generated Smithers agent fails closed instead of promoting dedupe findings into a final report", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const fallbackStart = source.indexOf("function materializeMissingFinalReportArtifacts");
-  const reportReaderStart = source.indexOf("function meaningfulFinalReport");
+  const reportReaderStart = source.indexOf("function validatedFinalReport");
 
   assert.ok(fallbackStart >= 0, source);
   assert.ok(reportReaderStart > fallbackStart, source);
@@ -1454,25 +1602,36 @@ test("generated Smithers agent fails closed instead of promoting dedupe findings
   const fallback = source.slice(fallbackStart, reportReaderStart);
   assert.match(fallback, /logicalNodeId !== "final-report"/u);
   assert.match(fallback, /candidate\.path === "report\.json" && candidate\.contract === "ultrafuzz\/report@1"/u);
+  assert.match(
+    fallback,
+    /candidate\.path === "report\.md" && candidate\.contract === "ultrafuzz\/nonempty-markdown@1"/u
+  );
   assert.match(fallback, /candidate\.path === "findings\.normalized\.json"/u);
   assert.match(fallback, /if \(report === undefined\) \{[\s\S]*?return;\s*\}/u);
-  assert.match(fallback, /writeValidatedTaskArtifact\(task, reportOutput, report\)/u);
-  assert.match(fallback, /let findings = normalizedFindingArray\(report\.issues\)/u);
-  assert.doesNotMatch(fallback, /dedupe-findings|retainedDedupeFindings|recoveredReport|artifact_recovery/u);
+  assert.match(fallback, /const projection = projectCanonicalFinalReport\(report\)/u);
+  assert.match(fallback, /writeValidatedTaskArtifact\(task, reportOutput, projection\.report\)/u);
+  assert.match(fallback, /const findings = normalizedFindingArray\(projection\.report\.issues\)/u);
+  assert.match(fallback, /writeValidatedTaskArtifactContents\(task, markdownOutput, projection\.markdown\)/u);
+  assert.doesNotMatch(
+    fallback,
+    /dedupe-findings|retainedDedupeFindings|normalizedFindingsArtifact|recoveredReport|artifact_recovery/u
+  );
   assert.doesNotMatch(source, /function normalizedFallbackReportIssue|issue\.impact =|issue\.likelihood =/u);
 });
 
-test("generated Smithers agent leaves final-report Markdown to the final-review worker", () => {
+test("generated Smithers agent projects final-report Markdown only from validated final-review JSON", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const markdownStart = source.indexOf("function materializeMissingMarkdownArtifacts");
   const summaryStart = source.indexOf("function agentResultSummary");
   const finalReportStart = source.indexOf("function materializeMissingFinalReportArtifacts");
-  const reportReaderStart = source.indexOf("function meaningfulFinalReport");
+  const reportReaderStart = source.indexOf("function validatedFinalReport");
+  const reportReaderEnd = source.indexOf("\n\nfunction normalizedFindingArray", reportReaderStart);
 
   assert.ok(markdownStart >= 0, source);
   assert.ok(summaryStart > markdownStart, source);
   assert.ok(finalReportStart > summaryStart, source);
   assert.ok(reportReaderStart > finalReportStart, source);
+  assert.ok(reportReaderEnd > reportReaderStart, source);
 
   const markdownFallback = source.slice(markdownStart, summaryStart);
   assert.match(
@@ -1482,8 +1641,413 @@ test("generated Smithers agent leaves final-report Markdown to the final-review 
   assert.match(markdownFallback, /continue;/u);
 
   const finalReportFallback = source.slice(finalReportStart, reportReaderStart);
-  assert.doesNotMatch(finalReportFallback, /report\.md|markdown|writeValidatedTextArtifact/u);
-  assert.doesNotMatch(source, /function writeRecoveredReportMarkdown|function writeValidatedTextArtifact/u);
+  assert.match(finalReportFallback, /projectCanonicalFinalReport\(report\)/u);
+  assert.match(finalReportFallback, /projection\.report/u);
+  assert.match(finalReportFallback, /projection\.markdown/u);
+  assert.doesNotMatch(finalReportFallback, /agentResultSummary|dedupe-findings|retainedDedupeFindings/u);
+  const reportReader = source.slice(reportReaderStart, reportReaderEnd);
+  assert.match(reportReader, /openSync\(reportPath, fsConstants\.O_RDONLY \| fsConstants\.O_NOFOLLOW\)/u);
+  assert.match(reportReader, /const reportStat = fstatSync\(descriptor\)/u);
+  assert.match(reportReader, /!reportStat\.isFile\(\) \|\| reportStat\.size > MAX_FINAL_REPORT_JSON_BYTES/u);
+  assert.match(reportReader, /const contents = readFileSync\(descriptor\)/u);
+  assert.match(reportReader, /contents\.byteLength > MAX_FINAL_REPORT_JSON_BYTES/u);
+  assert.match(reportReader, /finally \{\s*closeSync\(descriptor\)/u);
+  assert.doesNotMatch(reportReader, /readFileSync\(reportPath/u);
+});
+
+test("generated Smithers rejects canonical-empty final review before touching existing report artifacts", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const materializerStart = source.indexOf("function materializeMissingFinalReportArtifacts");
+  const readerStart = source.indexOf("function validatedFinalReport");
+  const readerEnd = source.indexOf("\n\nfunction normalizedFindingArray", readerStart);
+  assert.ok(materializerStart >= 0 && readerStart > materializerStart && readerEnd > readerStart, source);
+  const materializer = source.slice(materializerStart, readerStart);
+  const reader = source.slice(readerStart, readerEnd);
+  assert.doesNotMatch(reader, /isCanonicalEmptyReport/u);
+  assert.ok(
+    materializer.indexOf("projectCanonicalFinalReport(report)") <
+      materializer.indexOf("writeValidatedTaskArtifact(task, reportOutput"),
+    materializer
+  );
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-empty-final-report-"));
+  const markdownPath = path.join(root, "report.md");
+  const findingsPath = path.join(root, "findings.normalized.json");
+  fs.writeFileSync(markdownPath, "# Existing model report\n");
+  fs.writeFileSync(findingsPath, "[]\n");
+  try {
+    assert.throws(
+      () =>
+        projectCanonicalFinalReport({
+          schema_version: "1.0",
+          run_metadata: {},
+          issues: [],
+          non_production_outcomes: []
+        }),
+      /canonical empty final report/u
+    );
+    assert.equal(fs.readFileSync(markdownPath, "utf8"), "# Existing model report\n");
+    assert.equal(fs.readFileSync(findingsPath, "utf8"), "[]\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers derives an exact empty sidecar from a meaningful zero-issue projection", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const materializerStart = source.indexOf("function materializeMissingFinalReportArtifacts");
+  const readerStart = source.indexOf("function validatedFinalReport");
+  const materializer = source.slice(materializerStart, readerStart);
+  assert.match(materializer, /normalizedFindingArray\(projection\.report\.issues\)/u);
+  assert.doesNotMatch(materializer, /normalizedFindingsArtifact|findings\.length/u);
+
+  const { normalizeFindings } = loadFinalReportProducerNormalizers();
+  const projection = projectCanonicalFinalReport({
+    schema_version: "1.0",
+    run_metadata: { run_id: "zero-issue-sidecar" },
+    issues: [],
+    non_production_outcomes: [],
+    property_provenance: []
+  });
+  assert.deepEqual(normalizeFindings(projection.report.issues), []);
+  assert.equal(`${JSON.stringify(normalizeFindings(projection.report.issues), null, 2)}\n`, "[]\n");
+});
+
+test("generated Smithers materializes one canonical JSON, Markdown, and findings projection", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-materializer-"));
+  const canonicalRoot = path.join(root, "canonical");
+  const mirrorRoot = path.join(root, "mirror");
+  fs.mkdirSync(canonicalRoot, { recursive: true });
+  fs.mkdirSync(mirrorRoot, { recursive: true });
+  const report = generatedFinalReportFixture();
+  fs.writeFileSync(path.join(canonicalRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
+  fs.writeFileSync(
+    path.join(canonicalRoot, "findings.normalized.json"),
+    `${JSON.stringify([{ id: "stale-independent-sidecar" }], null, 2)}\n`
+  );
+  const materialize = loadFinalReportArtifactMaterializer();
+  const task = {
+    metadata: { node: { logicalNodeId: "final-report" }, artifacts: { dir: canonicalRoot } },
+    outputs: [
+      { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" },
+      { path: "report.json", contract: "ultrafuzz/report@1" },
+      { path: "findings.normalized.json", contract: "ultrafuzz/findings@1" }
+    ],
+    mirrorRoot
+  };
+
+  try {
+    materialize(task);
+    const projection = projectCanonicalFinalReport(report);
+    assert.equal(
+      fs.readFileSync(path.join(canonicalRoot, "report.json"), "utf8"),
+      `${JSON.stringify(projection.report, null, 2)}\n`
+    );
+    assert.equal(fs.readFileSync(path.join(canonicalRoot, "report.md"), "utf8"), projection.markdown);
+    assert.equal(
+      fs.readFileSync(path.join(canonicalRoot, "findings.normalized.json"), "utf8"),
+      `${JSON.stringify(projection.report.issues, null, 2)}\n`
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers reads final-report JSON through a bounded no-follow descriptor", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-bounded-read-"));
+  const canonicalRoot = path.join(root, "canonical");
+  const mirrorRoot = path.join(root, "mirror");
+  fs.mkdirSync(canonicalRoot, { recursive: true });
+  fs.mkdirSync(mirrorRoot, { recursive: true });
+  const reportPath = path.join(canonicalRoot, "report.json");
+  const reportBytes = `${JSON.stringify(generatedFinalReportFixture(), null, 2)}\n`;
+  fs.writeFileSync(reportPath, reportBytes);
+
+  let openedDescriptor: number | undefined;
+  let readDescriptor: number | undefined;
+  let closedDescriptor: number | undefined;
+  const materialize = loadFinalReportArtifactMaterializer({
+    maximumJsonBytes: 32,
+    open: (filePath, flags) => {
+      assert.equal(filePath, reportPath);
+      assert.notEqual(flags & fs.constants.O_NOFOLLOW, 0);
+      openedDescriptor = fs.openSync(filePath, flags);
+      return openedDescriptor;
+    },
+    fstat: (descriptor) => {
+      assert.equal(descriptor, openedDescriptor);
+      assert.equal(fs.fstatSync(descriptor).isFile(), true);
+      // Simulate a file that passed the pre-read bound and then grew. The
+      // byteLength check on the descriptor read must still reject it.
+      return { size: 1, isFile: () => true };
+    },
+    read: (descriptor) => {
+      readDescriptor = descriptor;
+      return fs.readFileSync(descriptor);
+    },
+    close: (descriptor) => {
+      closedDescriptor = descriptor;
+      fs.closeSync(descriptor);
+    }
+  });
+  const task = {
+    metadata: { node: { logicalNodeId: "final-report" }, artifacts: { dir: canonicalRoot } },
+    outputs: [
+      { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" },
+      { path: "report.json", contract: "ultrafuzz/report@1" },
+      { path: "findings.normalized.json", contract: "ultrafuzz/findings@1" }
+    ],
+    mirrorRoot
+  };
+
+  try {
+    materialize(task);
+    assert.equal(readDescriptor, openedDescriptor);
+    assert.equal(closedDescriptor, openedDescriptor);
+    assert.equal(fs.existsSync(path.join(canonicalRoot, "report.md")), false);
+    assert.equal(fs.readFileSync(reportPath, "utf8"), reportBytes);
+  } finally {
+    if (openedDescriptor !== undefined && closedDescriptor !== openedDescriptor) {
+      fs.closeSync(openedDescriptor);
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers final-report materializer fails closed without renderable final-review JSON", async (t) => {
+  const materialize = loadFinalReportArtifactMaterializer();
+  const runCase = (
+    reportContents: string | undefined,
+    options: { existingMarkdown?: string; existingFindings?: string } = {}
+  ): {
+    root: string;
+    canonicalRoot: string;
+    task: {
+      metadata: { node: { logicalNodeId: string }; artifacts: { dir: string } };
+      outputs: Array<{ path: string; contract: string }>;
+      mirrorRoot: string;
+    };
+  } => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-fail-closed-"));
+    const canonicalRoot = path.join(root, "canonical");
+    const mirrorRoot = path.join(root, "mirror");
+    fs.mkdirSync(canonicalRoot, { recursive: true });
+    fs.mkdirSync(mirrorRoot, { recursive: true });
+    if (reportContents !== undefined) fs.writeFileSync(path.join(canonicalRoot, "report.json"), reportContents);
+    if (options.existingMarkdown !== undefined) {
+      fs.writeFileSync(path.join(canonicalRoot, "report.md"), options.existingMarkdown);
+    }
+    if (options.existingFindings !== undefined) {
+      fs.writeFileSync(path.join(canonicalRoot, "findings.normalized.json"), options.existingFindings);
+    }
+    return {
+      root,
+      canonicalRoot,
+      task: {
+        metadata: { node: { logicalNodeId: "final-report" }, artifacts: { dir: canonicalRoot } },
+        outputs: [
+          { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" },
+          { path: "report.json", contract: "ultrafuzz/report@1" },
+          { path: "findings.normalized.json", contract: "ultrafuzz/findings@1" }
+        ],
+        mirrorRoot
+      }
+    };
+  };
+
+  await t.test("missing and malformed JSON do not recover Markdown", () => {
+    for (const contents of [undefined, "{ malformed\n"]) {
+      const fixture = runCase(contents);
+      try {
+        materialize(fixture.task);
+        assert.equal(fs.existsSync(path.join(fixture.canonicalRoot, "report.md")), false);
+      } finally {
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  await t.test("canonical-empty JSON fails even when all other outputs already validate", () => {
+    const empty = `${JSON.stringify(
+      { schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] },
+      null,
+      2
+    )}\n`;
+    const fixture = runCase(empty, { existingMarkdown: "# Existing final report\n", existingFindings: "[]\n" });
+    try {
+      assert.throws(() => materialize(fixture.task), /canonical empty final report/u);
+      assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "report.md"), "utf8"), "# Existing final report\n");
+      assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "findings.normalized.json"), "utf8"), "[]\n");
+    } finally {
+      fs.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("schema-valid but unrenderable JSON does not recover Markdown", () => {
+    const report = generatedFinalReportFixture();
+    const issue = (report.issues as Array<Record<string, unknown>>)[0]!;
+    issue.strategy_provenance = { detection_rates: [{ strategy: "stateful-invariant" }] };
+    const fixture = runCase(`${JSON.stringify(report, null, 2)}\n`);
+    try {
+      assert.throws(() => materialize(fixture.task), /not renderable/u);
+      assert.equal(fs.existsSync(path.join(fixture.canonicalRoot, "report.md")), false);
+    } finally {
+      fs.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("meaningful zero-issue JSON replaces a stale nonempty sidecar with exact empty bytes", () => {
+    const report = {
+      schema_version: "1.0",
+      run_metadata: { run_id: "meaningful-zero" },
+      issues: [],
+      non_production_outcomes: [],
+      property_provenance: []
+    };
+    const fixture = runCase(`${JSON.stringify(report, null, 2)}\n`, {
+      existingFindings: `${JSON.stringify([{ id: "stale" }], null, 2)}\n`
+    });
+    try {
+      materialize(fixture.task);
+      assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "findings.normalized.json"), "utf8"), "[]\n");
+      assert.equal(
+        fs.readFileSync(path.join(fixture.canonicalRoot, "report.md"), "utf8"),
+        projectCanonicalFinalReport(report).markdown
+      );
+    } finally {
+      fs.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("generated Smithers final-report writes preserve strict canonical and mirror path handling", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const writerStart = source.indexOf("function writeValidatedTaskArtifactContents");
+  const writerEnd = source.indexOf("\n\nfunction isPlainRecord", writerStart);
+  assert.ok(writerStart >= 0, source);
+  assert.ok(writerEnd > writerStart, source);
+
+  const writer = source.slice(writerStart, writerEnd);
+  assert.match(writer, /validateArtifactContract\(output\.contract, contents, output\.path\)/u);
+  assert.match(writer, /isStrictlyInsideDirectory\(canonicalRoot, canonicalPath\)/u);
+  assert.match(writer, /resolveRegularArtifactFile\([\s\S]*canonicalRoot,[\s\S]*canonicalPath/u);
+  assert.match(writer, /if \(!existsSync\(canonicalPath\)\)/u);
+  assert.match(writer, /isStrictlyInsideDirectory\(mirrorRoot, mirrorPath\)/u);
+  assert.match(writer, /resolveRegularArtifactFile\([\s\S]*mirrorRoot,[\s\S]*mirrorPath/u);
+  assert.match(writer, /writeFileDurable\(existingCanonical, contents\)/u);
+  assert.match(writer, /writeFileDurable\(canonicalPath, contents\)/u);
+  assert.match(writer, /writeFileDurable\(mirrorPath, contents\)/u);
+  assert.doesNotMatch(writer, /writeFileSync/u);
+});
+
+test("generated Smithers recovered-artifact writer handles regular and unsafe paths without target writes", async (t) => {
+  const output = { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" };
+  const contents = "# Canonical final report\n";
+  const fixture = (): {
+    root: string;
+    canonicalRoot: string;
+    mirrorRoot: string;
+    task: { metadata: { artifacts: { dir: string } }; mirrorRoot: string };
+  } => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-writer-"));
+    const canonicalRoot = path.join(root, "canonical");
+    const mirrorRoot = path.join(root, "mirror");
+    fs.mkdirSync(canonicalRoot, { recursive: true });
+    fs.mkdirSync(mirrorRoot, { recursive: true });
+    return { root, canonicalRoot, mirrorRoot, task: { metadata: { artifacts: { dir: canonicalRoot } }, mirrorRoot } };
+  };
+
+  await t.test("invalid regular output is replaced durably", () => {
+    const value = fixture();
+    try {
+      fs.writeFileSync(path.join(value.canonicalRoot, "report.md"), "");
+      loadValidatedTaskArtifactWriter()(value.task, output, contents);
+      assert.equal(fs.readFileSync(path.join(value.canonicalRoot, "report.md"), "utf8"), contents);
+      assert.equal(fs.existsSync(path.join(value.mirrorRoot, "report.md")), false);
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("canonical symlink is untouched and projection is written to the exact mirror", () => {
+    const value = fixture();
+    const target = path.join(value.root, "symlink-target.md");
+    try {
+      fs.writeFileSync(target, "target remains unchanged\n");
+      fs.symlinkSync(target, path.join(value.canonicalRoot, "report.md"));
+      loadValidatedTaskArtifactWriter()(value.task, output, contents);
+      assert.equal(fs.lstatSync(path.join(value.canonicalRoot, "report.md")).isSymbolicLink(), true);
+      assert.equal(fs.readFileSync(target, "utf8"), "target remains unchanged\n");
+      assert.equal(fs.readFileSync(path.join(value.mirrorRoot, "report.md"), "utf8"), contents);
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("canonical hard link is atomically replaced without modifying its peer", () => {
+    const value = fixture();
+    const target = path.join(value.root, "hardlink-peer.md");
+    const canonical = path.join(value.canonicalRoot, "report.md");
+    try {
+      fs.writeFileSync(target, "peer remains unchanged\n");
+      fs.linkSync(target, canonical);
+      const originalPeerIdentity = fs.statSync(target).ino;
+      assert.equal(fs.statSync(canonical).ino, originalPeerIdentity);
+      loadValidatedTaskArtifactWriter()(value.task, output, contents);
+      assert.equal(fs.readFileSync(target, "utf8"), "peer remains unchanged\n");
+      assert.equal(fs.readFileSync(canonical, "utf8"), contents);
+      assert.notEqual(fs.statSync(canonical).ino, originalPeerIdentity);
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("canonical directory is untouched and projection is written to the exact mirror", () => {
+    const value = fixture();
+    try {
+      fs.mkdirSync(path.join(value.canonicalRoot, "report.md"));
+      loadValidatedTaskArtifactWriter()(value.task, output, contents);
+      assert.equal(fs.statSync(path.join(value.canonicalRoot, "report.md")).isDirectory(), true);
+      assert.equal(fs.readFileSync(path.join(value.mirrorRoot, "report.md"), "utf8"), contents);
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("unsafe canonical and mirror paths fail without modifying either target", () => {
+    const value = fixture();
+    const canonicalTarget = path.join(value.root, "canonical-target.md");
+    const mirrorTarget = path.join(value.root, "mirror-target.md");
+    try {
+      fs.writeFileSync(canonicalTarget, "canonical target\n");
+      fs.writeFileSync(mirrorTarget, "mirror target\n");
+      fs.symlinkSync(canonicalTarget, path.join(value.canonicalRoot, "report.md"));
+      fs.symlinkSync(mirrorTarget, path.join(value.mirrorRoot, "report.md"));
+      assert.throws(
+        () => loadValidatedTaskArtifactWriter()(value.task, output, contents),
+        /output is not a regular file report\.md/u
+      );
+      assert.equal(fs.readFileSync(canonicalTarget, "utf8"), "canonical target\n");
+      assert.equal(fs.readFileSync(mirrorTarget, "utf8"), "mirror target\n");
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("durable canonical write failures propagate instead of falling through to stale canonical bytes", () => {
+    const value = fixture();
+    try {
+      fs.writeFileSync(path.join(value.canonicalRoot, "report.md"), "# Stale model report\n");
+      const writer = loadValidatedTaskArtifactWriter(() => {
+        throw new Error("injected durable write failure");
+      });
+      assert.throws(() => writer(value.task, output, contents), /injected durable write failure/u);
+      assert.equal(fs.readFileSync(path.join(value.canonicalRoot, "report.md"), "utf8"), "# Stale model report\n");
+      assert.equal(fs.existsSync(path.join(value.mirrorRoot, "report.md")), false);
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
+  });
 });
 
 test("generated Smithers agent normalizes legacy generated-test string lists", () => {
