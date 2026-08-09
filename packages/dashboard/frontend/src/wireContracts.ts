@@ -1,5 +1,15 @@
+import { parseStrictJson, parseStrictJsonBytes, StrictJsonError } from "@ultrafuzz/artifacts/strict-json";
+
 export const DASHBOARD_HTTP_SCHEMA_VERSION = "ultrafuzz.dashboard.http.v1" as const;
 export const DASHBOARD_SSE_SCHEMA_VERSION = "ultrafuzz.dashboard.sse.v1" as const;
+export const DASHBOARD_FRONTEND_JSON_MAX_BYTES = 16 * 1024 * 1024;
+
+const DASHBOARD_FRONTEND_JSON_LIMITS = Object.freeze({
+  maxBytes: DASHBOARD_FRONTEND_JSON_MAX_BYTES,
+  maxDepth: 128,
+  maxItems: 250_000,
+  maxProperties: 250_000
+});
 
 export type DashboardRequestType = "config-save" | "topology-save" | "prompt-save" | "prompt-create";
 export type DashboardCommandName =
@@ -76,16 +86,26 @@ export function dashboardCommandRequest(
 export function parseDashboardHttpDocument<T>(value: unknown, documentType: DashboardHttpDocumentType): T {
   const document = requireRecord(value, `dashboard ${documentType} document`);
   if (document.schema_version !== DASHBOARD_HTTP_SCHEMA_VERSION) {
-    throw new Error(`unsupported dashboard HTTP schema version: ${String(document.schema_version)}`);
+    throw new Error("dashboard HTTP document has an unsupported schema version");
   }
   if (document.document_type !== documentType) {
-    throw new Error(`unexpected dashboard document type: ${String(document.document_type)}`);
+    throw new Error("dashboard HTTP document has an unexpected document type");
   }
   return document as T;
 }
 
+export async function parseDashboardHttpResponse<T>(
+  response: Response,
+  documentType: DashboardHttpDocumentType
+): Promise<T> {
+  const label = `dashboard ${documentType} HTTP response`;
+  const bytes = await readBoundedResponseBytes(response, label);
+  const value = parseDashboardJsonBytes(bytes, label);
+  return parseDashboardHttpDocument<T>(value, documentType);
+}
+
 export function dashboardSseEvents(serialized: string): Record<string, unknown> {
-  const value: unknown = JSON.parse(serialized);
+  const value = parseDashboardJsonText(serialized, "dashboard SSE events envelope");
   const envelope = requireRecord(value, "dashboard SSE events envelope");
   assertSseIdentity(envelope, "ultrafuzz-event");
   const payload = requireRecord(envelope.payload, "dashboard SSE events payload");
@@ -101,7 +121,7 @@ export function dashboardSseEvents(serialized: string): Record<string, unknown> 
 }
 
 export function dashboardSseErrorMessage(serialized: string): string {
-  const value: unknown = JSON.parse(serialized);
+  const value = parseDashboardJsonText(serialized, "dashboard SSE error envelope");
   const envelope = requireRecord(value, "dashboard SSE error envelope");
   assertSseIdentity(envelope, "ultrafuzz-error");
   const payload = requireRecord(envelope.payload, "dashboard SSE error payload");
@@ -110,7 +130,7 @@ export function dashboardSseErrorMessage(serialized: string): string {
 }
 
 export function dashboardSseCommandJobs(serialized: string): DashboardCommandJob[] {
-  const value: unknown = JSON.parse(serialized);
+  const value = parseDashboardJsonText(serialized, "dashboard SSE command envelope");
   const envelope = requireRecord(value, "dashboard SSE command envelope");
   assertSseIdentity(envelope, "ultrafuzz-command-jobs");
   const payload = requireRecord(envelope.payload, "dashboard SSE command payload");
@@ -182,10 +202,10 @@ function parseCommandJob(value: unknown, index: number): DashboardCommandJob {
 function assertSseIdentity(envelope: Record<string, unknown>, eventType: string): void {
   assertOnlyKeys(envelope, ["schema_version", "event_type", "sequence", "generated_at", "payload"]);
   if (envelope.schema_version !== DASHBOARD_SSE_SCHEMA_VERSION) {
-    throw new Error(`unsupported dashboard SSE schema version: ${String(envelope.schema_version)}`);
+    throw new Error("dashboard SSE envelope has an unsupported schema version");
   }
   if (envelope.event_type !== eventType) {
-    throw new Error(`unexpected dashboard SSE event type: ${String(envelope.event_type)}`);
+    throw new Error("dashboard SSE envelope has an unexpected event type");
   }
   if (!Number.isSafeInteger(envelope.sequence) || Number(envelope.sequence) < 0) {
     throw new Error("dashboard SSE sequence must be a nonnegative safe integer");
@@ -218,8 +238,75 @@ function parseCommandName(value: unknown, index: number): DashboardCommandName {
 
 function assertOnlyKeys(record: Record<string, unknown>, allowed: readonly string[]): void {
   const allowedKeys = new Set(allowed);
-  const unknown = Object.keys(record).filter((key) => !allowedKeys.has(key));
-  if (unknown.length > 0) throw new Error(`dashboard document has unknown fields: ${unknown.join(", ")}`);
+  const unknownCount = Object.keys(record).filter((key) => !allowedKeys.has(key)).length;
+  if (unknownCount > 0) throw new Error(`dashboard document has ${unknownCount} unknown field(s)`);
+}
+
+async function readBoundedResponseBytes(response: Response, label: string): Promise<Uint8Array> {
+  if (response.body === null) return new Uint8Array();
+  const reader = response.body.getReader();
+  let bytes = new Uint8Array();
+  let totalBytes = 0;
+  try {
+    for (;;) {
+      let next: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        next = await reader.read();
+      } catch {
+        throw new Error(`${label} could not be read`);
+      }
+      if (next.done) break;
+      const requiredBytes = totalBytes + next.value.byteLength;
+      if (requiredBytes > DASHBOARD_FRONTEND_JSON_MAX_BYTES) {
+        try {
+          await reader.cancel();
+        } catch {
+          // The size violation remains authoritative even when transport cancellation fails.
+        }
+        throw invalidStrictJson(label, "limit");
+      }
+      if (requiredBytes > bytes.byteLength) {
+        const capacity = Math.min(
+          DASHBOARD_FRONTEND_JSON_MAX_BYTES,
+          Math.max(requiredBytes, Math.max(64 * 1024, bytes.byteLength * 2))
+        );
+        const grown = new Uint8Array(capacity);
+        grown.set(bytes);
+        bytes = grown;
+      }
+      bytes.set(next.value, totalBytes);
+      totalBytes = requiredBytes;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return bytes.subarray(0, totalBytes);
+}
+
+function parseDashboardJsonBytes(bytes: Uint8Array, label: string): unknown {
+  try {
+    return parseStrictJsonBytes(bytes, DASHBOARD_FRONTEND_JSON_LIMITS);
+  } catch (error) {
+    throw strictJsonFailure(label, error);
+  }
+}
+
+function parseDashboardJsonText(serialized: string, label: string): unknown {
+  try {
+    return parseStrictJson(serialized, DASHBOARD_FRONTEND_JSON_LIMITS);
+  } catch (error) {
+    throw strictJsonFailure(label, error);
+  }
+}
+
+function strictJsonFailure(label: string, error: unknown): Error {
+  return error instanceof StrictJsonError
+    ? invalidStrictJson(label, error.kind)
+    : new Error(`${label} strict JSON parsing failed`);
+}
+
+function invalidStrictJson(label: string, kind: StrictJsonError["kind"]): Error {
+  return new Error(`${label} is invalid strict JSON (${kind})`);
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {

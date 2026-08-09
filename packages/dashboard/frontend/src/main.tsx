@@ -84,7 +84,7 @@ import {
   dashboardSseEvents,
   dashboardSseCommandJobs,
   dashboardSseErrorMessage,
-  parseDashboardHttpDocument
+  parseDashboardHttpResponse
 } from "./wireContracts";
 import type { DashboardCommandJob, DashboardCommandName, DashboardHttpDocumentType } from "./wireContracts";
 
@@ -767,7 +767,7 @@ function App() {
       if (!response.ok) {
         throw new Error(await response.text());
       }
-      const saved = parseDashboardHttpDocument<SaveTopologyResponse>(await response.json(), "topology-save");
+      const saved = await parseDashboardHttpResponse<SaveTopologyResponse>(response, "topology-save");
       setMessage(`Saved ${saved.path}: ${saved.validation.message}`);
       await loadTopology();
       return await loadFlow();
@@ -1163,7 +1163,7 @@ function App() {
         if (!response.ok) {
           throw new Error(await response.text());
         }
-        const saved = parseDashboardHttpDocument<SaveConfigResponse>(await response.json(), "config-save");
+        const saved = await parseDashboardHttpResponse<SaveConfigResponse>(response, "config-save");
         setMessage(`Saved ${saved.path}: ${saved.validation.message}`);
         const refreshed = await getJson<ConfigDetail>("/api/config", "config-detail");
         setConfig(refreshed);
@@ -1451,7 +1451,7 @@ function App() {
         if (!response.ok) {
           throw new Error(await response.text());
         }
-        const saved = parseDashboardHttpDocument<SavePromptResponse>(await response.json(), "prompt-save");
+        const saved = await parseDashboardHttpResponse<SavePromptResponse>(response, "prompt-save");
         await loadTopology();
         await loadFlow();
         if (saved.nodeId) {
@@ -2962,7 +2962,7 @@ async function getJson<T>(url: string, documentType: DashboardHttpDocumentType):
   if (!response.ok) {
     throw new Error(await response.text());
   }
-  return parseDashboardHttpDocument<T>(await response.json(), documentType);
+  return parseDashboardHttpResponse<T>(response, documentType);
 }
 
 async function postCommandJson<T>(
@@ -2982,7 +2982,7 @@ async function postCommandJson<T>(
   if (!response.ok) {
     throw new Error(await response.text());
   }
-  return parseDashboardHttpDocument<T>(await response.json(), "command-job");
+  return parseDashboardHttpResponse<T>(response, "command-job");
 }
 
 function promptEndpointForNode(node: DashboardFlowNode): string | null {

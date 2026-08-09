@@ -26,6 +26,10 @@ test("strict JSON parsing rejects duplicate object keys", () => {
     (error: unknown) => error instanceof StrictJsonError && error.kind === "duplicate-key" && error.pointer === "/safe"
   );
   assert.deepEqual(parseStrictJson('{"safe":[true,null,2]}'), { safe: [true, null, 2] });
+  assert.equal(parseStrictJson('"é"', { maxBytes: 4 }), "é");
+  assert.throws(() => parseStrictJson('"é"', { maxBytes: 3 }), /byte limit/u);
+  assert.equal(parseStrictJson('"😀"', { maxBytes: 6 }), "😀");
+  assert.throws(() => parseStrictJson('"😀"', { maxBytes: 5 }), /byte limit/u);
   assert.throws(() => parseStrictJsonBytes(Buffer.from([0xef, 0xbb, 0xbf, 0x7b, 0x7d])), /byte-order mark/u);
   assert.throws(() => parseStrictJsonBytes(Buffer.from([0x7b, 0xff, 0x7d])), /valid UTF-8/u);
 });

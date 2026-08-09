@@ -1,5 +1,3 @@
-import { TextDecoder } from "node:util";
-
 export interface StrictJsonLimits {
   maxBytes: number;
   maxDepth: number;
@@ -49,10 +47,34 @@ export function parseStrictJsonBytes(bytes: Uint8Array, limits: Partial<StrictJs
 
 export function parseStrictJson(text: string, limits: Partial<StrictJsonLimits> = {}): unknown {
   const resolved = { ...DEFAULT_STRICT_JSON_LIMITS, ...limits };
-  if (Buffer.byteLength(text, "utf8") > resolved.maxBytes) {
+  if (utf8ByteLengthExceeds(text, resolved.maxBytes)) {
     throw new StrictJsonError("limit", `JSON exceeds the ${resolved.maxBytes}-byte limit`);
   }
   return new Parser(text, resolved).parse();
+}
+
+function utf8ByteLengthExceeds(text: string, maximum: number): boolean {
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const codeUnit = text.charCodeAt(index);
+    if (codeUnit <= 0x7f) {
+      bytes += 1;
+    } else if (codeUnit <= 0x7ff) {
+      bytes += 2;
+    } else if (codeUnit >= 0xd800 && codeUnit <= 0xdbff && index + 1 < text.length) {
+      const next = text.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+    if (bytes > maximum) return true;
+  }
+  return false;
 }
 
 class Parser {

@@ -10,6 +10,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./strict-json": {
+      "types": "./dist/strict-json.d.ts",
+      "import": "./dist/strict-json.js",
+      "default": "./dist/strict-json.js"
     }
   },
   "files": [

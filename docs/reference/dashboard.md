@@ -34,6 +34,15 @@ editable graph changes must write back to the logical topology file.
 Editors for config, topology, prompts, and reference state must apply the same
 validation as the CLI. Invalid changes must be rejected without partial writes.
 
+Successful dashboard HTTP JSON and server-sent event data use the registered,
+current-only dashboard contracts. The browser reads HTTP bodies as bounded
+bytes, rejects invalid UTF-8, duplicate object keys, malformed or oversized
+JSON, and only then checks the expected document identity. SSE data follows the
+same bounded duplicate-key-safe parsing path after the browser decodes the
+event stream. The frontend does not convert historical versions or use
+last-key-wins `JSON.parse` behavior. Non-success HTTP bodies remain
+operator-facing text errors rather than JSON documents.
+
 ## Command Jobs
 
 Dashboard command jobs must map only to supported product operations:
