@@ -42,10 +42,10 @@ describe("Modal benchmark launch guardrails", () => {
     );
   });
 
-  it("rejects local-only and dry-run smoke manifests before dispatch", () => {
+  it("rejects non-canonical execution fields in smoke manifests before dispatch", () => {
     const cases: Array<[RegExp, (manifest: LaunchManifest) => void]> = [
-      [/Modal benchmark launch manifest .*local-only/u, (manifest) => (manifest.execution.mode = "local")],
-      [/Modal benchmark launch manifest .*dry-run/u, (manifest) => (manifest.execution.dry_run = true)]
+      [/benchmark-control-manifest/iu, (manifest) => (manifest.execution.mode = "local")],
+      [/benchmark-control-manifest/iu, (manifest) => (manifest.execution.dry_run = true)]
     ];
     for (const [message, mutate] of cases) {
       const fixture = preparedSmokeFixture();
@@ -60,12 +60,13 @@ describe("Modal benchmark launch guardrails", () => {
     const fixture = preparedSmokeFixture();
     const manifest = readJson<Record<string, unknown>>(fixture.manifestPath);
     manifest.candidate_commit = "b".repeat(40);
+    manifest.image_name = `ufz-runner-${"b".repeat(40)}`;
     writeJson(fixture.manifestPath, manifest);
 
     expect(() => validateModalBenchmarkLaunch(fixture.input)).toThrow(/candidate commit does not match/u);
   });
 
-  it("rejects local-only, dry-run, and target-truncated pair configs before dispatch", () => {
+  it("rejects private, compatibility-field, and target-truncated pair configs before dispatch", () => {
     const localOnly = preparedSmokeFixture();
     const localOnlyConfig = readJson<Record<string, unknown>>(localOnly.configPath);
     delete localOnlyConfig.public_benchmark;
@@ -73,8 +74,11 @@ describe("Modal benchmark launch guardrails", () => {
     localOnlyConfig.ground_truth = {
       repo: "https://github.com/example/truth",
       ref: "c".repeat(40),
-      file: "ground-truth.yml"
+      file: "ground-truth.yml",
+      format: "ultrafuzz"
     };
+    localOnlyConfig.benchmark_execution = { excluded_node_ids: [] };
+    localOnlyConfig.eval_reporting = { provider: "none" };
     writeJson(localOnly.configPath, localOnlyConfig);
     expect(() => validateModalBenchmarkLaunch(localOnly.input)).toThrow(
       /Modal benchmark launch config .*local-only\/private.*manifest/u
@@ -84,7 +88,7 @@ describe("Modal benchmark launch guardrails", () => {
     const dryRunConfig = readJson<Record<string, unknown>>(dryRun.configPath);
     dryRunConfig.execution = { mode: "modal", dry_run: true };
     writeJson(dryRun.configPath, dryRunConfig);
-    expect(() => validateModalBenchmarkLaunch(dryRun.input)).toThrow(/Modal benchmark launch config .*dry-run/u);
+    expect(() => validateModalBenchmarkLaunch(dryRun.input)).toThrow(/benchmark-config/iu);
 
     const truncated = preparedSmokeFixture();
     const truncatedConfig = readJson<LaunchConfig>(truncated.configPath);
@@ -93,6 +97,21 @@ describe("Modal benchmark launch guardrails", () => {
     expect(() => validateModalBenchmarkLaunch(truncated.input)).toThrow(
       /Modal benchmark launch config .*missing configured target\(s\).*expected 3, found 1/u
     );
+  });
+
+  it("rejects duplicate keys in manifests and pair configs", () => {
+    const duplicateManifest = preparedSmokeFixture();
+    const manifest = fs.readFileSync(duplicateManifest.manifestPath, "utf8");
+    fs.writeFileSync(
+      duplicateManifest.manifestPath,
+      manifest.replace('"generation":', '"generation":"shadowed","generation":')
+    );
+    expect(() => validateModalBenchmarkLaunch(duplicateManifest.input)).toThrow(/duplicate/iu);
+
+    const duplicateConfig = preparedSmokeFixture();
+    const config = fs.readFileSync(duplicateConfig.configPath, "utf8");
+    fs.writeFileSync(duplicateConfig.configPath, config.replace('"run_id":', '"run_id":"shadowed","run_id":'));
+    expect(() => validateModalBenchmarkLaunch(duplicateConfig.input)).toThrow(/duplicate/iu);
   });
 
   it("rejects whitespace-padded Kimi reasoning during CI model matrix preparation", () => {

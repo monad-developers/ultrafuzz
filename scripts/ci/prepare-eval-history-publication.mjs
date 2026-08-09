@@ -84,11 +84,7 @@ export function validateAutomaticPublicationManifest(value, context) {
   return validateBenchmarkControlManifest(value, context);
 }
 
-/**
- * Validate immutable pre-compute control for every recoverable lane. Unlike
- * automatic publication, this boundary admits the non-publishable threat-model
- * release gate so trusted default-branch cleanup can authenticate its plan.
- */
+/** Validate immutable pre-compute control for every recoverable benchmark lane. */
 export function validateBenchmarkControlManifest(value, context) {
   assertModalDocumentValue(MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID, value);
   const manifest = strictRecord(value, "benchmark manifest", ROOT_KEYS);
@@ -333,8 +329,8 @@ function benchmarkControlExpectations(input) {
   const repository = canonicalRepository(input.repository);
   const producerRunId = positiveDecimal(input.producerRunId, "producer run ID");
   const producerRunAttempt = positiveDecimal(input.producerRunAttempt, "producer run attempt");
-  if (input.mode !== "smoke" && input.mode !== "full" && input.mode !== "threat-model") {
-    throw new Error("benchmark control mode must be smoke, full, or threat-model");
+  if (input.mode !== "smoke" && input.mode !== "full") {
+    throw new Error("benchmark control mode must be smoke or full");
   }
   const smoke = input.mode === "smoke";
   const full = input.mode === "full";
@@ -375,11 +371,7 @@ function benchmarkControlExpectations(input) {
     "benchmark control timeout"
   );
   const maxLiveRowsPerPair = Math.min(matrixRowsPerPair, maxParallelEvalRows);
-  const providers = full
-    ? ["openai", "anthropic", "kimi", "deepseek"]
-    : smoke
-      ? [smokeProviderName(input.smokeProvider)]
-      : ["openai"];
+  const providers = full ? ["openai", "anthropic", "kimi", "deepseek"] : [smokeProviderName(input.smokeProvider)];
   return {
     candidateCommit,
     repository,

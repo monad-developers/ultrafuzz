@@ -509,7 +509,7 @@ export interface StrictModalSmokeResultDocument {
   };
 }
 
-export type StrictModalBenchmarkMode = "smoke" | "full" | "threat-model";
+export type StrictModalBenchmarkMode = "smoke" | "full";
 export type StrictModalBenchmarkName = "evmbench" | "ultrafuzz-bench";
 
 export interface StrictModalBenchmarkTarget {

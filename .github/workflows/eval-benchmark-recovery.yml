@@ -53,7 +53,7 @@ jobs:
           plan_count=0
           plan_mode=
           plan_artifact_name=
-          for mode in smoke full threat-model; do
+          for mode in smoke full; do
             candidate_name="modal-benchmark-plan-$mode-$SOURCE_RUN_ID-$SOURCE_RUN_ATTEMPT"
             candidate_count="$(jq --arg name "$candidate_name" \
               '[.artifacts[] | select(.name == $name)] | length' \

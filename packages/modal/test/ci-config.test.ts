@@ -692,9 +692,10 @@ describe("public Modal benchmark configuration", () => {
       "utf8"
     );
     expect(cleanupPreparation).toContain("readBenchmarkControlManifest");
+    expect(cleanupPreparation).toContain("loadModalBenchmarkConfig");
+    expect(cleanupPreparation).toContain("isPublicModalBenchmarkConfig");
     expect(cleanupPreparation).toContain("validateAutomaticPairConfig");
-    expect(cleanupPreparation).toContain("CONFIG_KEYS");
-    expect(cleanupPreparation).toContain("MODEL_KEYS");
+    expect(cleanupPreparation).not.toContain("JSON.parse");
     expect(cleanupPreparation).toContain("configs.has(configPath) || states.has(statePath)");
     const termination = cleanup.steps.find((step) => step.name === "Terminate every exact incomplete-run sandbox")!;
     expect(Object.keys(termination.env ?? {})).toEqual(
@@ -787,7 +788,8 @@ describe("public Modal benchmark configuration", () => {
     const discovery = cleanup.steps.find((step) => step.name === "Discover the exact pre-compute benchmark plan")!;
     expect(discovery.run).toContain("attempts/$SOURCE_RUN_ATTEMPT/jobs");
     expect(discovery.run).toContain("compute_may_have_started");
-    expect(discovery.run).toContain("for mode in smoke full threat-model");
+    expect(discovery.run).toContain("for mode in smoke full");
+    expect(discovery.run).not.toContain("threat-model");
     expect(discovery.run).toContain('echo "benchmark_mode=$plan_mode"');
     expect(discovery.run).toContain('echo "plan_artifact_name=$plan_artifact_name"');
 

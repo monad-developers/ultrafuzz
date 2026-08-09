@@ -36,7 +36,7 @@
       "pattern": "^[1-9][0-9]*-[1-9][0-9]*$"
     },
     "mode": {
-      "enum": ["smoke", "full", "threat-model"]
+      "enum": ["smoke", "full"]
     },
     "benchmark": {
       "enum": ["evmbench", "ultrafuzz-bench"]
@@ -170,10 +170,10 @@
             "enum": ["evmbench", "ultrafuzz-bench"]
           },
           "mode": {
-            "enum": ["smoke", "full", "threat-model"]
+            "enum": ["smoke", "full"]
           },
           "lane": {
-            "enum": ["smoke", "full", "threat-model"]
+            "enum": ["smoke", "full"]
           },
           "model_slug": {
             "type": "string",
