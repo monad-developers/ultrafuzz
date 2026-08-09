@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { validatePromptTemplateVariables } from "./templateValidation";
 import type { TemplateValidation } from "./templateValidation";
-import { dashboardRequest } from "./wireContracts";
+import { dashboardRequest, parseDashboardHttpDocument } from "./wireContracts";
 
 export const promptAutosaveDelayMs = 1500;
 
@@ -54,12 +54,12 @@ type UseManagedPromptEditorOptions = {
   refreshTopology: () => Promise<unknown>;
 };
 
-async function getJson<T>(url: string): Promise<T> {
+async function getPromptDetail<T>(url: string): Promise<T> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(await response.text());
   }
-  return response.json() as Promise<T>;
+  return parseDashboardHttpDocument<T>(await response.json(), "prompt-detail");
 }
 
 function errorMessage(error: unknown): string {
@@ -125,7 +125,7 @@ export function useManagedPromptEditor({
     setPromptDraft("");
     setPromptError("");
 
-    getJson<Omit<ManagedPromptDetail, "endpoint">>(promptEndpoint)
+    getPromptDetail<Omit<ManagedPromptDetail, "endpoint">>(promptEndpoint)
       .then((promptDetail) => {
         if (cancelled) {
           return;
@@ -167,7 +167,7 @@ export function useManagedPromptEditor({
         if (!response.ok) {
           throw new Error(await response.text());
         }
-        const saved = (await response.json()) as SavePromptResponse;
+        const saved = parseDashboardHttpDocument<SavePromptResponse>(await response.json(), "prompt-save");
         const renamedNodeId = saved.renamedFrom && saved.nodeId ? saved.nodeId : null;
         const nextEndpoint = renamedNodeId ? `/api/prompts/nodes/${encodeURIComponent(renamedNodeId)}` : endpoint;
         if (renamedNodeId) {
@@ -177,7 +177,7 @@ export function useManagedPromptEditor({
           await refreshFlow();
           onRenamed(renamedNodeId);
         }
-        const refreshed = await getJson<Omit<ManagedPromptDetail, "endpoint">>(nextEndpoint);
+        const refreshed = await getPromptDetail<Omit<ManagedPromptDetail, "endpoint">>(nextEndpoint);
         if (!renamedNodeId && promptEndpointRef.current !== nextEndpoint) {
           return;
         }

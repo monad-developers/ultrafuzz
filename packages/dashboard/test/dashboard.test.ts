@@ -5,9 +5,17 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
+import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
 import { initProject } from "@ultrafuzz/runtime";
 
-import { DASHBOARD_HTTP_SCHEMA_VERSION, serveDashboard } from "../src/index.js";
+import {
+  assertDashboardHttpDocument,
+  assertDashboardSseDocument,
+  DASHBOARD_HTTP_SCHEMA_VERSION,
+  serveDashboard,
+  type DashboardHttpDefinition,
+  type DashboardSseDefinition
+} from "../src/index.js";
 
 interface FlowResponse {
   run: {
@@ -37,7 +45,7 @@ test("serves logical topology flow with expanded attempt details", async () => {
   const projectRoot = makeProject();
   const handle = await serveDashboard({ projectRoot, port: 0 });
   try {
-    const flow = await getJson<FlowResponse>(apiUrl(handle.url, "/api/flow"));
+    const flow = await getJson<FlowResponse>(apiUrl(handle.url, "/api/flow"), "flowResponse");
     assert.equal(flow.run.run_id, "preview");
     assert.ok(flow.nodes.length > 0);
     assert.ok(flow.run.expanded_nodes > flow.nodes.length);
@@ -85,7 +93,7 @@ test("creates a topology node prompt as terminal work before finish", async () =
     if (response.status !== 201) {
       assert.fail(await response.text());
     }
-    const saved = (await response.json()) as { nodeId: string; path: string };
+    const saved = await parseHttpResponse(response, "promptSaveResponse");
     assert.equal(saved.nodeId, "added-check");
     assert.equal(saved.path, ".ultrafuzz/prompts/strategies/added-check.md");
     assert.equal(
@@ -93,7 +101,7 @@ test("creates a topology node prompt as terminal work before finish", async () =
       "---\nid: added-check\ndisplay_name: Added check\n---\n\n# Added check\n"
     );
 
-    const topology = await getJson<TopologyResponse>(apiUrl(handle.url, "/api/topology"));
+    const topology = await getJson<TopologyResponse>(apiUrl(handle.url, "/api/topology"), "topologyDetailResponse");
     const added = topology.topology.nodes.find((node) => node.id === "added-check");
     const finish = topology.topology.nodes.find((node) => node.id === "__finish__");
     assert.deepEqual(added?.depends_on, ["__start__"]);
@@ -303,6 +311,89 @@ test("dashboard audit append refuses a final-component symlink", async () => {
   }
 });
 
+test("dashboard validates the serialized bytes and identities of every preview API document", async () => {
+  const projectRoot = makeProject();
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const routes: Array<[string, DashboardHttpDefinition, string]> = [
+      ["/api/session", "sessionResponse", "session"],
+      ["/api/flow", "flowResponse", "flow"],
+      ["/api/run", "runOverviewResponse", "run-overview"],
+      ["/api/graph", "graphResponse", "graph"],
+      ["/api/nodes", "nodesResponse", "nodes"],
+      ["/api/nodes/project-discovery", "nodeDetailResponse", "node-detail"],
+      ["/api/findings", "findingsResponse", "findings"],
+      ["/api/report", "reportResponse", "report"],
+      ["/api/events", "eventsResponse", "events"],
+      ["/api/config", "configDetailResponse", "config-detail"],
+      ["/api/topology", "topologyDetailResponse", "topology-detail"],
+      ["/api/prompts/strategies", "promptListResponse", "prompt-list"],
+      ["/api/prompts/nodes/project-discovery", "promptDetailResponse", "prompt-detail"]
+    ];
+    for (const [route, definition, documentType] of routes) {
+      const response = await fetch(apiUrl(handle.url, route));
+      assert.equal(response.status, 200, route);
+      const document = await parseHttpResponse(response, definition);
+      assert.equal(document.schema_version, DASHBOARD_HTTP_SCHEMA_VERSION, route);
+      assert.equal(document.document_type, documentType, route);
+    }
+
+    const missing = await fetch(apiUrl(handle.url, "/api/not-a-route"));
+    assert.equal(missing.status, 404);
+    const error = await parseHttpResponse(missing, "errorResponse");
+    assert.equal(error.document_type, "error");
+  } finally {
+    await handle.close();
+  }
+});
+
+test("dashboard emits typed SSE envelopes with monotonic per-stream sequences", async () => {
+  const projectRoot = makeProject();
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const eventFrames = await readSseFrames(apiUrl(handle.url, "/api/events/stream"), 1);
+    assertSseFrame(eventFrames[0]!, "eventsEnvelope", "ultrafuzz-event", 0);
+
+    const commandFrames = await readSseFrames(apiUrl(handle.url, "/api/commands/stream"), 2);
+    assertSseFrame(commandFrames[0]!, "commandJobsEnvelope", "ultrafuzz-command-jobs", 0);
+    assertSseFrame(commandFrames[1]!, "commandJobsEnvelope", "ultrafuzz-command-jobs", 1);
+  } finally {
+    await handle.close();
+  }
+});
+
+test("dashboard refuses malformed historical audit data before changing project files", async () => {
+  const projectRoot = makeProject();
+  const configPath = path.join(projectRoot, "ultrafuzz.toml");
+  const auditPath = path.join(projectRoot, ".ultrafuzz", "dashboard-audit.jsonl");
+  const originalConfig = fs.readFileSync(configPath);
+  const malformedAudit = Buffer.from(
+    '{"schema_version":"1.0","audit_id":"00000000-0000-4000-8000-000000000001","timestamp":"2026-08-09T12:00:00.000Z","kind":"config-edit","path":"ultrafuzz.toml","content_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n',
+    "utf8"
+  );
+  fs.writeFileSync(auditPath, malformedAudit);
+
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const response = await fetch(apiUrl(handle.url, "/api/config"), {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        "x-ultrafuzz-session": handle.sessionToken
+      },
+      body: JSON.stringify(
+        dashboardRequest("config-save", { content: `${originalConfig.toString("utf8")}\n# proposed change\n` })
+      )
+    });
+    assert.equal(response.status, 500);
+    await parseHttpResponse(response, "errorResponse");
+    assert.deepEqual(fs.readFileSync(configPath), originalConfig);
+    assert.deepEqual(fs.readFileSync(auditPath), malformedAudit);
+  } finally {
+    await handle.close();
+  }
+});
+
 function makeProject(): string {
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-dashboard-"));
   const result = initProject({ projectRoot, force: true });
@@ -310,12 +401,89 @@ function makeProject(): string {
   return projectRoot;
 }
 
-async function getJson<T>(url: string): Promise<T> {
+async function getJson<T>(url: string, definition: DashboardHttpDefinition): Promise<T> {
   const response = await fetch(url);
   if (!response.ok) {
     assert.fail(await response.text());
   }
-  return (await response.json()) as T;
+  return (await parseHttpResponse(response, definition)) as T;
+}
+
+async function parseHttpResponse(
+  response: Response,
+  definition: DashboardHttpDefinition
+): Promise<Record<string, unknown>> {
+  const bytes = Buffer.from(await response.arrayBuffer());
+  assert.equal(response.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.equal(response.headers.get("content-length"), String(bytes.byteLength));
+  const document = parseStrictJsonBytes(bytes);
+  assertDashboardHttpDocument(document, definition, `HTTP ${definition} bytes`);
+  assert.ok(isRecord(document));
+  return document;
+}
+
+interface SseFrame {
+  event: string;
+  data: string;
+}
+
+async function readSseFrames(url: string, count: number): Promise<SseFrame[]> {
+  const response = await fetch(url);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "text/event-stream; charset=utf-8");
+  assert.ok(response.body);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const frames: SseFrame[] = [];
+  let pending = "";
+  try {
+    while (frames.length < count) {
+      const chunk = await reader.read();
+      assert.equal(chunk.done, false, "SSE stream ended before the expected frames arrived");
+      pending += decoder.decode(chunk.value, { stream: true });
+      let boundary = pending.indexOf("\n\n");
+      while (boundary >= 0) {
+        const block = pending.slice(0, boundary);
+        pending = pending.slice(boundary + 2);
+        if (!block.startsWith(":")) {
+          const event = block
+            .split("\n")
+            .find((line) => line.startsWith("event: "))
+            ?.slice("event: ".length);
+          const data = block
+            .split("\n")
+            .find((line) => line.startsWith("data: "))
+            ?.slice("data: ".length);
+          assert.ok(event);
+          assert.ok(data);
+          frames.push({ event, data });
+          if (frames.length === count) break;
+        }
+        boundary = pending.indexOf("\n\n");
+      }
+    }
+  } finally {
+    await reader.cancel();
+  }
+  return frames;
+}
+
+function assertSseFrame(
+  frame: SseFrame,
+  definition: DashboardSseDefinition,
+  eventType: string,
+  sequence: number
+): void {
+  assert.equal(frame.event, eventType);
+  const document = parseStrictJsonBytes(Buffer.from(frame.data, "utf8"));
+  assertDashboardSseDocument(document, definition, `SSE ${definition} bytes`);
+  assert.ok(isRecord(document));
+  assert.equal(document.event_type, eventType);
+  assert.equal(document.sequence, sequence);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function dashboardRequest(requestType: string, fields: Record<string, unknown>): Record<string, unknown> {

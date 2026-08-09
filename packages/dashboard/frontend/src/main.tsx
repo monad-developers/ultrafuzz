@@ -79,10 +79,12 @@ import { useManagedPromptEditor } from "./useManagedPromptEditor";
 import {
   dashboardCommandRequest,
   dashboardRequest,
+  dashboardSseEvents,
   dashboardSseCommandJobs,
-  dashboardSseErrorMessage
+  dashboardSseErrorMessage,
+  parseDashboardHttpDocument
 } from "./wireContracts";
-import type { DashboardCommandJob } from "./wireContracts";
+import type { DashboardCommandJob, DashboardHttpDocumentType } from "./wireContracts";
 
 type Status =
   | "pending"
@@ -424,7 +426,7 @@ type TopologyDetail = {
   editable: boolean;
   contentHash: string;
   content: string;
-  topology: ProjectTopology;
+  topology?: ProjectTopology;
   validation: {
     valid: boolean;
     message: string;
@@ -778,7 +780,7 @@ function App() {
   }, [themePreference]);
   const loadFlow = useCallback(async () => {
     try {
-      const data = await getJson<FlowData>("/api/flow");
+      const data = await getJson<FlowData>("/api/flow", "flow");
       setFlow(data);
       setFlowError("");
       return data;
@@ -791,7 +793,7 @@ function App() {
 
   const loadTopology = useCallback(async () => {
     try {
-      const detail = await getJson<TopologyDetail>("/api/topology");
+      const detail = await getJson<TopologyDetail>("/api/topology", "topology-detail");
       setTopology(detail);
       setTopologyError(detail.validation.valid ? "" : detail.validation.message);
       return detail;
@@ -818,7 +820,7 @@ function App() {
       if (!response.ok) {
         throw new Error(await response.text());
       }
-      const saved = (await response.json()) as SaveTopologyResponse;
+      const saved = parseDashboardHttpDocument<SaveTopologyResponse>(await response.json(), "topology-save");
       setMessage(`Saved ${saved.path}: ${saved.validation.message}`);
       await loadTopology();
       return await loadFlow();
@@ -829,6 +831,9 @@ function App() {
   const mutateTopology = useCallback(
     async (mutator: (topology: ProjectTopology) => void) => {
       const detail = topology ?? (await loadTopology());
+      if (!detail.topology) {
+        throw new Error(detail.validation.message);
+      }
       const nextTopology = cloneTopology(detail.topology);
       mutator(nextTopology);
       return await saveTopology(nextTopology);
@@ -897,7 +902,7 @@ function App() {
 
   const openConfig = useCallback(async () => {
     try {
-      const detail = await getJson<ConfigDetail>("/api/config");
+      const detail = await getJson<ConfigDetail>("/api/config", "config-detail");
       setSelectedNodeId(null);
       setSelectedEdgeId(null);
       setConnectSourceNodeId(null);
@@ -918,7 +923,7 @@ function App() {
 
   const loadEvents = useCallback(async () => {
     try {
-      const data = await getJson<{ events: EventRecord[] }>("/api/events");
+      const data = await getJson<{ events: EventRecord[] }>("/api/events", "events");
       setEvents(data.events.slice(-80).reverse());
       setEventsError("");
     } catch (error) {
@@ -962,7 +967,7 @@ function App() {
   }, [sidePanelOpen]);
 
   useEffect(() => {
-    getJson<DashboardSession>("/api/session")
+    getJson<DashboardSession>("/api/session", "session")
       .then((sessionData) => {
         setSession(sessionData);
         setSessionError("");
@@ -1040,10 +1045,16 @@ function App() {
         setLiveError("Live event stream disconnected. The browser will retry automatically.");
       }
     };
-    stream.addEventListener("ultrafuzz-event", () => {
-      setLiveState("live");
-      setLiveError("");
-      scheduleRefresh();
+    stream.addEventListener("ultrafuzz-event", (event) => {
+      try {
+        dashboardSseEvents(event.data);
+        setLiveState("live");
+        setLiveError("");
+        scheduleRefresh();
+      } catch (error) {
+        setLiveState("degraded");
+        setLiveError(`Live event update failed to parse: ${errorMessage(error)}`);
+      }
     });
     stream.addEventListener("ultrafuzz-error", (event) => {
       setLiveState("degraded");
@@ -1129,7 +1140,7 @@ function App() {
       };
     }
 
-    getJson<NodeDetail>(`/api/nodes/${encodeURIComponent(selectedNodeId)}`)
+    getJson<NodeDetail>(`/api/nodes/${encodeURIComponent(selectedNodeId)}`, "node-detail")
       .then((detail) => {
         if (cancelled) {
           return;
@@ -1205,9 +1216,9 @@ function App() {
         if (!response.ok) {
           throw new Error(await response.text());
         }
-        const saved = (await response.json()) as SaveConfigResponse;
+        const saved = parseDashboardHttpDocument<SaveConfigResponse>(await response.json(), "config-save");
         setMessage(`Saved ${saved.path}: ${saved.validation.message}`);
-        const refreshed = await getJson<ConfigDetail>("/api/config");
+        const refreshed = await getJson<ConfigDetail>("/api/config", "config-detail");
         setConfig(refreshed);
         setConfigError("");
         await loadFlow();
@@ -1493,7 +1504,7 @@ function App() {
         if (!response.ok) {
           throw new Error(await response.text());
         }
-        const saved = (await response.json()) as SavePromptResponse;
+        const saved = parseDashboardHttpDocument<SavePromptResponse>(await response.json(), "prompt-save");
         await loadTopology();
         await loadFlow();
         if (saved.nodeId) {
@@ -3087,12 +3098,12 @@ function diffLines(beforeLines: string[], afterLines: string[]): DiffRow[] {
   return rows;
 }
 
-async function getJson<T>(url: string): Promise<T> {
+async function getJson<T>(url: string, documentType: DashboardHttpDocumentType): Promise<T> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(await response.text());
   }
-  return response.json() as Promise<T>;
+  return parseDashboardHttpDocument<T>(await response.json(), documentType);
 }
 
 async function postCommandJson<T>(
@@ -3112,7 +3123,7 @@ async function postCommandJson<T>(
   if (!response.ok) {
     throw new Error(await response.text());
   }
-  return response.json() as Promise<T>;
+  return parseDashboardHttpDocument<T>(await response.json(), "command-job");
 }
 
 function promptEndpointForNode(node: DashboardFlowNode): string | null {
@@ -3338,7 +3349,7 @@ function edgeEndpointValidationNodesForTopology(
   topology: TopologyDetail | null,
   nodes: DashboardFlowNode[]
 ): EdgeEndpointValidationNode[] {
-  if (!topology) {
+  if (!topology?.topology) {
     return [];
   }
   const flowNodeByLogicalId = new Map<string, DashboardFlowNode>();
@@ -3365,11 +3376,11 @@ function edgeEndpointValidationNodesForTopology(
 }
 
 function topologyNodeIdSet(topology: TopologyDetail | null): Set<string> {
-  return new Set(topology?.topology.nodes.map((node) => node.id) ?? []);
+  return new Set(topology?.topology?.nodes.map((node) => node.id) ?? []);
 }
 
 function existingTopologyNodeIds(topology: TopologyDetail | null, flow: FlowData | null): string[] {
-  if (topology) {
+  if (topology?.topology) {
     return topology.topology.nodes.map((node) => node.id);
   }
   return flow?.nodes.map((node) => node.data.logicalNodeId).filter(Boolean) ?? [];

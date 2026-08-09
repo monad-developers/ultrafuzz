@@ -137,8 +137,9 @@ export function appendDashboardAuditRecord(
 }
 
 function serializeJson(value: unknown, maxBytes: number, label: string, pretty = true): Buffer {
-  const serialized = pretty ? `${JSON.stringify(value, null, 2)}\n` : JSON.stringify(value);
-  const bytes = Buffer.from(serialized, "utf8");
+  const json = JSON.stringify(value, null, pretty ? 2 : undefined);
+  if (json === undefined) throw new Error(`${label} is not JSON-serializable`);
+  const bytes = Buffer.from(pretty ? `${json}\n` : json, "utf8");
   if (bytes.byteLength > maxBytes) throw new Error(`${label} exceeds the ${maxBytes}-byte limit`);
   return bytes;
 }

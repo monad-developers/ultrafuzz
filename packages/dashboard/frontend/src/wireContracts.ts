@@ -2,6 +2,25 @@ export const DASHBOARD_HTTP_SCHEMA_VERSION = "ultrafuzz.dashboard.http.v1" as co
 export const DASHBOARD_SSE_SCHEMA_VERSION = "ultrafuzz.dashboard.sse.v1" as const;
 
 export type DashboardRequestType = "config-save" | "topology-save" | "prompt-save" | "prompt-create";
+export type DashboardHttpDocumentType =
+  | "session"
+  | "run-overview"
+  | "flow"
+  | "graph"
+  | "nodes"
+  | "node-detail"
+  | "findings"
+  | "report"
+  | "events"
+  | "config-detail"
+  | "config-save"
+  | "topology-detail"
+  | "topology-save"
+  | "prompt-list"
+  | "prompt-detail"
+  | "prompt-save"
+  | "command-job"
+  | "error";
 
 export interface DashboardCommandJob {
   schema_version: typeof DASHBOARD_HTTP_SCHEMA_VERSION;
@@ -38,6 +57,24 @@ export function dashboardCommandRequest(
     command,
     arguments: commandArguments
   };
+}
+
+export function parseDashboardHttpDocument<T>(value: unknown, documentType: DashboardHttpDocumentType): T {
+  const document = requireRecord(value, `dashboard ${documentType} document`);
+  if (document.schema_version !== DASHBOARD_HTTP_SCHEMA_VERSION) {
+    throw new Error(`unsupported dashboard HTTP schema version: ${String(document.schema_version)}`);
+  }
+  if (document.document_type !== documentType) {
+    throw new Error(`unexpected dashboard document type: ${String(document.document_type)}`);
+  }
+  return document as T;
+}
+
+export function dashboardSseEvents(serialized: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(serialized);
+  const envelope = requireRecord(value, "dashboard SSE events envelope");
+  assertSseIdentity(envelope, "ultrafuzz-event");
+  return parseDashboardHttpDocument(requireRecord(envelope.payload, "dashboard SSE events payload"), "events");
 }
 
 export function dashboardSseErrorMessage(serialized: string): string {
