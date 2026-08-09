@@ -22,470 +22,453 @@
 <line x1="114" y1="104" x2="114" y2="404" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
 <text transform="translate(121,112) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">cohort-cf3da608</text></g>
 <g data-lineage-marker="cohort-a98bf547"><title>ultrafuzz-bench smoke cohort-a98bf547 policy-33b8d296</title>
-<line x1="232.77" y1="104" x2="232.77" y2="404" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
-<text transform="translate(239.77,112) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">cohort-a98bf547</text></g>
+<line x1="235.89" y1="104" x2="235.89" y2="404" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
+<text transform="translate(242.89,112) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">cohort-a98bf547</text></g>
 <g data-lineage-marker="cohort-7d061c80"><title>ultrafuzz-bench smoke cohort-7d061c80 policy-33b8d296</title>
-<line x1="292.15" y1="104" x2="292.15" y2="404" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
-<text transform="translate(299.15,112) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">cohort-7d061c80</text></g>
+<line x1="296.84" y1="104" x2="296.84" y2="404" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
+<text transform="translate(303.84,112) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">cohort-7d061c80</text></g>
 <g data-lineage-marker="cohort-b05ba222"><title>ultrafuzz-bench smoke cohort-b05ba222 policy-33b8d296</title>
-<line x1="450.51" y1="104" x2="450.51" y2="404" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
-<text transform="translate(457.51,112) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">cohort-b05ba222</text></g>
-<g data-lineage-marker="cohort-2198f473"><title>ultrafuzz-bench smoke cohort-2198f473 policy-33b8d296</title>
-<line x1="826.62" y1="104" x2="826.62" y2="404" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
-<text transform="translate(833.62,112) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">cohort-2198f473</text></g>
+<line x1="459.37" y1="104" x2="459.37" y2="404" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
+<text transform="translate(466.37,112) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">cohort-b05ba222</text></g>
 <g data-lineage-marker="cohort-c0e17843"><title>ultrafuzz-bench smoke cohort-c0e17843 policy-33b8d296</title>
-<line x1="846.41" y1="104" x2="846.41" y2="404" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
-<text transform="translate(853.41,112) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">cohort-c0e17843</text></g>
+<line x1="845.37" y1="104" x2="845.37" y2="404" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
+<text transform="translate(852.37,112) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">cohort-c0e17843</text></g>
 <g data-lineage-marker="cohort-d49aa3e2"><title>ultrafuzz-bench smoke cohort-d49aa3e2 policy-33b8d296</title>
 <line x1="886" y1="104" x2="886" y2="404" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
 <text transform="translate(893,112) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">cohort-d49aa3e2</text></g>
-<polyline fill="none" stroke="#2563eb" stroke-width="2.5" points="826.62,328.97 886,328.97"/>
-<a href="https://github.com/monad-developers/ultrafuzz/commit/70646d231ebb758ad3f18d981f5f3c2cfec0aa2b" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/70646d231ebb758ad3f18d981f5f3c2cfec0aa2b" data-status="complete" data-available-count="1" data-expected-count="1"><title>deepseek-v4-flash max stableswap-ng-vyper 70646d2: 0.25</title>
-<circle cx="826.62" cy="328.97" r="5" fill="#2563eb"/>
-</a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/6d1db74df734ad9503069c86c6eea51eff51d569" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/6d1db74df734ad9503069c86c6eea51eff51d569" data-status="complete" data-available-count="1" data-expected-count="1"><title>deepseek-v4-flash max stableswap-ng-vyper 6d1db74: 0.25</title>
 <circle cx="886" cy="328.97" r="5" fill="#2563eb"/>
 </a>
-<polyline fill="none" stroke="#7c3aed" stroke-width="2.5" points="826.62,340.85 886,370.67"/>
-<a href="https://github.com/monad-developers/ultrafuzz/commit/70646d231ebb758ad3f18d981f5f3c2cfec0aa2b" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/70646d231ebb758ad3f18d981f5f3c2cfec0aa2b" data-status="complete" data-available-count="1" data-expected-count="1"><title>deepseek-v4-flash max venus-isolated-pools-hardhat 70646d2: 0.21</title>
-<circle cx="826.62" cy="340.85" r="5" fill="#7c3aed"/>
-</a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/6d1db74df734ad9503069c86c6eea51eff51d569" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/6d1db74df734ad9503069c86c6eea51eff51d569" data-status="complete" data-available-count="1" data-expected-count="1"><title>deepseek-v4-flash max venus-isolated-pools-hardhat 6d1db74: 0.11</title>
 <circle cx="886" cy="370.67" r="5" fill="#7c3aed"/>
-</a>
-<polyline fill="none" stroke="#0f766e" stroke-width="2.5" points="826.62,328.97 886,270.68"/>
-<a href="https://github.com/monad-developers/ultrafuzz/commit/70646d231ebb758ad3f18d981f5f3c2cfec0aa2b" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/70646d231ebb758ad3f18d981f5f3c2cfec0aa2b" data-status="complete" data-available-count="1" data-expected-count="1"><title>deepseek-v4-flash max very-liquid-vaults-foundry 70646d2: 0.25</title>
-<circle cx="826.62" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/6d1db74df734ad9503069c86c6eea51eff51d569" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/6d1db74df734ad9503069c86c6eea51eff51d569" data-status="complete" data-available-count="1" data-expected-count="1"><title>deepseek-v4-flash max very-liquid-vaults-foundry 6d1db74: 0.44</title>
 <circle cx="886" cy="270.68" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/09277b81397d06cf697403a863c8f29f4e2320b9" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/09277b81397d06cf697403a863c8f29f4e2320b9" data-status="complete" data-available-count="1" data-expected-count="1"><title>deepseek-v4-pro max stableswap-ng-vyper 09277b8: 0.00</title>
-<circle cx="450.51" cy="404" r="5" fill="#c2410c"/>
+<circle cx="459.37" cy="404" r="5" fill="#c2410c"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/09277b81397d06cf697403a863c8f29f4e2320b9" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/09277b81397d06cf697403a863c8f29f4e2320b9" data-status="complete" data-available-count="1" data-expected-count="1"><title>deepseek-v4-pro max venus-isolated-pools-hardhat 09277b8: 0.30</title>
-<circle cx="450.51" cy="314" r="5" fill="#be123c"/>
+<circle cx="459.37" cy="314" r="5" fill="#be123c"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/09277b81397d06cf697403a863c8f29f4e2320b9" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/09277b81397d06cf697403a863c8f29f4e2320b9" data-status="complete" data-available-count="1" data-expected-count="1"><title>deepseek-v4-pro max very-liquid-vaults-foundry 09277b8: 0.00</title>
-<circle cx="450.51" cy="404" r="5" fill="#4f46e5"/>
+<circle cx="459.37" cy="404" r="5" fill="#4f46e5"/>
 </a>
-<polyline fill="none" stroke="#2563eb" stroke-width="2.5" points="114,328.97 133.79,328.97 153.59,328.97 173.38,328.97 193.18,328.97 212.97,270.68 232.77,270.68 252.56,404 272.36,328.97 311.95,337.31 331.74,328.97 351.54,328.97 371.33,328.97 391.13,284 410.92,294.92 430.72,404 470.31,328.97 490.1,328.97 529.69,328.97 549.49,404 569.28,270.68 589.08,404 608.87,404 628.67,404 648.46,328.97 668.26,404 688.05,328.97 707.85,328.97 727.64,404 747.44,404 767.23,328.97 787.03,270.68 806.82,328.97 846.41,404 866.21,328.97"/>
+<polyline fill="none" stroke="#2563eb" stroke-width="2.5" points="114,328.97 134.32,328.97 154.63,328.97 174.95,328.97 195.26,328.97 215.58,270.68 235.89,270.68 256.21,404 276.53,328.97 317.16,337.31 337.47,328.97 357.79,328.97 378.11,328.97 398.42,284 418.74,294.92 439.05,404 479.68,328.97 500,328.97 540.63,328.97 560.95,404 581.26,270.68 601.58,404 621.89,404 642.21,404 662.53,328.97 682.84,404 703.16,328.97 723.47,328.97 743.79,404 764.11,404 784.42,328.97 804.74,270.68 825.05,328.97 845.37,404 865.68,328.97"/>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/953a397a860307d3061eef2cad69c80d09ef20f5" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/953a397a860307d3061eef2cad69c80d09ef20f5" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 953a397: 0.25</title>
 <circle cx="114" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/2051b642d9e31e9402ce1ec8a00b70cc27801f16" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/2051b642d9e31e9402ce1ec8a00b70cc27801f16" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 2051b64: 0.25</title>
-<circle cx="133.79" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="134.32" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/23ef040e5ad66603354e3395f7eac77df9b76f06" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/23ef040e5ad66603354e3395f7eac77df9b76f06" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 23ef040: 0.25</title>
-<circle cx="153.59" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="154.63" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 8483637: 0.25</title>
-<circle cx="173.38" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="174.95" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper e03c176: 0.25</title>
-<circle cx="193.18" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="195.26" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/da5d191b03f61b4e07149c10d29bbd7542511889" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/da5d191b03f61b4e07149c10d29bbd7542511889" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper da5d191: 0.44</title>
-<circle cx="212.97" cy="270.68" r="5" fill="#2563eb"/>
+<circle cx="215.58" cy="270.68" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/24b90c4d2a03ece561b3b1b988cfa2508c088013" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/24b90c4d2a03ece561b3b1b988cfa2508c088013" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 24b90c4: 0.44</title>
-<circle cx="232.77" cy="270.68" r="5" fill="#2563eb"/>
+<circle cx="235.89" cy="270.68" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/5cfa918db7448aeb92b6b8aa66f687a9359b71e6" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/5cfa918db7448aeb92b6b8aa66f687a9359b71e6" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 5cfa918: 0.00</title>
-<circle cx="252.56" cy="404" r="5" fill="#2563eb"/>
+<circle cx="256.21" cy="404" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper bdf2482: 0.25</title>
-<circle cx="272.36" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="276.53" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/ed26197c6c6cf5c7d21e35b9f2c9f5cb85fcac8e" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/ed26197c6c6cf5c7d21e35b9f2c9f5cb85fcac8e" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper ed26197: 0.22</title>
-<circle cx="311.95" cy="337.31" r="5" fill="#2563eb"/>
+<circle cx="317.16" cy="337.31" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/3ea30591805bdb0dda96ae56efa08419e7b4a506" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/3ea30591805bdb0dda96ae56efa08419e7b4a506" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 3ea3059: 0.25</title>
-<circle cx="331.74" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="337.47" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/63becee294476e3e750a79163c01634138b94282" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/63becee294476e3e750a79163c01634138b94282" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 63becee: 0.25</title>
-<circle cx="351.54" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="357.79" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/bf9f729656bd4d2b0e8860c560cc3a1716a3dca0" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/bf9f729656bd4d2b0e8860c560cc3a1716a3dca0" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper bf9f729: 0.25</title>
-<circle cx="371.33" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="378.11" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/8aac39f661655f98f6e9ba2be71c079d650e2223" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/8aac39f661655f98f6e9ba2be71c079d650e2223" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 8aac39f: 0.40</title>
-<circle cx="391.13" cy="284" r="5" fill="#2563eb"/>
+<circle cx="398.42" cy="284" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/80350a94d72cb12c6e22427fcc925ba21777a309" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/80350a94d72cb12c6e22427fcc925ba21777a309" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 80350a9: 0.36</title>
-<circle cx="410.92" cy="294.92" r="5" fill="#2563eb"/>
+<circle cx="418.74" cy="294.92" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/4928cbe154027060b4b9d9e63e9414a6a0547022" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/4928cbe154027060b4b9d9e63e9414a6a0547022" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 4928cbe: 0.00</title>
-<circle cx="430.72" cy="404" r="5" fill="#2563eb"/>
+<circle cx="439.05" cy="404" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/e685be803fb66b20e1a95861e825977bfb44688d" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/e685be803fb66b20e1a95861e825977bfb44688d" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper e685be8: 0.25</title>
-<circle cx="470.31" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="479.68" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/10f56085d502872dc4bea66c9101053c73eced29" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/10f56085d502872dc4bea66c9101053c73eced29" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 10f5608: 0.25</title>
-<circle cx="490.1" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="500" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/04cfef8eedde6e7fe64ecb1d661c3f1555ac8edf" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/04cfef8eedde6e7fe64ecb1d661c3f1555ac8edf" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 04cfef8: 0.25</title>
-<circle cx="529.69" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="540.63" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/fa8d03937b693cb377015d2e52bdcd44fe312657" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/fa8d03937b693cb377015d2e52bdcd44fe312657" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper fa8d039: 0.00</title>
-<circle cx="549.49" cy="404" r="5" fill="#2563eb"/>
+<circle cx="560.95" cy="404" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/89e05a75990d27a6fee589f13e6f9679338a2b9f" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/89e05a75990d27a6fee589f13e6f9679338a2b9f" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 89e05a7: 0.44</title>
-<circle cx="569.28" cy="270.68" r="5" fill="#2563eb"/>
+<circle cx="581.26" cy="270.68" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/0e073cf7809d7f05ba1cc2a3c86c273100f7455c" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/0e073cf7809d7f05ba1cc2a3c86c273100f7455c" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 0e073cf: 0.00</title>
-<circle cx="589.08" cy="404" r="5" fill="#2563eb"/>
+<circle cx="601.58" cy="404" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/09deffaa16713b4eb7a1f29e937ca1862ecc747b" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/09deffaa16713b4eb7a1f29e937ca1862ecc747b" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 09deffa: 0.00</title>
-<circle cx="608.87" cy="404" r="5" fill="#2563eb"/>
+<circle cx="621.89" cy="404" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/a4b3c9769af5f999a337dfb34baf0a25b2295a38" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/a4b3c9769af5f999a337dfb34baf0a25b2295a38" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper a4b3c97: 0.00</title>
-<circle cx="628.67" cy="404" r="5" fill="#2563eb"/>
+<circle cx="642.21" cy="404" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/650dc02cf904e33d00049bf0dc361d655579add2" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/650dc02cf904e33d00049bf0dc361d655579add2" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 650dc02: 0.25</title>
-<circle cx="648.46" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="662.53" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/4c5900210ab2d2b3eef1184164817a881e2fb09c" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/4c5900210ab2d2b3eef1184164817a881e2fb09c" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 4c59002: 0.00</title>
-<circle cx="668.26" cy="404" r="5" fill="#2563eb"/>
+<circle cx="682.84" cy="404" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/fd079e3c6e4d41dccf33c97d56b816b15e6069b5" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/fd079e3c6e4d41dccf33c97d56b816b15e6069b5" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper fd079e3: 0.25</title>
-<circle cx="688.05" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="703.16" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/e75076041731a56b64df14bc3749a829a5777ea4" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/e75076041731a56b64df14bc3749a829a5777ea4" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper e750760: 0.25</title>
-<circle cx="707.85" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="723.47" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/5b7c0c0d13461dd479952f772d71fa3657874a7e" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/5b7c0c0d13461dd479952f772d71fa3657874a7e" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 5b7c0c0: 0.00</title>
-<circle cx="727.64" cy="404" r="5" fill="#2563eb"/>
+<circle cx="743.79" cy="404" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/b22f23c6a6787014f7ac35d6c7dbcc4101482c5f" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/b22f23c6a6787014f7ac35d6c7dbcc4101482c5f" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper b22f23c: 0.00</title>
-<circle cx="747.44" cy="404" r="5" fill="#2563eb"/>
+<circle cx="764.11" cy="404" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/2d47e73d15bf74184d8672ae39799ff4cff018fd" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/2d47e73d15bf74184d8672ae39799ff4cff018fd" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 2d47e73: 0.25</title>
-<circle cx="767.23" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="784.42" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/5db8c6febeaddeb012d60f34c96b28009fda1ff9" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/5db8c6febeaddeb012d60f34c96b28009fda1ff9" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 5db8c6f: 0.44</title>
-<circle cx="787.03" cy="270.68" r="5" fill="#2563eb"/>
+<circle cx="804.74" cy="270.68" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/650a87aac8cf0d02d1ad698de39e8b30e39c94d4" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/650a87aac8cf0d02d1ad698de39e8b30e39c94d4" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 650a87a: 0.25</title>
-<circle cx="806.82" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="825.05" cy="328.97" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/cb672c67bbe1255a0c96dc2e89653e7422f2246b" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/cb672c67bbe1255a0c96dc2e89653e7422f2246b" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper cb672c6: 0.00</title>
-<circle cx="846.41" cy="404" r="5" fill="#2563eb"/>
+<circle cx="845.37" cy="404" r="5" fill="#2563eb"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/6d1db74df734ad9503069c86c6eea51eff51d569" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/6d1db74df734ad9503069c86c6eea51eff51d569" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high stableswap-ng-vyper 6d1db74: 0.25</title>
-<circle cx="866.21" cy="328.97" r="5" fill="#2563eb"/>
+<circle cx="865.68" cy="328.97" r="5" fill="#2563eb"/>
 </a>
-<polyline fill="none" stroke="#7c3aed" stroke-width="2.5" points="114,314 133.79,370.67 153.59,314 173.38,340.85 193.18,370.67 212.97,340.85 232.77,370.67 252.56,314 272.36,370.67 311.95,340.85 331.74,314 351.54,340.85 371.33,404 391.13,340.85 410.92,370.67 430.72,370.67 470.31,370.67 490.1,340.85 529.69,404 549.49,340.85 569.28,340.85 589.08,370.67 608.87,370.67 628.67,340.85 648.46,340.85 668.26,314 688.05,340.85 707.85,370.67 727.64,370.67 747.44,340.85 767.23,370.67 787.03,289.7 806.82,404 846.41,340.85 866.21,404"/>
+<polyline fill="none" stroke="#7c3aed" stroke-width="2.5" points="114,314 134.32,370.67 154.63,314 174.95,340.85 195.26,370.67 215.58,340.85 235.89,370.67 256.21,314 276.53,370.67 317.16,340.85 337.47,314 357.79,340.85 378.11,404 398.42,340.85 418.74,370.67 439.05,370.67 479.68,370.67 500,340.85 540.63,404 560.95,340.85 581.26,340.85 601.58,370.67 621.89,370.67 642.21,340.85 662.53,340.85 682.84,314 703.16,340.85 723.47,370.67 743.79,370.67 764.11,340.85 784.42,370.67 804.74,289.7 825.05,404 845.37,340.85 865.68,404"/>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/953a397a860307d3061eef2cad69c80d09ef20f5" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/953a397a860307d3061eef2cad69c80d09ef20f5" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 953a397: 0.30</title>
 <circle cx="114" cy="314" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/2051b642d9e31e9402ce1ec8a00b70cc27801f16" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/2051b642d9e31e9402ce1ec8a00b70cc27801f16" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 2051b64: 0.11</title>
-<circle cx="133.79" cy="370.67" r="5" fill="#7c3aed"/>
+<circle cx="134.32" cy="370.67" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/23ef040e5ad66603354e3395f7eac77df9b76f06" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/23ef040e5ad66603354e3395f7eac77df9b76f06" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 23ef040: 0.30</title>
-<circle cx="153.59" cy="314" r="5" fill="#7c3aed"/>
+<circle cx="154.63" cy="314" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 8483637: 0.21</title>
-<circle cx="173.38" cy="340.85" r="5" fill="#7c3aed"/>
+<circle cx="174.95" cy="340.85" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat e03c176: 0.11</title>
-<circle cx="193.18" cy="370.67" r="5" fill="#7c3aed"/>
+<circle cx="195.26" cy="370.67" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/da5d191b03f61b4e07149c10d29bbd7542511889" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/da5d191b03f61b4e07149c10d29bbd7542511889" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat da5d191: 0.21</title>
-<circle cx="212.97" cy="340.85" r="5" fill="#7c3aed"/>
+<circle cx="215.58" cy="340.85" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/24b90c4d2a03ece561b3b1b988cfa2508c088013" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/24b90c4d2a03ece561b3b1b988cfa2508c088013" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 24b90c4: 0.11</title>
-<circle cx="232.77" cy="370.67" r="5" fill="#7c3aed"/>
+<circle cx="235.89" cy="370.67" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/5cfa918db7448aeb92b6b8aa66f687a9359b71e6" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/5cfa918db7448aeb92b6b8aa66f687a9359b71e6" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 5cfa918: 0.30</title>
-<circle cx="252.56" cy="314" r="5" fill="#7c3aed"/>
+<circle cx="256.21" cy="314" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat bdf2482: 0.11</title>
-<circle cx="272.36" cy="370.67" r="5" fill="#7c3aed"/>
+<circle cx="276.53" cy="370.67" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/ed26197c6c6cf5c7d21e35b9f2c9f5cb85fcac8e" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/ed26197c6c6cf5c7d21e35b9f2c9f5cb85fcac8e" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat ed26197: 0.21</title>
-<circle cx="311.95" cy="340.85" r="5" fill="#7c3aed"/>
+<circle cx="317.16" cy="340.85" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/3ea30591805bdb0dda96ae56efa08419e7b4a506" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/3ea30591805bdb0dda96ae56efa08419e7b4a506" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 3ea3059: 0.30</title>
-<circle cx="331.74" cy="314" r="5" fill="#7c3aed"/>
+<circle cx="337.47" cy="314" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/63becee294476e3e750a79163c01634138b94282" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/63becee294476e3e750a79163c01634138b94282" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 63becee: 0.21</title>
-<circle cx="351.54" cy="340.85" r="5" fill="#7c3aed"/>
+<circle cx="357.79" cy="340.85" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/bf9f729656bd4d2b0e8860c560cc3a1716a3dca0" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/bf9f729656bd4d2b0e8860c560cc3a1716a3dca0" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat bf9f729: 0.00</title>
-<circle cx="371.33" cy="404" r="5" fill="#7c3aed"/>
+<circle cx="378.11" cy="404" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/8aac39f661655f98f6e9ba2be71c079d650e2223" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/8aac39f661655f98f6e9ba2be71c079d650e2223" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 8aac39f: 0.21</title>
-<circle cx="391.13" cy="340.85" r="5" fill="#7c3aed"/>
+<circle cx="398.42" cy="340.85" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/80350a94d72cb12c6e22427fcc925ba21777a309" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/80350a94d72cb12c6e22427fcc925ba21777a309" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 80350a9: 0.11</title>
-<circle cx="410.92" cy="370.67" r="5" fill="#7c3aed"/>
+<circle cx="418.74" cy="370.67" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/4928cbe154027060b4b9d9e63e9414a6a0547022" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/4928cbe154027060b4b9d9e63e9414a6a0547022" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 4928cbe: 0.11</title>
-<circle cx="430.72" cy="370.67" r="5" fill="#7c3aed"/>
+<circle cx="439.05" cy="370.67" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/e685be803fb66b20e1a95861e825977bfb44688d" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/e685be803fb66b20e1a95861e825977bfb44688d" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat e685be8: 0.11</title>
-<circle cx="470.31" cy="370.67" r="5" fill="#7c3aed"/>
+<circle cx="479.68" cy="370.67" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/10f56085d502872dc4bea66c9101053c73eced29" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/10f56085d502872dc4bea66c9101053c73eced29" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 10f5608: 0.21</title>
-<circle cx="490.1" cy="340.85" r="5" fill="#7c3aed"/>
+<circle cx="500" cy="340.85" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/04cfef8eedde6e7fe64ecb1d661c3f1555ac8edf" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/04cfef8eedde6e7fe64ecb1d661c3f1555ac8edf" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 04cfef8: 0.00</title>
-<circle cx="529.69" cy="404" r="5" fill="#7c3aed"/>
+<circle cx="540.63" cy="404" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/fa8d03937b693cb377015d2e52bdcd44fe312657" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/fa8d03937b693cb377015d2e52bdcd44fe312657" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat fa8d039: 0.21</title>
-<circle cx="549.49" cy="340.85" r="5" fill="#7c3aed"/>
+<circle cx="560.95" cy="340.85" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/89e05a75990d27a6fee589f13e6f9679338a2b9f" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/89e05a75990d27a6fee589f13e6f9679338a2b9f" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 89e05a7: 0.21</title>
-<circle cx="569.28" cy="340.85" r="5" fill="#7c3aed"/>
+<circle cx="581.26" cy="340.85" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/0e073cf7809d7f05ba1cc2a3c86c273100f7455c" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/0e073cf7809d7f05ba1cc2a3c86c273100f7455c" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 0e073cf: 0.11</title>
-<circle cx="589.08" cy="370.67" r="5" fill="#7c3aed"/>
+<circle cx="601.58" cy="370.67" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/09deffaa16713b4eb7a1f29e937ca1862ecc747b" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/09deffaa16713b4eb7a1f29e937ca1862ecc747b" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 09deffa: 0.11</title>
-<circle cx="608.87" cy="370.67" r="5" fill="#7c3aed"/>
+<circle cx="621.89" cy="370.67" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/a4b3c9769af5f999a337dfb34baf0a25b2295a38" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/a4b3c9769af5f999a337dfb34baf0a25b2295a38" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat a4b3c97: 0.21</title>
-<circle cx="628.67" cy="340.85" r="5" fill="#7c3aed"/>
+<circle cx="642.21" cy="340.85" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/650dc02cf904e33d00049bf0dc361d655579add2" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/650dc02cf904e33d00049bf0dc361d655579add2" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 650dc02: 0.21</title>
-<circle cx="648.46" cy="340.85" r="5" fill="#7c3aed"/>
+<circle cx="662.53" cy="340.85" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/4c5900210ab2d2b3eef1184164817a881e2fb09c" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/4c5900210ab2d2b3eef1184164817a881e2fb09c" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 4c59002: 0.30</title>
-<circle cx="668.26" cy="314" r="5" fill="#7c3aed"/>
+<circle cx="682.84" cy="314" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/fd079e3c6e4d41dccf33c97d56b816b15e6069b5" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/fd079e3c6e4d41dccf33c97d56b816b15e6069b5" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat fd079e3: 0.21</title>
-<circle cx="688.05" cy="340.85" r="5" fill="#7c3aed"/>
+<circle cx="703.16" cy="340.85" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/e75076041731a56b64df14bc3749a829a5777ea4" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/e75076041731a56b64df14bc3749a829a5777ea4" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat e750760: 0.11</title>
-<circle cx="707.85" cy="370.67" r="5" fill="#7c3aed"/>
+<circle cx="723.47" cy="370.67" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/5b7c0c0d13461dd479952f772d71fa3657874a7e" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/5b7c0c0d13461dd479952f772d71fa3657874a7e" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 5b7c0c0: 0.11</title>
-<circle cx="727.64" cy="370.67" r="5" fill="#7c3aed"/>
+<circle cx="743.79" cy="370.67" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/b22f23c6a6787014f7ac35d6c7dbcc4101482c5f" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/b22f23c6a6787014f7ac35d6c7dbcc4101482c5f" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat b22f23c: 0.21</title>
-<circle cx="747.44" cy="340.85" r="5" fill="#7c3aed"/>
+<circle cx="764.11" cy="340.85" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/2d47e73d15bf74184d8672ae39799ff4cff018fd" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/2d47e73d15bf74184d8672ae39799ff4cff018fd" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 2d47e73: 0.11</title>
-<circle cx="767.23" cy="370.67" r="5" fill="#7c3aed"/>
+<circle cx="784.42" cy="370.67" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/5db8c6febeaddeb012d60f34c96b28009fda1ff9" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/5db8c6febeaddeb012d60f34c96b28009fda1ff9" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 5db8c6f: 0.38</title>
-<circle cx="787.03" cy="289.7" r="5" fill="#7c3aed"/>
+<circle cx="804.74" cy="289.7" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/650a87aac8cf0d02d1ad698de39e8b30e39c94d4" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/650a87aac8cf0d02d1ad698de39e8b30e39c94d4" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 650a87a: 0.00</title>
-<circle cx="806.82" cy="404" r="5" fill="#7c3aed"/>
+<circle cx="825.05" cy="404" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/cb672c67bbe1255a0c96dc2e89653e7422f2246b" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/cb672c67bbe1255a0c96dc2e89653e7422f2246b" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat cb672c6: 0.21</title>
-<circle cx="846.41" cy="340.85" r="5" fill="#7c3aed"/>
+<circle cx="845.37" cy="340.85" r="5" fill="#7c3aed"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/6d1db74df734ad9503069c86c6eea51eff51d569" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/6d1db74df734ad9503069c86c6eea51eff51d569" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high venus-isolated-pools-hardhat 6d1db74: 0.00</title>
-<circle cx="866.21" cy="404" r="5" fill="#7c3aed"/>
+<circle cx="865.68" cy="404" r="5" fill="#7c3aed"/>
 </a>
-<polyline fill="none" stroke="#0f766e" stroke-width="2.5" points="114,328.97 133.79,270.68 153.59,328.97 173.38,328.97 193.18,404 212.97,224 232.77,328.97 252.56,404 272.36,328.97 311.95,284 331.74,328.97 351.54,328.97 371.33,328.97 391.13,328.97 410.92,270.68 430.72,270.68 470.31,328.97 490.1,270.68 529.69,270.68 549.49,270.68 569.28,270.68 589.08,328.97 608.87,270.68 628.67,328.97 648.46,270.68 668.26,328.97 688.05,328.97 707.85,328.97 727.64,270.68 747.44,328.97 767.23,328.97 787.03,328.97 806.82,270.68 846.41,328.97 866.21,270.68"/>
+<polyline fill="none" stroke="#0f766e" stroke-width="2.5" points="114,328.97 134.32,270.68 154.63,328.97 174.95,328.97 195.26,404 215.58,224 235.89,328.97 256.21,404 276.53,328.97 317.16,284 337.47,328.97 357.79,328.97 378.11,328.97 398.42,328.97 418.74,270.68 439.05,270.68 479.68,328.97 500,270.68 540.63,270.68 560.95,270.68 581.26,270.68 601.58,328.97 621.89,270.68 642.21,328.97 662.53,270.68 682.84,328.97 703.16,328.97 723.47,328.97 743.79,270.68 764.11,328.97 784.42,328.97 804.74,328.97 825.05,270.68 845.37,328.97 865.68,270.68"/>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/953a397a860307d3061eef2cad69c80d09ef20f5" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/953a397a860307d3061eef2cad69c80d09ef20f5" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 953a397: 0.25</title>
 <circle cx="114" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/2051b642d9e31e9402ce1ec8a00b70cc27801f16" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/2051b642d9e31e9402ce1ec8a00b70cc27801f16" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 2051b64: 0.44</title>
-<circle cx="133.79" cy="270.68" r="5" fill="#0f766e"/>
+<circle cx="134.32" cy="270.68" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/23ef040e5ad66603354e3395f7eac77df9b76f06" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/23ef040e5ad66603354e3395f7eac77df9b76f06" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 23ef040: 0.25</title>
-<circle cx="153.59" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="154.63" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 8483637: 0.25</title>
-<circle cx="173.38" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="174.95" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry e03c176: 0.00</title>
-<circle cx="193.18" cy="404" r="5" fill="#0f766e"/>
+<circle cx="195.26" cy="404" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/da5d191b03f61b4e07149c10d29bbd7542511889" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/da5d191b03f61b4e07149c10d29bbd7542511889" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry da5d191: 0.60</title>
-<circle cx="212.97" cy="224" r="5" fill="#0f766e"/>
+<circle cx="215.58" cy="224" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/24b90c4d2a03ece561b3b1b988cfa2508c088013" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/24b90c4d2a03ece561b3b1b988cfa2508c088013" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 24b90c4: 0.25</title>
-<circle cx="232.77" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="235.89" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/5cfa918db7448aeb92b6b8aa66f687a9359b71e6" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/5cfa918db7448aeb92b6b8aa66f687a9359b71e6" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 5cfa918: 0.00</title>
-<circle cx="252.56" cy="404" r="5" fill="#0f766e"/>
+<circle cx="256.21" cy="404" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry bdf2482: 0.25</title>
-<circle cx="272.36" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="276.53" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/ed26197c6c6cf5c7d21e35b9f2c9f5cb85fcac8e" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/ed26197c6c6cf5c7d21e35b9f2c9f5cb85fcac8e" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry ed26197: 0.40</title>
-<circle cx="311.95" cy="284" r="5" fill="#0f766e"/>
+<circle cx="317.16" cy="284" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/3ea30591805bdb0dda96ae56efa08419e7b4a506" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/3ea30591805bdb0dda96ae56efa08419e7b4a506" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 3ea3059: 0.25</title>
-<circle cx="331.74" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="337.47" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/63becee294476e3e750a79163c01634138b94282" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/63becee294476e3e750a79163c01634138b94282" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 63becee: 0.25</title>
-<circle cx="351.54" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="357.79" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/bf9f729656bd4d2b0e8860c560cc3a1716a3dca0" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/bf9f729656bd4d2b0e8860c560cc3a1716a3dca0" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry bf9f729: 0.25</title>
-<circle cx="371.33" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="378.11" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/8aac39f661655f98f6e9ba2be71c079d650e2223" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/8aac39f661655f98f6e9ba2be71c079d650e2223" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 8aac39f: 0.25</title>
-<circle cx="391.13" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="398.42" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/80350a94d72cb12c6e22427fcc925ba21777a309" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/80350a94d72cb12c6e22427fcc925ba21777a309" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 80350a9: 0.44</title>
-<circle cx="410.92" cy="270.68" r="5" fill="#0f766e"/>
+<circle cx="418.74" cy="270.68" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/4928cbe154027060b4b9d9e63e9414a6a0547022" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/4928cbe154027060b4b9d9e63e9414a6a0547022" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 4928cbe: 0.44</title>
-<circle cx="430.72" cy="270.68" r="5" fill="#0f766e"/>
+<circle cx="439.05" cy="270.68" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/e685be803fb66b20e1a95861e825977bfb44688d" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/e685be803fb66b20e1a95861e825977bfb44688d" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry e685be8: 0.25</title>
-<circle cx="470.31" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="479.68" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/10f56085d502872dc4bea66c9101053c73eced29" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/10f56085d502872dc4bea66c9101053c73eced29" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 10f5608: 0.44</title>
-<circle cx="490.1" cy="270.68" r="5" fill="#0f766e"/>
+<circle cx="500" cy="270.68" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/04cfef8eedde6e7fe64ecb1d661c3f1555ac8edf" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/04cfef8eedde6e7fe64ecb1d661c3f1555ac8edf" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 04cfef8: 0.44</title>
-<circle cx="529.69" cy="270.68" r="5" fill="#0f766e"/>
+<circle cx="540.63" cy="270.68" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/fa8d03937b693cb377015d2e52bdcd44fe312657" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/fa8d03937b693cb377015d2e52bdcd44fe312657" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry fa8d039: 0.44</title>
-<circle cx="549.49" cy="270.68" r="5" fill="#0f766e"/>
+<circle cx="560.95" cy="270.68" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/89e05a75990d27a6fee589f13e6f9679338a2b9f" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/89e05a75990d27a6fee589f13e6f9679338a2b9f" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 89e05a7: 0.44</title>
-<circle cx="569.28" cy="270.68" r="5" fill="#0f766e"/>
+<circle cx="581.26" cy="270.68" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/0e073cf7809d7f05ba1cc2a3c86c273100f7455c" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/0e073cf7809d7f05ba1cc2a3c86c273100f7455c" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 0e073cf: 0.25</title>
-<circle cx="589.08" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="601.58" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/09deffaa16713b4eb7a1f29e937ca1862ecc747b" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/09deffaa16713b4eb7a1f29e937ca1862ecc747b" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 09deffa: 0.44</title>
-<circle cx="608.87" cy="270.68" r="5" fill="#0f766e"/>
+<circle cx="621.89" cy="270.68" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/a4b3c9769af5f999a337dfb34baf0a25b2295a38" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/a4b3c9769af5f999a337dfb34baf0a25b2295a38" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry a4b3c97: 0.25</title>
-<circle cx="628.67" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="642.21" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/650dc02cf904e33d00049bf0dc361d655579add2" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/650dc02cf904e33d00049bf0dc361d655579add2" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 650dc02: 0.44</title>
-<circle cx="648.46" cy="270.68" r="5" fill="#0f766e"/>
+<circle cx="662.53" cy="270.68" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/4c5900210ab2d2b3eef1184164817a881e2fb09c" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/4c5900210ab2d2b3eef1184164817a881e2fb09c" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 4c59002: 0.25</title>
-<circle cx="668.26" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="682.84" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/fd079e3c6e4d41dccf33c97d56b816b15e6069b5" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/fd079e3c6e4d41dccf33c97d56b816b15e6069b5" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry fd079e3: 0.25</title>
-<circle cx="688.05" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="703.16" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/e75076041731a56b64df14bc3749a829a5777ea4" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/e75076041731a56b64df14bc3749a829a5777ea4" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry e750760: 0.25</title>
-<circle cx="707.85" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="723.47" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/5b7c0c0d13461dd479952f772d71fa3657874a7e" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/5b7c0c0d13461dd479952f772d71fa3657874a7e" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 5b7c0c0: 0.44</title>
-<circle cx="727.64" cy="270.68" r="5" fill="#0f766e"/>
+<circle cx="743.79" cy="270.68" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/b22f23c6a6787014f7ac35d6c7dbcc4101482c5f" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/b22f23c6a6787014f7ac35d6c7dbcc4101482c5f" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry b22f23c: 0.25</title>
-<circle cx="747.44" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="764.11" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/2d47e73d15bf74184d8672ae39799ff4cff018fd" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/2d47e73d15bf74184d8672ae39799ff4cff018fd" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 2d47e73: 0.25</title>
-<circle cx="767.23" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="784.42" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/5db8c6febeaddeb012d60f34c96b28009fda1ff9" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/5db8c6febeaddeb012d60f34c96b28009fda1ff9" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 5db8c6f: 0.25</title>
-<circle cx="787.03" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="804.74" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/650a87aac8cf0d02d1ad698de39e8b30e39c94d4" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/650a87aac8cf0d02d1ad698de39e8b30e39c94d4" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 650a87a: 0.44</title>
-<circle cx="806.82" cy="270.68" r="5" fill="#0f766e"/>
+<circle cx="825.05" cy="270.68" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/cb672c67bbe1255a0c96dc2e89653e7422f2246b" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/cb672c67bbe1255a0c96dc2e89653e7422f2246b" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry cb672c6: 0.25</title>
-<circle cx="846.41" cy="328.97" r="5" fill="#0f766e"/>
+<circle cx="845.37" cy="328.97" r="5" fill="#0f766e"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/6d1db74df734ad9503069c86c6eea51eff51d569" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/6d1db74df734ad9503069c86c6eea51eff51d569" data-status="complete" data-available-count="1" data-expected-count="1"><title>gpt-5.6-luna high very-liquid-vaults-foundry 6d1db74: 0.44</title>
-<circle cx="866.21" cy="270.68" r="5" fill="#0f766e"/>
+<circle cx="865.68" cy="270.68" r="5" fill="#0f766e"/>
 </a>
-<polyline fill="none" stroke="#c2410c" stroke-width="2.5" points="292.15,270.68 509.9,328.97"/>
+<polyline fill="none" stroke="#c2410c" stroke-width="2.5" points="296.84,270.68 520.32,328.97"/>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278" data-status="complete" data-available-count="1" data-expected-count="1"><title>kimi-k3 max stableswap-ng-vyper bdf2482: 0.44</title>
-<circle cx="292.15" cy="270.68" r="5" fill="#c2410c"/>
+<circle cx="296.84" cy="270.68" r="5" fill="#c2410c"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/5771bbcb44218fd64e14580443b2502cdf11dad8" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/5771bbcb44218fd64e14580443b2502cdf11dad8" data-status="complete" data-available-count="1" data-expected-count="1"><title>kimi-k3 max stableswap-ng-vyper 5771bbc: 0.25</title>
-<circle cx="509.9" cy="328.97" r="5" fill="#c2410c"/>
+<circle cx="520.32" cy="328.97" r="5" fill="#c2410c"/>
 </a>
-<polyline fill="none" stroke="#be123c" stroke-width="2.5" points="292.15,314 509.9,289.7"/>
+<polyline fill="none" stroke="#be123c" stroke-width="2.5" points="296.84,314 520.32,289.7"/>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278" data-status="complete" data-available-count="1" data-expected-count="1"><title>kimi-k3 max venus-isolated-pools-hardhat bdf2482: 0.30</title>
-<circle cx="292.15" cy="314" r="5" fill="#be123c"/>
+<circle cx="296.84" cy="314" r="5" fill="#be123c"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/5771bbcb44218fd64e14580443b2502cdf11dad8" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/5771bbcb44218fd64e14580443b2502cdf11dad8" data-status="complete" data-available-count="1" data-expected-count="1"><title>kimi-k3 max venus-isolated-pools-hardhat 5771bbc: 0.38</title>
-<circle cx="509.9" cy="289.7" r="5" fill="#be123c"/>
+<circle cx="520.32" cy="289.7" r="5" fill="#be123c"/>
 </a>
-<polyline fill="none" stroke="#4f46e5" stroke-width="2.5" points="292.15,270.68 509.9,328.97"/>
+<polyline fill="none" stroke="#4f46e5" stroke-width="2.5" points="296.84,270.68 520.32,328.97"/>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278" data-status="complete" data-available-count="1" data-expected-count="1"><title>kimi-k3 max very-liquid-vaults-foundry bdf2482: 0.44</title>
-<circle cx="292.15" cy="270.68" r="5" fill="#4f46e5"/>
+<circle cx="296.84" cy="270.68" r="5" fill="#4f46e5"/>
 </a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/5771bbcb44218fd64e14580443b2502cdf11dad8" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/5771bbcb44218fd64e14580443b2502cdf11dad8" data-status="complete" data-available-count="1" data-expected-count="1"><title>kimi-k3 max very-liquid-vaults-foundry 5771bbc: 0.25</title>
-<circle cx="509.9" cy="328.97" r="5" fill="#4f46e5"/>
+<circle cx="520.32" cy="328.97" r="5" fill="#4f46e5"/>
 </a>
 <text x="114" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">953a397</text>
 <text transform="translate(114,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-21</text>
-<text x="133.79" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">2051b64</text>
-<text transform="translate(133.79,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-22</text>
-<text x="153.59" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">23ef040</text>
-<text transform="translate(153.59,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-22</text>
-<text x="173.38" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">8483637</text>
-<text transform="translate(173.38,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-22</text>
-<text x="193.18" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">e03c176</text>
-<text transform="translate(193.18,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-23</text>
-<text x="212.97" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">da5d191</text>
-<text transform="translate(212.97,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-23</text>
-<text x="232.77" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">24b90c4</text>
-<text transform="translate(232.77,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-30</text>
-<text x="252.56" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">5cfa918</text>
-<text transform="translate(252.56,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-30</text>
-<text x="272.36" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">bdf2482</text>
-<text transform="translate(272.36,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-30</text>
-<text x="292.15" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">bdf2482</text>
-<text transform="translate(292.15,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-30</text>
-<text x="311.95" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">ed26197</text>
-<text transform="translate(311.95,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-30</text>
-<text x="331.74" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">3ea3059</text>
-<text transform="translate(331.74,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-30</text>
-<text x="351.54" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">63becee</text>
-<text transform="translate(351.54,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-31</text>
-<text x="371.33" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">bf9f729</text>
-<text transform="translate(371.33,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-31</text>
-<text x="391.13" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">8aac39f</text>
-<text transform="translate(391.13,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-31</text>
-<text x="410.92" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">80350a9</text>
-<text transform="translate(410.92,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-31</text>
-<text x="430.72" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">4928cbe</text>
-<text transform="translate(430.72,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-31</text>
-<text x="450.51" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">09277b8</text>
-<text transform="translate(450.51,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-01</text>
-<text x="470.31" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">e685be8</text>
-<text transform="translate(470.31,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-02</text>
-<text x="490.1" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">10f5608</text>
-<text transform="translate(490.1,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-03</text>
-<text x="509.9" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">5771bbc</text>
-<text transform="translate(509.9,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-03</text>
-<text x="529.69" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">04cfef8</text>
-<text transform="translate(529.69,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-03</text>
-<text x="549.49" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">fa8d039</text>
-<text transform="translate(549.49,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-04</text>
-<text x="569.28" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">89e05a7</text>
-<text transform="translate(569.28,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-04</text>
-<text x="589.08" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">0e073cf</text>
-<text transform="translate(589.08,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-04</text>
-<text x="608.87" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">09deffa</text>
-<text transform="translate(608.87,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
-<text x="628.67" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">a4b3c97</text>
-<text transform="translate(628.67,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
-<text x="648.46" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">650dc02</text>
-<text transform="translate(648.46,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
-<text x="668.26" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">4c59002</text>
-<text transform="translate(668.26,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
-<text x="688.05" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">fd079e3</text>
-<text transform="translate(688.05,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
-<text x="707.85" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">e750760</text>
-<text transform="translate(707.85,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
-<text x="727.64" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">5b7c0c0</text>
-<text transform="translate(727.64,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
-<text x="747.44" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">b22f23c</text>
-<text transform="translate(747.44,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
-<text x="767.23" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">2d47e73</text>
-<text transform="translate(767.23,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-07</text>
-<text x="787.03" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">5db8c6f</text>
-<text transform="translate(787.03,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-07</text>
-<text x="806.82" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">650a87a</text>
-<text transform="translate(806.82,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-08</text>
-<text x="826.62" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">70646d2</text>
-<text transform="translate(826.62,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-08</text>
-<text x="846.41" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">cb672c6</text>
-<text transform="translate(846.41,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-09</text>
-<text x="866.21" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">6d1db74</text>
-<text transform="translate(866.21,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-09</text>
+<text x="134.32" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">2051b64</text>
+<text transform="translate(134.32,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-22</text>
+<text x="154.63" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">23ef040</text>
+<text transform="translate(154.63,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-22</text>
+<text x="174.95" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">8483637</text>
+<text transform="translate(174.95,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-22</text>
+<text x="195.26" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">e03c176</text>
+<text transform="translate(195.26,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-23</text>
+<text x="215.58" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">da5d191</text>
+<text transform="translate(215.58,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-23</text>
+<text x="235.89" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">24b90c4</text>
+<text transform="translate(235.89,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-30</text>
+<text x="256.21" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">5cfa918</text>
+<text transform="translate(256.21,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-30</text>
+<text x="276.53" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">bdf2482</text>
+<text transform="translate(276.53,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-30</text>
+<text x="296.84" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">bdf2482</text>
+<text transform="translate(296.84,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-30</text>
+<text x="317.16" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">ed26197</text>
+<text transform="translate(317.16,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-30</text>
+<text x="337.47" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">3ea3059</text>
+<text transform="translate(337.47,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-30</text>
+<text x="357.79" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">63becee</text>
+<text transform="translate(357.79,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-31</text>
+<text x="378.11" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">bf9f729</text>
+<text transform="translate(378.11,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-31</text>
+<text x="398.42" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">8aac39f</text>
+<text transform="translate(398.42,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-31</text>
+<text x="418.74" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">80350a9</text>
+<text transform="translate(418.74,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-31</text>
+<text x="439.05" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">4928cbe</text>
+<text transform="translate(439.05,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-31</text>
+<text x="459.37" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">09277b8</text>
+<text transform="translate(459.37,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-01</text>
+<text x="479.68" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">e685be8</text>
+<text transform="translate(479.68,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-02</text>
+<text x="500" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">10f5608</text>
+<text transform="translate(500,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-03</text>
+<text x="520.32" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">5771bbc</text>
+<text transform="translate(520.32,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-03</text>
+<text x="540.63" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">04cfef8</text>
+<text transform="translate(540.63,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-03</text>
+<text x="560.95" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">fa8d039</text>
+<text transform="translate(560.95,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-04</text>
+<text x="581.26" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">89e05a7</text>
+<text transform="translate(581.26,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-04</text>
+<text x="601.58" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">0e073cf</text>
+<text transform="translate(601.58,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-04</text>
+<text x="621.89" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">09deffa</text>
+<text transform="translate(621.89,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
+<text x="642.21" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">a4b3c97</text>
+<text transform="translate(642.21,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
+<text x="662.53" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">650dc02</text>
+<text transform="translate(662.53,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
+<text x="682.84" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">4c59002</text>
+<text transform="translate(682.84,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
+<text x="703.16" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">fd079e3</text>
+<text transform="translate(703.16,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
+<text x="723.47" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">e750760</text>
+<text transform="translate(723.47,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
+<text x="743.79" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">5b7c0c0</text>
+<text transform="translate(743.79,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
+<text x="764.11" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">b22f23c</text>
+<text transform="translate(764.11,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-05</text>
+<text x="784.42" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">2d47e73</text>
+<text transform="translate(784.42,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-07</text>
+<text x="804.74" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">5db8c6f</text>
+<text transform="translate(804.74,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-07</text>
+<text x="825.05" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">650a87a</text>
+<text transform="translate(825.05,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-08</text>
+<text x="845.37" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">cb672c6</text>
+<text transform="translate(845.37,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-09</text>
+<text x="865.68" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">6d1db74</text>
+<text transform="translate(865.68,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-09</text>
 <text x="886" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">6d1db74</text>
 <text transform="translate(886,520) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-08-09</text>
 <rect x="70" y="543" width="12" height="12" fill="#2563eb"/>
