@@ -3,7 +3,7 @@
 The CLI binary is `ultrafuzz`.
 
 Every command accepts `--project <path>`. Commands that support automation
-accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
+accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 
 ## Commands
 
@@ -59,15 +59,26 @@ JSON output has this shape:
 
 ```json
 {
-  "schema_version": "ultrafuzz.cli.result.v1",
-  "command": "validate",
+  "schema_version": "ultrafuzz.cli.result.v2",
+  "command": "init",
   "ok": true,
   "diagnostics": [],
-  "data": {}
+  "data": {
+    "project_root": "/project",
+    "created": [],
+    "preserved": [],
+    "overwritten": []
+  }
 }
 ```
 
-Machine consumers should read `ok`, `diagnostics`, and `data`.
+Machine consumers should read `ok`, `diagnostics`, and `data`. The v2 envelope
+is intentionally breaking and command-discriminated: every known command has a
+closed `data` shape, public diagnostics omit private implementation details,
+and unknown invocation failures can emit only `ok: false` with `data: null`.
+Only explicit operator workflow input and redacted third-party tool
+input/output retain deliberately open nested JSON. Version 1 is not accepted
+or converted.
 
 ## Init
 
@@ -131,7 +142,7 @@ The exit contract is:
 |    2 | Invocation, schema/reference loading, schema compilation, resource limits, or validator setup failed. |
 
 Human-readable failures go to stderr. `--json` emits the standard
-`ultrafuzz.cli.result.v1` envelope. Neither success nor failure changes the
+`ultrafuzz.cli.result.v2` envelope. Neither success nor failure changes the
 schema or artifact bytes.
 
 Checked-in artifact, eval, Modal, and topology schemas are loaded from composed
@@ -162,7 +173,7 @@ and post-session shape failure is terminal rather than a model retry.
 ultrafuzz run \
   [--project <path>] \
   [--run-id <id>] \
-  [--input <json-or-path>] \
+  [--input-json <strict-json> | --input-file <json-path>] \
   [--prompt <text>] \
   [--agent <agent-ref>] \
   [--model <model>] \
@@ -170,10 +181,17 @@ ultrafuzz run \
   [--json]
 ```
 
-`--input` accepts inline JSON or a project-relative JSON file path. Model-only
-overrides keep the configured agent and reasoning. When `--agent` selects
-another agent, backend-specific reasoning is cleared, including when `--model`
-also pins a replacement model.
+`--input-json` and `--input-file` are mutually exclusive. Inline input is
+always strict RFC 8259 JSON and is never retried as a path after a parse error.
+Relative file paths resolve from the project root. File input is read from one
+bounded, non-symlink regular-file snapshot and is rejected if it changes
+during the read. Both forms reject invalid UTF-8,
+duplicate keys, malformed JSON, and non-finite numbers. Their application data
+is explicitly operator-defined; Ultrafuzz validates that it is JSON but does
+not infer, repair, normalize, or convert its domain shape. Model-only overrides
+keep the configured agent and reasoning. When `--agent` selects another agent,
+backend-specific reasoning is cleared, including when `--model` also pins a
+replacement model.
 `--max-concurrency` caps workflow task submission concurrency.
 
 Runs require pinned reference material to already be present in the local cache
@@ -263,7 +281,7 @@ Pace: 4 finished in the last 10m
 `--watch` re-polls every `--interval` seconds (default 30) until the run
 reaches a terminal state (`succeeded`, `failed`, `timed-out`, or `canceled`)
 or the poll fails. With `--json --watch`, every poll writes one
-newline-delimited `ultrafuzz.cli.result.v1` envelope so the stream pipes into
+newline-delimited `ultrafuzz.cli.result.v2` envelope so the stream pipes into
 `jq` and other line-oriented tools; without `--watch`, `--json` keeps the
 existing pretty-printed single envelope.
 
@@ -354,7 +372,7 @@ Without `--watch` it returns a bounded typed array with `limit` and
 `truncated`;
 `--limit` defaults to 200 and is capped at 2000. `--watch` streams new events
 incrementally rather than buffering the run, printing one redacted event per
-line in human mode and one newline-delimited `ultrafuzz.cli.result.v1` envelope
+line in human mode and one newline-delimited `ultrafuzz.cli.result.v2` envelope
 per event with `--json`. `--history` replays existing history before streaming.
 
 `node` takes a workflow node ID as already reported by `ultrafuzz inspect`. It

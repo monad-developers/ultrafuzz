@@ -263,7 +263,7 @@ function baseConfig(): string {
 
 function success(command: string, data: Record<string, unknown>): unknown {
   return {
-    schema_version: "ultrafuzz.cli.result.v1",
+    schema_version: "ultrafuzz.cli.result.v2",
     command,
     ok: true,
     diagnostics: [],

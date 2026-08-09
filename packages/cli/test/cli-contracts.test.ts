@@ -1,0 +1,244 @@
+import assert from "node:assert/strict";
+import path from "node:path";
+import test from "node:test";
+
+import { parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
+import { parseEvmbenchCliResult, type EvmbenchCliCommand } from "@ultrafuzz/evmbench";
+
+import { CLI_KNOWN_COMMANDS, CLI_SCHEMA_VERSION, type CliResultEnvelope } from "../src/cli-contracts.js";
+import {
+  CLI_RESULT_JSON_SCHEMA_ID,
+  CLI_RESULT_SCHEMA_FILENAME,
+  OPERATOR_INPUT_JSON_SCHEMA_ID,
+  OPERATOR_INPUT_SCHEMA_FILENAME,
+  cliSchemaDirectory,
+  cliOwnedSchemaRegistry,
+  cliResultJsonSchema,
+  validateCliResultEnvelope,
+  validateOperatorInput
+} from "../src/cli-schema-registry.js";
+
+const validInitEnvelope: CliResultEnvelope = {
+  schema_version: CLI_SCHEMA_VERSION,
+  command: "init",
+  ok: true,
+  diagnostics: [],
+  data: {
+    project_root: "/tmp/project",
+    created: ["ultrafuzz.toml"],
+    preserved: [],
+    overwritten: []
+  }
+};
+
+test("the CLI registry owns and compiles every CLI schema", () => {
+  const registry = cliOwnedSchemaRegistry();
+  assert.deepEqual(
+    registry.map((entry) => [entry.filename, entry.id]),
+    [
+      [CLI_RESULT_SCHEMA_FILENAME, CLI_RESULT_JSON_SCHEMA_ID],
+      [OPERATOR_INPUT_SCHEMA_FILENAME, OPERATOR_INPUT_JSON_SCHEMA_ID]
+    ]
+  );
+  assert.equal(validateCliResultEnvelope(validInitEnvelope).ok, true);
+  assert.equal(validateOperatorInput({ nested: [null, true, 1, "value"] }).ok, true);
+  for (const entry of registry) {
+    const checkedIn = parseStrictJsonBytes(
+      readRegularFileSnapshot(path.join(cliSchemaDirectory(), entry.filename), 4 * 1024 * 1024)
+    );
+    assert.deepEqual(entry.schema, checkedIn, `${entry.filename} export drifted from its checked-in schema`);
+  }
+});
+
+test("every known command has exactly one result discriminator", () => {
+  const definitions = cliResultJsonSchema.$defs as Record<string, unknown>;
+  const knownCommand = definitions.knownCommand as { enum: string[] };
+  assert.deepEqual(knownCommand.enum, [...CLI_KNOWN_COMMANDS]);
+  assert.equal(new Set(knownCommand.enum).size, CLI_KNOWN_COMMANDS.length);
+  for (const command of CLI_KNOWN_COMMANDS) {
+    const definition = command.startsWith("eval analyze ")
+      ? definitions.evalAnalyzeCommand
+      : definitions[`commandTemplate-${command.replaceAll(" ", "-")}`];
+    assert.notEqual(definition, undefined, `missing result discriminator for ${command}`);
+  }
+});
+
+test("CLI result v2 rejects legacy, open, and mistyped envelopes", () => {
+  const invalid = [
+    { ...validInitEnvelope, schema_version: "ultrafuzz.cli.result.v1" },
+    { ...validInitEnvelope, legacy: true },
+    {
+      ...validInitEnvelope,
+      diagnostics: [
+        {
+          code: "FAIL",
+          message: "failure",
+          severity: "error",
+          source: "test",
+          details: { private: true }
+        }
+      ]
+    },
+    {
+      ...validInitEnvelope,
+      data: { ...validInitEnvelope.data, legacy: true }
+    },
+    {
+      ...validInitEnvelope,
+      data: {
+        project_root: "/tmp/project",
+        created: [1],
+        preserved: [],
+        overwritten: []
+      }
+    },
+    { ...validInitEnvelope, command: "run" },
+    {
+      ...validInitEnvelope,
+      command: "future command",
+      ok: true,
+      data: null
+    }
+  ];
+  for (const candidate of invalid) {
+    assert.equal(validateCliResultEnvelope(candidate).ok, false, JSON.stringify(candidate));
+  }
+});
+
+test("unknown Oclif invocation failures remain closed and value-free", () => {
+  assert.equal(
+    validateCliResultEnvelope({
+      schema_version: CLI_SCHEMA_VERSION,
+      command: "future command",
+      ok: false,
+      diagnostics: [{ code: "CLI_OCLIF_ERROR", message: "unknown command", severity: "error", source: "cli" }],
+      data: null
+    }).ok,
+    true
+  );
+});
+
+test("EVMBench's retained Zod consumer has exact v2 shape acceptance", () => {
+  const samples: Record<EvmbenchCliCommand, Record<string, unknown>> = {
+    init: {
+      project_root: "",
+      created: [""],
+      preserved: [],
+      overwritten: []
+    },
+    run: {
+      run_id: "",
+      run_root: "",
+      status: "",
+      graph_fingerprint: "a".repeat(64),
+      config_fingerprint: "b".repeat(64),
+      workflow_ids: []
+    },
+    resume: {
+      run_id: "",
+      action: "resume",
+      submitted: true
+    },
+    status: statusData(),
+    report: {
+      markdown_path: "",
+      json_path: "",
+      source: "validated-agent-report"
+    }
+  };
+
+  for (const command of Object.keys(samples) as EvmbenchCliCommand[]) {
+    const data = samples[command];
+    const envelope = successEnvelope(command, data);
+    assertParity(command, envelope, true);
+    assertParity(command, successEnvelope(command, { ...data, unexpected: true }), false);
+    const [required] = Object.keys(data);
+    assert.ok(required);
+    const missing = { ...data };
+    delete missing[required];
+    assertParity(command, successEnvelope(command, missing), false);
+  }
+
+  const unsafeInteger = statusData();
+  (unsafeInteger.counts as Record<string, unknown>).finished = Number.MAX_SAFE_INTEGER + 1;
+  assertParity("status", successEnvelope("status", unsafeInteger), false);
+
+  const inconsistentEta = statusData();
+  inconsistentEta.eta = { available: true, seconds: null, basis: null, unavailable_reason: "run-terminal" };
+  assertParity("status", successEnvelope("status", inconsistentEta), false);
+
+  const privateDiagnostic = successEnvelope("init", samples.init);
+  privateDiagnostic.diagnostics = [
+    { code: "WARN", message: "warning", severity: "warning", source: "test", details: { private: true } }
+  ];
+  assertParity("init", privateDiagnostic, false);
+
+  const successfulError = successEnvelope("init", samples.init);
+  successfulError.diagnostics = [{ code: "FAIL", message: "failure", severity: "error", source: "test" }];
+  assertParity("init", successfulError, false);
+});
+
+function successEnvelope(command: EvmbenchCliCommand, data: Record<string, unknown>): Record<string, unknown> {
+  return {
+    schema_version: CLI_SCHEMA_VERSION,
+    command,
+    ok: true,
+    diagnostics: [],
+    data
+  };
+}
+
+function assertParity(command: EvmbenchCliCommand, value: unknown, expected: boolean): void {
+  const ajvAccepted = validateCliResultEnvelope(value).ok;
+  let zodAccepted = true;
+  try {
+    parseEvmbenchCliResult(command, value);
+  } catch {
+    zodAccepted = false;
+  }
+  assert.equal(ajvAccepted, expected, `unexpected JSON Schema result for ${command}`);
+  assert.equal(zodAccepted, expected, `unexpected Zod result for ${command}`);
+}
+
+function statusData(): Record<string, unknown> {
+  return {
+    run_id: "",
+    run_root: "",
+    status: "",
+    workflow_ids: [],
+    workflow_run_id: "",
+    workflow_status: "",
+    verdict: "progressing",
+    reason: "",
+    counts: {
+      finished: 0,
+      in_progress: 1,
+      pending: 0,
+      failed: 0,
+      waiting_approval: 0,
+      waiting_event: 0,
+      waiting_timer: 0,
+      skipped: 0,
+      other: 0,
+      total: 1
+    },
+    model_mix: [{ engine: "", model: "", attempts: 1, quota_parked: false }],
+    throughput: { recent_finished: 0, window_ms: 60_000, total_finished: 0, last_finished_at_ms: null },
+    progress: {
+      percent: 0,
+      finished: 0,
+      in_progress: 1,
+      pending: 0,
+      failed: 0,
+      skipped: 0,
+      remaining: 1,
+      total: 1
+    },
+    eta: { available: true, seconds: 10, basis: "run-throughput", unavailable_reason: null },
+    current_step: { node_id: "", iteration: 0, started_at: "", elapsed_seconds: 1, running_count: 1 },
+    gating: [],
+    gating_omitted: 0,
+    quota: null,
+    generated_at_ms: 1
+  };
+}

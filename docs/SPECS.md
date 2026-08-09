@@ -76,8 +76,18 @@ The CLI product surface consists of:
 | `materialize <run-id>` | Copy selected reviewed outputs into the target project after confirmation and path checks.                                 |
 | `clean <run-id>`       | Remove selected generated run paths after confirmation and path checks.                                                    |
 
-Commands that support automation SHOULD emit a schema-versioned JSON envelope
-with `ok`, `diagnostics`, and `data`.
+Commands that support automation MUST emit `ultrafuzz.cli.result.v2` with
+`ok`, public `diagnostics`, and command-discriminated `data`. Each current
+command payload MUST be closed and schema-validated before serialization.
+Unknown invocation failures MUST use `ok: false` and `data: null`. Explicit
+operator workflow input and redacted third-party tool input/output are the only
+deliberately opaque nested JSON values. Version-1 envelopes and compatibility
+conversion are unsupported.
+
+`run` MUST use mutually exclusive `--input-json` and `--input-file` flags; it
+MUST NOT reinterpret malformed inline JSON as a path or retain the historical
+`--input` fallback. Both forms use the strict JSON parser, and file input uses
+one bounded immutable regular-file snapshot.
 
 `ultrafuzz json validate` MUST remain separate from project-wide `ultrafuzz
 validate`. Its canonical invocation is:

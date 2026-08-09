@@ -63,7 +63,7 @@ test("json validate exposes the strict validator through the primary CLI", async
       ok: boolean;
       data: { status: string };
     };
-    assert.equal(envelope.schema_version, "ultrafuzz.cli.result.v1");
+    assert.equal(envelope.schema_version, "ultrafuzz.cli.result.v2");
     assert.equal(envelope.command, "json validate");
     assert.equal(envelope.ok, false);
     assert.equal(envelope.data.status, "instance-error");

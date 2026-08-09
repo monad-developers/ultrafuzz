@@ -1,72 +1,68 @@
 import { z } from "zod/v4";
 
-export const ULTRAFUZZ_CLI_RESULT_VERSION = "ultrafuzz.cli.result.v1" as const;
+export const ULTRAFUZZ_CLI_RESULT_VERSION = "ultrafuzz.cli.result.v2" as const;
 
-const nonemptyStringSchema = z
-  .string()
-  .min(1)
-  .max(16 * 1024);
-const safeIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u);
+const stringSchema = z.string();
 const fingerprintSchema = z.string().regex(/^[0-9a-f]{64}$/u);
-const nonnegativeIntegerSchema = z.number().int().nonnegative();
+const nonnegativeIntegerSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 
 export const evmbenchCliDiagnosticSchema = z
   .object({
-    code: nonemptyStringSchema,
-    message: nonemptyStringSchema,
+    code: stringSchema,
+    message: stringSchema,
     severity: z.enum(["error", "warning", "info"]),
-    source: nonemptyStringSchema,
-    path: nonemptyStringSchema.optional()
+    source: stringSchema,
+    path: stringSchema.optional()
   })
   .strict();
 
 const initDataSchema = z
   .object({
-    project_root: nonemptyStringSchema,
-    created: z.array(nonemptyStringSchema),
-    preserved: z.array(nonemptyStringSchema),
-    overwritten: z.array(nonemptyStringSchema)
+    project_root: stringSchema,
+    created: z.array(stringSchema),
+    preserved: z.array(stringSchema),
+    overwritten: z.array(stringSchema)
   })
   .strict();
 
 const runDataSchema = z
   .object({
-    run_id: safeIdSchema,
-    run_root: nonemptyStringSchema,
-    status: nonemptyStringSchema,
-    source_run_id: safeIdSchema.optional(),
+    run_id: stringSchema,
+    run_root: stringSchema,
+    status: stringSchema,
+    source_run_id: stringSchema.optional(),
     graph_fingerprint: fingerprintSchema,
     config_fingerprint: fingerprintSchema,
-    workflow_ids: z.array(nonemptyStringSchema).min(1)
+    workflow_ids: z.array(stringSchema)
   })
   .strict();
 
 const resumeDataSchema = z
   .object({
-    run_id: safeIdSchema,
-    workflow_run_id: nonemptyStringSchema.optional(),
-    workflow_path: nonemptyStringSchema.optional(),
+    run_id: stringSchema,
+    workflow_run_id: stringSchema.optional(),
+    workflow_path: stringSchema.optional(),
     action: z.literal("resume"),
     submitted: z.boolean()
   })
   .strict();
 
 const runListFields = {
-  run_id: safeIdSchema,
-  run_root: nonemptyStringSchema,
-  status: nonemptyStringSchema,
-  created_at: nonemptyStringSchema.optional(),
-  started_at: nonemptyStringSchema.optional(),
-  finished_at: nonemptyStringSchema.optional(),
-  source_run_id: safeIdSchema.optional(),
-  workflow_ids: z.array(nonemptyStringSchema)
+  run_id: stringSchema,
+  run_root: stringSchema,
+  status: stringSchema,
+  created_at: stringSchema.optional(),
+  started_at: stringSchema.optional(),
+  finished_at: stringSchema.optional(),
+  source_run_id: stringSchema.optional(),
+  workflow_ids: z.array(stringSchema)
 } as const;
 
 const statusDataSchema = z
   .object({
     ...runListFields,
-    workflow_run_id: nonemptyStringSchema,
-    workflow_status: nonemptyStringSchema,
+    workflow_run_id: stringSchema,
+    workflow_status: stringSchema,
     verdict: z.enum([
       "done",
       "running-healthy",
@@ -78,7 +74,7 @@ const statusDataSchema = z
       "cancelled",
       "failed"
     ]),
-    reason: z.string().max(16 * 1024),
+    reason: stringSchema,
     counts: z
       .object({
         finished: nonnegativeIntegerSchema,
@@ -96,8 +92,8 @@ const statusDataSchema = z
     model_mix: z.array(
       z
         .object({
-          engine: nonemptyStringSchema,
-          model: nonemptyStringSchema,
+          engine: stringSchema,
+          model: stringSchema,
           attempts: nonnegativeIntegerSchema,
           quota_parked: z.boolean()
         })
@@ -150,9 +146,9 @@ const statusDataSchema = z
       }),
     current_step: z
       .object({
-        node_id: safeIdSchema.nullable(),
+        node_id: stringSchema.nullable(),
         iteration: nonnegativeIntegerSchema.nullable(),
-        started_at: nonemptyStringSchema.nullable(),
+        started_at: stringSchema.nullable(),
         elapsed_seconds: z.number().nonnegative().nullable(),
         running_count: nonnegativeIntegerSchema
       })
@@ -160,13 +156,10 @@ const statusDataSchema = z
     gating: z.array(
       z
         .object({
-          node_id: safeIdSchema,
+          node_id: stringSchema,
           iteration: nonnegativeIntegerSchema,
-          state: nonemptyStringSchema,
-          detail: z
-            .string()
-            .max(16 * 1024)
-            .nullable()
+          state: stringSchema,
+          detail: stringSchema.nullable()
         })
         .strict()
     ),
@@ -174,7 +167,7 @@ const statusDataSchema = z
     quota: z
       .object({
         parked_count: nonnegativeIntegerSchema,
-        parked_node_ids: z.array(safeIdSchema),
+        parked_node_ids: z.array(stringSchema),
         reset_at_ms: nonnegativeIntegerSchema.nullable()
       })
       .strict()
@@ -185,8 +178,8 @@ const statusDataSchema = z
 
 const reportDataSchema = z
   .object({
-    markdown_path: nonemptyStringSchema,
-    json_path: nonemptyStringSchema,
+    markdown_path: stringSchema,
+    json_path: stringSchema,
     source: z.literal("validated-agent-report")
   })
   .strict();

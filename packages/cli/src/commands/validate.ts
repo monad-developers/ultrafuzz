@@ -2,6 +2,7 @@ import { Command } from "@oclif/core";
 import { validateProject } from "@ultrafuzz/runtime";
 
 import { cliIo, commandFromRuntime, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
+import { toCliValidateProjectData } from "../cli-contracts.js";
 
 export default class Validate extends Command {
   static override summary = "Validate config, topology, prompts, paths, and agent registry";
@@ -13,12 +14,17 @@ export default class Validate extends Command {
     emitCommandResult(
       this,
       "validate",
-      commandFromRuntime("validate", result, (value) => {
-        const entries = Object.entries(value.policy_posture)
-          .map(([name, posture]) => `- ${name}: ${posture.status} - ${posture.summary}`)
-          .join("\n");
-        return `${entries}\n`;
-      }),
+      commandFromRuntime(
+        "validate",
+        result,
+        (value) => {
+          const entries = Object.entries(value.policy_posture)
+            .map(([name, posture]) => `- ${name}: ${posture.status} - ${posture.summary}`)
+            .join("\n");
+          return `${entries}\n`;
+        },
+        toCliValidateProjectData
+      ),
       flags.json === true
     );
   }

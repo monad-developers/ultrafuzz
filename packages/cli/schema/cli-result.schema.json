@@ -1,0 +1,2151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:cli:result:2",
+  "title": "Ultrafuzz CLI result v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "command", "ok", "diagnostics", "data"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.cli.result.v2" },
+    "command": { "type": "string", "minLength": 1 },
+    "ok": { "type": "boolean" },
+    "diagnostics": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/diagnostic" }
+    },
+    "data": {}
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": { "ok": { "const": true } },
+        "required": ["ok"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "diagnostics": {
+            "not": {
+              "type": "array",
+              "contains": {
+                "type": "object",
+                "properties": { "severity": { "const": "error" } },
+                "required": ["severity"]
+              }
+            }
+          }
+        }
+      }
+    },
+    { "$ref": "#/$defs/initCommand" },
+    { "$ref": "#/$defs/validateCommand" },
+    { "$ref": "#/$defs/runCommand" },
+    { "$ref": "#/$defs/psCommand" },
+    { "$ref": "#/$defs/statusCommand" },
+    { "$ref": "#/$defs/inspectCommand" },
+    { "$ref": "#/$defs/reportCommand" },
+    { "$ref": "#/$defs/reportBundleCommand" },
+    { "$ref": "#/$defs/materializeCommand" },
+    { "$ref": "#/$defs/cleanCommand" },
+    { "$ref": "#/$defs/doctorCommand" },
+    { "$ref": "#/$defs/referencesStatusCommand" },
+    { "$ref": "#/$defs/referencesSyncCommand" },
+    { "$ref": "#/$defs/referencesUpdateCommand" },
+    { "$ref": "#/$defs/pauseCommand" },
+    { "$ref": "#/$defs/resumeCommand" },
+    { "$ref": "#/$defs/replayCommand" },
+    { "$ref": "#/$defs/forkCommand" },
+    { "$ref": "#/$defs/cancelCommand" },
+    { "$ref": "#/$defs/whyCommand" },
+    { "$ref": "#/$defs/timelineCommand" },
+    { "$ref": "#/$defs/eventsCommand" },
+    { "$ref": "#/$defs/nodeCommand" },
+    { "$ref": "#/$defs/snapshotsCommand" },
+    { "$ref": "#/$defs/jsonValidateCommand" },
+    { "$ref": "#/$defs/evalPlanCommand" },
+    { "$ref": "#/$defs/evalRunCommand" },
+    { "$ref": "#/$defs/evalStatusCommand" },
+    { "$ref": "#/$defs/evalScoreCommand" },
+    { "$ref": "#/$defs/evalReportCommand" },
+    { "$ref": "#/$defs/evalBundleCommand" },
+    { "$ref": "#/$defs/evalCompareCommand" },
+    { "$ref": "#/$defs/evalHistoryCommand" },
+    { "$ref": "#/$defs/evalPublishCommand" },
+    { "$ref": "#/$defs/evalAnalyzeCommand" },
+    { "$ref": "#/$defs/unknownInvocationFailure" }
+  ],
+  "$defs": {
+    "knownCommand": {
+      "enum": [
+        "init",
+        "validate",
+        "run",
+        "ps",
+        "status",
+        "inspect",
+        "report",
+        "report bundle",
+        "materialize",
+        "clean",
+        "doctor",
+        "references status",
+        "references sync",
+        "references update",
+        "pause",
+        "resume",
+        "replay",
+        "fork",
+        "cancel",
+        "why",
+        "timeline",
+        "events",
+        "node",
+        "snapshots",
+        "json validate",
+        "eval plan",
+        "eval run",
+        "eval status",
+        "eval score",
+        "eval report",
+        "eval bundle",
+        "eval compare",
+        "eval history",
+        "eval publish",
+        "eval analyze upsert",
+        "eval analyze upset",
+        "eval analyze scores",
+        "eval analyze precision-recall-f1",
+        "eval analyze provenance",
+        "eval analyze table",
+        "eval analyze cost",
+        "eval analyze pairwise",
+        "eval analyze all"
+      ]
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "severity", "source"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "severity": { "enum": ["error", "warning", "info"] },
+        "source": { "type": "string" },
+        "path": { "type": "string" }
+      }
+    },
+    "jsonValue": {
+      "$comment": "Only redacted tool payloads and explicit operator-controlled workflow input use this deliberately opaque JSON value.",
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        }
+      ]
+    },
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "stringArray": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "copySelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "destination"],
+      "properties": {
+        "source": { "type": "string" },
+        "destination": { "type": "string" }
+      }
+    },
+    "runListFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "run_root", "status", "workflow_ids"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "run_root": { "type": "string" },
+        "status": { "type": "string" },
+        "created_at": { "type": "string" },
+        "started_at": { "type": "string" },
+        "finished_at": { "type": "string" },
+        "source_run_id": { "type": "string" },
+        "workflow_ids": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "initData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_root", "created", "preserved", "overwritten"],
+      "properties": {
+        "project_root": { "type": "string" },
+        "created": { "$ref": "#/$defs/stringArray" },
+        "preserved": { "$ref": "#/$defs/stringArray" },
+        "overwritten": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "posture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "status", "summary"],
+      "properties": {
+        "ok": { "type": "boolean" },
+        "status": { "enum": ["pass", "warn", "fail"] },
+        "summary": { "type": "string" }
+      }
+    },
+    "validateData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_root", "policy_posture"],
+      "properties": {
+        "project_root": { "type": "string" },
+        "config_path": { "type": "string" },
+        "policy_posture": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["config", "topology", "prompts", "paths", "agents", "trust"],
+          "properties": {
+            "config": { "$ref": "#/$defs/posture" },
+            "topology": { "$ref": "#/$defs/posture" },
+            "prompts": { "$ref": "#/$defs/posture" },
+            "paths": { "$ref": "#/$defs/posture" },
+            "agents": { "$ref": "#/$defs/posture" },
+            "trust": { "$ref": "#/$defs/posture" }
+          }
+        },
+        "resolved_config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "default_agent",
+            "output_dir",
+            "triage_quorum",
+            "triage_panel_size",
+            "execution_mode"
+          ],
+          "properties": {
+            "schema_version": { "const": "ultrafuzz.config.v2" },
+            "default_agent": { "type": "string" },
+            "default_model": { "type": "string" },
+            "default_reasoning": { "type": "string" },
+            "output_dir": { "type": "string" },
+            "triage_quorum": { "$ref": "#/$defs/positiveInteger" },
+            "triage_panel_size": { "$ref": "#/$defs/positiveInteger" },
+            "execution_mode": { "enum": ["local", "cloud"] },
+            "execution_provider": { "const": "modal" }
+          }
+        },
+        "topology": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "logical_nodes", "expanded_nodes"],
+          "properties": {
+            "path": { "type": "string" },
+            "logical_nodes": { "$ref": "#/$defs/nonNegativeInteger" },
+            "expanded_nodes": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "prompts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["prompt_dir", "prompt_count"],
+          "properties": {
+            "prompt_dir": { "type": "string" },
+            "prompt_count": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        }
+      }
+    },
+    "runData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "run_root", "status", "graph_fingerprint", "config_fingerprint", "workflow_ids"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "run_root": { "type": "string" },
+        "status": { "type": "string" },
+        "source_run_id": { "type": "string" },
+        "graph_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "config_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "workflow_ids": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "psData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_root", "product_runs", "runs"],
+      "properties": {
+        "project_root": { "type": "string" },
+        "product_runs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/runListFields" }
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["workflow_run_id"],
+            "properties": {
+              "workflow_run_id": { "type": "string" },
+              "ultrafuzz_run_id": { "type": "string" },
+              "ultrafuzz_status": { "type": "string" },
+              "run_root": { "type": "string" },
+              "workflow_status": { "type": "string" },
+              "step": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "statusData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "run_root",
+        "status",
+        "workflow_ids",
+        "workflow_run_id",
+        "workflow_status",
+        "verdict",
+        "reason",
+        "counts",
+        "model_mix",
+        "throughput",
+        "progress",
+        "eta",
+        "current_step",
+        "gating",
+        "gating_omitted",
+        "quota",
+        "generated_at_ms"
+      ],
+      "properties": {
+        "run_id": { "type": "string" },
+        "run_root": { "type": "string" },
+        "status": { "type": "string" },
+        "created_at": { "type": "string" },
+        "started_at": { "type": "string" },
+        "finished_at": { "type": "string" },
+        "source_run_id": { "type": "string" },
+        "workflow_ids": { "$ref": "#/$defs/stringArray" },
+        "workflow_run_id": { "type": "string" },
+        "workflow_status": { "type": "string" },
+        "verdict": {
+          "enum": [
+            "done",
+            "running-healthy",
+            "progressing",
+            "stalled",
+            "blocked",
+            "waiting-quota",
+            "paused",
+            "cancelled",
+            "failed"
+          ]
+        },
+        "reason": { "type": "string" },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "finished",
+            "in_progress",
+            "pending",
+            "failed",
+            "waiting_approval",
+            "waiting_event",
+            "waiting_timer",
+            "skipped",
+            "other",
+            "total"
+          ],
+          "properties": {
+            "finished": { "$ref": "#/$defs/nonNegativeInteger" },
+            "in_progress": { "$ref": "#/$defs/nonNegativeInteger" },
+            "pending": { "$ref": "#/$defs/nonNegativeInteger" },
+            "failed": { "$ref": "#/$defs/nonNegativeInteger" },
+            "waiting_approval": { "$ref": "#/$defs/nonNegativeInteger" },
+            "waiting_event": { "$ref": "#/$defs/nonNegativeInteger" },
+            "waiting_timer": { "$ref": "#/$defs/nonNegativeInteger" },
+            "skipped": { "$ref": "#/$defs/nonNegativeInteger" },
+            "other": { "$ref": "#/$defs/nonNegativeInteger" },
+            "total": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "model_mix": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["engine", "model", "attempts", "quota_parked"],
+            "properties": {
+              "engine": { "type": "string" },
+              "model": { "type": "string" },
+              "attempts": { "$ref": "#/$defs/nonNegativeInteger" },
+              "quota_parked": { "type": "boolean" }
+            }
+          }
+        },
+        "throughput": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["recent_finished", "window_ms", "total_finished", "last_finished_at_ms"],
+          "properties": {
+            "recent_finished": { "$ref": "#/$defs/nonNegativeInteger" },
+            "window_ms": { "$ref": "#/$defs/nonNegativeInteger" },
+            "total_finished": { "$ref": "#/$defs/nonNegativeInteger" },
+            "last_finished_at_ms": {
+              "type": ["integer", "null"],
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "progress": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["percent", "finished", "in_progress", "pending", "failed", "skipped", "remaining", "total"],
+          "properties": {
+            "percent": { "type": "number", "minimum": 0, "maximum": 100 },
+            "finished": { "$ref": "#/$defs/nonNegativeInteger" },
+            "in_progress": { "$ref": "#/$defs/nonNegativeInteger" },
+            "pending": { "$ref": "#/$defs/nonNegativeInteger" },
+            "failed": { "$ref": "#/$defs/nonNegativeInteger" },
+            "skipped": { "$ref": "#/$defs/nonNegativeInteger" },
+            "remaining": { "$ref": "#/$defs/nonNegativeInteger" },
+            "total": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "eta": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["available", "seconds", "basis", "unavailable_reason"],
+          "properties": {
+            "available": { "type": "boolean" },
+            "seconds": { "type": ["number", "null"], "minimum": 0 },
+            "basis": { "enum": ["recent-throughput", "run-throughput", "no-remaining-nodes", null] },
+            "unavailable_reason": {
+              "enum": [
+                "run-terminal",
+                "run-paused",
+                "no-node-counts",
+                "no-finished-nodes",
+                "no-observed-elapsed-time",
+                null
+              ]
+            }
+          },
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "available": { "const": true },
+                "seconds": { "type": "number", "minimum": 0 },
+                "basis": { "enum": ["recent-throughput", "run-throughput", "no-remaining-nodes"] },
+                "unavailable_reason": { "type": "null" }
+              },
+              "required": ["available", "seconds", "basis", "unavailable_reason"]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "available": { "const": false },
+                "seconds": { "type": "null" },
+                "basis": { "type": "null" },
+                "unavailable_reason": {
+                  "enum": [
+                    "run-terminal",
+                    "run-paused",
+                    "no-node-counts",
+                    "no-finished-nodes",
+                    "no-observed-elapsed-time"
+                  ]
+                }
+              },
+              "required": ["available", "seconds", "basis", "unavailable_reason"]
+            }
+          ]
+        },
+        "current_step": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["node_id", "iteration", "started_at", "elapsed_seconds", "running_count"],
+          "properties": {
+            "node_id": { "type": ["string", "null"] },
+            "iteration": {
+              "type": ["integer", "null"],
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "started_at": { "type": ["string", "null"] },
+            "elapsed_seconds": { "type": ["number", "null"], "minimum": 0 },
+            "running_count": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "gating": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["node_id", "iteration", "state", "detail"],
+            "properties": {
+              "node_id": { "type": "string" },
+              "iteration": { "$ref": "#/$defs/nonNegativeInteger" },
+              "state": { "type": "string" },
+              "detail": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "gating_omitted": { "$ref": "#/$defs/nonNegativeInteger" },
+        "quota": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["parked_count", "parked_node_ids", "reset_at_ms"],
+              "properties": {
+                "parked_count": { "$ref": "#/$defs/nonNegativeInteger" },
+                "parked_node_ids": { "$ref": "#/$defs/stringArray" },
+                "reset_at_ms": {
+                  "type": ["integer", "null"],
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              }
+            }
+          ]
+        },
+        "generated_at_ms": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "inspectData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "run_root", "status", "workflow_ids", "state", "events", "attempts", "graph", "metadata"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "run_root": { "type": "string" },
+        "status": { "type": "string" },
+        "created_at": { "type": "string" },
+        "started_at": { "type": "string" },
+        "finished_at": { "type": "string" },
+        "source_run_id": { "type": "string" },
+        "workflow_ids": { "$ref": "#/$defs/stringArray" },
+        "state": { "$ref": "#/$defs/publicRunState" },
+        "events": { "$ref": "#/$defs/nonNegativeInteger" },
+        "attempts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "total",
+            "executed",
+            "reused",
+            "outcomes",
+            "strategy_attempts",
+            "workflow_runs",
+            "control_generations"
+          ],
+          "properties": {
+            "total": { "$ref": "#/$defs/nonNegativeInteger" },
+            "executed": { "$ref": "#/$defs/nonNegativeInteger" },
+            "reused": { "$ref": "#/$defs/nonNegativeInteger" },
+            "outcomes": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["succeeded", "failed", "timed-out", "canceled", "reused"],
+              "properties": {
+                "succeeded": { "$ref": "#/$defs/nonNegativeInteger" },
+                "failed": { "$ref": "#/$defs/nonNegativeInteger" },
+                "timed-out": { "$ref": "#/$defs/nonNegativeInteger" },
+                "canceled": { "$ref": "#/$defs/nonNegativeInteger" },
+                "reused": { "$ref": "#/$defs/nonNegativeInteger" }
+              }
+            },
+            "strategy_attempts": { "$ref": "#/$defs/nonNegativeInteger" },
+            "workflow_runs": { "$ref": "#/$defs/nonNegativeInteger" },
+            "control_generations": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "graph": { "$ref": "urn:ultrafuzz:schema:artifacts:planned-graph:3" },
+        "metadata": { "$ref": "#/$defs/publicRunMetadata" },
+        "workflow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["run_id", "inspect", "events"],
+          "properties": {
+            "run_id": { "type": "string" },
+            "status": { "type": "string" },
+            "inspect": { "$ref": "#/$defs/workflowCommandSummary" },
+            "events": { "$ref": "#/$defs/workflowCommandSummary" }
+          }
+        }
+      }
+    },
+    "workflowCommandSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "has_json"],
+      "properties": {
+        "ok": { "type": "boolean" },
+        "has_json": { "type": "boolean" }
+      }
+    },
+    "publicRunState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "status",
+        "graph_fingerprint",
+        "config_fingerprint",
+        "created_at",
+        "nodes",
+        "last_transition_at",
+        "controller_lease",
+        "concurrency"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.cli.public-run-state.v1" },
+        "run_id": { "type": "string" },
+        "status": { "enum": ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled"] },
+        "graph_fingerprint": { "type": "string" },
+        "config_fingerprint": { "type": "string" },
+        "created_at": { "type": "string" },
+        "source_run_id": { "type": "string" },
+        "started_at": { "type": "string" },
+        "finished_at": { "type": "string" },
+        "workflow_deadline_at": { "type": "string" },
+        "last_transition_at": { "type": "string" },
+        "nodes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["node_id", "status", "retry_count", "timed_out"],
+            "properties": {
+              "node_id": { "type": "string" },
+              "status": {
+                "enum": [
+                  "pending",
+                  "ready",
+                  "runnable",
+                  "running",
+                  "succeeded",
+                  "failed",
+                  "skipped",
+                  "timed-out",
+                  "reused-from-prior-run",
+                  "invalidated"
+                ]
+              },
+              "retry_count": { "$ref": "#/$defs/nonNegativeInteger" },
+              "timed_out": { "type": "boolean" },
+              "logical_node_id": { "type": "string" },
+              "attempt_index": { "$ref": "#/$defs/nonNegativeInteger" },
+              "loop_index": { "$ref": "#/$defs/nonNegativeInteger" },
+              "model_id": { "type": "string" },
+              "model": { "type": "string" },
+              "model_index": { "$ref": "#/$defs/nonNegativeInteger" },
+              "started_at": { "type": "string" },
+              "finished_at": { "type": "string" },
+              "last_error": { "type": "string" },
+              "wait_since": { "type": "string" },
+              "wait_reason": {
+                "enum": [
+                  "ready",
+                  "capacity",
+                  "dependency",
+                  "backoff",
+                  "approval",
+                  "event",
+                  "timer",
+                  "controller-loss",
+                  "active"
+                ]
+              },
+              "next_eligible_action": {
+                "enum": [
+                  "dispatch",
+                  "capacity-available",
+                  "dependency-complete",
+                  "retry",
+                  "approve",
+                  "signal",
+                  "timer-fire",
+                  "controller-takeover",
+                  "task-complete"
+                ]
+              }
+            }
+          }
+        },
+        "controller_lease": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "duration_ms", "renewed_at", "expires_at", "recovery_attempts"],
+          "properties": {
+            "status": { "enum": ["active", "expired", "recovering"] },
+            "duration_ms": { "$ref": "#/$defs/positiveInteger" },
+            "renewed_at": { "type": "string" },
+            "expires_at": { "type": "string" },
+            "recovery_attempts": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "concurrency": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "requested_concurrency",
+            "effective_concurrency",
+            "ready_queue_depth",
+            "active_work",
+            "queued_duration_ms",
+            "active_duration_ms",
+            "idle_duration_ms",
+            "observed_at"
+          ],
+          "properties": {
+            "requested_concurrency": { "$ref": "#/$defs/positiveInteger" },
+            "effective_concurrency": { "$ref": "#/$defs/nonNegativeInteger" },
+            "ready_queue_depth": { "$ref": "#/$defs/nonNegativeInteger" },
+            "active_work": { "$ref": "#/$defs/nonNegativeInteger" },
+            "queued_duration_ms": { "$ref": "#/$defs/nonNegativeInteger" },
+            "active_duration_ms": { "$ref": "#/$defs/nonNegativeInteger" },
+            "idle_duration_ms": { "$ref": "#/$defs/nonNegativeInteger" },
+            "observed_at": { "type": "string" }
+          }
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "workflow": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "inspection": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["runId"],
+                  "properties": { "runId": { "type": "string" } }
+                },
+                "runId": { "type": "string" },
+                "compiledRunId": { "type": "string" },
+                "name": { "type": "string" },
+                "controlGeneration": { "type": "string" },
+                "linkId": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "publicRunMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "created_at",
+        "mode",
+        "workflow_ids",
+        "redacted_config_fingerprint",
+        "forge_guard"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.run-metadata.v2" },
+        "run_id": { "type": "string" },
+        "created_at": { "type": "string" },
+        "source_run_id": { "type": "string" },
+        "mode": { "enum": ["run", "resume", "replay", "fork"] },
+        "workflow_ids": { "$ref": "#/$defs/stringArray" },
+        "redacted_config_fingerprint": { "type": "string" },
+        "forge_guard": { "$ref": "urn:ultrafuzz:schema:artifacts:run-metadata:2#/$defs/forgeGuard" },
+        "workflow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["run_id", "name", "task_node_ids"],
+          "properties": {
+            "run_id": { "type": "string" },
+            "name": { "type": "string" },
+            "task_node_ids": { "$ref": "#/$defs/stringArray" }
+          }
+        },
+        "accounting": { "$ref": "urn:ultrafuzz:schema:artifacts:run-metadata:2#/$defs/accounting" }
+      }
+    },
+    "reportData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["markdown_path", "json_path", "source"],
+      "properties": {
+        "markdown_path": { "type": "string" },
+        "json_path": { "type": "string" },
+        "source": { "const": "validated-agent-report" }
+      }
+    },
+    "reportBundleData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["zip_path", "bytes", "sha256", "entry_count", "included_roots", "excluded_roots"],
+      "properties": {
+        "zip_path": { "type": "string" },
+        "bytes": { "$ref": "#/$defs/nonNegativeInteger" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "entry_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "included_roots": { "$ref": "#/$defs/stringArray" },
+        "excluded_roots": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "materializeData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "dry_run", "copied", "patches", "audit"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "dry_run": { "type": "boolean" },
+        "copied": { "type": "array", "items": { "$ref": "#/$defs/copySelection" } },
+        "patches": { "$ref": "#/$defs/stringArray" },
+        "audit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "mode", "unstaged", "audit_path", "copies", "patches"],
+          "properties": {
+            "schema_version": { "const": "ultrafuzz.materialize.audit.v1" },
+            "mode": { "enum": ["dry-run", "unstaged-working-tree"] },
+            "unstaged": { "const": true },
+            "audit_path": { "type": "string" },
+            "event_id": { "type": "string" },
+            "copies": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["source", "destination", "size_bytes", "sha256"],
+                "properties": {
+                  "source": { "type": "string" },
+                  "destination": { "type": "string" },
+                  "size_bytes": { "$ref": "#/$defs/nonNegativeInteger" },
+                  "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                }
+              }
+            },
+            "patches": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["source", "size_bytes", "sha256"],
+                "properties": {
+                  "source": { "type": "string" },
+                  "size_bytes": { "$ref": "#/$defs/nonNegativeInteger" },
+                  "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "cleanData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dry_run", "removed", "audit"],
+      "properties": {
+        "dry_run": { "type": "boolean" },
+        "removed": { "$ref": "#/$defs/stringArray" },
+        "audit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "audit_path", "selections"],
+          "properties": {
+            "schema_version": { "const": "ultrafuzz.clean.audit.v1" },
+            "audit_path": { "type": "string" },
+            "selections": { "$ref": "#/$defs/stringArray" }
+          }
+        }
+      }
+    },
+    "doctorStatus": { "enum": ["ok", "warning", "error", "unknown"] },
+    "doctorData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_root", "ok", "checks", "validation", "toolchain", "workflow_engine"],
+      "properties": {
+        "project_root": { "type": "string" },
+        "ok": { "type": "boolean" },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "status", "summary"],
+            "properties": {
+              "name": { "type": "string" },
+              "status": { "$ref": "#/$defs/doctorStatus" },
+              "summary": { "type": "string" }
+            }
+          }
+        },
+        "validation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "policy_posture"],
+          "properties": {
+            "status": { "$ref": "#/$defs/doctorStatus" },
+            "policy_posture": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "config": { "$ref": "#/$defs/doctorPosture" },
+                "topology": { "$ref": "#/$defs/doctorPosture" },
+                "prompts": { "$ref": "#/$defs/doctorPosture" },
+                "paths": { "$ref": "#/$defs/doctorPosture" },
+                "agents": { "$ref": "#/$defs/doctorPosture" },
+                "trust": { "$ref": "#/$defs/doctorPosture" }
+              }
+            }
+          }
+        },
+        "toolchain": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "required", "available", "path"],
+            "properties": {
+              "name": { "type": "string" },
+              "required": { "type": "boolean" },
+              "available": { "type": "boolean" },
+              "path": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "workflow_engine": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "bundled_version",
+            "required_version",
+            "installed_version",
+            "installed_bin_target",
+            "bin_path",
+            "latest_published_version",
+            "latest_published_is_renamed_package",
+            "layout_status",
+            "layout_detail",
+            "compatibility_patches"
+          ],
+          "properties": {
+            "bundled_version": { "type": "string" },
+            "required_version": { "type": "string" },
+            "installed_version": { "type": ["string", "null"] },
+            "installed_bin_target": { "type": ["string", "null"] },
+            "bin_path": { "type": ["string", "null"] },
+            "latest_published_version": { "type": "string" },
+            "latest_published_is_renamed_package": { "type": "boolean" },
+            "layout_status": { "$ref": "#/$defs/doctorStatus" },
+            "layout_detail": { "type": ["string", "null"] },
+            "compatibility_patches": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "doctorPosture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "summary"],
+      "properties": {
+        "status": { "type": "string" },
+        "summary": { "type": "string" }
+      }
+    },
+    "referenceStatusData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalog_path", "cache_root", "references"],
+      "properties": {
+        "catalog_path": { "type": "string" },
+        "cache_root": { "type": "string" },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "repo", "commit", "cache_dir", "ok", "messages"],
+            "properties": {
+              "id": { "type": "string" },
+              "repo": { "type": "string" },
+              "commit": { "type": "string" },
+              "cache_dir": { "type": "string" },
+              "ok": { "type": "boolean" },
+              "messages": { "$ref": "#/$defs/stringArray" }
+            }
+          }
+        }
+      }
+    },
+    "referenceSyncData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cache_root", "synced"],
+      "properties": {
+        "cache_root": { "type": "string" },
+        "synced": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "repo", "commit", "cache_dir", "fetched"],
+            "properties": {
+              "id": { "type": "string" },
+              "repo": { "type": "string" },
+              "commit": { "type": "string" },
+              "cache_dir": { "type": "string" },
+              "fetched": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "referenceUpdateData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalog_path", "updated"],
+      "properties": {
+        "catalog_path": { "type": "string" },
+        "updated": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "repo", "old_commit", "new_commit"],
+            "properties": {
+              "id": { "type": "string" },
+              "repo": { "type": "string" },
+              "old_commit": { "type": "string" },
+              "new_commit": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "pauseData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "workflow_run_id", "action", "status", "submitted"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "workflow_run_id": { "type": "string" },
+        "action": { "const": "pause" },
+        "status": { "enum": ["pause-requested", "paused"] },
+        "submitted": { "type": "boolean" }
+      }
+    },
+    "lifecycleData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "action", "submitted"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "workflow_run_id": { "type": "string" },
+        "workflow_path": { "type": "string" },
+        "action": { "enum": ["resume", "replay", "fork"] },
+        "submitted": { "type": "boolean" }
+      }
+    },
+    "cancelData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "workflow_run_id", "action", "status", "submitted", "confirmed", "run_status"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "workflow_run_id": { "type": "string" },
+        "action": { "const": "cancel" },
+        "status": { "enum": ["cancel-requested", "canceled"] },
+        "submitted": { "type": "boolean" },
+        "confirmed": { "type": "boolean" },
+        "run_status": { "type": "string" }
+      }
+    },
+    "whyData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "workflow_run_id",
+        "run_status",
+        "workflow_status",
+        "summary",
+        "current_node_id",
+        "blockers",
+        "notes",
+        "generated_at"
+      ],
+      "properties": {
+        "run_id": { "type": "string" },
+        "workflow_run_id": { "type": "string" },
+        "run_status": { "type": "string" },
+        "workflow_status": { "type": "string" },
+        "summary": { "type": "string" },
+        "current_node_id": { "type": ["string", "null"] },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "node_id",
+              "iteration",
+              "reason",
+              "unblocker",
+              "waiting_since",
+              "attempt",
+              "max_attempts"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "waiting-approval",
+                  "waiting-event",
+                  "waiting-timer",
+                  "retry-backoff",
+                  "retries-exhausted",
+                  "dependency-failed",
+                  "stale-heartbeat",
+                  "engine-busy",
+                  "binding",
+                  "side-effect-boundary",
+                  "other"
+                ]
+              },
+              "node_id": { "type": ["string", "null"] },
+              "iteration": { "type": ["integer", "null"], "minimum": 0 },
+              "reason": { "type": "string" },
+              "unblocker": { "type": ["string", "null"] },
+              "waiting_since": { "type": ["string", "null"] },
+              "attempt": { "type": ["integer", "null"], "minimum": 0 },
+              "max_attempts": { "type": ["integer", "null"], "minimum": 0 }
+            }
+          }
+        },
+        "notes": { "$ref": "#/$defs/stringArray" },
+        "generated_at": { "type": ["string", "null"] }
+      }
+    },
+    "timelineFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame", "created_at", "content_hash", "forks"],
+      "properties": {
+        "frame": { "$ref": "#/$defs/nonNegativeInteger" },
+        "created_at": { "type": ["string", "null"] },
+        "content_hash": { "type": ["string", "null"] },
+        "forks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["run_id", "branch_label", "description"],
+            "properties": {
+              "run_id": { "type": "string" },
+              "branch_label": { "type": ["string", "null"] },
+              "description": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "timelineData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "workflow_run_id", "tree", "branch", "frames", "latest_frame", "lineage"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "workflow_run_id": { "type": "string" },
+        "tree": { "type": "boolean" },
+        "branch": { "type": ["string", "null"] },
+        "frames": { "type": "array", "items": { "$ref": "#/$defs/timelineFrame" } },
+        "latest_frame": { "type": ["integer", "null"], "minimum": 0 },
+        "lineage": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["workflow_run_id", "branch", "depth", "frames"],
+            "properties": {
+              "workflow_run_id": { "type": "string" },
+              "branch": { "type": ["string", "null"] },
+              "depth": { "$ref": "#/$defs/nonNegativeInteger" },
+              "frames": { "type": "array", "items": { "$ref": "#/$defs/timelineFrame" } }
+            }
+          }
+        }
+      }
+    },
+    "lifecycleEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "timestamp", "category", "node_id", "iteration", "attempt", "detail"],
+      "properties": {
+        "sequence": { "type": ["integer", "null"], "minimum": 0 },
+        "timestamp": { "type": ["string", "null"] },
+        "category": { "type": "string" },
+        "node_id": { "type": ["string", "null"] },
+        "iteration": { "type": ["integer", "null"], "minimum": 0 },
+        "attempt": { "type": ["integer", "null"], "minimum": 0 },
+        "detail": { "type": ["string", "null"] }
+      }
+    },
+    "eventsData": {
+      "oneOf": [
+        { "$ref": "#/$defs/lifecycleEvent" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["run_id", "workflow_run_id", "events", "limit", "truncated"],
+          "properties": {
+            "run_id": { "type": "string" },
+            "workflow_run_id": { "type": "string" },
+            "events": { "type": "array", "items": { "$ref": "#/$defs/lifecycleEvent" } },
+            "limit": { "$ref": "#/$defs/positiveInteger" },
+            "truncated": { "type": "boolean" }
+          }
+        }
+      ]
+    },
+    "nodeData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "workflow_run_id",
+        "node_id",
+        "iteration",
+        "state",
+        "status",
+        "duration_ms",
+        "updated_at",
+        "attempt_counts",
+        "models",
+        "agents",
+        "output",
+        "attempts",
+        "tool_details_included"
+      ],
+      "properties": {
+        "run_id": { "type": "string" },
+        "workflow_run_id": { "type": "string" },
+        "node_id": { "type": "string" },
+        "iteration": { "type": ["integer", "null"], "minimum": 0 },
+        "state": { "type": ["string", "null"] },
+        "status": { "type": ["string", "null"] },
+        "duration_ms": { "type": ["number", "null"], "minimum": 0 },
+        "updated_at": { "type": ["string", "null"] },
+        "attempt_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["total", "succeeded", "failed", "cancelled", "waiting"],
+          "properties": {
+            "total": { "$ref": "#/$defs/nonNegativeInteger" },
+            "succeeded": { "$ref": "#/$defs/nonNegativeInteger" },
+            "failed": { "$ref": "#/$defs/nonNegativeInteger" },
+            "cancelled": { "$ref": "#/$defs/nonNegativeInteger" },
+            "waiting": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "models": { "$ref": "#/$defs/stringArray" },
+        "agents": { "$ref": "#/$defs/stringArray" },
+        "output": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "present"],
+          "properties": {
+            "source": { "type": ["string", "null"] },
+            "present": { "type": "boolean" }
+          }
+        },
+        "attempts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "attempt",
+              "iteration",
+              "state",
+              "started_at",
+              "finished_at",
+              "duration_ms",
+              "error",
+              "cached",
+              "models",
+              "agents",
+              "tool_calls"
+            ],
+            "properties": {
+              "attempt": { "type": ["integer", "null"], "minimum": 0 },
+              "iteration": { "type": ["integer", "null"], "minimum": 0 },
+              "state": { "type": ["string", "null"] },
+              "started_at": { "type": ["string", "null"] },
+              "finished_at": { "type": ["string", "null"] },
+              "duration_ms": { "type": ["number", "null"], "minimum": 0 },
+              "error": { "type": ["string", "null"] },
+              "cached": { "type": "boolean" },
+              "models": { "$ref": "#/$defs/stringArray" },
+              "agents": { "$ref": "#/$defs/stringArray" },
+              "tool_calls": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["attempt", "sequence", "name", "status", "duration_ms", "error"],
+                  "properties": {
+                    "attempt": { "type": ["integer", "null"], "minimum": 0 },
+                    "sequence": { "type": ["integer", "null"], "minimum": 0 },
+                    "name": { "type": "string" },
+                    "status": { "type": ["string", "null"] },
+                    "duration_ms": { "type": ["number", "null"], "minimum": 0 },
+                    "error": { "type": ["string", "null"] },
+                    "input": { "$ref": "#/$defs/jsonValue" },
+                    "output": { "$ref": "#/$defs/jsonValue" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tool_details_included": { "type": "boolean" }
+      }
+    },
+    "snapshotsData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "workflow_run_id", "snapshots"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "workflow_run_id": { "type": "string" },
+        "snapshots": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sequence", "node_id", "iteration", "attempt", "tier", "source", "label", "created_at"],
+            "properties": {
+              "sequence": { "type": ["integer", "null"], "minimum": 0 },
+              "node_id": { "type": ["string", "null"] },
+              "iteration": { "type": ["integer", "null"], "minimum": 0 },
+              "attempt": { "type": ["integer", "null"], "minimum": 0 },
+              "tier": { "type": ["integer", "null"], "minimum": 0 },
+              "source": { "type": ["string", "null"] },
+              "label": { "type": ["string", "null"] },
+              "created_at": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "jsonValidationData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "diagnostics", "schema", "artifact_sha256", "truncated"],
+      "properties": {
+        "status": { "enum": ["instance-error", "setup-error", "valid"] },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" },
+              "instancePath": { "type": "string" },
+              "schemaPath": { "type": "string" },
+              "keyword": { "type": "string" }
+            }
+          }
+        },
+        "schema": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "sha256", "bundle_sha256", "validator_build", "registered"],
+              "properties": {
+                "id": { "type": ["string", "null"] },
+                "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "validator_build": { "type": "string" },
+                "registered": { "type": "boolean" }
+              }
+            }
+          ]
+        },
+        "artifact_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "evalPlanData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["suite_path", "suite", "provider", "reporting", "matrix"],
+      "properties": {
+        "suite_path": { "type": "string" },
+        "suite": { "type": "string" },
+        "provider": { "enum": ["braintrust", "none"] },
+        "reporting": { "$ref": "urn:ultrafuzz:schema:evals:common:1#/$defs/reportingPolicy" },
+        "matrix": { "$ref": "urn:ultrafuzz:schema:evals:matrix:1" }
+      }
+    },
+    "evalRunData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eval_run_id", "eval_run_root", "suite_path", "matrix_path", "launched", "failed", "incomplete"],
+      "properties": {
+        "eval_run_id": { "type": "string" },
+        "eval_run_root": { "type": "string" },
+        "suite_path": { "type": "string" },
+        "matrix_path": { "type": "string" },
+        "launched": { "$ref": "#/$defs/nonNegativeInteger" },
+        "failed": { "$ref": "#/$defs/nonNegativeInteger" },
+        "incomplete": { "$ref": "#/$defs/nonNegativeInteger" },
+        "report_url": { "type": "string" }
+      }
+    },
+    "evalStatusData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "snapshot_at", "stale_after_seconds", "completed_node_statuses", "rows"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.eval.status.v1" },
+        "snapshot_at": { "type": "string", "format": "date-time" },
+        "stale_after_seconds": { "$ref": "#/$defs/positiveInteger" },
+        "completed_node_statuses": { "$ref": "#/$defs/stringArray" },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "row",
+              "status",
+              "terminal",
+              "executed_nodes",
+              "total_nodes",
+              "progress_percent",
+              "eta_remaining_seconds",
+              "eta_at",
+              "checkpoint_age_seconds",
+              "checkpoint_stale",
+              "eta_basis",
+              "eta_unavailable_reason"
+            ],
+            "properties": {
+              "row": { "type": "string" },
+              "status": {
+                "enum": [
+                  "pending",
+                  "running",
+                  "paused",
+                  "succeeded",
+                  "failed",
+                  "timed-out",
+                  "canceled",
+                  "not-launched",
+                  "inaccessible",
+                  "invalid"
+                ]
+              },
+              "terminal": { "type": "boolean" },
+              "executed_nodes": { "type": ["integer", "null"], "minimum": 0 },
+              "total_nodes": { "type": ["integer", "null"], "minimum": 0 },
+              "progress_percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+              "eta_remaining_seconds": { "type": ["integer", "null"], "minimum": 0 },
+              "eta_at": { "type": ["string", "null"], "format": "date-time" },
+              "checkpoint_age_seconds": { "type": ["number", "null"], "minimum": 0 },
+              "checkpoint_stale": { "type": ["boolean", "null"] },
+              "eta_basis": { "enum": ["observed-terminal-node-throughput", "terminal", null] },
+              "eta_unavailable_reason": {
+                "enum": ["progress-unavailable", "no-completed-nodes", "timing-unavailable", "checkpoint-stale", null]
+              }
+            }
+          }
+        }
+      }
+    },
+    "evalBundleData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["output_dir", "manifest_path", "omissions_path", "manifest", "omissions"],
+      "properties": {
+        "output_dir": { "type": "string" },
+        "manifest_path": { "type": "string" },
+        "omissions_path": { "type": "string" },
+        "manifest": { "$ref": "urn:ultrafuzz:schema:artifacts:analysis-bundle:1" },
+        "omissions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "omissions"],
+          "properties": {
+            "schema_version": { "const": "ultrafuzz.analysis-bundle.v1" },
+            "omissions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "path", "reason"],
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "terminal-status",
+                      "evaluation-metrics",
+                      "accounting-summary",
+                      "attempt-history",
+                      "recovery-summary"
+                    ]
+                  },
+                  "path": { "type": "string" },
+                  "reason": { "enum": ["source-missing", "source-invalid", "not-terminal", "data-unavailable"] }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "variantScore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "variant_id",
+        "row_count",
+        "precision",
+        "recall",
+        "f1_score",
+        "full_match_rate",
+        "human_review_queue_count",
+        "duplicate_rate",
+        "report_schema_valid_rate"
+      ],
+      "properties": {
+        "variant_id": { "type": "string" },
+        "row_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "precision": { "type": "number" },
+        "recall": { "type": "number" },
+        "f1_score": { "type": "number" },
+        "full_match_rate": { "type": "number" },
+        "human_review_queue_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "duplicate_rate": { "type": "number" },
+        "report_schema_valid_rate": { "type": "number" }
+      }
+    },
+    "candidateProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "commit", "dirty"],
+      "properties": {
+        "label": { "type": "string" },
+        "commit": { "type": "string" },
+        "dirty": { "type": "boolean" },
+        "execution_artifact_id": { "type": "string" }
+      }
+    },
+    "evalCompareData": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["baseline", "variants"],
+          "properties": {
+            "baseline": { "type": "string" },
+            "variants": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "variant_id",
+                  "row_count",
+                  "precision",
+                  "recall",
+                  "f1_score",
+                  "full_match_rate",
+                  "human_review_queue_count",
+                  "duplicate_rate",
+                  "report_schema_valid_rate",
+                  "delta_f1_score",
+                  "delta_recall",
+                  "delta_precision"
+                ],
+                "properties": {
+                  "variant_id": { "type": "string" },
+                  "row_count": { "$ref": "#/$defs/nonNegativeInteger" },
+                  "precision": { "type": "number" },
+                  "recall": { "type": "number" },
+                  "f1_score": { "type": "number" },
+                  "full_match_rate": { "type": "number" },
+                  "human_review_queue_count": { "$ref": "#/$defs/nonNegativeInteger" },
+                  "duplicate_rate": { "type": "number" },
+                  "report_schema_valid_rate": { "type": "number" },
+                  "delta_f1_score": { "type": "number" },
+                  "delta_recall": { "type": "number" },
+                  "delta_precision": { "type": "number" }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "baseline_eval_run_id",
+            "candidate_eval_run_id",
+            "compatible",
+            "waiver_applied",
+            "differences",
+            "variants"
+          ],
+          "properties": {
+            "baseline_eval_run_id": { "type": "string" },
+            "candidate_eval_run_id": { "type": "string" },
+            "compatible": { "type": "boolean" },
+            "waiver_applied": { "type": "boolean" },
+            "differences": { "$ref": "#/$defs/stringArray" },
+            "baseline_candidate": { "$ref": "#/$defs/candidateProvenance" },
+            "candidate": { "$ref": "#/$defs/candidateProvenance" },
+            "variants": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "variant_id",
+                  "baseline",
+                  "candidate",
+                  "delta_f1_score",
+                  "delta_recall",
+                  "delta_precision"
+                ],
+                "properties": {
+                  "variant_id": { "type": "string" },
+                  "baseline": { "$ref": "#/$defs/variantScore" },
+                  "candidate": { "$ref": "#/$defs/variantScore" },
+                  "delta_f1_score": { "type": "number" },
+                  "delta_recall": { "type": "number" },
+                  "delta_precision": { "type": "number" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "evalHistoryData": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["history_path", "observations", "appended", "charts"],
+          "properties": {
+            "history_path": { "type": "string" },
+            "observations": { "$ref": "#/$defs/nonNegativeInteger" },
+            "appended": { "$ref": "#/$defs/nonNegativeInteger" },
+            "charts": { "$ref": "#/$defs/stringArray" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["history_path", "observations", "charts_directory", "checked"],
+          "properties": {
+            "history_path": { "type": "string" },
+            "observations": { "$ref": "#/$defs/nonNegativeInteger" },
+            "charts_directory": { "type": "string" },
+            "checked": { "type": "boolean" }
+          }
+        }
+      ]
+    },
+    "evalPublishData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eval_run_id",
+        "provider",
+        "rows_published",
+        "rows_skipped",
+        "events_published",
+        "artifacts_published",
+        "scores_published"
+      ],
+      "properties": {
+        "eval_run_id": { "type": "string" },
+        "provider": { "type": "string" },
+        "rows_published": { "$ref": "#/$defs/nonNegativeInteger" },
+        "rows_skipped": { "$ref": "#/$defs/nonNegativeInteger" },
+        "events_published": { "$ref": "#/$defs/nonNegativeInteger" },
+        "artifacts_published": { "$ref": "#/$defs/nonNegativeInteger" },
+        "scores_published": { "type": "boolean" },
+        "report_url": { "type": "string" }
+      }
+    },
+    "analysisData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "sourceArchive",
+        "sourceSha256",
+        "handoffSchemaVersion",
+        "rows",
+        "findingInstances",
+        "rootCauseClusters",
+        "groundTruthCount",
+        "groundTruthTpCredits",
+        "truePositiveInstances",
+        "falsePositiveInstances",
+        "needsHumanReviewInstances",
+        "duplicateInstances",
+        "outputDirectory",
+        "outputs"
+      ],
+      "properties": {
+        "command": { "enum": ["upset", "scores", "provenance", "table", "cost", "pairwise", "all"] },
+        "sourceArchive": { "type": "string" },
+        "sourceSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "handoffSchemaVersion": { "type": "string" },
+        "rows": { "$ref": "#/$defs/nonNegativeInteger" },
+        "findingInstances": { "$ref": "#/$defs/nonNegativeInteger" },
+        "rootCauseClusters": { "$ref": "#/$defs/nonNegativeInteger" },
+        "groundTruthCount": { "$ref": "#/$defs/nonNegativeInteger" },
+        "groundTruthTpCredits": { "$ref": "#/$defs/nonNegativeInteger" },
+        "truePositiveInstances": { "$ref": "#/$defs/nonNegativeInteger" },
+        "falsePositiveInstances": { "$ref": "#/$defs/nonNegativeInteger" },
+        "needsHumanReviewInstances": { "$ref": "#/$defs/nonNegativeInteger" },
+        "duplicateInstances": { "$ref": "#/$defs/nonNegativeInteger" },
+        "outputDirectory": { "type": "string" },
+        "outputs": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "initCommand": { "$ref": "#/$defs/command-init" },
+    "validateCommand": { "$ref": "#/$defs/command-validate" },
+    "runCommand": { "$ref": "#/$defs/command-run" },
+    "psCommand": { "$ref": "#/$defs/command-ps" },
+    "statusCommand": { "$ref": "#/$defs/command-status" },
+    "inspectCommand": { "$ref": "#/$defs/command-inspect" },
+    "reportCommand": { "$ref": "#/$defs/command-report" },
+    "reportBundleCommand": { "$ref": "#/$defs/command-report-bundle" },
+    "materializeCommand": { "$ref": "#/$defs/command-materialize" },
+    "cleanCommand": { "$ref": "#/$defs/command-clean" },
+    "doctorCommand": { "$ref": "#/$defs/command-doctor" },
+    "referencesStatusCommand": { "$ref": "#/$defs/command-references-status" },
+    "referencesSyncCommand": { "$ref": "#/$defs/command-references-sync" },
+    "referencesUpdateCommand": { "$ref": "#/$defs/command-references-update" },
+    "pauseCommand": { "$ref": "#/$defs/command-pause" },
+    "resumeCommand": { "$ref": "#/$defs/command-resume" },
+    "replayCommand": { "$ref": "#/$defs/command-replay" },
+    "forkCommand": { "$ref": "#/$defs/command-fork" },
+    "cancelCommand": { "$ref": "#/$defs/command-cancel" },
+    "whyCommand": { "$ref": "#/$defs/command-why" },
+    "timelineCommand": { "$ref": "#/$defs/command-timeline" },
+    "eventsCommand": { "$ref": "#/$defs/command-events" },
+    "nodeCommand": { "$ref": "#/$defs/command-node" },
+    "snapshotsCommand": { "$ref": "#/$defs/command-snapshots" },
+    "jsonValidateCommand": { "$ref": "#/$defs/command-json-validate" },
+    "evalPlanCommand": { "$ref": "#/$defs/command-eval-plan" },
+    "evalRunCommand": { "$ref": "#/$defs/command-eval-run" },
+    "evalStatusCommand": { "$ref": "#/$defs/command-eval-status" },
+    "evalScoreCommand": { "$ref": "#/$defs/command-eval-score" },
+    "evalReportCommand": { "$ref": "#/$defs/command-eval-report" },
+    "evalBundleCommand": { "$ref": "#/$defs/command-eval-bundle" },
+    "evalCompareCommand": { "$ref": "#/$defs/command-eval-compare" },
+    "evalHistoryCommand": { "$ref": "#/$defs/command-eval-history" },
+    "evalPublishCommand": { "$ref": "#/$defs/command-eval-publish" },
+    "evalAnalyzeCommand": {
+      "if": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "enum": [
+              "eval analyze upsert",
+              "eval analyze upset",
+              "eval analyze scores",
+              "eval analyze precision-recall-f1",
+              "eval analyze provenance",
+              "eval analyze table",
+              "eval analyze cost",
+              "eval analyze pairwise",
+              "eval analyze all"
+            ]
+          }
+        },
+        "required": ["command"]
+      },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/analysisData" }] } }
+      }
+    },
+    "unknownInvocationFailure": {
+      "if": {
+        "type": "object",
+        "properties": { "command": { "not": { "$ref": "#/$defs/knownCommand" } } },
+        "required": ["command"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "ok": { "const": false },
+          "data": { "type": "null" }
+        }
+      }
+    },
+    "command-init": { "$ref": "#/$defs/commandTemplate-init" },
+    "command-validate": { "$ref": "#/$defs/commandTemplate-validate" },
+    "command-run": { "$ref": "#/$defs/commandTemplate-run" },
+    "command-ps": { "$ref": "#/$defs/commandTemplate-ps" },
+    "command-status": { "$ref": "#/$defs/commandTemplate-status" },
+    "command-inspect": { "$ref": "#/$defs/commandTemplate-inspect" },
+    "command-report": { "$ref": "#/$defs/commandTemplate-report" },
+    "command-report-bundle": { "$ref": "#/$defs/commandTemplate-report-bundle" },
+    "command-materialize": { "$ref": "#/$defs/commandTemplate-materialize" },
+    "command-clean": { "$ref": "#/$defs/commandTemplate-clean" },
+    "command-doctor": { "$ref": "#/$defs/commandTemplate-doctor" },
+    "command-references-status": { "$ref": "#/$defs/commandTemplate-references-status" },
+    "command-references-sync": { "$ref": "#/$defs/commandTemplate-references-sync" },
+    "command-references-update": { "$ref": "#/$defs/commandTemplate-references-update" },
+    "command-pause": { "$ref": "#/$defs/commandTemplate-pause" },
+    "command-resume": { "$ref": "#/$defs/commandTemplate-resume" },
+    "command-replay": { "$ref": "#/$defs/commandTemplate-replay" },
+    "command-fork": { "$ref": "#/$defs/commandTemplate-fork" },
+    "command-cancel": { "$ref": "#/$defs/commandTemplate-cancel" },
+    "command-why": { "$ref": "#/$defs/commandTemplate-why" },
+    "command-timeline": { "$ref": "#/$defs/commandTemplate-timeline" },
+    "command-events": { "$ref": "#/$defs/commandTemplate-events" },
+    "command-node": { "$ref": "#/$defs/commandTemplate-node" },
+    "command-snapshots": { "$ref": "#/$defs/commandTemplate-snapshots" },
+    "command-json-validate": { "$ref": "#/$defs/commandTemplate-json-validate" },
+    "command-eval-plan": { "$ref": "#/$defs/commandTemplate-eval-plan" },
+    "command-eval-run": { "$ref": "#/$defs/commandTemplate-eval-run" },
+    "command-eval-status": { "$ref": "#/$defs/commandTemplate-eval-status" },
+    "command-eval-score": { "$ref": "#/$defs/commandTemplate-eval-score" },
+    "command-eval-report": { "$ref": "#/$defs/commandTemplate-eval-report" },
+    "command-eval-bundle": { "$ref": "#/$defs/commandTemplate-eval-bundle" },
+    "command-eval-compare": { "$ref": "#/$defs/commandTemplate-eval-compare" },
+    "command-eval-history": { "$ref": "#/$defs/commandTemplate-eval-history" },
+    "command-eval-publish": { "$ref": "#/$defs/commandTemplate-eval-publish" },
+    "commandTemplate-init": {
+      "if": { "type": "object", "properties": { "command": { "const": "init" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/initData" }] } }
+      }
+    },
+    "commandTemplate-validate": {
+      "if": { "type": "object", "properties": { "command": { "const": "validate" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/validateData" }] } }
+      }
+    },
+    "commandTemplate-run": {
+      "if": { "type": "object", "properties": { "command": { "const": "run" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/runData" }] } }
+      }
+    },
+    "commandTemplate-ps": {
+      "if": { "type": "object", "properties": { "command": { "const": "ps" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/psData" }] } }
+      }
+    },
+    "commandTemplate-status": {
+      "if": { "type": "object", "properties": { "command": { "const": "status" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/statusData" }] } }
+      }
+    },
+    "commandTemplate-inspect": {
+      "if": { "type": "object", "properties": { "command": { "const": "inspect" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/inspectData" }] } }
+      }
+    },
+    "commandTemplate-report": {
+      "if": { "type": "object", "properties": { "command": { "const": "report" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/reportData" }] } }
+      }
+    },
+    "commandTemplate-report-bundle": {
+      "if": { "type": "object", "properties": { "command": { "const": "report bundle" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/reportBundleData" }] } }
+      }
+    },
+    "commandTemplate-materialize": {
+      "if": { "type": "object", "properties": { "command": { "const": "materialize" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/materializeData" }] } }
+      }
+    },
+    "commandTemplate-clean": {
+      "if": { "type": "object", "properties": { "command": { "const": "clean" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/cleanData" }] } }
+      }
+    },
+    "commandTemplate-doctor": {
+      "if": { "type": "object", "properties": { "command": { "const": "doctor" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/doctorData" }] } }
+      }
+    },
+    "commandTemplate-references-status": {
+      "if": {
+        "type": "object",
+        "properties": { "command": { "const": "references status" } },
+        "required": ["command"]
+      },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/referenceStatusData" }] } }
+      }
+    },
+    "commandTemplate-references-sync": {
+      "if": { "type": "object", "properties": { "command": { "const": "references sync" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/referenceSyncData" }] } }
+      }
+    },
+    "commandTemplate-references-update": {
+      "if": {
+        "type": "object",
+        "properties": { "command": { "const": "references update" } },
+        "required": ["command"]
+      },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/referenceUpdateData" }] } }
+      }
+    },
+    "commandTemplate-pause": {
+      "if": { "type": "object", "properties": { "command": { "const": "pause" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/pauseData" }] } }
+      }
+    },
+    "commandTemplate-resume": {
+      "if": { "type": "object", "properties": { "command": { "const": "resume" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "oneOf": [
+              { "type": "null" },
+              {
+                "allOf": [
+                  { "$ref": "#/$defs/lifecycleData" },
+                  { "type": "object", "properties": { "action": { "const": "resume" } } }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "commandTemplate-replay": {
+      "if": { "type": "object", "properties": { "command": { "const": "replay" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "oneOf": [
+              { "type": "null" },
+              {
+                "allOf": [
+                  { "$ref": "#/$defs/lifecycleData" },
+                  { "type": "object", "properties": { "action": { "const": "replay" } } }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "commandTemplate-fork": {
+      "if": { "type": "object", "properties": { "command": { "const": "fork" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "oneOf": [
+              { "type": "null" },
+              {
+                "allOf": [
+                  { "$ref": "#/$defs/lifecycleData" },
+                  { "type": "object", "properties": { "action": { "const": "fork" } } }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "commandTemplate-cancel": {
+      "if": { "type": "object", "properties": { "command": { "const": "cancel" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/cancelData" }] } }
+      }
+    },
+    "commandTemplate-why": {
+      "if": { "type": "object", "properties": { "command": { "const": "why" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/whyData" }] } }
+      }
+    },
+    "commandTemplate-timeline": {
+      "if": { "type": "object", "properties": { "command": { "const": "timeline" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/timelineData" }] } }
+      }
+    },
+    "commandTemplate-events": {
+      "if": { "type": "object", "properties": { "command": { "const": "events" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/eventsData" }] } }
+      }
+    },
+    "commandTemplate-node": {
+      "if": { "type": "object", "properties": { "command": { "const": "node" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/nodeData" }] } }
+      }
+    },
+    "commandTemplate-snapshots": {
+      "if": { "type": "object", "properties": { "command": { "const": "snapshots" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/snapshotsData" }] } }
+      }
+    },
+    "commandTemplate-json-validate": {
+      "if": { "type": "object", "properties": { "command": { "const": "json validate" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/jsonValidationData" }] } }
+      }
+    },
+    "commandTemplate-eval-plan": {
+      "if": { "type": "object", "properties": { "command": { "const": "eval plan" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/evalPlanData" }] } }
+      }
+    },
+    "commandTemplate-eval-run": {
+      "if": { "type": "object", "properties": { "command": { "const": "eval run" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/evalRunData" }] } }
+      }
+    },
+    "commandTemplate-eval-status": {
+      "if": { "type": "object", "properties": { "command": { "const": "eval status" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/evalStatusData" }] } }
+      }
+    },
+    "commandTemplate-eval-score": {
+      "if": { "type": "object", "properties": { "command": { "const": "eval score" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "data": { "oneOf": [{ "type": "null" }, { "$ref": "urn:ultrafuzz:schema:evals:score-summary:1" }] }
+        }
+      }
+    },
+    "commandTemplate-eval-report": {
+      "if": { "type": "object", "properties": { "command": { "const": "eval report" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "data": { "oneOf": [{ "type": "null" }, { "$ref": "urn:ultrafuzz:schema:evals:score-summary:1" }] }
+        }
+      }
+    },
+    "commandTemplate-eval-bundle": {
+      "if": { "type": "object", "properties": { "command": { "const": "eval bundle" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/evalBundleData" }] } }
+      }
+    },
+    "commandTemplate-eval-compare": {
+      "if": { "type": "object", "properties": { "command": { "const": "eval compare" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/evalCompareData" }] } }
+      }
+    },
+    "commandTemplate-eval-history": {
+      "if": { "type": "object", "properties": { "command": { "const": "eval history" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/evalHistoryData" }] } }
+      }
+    },
+    "commandTemplate-eval-publish": {
+      "if": { "type": "object", "properties": { "command": { "const": "eval publish" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/evalPublishData" }] } }
+      }
+    }
+  }
+}

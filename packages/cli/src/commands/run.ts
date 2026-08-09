@@ -1,9 +1,10 @@
-import fs from "node:fs";
 import path from "node:path";
 
 import { Command, Flags } from "@oclif/core";
+import { parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
 import { startRun } from "@ultrafuzz/runtime";
 
+import { validateOperatorInput } from "../cli-schema-registry.js";
 import {
   cliIo,
   cliEntrypoint,
@@ -14,12 +15,21 @@ import {
   projectRoot
 } from "../command-shared.js";
 
+const MAX_OPERATOR_INPUT_BYTES = 64 * 1024 * 1024;
+
 export default class Run extends Command {
   static override summary = "Plan, render prompts, and launch a fuzzing workflow";
   static override flags = {
     ...globalFlags,
     "run-id": Flags.string({ summary: "Ultrafuzz run ID" }),
-    input: Flags.string({ summary: "Workflow input JSON path or inline JSON" }),
+    "input-json": Flags.string({
+      summary: "Workflow input as strict inline JSON",
+      exclusive: ["input-file"]
+    }),
+    "input-file": Flags.string({
+      summary: "Workflow input as a strict JSON file (relative to the project root)",
+      exclusive: ["input-json"]
+    }),
     "reference-expectations": Flags.string({
       summary: "Trusted benchmark expectation catalog JSON path"
     }),
@@ -34,7 +44,7 @@ export default class Run extends Command {
     const root = projectRoot(flags);
     let workflowInput: unknown;
     try {
-      workflowInput = parseWorkflowInput(flags.input, root);
+      workflowInput = parseWorkflowInput(flags["input-json"], flags["input-file"], root);
     } catch (error) {
       emitCommandResult(
         this,
@@ -73,22 +83,35 @@ export default class Run extends Command {
   }
 }
 
-function parseWorkflowInput(value: string | undefined, projectRoot: string): unknown {
-  if (value === undefined) {
-    return undefined;
-  }
+function parseWorkflowInput(
+  inlineJson: string | undefined,
+  inputFile: string | undefined,
+  projectRoot: string
+): unknown {
+  if (inlineJson === undefined && inputFile === undefined) return undefined;
+
+  let value: unknown;
   try {
-    return JSON.parse(value) as unknown;
-  } catch {
-    const absolute = path.resolve(projectRoot, value);
-    if (!fs.existsSync(absolute)) {
-      throw new Error(`workflow input must be inline JSON or an existing JSON file: ${value}`);
-    }
-    try {
-      return JSON.parse(fs.readFileSync(absolute, "utf8")) as unknown;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`workflow input file is not valid JSON: ${message}`, { cause: error });
-    }
+    value =
+      inlineJson !== undefined
+        ? parseStrictJsonBytes(Buffer.from(inlineJson, "utf8"), { maxBytes: MAX_OPERATOR_INPUT_BYTES })
+        : parseStrictJsonBytes(
+            readRegularFileSnapshot(path.resolve(projectRoot, inputFile!), MAX_OPERATOR_INPUT_BYTES),
+            { maxBytes: MAX_OPERATOR_INPUT_BYTES }
+          );
+  } catch (error) {
+    const source = inlineJson === undefined ? `workflow input file ${inputFile}` : "inline workflow input";
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${source} is not valid strict JSON: ${message}`, { cause: error });
   }
+
+  const validation = validateOperatorInput(value);
+  if (!validation.ok) {
+    const summary = validation.issues
+      .slice(0, 10)
+      .map((issue) => `${issue.instancePath || "/"} ${issue.keyword}: ${issue.message}`)
+      .join("; ");
+    throw new Error(`workflow input does not match the operator-input contract: ${summary}`);
+  }
+  return value;
 }

@@ -9,6 +9,7 @@ import {
   loadEvalConfig,
   projectRoot
 } from "../../command-shared.js";
+import { toCliEvalPlanData } from "../../cli-contracts.js";
 
 export default class EvalPlan extends Command {
   static override summary = "Dry-run an eval suite matrix without launching workflows";
@@ -55,13 +56,7 @@ export default class EvalPlan extends Command {
         {
           ok: true,
           command: "eval plan",
-          data: {
-            suite_path: plan.suite_path,
-            suite: plan.suite.suite,
-            provider: provider.provider,
-            reporting: plan.suite.reporting,
-            matrix: plan.matrix
-          },
+          data: toCliEvalPlanData(plan, provider.provider),
           text: `Suite: ${plan.suite.suite}\nProvider: ${provider.provider}\nRows: ${plan.matrix.length}\n`,
           diagnostics
         },

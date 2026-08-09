@@ -1,20 +1,9 @@
 import path from "node:path";
 
 import { Command, Flags } from "@oclif/core";
-import {
-  artifactSchemaBundleDigest,
-  artifactSchemaRegistry,
-  schemaRegistryBundleDigest,
-  validateJsonFile,
-  type SchemaRegistryEntry
-} from "@ultrafuzz/artifacts";
-import { configSchemaBundleDigest, configSchemaRegistry } from "@ultrafuzz/config";
-import { evmbenchSchemaBundleDigest, evmbenchSchemaRegistry } from "@ultrafuzz/evmbench";
-import { evalSchemaBundleDigest, evalSchemaRegistry } from "@ultrafuzz/evals";
-import { modalSchemaBundleDigest, modalSchemaRegistry } from "@ultrafuzz/modal";
-import { referenceSchemaBundleDigest, referenceSchemaRegistry } from "@ultrafuzz/references";
-import { topologySchemaBundleDigest, topologySchemaRegistry } from "@ultrafuzz/topology";
+import { validateJsonFile } from "@ultrafuzz/artifacts";
 
+import { cliSchemaRegistry } from "../../cli-schema-registry.js";
 import { cliIo, emitCommandResult, globalFlags, type CommandResult } from "../../command-shared.js";
 
 export default class JsonValidate extends Command {
@@ -65,43 +54,6 @@ export default class JsonValidate extends Command {
     };
     emitCommandResult(this, "json validate", commandResult, flags.json === true);
   }
-}
-
-function cliSchemaRegistry(): {
-  entries: readonly SchemaRegistryEntry[];
-  bundleByFilename: ReadonlyMap<string, string>;
-  composedBundle: string;
-} {
-  const owners = [
-    { entries: artifactSchemaRegistry(), bundle: artifactSchemaBundleDigest() },
-    { entries: configSchemaRegistry(), bundle: configSchemaBundleDigest() },
-    { entries: evmbenchSchemaRegistry(), bundle: evmbenchSchemaBundleDigest() },
-    { entries: evalSchemaRegistry(), bundle: evalSchemaBundleDigest() },
-    { entries: modalSchemaRegistry(), bundle: modalSchemaBundleDigest() },
-    { entries: referenceSchemaRegistry(), bundle: referenceSchemaBundleDigest() },
-    { entries: topologySchemaRegistry(), bundle: topologySchemaBundleDigest() }
-  ];
-  const entries = owners.flatMap((owner) => [...owner.entries]);
-  const bundleByFilename = new Map<string, string>();
-  const ids = new Set<string>();
-  const digests = new Set<string>();
-  for (const owner of owners) {
-    for (const entry of owner.entries) {
-      if (bundleByFilename.has(entry.filename)) {
-        throw new Error(`ambiguous registered JSON Schema filename: ${entry.filename}`);
-      }
-      if (ids.has(entry.id)) throw new Error(`ambiguous registered JSON Schema $id: ${entry.id}`);
-      if (digests.has(entry.sha256)) throw new Error(`ambiguous registered JSON Schema digest: ${entry.sha256}`);
-      bundleByFilename.set(entry.filename, owner.bundle);
-      ids.add(entry.id);
-      digests.add(entry.sha256);
-    }
-  }
-  return {
-    entries: Object.freeze(entries),
-    bundleByFilename,
-    composedBundle: schemaRegistryBundleDigest(entries)
-  };
 }
 
 function resolveFromCli(cwd: string, value: string): string {

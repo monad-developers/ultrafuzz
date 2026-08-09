@@ -9,6 +9,7 @@ import {
   loadEvalConfig,
   projectRoot
 } from "../../command-shared.js";
+import { toCliEvalPublishData } from "../../cli-contracts.js";
 
 export default class EvalPublish extends Command {
   static override summary = "Replay a recorded eval run's node telemetry to the configured provider";
@@ -41,7 +42,7 @@ export default class EvalPublish extends Command {
         {
           ok: true,
           command: "eval publish",
-          data: result,
+          data: toCliEvalPublishData(result),
           text:
             `Provider: ${result.provider}\nRows published: ${result.rows_published} (skipped ${result.rows_skipped})\n` +
             `Events: ${result.events_published}\nArtifacts: ${result.artifacts_published}\n` +

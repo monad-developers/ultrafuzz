@@ -503,7 +503,7 @@ test("init and validate emit schema-versioned launch JSON", async () => {
   const body = parseJson(validate);
   assert.equal(validate.code, 0, validate.stderr);
   assertNoSmithersSurface(body);
-  assert.equal(body.schema_version, "ultrafuzz.cli.result.v1");
+  assert.equal(body.schema_version, "ultrafuzz.cli.result.v2");
   const posture = (body.data as { policy_posture: Record<string, unknown> }).policy_posture;
   for (const key of ["config", "topology", "prompts", "paths", "agents", "trust"]) {
     assert.equal(Boolean(posture[key]), true, `${key} posture missing`);
@@ -547,6 +547,61 @@ test("run exposes the trusted reference expectation catalog option", async () =>
   );
 });
 
+test("run input flags are explicit, strict, and never reinterpret malformed inline JSON as a path", async () => {
+  const project = tempProject();
+  fs.writeFileSync(path.join(project, "looks-like-a-path.json"), '{"loaded":true}\n', "utf8");
+
+  const malformedInline = await cli(project, ["run", "--input-json", "looks-like-a-path.json", "--json"]);
+  assert.equal(malformedInline.code, 1);
+  assert.match(JSON.stringify(parseJson(malformedInline).diagnostics), /inline workflow input.*strict JSON/iu);
+
+  const duplicateInline = await cli(project, ["run", "--input-json", '{"ticket":1,"ticket":2}', "--json"]);
+  assert.equal(duplicateInline.code, 1);
+  assert.match(JSON.stringify(parseJson(duplicateInline).diagnostics), /duplicate property name/iu);
+
+  const mutuallyExclusive = await cli(project, [
+    "run",
+    "--input-json",
+    "{}",
+    "--input-file",
+    "looks-like-a-path.json",
+    "--json"
+  ]);
+  assert.equal(mutuallyExclusive.code, 2);
+  assert.deepEqual(parseJson(mutuallyExclusive).data, null);
+  assert.match(JSON.stringify(parseJson(mutuallyExclusive).diagnostics), /cannot also be provided/iu);
+
+  const legacyInput = await cli(project, ["run", "--input", "{}", "--json"]);
+  assert.equal(legacyInput.code, 2);
+  assert.deepEqual(parseJson(legacyInput).data, null);
+  assert.match(JSON.stringify(parseJson(legacyInput).diagnostics), /Nonexistent flag: --input/iu);
+
+  const symlink = path.join(project, "operator-input-link.json");
+  fs.symlinkSync(path.join(project, "looks-like-a-path.json"), symlink);
+  const linkedInput = await cli(project, ["run", "--input-file", symlink, "--json"]);
+  assert.equal(linkedInput.code, 1);
+  assert.match(JSON.stringify(parseJson(linkedInput).diagnostics), /cannot open regular file/iu);
+});
+
+test("run reads a bounded immutable workflow-input file", async () => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  writeSmallTopology(project);
+  fs.writeFileSync(path.join(project, "operator-input.json"), '{"ticket":3}\n', "utf8");
+
+  const run = await cli(
+    project,
+    ["run", "--run-id", "cli-file-input", "--input-file", "operator-input.json", "--json"],
+    fakeSmithersEnv(project)
+  );
+  assert.equal(run.code, 0, run.stderr);
+  const runData = parseJson(run).data as { run_root: string };
+  const smithersInput = JSON.parse(fs.readFileSync(path.join(runData.run_root, "smithers", "input.json"), "utf8")) as {
+    operator_input?: { ticket?: number };
+  };
+  assert.equal(smithersInput.operator_input?.ticket, 3);
+});
+
 test("run, ps, status, inspect, report, materialize, clean, and lifecycle commands expose product workflow evidence", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
@@ -563,7 +618,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
       "2",
       "--prompt",
       "Operator prompt",
-      "--input",
+      "--input-json",
       '{"ticket":2}',
       "--json"
     ],

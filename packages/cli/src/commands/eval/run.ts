@@ -9,6 +9,7 @@ import {
   loadEvalConfig,
   projectRoot
 } from "../../command-shared.js";
+import { toCliEvalRunData } from "../../cli-contracts.js";
 
 export default class EvalRun extends Command {
   static override summary = "Launch Ultrafuzz runs for an eval suite matrix and stream node telemetry";
@@ -62,7 +63,7 @@ export default class EvalRun extends Command {
         {
           ok: result.failed === 0 && result.incomplete === 0,
           command: "eval run",
-          data: result,
+          data: toCliEvalRunData(result),
           text: `Eval run: ${result.eval_run_id}\nLaunched: ${result.launched}\nFailed: ${result.failed}\nIncomplete: ${result.incomplete}\nRoot: ${result.eval_run_root}\n`,
           diagnostics: [
             ...diagnostics,

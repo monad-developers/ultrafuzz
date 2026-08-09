@@ -1,7 +1,7 @@
 # Ultrafuzz CLI
 
 Every command accepts `--project <path>`. Commands that support automation
-accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
+accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 
 | Command                   | Purpose                                                                                                                   |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
@@ -51,7 +51,8 @@ references, run evidence, and materialized outputs remain under root
 ## Run Flags
 
 - `--run-id <id>`
-- `--input <json-or-path>`
+- `--input-json <strict-json>`
+- `--input-file <json-path>`
 - `--prompt <text>`
 - `--agent <agent-ref>`
 - `--model <model>`
@@ -61,6 +62,14 @@ references, run evidence, and materialized outputs remain under root
 Model-only overrides keep the configured agent and reasoning. When `--agent`
 selects another agent, backend-specific reasoning is cleared, including when
 `--model` also pins a replacement model.
+
+`--input-json` and `--input-file` are mutually exclusive. Inline input is
+always parsed as strict RFC 8259 JSON and is never reinterpreted as a path.
+Relative file input is resolved from the project root, then read once from a
+bounded, non-symlink regular-file snapshot.
+Duplicate keys, invalid UTF-8, malformed JSON, symlinks, nonregular files, and
+files that change during the read are rejected. Ultrafuzz does not infer or
+normalize the application-defined operator payload.
 
 ## JSON Schema Validation
 
@@ -83,7 +92,7 @@ Exit `0` means the document conforms to the schema. Exit `1` means the artifact
 is missing, malformed, or violates the schema and should be corrected by its
 author. Exit `2` means invocation, schema, reference, resource, or validator
 setup failed. Validation never repairs, normalizes, coerces, or rewrites the
-document. `--json` uses the usual `ultrafuzz.cli.result.v1` envelope.
+document. `--json` uses the usual `ultrafuzz.cli.result.v2` envelope.
 
 ## Run Lifecycle
 
@@ -95,7 +104,7 @@ document. `--json` uses the usual `ultrafuzz.cli.result.v1` envelope.
   linked workflow tasks while the current step counts durable Ultrafuzz nodes,
   so the two can legitimately disagree. `--watch` refreshes
   every `--interval` seconds (default 30) until the run is terminal; with
-  `--json` each poll is one newline-delimited `ultrafuzz.cli.result.v1`
+  `--json` each poll is one newline-delimited `ultrafuzz.cli.result.v2`
   envelope.
 - `pause <run-id>` stops new task scheduling and lets in-flight work settle
   before the run becomes `paused`.
@@ -211,13 +220,23 @@ committed.
 
 ```json
 {
-  "schema_version": "ultrafuzz.cli.result.v1",
-  "command": "validate",
+  "schema_version": "ultrafuzz.cli.result.v2",
+  "command": "init",
   "ok": true,
   "diagnostics": [],
-  "data": {}
+  "data": {
+    "project_root": "/project",
+    "created": [],
+    "preserved": [],
+    "overwritten": []
+  }
 }
 ```
 
 Machine consumers should read `ok`, `diagnostics`, and `data`; human text is
-not the stable automation contract.
+not the stable automation contract. Version 2 is intentionally breaking: each
+known command has a closed, command-specific `data` schema, diagnostics expose
+only their public fields, and unknown invocation failures can emit only
+`ok: false` with `data: null`. The only deliberately opaque JSON values are
+explicit operator workflow input and redacted third-party tool input/output.
+There is no version-1 compatibility reader or automatic conversion.
