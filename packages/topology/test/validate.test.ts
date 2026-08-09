@@ -72,7 +72,7 @@ describe("validateTopology", () => {
     const reservedManifest = validTopology();
     reservedManifest.nodes[1] = {
       ...reservedManifest.nodes[1]!,
-      outputs: [{ path: ARTIFACT_MANIFEST_FILE, contract: "ultrafuzz/json-object@1", primary: true }]
+      outputs: [{ path: ARTIFACT_MANIFEST_FILE, contract: "ultrafuzz/findings@2", primary: true }]
     };
     expect(() => validateTopology(reservedManifest)).toThrow(
       expect.objectContaining({ code: "INVALID_OUTPUT_CONTRACT" })
@@ -144,7 +144,7 @@ describe("validateTopology", () => {
           depends_on: ["__start__"],
           outputs: [
             { path: "references/example.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
-            { path: RUN_REFERENCE_MANIFEST_FILE, contract: "ultrafuzz/json-object@1" }
+            { path: RUN_REFERENCE_MANIFEST_FILE, contract: "ultrafuzz/reference-manifest@1" }
           ]
         },
         { ...validTopology().nodes[2]!, depends_on: ["setup", "reference-properties-example"] },

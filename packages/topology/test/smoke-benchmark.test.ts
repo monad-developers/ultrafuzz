@@ -35,13 +35,13 @@ describe("smoke benchmark topology", () => {
     }
     expect(topology.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toEqual(STRATEGY_IDS);
     expect(topology.nodes.find((node) => node.id === "dedupe-findings")?.outputs).toContainEqual(
-      expect.objectContaining({ path: "deduped-findings.json", contract: "ultrafuzz/findings@1", primary: true })
+      expect.objectContaining({ path: "deduped-findings.json", contract: "ultrafuzz/findings@2", primary: true })
     );
     expect(topology.nodes.find((node) => node.id === "final-report")?.depends_on).toEqual(["dedupe-findings"]);
     expect(topology.nodes.find((node) => node.id === "final-report")?.outputs).toEqual([
       expect.objectContaining({ path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true }),
-      expect.objectContaining({ path: "report.json", contract: "ultrafuzz/report@1" }),
-      expect.objectContaining({ path: "findings.normalized.json", contract: "ultrafuzz/findings@1" })
+      expect.objectContaining({ path: "report.json", contract: "ultrafuzz/report@2" }),
+      expect.objectContaining({ path: "findings.normalized.json", contract: "ultrafuzz/findings@2" })
     ]);
 
     const graph = expandTopology(topology, {

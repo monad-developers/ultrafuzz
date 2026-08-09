@@ -4,7 +4,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { ARTIFACT_CONTRACT_IDS, artifactSchemaRegistry, createStrictAjv } from "@ultrafuzz/artifacts";
+import {
+  ARTIFACT_CONTRACT_IDS,
+  artifactContractSchemaBinding,
+  artifactSchemaRegistry,
+  createStrictAjv
+} from "@ultrafuzz/artifacts";
 
 import {
   GRAPH_VERSION,
@@ -18,6 +23,15 @@ import {
 } from "../src/index.js";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const findingsSchemaBinding = artifactContractSchemaBinding("ultrafuzz/findings@2");
+if (findingsSchemaBinding === undefined) throw new Error("findings@2 must have a registered schema binding");
+const expandedFindingsSchemaBinding = {
+  schemaFile: findingsSchemaBinding.schema_file,
+  schemaId: findingsSchemaBinding.schema_id,
+  schemaSha256: findingsSchemaBinding.schema_sha256,
+  schemaBundleSha256: findingsSchemaBinding.schema_bundle_sha256,
+  validatorBuild: findingsSchemaBinding.validator_build
+};
 
 describe("expanded graph schema", () => {
   it("accepts a minimal graph with concrete provenance fields", () => {
@@ -43,9 +57,10 @@ describe("expanded graph schema", () => {
           outputs: [
             {
               path: "findings.json",
-              contract: "ultrafuzz/findings@1",
+              contract: "ultrafuzz/findings@2",
               primary: true,
-              contractDigest: "a".repeat(64)
+              contractDigest: "a".repeat(64),
+              ...expandedFindingsSchemaBinding
             }
           ],
           modelFanout: [
@@ -158,7 +173,7 @@ describe("expanded graph schema", () => {
           outputs: [
             {
               path: "findings.json",
-              contract: "ultrafuzz/findings@1",
+              contract: "ultrafuzz/findings@2",
               primary: true,
               contractDigest: "a".repeat(64),
               schemaFile: "findings.schema.json"
