@@ -4586,7 +4586,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /function artifactAwareAgent/);
   assert.match(
     workflowSource,
-    /const result = await agent\.generate\(args\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\);/
+    /const result = await agent\.generate\(attemptArgs\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\);/
   );
   assert.match(workflowSource, /materializeMissingMarkdownArtifacts\(task, result\)/);
   assert.match(workflowSource, /normalizeLegacyFindingFields\(task\)/);
