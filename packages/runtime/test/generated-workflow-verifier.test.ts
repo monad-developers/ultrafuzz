@@ -769,6 +769,7 @@ function loadVerifyArtifactsHarness(): {
     "writeArtifactVerificationMarker",
     "taskSpecs",
     "declaredAncestorOutputsByContract",
+    "declaredFinalReportOutputPair",
     `${emitted}; return { captureTaskOutputs, verifyArtifacts };`
   )(
     path,
@@ -815,7 +816,12 @@ function loadVerifyArtifactsHarness(): {
     },
     (...args: unknown[]) => markerWrites.push(args),
     [],
-    declaredAncestorOutputsByContract
+    declaredAncestorOutputsByContract,
+    (task: VerifyArtifactsTask) => {
+      const report = task.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
+      const markdown = task.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
+      return report.length === 1 && markdown.length === 1 ? { report: report[0]!, markdown: markdown[0]! } : undefined;
+    }
   ) as {
     captureTaskOutputs: ReturnType<typeof loadVerifyArtifactsHarness>["captureTaskOutputs"];
     verifyArtifacts: ReturnType<typeof loadVerifyArtifactsHarness>["verifyArtifacts"];

@@ -3287,11 +3287,28 @@ function assertInvariantSuiteDependencyExpectations(
   dependencies: readonly string[],
   suitePathsByDependency: ReadonlyMap<string, string[]>
 ): void {
+  const directAgenticAttempts = new Set(
+    task.metadata.dependencies.smithersNodeIds.map((nodeId) =>
+      nodeId.startsWith("verify:") ? nodeId.slice("verify:".length) : nodeId
+    )
+  );
   for (const dependency of dependencies) {
     const expectedPaths = new Set<string>();
-    const producer = taskSpecs.find((candidate) => candidate.attemptId === path.basename(dependency));
+    const dependencyAttemptId = path.basename(dependency);
+    const producer = taskSpecs.find((candidate) => candidate.attemptId === dependencyAttemptId);
     if (producer === undefined) {
-      throw new Error(`artifact-contract failure: invariant suite producer declaration is unavailable ${dependency}`);
+      // Pinned/reference ancestors own artifact directories but deliberately do
+      // not have agentic task specs. They cannot publish or satisfy an
+      // invariant-suite handoff, so ignore them. A missing direct agentic task,
+      // or an undeclared directory that claims an invariant-suite manifest,
+      // remains a terminal declaration failure.
+      if (
+        directAgenticAttempts.has(dependencyAttemptId) ||
+        existsSync(path.join(dependency, INVARIANT_SUITE_MANIFEST_FILE))
+      ) {
+        throw new Error(`artifact-contract failure: invariant suite producer declaration is unavailable ${dependency}`);
+      }
+      continue;
     }
     const implementationOutputs = producer.outputs.filter(
       (output) => output.contract === "ultrafuzz/implemented-properties@3"

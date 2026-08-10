@@ -53,6 +53,7 @@ import {
   type PropertyReferenceInput,
   type RunLayout,
   type RunState,
+  type SmithersTaskManifestOutput,
   type SmithersTaskManifestTask,
   type NodeProvenanceReasonCode,
   type NodeOutputContract,
@@ -852,7 +853,7 @@ function resolveStateDeclaredPropertyLens(
 type FinalizedPropertyLensResolution =
   | {
       ok: true;
-      declaration: NodeOutputContract;
+      declaration: Pick<NodeOutputContract, "path">;
       artifact: VerifiedOutputArtifactSnapshot;
       document: LensPropertiesArtifact;
     }
@@ -920,6 +921,174 @@ function loadFinalizedPropertyLens(
   return { ok: true, declaration: declaration.output, artifact, document: typed.value };
 }
 
+type DirectArtifactDependency = {
+  attemptId: string;
+  node: PlannedGraphNode;
+  task?: SmithersTaskManifestTask;
+};
+
+/** Resolve the current attempt's exact direct dependencies from its sealed task declaration. */
+function sealedDirectArtifactDependencies(
+  layout: RunLayout,
+  consumer: PlannedGraphNode,
+  authority: ArtifactGateAttemptAuthority
+): DirectArtifactDependency[] {
+  semanticAttemptDeclarations(consumer, authority);
+  assertRegularFileInside(layout.root, layout.graphPath, "sealed direct artifact dependency authority");
+  const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
+  const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
+  const tasksByAttempt = new Map<string, SmithersTaskManifestTask>();
+  for (const task of authority.tasks) {
+    if (tasksByAttempt.has(task.attemptId)) {
+      throw new Error(`sealed Smithers task set repeats attempt ${JSON.stringify(task.attemptId)}`);
+    }
+    tasksByAttempt.set(task.attemptId, task);
+  }
+
+  const dependencies: DirectArtifactDependency[] = [];
+  for (const dependencyAttemptId of authority.task.dependencies) {
+    const task = tasksByAttempt.get(dependencyAttemptId);
+    if (task !== undefined) {
+      const node = nodesById.get(task.concreteNodeId);
+      if (
+        node === undefined ||
+        node.kind !== "agentic" ||
+        node.logical_id !== task.logicalNodeId ||
+        (node.workflow !== undefined && !node.workflow.task_node_ids.includes(`node:${task.attemptId}`))
+      ) {
+        throw new Error(
+          `sealed Smithers dependency ${JSON.stringify(dependencyAttemptId)} does not bind one planned agentic attempt`
+        );
+      }
+      dependencies.push({ attemptId: dependencyAttemptId, node, task });
+      continue;
+    }
+
+    // Reference attempts deliberately have artifact directories but no Smithers
+    // task declaration. An absent agentic task is never interpreted as a
+    // reference or as an empty producer.
+    const node = nodesById.get(dependencyAttemptId);
+    if (node === undefined || node.kind !== "reference") {
+      throw new Error(
+        `sealed Smithers dependency ${JSON.stringify(dependencyAttemptId)} has no task or planned reference declaration`
+      );
+    }
+    dependencies.push({ attemptId: dependencyAttemptId, node });
+  }
+  return dependencies;
+}
+
+function smithersOutputMatchesPlanned(
+  output: SmithersTaskManifestOutput,
+  planned: PlannedGraphNode["outputs"][number]
+): boolean {
+  return (
+    output.path === planned.path &&
+    output.contract === planned.contract &&
+    output.contractDigest === planned.contract_digest &&
+    output.schemaFile === planned.schema_file &&
+    output.schemaId === planned.schema_id &&
+    output.schemaSha256 === planned.schema_sha256 &&
+    output.schemaBundleSha256 === planned.schema_bundle_sha256 &&
+    output.validatorBuild === planned.validator_build &&
+    output.primary === planned.primary
+  );
+}
+
+/** Authenticate one fanout attempt's property lens against both sealed and planned declarations. */
+function loadFinalizedTaskPropertyLens(
+  layout: RunLayout,
+  dependency: DirectArtifactDependency,
+  source: "property-fanin" | "property-provenance"
+): FinalizedPropertyLensResolution {
+  const declarationPath = `smithers.tasks.${dependency.attemptId}.metadata.artifacts.outputs`;
+  const taskOutputs =
+    dependency.task?.metadata.artifacts.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT) ?? [];
+  if (taskOutputs.length !== 1) {
+    return {
+      ok: false,
+      diagnostics: [
+        {
+          code: taskOutputs.length === 0 ? "PROPERTY_LENS_DECLARATION_MISSING" : "PROPERTY_LENS_DECLARATION_AMBIGUOUS",
+          message: `Sealed Smithers attempt ${JSON.stringify(dependency.attemptId)} must declare exactly one ${PROPERTY_LENS_CONTRACT} output; found ${taskOutputs.length}`,
+          severity: "error",
+          source,
+          path: declarationPath,
+          ...(taskOutputs.length < 2 ? {} : { details: { declared_paths: taskOutputs.map((output) => output.path) } })
+        }
+      ]
+    };
+  }
+  const plannedOutputs = dependency.node.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT);
+  const declaration = taskOutputs[0]!;
+  if (plannedOutputs.length !== 1 || !smithersOutputMatchesPlanned(declaration, plannedOutputs[0]!)) {
+    return {
+      ok: false,
+      diagnostics: [
+        {
+          code: "PROPERTY_LENS_SCHEMA_BINDING_INVALID",
+          message: `Sealed Smithers attempt ${JSON.stringify(dependency.attemptId)} does not match its exact planned ${PROPERTY_LENS_CONTRACT} declaration`,
+          severity: "error",
+          source,
+          path: declarationPath
+        }
+      ]
+    };
+  }
+
+  let authority: ReturnType<typeof loadFinalizedNodeOutputSnapshot>;
+  try {
+    authority = loadFinalizedNodeOutputSnapshot({
+      runRoot: layout.root,
+      logicalNodeId: dependency.node.logical_id,
+      attemptId: dependency.attemptId
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      diagnostics: [
+        {
+          code: "PROPERTY_LENS_AUTHORITY_INVALID",
+          message: `Property lens attempt ${JSON.stringify(dependency.attemptId)} has no current finalized output authority: ${error instanceof Error ? error.message : String(error)}`,
+          severity: "error",
+          source,
+          path: declarationPath
+        }
+      ]
+    };
+  }
+  const artifacts = authority.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT);
+  if (artifacts.length !== 1 || artifacts[0]?.path !== declaration.path) {
+    return {
+      ok: false,
+      diagnostics: [
+        {
+          code: "PROPERTY_LENS_AUTHORITY_INVALID",
+          message: `Finalized authority for ${JSON.stringify(dependency.attemptId)} does not bind its sealed ${PROPERTY_LENS_CONTRACT} output`,
+          severity: "error",
+          source,
+          path: declarationPath
+        }
+      ]
+    };
+  }
+  const artifact = artifacts[0]!;
+  const typed = validateLensPropertiesSchema(artifact.value, artifact.absolute_path);
+  if (!typed.ok || typed.value === undefined) {
+    return {
+      ok: false,
+      diagnostics: typed.issues.map((issue) => ({
+        code: issue.code,
+        message: issue.message,
+        severity: "error" as const,
+        source,
+        path: issue.path
+      }))
+    };
+  }
+  return { ok: true, declaration, artifact, document: typed.value };
+}
+
 function verifyLensReferenceExpectationPreservation(
   layout: RunLayout,
   node: PlannedGraphNode,
@@ -931,20 +1100,36 @@ function verifyLensReferenceExpectationPreservation(
   const lensRows = new Map<string, LensReferenceRow>();
   const lensPathsByDependency = new Map<string, string>();
   const state = readRunState(layout);
-  const dependencies = plannedDirectDependencyNodes(layout, node);
+  let dependencies: DirectArtifactDependency[];
+  try {
+    dependencies =
+      attemptAuthority === undefined
+        ? plannedDirectDependencyNodes(layout, node).map((dependency) => ({
+            attemptId: dependency.id,
+            node: dependency
+          }))
+        : sealedDirectArtifactDependencies(layout, node, attemptAuthority);
+  } catch (error) {
+    return [diagnosticFromError(error, "property-fanin", "PROPERTY_LENS_AUTHORITY_INVALID")];
+  }
   for (const plannedDependency of dependencies) {
-    const dependencyId = plannedDependency.id;
-    const dependency = plannedDependency.logical_id;
+    const dependencyId = plannedDependency.attemptId;
+    const dependency = plannedDependency.node.logical_id;
     const isCatalogSource = catalog.properties.some((property) =>
       property.sources.some((source) => source.source_node_id === dependency)
     );
-    const declaresLens = plannedDependency.outputs.some((output) => output.contract === PROPERTY_LENS_CONTRACT);
-    if (isCatalogSource && isSyntheticLedgerDependency(plannedDependency)) continue;
+    const declaresLens =
+      plannedDependency.task?.metadata.artifacts.outputs.some((output) => output.contract === PROPERTY_LENS_CONTRACT) ??
+      plannedDependency.node.outputs.some((output) => output.contract === PROPERTY_LENS_CONTRACT);
+    if (isCatalogSource && isSyntheticLedgerDependency(plannedDependency.node)) continue;
     if (!isCatalogSource && !declaresLens) continue;
     // Expanded graphs may give fan-in concrete dependencies such as
     // `property-specification-recon-0` and `property-specification-recon-1`.
     // Only that declared concrete dependency may satisfy the handoff.
-    const lens = loadFinalizedPropertyLens(layout, state, dependencyId, "property-fanin");
+    const lens =
+      attemptAuthority === undefined
+        ? loadFinalizedPropertyLens(layout, state, dependencyId, "property-fanin")
+        : loadFinalizedTaskPropertyLens(layout, plannedDependency, "property-fanin");
     if (!lens.ok) {
       diagnostics.push(...lens.diagnostics);
       continue;
@@ -964,9 +1149,9 @@ function verifyLensReferenceExpectationPreservation(
   }
 
   for (const plannedDependency of dependencies) {
-    if (isSyntheticLedgerDependency(plannedDependency)) continue;
-    const dependencyId = plannedDependency.id;
-    const dependency = plannedDependency.logical_id;
+    if (isSyntheticLedgerDependency(plannedDependency.node)) continue;
+    const dependencyId = plannedDependency.attemptId;
+    const dependency = plannedDependency.node.logical_id;
     if (
       !catalog.properties.some((property) => property.sources.some((source) => source.source_node_id === dependency))
     ) {
@@ -1021,7 +1206,7 @@ function verifyLensReferenceExpectationPreservation(
 
   const rowsBySource = new Map<string, LensReferenceRow[]>();
   for (const row of lensRows.values()) {
-    const key = `${row.sourceNodeId}\\u0000${row.propertyId}`;
+    const key = `${row.sourceNodeId}\u0000${row.propertyId}`;
     const rows = rowsBySource.get(key) ?? [];
     rows.push(row);
     rowsBySource.set(key, rows);
@@ -1041,9 +1226,7 @@ function verifyLensReferenceExpectationPreservation(
     }
   }
 
-  const dependencyLogicalIds = new Set(
-    node.depends_on.map((dependencyId) => state.nodes[dependencyId]?.logical_node_id ?? dependencyId)
-  );
+  const dependencyLogicalIds = new Set(dependencies.map((dependency) => dependency.node.logical_id));
   for (const [propertyIndex, property] of catalog.properties.entries()) {
     if ((property.reference_expectations?.length ?? 0) === 0) continue;
     for (const [sourceIndex, source] of property.sources.entries()) {
@@ -2003,6 +2186,9 @@ function plannedContractProducerStatus(
   if (attemptAuthority !== undefined) {
     try {
       const { current, declarations } = semanticAttemptDeclarations(consumer, attemptAuthority);
+      assertRegularFileInside(layout.root, layout.graphPath, "planned contract producer authority");
+      const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
+      assertSealedAncestorDirectoryAuthority(graph, current, declarations);
       return declaredAncestorOutputsByContract(current, declarations, contract).length === 0 ? "absent" : "present";
     } catch {
       return "unknown";
@@ -2042,6 +2228,12 @@ function semanticAttemptDeclarations(
       `sealed Smithers attempt ${JSON.stringify(authority.task.attemptId)} does not bind consumer ${JSON.stringify(consumer.id)}`
     );
   }
+  const currentTasks = authority.tasks.filter((task) => task.attemptId === authority.task.attemptId);
+  if (currentTasks.length !== 1 || currentTasks[0] !== authority.task) {
+    throw new Error(
+      `current Smithers attempt is not the exact unique declaration in the sealed task set: ${authority.task.attemptId}`
+    );
+  }
   const declarations = authority.tasks.map((task): SemanticArtifactTaskDeclaration => ({
     attemptId: task.attemptId,
     logicalNodeId: task.logicalNodeId,
@@ -2055,6 +2247,26 @@ function semanticAttemptDeclarations(
     throw new Error(`current Smithers attempt is absent from the sealed task set: ${authority.task.attemptId}`);
   }
   return { current, declarations };
+}
+
+function assertSealedAncestorDirectoryAuthority(
+  graph: PlannedGraph,
+  current: SemanticArtifactTaskDeclaration,
+  declarations: readonly SemanticArtifactTaskDeclaration[]
+): void {
+  const declaredAttempts = new Set(declarations.map((declaration) => declaration.attemptId));
+  for (const dependencyDirectory of current.dependencyArtifactDirs) {
+    const attemptId = path.basename(dependencyDirectory);
+    if (declaredAttempts.has(attemptId)) continue;
+    const planned = graph.nodes.find(
+      (node) => node.id === attemptId || node.workflow?.task_node_ids.includes(`node:${attemptId}`) === true
+    );
+    if (planned?.kind === "reference") continue;
+    if (planned?.kind === "agentic") {
+      throw new Error(`planned agentic ancestor is absent from the sealed Smithers task set: ${attemptId}`);
+    }
+    throw new Error(`sealed dependency directory has no planned producer authority: ${dependencyDirectory}`);
+  }
 }
 
 function plannedAncestorIds(
@@ -2116,9 +2328,16 @@ function finalizedDeclaredContractProducers(
   let current: SemanticArtifactTaskDeclaration;
   let declarations: SemanticArtifactTaskDeclaration[];
   const concreteNodeIdByAttempt = new Map<string, string>();
+  const sealedTaskByAttempt = new Map<string, SmithersTaskManifestTask>();
   if (attemptAuthority !== undefined) {
     ({ current, declarations } = semanticAttemptDeclarations(consumer, attemptAuthority));
-    for (const task of attemptAuthority.tasks) concreteNodeIdByAttempt.set(task.attemptId, task.concreteNodeId);
+    for (const task of attemptAuthority.tasks) {
+      if (sealedTaskByAttempt.has(task.attemptId)) {
+        throw new Error(`sealed Smithers task set repeats attempt ${JSON.stringify(task.attemptId)}`);
+      }
+      sealedTaskByAttempt.set(task.attemptId, task);
+      concreteNodeIdByAttempt.set(task.attemptId, task.concreteNodeId);
+    }
   } else {
     const ancestorIds = plannedAncestorIds(graph, consumer);
     const artifactDirectory = (node: PlannedGraphNode): string =>
@@ -2140,6 +2359,9 @@ function finalizedDeclaredContractProducers(
     }
     for (const node of graph.nodes) concreteNodeIdByAttempt.set(node.id, node.id);
   }
+  if (attemptAuthority !== undefined) {
+    assertSealedAncestorDirectoryAuthority(graph, current, declarations);
+  }
   const bindings = declaredAncestorOutputsByContract(current, declarations, contract, options);
   const bindingsByAttempt = new Map<string, typeof bindings>();
   for (const binding of bindings) {
@@ -2151,6 +2373,26 @@ function finalizedDeclaredContractProducers(
     const node = concreteNodeId === undefined ? undefined : nodesById.get(concreteNodeId);
     if (node === undefined)
       throw new Error(`declared semantic producer is absent from the planned graph: ${attemptId}`);
+    const sealedTask = sealedTaskByAttempt.get(attemptId);
+    if (
+      attemptAuthority !== undefined &&
+      (sealedTask === undefined ||
+        node.kind !== "agentic" ||
+        sealedTask.logicalNodeId !== node.logical_id ||
+        (node.workflow !== undefined && !node.workflow.task_node_ids.includes(`node:${attemptId}`)))
+    ) {
+      throw new Error(`sealed semantic producer does not bind its planned attempt: ${attemptId}`);
+    }
+    if (sealedTask !== undefined) {
+      const sealedOutputs = sealedTask.metadata.artifacts.outputs.filter((output) => output.contract === contract);
+      const plannedOutputs = node.outputs.filter((output) => output.contract === contract);
+      if (
+        sealedOutputs.length !== plannedOutputs.length ||
+        sealedOutputs.some((output) => !plannedOutputs.some((planned) => smithersOutputMatchesPlanned(output, planned)))
+      ) {
+        throw new Error(`sealed ${contract} declaration does not match the planned producer: ${attemptId}`);
+      }
+    }
     let outputAuthority: ReturnType<typeof loadFinalizedNodeOutputSnapshot>;
     try {
       outputAuthority = loadFinalizedNodeOutputSnapshot({
@@ -2227,25 +2469,40 @@ function semanticPropertyLenses(
     });
   }
 
-  let directDependencies: readonly PlannedGraphNode[];
+  let directDependencies: DirectArtifactDependency[];
   try {
-    directDependencies = plannedDirectDependencyNodes(layout, consumer);
+    directDependencies =
+      attemptAuthority === undefined
+        ? plannedDirectDependencyNodes(layout, consumer).map((dependency) => ({
+            attemptId: dependency.id,
+            node: dependency
+          }))
+        : sealedDirectArtifactDependencies(layout, consumer, attemptAuthority);
   } catch {
     return undefined;
   }
   for (const dependency of directDependencies) {
-    const nodeId = dependency.id;
+    const nodeId = dependency.attemptId;
     const nodeState = state.nodes[nodeId];
-    if (nodeState?.logical_node_id !== undefined && nodeState.logical_node_id !== dependency.logical_id) {
+    if (
+      attemptAuthority === undefined &&
+      nodeState?.logical_node_id !== undefined &&
+      nodeState.logical_node_id !== dependency.node.logical_id
+    ) {
       return undefined;
     }
-    const declaredLensCount = dependency.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT).length;
+    const declaredLensCount =
+      dependency.task?.metadata.artifacts.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT)
+        .length ?? dependency.node.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT).length;
     if (declaredLensCount === 0) continue;
     if (declaredLensCount !== 1) return undefined;
     producerCount += 1;
-    const lens = loadFinalizedPropertyLens(layout, state, nodeId, "property-fanin");
+    const lens =
+      attemptAuthority === undefined
+        ? loadFinalizedPropertyLens(layout, state, nodeId, "property-fanin")
+        : loadFinalizedTaskPropertyLens(layout, dependency, "property-fanin");
     if (!lens.ok) return undefined;
-    lenses.push({ sourceNodeId: dependency.logical_id, projectionRequired: true, document: lens.document });
+    lenses.push({ sourceNodeId: dependency.node.logical_id, projectionRequired: true, document: lens.document });
   }
   return producerCount === 0 ? undefined : lenses;
 }
@@ -2421,7 +2678,9 @@ function verifyPropertyProvenanceArtifacts(
   const isCampaign = node.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@2");
   const diagnostics: RuntimeDiagnostic[] = [];
   if (isPropertyLens) {
-    diagnostics.push(...verifyLensReferenceExpectationAuthority(layout, artifactDir, node, attemptId));
+    diagnostics.push(
+      ...verifyLensReferenceExpectationAuthority(layout, artifactDir, node, attemptId, attemptAuthority)
+    );
   }
   if (isFinalReport) {
     diagnostics.push(...verifyFinalReportPropertyReferences(layout, artifactDir, node, attemptAuthority));
@@ -2562,16 +2821,47 @@ function verifyLensReferenceExpectationAuthority(
   layout: RunLayout,
   artifactDir: string,
   node: PlannedGraphNode,
-  attemptId: string
+  attemptId: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): RuntimeDiagnostic[] {
-  const declaration = resolveStateDeclaredPropertyLens(readRunState(layout), attemptId, "property-provenance");
-  if (!declaration.ok) return [declaration.diagnostic];
-  const lensPath = safeResolveInside(artifactDir, declaration.output.path, "property lens output");
+  let declaration: Pick<NodeOutputContract, "path">;
+  if (attemptAuthority === undefined) {
+    const resolved = resolveStateDeclaredPropertyLens(readRunState(layout), attemptId, "property-provenance");
+    if (!resolved.ok) return [resolved.diagnostic];
+    declaration = resolved.output;
+  } else {
+    try {
+      semanticAttemptDeclarations(node, attemptAuthority);
+    } catch (error) {
+      return [diagnosticFromError(error, "property-provenance", "PROPERTY_LENS_AUTHORITY_INVALID")];
+    }
+    const sealedOutputs = attemptAuthority.task.metadata.artifacts.outputs.filter(
+      (output) => output.contract === PROPERTY_LENS_CONTRACT
+    );
+    const plannedOutputs = node.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT);
+    if (
+      sealedOutputs.length !== 1 ||
+      plannedOutputs.length !== 1 ||
+      !smithersOutputMatchesPlanned(sealedOutputs[0]!, plannedOutputs[0]!)
+    ) {
+      return [
+        {
+          code: "PROPERTY_LENS_SCHEMA_BINDING_INVALID",
+          message: `Current Smithers attempt ${JSON.stringify(attemptId)} must match its exact planned ${PROPERTY_LENS_CONTRACT} declaration`,
+          severity: "error",
+          source: "property-provenance",
+          path: `smithers.tasks.${attemptId}.metadata.artifacts.outputs`
+        }
+      ];
+    }
+    declaration = sealedOutputs[0]!;
+  }
+  const lensPath = safeResolveInside(artifactDir, declaration.path, "property lens output");
   if (!fs.existsSync(lensPath)) {
     return [
       {
         code: "PROPERTY_LENS_MISSING",
-        message: `Declared property lens output ${JSON.stringify(declaration.output.path)} is unavailable`,
+        message: `Declared property lens output ${JSON.stringify(declaration.path)} is unavailable`,
         severity: "error",
         source: "property-provenance",
         path: lensPath

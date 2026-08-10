@@ -16,13 +16,15 @@ import {
   derivePropertyImplementationCoverage,
   getNodeArtifactDir,
   readRunState,
+  SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   updateNodeState,
   validateRegisteredJsonFileSync,
   writeArtifact as writeArtifactFile,
   writeArtifactManifest,
   writeJsonDurable,
   writeRunState,
-  type ArtifactVerificationMarker
+  type ArtifactVerificationMarker,
+  type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 import { loadBuiltInPromptAssets } from "@ultrafuzz/prompts";
 
@@ -31,6 +33,7 @@ import {
   captureWorkspaceTree,
   dependencyGateForNode,
   verifyRequiredArtifactsForAttempt as verifyRuntimeRequiredArtifactsForAttempt,
+  type ArtifactGateAttemptAuthority,
   type PlannedGraphNode
 } from "../src/index.js";
 
@@ -315,7 +318,8 @@ function registerMissingFixtureDependencies(
 function verifyRequiredArtifactsForAttempt(
   layout: ReturnType<typeof createRunLayout>,
   node: PlannedGraphNode,
-  attemptId: string
+  attemptId: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): ReturnType<typeof verifyRuntimeRequiredArtifactsForAttempt> {
   const graph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as {
     schema_version: string;
@@ -344,7 +348,7 @@ function verifyRequiredArtifactsForAttempt(
   if (existingIndex === -1) graph.nodes.push(planned);
   else graph.nodes[existingIndex] = planned;
   fs.writeFileSync(layout.graphPath, JSON.stringify(graph), "utf8");
-  return verifyRuntimeRequiredArtifactsForAttempt(layout, planned, attemptId);
+  return verifyRuntimeRequiredArtifactsForAttempt(layout, planned, attemptId, attemptAuthority);
 }
 
 function boundOutput(
@@ -361,13 +365,121 @@ function boundOutput(
   };
 }
 
+function smithersTaskForNode(input: {
+  layout: ReturnType<typeof createRunLayout>;
+  node: PlannedGraphNode;
+  attemptId: string;
+  dependencies?: string[];
+  dependencyArtifactDirs?: string[];
+  modelIndex?: number;
+}): SmithersTaskManifestTask {
+  const dependencies = input.dependencies ?? [];
+  const dependencyArtifactDirs = input.dependencyArtifactDirs ?? [];
+  const outputs = input.node.outputs.map((output) => ({
+    path: output.path,
+    contract: output.contract,
+    contractDigest: output.contract_digest,
+    ...(output.schema_file === undefined ? {} : { schemaFile: output.schema_file }),
+    ...(output.schema_id === undefined ? {} : { schemaId: output.schema_id }),
+    ...(output.schema_sha256 === undefined ? {} : { schemaSha256: output.schema_sha256 }),
+    ...(output.schema_bundle_sha256 === undefined ? {} : { schemaBundleSha256: output.schema_bundle_sha256 }),
+    ...(output.validator_build === undefined ? {} : { validatorBuild: output.validator_build }),
+    primary: output.primary
+  }));
+  const artifactDir = getNodeArtifactDir(input.layout, input.attemptId, { create: true });
+  const workspacePath = path.join(input.layout.workspacesDir, input.attemptId);
+  return {
+    attemptId: input.attemptId,
+    concreteNodeId: input.node.id,
+    logicalNodeId: input.node.logical_id,
+    preparationSmithersNodeId: `prepare:${input.attemptId}`,
+    smithersNodeId: `node:${input.attemptId}`,
+    verifierSmithersNodeId: `verify:${input.attemptId}`,
+    agentRef: "CodexAgent",
+    modelName: "gpt-test",
+    reasoningEffort: "high",
+    dependencies,
+    dependencySmithersNodeIds: dependencies.map((dependency) => `verify:${dependency}`),
+    timeoutMs: 60_000,
+    heartbeatTimeoutMs: 60_000,
+    retries: 0,
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+    workspacePath,
+    artifactDir,
+    dependencyArtifactDirs,
+    renderedPromptPath: path.join(input.layout.root, "prompts", `${input.attemptId}.md`),
+    execution: {
+      mode: "local",
+      resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 },
+      agentCredentialEnv: []
+    },
+    metadata: {
+      schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
+      run: {
+        ultrafuzzRunId: input.layout.runId,
+        smithersWorkflowName: "workflow-artifact-gates",
+        graphVersion: "3",
+        topologyVersion: 2
+      },
+      node: {
+        concreteNodeId: input.node.id,
+        logicalNodeId: input.node.logical_id,
+        attemptId: input.attemptId,
+        label: input.node.display_name,
+        kind: "agentic",
+        promptPath: input.node.prompt_path
+      },
+      dependencies: {
+        concreteNodeIds: [...input.node.depends_on],
+        attemptIds: dependencies,
+        smithersNodeIds: dependencies.map((dependency) => `verify:${dependency}`)
+      },
+      loop: {
+        index: input.node.loop.index,
+        count: input.node.loop.count,
+        mode: input.node.loop.mode,
+        attemptIndex: input.node.loop.attempt_index
+      },
+      model: {
+        profileId: "default",
+        agentRef: "CodexAgent",
+        modelName: "gpt-test",
+        reasoningEffort: "high",
+        modelIndex: input.modelIndex ?? 0,
+        attemptIndex: input.node.loop.attempt_index
+      },
+      workspace: {
+        primitive: "worktree",
+        path: workspacePath,
+        repoPath: "/repo",
+        trustModel: "skip-permissions"
+      },
+      artifacts: {
+        dir: artifactDir,
+        outputs,
+        manifestPath: path.join(artifactDir, "artifact-manifest.json")
+      },
+      retryPolicy: { maxAttempts: 1, smithersRetries: 0 },
+      timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
+      execution: { mode: "local", resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 } }
+    }
+  };
+}
+
 function finalizeArtifactNode(
   layout: ReturnType<typeof createRunLayout>,
   nodeId: string,
-  outputs: readonly PlannedGraphNode["outputs"][number][]
+  outputs: readonly PlannedGraphNode["outputs"][number][],
+  identity: { concreteNodeId?: string; logicalNodeId?: string; modelIndex?: number } = {}
 ): void {
   const state = readRunState(layout);
-  const logicalNodeId = state.nodes[nodeId]?.logical_node_id ?? nodeId;
+  const concreteNodeId = identity.concreteNodeId ?? nodeId;
+  const logicalNodeId = identity.logicalNodeId ?? state.nodes[nodeId]?.logical_node_id ?? nodeId;
+  if (state.nodes[nodeId] !== undefined) {
+    state.nodes[nodeId]!.logical_node_id = logicalNodeId;
+    state.nodes[nodeId]!.outputs = [...outputs];
+    writeRunState(layout, state);
+  }
   const graph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as {
     schema_version: string;
     graph_version: string;
@@ -375,17 +487,17 @@ function finalizeArtifactNode(
     groups: Record<string, unknown>;
     nodes: PlannedGraphNode[];
   };
-  const existingIndex = graph.nodes.findIndex((node) => node.id === nodeId);
+  const existingIndex = graph.nodes.findIndex((node) => node.id === concreteNodeId);
   const existing = existingIndex === -1 ? undefined : graph.nodes[existingIndex];
   const planned: PlannedGraphNode = {
     ...plannedNode([]),
-    id: nodeId,
+    id: concreteNodeId,
     logical_id: logicalNodeId,
     display_name: logicalNodeId,
-    artifact_dir: `artifacts/${nodeId}`,
+    artifact_dir: `artifacts/${concreteNodeId}`,
     depends_on:
       existing === undefined
-        ? inferredFixtureDependencies(graph, outputs).filter((dependency) => dependency !== nodeId)
+        ? inferredFixtureDependencies(graph, outputs).filter((dependency) => dependency !== concreteNodeId)
         : existing.depends_on,
     outputs: [...outputs]
   };
@@ -406,12 +518,12 @@ function finalizeArtifactNode(
       logical_node_id: logicalNodeId,
       attempt_index: 0,
       loop_index: 0,
-      model_index: 0,
+      model_index: identity.modelIndex ?? 0,
       agent_ref: "Codex",
       workflow_run_id: FIXTURE_WORKFLOW_RUN_ID,
       workflow_task_id: FIXTURE_AGENT_TASK_ID,
       origin: "workflow",
-      metadata: { concrete_node_id: nodeId }
+      metadata: { concrete_node_id: concreteNodeId }
     }
   });
   const marker: ArtifactVerificationMarker = {
@@ -2900,6 +3012,137 @@ test("property fan-in consumes one exactly bound custom property-lens path", () 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
 
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("property fan-in authenticates every sealed model-fanout lens attempt independently", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-sealed-fanout-lenses" });
+  const faninNode = writeMinimalPropertyFaninFixture(layout);
+  const discoveryGraph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as { nodes: PlannedGraphNode[] };
+  const discoveryNode = discoveryGraph.nodes.find((node) => node.id === "project-discovery")!;
+  const lensOutput = boundOutput("custom/recon-lens.json", "ultrafuzz/property-lens@2", true);
+  const lensNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon",
+    display_name: "Property specification recon",
+    artifact_dir: "artifacts/property-specification-recon",
+    depends_on: ["project-discovery"],
+    outputs: [lensOutput],
+    model_fanout: [
+      {
+        model_profile_id: "model-a",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-test-a",
+        reasoning_effort: "high",
+        model_index: 0,
+        loop_index: 0,
+        attempt_index: 0
+      },
+      {
+        model_profile_id: "model-b",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-test-b",
+        reasoning_effort: "high",
+        model_index: 1,
+        loop_index: 0,
+        attempt_index: 0
+      }
+    ],
+    workflow: {
+      node_id: "node:property-specification-recon__model_0__attempt_0",
+      task_node_ids: [
+        "node:property-specification-recon__model_0__attempt_0",
+        "node:property-specification-recon__model_1__attempt_0"
+      ]
+    }
+  };
+  const currentNode: PlannedGraphNode = {
+    ...faninNode,
+    artifact_dir: `artifacts/${faninNode.id}`,
+    depends_on: [lensNode.id],
+    workflow: { node_id: `node:${faninNode.id}`, task_node_ids: [`node:${faninNode.id}`] }
+  };
+  const lensAttempts = [
+    "property-specification-recon__model_0__attempt_0",
+    "property-specification-recon__model_1__attempt_0"
+  ];
+  const lensDocument = JSON.stringify({
+    schema_version: "ultrafuzz.property-lens.v2",
+    properties: [
+      {
+        id: "recon-1",
+        description: "Supply accounting remains consistent.",
+        category: "accounting",
+        priority: "high"
+      }
+    ]
+  });
+  for (const [modelIndex, attemptId] of lensAttempts.entries()) {
+    registerArtifactNode(layout, attemptId, [lensOutput]);
+    writeArtifactFile(layout, attemptId, lensOutput.path, lensDocument);
+    finalizeArtifactNode(layout, attemptId, [lensOutput], {
+      concreteNodeId: lensNode.id,
+      logicalNodeId: lensNode.logical_id,
+      modelIndex
+    });
+  }
+  writePlannedGraph(layout, [discoveryNode, lensNode, currentNode]);
+
+  const discoveryTask = smithersTaskForNode({
+    layout,
+    node: discoveryNode,
+    attemptId: discoveryNode.id
+  });
+  const lensTasks = lensAttempts.map((attemptId, modelIndex) =>
+    smithersTaskForNode({
+      layout,
+      node: lensNode,
+      attemptId,
+      dependencies: [discoveryNode.id],
+      dependencyArtifactDirs: [discoveryTask.artifactDir],
+      modelIndex
+    })
+  );
+  const currentTask = smithersTaskForNode({
+    layout,
+    node: currentNode,
+    attemptId: currentNode.id,
+    dependencies: lensAttempts,
+    dependencyArtifactDirs: [discoveryTask.artifactDir, ...lensTasks.map((task) => task.artifactDir)]
+  });
+  const tasks = [discoveryTask, ...lensTasks, currentTask];
+  const valid = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
+    task: currentTask,
+    tasks
+  });
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  const missingDeclaredAttempt = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
+    task: currentTask,
+    tasks: [discoveryTask, lensTasks[0]!, currentTask]
+  });
+  assert.equal(missingDeclaredAttempt.ok, false, JSON.stringify(missingDeclaredAttempt.diagnostics));
+  assert.ok(
+    missingDeclaredAttempt.diagnostics.some((diagnostic) =>
+      `${diagnostic.message} ${diagnostic.path ?? ""}`.includes(lensAttempts[1]!)
+    ),
+    JSON.stringify(missingDeclaredAttempt.diagnostics)
+  );
+
+  fs.unlinkSync(path.join(layout.root, ".ultrafuzz-verification", `${lensAttempts[1]}.json`));
+  const missingSecondAttempt = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
+    task: currentTask,
+    tasks
+  });
+  assert.equal(missingSecondAttempt.ok, false, JSON.stringify(missingSecondAttempt.diagnostics));
+  assert.ok(
+    missingSecondAttempt.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_LENS_AUTHORITY_INVALID" &&
+        `${diagnostic.message} ${diagnostic.path ?? ""}`.includes(lensAttempts[1]!)
+    ),
+    JSON.stringify(missingSecondAttempt.diagnostics)
+  );
 });
 
 test("property fan-in selects a declared lens contract without relying on the producer name", () => {

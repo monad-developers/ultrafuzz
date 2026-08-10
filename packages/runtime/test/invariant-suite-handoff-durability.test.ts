@@ -64,7 +64,7 @@ type TaskSpecLike = {
   outputs: Array<{ path: string; contract: string }>;
   metadata: {
     node: { logicalNodeId: string; concreteNodeId: string };
-    dependencies: { attemptIds: string[] };
+    dependencies: { attemptIds: string[]; smithersNodeIds: string[] };
     artifacts: { dir: string };
   };
 };
@@ -97,6 +97,11 @@ type WorkflowHelpers = {
   assertSafeInvariantSuitePath?: (value: string) => string;
   assertSafeInvariantSuiteTestPath?: (value: string) => string;
   assertInvariantSuiteSourceBudget?: (fileCount: number, totalBytes: number) => void;
+  assertInvariantSuiteDependencyExpectations?: (
+    task: TaskSpecLike,
+    dependencies: readonly string[],
+    suitePathsByDependency: ReadonlyMap<string, string[]>
+  ) => void;
 };
 
 /** The running file/byte allowance `listInvariantSuiteSources` spends while it walks. */
@@ -524,7 +529,10 @@ function makeTaskSpec(
     outputs: [],
     metadata: {
       node: { logicalNodeId, concreteNodeId: attemptId },
-      dependencies: { attemptIds: [...directDependencyAttemptIds] },
+      dependencies: {
+        attemptIds: [...directDependencyAttemptIds],
+        smithersNodeIds: directDependencyAttemptIds.map((dependency) => `verify:${dependency}`)
+      },
       artifacts: { dir: artifactDir }
     }
   };
@@ -604,6 +612,46 @@ test("invariant-suite runtime readers accept only strict current-version manifes
       () => parseManifest(Buffer.from(invalid, "utf8"), "manifest.json"),
       /artifact-contract failure: invariant suite manifest is invalid manifest\.json/u
     );
+  }
+});
+
+test("invariant-suite expectations ignore reference ancestors but fail closed for missing agentic producers", () => {
+  const runRoot = fs.mkdtempSync(path.join(process.cwd(), "ultrafuzz-invariant-reference-"));
+  try {
+    const reference = makeTaskSpec(runRoot, "pinned-reference", "pinned-reference", [], []);
+    const consumer = makeTaskSpec(
+      runRoot,
+      "coverage",
+      "stateful-invariant-coverage",
+      [reference.attemptId],
+      [reference.attemptId]
+    );
+    consumer.metadata.dependencies.smithersNodeIds = [];
+    const state = createHarnessState([consumer]);
+    const helpers = loadWorkflowHelpers(["assertInvariantSuiteDependencyExpectations"], state);
+    const assertExpectations = helpers.assertInvariantSuiteDependencyExpectations;
+    assert.ok(assertExpectations);
+
+    assert.doesNotThrow(() => assertExpectations(consumer, consumer.dependencyArtifactDirs, new Map()));
+
+    consumer.metadata.dependencies.smithersNodeIds = [`verify:${reference.attemptId}`];
+    assert.throws(
+      () => assertExpectations(consumer, consumer.dependencyArtifactDirs, new Map()),
+      /producer declaration is unavailable/u
+    );
+
+    consumer.metadata.dependencies.smithersNodeIds = [];
+    fs.writeFileSync(
+      path.join(reference.artifactDir, "invariant-suite-manifest.json"),
+      `${JSON.stringify({ schema_version: INVARIANT_SUITE_MANIFEST_SCHEMA_VERSION })}\n`,
+      "utf8"
+    );
+    assert.throws(
+      () => assertExpectations(consumer, consumer.dependencyArtifactDirs, new Map()),
+      /producer declaration is unavailable/u
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
   }
 });
 
