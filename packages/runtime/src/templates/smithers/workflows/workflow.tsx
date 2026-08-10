@@ -2426,8 +2426,8 @@ function materializeGeneratedTestCompanions(
     const validation = validateArtifactContract(output.contract, contents, output.path);
     if (!validation.ok) continue;
     const manifest = validation.value as {
-      generated_tests: Array<{ path: string }>;
-      support_files: Array<{ path: string }>;
+      generated_tests: Array<{ path: string; size_bytes: number; sha256: string }>;
+      support_files: Array<{ path: string; size_bytes: number; sha256: string }>;
     };
     for (const entry of [...manifest.generated_tests, ...manifest.support_files]) {
       materializeGeneratedTestCompanion(workspaceRoot, captured.artifactRoot, generatedTestNodeIds(task), entry.path);
@@ -4965,8 +4965,8 @@ function writeArtifactVerificationMarker(
 
 function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ path: string; contents: Buffer }> {
   const manifest = value as {
-    generated_tests: Array<{ path: string }>;
-    support_files: Array<{ path: string }>;
+    generated_tests: Array<{ path: string; size_bytes: number; sha256: string }>;
+    support_files: Array<{ path: string; size_bytes: number; sha256: string }>;
   };
   const entries = [...manifest.generated_tests, ...manifest.support_files];
   const paths = new Set<string>();
@@ -4988,6 +4988,12 @@ function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ 
       true
     );
     decodeStrictUtf8Snapshot(snapshot, `artifact-contract failure: generated-test bundle file ${relativePath}`);
+    if (snapshot.bytes.length !== entry.size_bytes) {
+      throw new Error(`artifact-contract failure: generated-test bundle file size does not match ${relativePath}`);
+    }
+    if (createHash("sha256").update(snapshot.bytes).digest("hex") !== entry.sha256) {
+      throw new Error(`artifact-contract failure: generated-test bundle file digest does not match ${relativePath}`);
+    }
     return { path: relativePath, contents: snapshot.bytes };
   });
 }

@@ -23,6 +23,21 @@ import {
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
 
+function generatedTestEntry(
+  entryPath: string,
+  contents: string | Buffer
+): {
+  path: string;
+  size_bytes: number;
+  sha256: string;
+} {
+  return {
+    path: entryPath,
+    size_bytes: Buffer.byteLength(contents),
+    sha256: createHash("sha256").update(contents).digest("hex")
+  };
+}
+
 function loadGeneratedWorkflowInputSchema(): { safeParse(value: unknown): { success: boolean } } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const schemaStart = source.indexOf("const inputTaskSchema");
@@ -676,6 +691,78 @@ test("generated Smithers verifier rejects zero-byte generated-test companions", 
   assert.match(generatedTestVerifier, /readBoundedRegularArtifactSnapshot\(/u);
   assert.match(generatedTestVerifier, /MAX_VERIFIED_COMPANION_BYTES,\s*true/u);
   assert.match(generatedTestVerifier, /decodeStrictUtf8Snapshot\(snapshot/u);
+  assert.match(generatedTestVerifier, /snapshot\.bytes\.length !== entry\.size_bytes/u);
+  assert.match(generatedTestVerifier, /createHash\("sha256"\)\.update\(snapshot\.bytes\).*entry\.sha256/su);
+});
+
+test("generated Smithers authenticates the final generated-test publication snapshot", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const verifierStart = source.indexOf("function verifyGeneratedTestFiles");
+  const workflowStart = source.indexOf("export default smithers", verifierStart);
+  assert.ok(verifierStart >= 0 && workflowStart > verifierStart, source);
+  const emitted = ts.transpileModule(source.slice(verifierStart, workflowStart), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const verifyGeneratedTestFiles = new Function(
+    "path",
+    "isStrictlyInsideDirectory",
+    "readBoundedRegularArtifactSnapshot",
+    "MAX_VERIFIED_COMPANION_BYTES",
+    "decodeStrictUtf8Snapshot",
+    "createHash",
+    `${emitted}; return verifyGeneratedTestFiles;`
+  )(
+    path,
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    (root: string, candidate: string, failureMessage: string, maxBytes: number, requireNonEmpty: boolean) => {
+      if (candidate === root || !candidate.startsWith(`${root}${path.sep}`)) throw new Error(failureMessage);
+      const resolved = fs.realpathSync(candidate);
+      const bytes = readRegularFileSnapshot(resolved, maxBytes);
+      if (requireNonEmpty && bytes.length === 0) throw new Error(`${failureMessage}: file is empty`);
+      return Object.freeze({ path: resolved, bytes });
+    },
+    16 * 1024 * 1024,
+    (snapshot: { bytes: Buffer }, failureMessage: string) => {
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(snapshot.bytes);
+      } catch (error) {
+        throw new Error(`${failureMessage}: file is not valid UTF-8`, { cause: error });
+      }
+    },
+    createHash
+  ) as (artifactDir: string, value: unknown) => Array<{ path: string; contents: Buffer }>;
+
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-final-snapshot-")));
+  try {
+    const relativePath = "generated-tests/Replay.t.sol";
+    const contents = "contract Replay {}\n";
+    fs.mkdirSync(path.join(root, "generated-tests"));
+    fs.writeFileSync(path.join(root, relativePath), contents, "utf8");
+    const entry = generatedTestEntry(relativePath, contents);
+    const manifest = { generated_tests: [entry], support_files: [] };
+
+    assert.deepEqual(verifyGeneratedTestFiles(root, manifest), [
+      { path: relativePath, contents: Buffer.from(contents, "utf8") }
+    ]);
+    assert.throws(
+      () =>
+        verifyGeneratedTestFiles(root, {
+          ...manifest,
+          generated_tests: [{ ...entry, size_bytes: entry.size_bytes + 1 }]
+        }),
+      /file size does not match/u
+    );
+    assert.throws(
+      () =>
+        verifyGeneratedTestFiles(root, {
+          ...manifest,
+          generated_tests: [{ ...entry, sha256: "0".repeat(64) }]
+        }),
+      /file digest does not match/u
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 type VerifyArtifactsTask = {
@@ -884,8 +971,8 @@ test("generated Smithers fails closed on schema-valid document semantic violatio
       schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-one",
       node_id: "node-one",
-      generated_tests: [{ path: "generated-tests/Duplicate.t.sol" }],
-      support_files: [{ path: "generated-tests/Duplicate.t.sol" }]
+      generated_tests: [generatedTestEntry("generated-tests/Duplicate.t.sol", "duplicate\n")],
+      support_files: [generatedTestEntry("generated-tests/Duplicate.t.sol", "duplicate\n")]
     };
     const contents = `${JSON.stringify(document)}\n`;
     assert.equal(validateArtifactContract("ultrafuzz/generated-tests@3", contents).ok, true);
@@ -910,14 +997,16 @@ test("generated Smithers rejects non-UTF-8 generated-test support companions", (
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-support-utf8-")));
   try {
     fs.mkdirSync(path.join(root, "generated-tests"));
-    fs.writeFileSync(path.join(root, "generated-tests", "Replay.t.sol"), "contract Replay {}\n", "utf8");
-    fs.writeFileSync(path.join(root, "generated-tests", "fixture.dat"), Buffer.from([0xff]));
+    const replayContents = "contract Replay {}\n";
+    const supportContents = Buffer.from([0xff]);
+    fs.writeFileSync(path.join(root, "generated-tests", "Replay.t.sol"), replayContents, "utf8");
+    fs.writeFileSync(path.join(root, "generated-tests", "fixture.dat"), supportContents);
     const document = {
       schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-one",
       node_id: "node-one",
-      generated_tests: [{ path: "generated-tests/Replay.t.sol" }],
-      support_files: [{ path: "generated-tests/fixture.dat" }]
+      generated_tests: [generatedTestEntry("generated-tests/Replay.t.sol", replayContents)],
+      support_files: [generatedTestEntry("generated-tests/fixture.dat", supportContents)]
     };
     const contents = `${JSON.stringify(document)}\n`;
     assert.equal(validateArtifactContract("ultrafuzz/generated-tests@3", contents).ok, true);
@@ -2536,8 +2625,8 @@ test("generated Smithers dependency verification fails closed before descendant 
       value:
         contract === "ultrafuzz/generated-tests@3"
           ? {
-              generated_tests: [{ path: "generated-tests/Property.t.sol" }],
-              support_files: [{ path: "generated-tests/PropertyHelper.sol" }]
+              generated_tests: [generatedTestEntry("generated-tests/Property.t.sol", "contract Property {}\n")],
+              support_files: [generatedTestEntry("generated-tests/PropertyHelper.sol", "library PropertyHelper {}\n")]
             }
           : undefined
     }),
@@ -2654,8 +2743,16 @@ test("generated Smithers dependency verification fails closed before descendant 
   writeMarker([validArtifact]);
   assert.doesNotThrow(() => assertVerifiedDependency(task, dependency));
   fs.mkdirSync(path.join(generatedDependency, "generated-tests"), { recursive: true });
+  const propertyContents = "contract Property {}\n";
+  const propertyHelperContents = "library PropertyHelper {}\n";
   const generatedBytes = Buffer.from(
-    '{"schema_version":"ultrafuzz.generated-tests.v3","run_id":"run-one","node_id":"generated-tests-fanin","generated_tests":[{"path":"generated-tests/Property.t.sol"}],"support_files":[{"path":"generated-tests/PropertyHelper.sol"}]}\n'
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.generated-tests.v3",
+      run_id: "run-one",
+      node_id: "generated-tests-fanin",
+      generated_tests: [generatedTestEntry("generated-tests/Property.t.sol", propertyContents)],
+      support_files: [generatedTestEntry("generated-tests/PropertyHelper.sol", propertyHelperContents)]
+    })}\n`
   );
   fs.writeFileSync(path.join(generatedDependency, "generated-tests.json"), generatedBytes);
   const generatedArtifact = {
@@ -2667,16 +2764,16 @@ test("generated Smithers dependency verification fails closed before descendant 
     primary: true
   };
   const companionPath = path.join(generatedDependency, "generated-tests", "Property.t.sol");
-  fs.writeFileSync(companionPath, "contract Property {}\n", "utf8");
+  fs.writeFileSync(companionPath, propertyContents, "utf8");
   const supportPath = path.join(generatedDependency, "generated-tests", "PropertyHelper.sol");
-  fs.writeFileSync(supportPath, "library PropertyHelper {}\n", "utf8");
+  fs.writeFileSync(supportPath, propertyHelperContents, "utf8");
   const companionPublication = {
     path: "generated-tests/Property.t.sol",
-    sha256: createHash("sha256").update("contract Property {}\n").digest("hex")
+    sha256: createHash("sha256").update(propertyContents).digest("hex")
   };
   const supportPublication = {
     path: "generated-tests/PropertyHelper.sol",
-    sha256: createHash("sha256").update("library PropertyHelper {}\n").digest("hex")
+    sha256: createHash("sha256").update(propertyHelperContents).digest("hex")
   };
   writeAttemptMarker("generated-tests-fanin", [generatedArtifact]);
   assert.throws(

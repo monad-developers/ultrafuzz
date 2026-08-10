@@ -13,7 +13,8 @@ import {
   ensureSafeDirectory,
   normalizeSafeRelativePath,
   prepareSafeFilePath,
-  sha256File,
+  safeResolveInside,
+  sha256Bytes,
   writeFileDurable,
   writeJsonDurable
 } from "./safe-paths.js";
@@ -31,6 +32,7 @@ export const GENERATED_TEST_MANIFEST_PATH_PATTERN =
 export type GeneratedTestProvenance = Partial<Omit<ArtifactProvenance, "metadata">>;
 
 export interface GeneratedTestInput {
+  /** Exact normalized POSIX manifest path beginning with `generated-tests/`. */
   path: string;
   content?: string | Uint8Array;
   language?: string;
@@ -41,8 +43,8 @@ export interface GeneratedTestInput {
 
 export interface GeneratedTestEntry {
   path: string;
-  size_bytes?: number;
-  sha256?: string;
+  size_bytes: number;
+  sha256: string;
   provenance?: GeneratedTestProvenance;
   language?: string;
   framework?: string;
@@ -60,7 +62,7 @@ export interface GeneratedTestManifest {
 
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
-const generatedTestFileSize = nonNegativeInteger.max(MAX_GENERATED_TEST_COMPANION_BYTES);
+const generatedTestFileSize = nonNegativeInteger.min(1).max(MAX_GENERATED_TEST_COMPANION_BYTES);
 const generatedTestManifestPathPattern = new RegExp(GENERATED_TEST_MANIFEST_PATH_PATTERN, "u");
 
 export const generatedTestProvenanceSchema = z
@@ -91,11 +93,8 @@ const generatedTestPathSchema = nonEmptyString.regex(generatedTestManifestPathPa
 export const generatedTestEntrySchema = z
   .strictObject({
     path: generatedTestPathSchema,
-    size_bytes: generatedTestFileSize.optional(),
-    sha256: z
-      .string()
-      .regex(/^[a-f0-9]{64}$/u)
-      .optional(),
+    size_bytes: generatedTestFileSize,
+    sha256: z.string().regex(/^[a-f0-9]{64}$/u),
     provenance: generatedTestProvenanceSchema.optional(),
     language: nonEmptyString.optional(),
     framework: nonEmptyString.optional(),
@@ -151,6 +150,7 @@ export function assertGeneratedTestManifestSemantics(manifest: GeneratedTestMani
     }
     paths.add(entry.path);
   }
+  assertGeneratedTestPathsAreMaterializable(paths);
   if (manifest.generated_tests.length === 0 && manifest.support_files.length > 0) {
     throw new Error("generated tests manifest cannot declare support files without a runnable generated test");
   }
@@ -163,10 +163,14 @@ export function writeGeneratedTestManifest(input: {
   supportFiles: GeneratedTestInput[];
   provenance?: GeneratedTestProvenance;
 }): GeneratedTestManifest {
-  preflightGeneratedTestInputs(input.tests, input.supportFiles);
-  const nodeDir = getNodeArtifactDir(input.layout, input.nodeId, { create: true });
-  ensureSafeDirectory(nodeDir, GENERATED_TESTS_DIR);
   const provenance = normalizeArtifactProvenance(input.layout, input.nodeId, input.provenance);
+  preflightGeneratedTestInputShapes(input, provenance);
+  const nodeDir = getNodeArtifactDir(input.layout, input.nodeId);
+  const manifestPath = safeResolveInside(nodeDir, GENERATED_TESTS_MANIFEST, "generated tests manifest path");
+  assertGeneratedTestDestinationCanBeReplaced(manifestPath);
+  preflightGeneratedTestFiles(nodeDir, input.tests, input.supportFiles);
+  getNodeArtifactDir(input.layout, input.nodeId, { create: true });
+  ensureSafeDirectory(nodeDir, GENERATED_TESTS_DIR);
   const generated_tests = input.tests.map((test) => writeGeneratedTestEntry(nodeDir, test, provenance));
   const support_files = input.supportFiles.map((supportFile) =>
     writeGeneratedTestEntry(nodeDir, supportFile, provenance)
@@ -180,7 +184,7 @@ export function writeGeneratedTestManifest(input: {
     provenance
   };
   assertGeneratedTestManifestSchema(manifest);
-  writeJsonDurable(path.join(nodeDir, GENERATED_TESTS_MANIFEST), manifest);
+  writeJsonDurable(manifestPath, manifest);
   return manifest;
 }
 
@@ -196,27 +200,32 @@ function writeGeneratedTestEntry(
   input: GeneratedTestInput,
   manifestProvenance: GeneratedTestProvenance & Pick<ArtifactProvenance, "producer_node_id">
 ): GeneratedTestEntry {
-  const safeRelativeTestPath = normalizeSafeRelativePath(stripGeneratedTestsPrefix(input.path), "generated test path");
+  const safeRelativeTestPath = canonicalGeneratedTestRelativePath(input.path, "generated test path");
   const generatedTestsRoot = path.join(nodeDir, GENERATED_TESTS_DIR);
   const absolutePath = prepareSafeFilePath(generatedTestsRoot, safeRelativeTestPath);
-  assertGeneratedTestDestinationIsNotSymlink(absolutePath);
+  assertGeneratedTestDestinationCanBeReplaced(absolutePath);
   if (input.content !== undefined) {
     writeFileDurable(absolutePath, input.content);
   }
   assertRegularFileInside(generatedTestsRoot, absolutePath, "generated test file");
-  const fileStats = fs.lstatSync(absolutePath);
-  if (fileStats.size === 0) {
+  const contents = readRegularFileSnapshot(absolutePath, MAX_GENERATED_TEST_COMPANION_BYTES);
+  if (contents.length === 0) {
     throw new Error(`generated test file must be non-empty: ${absolutePath}`);
   }
-  if (fileStats.size > MAX_GENERATED_TEST_COMPANION_BYTES) {
-    throw new Error(
-      `generated test file exceeds the ${MAX_GENERATED_TEST_COMPANION_BYTES}-byte limit: ${absolutePath}`
-    );
-  }
+  assertStrictUtf8(contents, "generated test file", absolutePath);
+  return generatedTestEntryFromSnapshot(safeRelativeTestPath, input, contents, manifestProvenance);
+}
+
+function generatedTestEntryFromSnapshot(
+  safeRelativeTestPath: string,
+  input: GeneratedTestInput,
+  contents: Uint8Array,
+  manifestProvenance: GeneratedTestProvenance & Pick<ArtifactProvenance, "producer_node_id">
+): GeneratedTestEntry {
   const entry: GeneratedTestEntry = {
     path: `${GENERATED_TESTS_DIR}/${safeRelativeTestPath}`,
-    size_bytes: fileStats.size,
-    sha256: sha256File(absolutePath),
+    size_bytes: contents.length,
+    sha256: sha256Bytes(contents),
     provenance: normalizeArtifactProvenance(
       { runId: manifestProvenance.run_id ?? "" },
       manifestProvenance.producer_node_id,
@@ -238,20 +247,26 @@ function writeGeneratedTestEntry(
   return entry;
 }
 
-function preflightGeneratedTestInputs(
-  tests: readonly GeneratedTestInput[],
-  supportFiles: readonly GeneratedTestInput[]
+function preflightGeneratedTestInputShapes(
+  input: {
+    layout: RunLayout;
+    nodeId: string;
+    tests: readonly GeneratedTestInput[];
+    supportFiles: readonly GeneratedTestInput[];
+  },
+  provenance: GeneratedTestProvenance & Pick<ArtifactProvenance, "producer_node_id">
 ): void {
+  const { tests, supportFiles } = input;
   if (tests.length === 0 && supportFiles.length > 0) {
     throw new Error("generated tests manifest cannot declare support files without a runnable generated test");
   }
   const paths = new Set<string>();
   for (const [label, entries] of [
     ["generated test", tests],
-    ["generated-test support file", supportFiles]
+    ["generated-test support", supportFiles]
   ] as const) {
     for (const entry of entries) {
-      const safeRelativePath = normalizeSafeRelativePath(stripGeneratedTestsPrefix(entry.path), `${label} path`);
+      const safeRelativePath = canonicalGeneratedTestRelativePath(entry.path, `${label} path`);
       const manifestPath = `${GENERATED_TESTS_DIR}/${safeRelativePath}`;
       if (paths.has(manifestPath)) {
         throw new Error(`generated tests manifest repeats path ${JSON.stringify(manifestPath)}`);
@@ -263,11 +278,71 @@ function preflightGeneratedTestInputs(
       if (entry.content !== undefined && Buffer.byteLength(entry.content) > MAX_GENERATED_TEST_COMPANION_BYTES) {
         throw new Error(`${label} file exceeds the ${MAX_GENERATED_TEST_COMPANION_BYTES}-byte limit: ${manifestPath}`);
       }
+      if (entry.content !== undefined) {
+        assertStrictUtf8(Buffer.from(entry.content), `${label} file`, manifestPath);
+      }
+    }
+  }
+  assertGeneratedTestPathsAreMaterializable(paths);
+  const placeholder = Buffer.from("x", "utf8");
+  assertGeneratedTestManifestSchema({
+    schema_version: GENERATED_TESTS_SCHEMA_VERSION,
+    run_id: input.layout.runId,
+    node_id: input.nodeId,
+    generated_tests: tests.map((entry) =>
+      generatedTestEntryFromSnapshot(
+        canonicalGeneratedTestRelativePath(entry.path, "generated test path"),
+        entry,
+        placeholder,
+        provenance
+      )
+    ),
+    support_files: supportFiles.map((entry) =>
+      generatedTestEntryFromSnapshot(
+        canonicalGeneratedTestRelativePath(entry.path, "generated-test support path"),
+        entry,
+        placeholder,
+        provenance
+      )
+    ),
+    provenance
+  });
+}
+
+function preflightGeneratedTestFiles(
+  nodeDir: string,
+  tests: readonly GeneratedTestInput[],
+  supportFiles: readonly GeneratedTestInput[]
+): void {
+  const generatedTestsRoot = path.join(nodeDir, GENERATED_TESTS_DIR);
+  for (const [label, entries] of [
+    ["generated test", tests],
+    ["generated-test support", supportFiles]
+  ] as const) {
+    for (const entry of entries) {
+      const safeRelativePath = canonicalGeneratedTestRelativePath(entry.path, `${label} path`);
+      const manifestPath = `${GENERATED_TESTS_DIR}/${safeRelativePath}`;
+      const absolutePath = safeResolveInside(generatedTestsRoot, safeRelativePath, `${label} path`);
+      assertGeneratedTestDestinationCanBeReplaced(absolutePath);
+      if (entry.content !== undefined) continue;
+      const contents = readRegularFileSnapshot(absolutePath, MAX_GENERATED_TEST_COMPANION_BYTES);
+      if (contents.length === 0) {
+        throw new Error(`${label} file must be non-empty: ${manifestPath}`);
+      }
+      assertStrictUtf8(contents, `${label} file`, manifestPath);
     }
   }
 }
 
-function assertGeneratedTestDestinationIsNotSymlink(filePath: string): void {
+function assertStrictUtf8(contents: Uint8Array, label: string, filePath: string): void {
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(contents);
+  } catch {
+    throw new Error(`${label} must be strict UTF-8 text: ${filePath}`);
+  }
+}
+
+function assertGeneratedTestDestinationCanBeReplaced(filePath: string): void {
   let fileStats: fs.Stats;
   try {
     fileStats = fs.lstatSync(filePath);
@@ -278,10 +353,42 @@ function assertGeneratedTestDestinationIsNotSymlink(filePath: string): void {
     throw error;
   }
   if (fileStats.isSymbolicLink()) {
-    throw new ArtifactPathError("symlink-escape", `generated test file cannot be a symlink: ${filePath}`);
+    throw new ArtifactPathError("symlink-escape", `generated-test bundle destination cannot be a symlink: ${filePath}`);
+  }
+  if (!fileStats.isFile()) {
+    throw new ArtifactPathError("not-file", `generated-test bundle destination must be a regular file: ${filePath}`);
   }
 }
 
-function stripGeneratedTestsPrefix(value: string): string {
-  return value.replace(/^generated-tests\//u, "");
+function canonicalGeneratedTestRelativePath(value: string, label: string): string {
+  const prefix = `${GENERATED_TESTS_DIR}/`;
+  if (!value.startsWith(prefix)) {
+    throw new ArtifactPathError("noncanonical-path", `${label} must begin with ${JSON.stringify(prefix)}`);
+  }
+  const relativePath = value.slice(prefix.length);
+  const normalized = normalizeSafeRelativePath(relativePath, label);
+  if (relativePath !== normalized) {
+    throw new ArtifactPathError(
+      "noncanonical-path",
+      `${label} must already be a normalized relative POSIX path: ${JSON.stringify(value)}`
+    );
+  }
+  return normalized;
+}
+
+function assertGeneratedTestPathsAreMaterializable(paths: ReadonlySet<string>): void {
+  const directoryOrderedPaths = [...paths].sort((left, right) => {
+    const leftDirectory = `${left}/`;
+    const rightDirectory = `${right}/`;
+    return leftDirectory < rightDirectory ? -1 : leftDirectory > rightDirectory ? 1 : 0;
+  });
+  for (let index = 1; index < directoryOrderedPaths.length; index += 1) {
+    const parentCandidate = directoryOrderedPaths[index - 1]!;
+    const childCandidate = directoryOrderedPaths[index]!;
+    if (childCandidate.startsWith(`${parentCandidate}/`)) {
+      throw new Error(
+        `generated tests manifest path ${JSON.stringify(childCandidate)} conflicts with file path ${JSON.stringify(parentCandidate)}`
+      );
+    }
+  }
 }

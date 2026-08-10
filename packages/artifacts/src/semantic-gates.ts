@@ -2015,6 +2015,36 @@ function generatedTestSupportRequiresTestIssues(document: unknown): SemanticGate
     : [];
 }
 
+function generatedTestBundlePathIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+  const issues = uniqueFieldGate([["generated_tests"], ["support_files"]], "path", "generated-test bundle path", {
+    global: true
+  })(document, context);
+  const entries = ["generated_tests", "support_files"].flatMap((field) =>
+    arrayAt(document, [field]).flatMap((row, index) => {
+      const value = stringField(row, "path");
+      return value === undefined ? [] : [{ value, field, index }];
+    })
+  );
+  entries.sort((left, right) => {
+    const leftDirectory = `${left.value}/`;
+    const rightDirectory = `${right.value}/`;
+    return leftDirectory < rightDirectory ? -1 : leftDirectory > rightDirectory ? 1 : 0;
+  });
+  for (let index = 1; index < entries.length; index += 1) {
+    const parentCandidate = entries[index - 1]!;
+    const childCandidate = entries[index]!;
+    if (childCandidate.value.startsWith(`${parentCandidate.value}/`)) {
+      issues.push(
+        issue(
+          `$.${childCandidate.field}[${childCandidate.index}].path`,
+          `Generated-test bundle file path ${JSON.stringify(childCandidate.value)} descends from file path ${JSON.stringify(parentCandidate.value)}`
+        )
+      );
+    }
+  }
+  return issues;
+}
+
 function generatedTestIdentityIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const identity = context.artifactIdentity!;
   const issues: SemanticGateIssue[] = [];
@@ -2672,9 +2702,7 @@ const gateSpecifications = {
     ["artifactIdentity.runId", "artifactIdentity.nodeId"],
     generatedTestIdentityIssues
   ),
-  "generated-test-bundle-path-uniqueness": documentGate(
-    uniqueFieldGate([["generated_tests"], ["support_files"]], "path", "generated-test bundle path", { global: true })
-  ),
+  "generated-test-bundle-path-uniqueness": documentGate(generatedTestBundlePathIssues),
   "generated-test-support-requires-test": documentGate(generatedTestSupportRequiresTestIssues),
   "harness-repair-failure-id-uniqueness": documentGate(uniqueFieldGate([[]], "failure_id", "harness failure ID")),
   "implemented-property-id-uniqueness": documentGate(

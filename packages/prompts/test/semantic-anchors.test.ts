@@ -467,6 +467,7 @@ describe("prompt semantic anchors", () => {
 
   it("keeps generated-test manifests on the canonical generated/support bundle contract", () => {
     const aggregate = prompt("review/aggregate-test-files.md");
+    const dedupe = prompt("review/dedupe-findings.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
     const templatePath = fileURLToPath(
       new URL("../../../.ultrafuzz/prompts/_templates/output-contract/generated-tests.mdx", import.meta.url)
@@ -489,7 +490,12 @@ describe("prompt semantic anchors", () => {
     expect(readFileSync(templatePath, "utf8")).toContain("generated_tests");
     expect(readFileSync(templatePath, "utf8")).toContain("support_files");
     expect(readFileSync(templatePath, "utf8")).toContain("must be strict UTF-8 text");
+    expect(readFileSync(templatePath, "utf8")).toContain("exact positive `size_bytes`");
     expect(aggregate).toContain("required `generated_tests`\nand `support_files` arrays together");
+    expect(aggregate).toContain("Require both `size_bytes` and\n`sha256` to be present");
+    expect(dedupe).toContain("exact `ultrafuzz.generated-tests.v3` shape");
+    expect(dedupe).toContain("required `generated_tests` and `support_files` arrays");
+    expect(dedupe).toContain("exact positive `size_bytes`");
     expect(dynamic).toContain("Use the exact `ultrafuzz.generated-tests.v3` manifest shape");
     expect(dynamic).toContain("never list a non-runnable support file as a generated test");
     expect(dynamic).toContain("`path` with the\n`generated-tests/<file>` prefix");
@@ -548,11 +554,13 @@ describe("prompt semantic anchors", () => {
     expect(dedupe).toContain("For mixed repositories");
     expect(dedupe).toMatch(/manifest\s+`framework` and `language`/u);
     expect(dedupe).toContain("Strategy workspaces are isolated from this node");
-    expect(dedupe).toContain("copy only its exact byte-for-byte canonical");
-    expect(dedupe).toContain("under the existing native test root in\n`{{workspace_path}}`");
+    expect(dedupe).toContain("copy every exact byte-for-byte\ncanonical companion");
+    expect(dedupe).toContain("Do not execute a `support_files` entry");
+    expect(dedupe).toMatch(/blocked without\s+partially copying the bundle/u);
+    expect(dedupe).toMatch(/under the existing\s+native test root in `\{\{workspace_path\}\}`/u);
     expect(dedupe).toContain("normalized relative POSIX");
-    expect(dedupe).toContain("every symlink even when its\ntarget remains inside the artifact directory");
-    expect(dedupe).toContain("Never search a strategy workspace");
+    expect(dedupe).toMatch(/every symlink\s+even when its\s+target remains inside the artifact\s+directory/u);
+    expect(dedupe).toMatch(/Never search a\s+strategy workspace/u);
     expect(dedupe).toContain("Never install, fetch, restore, or update dependencies during dedupe");
     expect(dedupe).not.toContain("restore project-pinned dependencies first");
     expect(dedupe).not.toContain("Dependency hydration used only");

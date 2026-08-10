@@ -124,10 +124,11 @@ Use only files reported by strategy-owned generated-test manifests. Read every
 manifest listed above, including empty manifests. Require the exact
 `ultrafuzz.generated-tests.v3` shape and treat its required `generated_tests`
 and `support_files` arrays together as the complete source bundle. Reject a
-manifest with a path repeated within or across the arrays, or with non-empty
-`support_files` and no runnable `generated_tests`. Ignore any non-canonical file
-list arrays. Do not rely on the current working tree or a strategy workspace
-scan as a substitute for a missing manifest entry.
+manifest with a path repeated within or across the arrays, with one file path
+as the slash-delimited prefix of another, or with non-empty `support_files` and
+no runnable `generated_tests`. Ignore any non-canonical file list arrays. Do
+not rely on the current working tree or a strategy workspace scan as a
+substitute for a missing manifest entry.
 
 For every entry in either array, accept the exact byte-for-byte companion only
 when its `path` is a normalized relative POSIX path beginning with
@@ -135,10 +136,14 @@ when its `path` is a normalized relative POSIX path beginning with
 resolves to a non-empty strict UTF-8 text regular file inside the source node's
 artifact directory. This text-only rule also applies to data fixtures. Reject
 absolute paths, path escapes, and every symlink even when its
-target remains inside the artifact directory. When `size_bytes` or `sha256` is
-present, require it to match the companion exactly. Record rejected entries in
-`skipped_files` with the corresponding `generated-test` or `support-file`
-kind; never search for or substitute another file with the same basename.
+target remains inside the artifact directory. Require both `size_bytes` and
+`sha256` to be present and to match the companion exactly. Record rejected
+entries in `skipped_files` with the corresponding `generated-test` or
+`support-file` kind; never search for or substitute another file with the same
+basename. The manifest is one atomic bundle: if any entry fails these checks,
+copy none of its entries and record every row from that manifest as skipped,
+using the specific failure for invalid rows and a bundle-rejected reason for
+the remaining rows.
 
 Determine each bundle's destination from its runnable entries' `framework` and
 `language`, checked against project discovery, base setup, and the target's

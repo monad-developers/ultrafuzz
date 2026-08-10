@@ -291,6 +291,13 @@ test("required artifact gate validates generated-test manifest shape and listed 
   const artifactDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
   const manifestPath = path.join(artifactDir, "generated-tests.json");
   const node = plannedNode(["generated-tests.json"]);
+  const generatedContents = "contract InvariantTest {}\n";
+  const manifestEntry = (entryPath: string, contents: string | Buffer) => ({
+    path: entryPath,
+    size_bytes: Buffer.byteLength(contents),
+    sha256: createHash("sha256").update(contents).digest("hex")
+  });
+  const generatedEntry = manifestEntry("generated-tests/Invariant.t.sol", generatedContents);
 
   fs.writeFileSync(
     manifestPath,
@@ -314,7 +321,7 @@ test("required artifact gate validates generated-test manifest shape and listed 
       schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-1",
       node_id: "strategy-a",
-      generated_tests: [{ path: "generated-tests/Invariant.t.sol" }],
+      generated_tests: [generatedEntry],
       support_files: []
     }),
     "utf8"
@@ -338,7 +345,33 @@ test("required artifact gate validates generated-test manifest shape and listed 
   assert.equal(emptyFile.ok, false);
   assert.ok(emptyFile.diagnostics.some((diagnostic) => diagnostic.code === "GENERATED_TEST_FILE_EMPTY"));
 
-  fs.writeFileSync(path.join(artifactDir, "generated-tests", "Invariant.t.sol"), "contract InvariantTest {}\n", "utf8");
+  fs.writeFileSync(path.join(artifactDir, "generated-tests", "Invariant.t.sol"), generatedContents, "utf8");
+
+  for (const generated_tests of [
+    [{ ...generatedEntry, size_bytes: generatedEntry.size_bytes + 1 }],
+    [{ ...generatedEntry, sha256: "0".repeat(64) }]
+  ]) {
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        schema_version: "ultrafuzz.generated-tests.v3",
+        run_id: "run-1",
+        node_id: "strategy-a",
+        generated_tests,
+        support_files: []
+      }),
+      "utf8"
+    );
+    const mismatchedIntegrity = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+    assert.equal(mismatchedIntegrity.ok, false);
+    assert.ok(
+      mismatchedIntegrity.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+          diagnostic.details?.gate === "generated-test-file-integrity"
+      )
+    );
+  }
 
   for (const [field, value] of [
     ["run_id", "run-foreign"],
@@ -350,7 +383,7 @@ test("required artifact gate validates generated-test manifest shape and listed 
         schema_version: "ultrafuzz.generated-tests.v3",
         run_id: "run-1",
         node_id: "strategy-a",
-        generated_tests: [{ path: "generated-tests/Invariant.t.sol" }],
+        generated_tests: [generatedEntry],
         support_files: [],
         [field]: value
       }),
@@ -369,15 +402,16 @@ test("required artifact gate validates generated-test manifest shape and listed 
   }
 
   const supportPath = path.join(artifactDir, "generated-tests", "InvariantFixture.sol");
-  fs.writeFileSync(supportPath, Buffer.from([0xff]));
+  const binarySupportContents = Buffer.from([0xff]);
+  fs.writeFileSync(supportPath, binarySupportContents);
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({
       schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-1",
       node_id: "strategy-a",
-      generated_tests: [{ path: "generated-tests/Invariant.t.sol" }],
-      support_files: [{ path: "generated-tests/InvariantFixture.sol" }]
+      generated_tests: [generatedEntry],
+      support_files: [manifestEntry("generated-tests/InvariantFixture.sol", binarySupportContents)]
     }),
     "utf8"
   );
@@ -390,7 +424,8 @@ test("required artifact gate validates generated-test manifest shape and listed 
         diagnostic.details?.gate === "generated-test-file-integrity"
     )
   );
-  fs.writeFileSync(supportPath, "library InvariantFixture {}\n", "utf8");
+  const supportContents = "library InvariantFixture {}\n";
+  fs.writeFileSync(supportPath, supportContents, "utf8");
 
   fs.writeFileSync(
     manifestPath,
@@ -398,8 +433,8 @@ test("required artifact gate validates generated-test manifest shape and listed 
       schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-1",
       node_id: "strategy-a",
-      generated_tests: [{ path: "generated-tests/Invariant.t.sol" }],
-      support_files: [{ path: "generated-tests/InvariantFixture.sol" }]
+      generated_tests: [generatedEntry],
+      support_files: [manifestEntry("generated-tests/InvariantFixture.sol", supportContents)]
     }),
     "utf8"
   );

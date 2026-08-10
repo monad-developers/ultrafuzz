@@ -221,13 +221,15 @@ Use the exact `ultrafuzz.generated-tests.v3` manifest shape: top-level
 imported helpers, mocks, fixtures, scripts, or data dependencies in
 `support_files`; never list a non-runnable support file as a generated test.
 Every row in either array must contain `path` with the
-`generated-tests/<file>` prefix and may contain only `size_bytes`, `sha256`,
-`language`, `framework`, `description`, and the documented closed `provenance`
-fields. Keep strategy IDs, destination intent, and validation status in
+`generated-tests/<file>` prefix, exact positive `size_bytes`, and exact lowercase
+`sha256`; it may otherwise contain only `language`, `framework`, `description`,
+and the documented closed `provenance` fields. Keep strategy IDs, destination
+intent, and validation status in
 `selected-strategies.json` and `provenance.json`; they are not generated-test
 manifest fields. Keep paths unique across both arrays, and never emit support
-files without at least one runnable generated test. Use both arrays empty when
-no runnable test was produced.
+files without at least one runnable generated test. No file path may be the
+slash-delimited prefix of another path. Use both arrays empty when no runnable
+test was produced.
 
 Write findings to {{output_findings_path}}. Use an empty JSON array when no
 finding is confirmed or no generated strategy is actionable. Each finding must

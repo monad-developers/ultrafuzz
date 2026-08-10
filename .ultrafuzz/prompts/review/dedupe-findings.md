@@ -36,26 +36,35 @@ by project discovery, the base setup, and the generated-test manifest:
 
 Strategy workspaces are isolated from this node. Never assume a generated test
 already exists in the dedupe workspace and never validate a stale same-named
-workspace file. Before focused validation, read the strategy-owned
-`generated-tests.json` entry and copy only its exact byte-for-byte canonical
-companion into a deterministic path under the existing native test root in
-`{{workspace_path}}`: use
+workspace file. Before focused validation, require the strategy-owned
+`generated-tests.json` to have the exact `ultrafuzz.generated-tests.v3` shape
+with its required `generated_tests` and `support_files` arrays. Treat both
+arrays together as the complete bundle, copy every exact byte-for-byte
+canonical companion into one deterministic bundle root under the existing
+native test root in `{{workspace_path}}`, and execute only the selected runnable
+entries from `generated_tests`: use
 `ultrafuzz/dedupe/<source-node-id>/attempt-<n>/<safe-relative-tail>` below that
-root. Do not write to `{{repo_path}}`, stage the copied file, introduce a new
-test root, or overwrite another companion; use a stable source-derived suffix
-for a deterministic collision.
+root while preserving each path's relative tail below `generated-tests/` so
+relative imports continue to resolve. Do not execute a `support_files` entry.
+Do not write to `{{repo_path}}`, stage copied files, introduce a new test root,
+or overwrite another companion; use a stable source-derived suffix for a
+deterministic collision.
 
-Accept a companion only when the manifest `path` is a normalized relative POSIX
-path beginning with `generated-tests/`, contains no empty, `.` or `..` segment
-or backslash, and resolves to a regular file inside that source node's artifact
-directory. Reject absolute paths, path escapes, and every symlink even when its
-target remains inside the artifact directory. Never search a strategy workspace,
-the dedupe workspace, sibling runs, or the host for a missing companion. If the
-canonical companion or an existing native destination root is unavailable,
-record focused validation as blocked. Require the companion extension to match
-the selected existing framework: `.t.sol` for Foundry; `.js`, `.cjs`, `.mjs`,
-`.ts`, `.cts`, or `.mts` for Hardhat; and `.py` for a Vyper project's native
-Python harness.
+Accept the bundle only when every entry contains a normalized relative POSIX
+`path` beginning with `generated-tests/`, exact positive `size_bytes`, and exact
+lowercase `sha256`; paths must be unique across both arrays and no file path may
+be the slash-delimited prefix of another. Each path must contain no empty, `.`
+or `..` segment or backslash and resolve to a non-empty strict UTF-8 regular
+file inside that source node's artifact directory whose byte length and digest
+exactly match the entry. Reject absolute paths, path escapes, and every symlink
+even when its target remains inside the artifact directory. Never search a
+strategy workspace, the dedupe workspace, sibling runs, or the host for a
+missing companion. If any canonical companion or an existing native
+destination root is unavailable, record focused validation as blocked without
+partially copying the bundle. Require each selected runnable companion
+extension to match the existing framework: `.t.sol` for Foundry;
+`.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or `.mts` for Hardhat; and `.py` for a
+Vyper project's native Python harness.
 
 For mixed repositories, dispatch each generated test according to its manifest
 `framework` and `language`, confirmed against the checked-in configuration;

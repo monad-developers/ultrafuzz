@@ -136,7 +136,9 @@ the breaking-version decisions. Non-JSON outputs use the explicit
 both `generated_tests` for runnable tests/reproducers and `support_files` for
 their imported helpers, mocks, fixtures, scripts, and text data. Every path is
 under `generated-tests/`, unique across both arrays, and bound to a non-empty,
-non-symlink, strict UTF-8 regular companion. Support-only manifests are invalid;
+non-symlink, strict UTF-8 regular companion. Every entry requires the
+companion's exact positive `size_bytes` and lowercase `sha256`; no file path may
+be the slash-delimited prefix of another. Support-only manifests are invalid;
 v2 manifests are rejected without conversion.
 
 Every retained JSON contract maps to one complete checked-in Draft 2020-12

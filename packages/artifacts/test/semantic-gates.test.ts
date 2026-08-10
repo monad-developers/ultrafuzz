@@ -565,7 +565,7 @@ const fixtures = {
   },
   "generated-test-bundle-path-uniqueness": {
     positive: { generated_tests: [{ path: "a" }], support_files: [{ path: "b" }] },
-    negative: { generated_tests: [{ path: "a" }], support_files: [{ path: "a" }] }
+    negative: { generated_tests: [{ path: "a" }], support_files: [{ path: "a/b" }] }
   },
   "generated-test-support-requires-test": {
     positive: { generated_tests: [{ path: "a" }], support_files: [{ path: "b" }] },

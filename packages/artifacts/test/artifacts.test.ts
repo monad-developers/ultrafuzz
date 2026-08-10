@@ -924,22 +924,24 @@ test("durable append aggregates an operation failure with its close failure", (t
 
 test("generated-test manifests persist explicit generated files with provenance", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
+  const generatedContents = "contract InvariantTest {} // π\n";
+  const supportContents = "library InvariantFixture {} // café\n";
   const manifest = writeGeneratedTestManifest({
     layout,
     nodeId: "strategy-a",
     provenance: { agent_ref: "CodexAgent", workflow_task_id: "node:strategy-a", attempt_index: 0 },
     tests: [
       {
-        path: "Invariant.t.sol",
-        content: "contract InvariantTest {}\n",
+        path: "generated-tests/Invariant.t.sol",
+        content: generatedContents,
         language: "solidity",
         framework: "foundry"
       }
     ],
     supportFiles: [
       {
-        path: "helpers/InvariantFixture.sol",
-        content: "library InvariantFixture {}\n",
+        path: "generated-tests/helpers/InvariantFixture.sol",
+        content: supportContents,
         language: "solidity",
         framework: "foundry"
       }
@@ -949,8 +951,15 @@ test("generated-test manifests persist explicit generated files with provenance"
   assert.equal(manifest.schema_version, GENERATED_TESTS_SCHEMA_VERSION);
   assert.equal(manifest.generated_tests.length, 1);
   assert.equal(manifest.generated_tests[0]!.path, "generated-tests/Invariant.t.sol");
+  assert.equal(manifest.generated_tests[0]!.size_bytes, Buffer.byteLength(generatedContents));
+  assert.equal(
+    manifest.generated_tests[0]!.sha256,
+    crypto.createHash("sha256").update(generatedContents).digest("hex")
+  );
   assert.equal(manifest.generated_tests[0]!.provenance!.agent_ref, "CodexAgent");
   assert.equal(manifest.support_files[0]!.path, "generated-tests/helpers/InvariantFixture.sol");
+  assert.equal(manifest.support_files[0]!.size_bytes, Buffer.byteLength(supportContents));
+  assert.equal(manifest.support_files[0]!.sha256, crypto.createHash("sha256").update(supportContents).digest("hex"));
   assert.equal(
     fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests", "Invariant.t.sol")),
     true
@@ -1008,13 +1017,180 @@ test("generated-test manifest writer rejects cross-array duplicate paths before 
       writeGeneratedTestManifest({
         layout,
         nodeId: "strategy-a",
-        tests: [{ path: "Shared.sol", content: "replacement test\n" }],
+        tests: [{ path: "generated-tests/Shared.sol", content: "replacement test\n" }],
         supportFiles: [{ path: "generated-tests/Shared.sol", content: "replacement support\n" }]
       }),
     /repeats path "generated-tests\/Shared\.sol"/u
   );
   assert.equal(fs.readFileSync(companionPath, "utf8"), "sentinel companion\n");
   assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
+});
+
+test("generated-test manifest writer preflights missing existing companions before overwriting earlier files", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-missing-support-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
+  const manifestPath = path.join(nodeDir, "generated-tests.json");
+  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
+  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
+        supportFiles: [{ path: "generated-tests/MissingHelper.sol" }]
+      }),
+    /cannot open regular file/u
+  );
+  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
+});
+
+test("generated-test manifest writer preflights non-file destinations before overwriting earlier files", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-directory-support-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  const supportDirectory = path.join(generatedTestsDir, "InvariantFixture.sol");
+  fs.mkdirSync(supportDirectory, { recursive: true });
+  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
+  const manifestPath = path.join(nodeDir, "generated-tests.json");
+  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
+  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
+        supportFiles: [{ path: "generated-tests/InvariantFixture.sol", content: "library InvariantFixture {}\n" }]
+      }),
+    /generated-test bundle destination must be a regular file/u
+  );
+  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
+  assert.deepEqual(fs.readdirSync(supportDirectory), []);
+});
+
+test("generated-test manifest writer validates entry metadata before changing bundle bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invalid-metadata-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
+  const manifestPath = path.join(nodeDir, "generated-tests.json");
+  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
+  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
+        supportFiles: [
+          {
+            path: "generated-tests/InvariantFixture.sol",
+            content: "library InvariantFixture {}\n",
+            language: ""
+          }
+        ]
+      }),
+    /generated tests manifest is schema-invalid/u
+  );
+  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
+  assert.equal(fs.existsSync(path.join(generatedTestsDir, "InvariantFixture.sol")), false);
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
+});
+
+test("generated-test manifest writer preflights its manifest destination before changing companion bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-directory-manifest-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  const manifestDirectory = path.join(nodeDir, "generated-tests.json");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  fs.mkdirSync(manifestDirectory);
+  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
+  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
+        supportFiles: []
+      }),
+    /generated-test bundle destination must be a regular file/u
+  );
+  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
+  assert.deepEqual(fs.readdirSync(manifestDirectory), []);
+});
+
+test("generated-test manifest writer rejects file-directory path collisions before creating bundle bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-prefix-collision-generated-test" });
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "contract Replay {}\n" }],
+        supportFiles: [
+          {
+            path: "generated-tests/Replay.t.sol/InvariantFixture.sol",
+            content: "library InvariantFixture {}\n"
+          }
+        ]
+      }),
+    /conflicts with file path/u
+  );
+  assert.equal(fs.existsSync(path.join(layout.artifactsDir, "strategy-a")), false);
+});
+
+test("generated-test manifest writer rejects noncanonical path aliases without rewriting them", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-noncanonical-path-generated-test" });
+
+  for (const candidate of [
+    "Replay.t.sol",
+    "generated-tests/sub/../Replay.t.sol",
+    "generated-tests/./Replay.t.sol",
+    "generated-tests/sub//Replay.t.sol"
+  ]) {
+    assert.throws(
+      () =>
+        writeGeneratedTestManifest({
+          layout,
+          nodeId: "strategy-a",
+          tests: [{ path: candidate, content: "contract Replay {}\n" }],
+          supportFiles: []
+        }),
+      /must (?:begin with|already be a normalized relative POSIX path)/u,
+      candidate
+    );
+    assert.equal(fs.existsSync(path.join(layout.artifactsDir, "strategy-a")), false, candidate);
+  }
+});
+
+test("generated-test manifest writer rejects non-UTF-8 supplied support before creating bundle bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-binary-support-generated-test" });
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "contract Replay {}\n" }],
+        supportFiles: [{ path: "generated-tests/fixture.dat", content: Buffer.from([0xff]) }]
+      }),
+    /generated-test support file must be strict UTF-8 text/u
+  );
+  assert.equal(fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests.json")), false);
+  assert.equal(fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests")), false);
 });
 
 test("generated-test manifest writer rejects final symlinks without touching outside files", () => {

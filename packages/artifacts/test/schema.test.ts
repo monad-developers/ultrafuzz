@@ -34,6 +34,7 @@ import {
   artifactContractDefinition,
   artifactContractSchemaBinding,
   createInitialRunState,
+  assertGeneratedTestManifestSchema,
   assertPlannedGraph,
   assertPlannedGraphSemantics,
   derivePropertyImplementationCoverage,
@@ -1263,6 +1264,8 @@ test("generated test manifest runtime and exported schemas enforce the same safe
     generated_tests: [
       {
         path: "generated-tests/Invariant.t.sol",
+        size_bytes: 1,
+        sha256: "a".repeat(64),
         language: "solidity",
         framework: "foundry",
         description: "Focused invariant replay"
@@ -1279,6 +1282,28 @@ test("generated test manifest runtime and exported schemas enforce the same safe
   const missingSupportFiles = structuredClone(manifest) as Record<string, unknown>;
   delete missingSupportFiles.support_files;
   assert.equal(validateGeneratedTestManifestSchema(missingSupportFiles).ok, false);
+  const supportManifest = {
+    ...manifest,
+    support_files: [
+      {
+        path: "generated-tests/InvariantFixture.sol",
+        size_bytes: 1,
+        sha256: "b".repeat(64)
+      }
+    ]
+  };
+  assert.equal(validateGeneratedTestManifestSchema(supportManifest).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/generated-tests@3", JSON.stringify(supportManifest)).ok, true);
+  for (const generated_tests of [
+    [{ path: "generated-tests/Invariant.t.sol", sha256: "a".repeat(64) }],
+    [{ path: "generated-tests/Invariant.t.sol", size_bytes: 1 }],
+    [{ path: "generated-tests/Invariant.t.sol", size_bytes: 0, sha256: "a".repeat(64) }],
+    [{ path: "generated-tests/Invariant.t.sol", size_bytes: 16 * 1024 * 1024 + 1, sha256: "a".repeat(64) }]
+  ]) {
+    const candidate = { ...manifest, generated_tests };
+    assert.equal(validateGeneratedTestManifestSchema(candidate).ok, false);
+    assert.equal(validateArtifactContract("ultrafuzz/generated-tests@3", JSON.stringify(candidate)).ok, false);
+  }
   for (const candidate of [
     { ...manifest, provenance: {} },
     { ...manifest, generated_tests: [{ ...manifest.generated_tests[0]!, provenance: {} }] }
@@ -1321,6 +1346,32 @@ test("generated test manifest runtime and exported schemas enforce the same safe
     assert.equal(validateGeneratedTestManifestSchema(value).ok, candidate.ok, candidate.path);
     assert.equal(exportedPathPattern.test(candidate.path), candidate.ok, candidate.path);
   }
+});
+
+test("generated-test file-directory path conflicts remain explicit document semantics", () => {
+  const manifest = {
+    schema_version: GENERATED_TESTS_SCHEMA_VERSION,
+    run_id: "run-1",
+    node_id: "strategy-a",
+    generated_tests: [
+      {
+        path: "generated-tests/Replay.t.sol",
+        size_bytes: 1,
+        sha256: "a".repeat(64)
+      }
+    ],
+    support_files: [
+      {
+        path: "generated-tests/Replay.t.sol/InvariantFixture.sol",
+        size_bytes: 1,
+        sha256: "b".repeat(64)
+      }
+    ]
+  };
+
+  assert.equal(validateGeneratedTestManifestSchema(manifest).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/generated-tests@3", JSON.stringify(manifest)).ok, true);
+  assert.throws(() => assertGeneratedTestManifestSchema(manifest), /conflicts with file path/u);
 });
 
 test("present generated-test aggregation provenance cannot be an empty object", () => {
