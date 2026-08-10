@@ -1,5 +1,6 @@
 import { z } from "zod/v4";
 
+import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { canonicalTimestampSchema } from "./portable-json-primitives.js";
 import {
   schemaErrorMessage,
@@ -524,20 +525,80 @@ export function validateLensPropertiesSchema(
   value: unknown,
   path = "$"
 ): SchemaValidationResult<LensPropertiesArtifact> {
-  return validateWithZod(lensPropertiesSchema as z.ZodType<LensPropertiesArtifact>, value, {
-    path,
-    code: "PROPERTY_LENS_SCHEMA_INVALID"
-  });
+  return validateRegisteredPropertySchema(
+    PROPERTY_LENS_JSON_SCHEMA_ID,
+    lensPropertiesSchema as z.ZodType<LensPropertiesArtifact>,
+    value,
+    {
+      path,
+      code: "PROPERTY_LENS_SCHEMA_INVALID"
+    }
+  );
+}
+
+function validateRegisteredPropertySchema<T>(
+  schemaId: string,
+  zodSchema: z.ZodType<T>,
+  value: unknown,
+  options: { path: string; code: string }
+): SchemaValidationResult<T> {
+  const structural = validateRegisteredJsonSchema(schemaId, value);
+  if (!structural.ok) {
+    return {
+      ok: false,
+      issues: structural.issues.map((issue) => ({
+        path: jsonPointerPath(options.path, issue.instancePath),
+        code: options.code,
+        message: issue.message
+      }))
+    };
+  }
+
+  // The checked-in JSON Schema is authoritative. Zod remains only as a
+  // non-transforming parity assertion for typed access by existing callers.
+  const parity = validateWithZod(zodSchema, value, options);
+  if (!parity.ok) {
+    throw new Error(
+      schemaErrorMessage(
+        "registered JSON Schema/Zod parity",
+        parity.issues.map((issue) => ({
+          ...issue,
+          message: `registered schema and retained Zod parser disagree: ${issue.message}`
+        }))
+      )
+    );
+  }
+  return { ok: true, issues: [], value: value as T };
+}
+
+function jsonPointerPath(root: string, pointer: string): string {
+  if (pointer === "") return root;
+  return pointer
+    .slice(1)
+    .split("/")
+    .map((segment) => segment.replaceAll("~1", "/").replaceAll("~0", "~"))
+    .reduce(
+      (current, segment) =>
+        /^(?:0|[1-9][0-9]*)$/u.test(segment)
+          ? `${current}[${segment}]`
+          : `${current}${/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(segment) ? `.${segment}` : `[${JSON.stringify(segment)}]`}`,
+      root
+    );
 }
 
 export function validateReferenceExpectationsSchema(
   value: unknown,
   path = "$"
 ): SchemaValidationResult<ReferenceExpectationsArtifact> {
-  return validateWithZod(referenceExpectationsSchema as z.ZodType<ReferenceExpectationsArtifact>, value, {
-    path,
-    code: "REFERENCE_EXPECTATIONS_SCHEMA_INVALID"
-  });
+  return validateRegisteredPropertySchema(
+    REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID,
+    referenceExpectationsSchema as z.ZodType<ReferenceExpectationsArtifact>,
+    value,
+    {
+      path,
+      code: "REFERENCE_EXPECTATIONS_SCHEMA_INVALID"
+    }
+  );
 }
 
 export function validatePropertiesSchema(value: unknown, path = "$"): SchemaValidationResult<PropertiesArtifact> {

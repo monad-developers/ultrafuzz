@@ -22,6 +22,7 @@ import {
   PLANNED_GRAPH_SCHEMA_VERSION,
   PROPERTY_LENS_SCHEMA_VERSION,
   PROPERTY_CAMPAIGN_SCHEMA_VERSION,
+  REFERENCE_EXPECTATIONS_SCHEMA_VERSION,
   REPORT_SCHEMA_VERSION,
   USAGE_LEDGER_SCHEMA_VERSION,
   ARTIFACT_CONTRACT_IDS,
@@ -57,6 +58,7 @@ import {
   validateInvariantSourceProofSchema,
   validateImplementedPropertiesSchema,
   validateLensPropertiesSchema,
+  validateReferenceExpectationsSchema,
   validateArtifactContract,
   validateNodeAttemptLedgerEntry,
   validatePropertiesSchema,
@@ -482,6 +484,48 @@ test("property lens schema requires canonical priorities and unique reference ID
     false,
     "reference expectation IDs must be unique"
   );
+});
+
+test("property lens and reference catalog validators expose Ajv additionalProperties diagnostics", () => {
+  const lens = validateLensPropertiesSchema(
+    {
+      schema_version: PROPERTY_LENS_SCHEMA_VERSION,
+      properties: [
+        {
+          id: "aviggiano-001",
+          description: "Expected behavior",
+          category: "accounting",
+          priority: "high",
+          undeclared: true
+        }
+      ]
+    },
+    "lens.json"
+  );
+  assert.equal(lens.ok, false);
+  assert.deepEqual(lens.issues, [
+    {
+      path: "lens.json.properties[0]",
+      code: "PROPERTY_LENS_SCHEMA_INVALID",
+      message: "must NOT have additional properties"
+    }
+  ]);
+
+  const expectations = validateReferenceExpectationsSchema(
+    {
+      schema_version: REFERENCE_EXPECTATIONS_SCHEMA_VERSION,
+      expectations: [{ id: "benchmark:expectation", undeclared: true }]
+    },
+    "expectations.json"
+  );
+  assert.equal(expectations.ok, false);
+  assert.deepEqual(expectations.issues, [
+    {
+      path: "expectations.json.expectations[0]",
+      code: "REFERENCE_EXPECTATIONS_SCHEMA_INVALID",
+      message: "must NOT have additional properties"
+    }
+  ]);
 });
 
 test("canonical property schema preserves typed benchmark expectations", () => {
