@@ -919,8 +919,7 @@ function verifyLensReferenceExpectationPreservation(
     const isCatalogSource = catalog.properties.some((property) =>
       property.sources.some((source) => source.source_node_id === dependency)
     );
-    const declaresLens =
-      state.nodes[dependencyId]?.outputs?.some((output) => output.contract === PROPERTY_LENS_CONTRACT) ?? false;
+    const declaresLens = plannedDependency.outputs.some((output) => output.contract === PROPERTY_LENS_CONTRACT);
     if (isCatalogSource && isSyntheticLedgerDependency(plannedDependency)) continue;
     if (!isCatalogSource && !declaresLens) continue;
     // Expanded graphs may give fan-in concrete dependencies such as
@@ -2153,9 +2152,9 @@ function semanticPropertyLenses(
     if (nodeState?.logical_node_id !== undefined && nodeState.logical_node_id !== dependency.logical_id) {
       return undefined;
     }
-    const declaredLensCount =
-      nodeState?.outputs?.filter((output) => output.contract === PROPERTY_LENS_CONTRACT).length ?? 0;
+    const declaredLensCount = dependency.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT).length;
     if (declaredLensCount === 0) continue;
+    if (declaredLensCount !== 1) return undefined;
     producerCount += 1;
     const lens = loadFinalizedPropertyLens(layout, state, nodeId, "property-fanin");
     if (!lens.ok) return undefined;

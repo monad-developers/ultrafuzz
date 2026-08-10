@@ -2824,6 +2824,42 @@ test("property fan-in selects a declared lens contract without relying on the pr
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
+test("property fan-in cannot hide a planned lens by omitting its state declaration and catalog rows", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-planned-lens-state-omission" });
+  const node = writeMinimalPropertyFaninFixture(layout, {
+    sourceNodeId: "project-discovery",
+    sourcePropertyId: "evidence-1",
+    dependsOn: ["property-specification-recon"]
+  });
+  writeDeclaredPropertyLens(
+    layout,
+    "property-specification-recon",
+    "custom/recon-lens.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+  const state = readRunState(layout);
+  delete state.nodes["property-specification-recon"]!.outputs;
+  writeRunState(layout, state);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_DECLARATION_MISSING"),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
 for (const finalizationState of ["failed", "unfinalized"] as const) {
   test(`property fan-in rejects a ${finalizationState} declared lens producer`, () => {
     const layout = createRunLayout({
