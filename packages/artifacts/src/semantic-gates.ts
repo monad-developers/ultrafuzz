@@ -28,6 +28,7 @@ export interface SemanticGitContext {
 
 export interface SemanticPropertyLensContext {
   sourceNodeId: string;
+  projectionRequired: boolean;
   document: unknown;
 }
 
@@ -2176,20 +2177,31 @@ function implementedSelectionJoinIssues(document: unknown, context: SemanticGate
 
 function propertySourceJoinIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const known = new Set<string>();
+  const required = new Set<string>();
   for (const lens of context.artifactSet!.propertyLenses!) {
     for (const row of arrayAt(lens.document, ["properties"])) {
       const id = stringField(row, "id");
-      if (id !== undefined) known.add(JSON.stringify([lens.sourceNodeId, id]));
+      if (id === undefined) continue;
+      const key = JSON.stringify([lens.sourceNodeId, id]);
+      known.add(key);
+      if (lens.projectionRequired) required.add(key);
     }
   }
   const issues: SemanticGateIssue[] = [];
+  const referenced = new Set<string>();
   for (const [propertyIndex, property] of arrayAt(document, ["properties"]).entries()) {
     for (const [sourceIndex, source] of arrayAt(property, ["sources"]).entries()) {
       if (!isRecord(source)) continue;
       const key = JSON.stringify([source.source_node_id, source.source_property_id]);
+      referenced.add(key);
       if (!known.has(key)) {
         issues.push(issue(`$.properties[${propertyIndex}].sources[${sourceIndex}]`, `Unknown property source ${key}`));
       }
+    }
+  }
+  for (const key of required) {
+    if (!referenced.has(key)) {
+      issues.push(issue("$.properties", `Canonical properties omit declared property-lens source ${key}`));
     }
   }
   return issues;

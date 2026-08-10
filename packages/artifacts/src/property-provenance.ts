@@ -596,10 +596,15 @@ export function validateReferenceExpectationsSchema(
 }
 
 export function validatePropertiesSchema(value: unknown, path = "$"): SchemaValidationResult<PropertiesArtifact> {
-  return validateWithZod(propertiesSchema as z.ZodType<PropertiesArtifact>, value, {
-    path,
-    code: "PROPERTIES_SCHEMA_INVALID"
-  });
+  return validateRegisteredPropertySchema(
+    PROPERTIES_JSON_SCHEMA_ID,
+    propertiesSchema as z.ZodType<PropertiesArtifact>,
+    value,
+    {
+      path,
+      code: "PROPERTIES_SCHEMA_INVALID"
+    }
+  );
 }
 
 export function validateImplementedPropertiesSchema(
@@ -607,10 +612,15 @@ export function validateImplementedPropertiesSchema(
   path = "$",
   options: { requireSelection?: boolean } = {}
 ): SchemaValidationResult<ImplementedPropertiesArtifact> {
-  const result = validateWithZod(implementedPropertiesSchema as z.ZodType<ImplementedPropertiesArtifact>, value, {
-    path,
-    code: "IMPLEMENTED_PROPERTIES_SCHEMA_INVALID"
-  });
+  const result = validateRegisteredPropertySchema(
+    IMPLEMENTED_PROPERTIES_JSON_SCHEMA_ID,
+    implementedPropertiesSchema as z.ZodType<ImplementedPropertiesArtifact>,
+    value,
+    {
+      path,
+      code: "IMPLEMENTED_PROPERTIES_SCHEMA_INVALID"
+    }
+  );
   if (options.requireSelection && result.ok && result.value?.selection === undefined) {
     return {
       ok: false,
@@ -630,10 +640,15 @@ export function validatePropertyCampaignSchema(
   value: unknown,
   path = "$"
 ): SchemaValidationResult<PropertyCampaignArtifact> {
-  return validateWithZod(propertyCampaignSchema as z.ZodType<PropertyCampaignArtifact>, value, {
-    path,
-    code: "PROPERTY_CAMPAIGN_SCHEMA_INVALID"
-  });
+  return validateRegisteredPropertySchema(
+    PROPERTY_CAMPAIGN_JSON_SCHEMA_ID,
+    propertyCampaignSchema as z.ZodType<PropertyCampaignArtifact>,
+    value,
+    {
+      path,
+      code: "PROPERTY_CAMPAIGN_SCHEMA_INVALID"
+    }
+  );
 }
 
 export function assertPropertiesSchema(value: unknown): PropertiesArtifact {

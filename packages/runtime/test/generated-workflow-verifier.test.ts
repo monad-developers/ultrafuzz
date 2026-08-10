@@ -19,6 +19,7 @@ import {
   validateArtifactContract,
   writeFileDurable
 } from "@ultrafuzz/artifacts";
+import { declaredAncestorOutputsByContract } from "../src/semantic-artifact-context.js";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
@@ -687,6 +688,7 @@ type VerifyArtifactsTask = {
     run: { ultrafuzzRunId: string };
     artifacts: { dir: string };
     node: { logicalNodeId: string; concreteNodeId: string };
+    dependencies: { attemptIds: string[] };
   };
   outputs: Array<{
     path: string;
@@ -761,6 +763,8 @@ function loadVerifyArtifactsHarness(): {
     "createHash",
     "publishVerifiedArtifacts",
     "writeArtifactVerificationMarker",
+    "taskSpecs",
+    "declaredAncestorOutputsByContract",
     `${emitted}; return { captureTaskOutputs, verifyArtifacts };`
   )(
     path,
@@ -805,7 +809,9 @@ function loadVerifyArtifactsHarness(): {
     (_artifactDir: string, values: ReadonlyMap<string, Buffer>) => {
       for (const [relativePath, bytes] of values) publications.set(relativePath, Buffer.from(bytes));
     },
-    (...args: unknown[]) => markerWrites.push(args)
+    (...args: unknown[]) => markerWrites.push(args),
+    [],
+    declaredAncestorOutputsByContract
   ) as {
     captureTaskOutputs: ReturnType<typeof loadVerifyArtifactsHarness>["captureTaskOutputs"];
     verifyArtifacts: ReturnType<typeof loadVerifyArtifactsHarness>["verifyArtifacts"];
@@ -822,7 +828,8 @@ function singleOutputVerificationTask(root: string, contract: string): VerifyArt
     metadata: {
       run: { ultrafuzzRunId: "run-one" },
       artifacts: { dir: root },
-      node: { logicalNodeId: "node-one", concreteNodeId: "node-one" }
+      node: { logicalNodeId: "node-one", concreteNodeId: "node-one" },
+      dependencies: { attemptIds: [] }
     },
     outputs: [
       {
@@ -984,7 +991,8 @@ test("generated Smithers fails closed when same-node semantic counts disagree", 
       metadata: {
         run: { ultrafuzzRunId: "run-one" },
         artifacts: { dir: root },
-        node: { logicalNodeId: "stateful-invariant-campaign", concreteNodeId: "stateful-invariant-campaign" }
+        node: { logicalNodeId: "stateful-invariant-campaign", concreteNodeId: "stateful-invariant-campaign" },
+        dependencies: { attemptIds: [] }
       },
       outputs: [
         {
@@ -1045,6 +1053,103 @@ test("generated Smithers fails closed when a contextual gate lacks verified ance
   }
 });
 
+type PropertyLensHarnessProducer = {
+  attemptId: string;
+  artifactDir: string;
+  dependencyArtifactDirs: string[];
+  metadata: { node: { logicalNodeId: string }; dependencies: { attemptIds: string[] } };
+  outputs: Array<{ path: string; contract: string }>;
+};
+
+type PropertyLensHarnessTask = PropertyLensHarnessProducer;
+
+function loadVerifiedAncestorPropertyLensesHarness(
+  taskSpecs: readonly PropertyLensHarnessProducer[],
+  documents: ReadonlyMap<string, unknown>
+): (
+  task: PropertyLensHarnessTask
+) => Array<{ sourceNodeId: string; projectionRequired: boolean; document: unknown }> | undefined {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function verifiedAncestorPropertyLenses");
+  const helperEnd = source.indexOf("\n\nfunction workspacePatchSemanticGitContext", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const emitted = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "path",
+    "taskSpecs",
+    "verifiedDependencyJsonArtifact",
+    "isPlainJsonRecord",
+    "declaredAncestorOutputsByContract",
+    `${emitted}; return verifiedAncestorPropertyLenses;`
+  )(
+    path,
+    taskSpecs,
+    (_task: unknown, _dependency: string, producer: { attemptId: string }, outputPath: string, _contract: string) => ({
+      value: documents.get(`${producer.attemptId}\u0000${outputPath}`)
+    }),
+    (value: unknown) => typeof value === "object" && value !== null && !Array.isArray(value),
+    declaredAncestorOutputsByContract
+  ) as (
+    task: PropertyLensHarnessTask
+  ) => Array<{ sourceNodeId: string; projectionRequired: boolean; document: unknown }> | undefined;
+}
+
+test("generated Smithers accepts direct lenses, excludes transitive lenses, and projects a renamed ledger", () => {
+  const producer = (
+    attemptId: string,
+    logicalNodeId: string,
+    contract: string,
+    outputPath: string
+  ): PropertyLensHarnessProducer => ({
+    attemptId,
+    artifactDir: path.join("/run/artifacts", attemptId),
+    dependencyArtifactDirs: [],
+    metadata: { node: { logicalNodeId }, dependencies: { attemptIds: [] } },
+    outputs: [{ path: outputPath, contract }]
+  });
+  const producers = [
+    producer("attempt-ledger", "custom-evidence-root", "ultrafuzz/invariant-ledger@1", "custom/ledger.json"),
+    producer("attempt-direct", "direct-review", "ultrafuzz/property-lens@2", "custom/direct.json"),
+    producer("attempt-transitive", "transitive-review", "ultrafuzz/property-lens@2", "custom/transitive.json")
+  ];
+  const consumer: PropertyLensHarnessProducer = {
+    attemptId: "attempt-consumer",
+    artifactDir: "/run/artifacts/attempt-consumer",
+    dependencyArtifactDirs: producers.map((candidate) => candidate.artifactDir),
+    metadata: {
+      node: { logicalNodeId: "property-fanin" },
+      dependencies: { attemptIds: ["attempt-direct"] }
+    },
+    outputs: []
+  };
+  const taskSpecs = [...producers, consumer];
+  const documents = new Map<string, unknown>([
+    [
+      "attempt-ledger\u0000custom/ledger.json",
+      { entries: [{ id: "evidence-one" }], inventory_rows: [], scan_probes: [] }
+    ],
+    ["attempt-direct\u0000custom/direct.json", { properties: [{ id: "direct-one" }] }],
+    ["attempt-transitive\u0000custom/transitive.json", { properties: [{ id: "transitive-one" }] }]
+  ]);
+  const resolve = loadVerifiedAncestorPropertyLensesHarness(taskSpecs, documents);
+  const result = resolve(consumer);
+
+  assert.deepEqual(result, [
+    {
+      sourceNodeId: "custom-evidence-root",
+      projectionRequired: false,
+      document: { properties: [{ id: "evidence-one" }] }
+    },
+    {
+      sourceNodeId: "direct-review",
+      projectionRequired: true,
+      document: { properties: [{ id: "direct-one" }] }
+    }
+  ]);
+});
+
 test("generated Smithers selects property and discovery inputs by their declared contracts", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function verifiedAncestorPropertyLenses");
@@ -1053,15 +1158,16 @@ test("generated Smithers selects property and discovery inputs by their declared
   assert.ok(helperEnd > helperStart, source);
   const helper = source.slice(helperStart, helperEnd);
 
-  assert.match(helper, /producer\.outputs\.filter\(\(output\) => output\.contract === "ultrafuzz\/property-lens@2"\)/u);
-  assert.match(helper, /lensOutputs\.length !== 1/u);
-  assert.doesNotMatch(helper, /for \(const output of lensOutputs\)/u);
+  assert.match(helper, /declaredAncestorOutputsByContract/u);
+  assert.match(helper, /"ultrafuzz\/property-lens@2", \{/u);
+  assert.match(helper, /directOnly: true/u);
+  assert.match(helper, /seenLensProducers/u);
   assert.doesNotMatch(helper, /logicalNodeId\.startsWith\("property-specification-"\)/u);
-  assert.match(
-    helper,
-    /producer\.outputs\.filter\(\(output\) => output\.contract === "ultrafuzz\/invariant-ledger@1"\)/u
-  );
-  assert.match(helper, /ledgerOutputs\[0\]!\.path/u);
+  assert.match(helper, /"ultrafuzz\/invariant-ledger@1"/u);
+  assert.doesNotMatch(helper, /logicalNodeId === "project-discovery"/u);
+  assert.match(helper, /output\.artifactDir/u);
+  assert.match(helper, /projectionRequired: false/u);
+  assert.match(helper, /projectionRequired: true/u);
   assert.doesNotMatch(helper, /setup\/invariant-evidence-ledger\.json/u);
 });
 

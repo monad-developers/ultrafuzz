@@ -927,6 +927,50 @@ test("every document-local gate has a passing and failing non-mutating fixture",
   }
 });
 
+test("property source joins require exact reverse coverage of every declared lens row", () => {
+  const context = {
+    artifactSet: {
+      propertyLenses: [
+        {
+          sourceNodeId: "lens",
+          projectionRequired: true,
+          document: { properties: [{ id: "a" }, { id: "b" }] }
+        },
+        {
+          sourceNodeId: "custom-ledger-producer",
+          projectionRequired: false,
+          document: { properties: [{ id: "evidence-only" }] }
+        }
+      ]
+    }
+  };
+  const incomplete = {
+    properties: [{ sources: [{ source_node_id: "lens", source_property_id: "a" }] }]
+  };
+
+  const rejected = executeSemanticGate("property-source-join", { document: incomplete, context });
+
+  assert.equal(rejected.status, "failed");
+  assert.deepEqual(rejected.status === "failed" ? rejected.issues : [], [
+    {
+      path: "$.properties",
+      message: 'Canonical properties omit declared property-lens source ["lens","b"]'
+    }
+  ]);
+
+  const complete = {
+    properties: [
+      {
+        sources: [
+          { source_node_id: "lens", source_property_id: "a" },
+          { source_node_id: "lens", source_property_id: "b" }
+        ]
+      }
+    ]
+  };
+  assert.equal(executeSemanticGate("property-source-join", { document: complete, context }).status, "passed");
+});
+
 test("workspace patch path gate reports exact nonduplicated field diagnostics", () => {
   const cases = [
     {
@@ -1206,7 +1250,11 @@ test("every contextual registration executes real positive and negative checks",
         positive: { properties: [{ sources: [{ source_node_id: "lens", source_property_id: "a" }] }] },
         negative: { properties: [{ sources: [{ source_node_id: "lens", source_property_id: "missing" }] }] },
         context: {
-          artifactSet: { propertyLenses: [{ sourceNodeId: "lens", document: { properties: [{ id: "a" }] } }] }
+          artifactSet: {
+            propertyLenses: [
+              { sourceNodeId: "lens", projectionRequired: true, document: { properties: [{ id: "a" }] } }
+            ]
+          }
         }
       },
       "report-property-provenance-join": {

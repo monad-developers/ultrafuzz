@@ -61,6 +61,7 @@ const {
   applyWorkspacePatch,
   captureWorkspacePatch,
   captureWorkspaceTree,
+  declaredAncestorOutputsByContract,
   deriveWorkspacePatchGitFacts,
   hydratePinnedSubmodulesFromExecutionSnapshot,
   projectCanonicalFinalReport,
@@ -4322,44 +4323,63 @@ function siblingCampaignSemanticArtifacts(
 
 function verifiedAncestorPropertyLenses(
   task: (typeof taskSpecs)[number]
-): Array<{ sourceNodeId: string; document: unknown }> | undefined {
-  const lenses: Array<{ sourceNodeId: string; document: unknown }> = [];
+): Array<{ sourceNodeId: string; projectionRequired: boolean; document: unknown }> | undefined {
+  const lenses: Array<{ sourceNodeId: string; projectionRequired: boolean; document: unknown }> = [];
   let producerCount = 0;
-  for (const dependency of [...task.dependencyArtifactDirs].sort((left, right) => left.localeCompare(right))) {
-    const producer = taskSpecs.find((candidate) => candidate.attemptId === path.basename(dependency));
-    if (producer === undefined) continue;
-    const logicalNodeId = producer.metadata.node.logicalNodeId;
-    const lensOutputs = producer.outputs.filter((output) => output.contract === "ultrafuzz/property-lens@2");
-
-    if (logicalNodeId === "project-discovery") {
-      producerCount += 1;
-      const ledgerOutputs = producer.outputs.filter((output) => output.contract === "ultrafuzz/invariant-ledger@1");
-      if (ledgerOutputs.length !== 1) return undefined;
-      const ledger = verifiedDependencyJsonArtifact(
-        task,
-        dependency,
-        producer,
-        ledgerOutputs[0]!.path,
-        ledgerOutputs[0]!.contract
-      ).value;
-      const entries = isPlainJsonRecord(ledger) && Array.isArray(ledger.entries) ? ledger.entries : undefined;
-      if (entries === undefined) return undefined;
-      lenses.push({
-        sourceNodeId: logicalNodeId,
-        document: {
-          properties: entries.flatMap((entry) =>
-            isPlainJsonRecord(entry) && typeof entry.id === "string" ? [{ id: entry.id }] : []
-          )
-        }
-      });
-    }
-
-    if (lensOutputs.length === 0) continue;
+  const declarations = taskSpecs.map((candidate) => ({
+    attemptId: candidate.attemptId,
+    logicalNodeId: candidate.metadata.node.logicalNodeId,
+    artifactDir: candidate.artifactDir,
+    dependencies: candidate.metadata.dependencies.attemptIds,
+    dependencyArtifactDirs: candidate.dependencyArtifactDirs.map((directory) => path.resolve(process.cwd(), directory)),
+    outputs: candidate.outputs
+  }));
+  const current = declarations.find((candidate) => candidate.attemptId === task.attemptId);
+  if (current === undefined) return undefined;
+  let ledgerOutputs: ReturnType<typeof declaredAncestorOutputsByContract>;
+  let lensOutputs: ReturnType<typeof declaredAncestorOutputsByContract>;
+  try {
+    ledgerOutputs = declaredAncestorOutputsByContract(current, declarations, "ultrafuzz/invariant-ledger@1");
+    lensOutputs = declaredAncestorOutputsByContract(current, declarations, "ultrafuzz/property-lens@2", {
+      directOnly: true
+    });
+  } catch {
+    return undefined;
+  }
+  if (ledgerOutputs.length > 1) return undefined;
+  for (const output of ledgerOutputs) {
+    const producer = taskSpecs.find((candidate) => candidate.attemptId === output.attemptId);
+    if (producer === undefined) return undefined;
     producerCount += 1;
-    if (lensOutputs.length !== 1) return undefined;
-    const output = lensOutputs[0]!;
-    const lens = verifiedDependencyJsonArtifact(task, dependency, producer, output.path, output.contract);
-    lenses.push({ sourceNodeId: logicalNodeId, document: lens.value });
+    const ledger = verifiedDependencyJsonArtifact(
+      task,
+      output.artifactDir,
+      producer,
+      output.path,
+      output.contract
+    ).value;
+    const entries = isPlainJsonRecord(ledger) && Array.isArray(ledger.entries) ? ledger.entries : undefined;
+    if (entries === undefined) return undefined;
+    lenses.push({
+      sourceNodeId: output.logicalNodeId,
+      projectionRequired: false,
+      document: {
+        properties: entries.flatMap((entry) =>
+          isPlainJsonRecord(entry) && typeof entry.id === "string" ? [{ id: entry.id }] : []
+        )
+      }
+    });
+  }
+
+  const seenLensProducers = new Set<string>();
+  for (const output of lensOutputs) {
+    if (seenLensProducers.has(output.attemptId)) return undefined;
+    seenLensProducers.add(output.attemptId);
+    const producer = taskSpecs.find((candidate) => candidate.attemptId === output.attemptId);
+    if (producer === undefined) return undefined;
+    producerCount += 1;
+    const lens = verifiedDependencyJsonArtifact(task, output.artifactDir, producer, output.path, output.contract);
+    lenses.push({ sourceNodeId: output.logicalNodeId, projectionRequired: true, document: lens.value });
   }
   return producerCount === 0 ? undefined : lenses;
 }
@@ -4389,7 +4409,7 @@ function semanticGateContextForVerifiedOutput(
     campaigns?: readonly unknown[];
     findings?: readonly unknown[];
     propertyCatalog?: unknown;
-    propertyLenses?: readonly { sourceNodeId: string; document: unknown }[];
+    propertyLenses?: readonly { sourceNodeId: string; projectionRequired: boolean; document: unknown }[];
     implementedProperties?: unknown;
     triagedFindings?: unknown;
   };
