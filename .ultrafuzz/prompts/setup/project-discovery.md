@@ -86,7 +86,10 @@ source-evidence ledger` at
 `{{artifact_path}}/setup/invariant-evidence-ledger.json`. Use the task-local
 `{{schema_path}}/invariant-evidence-ledger.schema.json` and assign each entry a
 stable `id`, source path, line or symbol location, kind, verbatim source text,
-and one or more `inventory_ids` using the `inventory-` prefix. Scan every
+and one or more `inventory_ids` using the `inventory-` prefix. Write each
+`source_location` as `line <n>`, `lines <first>-<last>`, or the name of the
+declared symbol the entry came from; the verifier reads exactly those three
+forms, so an abbreviation such as `L55` is rejected. Scan every
 relevant documentation, specification, NatSpec, source-comment, test, and
 harness section and every explicitly enumerated bullet or formula, regardless of
 the section heading. Classify statements that express invariants, accounting,

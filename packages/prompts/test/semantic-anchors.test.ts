@@ -318,6 +318,12 @@ describe("prompt semantic anchors", () => {
       /Do not summarize, merge, or omit a source\s+bullet before it has a corresponding ledger entry/u
     );
     expect(discovery).toMatch(/source path and line or symbol location/u);
+    // The verifier reads exactly three source-location forms, so the prompt has to
+    // name them: a producer that guessed `L55` failed a whole campaign.
+    expect(discovery).toMatch(
+      /`source_location` as `line <n>`, `lines <first>-<last>`, or the name of the\s+declared symbol/u
+    );
+    expect(discovery).toMatch(/an abbreviation such as `L55` is rejected/u);
     expect(discovery).toContain("including statements under generic headings");
     expect(discovery).toContain("Byte-preserving ledger construction");
     expect(discovery).toMatch(/derive the value by reading the cited file and slicing the requested\s+line range/u);
