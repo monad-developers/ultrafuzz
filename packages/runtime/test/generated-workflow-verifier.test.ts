@@ -2697,19 +2697,10 @@ test("generated Smithers dependency verification fails closed before descendant 
     () => undefined,
     (contract: string) => ({ digest: "a".repeat(64), format: contract === "ultrafuzz/text@1" ? "text" : "json" }),
     (contract: string) => (contract === "ultrafuzz/text@1" ? undefined : markerSchemaBinding),
-    (contract: string) => ({
+    (contract: string, contents: string) => ({
       ok: true,
       issues: [],
-      value:
-        contract === "ultrafuzz/generated-tests@3"
-          ? {
-              run_id: "run-one",
-              node_id: "generated-tests-fanin",
-              framework: "foundry",
-              generated_tests: [generatedTestEntry("generated-tests/Property.t.sol", "contract Property {}\n")],
-              support_files: [generatedTestEntry("generated-tests/PropertyHelper.sol", "library PropertyHelper {}\n")]
-            }
-          : undefined
+      value: contract === "ultrafuzz/generated-tests@3" ? (JSON.parse(contents) as unknown) : undefined
     }),
     createHash,
     new Set(["stateful-invariant-setup"]),
@@ -2730,7 +2721,12 @@ test("generated Smithers dependency verification fails closed before descendant 
           .digest("hex")
       );
     }
-  ) as (task: { attemptId: string; runRoot: string }, dependency: string) => void;
+  ) as (
+    task: { attemptId: string; runRoot: string },
+    dependency: string
+  ) => {
+    generatedTestBundles: ReadonlyArray<{ framework: string; entries: readonly unknown[] }>;
+  };
 
   const task = { attemptId: "stateful-invariant-setup", runRoot };
   assert.throws(
@@ -2869,6 +2865,33 @@ test("generated Smithers dependency verification fails closed before descendant 
   );
   assert.doesNotThrow(() => assertVerifiedDependency(task, generatedDependency));
   fs.writeFileSync(companionPath, "contract Tampered {}\n", "utf8");
+  assert.throws(
+    () => assertVerifiedDependency(task, generatedDependency),
+    /artifact dependency has not passed verification generated-tests-fanin/u
+  );
+  const emptyGeneratedBytes = Buffer.from(
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.generated-tests.v3",
+      run_id: "run-one",
+      node_id: "generated-tests-fanin",
+      framework: "foundry",
+      generated_tests: [],
+      support_files: []
+    })}\n`
+  );
+  fs.writeFileSync(path.join(generatedDependency, "generated-tests.json"), emptyGeneratedBytes);
+  fs.rmSync(companionPath);
+  fs.rmSync(supportPath);
+  const emptyGeneratedArtifact = {
+    ...generatedArtifact,
+    sha256: createHash("sha256").update(emptyGeneratedBytes).digest("hex")
+  };
+  writeAttemptMarker("generated-tests-fanin", [emptyGeneratedArtifact]);
+  const emptyAuthority = assertVerifiedDependency(task, generatedDependency);
+  assert.equal(emptyAuthority.generatedTestBundles.length, 1);
+  assert.equal(emptyAuthority.generatedTestBundles[0]!.framework, "foundry");
+  assert.deepEqual(emptyAuthority.generatedTestBundles[0]!.entries, []);
+  fs.rmSync(path.join(runRoot, ".ultrafuzz-verification", "generated-tests-fanin.json"));
   assert.throws(
     () => assertVerifiedDependency(task, generatedDependency),
     /artifact dependency has not passed verification generated-tests-fanin/u

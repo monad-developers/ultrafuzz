@@ -31,6 +31,9 @@ import {
 } from "@ultrafuzz/artifacts";
 
 const MAX_AGGREGATION_AUTHORITY_BYTES = 64 * 1024 * 1024;
+const MAX_AGGREGATION_PREREQUISITE_MANIFESTS = 4_096;
+const MAX_AGGREGATION_PREREQUISITE_EDGES = 16_384;
+const MAX_AGGREGATION_PREREQUISITE_BYTES = 64 * 1024 * 1024;
 const VERIFICATION_MARKER_DIRECTORY = ".ultrafuzz-verification";
 
 interface AuthenticatedPublicationSnapshot {
@@ -45,6 +48,12 @@ interface AuthenticatedProducerAuthority {
   artifactManifest: ArtifactManifest;
   artifactManifestBytes: Buffer;
   publications: ReadonlyMap<string, AuthenticatedPublicationSnapshot>;
+}
+
+interface PlannedAttemptAuthority {
+  node: PlannedGraphNodeDocument;
+  attemptId: string;
+  attemptIndex: number;
 }
 
 /**
@@ -164,6 +173,34 @@ function plannedAttempts(node: PlannedGraphNodeDocument): Array<{ attemptId: str
   }));
 }
 
+function plannedAttemptAuthorities(nodes: readonly PlannedGraphNodeDocument[]): Map<string, PlannedAttemptAuthority> {
+  const authorities = new Map<string, PlannedAttemptAuthority>();
+  for (const node of nodes) {
+    for (const attempt of plannedAttempts(node)) {
+      if (authorities.has(attempt.attemptId)) {
+        throw new Error(`planned graph repeats artifact attempt authority ${attempt.attemptId}`);
+      }
+      authorities.set(attempt.attemptId, { node, ...attempt });
+    }
+  }
+  return authorities;
+}
+
+function plannedPrerequisiteAttempts(
+  node: PlannedGraphNodeDocument,
+  nodesById: ReadonlyMap<string, PlannedGraphNodeDocument>
+): PlannedAttemptAuthority[] {
+  return node.depends_on
+    .flatMap((dependencyId) => {
+      const dependency = nodesById.get(dependencyId);
+      if (dependency === undefined) {
+        throw new Error(`producer dependency is absent from the planned graph: ${dependencyId}`);
+      }
+      return plannedAttempts(dependency).map((attempt) => ({ node: dependency, ...attempt }));
+    })
+    .sort((left, right) => left.attemptId.localeCompare(right.attemptId));
+}
+
 function authenticatedProducerAuthority(
   layout: RunLayout,
   nodes: readonly PlannedGraphNodeDocument[],
@@ -224,19 +261,7 @@ function authenticatedProducerAuthority(
   ) {
     throw new Error(`producer artifact manifest identity changed for ${attemptId}`);
   }
-  const expectedPrerequisites = producer.depends_on
-    .flatMap((dependencyId) => {
-      const dependency = nodes.find((candidate) => candidate.id === dependencyId);
-      if (dependency === undefined)
-        throw new Error(`producer dependency is absent from the planned graph: ${dependencyId}`);
-      return plannedAttempts(dependency).map((attempt) => attempt.attemptId);
-    })
-    .sort();
-  const actualPrerequisites = artifactManifest.prerequisite_manifests.map((entry) => entry.node_id).sort();
-  if (!isDeepStrictEqual(actualPrerequisites, expectedPrerequisites)) {
-    throw new Error(`producer artifact manifest prerequisite set changed for ${attemptId}`);
-  }
-  authenticatePrerequisiteManifestChain(layout, artifactManifest, attemptId);
+  authenticatePrerequisiteManifestChain(layout, nodes, artifactManifest, attemptId);
 
   const manifestFiles = new Map(artifactManifest.files.map((entry) => [entry.path, entry]));
   const markerPublications = new Map(marker.publications.map((entry) => [entry.path, entry]));
@@ -322,70 +347,110 @@ function authenticatedProducerAuthority(
 
 function authenticatePrerequisiteManifestChain(
   layout: RunLayout,
+  nodes: readonly PlannedGraphNodeDocument[],
   rootManifest: ArtifactManifest,
   rootAttemptId: string
 ): void {
-  const authenticated = new Map<string, { sha256: string; manifest: ArtifactManifest }>();
-  const visiting = new Set<string>([rootAttemptId]);
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const attemptsById = plannedAttemptAuthorities(nodes);
+  const rootAuthority = attemptsById.get(rootAttemptId);
+  if (rootAuthority === undefined) {
+    throw new Error(`producer attempt is absent from the planned graph: ${rootAttemptId}`);
+  }
 
-  const authenticate = (nodeId: string, expectedSha256: string): ArtifactManifest => {
-    const cached = authenticated.get(nodeId);
-    if (cached !== undefined) {
-      if (cached.sha256 !== expectedSha256) {
-        throw new Error(`prerequisite artifact manifest has conflicting sealed digests for ${nodeId}`);
+  const pending: Array<{ authority: PlannedAttemptAuthority; expectedSha256: string }> = [];
+  const scheduledDigests = new Map<string, string>();
+  const schedule = (authority: PlannedAttemptAuthority, expectedSha256: string): void => {
+    const previous = scheduledDigests.get(authority.attemptId);
+    if (previous !== undefined) {
+      if (previous !== expectedSha256) {
+        throw new Error(`prerequisite artifact manifest has conflicting sealed digests for ${authority.attemptId}`);
       }
-      return cached.manifest;
+      return;
     }
-    if (visiting.has(nodeId)) {
-      throw new Error(`prerequisite artifact manifest chain contains a cycle at ${nodeId}`);
-    }
-    visiting.add(nodeId);
-    try {
-      const artifactRoot = safeResolveInside(layout.artifactsDir, nodeId, "prerequisite artifact directory");
-      const manifestPath = safeResolveInside(artifactRoot, ARTIFACT_MANIFEST_FILE, "prerequisite artifact manifest");
-      const bytes = readSinglyLinkedRegularFileSnapshotInside(
-        artifactRoot,
-        manifestPath,
-        MAX_AGGREGATION_AUTHORITY_BYTES,
-        `prerequisite artifact manifest ${nodeId}`
+    if (scheduledDigests.size >= MAX_AGGREGATION_PREREQUISITE_MANIFESTS) {
+      throw new Error(
+        `prerequisite artifact manifest chain exceeds ${MAX_AGGREGATION_PREREQUISITE_MANIFESTS} manifests`
       );
-      const sha256 = digest(bytes);
-      if (sha256 !== expectedSha256) {
-        throw new Error(`prerequisite artifact manifest bytes changed for ${nodeId}`);
-      }
-      const value = parseStrictJsonBytes(bytes);
-      const shape = validateArtifactManifest(value);
-      if (!shape.ok) throw new Error(`prerequisite artifact manifest is invalid for ${nodeId}`);
-      const manifest = value as ArtifactManifest;
-      if (
-        manifest.run_id !== layout.runId ||
-        manifest.node_id !== nodeId ||
-        manifest.producer_node_id !== nodeId ||
-        manifest.provenance.run_id !== layout.runId ||
-        manifest.provenance.producer_node_id !== nodeId
-      ) {
-        throw new Error(`prerequisite artifact manifest identity changed for ${nodeId}`);
-      }
-      const prerequisiteIds = new Set(manifest.prerequisite_manifests.map((entry) => entry.node_id));
-      if (prerequisiteIds.size !== manifest.prerequisite_manifests.length) {
-        throw new Error(`prerequisite artifact manifest repeats a prerequisite for ${nodeId}`);
-      }
-      for (const prerequisite of manifest.prerequisite_manifests) {
-        authenticate(prerequisite.node_id, prerequisite.sha256);
-      }
-      authenticated.set(nodeId, { sha256, manifest });
-      return manifest;
-    } finally {
-      visiting.delete(nodeId);
     }
+    scheduledDigests.set(authority.attemptId, expectedSha256);
+    pending.push({ authority, expectedSha256 });
   };
 
-  const rootPrerequisiteIds = new Set(rootManifest.prerequisite_manifests.map((entry) => entry.node_id));
-  if (rootPrerequisiteIds.size !== rootManifest.prerequisite_manifests.length) {
-    throw new Error(`producer artifact manifest repeats a prerequisite for ${rootAttemptId}`);
+  const rootExpectedPrerequisites = plannedPrerequisiteAttempts(rootAuthority.node, nodesById);
+  const rootExpectedById = new Map(rootExpectedPrerequisites.map((entry) => [entry.attemptId, entry]));
+  const rootActualIds = rootManifest.prerequisite_manifests.map((entry) => entry.node_id).sort();
+  if (!isDeepStrictEqual(rootActualIds, [...rootExpectedById.keys()].sort())) {
+    throw new Error(`producer artifact manifest prerequisite set changed for ${rootAttemptId}`);
   }
   for (const prerequisite of rootManifest.prerequisite_manifests) {
-    authenticate(prerequisite.node_id, prerequisite.sha256);
+    schedule(rootExpectedById.get(prerequisite.node_id)!, prerequisite.sha256);
+  }
+
+  let authenticatedManifestCount = 0;
+  let authenticatedEdgeCount = rootManifest.prerequisite_manifests.length;
+  let authenticatedBytes = 0;
+  if (authenticatedEdgeCount > MAX_AGGREGATION_PREREQUISITE_EDGES) {
+    throw new Error(`prerequisite artifact manifest chain exceeds ${MAX_AGGREGATION_PREREQUISITE_EDGES} edges`);
+  }
+
+  while (pending.length > 0) {
+    const { authority, expectedSha256 } = pending.pop()!;
+    const remainingBytes = MAX_AGGREGATION_PREREQUISITE_BYTES - authenticatedBytes;
+    if (remainingBytes <= 0) {
+      throw new Error(`prerequisite artifact manifest chain exceeds ${MAX_AGGREGATION_PREREQUISITE_BYTES} bytes`);
+    }
+    const artifactRoot = safeResolveInside(layout.artifactsDir, authority.attemptId, "prerequisite artifact directory");
+    const manifestPath = safeResolveInside(artifactRoot, ARTIFACT_MANIFEST_FILE, "prerequisite artifact manifest");
+    const bytes = readSinglyLinkedRegularFileSnapshotInside(
+      artifactRoot,
+      manifestPath,
+      Math.min(MAX_AGGREGATION_AUTHORITY_BYTES, remainingBytes),
+      `prerequisite artifact manifest ${authority.attemptId}`
+    );
+    authenticatedBytes += bytes.byteLength;
+    authenticatedManifestCount += 1;
+    const sha256 = digest(bytes);
+    if (sha256 !== expectedSha256) {
+      throw new Error(`prerequisite artifact manifest bytes changed for ${authority.attemptId}`);
+    }
+    const value = parseStrictJsonBytes(bytes);
+    const shape = validateArtifactManifest(value);
+    if (!shape.ok) throw new Error(`prerequisite artifact manifest is invalid for ${authority.attemptId}`);
+    const manifest = value as ArtifactManifest;
+    const provenanceMetadata = manifest.provenance.metadata as { concrete_node_id?: string } | undefined;
+    if (
+      manifest.run_id !== layout.runId ||
+      manifest.node_id !== authority.attemptId ||
+      manifest.producer_node_id !== authority.attemptId ||
+      manifest.provenance.run_id !== layout.runId ||
+      manifest.provenance.producer_node_id !== authority.attemptId ||
+      manifest.provenance.logical_node_id !== authority.node.logical_id ||
+      !isDeepStrictEqual(manifest.output_contracts, authority.node.outputs) ||
+      (authority.node.kind === "agentic" &&
+        (manifest.provenance.attempt_index !== authority.attemptIndex ||
+          provenanceMetadata?.concrete_node_id !== authority.node.id))
+    ) {
+      throw new Error(`prerequisite artifact manifest identity changed for ${authority.attemptId}`);
+    }
+
+    const expectedPrerequisites = plannedPrerequisiteAttempts(authority.node, nodesById);
+    const expectedById = new Map(expectedPrerequisites.map((entry) => [entry.attemptId, entry]));
+    const actualIds = manifest.prerequisite_manifests.map((entry) => entry.node_id).sort();
+    if (!isDeepStrictEqual(actualIds, [...expectedById.keys()].sort())) {
+      throw new Error(`prerequisite artifact manifest prerequisite set changed for ${authority.attemptId}`);
+    }
+    authenticatedEdgeCount += manifest.prerequisite_manifests.length;
+    if (authenticatedEdgeCount > MAX_AGGREGATION_PREREQUISITE_EDGES) {
+      throw new Error(`prerequisite artifact manifest chain exceeds ${MAX_AGGREGATION_PREREQUISITE_EDGES} edges`);
+    }
+    for (const prerequisite of manifest.prerequisite_manifests) {
+      schedule(expectedById.get(prerequisite.node_id)!, prerequisite.sha256);
+    }
+  }
+
+  if (authenticatedManifestCount !== scheduledDigests.size) {
+    throw new Error(`prerequisite artifact manifest chain authentication was incomplete for ${rootAttemptId}`);
   }
 }
 

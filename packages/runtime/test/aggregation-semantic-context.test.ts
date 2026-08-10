@@ -11,6 +11,7 @@ import {
   artifactContractDefinition,
   artifactContractSchemaBinding,
   createRunLayout,
+  executeSchemaSemanticGates,
   writeArtifact,
   writeArtifactManifest,
   writeJsonDurable,
@@ -30,6 +31,8 @@ interface AggregationAuthorityFixture {
   aggregationNode: PlannedGraphNodeDocument;
   expectedPrerequisiteAttemptIds: string[];
   prerequisiteManifestPaths: string[];
+  originManifestPath: string;
+  unrelatedManifestPath: string;
   markerPath: string;
   artifactManifestPath: string;
   generatedManifestPath: string;
@@ -228,13 +231,236 @@ test("authenticated aggregation source authority snapshots the sealed prerequisi
   });
 });
 
+test("authenticated aggregation source authority reconciles every transitive manifest with the planned graph", async (t) => {
+  await t.test("stale grandparent bytes", (subtest) => {
+    const fixture = createAggregationAuthorityFixture("aggregation-stale-grandparent");
+    subtest.after(() => fs.rmSync(path.dirname(fixture.layout.root), { recursive: true, force: true }));
+    mutateManifestAtPath(fixture.originManifestPath, (manifest) => {
+      manifest.created_at = "2026-08-10T00:00:01.000Z";
+    });
+
+    assertAuthorityRejectedWithoutMutation(fixture, /prerequisite artifact manifest bytes changed for origin/u);
+  });
+
+  await t.test("omitted planned grandparent after attacker reseals descendants", (subtest) => {
+    const fixture = createAggregationAuthorityFixture("aggregation-omitted-grandparent");
+    subtest.after(() => fs.rmSync(path.dirname(fixture.layout.root), { recursive: true, force: true }));
+    mutateManifestAtPath(fixture.prerequisiteManifestPaths[0]!, (manifest) => {
+      manifest.prerequisite_manifests = [];
+    });
+    resealProducerPrerequisiteDigests(fixture);
+
+    assertAuthorityRejectedWithoutMutation(
+      fixture,
+      /prerequisite artifact manifest prerequisite set changed for seed__model_0__attempt_0/u
+    );
+  });
+
+  await t.test("fabricated graph-known nondependency after attacker reseals descendants", (subtest) => {
+    const fixture = createAggregationAuthorityFixture("aggregation-fabricated-grandparent");
+    subtest.after(() => fs.rmSync(path.dirname(fixture.layout.root), { recursive: true, force: true }));
+    mutateManifestAtPath(fixture.prerequisiteManifestPaths[0]!, (manifest) => {
+      manifest.prerequisite_manifests.push({
+        node_id: "unrelated-generated-producer",
+        sha256: digest(fs.readFileSync(fixture.unrelatedManifestPath))
+      });
+    });
+    resealProducerPrerequisiteDigests(fixture);
+
+    assertAuthorityRejectedWithoutMutation(
+      fixture,
+      /prerequisite artifact manifest prerequisite set changed for seed__model_0__attempt_0/u
+    );
+  });
+
+  await t.test("transitive manifest identity drift after attacker reseals the complete chain", (subtest) => {
+    const fixture = createAggregationAuthorityFixture("aggregation-grandparent-identity");
+    subtest.after(() => fs.rmSync(path.dirname(fixture.layout.root), { recursive: true, force: true }));
+    mutateManifestAtPath(fixture.originManifestPath, (manifest) => {
+      manifest.provenance.logical_node_id = "unrelated-generated-producer";
+    });
+    const originSha256 = digest(fs.readFileSync(fixture.originManifestPath));
+    for (const manifestPath of fixture.prerequisiteManifestPaths) {
+      mutateManifestAtPath(manifestPath, (manifest) => {
+        manifest.prerequisite_manifests[0]!.sha256 = originSha256;
+      });
+    }
+    resealProducerPrerequisiteDigests(fixture);
+
+    assertAuthorityRejectedWithoutMutation(fixture, /prerequisite artifact manifest identity changed for origin/u);
+  });
+
+  await t.test("diamond ancestors with conflicting sealed digests", (subtest) => {
+    const fixture = createAggregationAuthorityFixture("aggregation-conflicting-diamond");
+    subtest.after(() => fs.rmSync(path.dirname(fixture.layout.root), { recursive: true, force: true }));
+    mutateManifestAtPath(fixture.prerequisiteManifestPaths[0]!, (manifest) => {
+      manifest.prerequisite_manifests[0]!.sha256 = "f".repeat(64);
+    });
+    resealProducerPrerequisiteDigests(fixture);
+
+    assertAuthorityRejectedWithoutMutation(
+      fixture,
+      /prerequisite artifact manifest has conflicting sealed digests for origin/u
+    );
+  });
+});
+
+test("authenticated aggregation context excludes graph-known generated-test nondependencies", (t) => {
+  const fixture = createAggregationAuthorityFixture("aggregation-nondependency-producer");
+  t.after(() => fs.rmSync(path.dirname(fixture.layout.root), { recursive: true, force: true }));
+
+  const context = authenticatedContext(fixture);
+
+  assert.deepEqual(
+    context.sourceBundles.map((bundle) => bundle.sourceAttemptId),
+    ["generated-producer"]
+  );
+  assert.equal(
+    fs.existsSync(path.join(fixture.layout.root, ".ultrafuzz-verification", "unrelated-generated-producer.json")),
+    false
+  );
+});
+
+test("authenticated aggregation context distinguishes valid empty authority from a missing required producer", async (t) => {
+  await t.test("one authenticated empty bundle remains an explicit typed source bundle", (subtest) => {
+    const fixture = createAggregationAuthorityFixture("aggregation-empty-bundle");
+    subtest.after(() => fs.rmSync(path.dirname(fixture.layout.root), { recursive: true, force: true }));
+    makeGeneratedProducerBundleEmpty(fixture);
+    const before = snapshotRunTree(fixture.layout.root);
+
+    const context = authenticatedContext(fixture);
+
+    assert.equal(context.sourceBundles.length, 1);
+    assert.equal(context.sourceBundles[0]!.framework, "foundry");
+    assert.deepEqual(context.sourceBundles[0]!.entries, []);
+    assert.deepEqual(snapshotRunTree(fixture.layout.root), before);
+  });
+
+  await t.test("an exact graph with no generated-test producers admits the canonical empty aggregation", (subtest) => {
+    const fixture = createNoGeneratedProducerFixture("aggregation-empty-producer-set");
+    subtest.after(() => fs.rmSync(path.dirname(fixture.layout.root), { recursive: true, force: true }));
+    const before = snapshotRunTree(fixture.layout.root);
+
+    const context = authenticatedAggregationSemanticContext({
+      layout: fixture.layout,
+      node: fixture.aggregationNode,
+      attemptId: fixture.aggregationNode.id
+    });
+    const document = {
+      schema_version: "ultrafuzz.aggregation-manifest.v1",
+      source_generated_tests: 0,
+      copied_generated_tests: 0,
+      source_support_files: 0,
+      copied_support_files: 0,
+      source_bundles: [],
+      files: [],
+      support_files: [],
+      skipped_files: []
+    };
+    const results = executeSchemaSemanticGates("aggregation-manifest.schema.json", {
+      document,
+      context: { aggregation: context }
+    });
+
+    assert.deepEqual(context.sourceBundles, []);
+    assert.deepEqual(
+      results.filter((result) => result.status !== "passed"),
+      []
+    );
+    assert.deepEqual(snapshotRunTree(fixture.layout.root), before);
+  });
+
+  await t.test("a declared generated-test producer without verifier authority fails closed", (subtest) => {
+    const fixture = createAggregationAuthorityFixture("aggregation-missing-producer-marker");
+    subtest.after(() => fs.rmSync(path.dirname(fixture.layout.root), { recursive: true, force: true }));
+    fs.rmSync(fixture.markerPath);
+
+    assertAuthorityRejectedWithoutMutation(fixture, /artifact verification marker/u);
+  });
+});
+
+function createNoGeneratedProducerFixture(runId: string): {
+  layout: RunLayout;
+  aggregationNode: PlannedGraphNodeDocument;
+} {
+  const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-empty-aggregation-authority-"));
+  const seedNode = plannedNode("seed", [], boundOutput("seed.md", "ultrafuzz/nonempty-markdown@1"));
+  const aggregationNode = plannedNode(
+    "aggregate-test-files",
+    [seedNode.id],
+    boundOutput("aggregation-manifest.json", "ultrafuzz/aggregation-manifest@1")
+  );
+  const graph: PlannedGraphDocument = {
+    schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
+    graph_version: "3",
+    topology_version: 2,
+    groups: {},
+    nodes: [seedNode, aggregationNode]
+  };
+  const layout = createRunLayout({ outputRoot, runId, graph });
+  fs.mkdirSync(path.join(layout.workspacesDir, aggregationNode.id), { recursive: true });
+  return { layout, aggregationNode };
+}
+
+function makeGeneratedProducerBundleEmpty(fixture: AggregationAuthorityFixture): void {
+  const generatedManifest = readJsonFile<{
+    generated_tests: unknown[];
+    support_files: unknown[];
+  }>(fixture.generatedManifestPath);
+  generatedManifest.generated_tests = [];
+  generatedManifest.support_files = [];
+  writeJsonForAttack(fixture.generatedManifestPath, generatedManifest);
+  fs.rmSync(fixture.generatedTestPath);
+  fs.rmSync(fixture.supportFilePath);
+
+  const manifestSha256 = digest(fs.readFileSync(fixture.generatedManifestPath));
+  const manifestSize = fs.statSync(fixture.generatedManifestPath).size;
+  mutateArtifactManifest(fixture, (manifest) => {
+    manifest.files = manifest.files.filter(
+      (entry) => entry.path !== "generated-tests/Property.t.sol" && entry.path !== "generated-tests/PropertyHelper.sol"
+    );
+    const generatedManifestEntry = manifest.files.find((entry) => entry.path === "generated-tests.json");
+    assert.ok(generatedManifestEntry);
+    generatedManifestEntry.sha256 = manifestSha256;
+    generatedManifestEntry.size_bytes = manifestSize;
+  });
+  mutateMarker(fixture, (marker) => {
+    marker.publications = marker.publications.filter(
+      (entry) => entry.path !== "generated-tests/Property.t.sol" && entry.path !== "generated-tests/PropertyHelper.sol"
+    );
+    const generatedArtifact = marker.artifacts.find((entry) => entry.path === "generated-tests.json");
+    const generatedPublication = marker.publications.find((entry) => entry.path === "generated-tests.json");
+    assert.ok(generatedArtifact);
+    assert.ok(generatedPublication);
+    generatedArtifact.sha256 = manifestSha256;
+    generatedPublication.sha256 = manifestSha256;
+  });
+}
+
+function resealProducerPrerequisiteDigests(fixture: AggregationAuthorityFixture): void {
+  const currentDigests = new Map(
+    fixture.prerequisiteManifestPaths.map((manifestPath) => [
+      path.basename(path.dirname(manifestPath)),
+      digest(fs.readFileSync(manifestPath))
+    ])
+  );
+  mutateArtifactManifest(fixture, (manifest) => {
+    for (const prerequisite of manifest.prerequisite_manifests) {
+      const sha256 = currentDigests.get(prerequisite.node_id);
+      if (sha256 !== undefined) prerequisite.sha256 = sha256;
+    }
+  });
+}
+
 function createAggregationAuthorityFixture(runId: string): AggregationAuthorityFixture {
   const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-aggregation-authority-"));
+  const originOutput = boundOutput("origin.md", "ultrafuzz/nonempty-markdown@1");
   const seedOutput = boundOutput("seed.md", "ultrafuzz/nonempty-markdown@1");
   const generatedOutput = boundOutput("generated-tests.json", "ultrafuzz/generated-tests@3");
   const aggregationOutput = boundOutput("aggregation-manifest.json", "ultrafuzz/aggregation-manifest@1");
+  const originNode = plannedNode("origin", [], originOutput);
   const seedNode: PlannedGraphNodeDocument = {
-    ...plannedNode("seed", [], seedOutput),
+    ...plannedNode("seed", [originNode.id], seedOutput),
     model_fanout: [
       {
         model_profile_id: "model-zero",
@@ -253,15 +479,54 @@ function createAggregationAuthorityFixture(runId: string): AggregationAuthorityF
     ]
   };
   const producerNode = plannedNode("generated-producer", [seedNode.id], generatedOutput);
+  const unrelatedNode = plannedNode("unrelated-generated-producer", [], generatedOutput);
   const aggregationNode = plannedNode("aggregate-test-files", [producerNode.id], aggregationOutput);
   const graph: PlannedGraphDocument = {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
     graph_version: "3",
     topology_version: 2,
     groups: {},
-    nodes: [seedNode, producerNode, aggregationNode]
+    nodes: [originNode, seedNode, producerNode, unrelatedNode, aggregationNode]
   };
   const layout = createRunLayout({ outputRoot, runId, graph });
+  writeArtifact(layout, originNode.id, originOutput.path, "origin\n");
+  writeArtifactManifest({
+    layout,
+    nodeId: originNode.id,
+    outputs: [originOutput],
+    provenance: {
+      logical_node_id: originNode.logical_id,
+      attempt_index: 0,
+      metadata: { concrete_node_id: originNode.id }
+    }
+  });
+  const originManifestPath = path.join(layout.artifactsDir, originNode.id, "artifact-manifest.json");
+
+  writeArtifact(
+    layout,
+    unrelatedNode.id,
+    generatedOutput.path,
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.generated-tests.v3",
+      run_id: runId,
+      node_id: unrelatedNode.logical_id,
+      framework: "medusa",
+      generated_tests: [],
+      support_files: []
+    })}\n`
+  );
+  writeArtifactManifest({
+    layout,
+    nodeId: unrelatedNode.id,
+    outputs: [generatedOutput],
+    provenance: {
+      logical_node_id: unrelatedNode.logical_id,
+      attempt_index: 0,
+      metadata: { concrete_node_id: unrelatedNode.id }
+    }
+  });
+  const unrelatedManifestPath = path.join(layout.artifactsDir, unrelatedNode.id, "artifact-manifest.json");
+
   const expectedPrerequisiteAttemptIds = ["seed__model_0__attempt_0", "seed__model_1__attempt_0"];
   const prerequisiteManifestPaths: string[] = [];
   for (const [modelIndex, attemptId] of expectedPrerequisiteAttemptIds.entries()) {
@@ -270,6 +535,7 @@ function createAggregationAuthorityFixture(runId: string): AggregationAuthorityF
       layout,
       nodeId: attemptId,
       outputs: [seedOutput],
+      prerequisiteNodeIds: [originNode.id],
       provenance: {
         logical_node_id: seedNode.logical_id,
         attempt_index: 0,
@@ -328,6 +594,8 @@ function createAggregationAuthorityFixture(runId: string): AggregationAuthorityF
     aggregationNode,
     expectedPrerequisiteAttemptIds,
     prerequisiteManifestPaths,
+    originManifestPath,
+    unrelatedManifestPath,
     markerPath,
     artifactManifestPath: path.join(layout.artifactsDir, producerNode.id, "artifact-manifest.json"),
     generatedManifestPath,
@@ -404,9 +672,13 @@ function mutateArtifactManifest(
   fixture: AggregationAuthorityFixture,
   mutate: (manifest: ArtifactManifest) => void
 ): void {
-  const manifest = readJsonFile<ArtifactManifest>(fixture.artifactManifestPath);
+  mutateManifestAtPath(fixture.artifactManifestPath, mutate);
+}
+
+function mutateManifestAtPath(filePath: string, mutate: (manifest: ArtifactManifest) => void): void {
+  const manifest = readJsonFile<ArtifactManifest>(filePath);
   mutate(manifest);
-  writeJsonForAttack(fixture.artifactManifestPath, manifest);
+  writeJsonForAttack(filePath, manifest);
 }
 
 function readJsonFile<T>(filePath: string): T {
