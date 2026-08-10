@@ -314,11 +314,18 @@ v2 contract.
 `ultrafuzz/implemented-properties@3` contract. Every record has a canonical
 `property_id`, a status (`implemented`, `pending`, `deferred`, or `blocked`),
 and `implementation_paths` and `test_paths` arrays. The invariant campaign's
-`recon-fuzzer-results.json` uses `ultrafuzz.property-campaign.v2`; failure
-records caused by implemented catalog properties carry `property_ids`.
-Property-derived `findings.json` entries carry the same optional
-`property_ids` and use the raw failure's ID. Setup or harness findings that do
-not originate from a catalog property omit the field.
+`recon-fuzzer-results.json` uses `ultrafuzz.property-campaign.v3`. It is a
+closed execution record that names the authenticated plan, implementation
+handoff, findings, and campaign-summary artifacts; preserves backend identity,
+command/config, worker count, timing, deadline, exit/failure evidence, and
+declared paths; types available or unavailable coverage; and contains exactly
+one result row for every implemented property. Every observed failure carries
+its raw evidence plus either a deterministic reproducer or a typed reproduction
+blocker. Failure records caused by implemented catalog properties carry
+non-empty `property_ids`; non-property failures use an empty array.
+Property-derived `findings.json` entries carry the same property IDs and use a
+representative raw failure's ID. Historical v1/v2 records are rejected without
+conversion or compatibility fallback.
 
 Current invariant implementation runs also emit a `selection` object with the
 configured `priority_threshold`, its inclusive `priorities`, and the complete
@@ -348,15 +355,16 @@ is schema-invalid.
 
 Runtime artifact gates reject unknown canonical IDs and campaign references to
 properties that were not recorded with `implemented` status. They validate each
-campaign result record independently, judge unexplained findings against the
-union of every campaign record in the node, reject raw campaign/finding
-reference mismatches and dangling final-report IDs, and require final joins to
-match the validated sources, implementation/test paths, and complete set of
-originating fuzzer backends. Final `report.json` stores the joined chain in
-`property_provenance`, using `fuzzer_backend` for one backend or
-`fuzzer_backends` for several, and `report.md` renders it under **Property
-provenance**. Missing or inconsistent current provenance fails the report gate;
-the host does not synthesize it from older handoffs.
+campaign result record independently; require its plan/backend/command/path and
+implemented-property joins; reconcile property results, failures, findings,
+reproducers, and summary accounting; judge unexplained findings against the
+union of every campaign record in the node; reject dangling final-report IDs;
+and require final joins to match the validated sources, implementation/test
+paths, and complete set of originating fuzzer backends. Final `report.json`
+stores the joined chain in `property_provenance`, using `fuzzer_backend` for one
+backend or `fuzzer_backends` for several, and `report.md` renders it under
+**Property provenance**. Missing or inconsistent current provenance fails the
+report gate; the host does not synthesize it from older handoffs.
 
 ## Final Report
 
