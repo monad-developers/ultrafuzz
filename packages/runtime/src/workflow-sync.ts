@@ -3,15 +3,18 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
+  ARTIFACT_MANIFEST_FILE,
   appendUsageEvents,
   appendNodeAttempts,
   appendEvent,
+  assertArtifactVerificationMarkerSemantics,
   assertTerminalDispositionDocument,
   assertRunMetadataDocument,
   assertPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
   assertNoSymlinkComponents,
   assertPathInside,
+  assertRegularFileInside,
   createNodeAttemptLedgerEntry,
   createUsageLedgerEntry,
   getNodeArtifactDir,
@@ -29,11 +32,14 @@ import {
   parseSmithersTaskManifestBytes,
   replayUsageEvents,
   safeResolveInside,
+  sha256Bytes,
   sha256File,
   updateNodeState,
   updateRunStatus,
   usageLedgerIdentity,
   validateArtifactContractBytes,
+  validateArtifactManifest,
+  validateArtifactVerificationMarker,
   validateFindingsSchema,
   validateSafeId,
   writeArtifactManifest,
@@ -41,7 +47,10 @@ import {
   writeRunState,
   type AppendEventInput,
   type AppendNodeAttemptInput,
+  type ArtifactManifest,
   type ArtifactProvenance,
+  type ArtifactVerificationEntry,
+  type ArtifactVerificationMarker,
   type AppendUsageEventInput,
   type NodeAttemptFailureCategory,
   type NodeAttemptLedgerEntry,
@@ -322,7 +331,23 @@ const NODE_RECOVERED_STATUSES = new Set<NodeStatus>(["succeeded", "reused-from-p
 const ACCOUNTING_SCHEMA_VERSION = "ultrafuzz.accounting.v3";
 const ACCOUNTING_CHECKPOINT_SCHEMA_VERSION = "ultrafuzz.accounting-checkpoint.v1";
 const ACCOUNTING_USD_PRECISION = 12;
-const MAX_FINDINGS_SNAPSHOT_BYTES = 64 * 1024 * 1024;
+const MAX_VERIFIER_AUTHORITY_BYTES = 64 * 1024 * 1024;
+const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
+
+interface VerifierPublicationSnapshot {
+  path: string;
+  absolutePath: string;
+  sha256: string;
+  bytes: Buffer;
+}
+
+interface VerifierPublicationAuthoritySnapshot {
+  marker: ArtifactVerificationMarker;
+  markerPath: string;
+  markerBytes: Buffer;
+  artifactDir: string;
+  publications: ReadonlyMap<string, VerifierPublicationSnapshot>;
+}
 
 export async function syncRun(input: SyncRunInput, control: WorkflowSynchronizationControl = {}) {
   const result = await synchronizeLinkedWorkflowRun(input, control);
@@ -2390,10 +2415,29 @@ async function finalizeTerminalTask(input: {
   const events: PendingNodeEvent[] = [];
   assertSynchronizationBudget(input.control);
   const artifactDir = getNodeArtifactDir(input.layout, input.task.attemptId);
-  const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId, {
-    task: input.task,
-    tasks: [...input.tasksByAttempt.values()]
-  });
+  let verifierAuthority: VerifierPublicationAuthoritySnapshot | undefined;
+  try {
+    verifierAuthority = captureVerifierPublicationAuthority(input.layout, input.node, input.task);
+  } catch (error) {
+    if (synchronizationInterruptionDiagnostic(error) !== undefined) throw error;
+    diagnostics.push({
+      ...diagnosticFromError(error, "artifact-contracts", "ARTIFACT_VERIFICATION_AUTHORITY_INVALID"),
+      code: "ARTIFACT_VERIFICATION_AUTHORITY_INVALID"
+    });
+  }
+  const gate =
+    verifierAuthority === undefined
+      ? { ok: false, diagnostics: [], missing: [] }
+      : verifyRequiredArtifactsForAttempt(
+          input.layout,
+          input.node,
+          input.task.attemptId,
+          {
+            task: input.task,
+            tasks: [...input.tasksByAttempt.values()]
+          },
+          authenticatedGateSnapshots(input.node, verifierAuthority)
+        );
   diagnostics.push(...gate.diagnostics);
   if (gate.ok) {
     events.push({
@@ -2423,20 +2467,17 @@ async function finalizeTerminalTask(input: {
   const declaredFindingsOutputs = input.node.outputs.filter((output) => output.contract === "ultrafuzz/findings@2");
   for (const output of declaredFindingsOutputs) {
     const findingsPath = safeResolveInside(artifactDir, output.path, "declared findings path");
-    if (!fs.existsSync(findingsPath)) continue;
+    const findingsSnapshot = verifierAuthority?.publications.get(output.path);
+    if (findingsSnapshot === undefined) continue;
     try {
       assertSynchronizationBudget(input.control);
-      const contract = validateArtifactContractBytes(
-        "ultrafuzz/findings@2",
-        readRegularFileSnapshot(findingsPath, MAX_FINDINGS_SNAPSHOT_BYTES),
-        findingsPath
-      );
+      const contract = validateArtifactContractBytes("ultrafuzz/findings@2", findingsSnapshot.bytes, findingsPath);
       let outputCount: number | undefined;
       if (!contract.ok || contract.value === undefined) {
         findingsValidationFailed = true;
-        // The required-artifact gate already reported failures from its own
-        // immutable byte snapshot. A failure here with a previously successful
-        // gate means the declared file changed between the two reads.
+        // Both retained-schema checks consume the verifier-authenticated byte
+        // snapshot. They can disagree only if the registered and retained
+        // validators drift, never because the mutable file was read twice.
         if (gate.ok) {
           diagnostics.push({
             code: "FINDINGS_VALIDATION_FAILED",
@@ -2491,9 +2532,25 @@ async function finalizeTerminalTask(input: {
     findingsCount = totalFindings;
   }
 
+  if (verifierAuthority !== undefined) {
+    try {
+      assertSynchronizationBudget(input.control);
+      assertVerifierPublicationAuthorityCurrent(input.layout, verifierAuthority);
+    } catch (error) {
+      if (synchronizationInterruptionDiagnostic(error) !== undefined) throw error;
+      diagnostics.push({
+        ...diagnosticFromError(error, "artifact-contracts", "ARTIFACT_VERIFICATION_AUTHORITY_CHANGED"),
+        code: "ARTIFACT_VERIFICATION_AUTHORITY_CHANGED"
+      });
+    }
+  }
+
   if (!diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
     try {
       assertSynchronizationBudget(input.control);
+      if (verifierAuthority === undefined) {
+        throw new Error(`verifier publication authority is unavailable for ${input.task.attemptId}`);
+      }
       const manifest = writeArtifactManifest({
         layout: input.layout,
         nodeId: input.task.attemptId,
@@ -2501,9 +2558,24 @@ async function finalizeTerminalTask(input: {
         prerequisiteNodeIds: input.task.dependencies,
         provenance: artifactProvenance(input.task, input.workflowRunId)
       });
-      artifactManifestSha256 = sha256File(
-        path.join(getNodeArtifactDir(input.layout, input.task.attemptId), "artifact-manifest.json")
+      const manifestPath = safeResolveInside(artifactDir, ARTIFACT_MANIFEST_FILE, "controller artifact manifest");
+      const manifestBytes = readControllerManifestSnapshot(
+        input.layout,
+        manifestPath,
+        manifest,
+        input.node,
+        verifierAuthority
       );
+      assertVerifierPublicationAuthorityCurrent(input.layout, verifierAuthority);
+      const secondManifestRead = readAuthorityFileSnapshot(
+        input.layout.root,
+        manifestPath,
+        "controller artifact manifest"
+      );
+      if (!secondManifestRead.equals(manifestBytes)) {
+        throw new Error(`controller artifact manifest changed during finalization for ${input.task.attemptId}`);
+      }
+      artifactManifestSha256 = sha256Bytes(manifestBytes);
       events.push({
         eventType: "artifact-manifest-written",
         status: "succeeded",
@@ -2516,19 +2588,25 @@ async function finalizeTerminalTask(input: {
       if (synchronizationInterruptionDiagnostic(error) !== undefined) {
         throw error;
       }
-      diagnostics.push(diagnosticFromError(error, "artifacts", "ARTIFACT_MANIFEST_WRITE_FAILED"));
+      diagnostics.push({
+        ...diagnosticFromError(error, "artifacts", "ARTIFACT_MANIFEST_WRITE_FAILED"),
+        code: "ARTIFACT_MANIFEST_WRITE_FAILED"
+      });
     }
   }
 
   const errorDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
   if (errorDiagnostics.length > 0) {
-    const taskOutputValidationFailure = !gate.ok || findingsValidationFailed;
+    const taskOutputValidationFailure = verifierAuthority === undefined || !gate.ok || findingsValidationFailed;
     return {
       status: "failed",
       diagnostics,
       lastError: errorDiagnostics.map((diagnostic) => diagnostic.message).join("; "),
       provenance: {
-        output_contracts: { ok: gate.ok, missing: gate.missing },
+        // A controller publication failure is never an output-contract
+        // success. In particular, the run-state schema forbids publishing
+        // ok=true without the manifest digest that seals that success.
+        output_contracts: { ok: false, missing: gate.missing },
         failure: {
           category: "artifact-contract",
           causal_task_id: input.task.verifierSmithersNodeId,
@@ -2548,6 +2626,9 @@ async function finalizeTerminalTask(input: {
       events
     };
   }
+  if (artifactManifestSha256 === undefined) {
+    throw new Error(`successful finalization lost its artifact manifest digest for ${input.task.attemptId}`);
+  }
   return {
     status: "succeeded",
     diagnostics,
@@ -2555,12 +2636,238 @@ async function finalizeTerminalTask(input: {
       output_contracts: {
         ok: true,
         missing: [],
-        artifact_manifest_sha256: artifactManifestSha256!
+        artifact_manifest_sha256: artifactManifestSha256
       },
       ...(findingsCount !== undefined ? { findings_count: findingsCount } : {})
     },
     events
   };
+}
+
+function captureVerifierPublicationAuthority(
+  layout: RunLayout,
+  node: PlannedGraphNode,
+  task: StoredWorkflowTask
+): VerifierPublicationAuthoritySnapshot {
+  const artifactDir = getNodeArtifactDir(layout, task.attemptId);
+  if (
+    task.concreteNodeId !== node.id ||
+    task.logicalNodeId !== node.logical_id ||
+    path.resolve(task.artifactDir) !== path.resolve(artifactDir)
+  ) {
+    throw new Error(`sealed verifier task identity does not match planned attempt ${task.attemptId}`);
+  }
+  const declaredOutputs = task.metadata.artifacts.outputs.map((output) => ({
+    path: output.path,
+    contract: output.contract,
+    contract_digest: output.contractDigest,
+    ...(output.schemaFile === undefined
+      ? {}
+      : {
+          schema_file: output.schemaFile,
+          schema_id: output.schemaId,
+          schema_sha256: output.schemaSha256,
+          schema_bundle_sha256: output.schemaBundleSha256,
+          validator_build: output.validatorBuild
+        }),
+    primary: output.primary
+  }));
+  if (!isDeepStrictEqual(declaredOutputs, node.outputs)) {
+    throw new Error(`sealed verifier output declarations do not match planned attempt ${task.attemptId}`);
+  }
+
+  const markerRoot = path.resolve(layout.root, ARTIFACT_VERIFICATION_DIRECTORY);
+  assertPathInside(layout.root, markerRoot, "artifact verification marker root");
+  assertNoSymlinkComponents(layout.root, markerRoot, "artifact verification marker root");
+  const markerPath = safeResolveInside(markerRoot, `${task.attemptId}.json`, "artifact verification marker");
+  const markerBytes = readAuthorityFileSnapshot(layout.root, markerPath, "artifact verification marker");
+  let markerValue: unknown;
+  try {
+    markerValue = parseStrictJsonBytes(markerBytes);
+  } catch (error) {
+    throw new Error(`artifact verification marker is not strict JSON for ${task.attemptId}`, { cause: error });
+  }
+  const markerShape = validateArtifactVerificationMarker(markerValue);
+  if (!markerShape.ok) {
+    throw new Error(
+      `artifact verification marker is schema-invalid for ${task.attemptId}: ${markerShape.issues
+        .map((issue) => `${issue.instancePath || "/"} ${issue.message}`)
+        .join("; ")}`
+    );
+  }
+  const marker = markerValue as ArtifactVerificationMarker;
+  try {
+    assertArtifactVerificationMarkerSemantics(marker);
+  } catch (error) {
+    throw new Error(`artifact verification marker is semantically invalid for ${task.attemptId}`, { cause: error });
+  }
+  if (marker.attempt_id !== task.attemptId || marker.node_id !== node.logical_id) {
+    throw new Error(`artifact verification marker identity does not match planned attempt ${task.attemptId}`);
+  }
+  if (!verificationArtifactsMatchPlanned(marker.artifacts, node.outputs)) {
+    throw new Error(`artifact verification marker outputs do not exactly match planned attempt ${task.attemptId}`);
+  }
+
+  const publications = new Map<string, VerifierPublicationSnapshot>();
+  for (const publication of marker.publications) {
+    if (publications.has(publication.path)) {
+      throw new Error(`artifact verification marker repeats publication ${JSON.stringify(publication.path)}`);
+    }
+    const absolutePath = safeResolveInside(artifactDir, publication.path, "verified publication");
+    const bytes = readPublicationAuthoritySnapshot(artifactDir, absolutePath, publication.path);
+    const digest = sha256Bytes(bytes);
+    if (digest !== publication.sha256) {
+      throw new Error(`verified publication changed after verifier approval: ${publication.path}`);
+    }
+    publications.set(publication.path, {
+      path: publication.path,
+      absolutePath,
+      sha256: digest,
+      bytes
+    });
+  }
+  for (const output of node.outputs) {
+    const publication = publications.get(output.path);
+    const artifact = marker.artifacts.find((entry) => entry.path === output.path);
+    if (publication === undefined || artifact === undefined || publication.sha256 !== artifact.sha256) {
+      throw new Error(`planned output is not bound to one verified publication: ${output.path}`);
+    }
+  }
+  return { marker, markerPath, markerBytes, artifactDir, publications };
+}
+
+function verificationArtifactsMatchPlanned(
+  artifacts: readonly ArtifactVerificationEntry[],
+  outputs: PlannedGraphNode["outputs"]
+): boolean {
+  if (artifacts.length !== outputs.length) return false;
+  return artifacts.every((artifact, index) => {
+    const { sha256: _sha256, ...declaration } = artifact;
+    return isDeepStrictEqual(declaration, outputs[index]);
+  });
+}
+
+function authenticatedGateSnapshots(
+  node: PlannedGraphNode,
+  authority: VerifierPublicationAuthoritySnapshot
+): {
+  outputs: Map<string, { absolutePath: string; bytes: Buffer }>;
+  publications: Map<string, Buffer>;
+  files: Map<string, Buffer>;
+} {
+  const publications = new Map(
+    [...authority.publications].map(([relativePath, publication]) => [relativePath, Buffer.from(publication.bytes)])
+  );
+  return {
+    outputs: new Map(
+      node.outputs.map((output) => {
+        const publication = authority.publications.get(output.path);
+        if (publication === undefined) {
+          throw new Error(`verified publication snapshot is missing planned output ${output.path}`);
+        }
+        return [output.path, { absolutePath: publication.absolutePath, bytes: Buffer.from(publication.bytes) }];
+      })
+    ),
+    publications,
+    files: new Map([...publications].map(([relativePath, bytes]) => [relativePath, Buffer.from(bytes)]))
+  };
+}
+
+function assertVerifierPublicationAuthorityCurrent(
+  layout: RunLayout,
+  authority: VerifierPublicationAuthoritySnapshot
+): void {
+  const currentMarker = readAuthorityFileSnapshot(layout.root, authority.markerPath, "artifact verification marker");
+  if (!currentMarker.equals(authority.markerBytes)) {
+    throw new Error(`artifact verification marker changed during finalization for ${authority.marker.attempt_id}`);
+  }
+  for (const publication of authority.publications.values()) {
+    const current = readPublicationAuthoritySnapshot(authority.artifactDir, publication.absolutePath, publication.path);
+    if (!current.equals(publication.bytes)) {
+      throw new Error(`verified publication changed during finalization: ${publication.path}`);
+    }
+  }
+}
+
+function readControllerManifestSnapshot(
+  layout: RunLayout,
+  manifestPath: string,
+  writtenManifest: ArtifactManifest,
+  node: PlannedGraphNode,
+  authority: VerifierPublicationAuthoritySnapshot
+): Buffer {
+  const bytes = readAuthorityFileSnapshot(layout.root, manifestPath, "controller artifact manifest");
+  let value: unknown;
+  try {
+    value = parseStrictJsonBytes(bytes);
+  } catch (error) {
+    throw new Error(`controller artifact manifest is not strict JSON for ${authority.marker.attempt_id}`, {
+      cause: error
+    });
+  }
+  const shape = validateArtifactManifest(value);
+  if (!shape.ok) {
+    throw new Error(
+      `controller artifact manifest is schema-invalid for ${authority.marker.attempt_id}: ${shape.issues
+        .map((issue) => `${issue.instancePath || "/"} ${issue.message}`)
+        .join("; ")}`
+    );
+  }
+  const manifest = value as ArtifactManifest;
+  if (!isDeepStrictEqual(manifest, writtenManifest)) {
+    throw new Error(
+      `controller artifact manifest bytes changed while being written for ${authority.marker.attempt_id}`
+    );
+  }
+  if (!isDeepStrictEqual(manifest.output_contracts, node.outputs)) {
+    throw new Error(`controller artifact manifest outputs do not match the planned verifier snapshot`);
+  }
+  const manifestFiles = new Map<string, ArtifactManifest["files"][number]>();
+  for (const file of manifest.files) {
+    if (manifestFiles.has(file.path)) {
+      throw new Error(`controller artifact manifest repeats file ${JSON.stringify(file.path)}`);
+    }
+    manifestFiles.set(file.path, file);
+  }
+  for (const publication of authority.publications.values()) {
+    const file = manifestFiles.get(publication.path);
+    if (file === undefined || file.sha256 !== publication.sha256 || file.size_bytes !== publication.bytes.byteLength) {
+      throw new Error(`controller artifact manifest does not match verified publication ${publication.path}`);
+    }
+  }
+  return bytes;
+}
+
+function readAuthorityFileSnapshot(root: string, filePath: string, label: string): Buffer {
+  assertRegularFileInside(root, filePath, label);
+  const before = fs.lstatSync(filePath, { bigint: true });
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n) {
+    throw new Error(`${label} is not a singly linked regular file: ${filePath}`);
+  }
+  const bytes = readRegularFileSnapshot(filePath, MAX_VERIFIER_AUTHORITY_BYTES);
+  const after = fs.lstatSync(filePath, { bigint: true });
+  if (
+    !after.isFile() ||
+    after.isSymbolicLink() ||
+    after.nlink !== 1n ||
+    before.dev !== after.dev ||
+    before.ino !== after.ino ||
+    before.size !== after.size ||
+    before.mtimeNs !== after.mtimeNs ||
+    before.ctimeNs !== after.ctimeNs ||
+    after.size !== BigInt(bytes.byteLength)
+  ) {
+    throw new Error(`${label} changed while it was snapshotted: ${filePath}`);
+  }
+  return bytes;
+}
+
+function readPublicationAuthoritySnapshot(root: string, filePath: string, relativePath: string): Buffer {
+  try {
+    return readAuthorityFileSnapshot(root, filePath, "verified publication");
+  } catch (error) {
+    throw new Error(`verified publication is unsafe or unreadable: ${relativePath}`, { cause: error });
+  }
 }
 
 function dependencyCascadeFailure(

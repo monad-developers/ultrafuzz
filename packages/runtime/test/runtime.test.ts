@@ -15,6 +15,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import * as ts from "typescript";
 
 import {
+  ARTIFACT_VERIFICATION_SCHEMA_VERSION,
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
@@ -984,6 +985,70 @@ function writeRequiredArtifactSet(runRoot: string, nodeId: string, required: str
       : `artifact for ${nodeId}\n`;
     fs.writeFileSync(filePath, contents, "utf8");
   }
+  writeCurrentArtifactVerificationMarker(runRoot, nodeId);
+}
+
+function writeCurrentArtifactVerificationMarker(runRoot: string, attemptId: string): void {
+  const tasksPath = path.join(runRoot, "smithers", "tasks.json");
+  if (!fs.existsSync(tasksPath)) return;
+  const document = JSON.parse(fs.readFileSync(tasksPath, "utf8")) as {
+    tasks?: Array<{
+      attemptId?: string;
+      logicalNodeId?: string;
+      metadata?: {
+        artifacts?: {
+          outputs?: Array<{
+            path: string;
+            contract: string;
+            contractDigest: string;
+            schemaFile?: string;
+            schemaId?: string;
+            schemaSha256?: string;
+            schemaBundleSha256?: string;
+            validatorBuild?: string;
+            primary: boolean;
+          }>;
+        };
+      };
+    }>;
+  };
+  const task = document.tasks?.find((candidate) => candidate.attemptId === attemptId);
+  const outputs = task?.metadata?.artifacts?.outputs;
+  if (task?.logicalNodeId === undefined || outputs === undefined || outputs.length === 0) return;
+  const artifactDir = path.join(runRoot, "artifacts", attemptId);
+  const snapshots = outputs.map((output) => {
+    const artifactPath = path.join(artifactDir, ...output.path.split("/"));
+    if (!fs.existsSync(artifactPath)) return undefined;
+    const bytes = fs.readFileSync(artifactPath);
+    return { output, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
+  });
+  if (snapshots.some((snapshot) => snapshot === undefined)) return;
+  const verified = snapshots.filter((snapshot): snapshot is NonNullable<typeof snapshot> => snapshot !== undefined);
+  const marker = {
+    schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+    attempt_id: attemptId,
+    node_id: task.logicalNodeId,
+    artifacts: verified.map(({ output, sha256 }) => ({
+      path: output.path,
+      contract: output.contract,
+      contract_digest: output.contractDigest,
+      ...(output.schemaFile === undefined
+        ? {}
+        : {
+            schema_file: output.schemaFile,
+            schema_id: output.schemaId,
+            schema_sha256: output.schemaSha256,
+            schema_bundle_sha256: output.schemaBundleSha256,
+            validator_build: output.validatorBuild
+          }),
+      sha256,
+      primary: output.primary
+    })),
+    publications: verified.map(({ output, sha256 }) => ({ path: output.path, sha256 }))
+  };
+  const markerRoot = path.join(runRoot, ".ultrafuzz-verification");
+  fs.mkdirSync(markerRoot, { recursive: true });
+  fs.writeFileSync(path.join(markerRoot, `${attemptId}.json`), `${JSON.stringify(marker, null, 2)}\n`, "utf8");
 }
 
 function writeSmallTopology(project: string): void {
@@ -8099,7 +8164,7 @@ test("syncRun accepts canonical findings without rewriting them and writes manif
   const sync = await syncRun({ projectRoot: project, runId: "sync-success", env });
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  assert.equal(sync.value?.status, "succeeded");
+  assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
   const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
     status?: string;
     nodes?: Record<string, { status?: string }>;
@@ -8126,6 +8191,134 @@ test("syncRun accepts canonical findings without rewriting them and writes manif
   const events = fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8");
   assert.doesNotMatch(events, /findings-normalized/u);
   assert.match(events, /artifact-manifest-written/);
+});
+
+test("syncRun rejects a valid output swap after verifier publication without repairing either version", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-verifier-snapshot-swap";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-verifier-snapshot-swap", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const artifactDir = path.join(run.value!.run_root, "artifacts", "project-discovery");
+  const findingsPath = path.join(artifactDir, "findings.json");
+  const markerPath = path.join(run.value!.run_root, ".ultrafuzz-verification", "project-discovery.json");
+  const markerBefore = fs.readFileSync(markerPath);
+  const swappedFindings = [
+    {
+      schema_version: "ultrafuzz.finding.v2",
+      id: "finding-project-discovery-swapped",
+      title: "Different valid candidate issue",
+      status: "candidate",
+      severity_guess: "Low",
+      confidence: "low",
+      summary: "These valid bytes were not the bytes approved by the verifier.",
+      source_node_id: "project-discovery"
+    }
+  ];
+  const swappedBytes = Buffer.from(`${JSON.stringify(swappedFindings)}\n`, "utf8");
+  fs.writeFileSync(findingsPath, swappedBytes);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-verifier-snapshot-swap", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  assert.ok(
+    sync.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_VERIFICATION_AUTHORITY_INVALID" &&
+        /changed after verifier approval/u.test(diagnostic.message)
+    ),
+    JSON.stringify(sync.diagnostics)
+  );
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<
+      string,
+      {
+        status?: string;
+        provenance?: {
+          output_contracts?: { ok?: boolean; missing?: string[]; artifact_manifest_sha256?: string };
+          terminal_disposition?: unknown;
+        };
+      }
+    >;
+  };
+  const node = state.nodes?.["project-discovery"];
+  assert.equal(node?.status, "failed");
+  assert.deepEqual(node?.provenance?.output_contracts, { ok: false, missing: [] });
+  assert.deepEqual(node?.provenance?.terminal_disposition, {
+    schema_version: "ultrafuzz.terminal-disposition.v1",
+    kind: "task-output-validation-failure"
+  });
+  assert.equal(fs.existsSync(path.join(artifactDir, "artifact-manifest.json")), false);
+  assert.deepEqual(fs.readFileSync(findingsPath), swappedBytes);
+  assert.deepEqual(fs.readFileSync(markerPath), markerBefore);
+});
+
+test("syncRun persists a schema-valid failed node when controller manifest publication fails", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-manifest-write-failure";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-manifest-write-failure", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const manifestPath = path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json");
+  fs.mkdirSync(manifestPath);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-manifest-write-failure", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  assert.ok(
+    sync.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_MANIFEST_WRITE_FAILED"),
+    JSON.stringify(sync.diagnostics)
+  );
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<
+      string,
+      {
+        status?: string;
+        provenance?: {
+          output_contracts?: { ok?: boolean; missing?: string[]; artifact_manifest_sha256?: string };
+          terminal_disposition?: unknown;
+        };
+      }
+    >;
+  };
+  const node = state.nodes?.["project-discovery"];
+  assert.equal(node?.status, "failed");
+  assert.equal(node?.provenance?.output_contracts?.artifact_manifest_sha256, undefined);
+  assert.deepEqual(node?.provenance?.output_contracts, { ok: false, missing: [] });
+  assert.equal(node?.provenance?.terminal_disposition, undefined);
+  assert.equal(fs.statSync(manifestPath).isDirectory(), true);
+  assert.doesNotMatch(
+    fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8"),
+    /artifact-manifest-written/u
+  );
 });
 
 test("syncRun marks task-output validation failures for terminal disposition", async () => {
@@ -8271,7 +8464,7 @@ test("syncRun keeps a preparation failure superseded by a later successful attem
   const sync = await syncRun({ projectRoot: project, runId: "sync-preparation-recovered", env });
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  assert.equal(sync.value?.status, "succeeded");
+  assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
   const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
     nodes?: Record<string, { status?: string }>;
   };
@@ -10488,7 +10681,11 @@ test("syncRun records model fan-out attempts independently", async () => {
       }
     >;
   };
-  assert.equal(state.nodes?.["project-discovery__model_0__attempt_0"]?.status, "succeeded");
+  assert.equal(
+    state.nodes?.["project-discovery__model_0__attempt_0"]?.status,
+    "succeeded",
+    JSON.stringify(sync.diagnostics)
+  );
   assert.equal(state.nodes?.["project-discovery__model_1__attempt_1"]?.status, "failed");
   assert.equal(state.nodes?.["signal-analysis__model_0__attempt_0"]?.status, "running");
   assert.equal(state.nodes?.["signal-analysis__model_1__attempt_1"]?.status, "skipped");

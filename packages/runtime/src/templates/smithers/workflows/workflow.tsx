@@ -4654,6 +4654,13 @@ function verifyArtifacts(
       }
     }
   }
+  if (taskPublishesWorkspacePatch(task)) {
+    rememberVerifiedPublication(
+      publications,
+      WORKSPACE_PATCH_BASELINE_FILE,
+      captureWorkspacePatchBaselinePublication(task, artifactDir)
+    );
+  }
   if (invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) {
     rememberInvariantSuitePublications(task, publications, artifactRoots);
   }
@@ -4958,6 +4965,34 @@ function rememberVerifiedPublication(publications: Map<string, Buffer>, relative
     throw new Error(`artifact-contract failure: conflicting verified output path ${relativePath}`);
   }
   publications.set(relativePath, contents);
+}
+
+function captureWorkspacePatchBaselinePublication(task: (typeof taskSpecs)[number], artifactDir: string): Buffer {
+  const baselinePath = workspacePatchBaselinePath(task);
+  const snapshot = readBoundedRegularArtifactSnapshot(
+    artifactDir,
+    baselinePath,
+    `artifact-contract failure: workspace patch baseline is unavailable ${task.attemptId}`,
+    MAX_PRE_AGENT_EVIDENCE_BYTES,
+    true
+  );
+  let parsed: ReturnType<typeof parseRuntimeDocumentBytes<typeof WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID>>;
+  try {
+    parsed = parseRuntimeDocumentBytes(
+      WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID,
+      snapshot.bytes,
+      `workspace patch baseline ${task.attemptId}`
+    );
+  } catch (error) {
+    throw new Error(`artifact-contract failure: workspace patch baseline is malformed ${task.attemptId}`, {
+      cause: error
+    });
+  }
+  const expectedTree = workspacePatchBaselineTrees.get(task.attemptId);
+  if (parsed.attempt_id !== task.attemptId || expectedTree === undefined || parsed.baseline_tree !== expectedTree) {
+    throw new Error(`artifact-contract failure: workspace patch baseline is invalid ${task.attemptId}`);
+  }
+  return Buffer.from(snapshot.bytes);
 }
 
 function publishVerifiedArtifacts(artifactDir: string, publications: ReadonlyMap<string, Buffer>): void {

@@ -1499,6 +1499,27 @@ test("generated Smithers workflow guards runtime-owned workspace patch publicati
   assert.match(helper, /if \(!replaceSuperseded\) \{/u);
 });
 
+test("generated Smithers verification publishes its exact workspace patch baseline snapshot", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const verificationStart = source.indexOf("function verifyArtifacts");
+  const verificationEnd = source.indexOf("\n\nfunction isPlainJsonRecord", verificationStart);
+  const captureStart = source.indexOf("function captureWorkspacePatchBaselinePublication");
+  const captureEnd = source.indexOf("\n\nfunction publishVerifiedArtifacts", captureStart);
+
+  assert.ok(verificationStart >= 0 && verificationEnd > verificationStart, source);
+  assert.ok(captureStart >= 0 && captureEnd > captureStart, source);
+
+  const verification = source.slice(verificationStart, verificationEnd);
+  const capture = source.slice(captureStart, captureEnd);
+  assert.match(verification, /taskPublishesWorkspacePatch\(task\)/u);
+  assert.match(verification, /rememberVerifiedPublication\([\s\S]*WORKSPACE_PATCH_BASELINE_FILE/u);
+  assert.match(verification, /captureWorkspacePatchBaselinePublication\(task, artifactDir\)/u);
+  assert.match(capture, /readBoundedRegularArtifactSnapshot\(/u);
+  assert.match(capture, /parseRuntimeDocumentBytes\(/u);
+  assert.match(capture, /workspacePatchBaselineTrees\.get\(task\.attemptId\)/u);
+  assert.match(capture, /parsed\.baseline_tree !== expectedTree/u);
+});
+
 test("runtime workspace patch publication replaces empty placeholders but rejects non-empty agent patches", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function writeWorkspacePatchArtifact");
